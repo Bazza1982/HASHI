@@ -5271,6 +5271,67 @@ class FlexibleAgentRuntime:
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         current = self._meter_enabled()
+        if len(args) == 1 and args[0] in {"summary", "session", "provider", "turn"}:
+            backend = getattr(self.backend_manager, "current_backend", None)
+            getter = getattr(backend, "durable_meter_summary", None)
+            summary = getter(turn_only=args[0] == "turn") if callable(getter) else {}
+            if not summary:
+                await self._reply_text(
+                    update, ui_language.tr("menu.meter.durable.no_data")
+                )
+                return
+            total = dict(summary.get("total") or {})
+
+            def cost_text(value):
+                return "unknown" if value is None else f"US${float(value):.6f}"
+
+            lines = [
+                f"💰 <b>{html.escape(ui_language.tr('menu.meter.durable.title'))}</b>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.scope'))}</b> · <code>{html.escape(args[0])}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.provider_requests'))}</b> · <code>{int(total.get('provider_requests') or 0):,}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.tokens'))}</b> · <code>{int(total.get('input_tokens') or 0) + int(total.get('output_tokens') or 0) + int(total.get('thinking_tokens') or 0):,}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.cache_hit'))}</b> · <code>{int(total.get('prompt_cache_hit_tokens') or 0):,}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.retries'))}</b> · <code>{int(total.get('retry_count') or 0):,}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.compact_calls'))}</b> · <code>{int(total.get('compact_requests') or 0):,}</code>",
+                "<b>{}</b> · <code>{}</code>".format(
+                    html.escape(ui_language.tr("menu.meter.durable.pricing_revisions")),
+                    html.escape(
+                        ", ".join(
+                            str(value)
+                            for value in (total.get("pricing_revisions") or ["unknown"])
+                        )
+                    )
+                ),
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.cost'))}</b> · <code>{html.escape(cost_text(total.get('cost_usd')))}</code>",
+            ]
+            if args[0] in {"summary", "session", "provider"}:
+                for row in summary.get("providers") or []:
+                    lines.append(
+                        "\n<b>{}</b> · <code>{}</code> · {} calls · {} tokens · {}".format(
+                            html.escape(str(row.get("provider") or "unknown")),
+                            html.escape(str(row.get("model") or "unknown")),
+                            int(row.get("provider_requests") or 0),
+                            int(row.get("input_tokens") or 0)
+                            + int(row.get("output_tokens") or 0)
+                            + int(row.get("thinking_tokens") or 0),
+                            html.escape(cost_text(row.get("cost_usd"))),
+                        )
+                    )
+            if args[0] in {"summary", "session", "turn"}:
+                for row in summary.get("turns") or []:
+                    lines.append(
+                        "\n<b>{}</b> · <code>{}</code> · {} calls · {} tokens · {}".format(
+                            html.escape(ui_language.tr("menu.meter.durable.turn")),
+                            html.escape(str(row.get("turn_id") or "maintenance")),
+                            int(row.get("provider_requests") or 0),
+                            int(row.get("input_tokens") or 0)
+                            + int(row.get("output_tokens") or 0)
+                            + int(row.get("thinking_tokens") or 0),
+                            html.escape(cost_text(row.get("cost_usd"))),
+                        )
+                    )
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
         if len(args) > 1 or (args and args[0] not in {"on", "off", "status"}):
             await self._reply_text(
                 update,

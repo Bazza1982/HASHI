@@ -27,6 +27,7 @@ from adapters.base import BackendCapabilities, BackendResponse, TokenUsage
 from adapters.openrouter_api import (
     _MEDIA_FALLBACK_TOOL_NAMES,
     OpenRouterAdapter,
+    ProviderCallObserverError,
     _APIResult,
     _assistant_content_text,
     _backend_failure_response,
@@ -428,6 +429,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                 gateway_session_id = f"hashi-tool-{uuid.uuid4().hex}"
 
             for loop_idx in count():
+                next_provider_recovery_kind = "none"
                 while True:
                     provider_attempt_count += 1
                     headers = self._hashi_headers(
@@ -475,6 +477,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                         }
                     )
 
+                    provider_call_started = time.perf_counter()
+                    provider_recovery_kind = next_provider_recovery_kind
                     try:
                         self._trace(
                             "HASHI_API_TRACE provider_call_started "
@@ -498,7 +502,59 @@ class HashiApiAdapter(OpenRouterAdapter):
                                 headers,
                                 on_stream_event,
                             )
+                    except asyncio.CancelledError:
+                        provider_calls.append(
+                            self._provider_call_record(
+                                request_id=request_id,
+                                serial=provider_attempt_count,
+                                payload={
+                                    "input": 0,
+                                    "output": 0,
+                                    "thinking": 0,
+                                    "token_source": "unknown",
+                                    "thinking_in_output": False,
+                                    "cost_usd": None,
+                                    "prompt_cache_hit_tokens": None,
+                                    "prompt_cache_miss_tokens": None,
+                                    "provider_call_latency_ms": round(
+                                        (time.perf_counter() - provider_call_started)
+                                        * 1000,
+                                        3,
+                                    ),
+                                    "attempt": 1,
+                                    "retry_count": 0,
+                                    "recovery_kind": provider_recovery_kind,
+                                    "status": "cancelled",
+                                },
+                            )
+                        )
+                        raise
                     except Exception as exc:
+                        provider_calls.append(
+                            self._provider_call_record(
+                                request_id=request_id,
+                                serial=provider_attempt_count,
+                                payload={
+                                    "input": 0,
+                                    "output": 0,
+                                    "thinking": 0,
+                                    "token_source": "unknown",
+                                    "thinking_in_output": False,
+                                    "cost_usd": None,
+                                    "prompt_cache_hit_tokens": None,
+                                    "prompt_cache_miss_tokens": None,
+                                    "provider_call_latency_ms": round(
+                                        (time.perf_counter() - provider_call_started)
+                                        * 1000,
+                                        3,
+                                    ),
+                                    "attempt": 1,
+                                    "retry_count": 0,
+                                    "recovery_kind": provider_recovery_kind,
+                                    "status": "failed_without_receipt",
+                                },
+                            )
+                        )
                         if not self._can_replay_typed_media_fallback(
                             exc,
                             media_routing=media_routing,
@@ -524,6 +580,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                         native_attachment_ids = set()
                         native_local_refs = set()
                         all_media_native = False
+                        next_provider_recovery_kind = "typed_media_fallback"
                         continue
                     break
 
@@ -543,14 +600,33 @@ class HashiApiAdapter(OpenRouterAdapter):
                 total_thinking += result.thinking_tokens
                 provider_call_count += 1
                 provider_calls.append(
-                    {
-                        "input": int(result.prompt_tokens or 0),
-                        "output": int(result.completion_tokens or 0),
-                        "thinking": int(result.thinking_tokens or 0),
-                        "token_source": "provider",
-                        "thinking_in_output": True,
-                        "cost_usd": result.cost_usd,
-                    }
+                    self._provider_call_record(
+                        request_id=request_id,
+                        serial=provider_attempt_count,
+                        payload={
+                            "input": int(result.prompt_tokens or 0),
+                            "output": int(result.completion_tokens or 0),
+                            "thinking": int(result.thinking_tokens or 0),
+                            "token_source": "provider",
+                            "thinking_in_output": True,
+                            "cost_usd": result.cost_usd,
+                            "prompt_cache_hit_tokens": getattr(
+                                result, "prompt_cache_hit_tokens", None
+                            ),
+                            "prompt_cache_miss_tokens": getattr(
+                                result, "prompt_cache_miss_tokens", None
+                            ),
+                            "provider_call_latency_ms": round(
+                                (time.perf_counter() - provider_call_started)
+                                * 1000,
+                                3,
+                            ),
+                            "attempt": 1,
+                            "retry_count": 0,
+                            "recovery_kind": provider_recovery_kind,
+                            "status": "completed",
+                        },
+                    )
                 )
                 if result.cost_usd is None:
                     provider_cost_complete = False
@@ -628,6 +704,8 @@ class HashiApiAdapter(OpenRouterAdapter):
         except asyncio.CancelledError:
             self.logger.warning(f"Request cancelled for {request_id}")
             raise
+        except ProviderCallObserverError:
+            raise
         # Provider SDK/HTTP boundaries can raise backend-specific exception types;
         # convert all of them into the adapter's stable failure response.
         except Exception as e:  # noqa: BLE001
@@ -639,6 +717,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                 tool_loop_count=tool_loop_count,
             )
             metadata = dict(failure.stream_metadata or {})
+            metadata["meter"] = {"provider_calls": provider_calls}
             metadata["multimodal_routing"] = list(media_routing)
             metadata["multimodal_fallback_attempted"] = media_fallback_attempted
             attachment_id = str(getattr(e, "attachment_id", "") or "")

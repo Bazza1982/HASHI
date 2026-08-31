@@ -28,6 +28,7 @@ from orchestrator.flexible_backend_registry import (
     normalize_effort,
 )
 from orchestrator.her_v2.config import HERv2Config
+from orchestrator.her_v2.models import Route
 from orchestrator.her_v2.runtime_configuration import (
     HER_V2_CONFIGURATION_DRAFT_STATE_KEY,
     HER_V2_CONFIGURATION_PRESETS_STATE_KEY,
@@ -682,14 +683,62 @@ class FlexibleBackendManager:
         selected = self._normalise_her_v2_target_providers(selected)
         self._validate_her_v2_selection(selected)
 
+        current = self.get_her_v2_configuration()
+        current_route = current.to_dict()
+        selected_route = selected.to_dict()
+        for payload in (current_route, selected_route):
+            payload.pop("routing_revision", None)
+            payload.pop("capability_revision", None)
+            payload.pop("pricing_revision", None)
+        next_revision = current.routing_revision + (
+            1 if selected_route != current_route else 0
+        )
+        selected = replace(
+            selected,
+            routing_revision=next_revision,
+            capability_revision=current.capability_revision,
+            pricing_revision=current.pricing_revision,
+        )
+
+        changed_targets = []
+        for route in Route:
+            old_target = current.target_for_route(route)
+            new_target = selected.target_for_route(route)
+            if new_target != old_target and new_target not in changed_targets:
+                changed_targets.append(new_target)
+
+        preflight: dict[str, Any] = {
+            "status": "not_required" if not changed_targets else "runtime_unavailable",
+            "targets": [],
+            "insufficient_targets": [],
+        }
+        if self.runtime is not None and changed_targets:
+            from orchestrator.context_compaction import preflight_route_context_fit
+
+            preflight = preflight_route_context_fit(
+                self.runtime,
+                selected,
+                targets=changed_targets,
+            )
+            insufficient = list(preflight.get("insufficient_targets") or [])
+            if insufficient:
+                target = insufficient[0]
+                raise ValueError(
+                    "Target model context is too small for the settled Session "
+                    f"({target.get('provider')}/{target.get('model')}: "
+                    f"{int(target.get('current_context_tokens') or 0):,} > "
+                    f"{int(target.get('usable_input_tokens') or 0):,} tokens). "
+                    "Run /compact after the active Turn settles, then retry the switch."
+                )
+
         effective = self._effective_her_v2_config(selected)
         parsed = HERv2Config.from_mapping(effective)
         serialized = selected.to_dict()
-        current = self.get_her_v2_configuration()
         draft = self.get_her_v2_draft_configuration()
 
         def update_state(state: dict[str, Any]) -> dict[str, Any]:
             state[HER_V2_CONFIGURATION_STATE_KEY] = serialized
+            state["her_v2_last_route_preflight"] = preflight
             presets = state.get(HER_V2_CONFIGURATION_PRESETS_STATE_KEY)
             presets = dict(presets) if isinstance(presets, dict) else {}
             presets[current.routing_mode] = current.to_dict()

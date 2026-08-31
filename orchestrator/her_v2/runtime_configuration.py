@@ -19,6 +19,7 @@ from orchestrator.flexible_backend_registry import (
     get_backend_entry,
     get_backend_label,
 )
+from tools.token_tracker import PRICING_REVISION
 
 from .config import DEFAULT_STAGE_ROLES
 from .models import DEFAULT_ROUTES_BY_STAGE, ROUTE_STAGES, Route, Stage
@@ -26,6 +27,8 @@ from .models import DEFAULT_ROUTES_BY_STAGE, ROUTE_STAGES, Route, Stage
 HER_V2_CONFIGURATION_STATE_KEY = "her_v2_configuration"
 HER_V2_CONFIGURATION_DRAFT_STATE_KEY = "her_v2_configuration_draft"
 HER_V2_CONFIGURATION_PRESETS_STATE_KEY = "her_v2_configuration_presets"
+HER_V2_CAPABILITY_REVISION = 1
+HER_V2_PRICING_REVISION = PRICING_REVISION
 HER_V2_MODEL_SLOTS = ("fast", "pro")
 HER_V2_ROUTING_MODES = ("single", "hybrid")
 HER_V2_MIXED_VALUE = "mixed"
@@ -211,6 +214,9 @@ class HERv2RuntimeConfiguration:
     route_model_slots: Mapping[str, str]
     route_reasoning: Mapping[str, str]
     route_targets: Mapping[str, ProviderModelTarget] = field(default_factory=dict)
+    routing_revision: int = 1
+    capability_revision: int = HER_V2_CAPABILITY_REVISION
+    pricing_revision: str = HER_V2_PRICING_REVISION
 
     def __post_init__(self) -> None:
         mode = str(self.routing_mode or "single").strip().lower()
@@ -240,6 +246,11 @@ class HERv2RuntimeConfiguration:
         object.__setattr__(self, "pro_provider", pro.provider)
         object.__setattr__(self, "pro_model", pro.model)
         object.__setattr__(self, "route_targets", parsed_routes)
+        object.__setattr__(self, "routing_revision", max(1, int(self.routing_revision)))
+        object.__setattr__(
+            self, "capability_revision", max(1, int(self.capability_revision))
+        )
+        object.__setattr__(self, "pricing_revision", str(self.pricing_revision or "unknown"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -258,6 +269,9 @@ class HERv2RuntimeConfiguration:
             "route_targets": {
                 route: target.to_dict() for route, target in self.route_targets.items()
             },
+            "routing_revision": self.routing_revision,
+            "capability_revision": self.capability_revision,
+            "pricing_revision": self.pricing_revision,
         }
 
     def reasoning_for_stage(self, raw: Mapping[str, Any], stage: Stage | str) -> str:
@@ -501,6 +515,14 @@ def resolve_her_v2_configuration(
                 for name, value in selected_route_targets.items()
             }
 
+    revision_source = override if isinstance(override, Mapping) else raw
+    routing_revision = max(1, int(revision_source.get("routing_revision") or 1))
+    # Capability and price revisions describe the loaded runtime, not a saved
+    # route preference.  Persisted overrides may carry their historical value
+    # for audit, but cannot pin future Turns to stale code or prices.
+    capability_revision = HER_V2_CAPABILITY_REVISION
+    pricing_revision = HER_V2_PRICING_REVISION
+
     if not fast_provider or not pro_provider or not fast_model or not pro_model:
         raise ValueError("HER v2 Quick/Pro provider configuration is incomplete")
     if routing_mode == "single" and fast_provider != pro_provider:
@@ -521,6 +543,9 @@ def resolve_her_v2_configuration(
         route_model_slots=route_model_slots,
         route_reasoning=route_reasoning,
         route_targets=route_targets,
+        routing_revision=routing_revision,
+        capability_revision=capability_revision,
+        pricing_revision=pricing_revision,
     )
 
 
@@ -823,6 +848,9 @@ def apply_her_v2_runtime_configuration(
         "pro": selected.pro_model,
     }
     result["route_model_slots"] = dict(selected.route_model_slots)
+    result["routing_revision"] = selected.routing_revision
+    result["capability_revision"] = selected.capability_revision
+    result["pricing_revision"] = selected.pricing_revision
     if selected.route_targets:
         result["route_targets"] = {
             route: target.to_dict() for route, target in selected.route_targets.items()

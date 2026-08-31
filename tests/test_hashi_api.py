@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from adapters.hashi_api import HashiApiAdapter
-from adapters.openrouter_api import _APIResult
+from adapters.openrouter_api import ProviderCallObserverError, _APIResult
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_INTERNAL,
@@ -130,6 +130,52 @@ async def test_hashi_api_initializes_without_a_provider_secret(tmp_path):
     }
 
     await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_observes_each_physical_provider_call(tmp_path):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult(
+            "done",
+            None,
+            "stop",
+            prompt_tokens=11,
+            completion_tokens=3,
+            thinking_tokens=2,
+            prompt_cache_hit_tokens=7,
+            prompt_cache_miss_tokens=4,
+        )
+    )
+
+    response = await adapter.generate_response("hello", "request-meter")
+
+    calls = response.stream_metadata["meter"]["provider_calls"]
+    assert calls == observed
+    assert len(calls) == 1
+    assert calls[0]["status"] == "completed"
+    assert calls[0]["prompt_cache_hit_tokens"] == 7
+    assert calls[0]["prompt_cache_miss_tokens"] == 4
+    assert calls[0]["provider_request_id"].startswith("hashi-provider:")
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_does_not_swallow_or_retry_accounting_failure(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("done", None, "stop", 4, 1)
+    )
+
+    def fail_accounting(_call):
+        raise RuntimeError("ledger unavailable")
+
+    adapter.set_provider_call_observer(fail_accounting)
+
+    with pytest.raises(ProviderCallObserverError):
+        await adapter.generate_response("hello", "request-accounting-failure")
+    assert adapter._call_api_once.await_count == 1
 
 
 @pytest.mark.asyncio

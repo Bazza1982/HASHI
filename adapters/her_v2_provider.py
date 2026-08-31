@@ -12,12 +12,13 @@ import ssl
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
 from adapters import her_persona
 from adapters.base import BackendResponse, TokenUsage
+from adapters.openrouter_api import ProviderCallObserverError
 from adapters.stream_events import (
     DELIVERY_FINAL,
     DELIVERY_INTERNAL,
@@ -898,7 +899,15 @@ def _evidence_ref_segment(value: Any, *, fallback: str) -> str:
 class _EvidenceRecordingToolRegistry:
     """Attach exact, current-invocation receipts to completed tool calls."""
 
-    def __init__(self, base: Any, request: StageRequest, *, model: str = ""):
+    def __init__(
+        self,
+        base: Any,
+        request: StageRequest,
+        *,
+        model: str = "",
+        provider: str = "",
+        audit_log: DurableAuditLog | None = None,
+    ):
         self._base = base
         self._request = request
         self._audit_context = {
@@ -907,6 +916,9 @@ class _EvidenceRecordingToolRegistry:
             "model": str(model or ""),
         }
         self._receipts: list[ToolEvidenceReceipt] = []
+        self._provider = str(provider or "")
+        self._model = str(model or "")
+        self._audit_log = audit_log
         self._serial = 0
         self.max_loops = None
 
@@ -983,6 +995,53 @@ class _EvidenceRecordingToolRegistry:
         )
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        effective_call_id = str(tool_call_id or f"call-{self._serial + 1}")
+        invocation_id = str(
+            self._request.invocation_id
+            or (
+                f"{self._request.turn_id}:{self._request.stage.value}:"
+                f"{self._request.attempt}"
+            )
+        )
+        operation_id = (
+            f"{invocation_id}:attempt:{self._request.attempt}:"
+            f"tool:{effective_call_id}"
+        )
+        if self._audit_log is not None:
+            arguments_digest = hashlib.sha256(
+                json.dumps(
+                    dict(arguments or {}),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            self._audit_log.append(
+                event_id=(
+                    f"{self._request.invocation_id or self._request.turn_id}:"
+                    f"attempt:{self._request.attempt}:"
+                    f"tool:{effective_call_id}:intent"
+                ),
+                turn_id=self._request.turn_id,
+                request_ref=self._request.request_ref,
+                stage=self._request.stage.value,
+                role=self._request.role,
+                event="tool_intent",
+                provider=self._provider,
+                model=self._model,
+                attempt=self._request.attempt,
+                plan_id=self._request.plan_id or None,
+                payload={
+                    "operation_id": operation_id,
+                    "invocation_id": invocation_id,
+                    "attempt": self._request.attempt,
+                    "tool_call_id": effective_call_id,
+                    "tool_name": str(tool_name),
+                    "arguments_sha256": "sha256:" + arguments_digest,
+                    "read_only": _registry_is_read_only(self._base, tool_name),
+                },
+            )
         matched_attachment_ids = _matched_attachment_ids(
             dict(arguments or {}), self._request.attachment_manifest
         )
@@ -1002,33 +1061,33 @@ class _EvidenceRecordingToolRegistry:
                     tool_name, arguments, tool_call_id
                 )
         except asyncio.CancelledError:
-            self._receipts.append(
-                self._receipt(
+            receipt = self._receipt(
                     tool_name=tool_name,
-                    tool_call_id=tool_call_id,
+                    tool_call_id=effective_call_id,
                     result=None,
                     completed=False,
                     status=ToolReceiptStatus.CANCELLED,
                     attachment_ids=matched_attachment_ids,
                 )
-            )
+            self._receipts.append(receipt)
+            self._record_recovery_receipt(receipt)
             raise
         except Exception:
-            self._receipts.append(
-                self._receipt(
+            receipt = self._receipt(
                     tool_name=tool_name,
-                    tool_call_id=tool_call_id,
+                    tool_call_id=effective_call_id,
                     result=None,
                     completed=False,
                     status=ToolReceiptStatus.FAILED,
                     attachment_ids=matched_attachment_ids,
                 )
-            )
+            self._receipts.append(receipt)
+            self._record_recovery_receipt(receipt)
             raise
 
         receipt = self._receipt(
             tool_name=tool_name,
-            tool_call_id=tool_call_id,
+            tool_call_id=effective_call_id,
             result=result,
             completed=True,
             status=(
@@ -1039,7 +1098,51 @@ class _EvidenceRecordingToolRegistry:
             attachment_ids=matched_attachment_ids,
         )
         self._receipts.append(receipt)
+        self._record_recovery_receipt(receipt)
         return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id)
+
+    def _record_recovery_receipt(self, receipt: ToolEvidenceReceipt) -> None:
+        if self._audit_log is None:
+            return
+        payload = {
+            "evidence_ref": receipt.evidence_ref,
+            "stage": receipt.stage.value,
+            "invocation_id": receipt.invocation_id,
+            "attempt": receipt.attempt,
+            "tool_call_id": receipt.tool_call_id,
+            "tool_name": receipt.tool_name,
+            "status": receipt.status.value,
+            "read_only": receipt.read_only,
+            "completed": receipt.completed,
+            "output_sha256": receipt.output_sha256,
+            "details": dict(receipt.details),
+        }
+        operation_id = (
+            f"{receipt.invocation_id}:attempt:{receipt.attempt}:"
+            f"tool:{receipt.tool_call_id}"
+        )
+        payload["operation_id"] = operation_id
+        self._audit_log.append(
+            event_id=(
+                f"{self._request.invocation_id or self._request.turn_id}:"
+                f"attempt:{self._request.attempt}:"
+                f"tool:{receipt.tool_call_id}:receipt"
+            ),
+            turn_id=self._request.turn_id,
+            request_ref=self._request.request_ref,
+            stage=self._request.stage.value,
+            role=self._request.role,
+            event="tool_receipt",
+            provider=self._provider,
+            model=self._model,
+            attempt=self._request.attempt,
+            plan_id=self._request.plan_id or None,
+            payload={
+                "operation_id": operation_id,
+                "tool_call_id": receipt.tool_call_id,
+                "receipt": payload,
+            },
+        )
 
     async def record_policy_denial(
         self,
@@ -1653,6 +1756,8 @@ class HashiStageProvider(StageProvider):
         audit_log: DurableAuditLog | None = None,
         workzone_ref: str = "",
         runtime_context: Any = None,
+        usage_observer: Callable[[PerCallUsageLineItem], None] | None = None,
+        default_recovery_kind: str = "none",
     ) -> None:
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
@@ -1662,6 +1767,8 @@ class HashiStageProvider(StageProvider):
         self.audit_log = audit_log
         self.workzone_ref = str(workzone_ref or "")
         self.runtime_context = runtime_context
+        self.usage_observer = usage_observer
+        self.default_recovery_kind = str(default_recovery_kind or "none")
         self._persona_invocation_serial = 0
         self._persona_audit_contexts: dict[str, tuple[str, str]] = {}
         self.logger = logging.getLogger("HASHI.HERv2.StageProvider")
@@ -1677,6 +1784,7 @@ class HashiStageProvider(StageProvider):
         # moment each stage/Persona invocation returns, while the real
         # profile.engine / profile.model / stage are still known.
         self.usage_line_items: list[PerCallUsageLineItem] = []
+        self._observed_provider_request_ids: set[str] = set()
 
     async def resolve_stage_modalities(
         self, profile: ProviderProfile
@@ -1966,6 +2074,9 @@ class HashiStageProvider(StageProvider):
         engine: str,
         model: str,
         response: Any,
+        invocation_id: str = "",
+        attempt: int = 1,
+        recovery_kind: str = "none",
     ) -> None:
         """Record one per-stage/per-persona usage line item with provenance."""
         metadata = getattr(response, "stream_metadata", None)
@@ -1975,7 +2086,7 @@ class HashiStageProvider(StageProvider):
         )
         calls: list[Mapping[str, Any]] = (
             [item for item in raw_calls if isinstance(item, Mapping)]
-            if isinstance(raw_calls, list) and raw_calls
+            if isinstance(raw_calls, list)
             else [
                 {
                     "input": int(getattr(response.usage, "input_tokens", 0) or 0),
@@ -1989,9 +2100,19 @@ class HashiStageProvider(StageProvider):
                 }
             ]
         )
+        if not calls:
+            # An explicit empty physical-call list proves that validation or
+            # payload construction failed before any Provider request began.
+            return
 
         from tools.token_tracker import calc_cost
 
+        observed_provider_request_ids = getattr(
+            self, "_observed_provider_request_ids", None
+        )
+        if observed_provider_request_ids is None:
+            observed_provider_request_ids = set()
+            self._observed_provider_request_ids = observed_provider_request_ids
         parent_request_id = str(request_id or "")
         for index, call in enumerate(calls, start=1):
             input_tokens = int(call.get("input") or 0)
@@ -2012,11 +2133,25 @@ class HashiStageProvider(StageProvider):
             provider_call_latency_ms = _optional_nonnegative_float(
                 call.get("provider_call_latency_ms")
             )
-            resolved_cost, cost_source = resolve_cost_source(
-                cost_usd=call.get("cost_usd"),
-                model=model,
-                engine=engine,
+            status = str(
+                call.get("status")
+                or (
+                    "completed"
+                    if bool(getattr(response, "is_success", True))
+                    else "failed_response"
+                )
             )
+            if token_source == "unknown" and call.get("cost_usd") is None:
+                # A request without a Provider receipt may still have been
+                # processed and billed. Zero-token table pricing would falsely
+                # turn that uncertainty into a known $0.00 charge.
+                resolved_cost, cost_source = None, "unknown"
+            else:
+                resolved_cost, cost_source = resolve_cost_source(
+                    cost_usd=call.get("cost_usd"),
+                    model=model,
+                    engine=engine,
+                )
             if resolved_cost is None and cost_source == "pricing_table":
                 resolved_cost = calc_cost(
                     input_tokens,
@@ -2027,9 +2162,39 @@ class HashiStageProvider(StageProvider):
                     thinking_in_output=thinking_in_output,
                 )
             per_call = len(calls) > 1 or bool(raw_calls)
+            call_identity = "|".join(
+                (
+                    parent_request_id,
+                    str(phase or ""),
+                    str(invocation_id or ""),
+                    str(max(1, int(attempt))),
+                    str(index),
+                    str(call.get("provider_request_id") or ""),
+                )
+            )
+            provider_request_id = str(call.get("provider_request_id") or "").strip()
+            if not provider_request_id:
+                provider_request_id = "hashi-provider:" + hashlib.sha256(
+                    call_identity.encode("utf-8")
+                ).hexdigest()
+            if provider_request_id in observed_provider_request_ids:
+                # Physical-call observers write immediately. The aggregate
+                # BackendResponse later repeats the same facts solely for
+                # reconciliation and must never double-charge them.
+                continue
+            resolved_recovery_kind = str(
+                call.get("recovery_kind") or recovery_kind or "none"
+            )
+            if resolved_recovery_kind in {"", "none"}:
+                resolved_recovery_kind = str(
+                    getattr(self, "default_recovery_kind", "none") or "none"
+                )
             line_item = PerCallUsageLineItem(
                 request_id=(
-                    f"{parent_request_id}:provider-call:{index}"
+                    f"{parent_request_id}:provider-call:"
+                    + hashlib.sha256(
+                        provider_request_id.encode("utf-8")
+                    ).hexdigest()[:16]
                     if per_call
                     else parent_request_id
                 ),
@@ -2044,13 +2209,91 @@ class HashiStageProvider(StageProvider):
                 thinking_in_output=thinking_in_output,
                 cost_usd=resolved_cost,
                 cost_source=cost_source,
+                provider_request_id=provider_request_id,
+                attempt=max(1, int(call.get("attempt") or attempt or 1)),
+                retry_count=max(
+                    0,
+                    int(call.get("retry_count") or max(0, int(attempt) - 1)),
+                ),
+                recovery_kind=(
+                    "fresh_connection_retry"
+                    if int(attempt) > 1
+                    else resolved_recovery_kind
+                ),
+                compact=bool(call.get("compact", False)),
+                status=status,
             )
             # /reboot min may retain the already-imported meter dataclass.
             # Dynamic attachment keeps mixed old/new module shapes safe.
             line_item.prompt_cache_hit_tokens = prompt_cache_hit_tokens
             line_item.prompt_cache_miss_tokens = prompt_cache_miss_tokens
             line_item.provider_call_latency_ms = provider_call_latency_ms
+            observed_provider_request_ids.add(provider_request_id)
             self.usage_line_items.append(line_item)
+            self._notify_usage_observer(line_item)
+
+    def _bind_provider_call_observer(
+        self,
+        backend: Any,
+        *,
+        request_id: str,
+        phase: str,
+        engine: str,
+        model: str,
+        invocation_id: str = "",
+        attempt: int = 1,
+        recovery_kind: str = "none",
+    ) -> None:
+        """Durably account each physical Provider call as it settles."""
+
+        setter = getattr(backend, "set_provider_call_observer", None)
+        if not callable(setter):
+            return
+
+        def observe(call: Mapping[str, Any]) -> None:
+            payload = dict(call)
+            response = BackendResponse(
+                text="",
+                duration_ms=float(payload.get("provider_call_latency_ms") or 0.0),
+                is_success=str(payload.get("status") or "completed") == "completed",
+                usage=TokenUsage(
+                    input_tokens=int(payload.get("input") or 0),
+                    output_tokens=int(payload.get("output") or 0),
+                    thinking_tokens=int(payload.get("thinking") or 0),
+                ),
+                cost_usd=payload.get("cost_usd"),
+                stream_metadata={"meter": {"provider_calls": [payload]}},
+            )
+            self._record_usage_line_item(
+                request_id=request_id,
+                phase=phase,
+                engine=engine,
+                model=model,
+                response=response,
+                invocation_id=invocation_id,
+                attempt=attempt,
+                recovery_kind=recovery_kind,
+            )
+
+        setter(observe)
+
+    @staticmethod
+    def _accounting_observer_failure(
+        error: ProviderCallObserverError,
+    ) -> StageInvocationError:
+        cause = error.__cause__
+        if isinstance(cause, StageInvocationError):
+            return cause
+        return StageInvocationError(
+            "Provider request accounting could not be persisted",
+            retryable=False,
+            code=ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE,
+            human_description=(
+                "A physical Provider request settled, but HASHI could not "
+                "durably record it; execution stopped without replay."
+            ),
+            details={"error_type": type(cause or error).__name__},
+        )
 
     def usage_receipt(self, request_id: str = ""):
         """Return a structured :class:`UsageReceipt` for this provider turn."""
@@ -2061,6 +2304,79 @@ class HashiStageProvider(StageProvider):
             parent_request_id="",
             line_items=list(self.usage_line_items),
         )
+
+    def _record_unreceipted_provider_attempt(
+        self,
+        request: StageRequest,
+        *,
+        engine: str,
+        model: str,
+        label: str,
+        status: str,
+    ) -> None:
+        identity = "|".join(
+            (
+                str(request.request_ref or request.turn_id),
+                request.stage.value,
+                str(request.invocation_id or ""),
+                str(request.attempt),
+                str(label),
+                str(status),
+            )
+        )
+        line_item = PerCallUsageLineItem(
+            request_id=str(request.request_ref or request.turn_id),
+            parent_request_id=str(request.request_ref or ""),
+            phase=request.stage.value,
+            engine=str(engine),
+            model=str(model),
+            token_source="unknown",
+            cost_usd=None,
+            cost_source="unknown",
+            provider_request_id="hashi-provider:" + hashlib.sha256(
+                identity.encode("utf-8")
+            ).hexdigest(),
+            attempt=max(1, int(request.attempt)),
+            retry_count=max(0, int(request.attempt) - 1),
+            recovery_kind=(
+                "fresh_connection_retry"
+                if request.attempt > 1
+                else (
+                    str(getattr(self, "default_recovery_kind", "none") or "none")
+                    if str(getattr(self, "default_recovery_kind", "none") or "none")
+                    != "none"
+                    else str(label)
+                )
+            ),
+            status=str(status),
+        )
+        self.usage_line_items.append(line_item)
+        self._notify_usage_observer(line_item)
+
+    def _notify_usage_observer(self, line_item: PerCallUsageLineItem) -> None:
+        """Synchronously durabilise one real call before stage progression."""
+
+        observer = getattr(self, "usage_observer", None)
+        if observer is None:
+            return
+        try:
+            observer(line_item)
+        except StageInvocationError:
+            raise
+        except Exception as exc:
+            raise StageInvocationError(
+                "Provider request accounting could not be persisted",
+                retryable=False,
+                code=ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE,
+                human_description=(
+                    "The Provider answered, but HASHI could not durably record "
+                    "the request usage; the stage stopped without replaying it."
+                ),
+                details={
+                    "provider_request_id": line_item.provider_request_id,
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
 
     def bind_persona_audit_context(
         self,
@@ -2291,7 +2607,11 @@ class HashiStageProvider(StageProvider):
             # length.  HER tool-enabled stages continue until the model
             # finishes, fails, or the request is cancelled.
             evidence_registry = _EvidenceRecordingToolRegistry(
-                selected_registry, request, model=profile.model
+                selected_registry,
+                request,
+                model=profile.model,
+                provider=profile.engine,
+                audit_log=self.audit_log,
             )
             selected_registry = evidence_registry
             if request.checkpoint_coordinator is not None:
@@ -2602,6 +2922,7 @@ class HashiStageProvider(StageProvider):
         reasoning_chunks: list[str] = []
         provider_tool_activity = False
         provider_replay_activity = False
+        provider_request_inflight: tuple[str, str, str, bool] | None = None
 
         async def _capture(event: StreamEvent) -> None:
             nonlocal provider_replay_activity, provider_tool_activity
@@ -2670,6 +2991,22 @@ class HashiStageProvider(StageProvider):
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     human_description="The configured provider could not be initialized.",
                 )
+            self._bind_provider_call_observer(
+                backend,
+                request_id=request.request_ref or request.turn_id,
+                phase=request.stage.value,
+                engine=profile.engine,
+                model=profile.model,
+                invocation_id=request.invocation_id,
+                attempt=request.attempt,
+                recovery_kind=(
+                    "json_repair"
+                    if request.stage is Stage.JSON_REPAIR
+                    else (
+                        "fresh_connection_retry" if request.attempt > 1 else "none"
+                    )
+                ),
+            )
             prompt_request = request
             if request.stage in {Stage.PLANNING, Stage.REPLANNING} and (
                 "available_execution_tools" not in request.context
@@ -2966,15 +3303,36 @@ class HashiStageProvider(StageProvider):
                         details={"media_routing": list(media_routing)},
                     )
                 generation_kwargs["request_content"] = provider_request_content
+            provider_request_inflight = (
+                profile.engine,
+                profile.model,
+                "stage",
+                callable(getattr(backend, "set_provider_call_observer", None)),
+            )
             response = await backend.generate_response(
                 stage_prompt,
                 f"{request.turn_id}:{request.stage.value}:{request.attempt}",
                 **generation_kwargs,
             )
+            provider_request_inflight = None
             response_metadata = (
                 dict(response.stream_metadata)
                 if isinstance(response.stream_metadata, Mapping)
                 else {}
+            )
+            self._record_usage_line_item(
+                request_id=request.request_ref or request.turn_id,
+                phase=request.stage.value,
+                engine=profile.engine,
+                model=profile.model,
+                response=response,
+                invocation_id=request.invocation_id,
+                attempt=request.attempt,
+                recovery_kind=(
+                    "json_repair"
+                    if request.stage is Stage.JSON_REPAIR
+                    else ("fresh_connection_retry" if request.attempt > 1 else "none")
+                ),
             )
             native_fallback_attempted = False
             if (
@@ -3091,6 +3449,30 @@ class HashiStageProvider(StageProvider):
                                     ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
                                 ),
                             )
+                        self._bind_provider_call_observer(
+                            fallback_backend,
+                            request_id=request.request_ref or request.turn_id,
+                            phase=request.stage.value,
+                            engine=fallback_provider,
+                            model=fallback_model,
+                            invocation_id=(
+                                f"{request.invocation_id}:native-audio-fallback"
+                            ),
+                            attempt=request.attempt,
+                            recovery_kind="native_audio_fallback",
+                        )
+                        provider_request_inflight = (
+                            fallback_provider,
+                            fallback_model,
+                            "native_audio_fallback",
+                            callable(
+                                getattr(
+                                    fallback_backend,
+                                    "set_provider_call_observer",
+                                    None,
+                                )
+                            ),
+                        )
                         response = await fallback_backend.generate_response(
                             f"[Local voice transcription]\n{transcript}",
                             (
@@ -3100,6 +3482,17 @@ class HashiStageProvider(StageProvider):
                             is_retry=True,
                             silent=self.silent,
                             on_stream_event=_capture,
+                        )
+                        provider_request_inflight = None
+                        self._record_usage_line_item(
+                            request_id=request.request_ref or request.turn_id,
+                            phase=request.stage.value,
+                            engine=fallback_provider,
+                            model=fallback_model,
+                            response=response,
+                            invocation_id=f"{request.invocation_id}:native-audio-fallback",
+                            attempt=request.attempt,
+                            recovery_kind="native_audio_fallback",
                         )
                     finally:
                         await fallback_backend.shutdown()
@@ -3226,12 +3619,39 @@ class HashiStageProvider(StageProvider):
                 her_media_fallback_attempted = True
                 if controls_tools:
                     backend.tool_registry = fallback_registry
+                self._bind_provider_call_observer(
+                    backend,
+                    request_id=request.request_ref or request.turn_id,
+                    phase=request.stage.value,
+                    engine=profile.engine,
+                    model=profile.model,
+                    invocation_id=f"{request.invocation_id}:media-fallback",
+                    attempt=request.attempt,
+                    recovery_kind="media_fallback",
+                )
+                provider_request_inflight = (
+                    profile.engine,
+                    profile.model,
+                    "media_fallback",
+                    callable(getattr(backend, "set_provider_call_observer", None)),
+                )
                 response = await backend.generate_response(
                     stage_prompt,
                     f"{request.turn_id}:{request.stage.value}:{request.attempt}:media-fallback",
                     is_retry=True,
                     silent=self.silent,
                     on_stream_event=_capture,
+                )
+                provider_request_inflight = None
+                self._record_usage_line_item(
+                    request_id=request.request_ref or request.turn_id,
+                    phase=request.stage.value,
+                    engine=profile.engine,
+                    model=profile.model,
+                    response=response,
+                    invocation_id=f"{request.invocation_id}:media-fallback",
+                    attempt=request.attempt,
+                    recovery_kind="media_fallback",
                 )
             if her_media_fallback_attempted:
                 fallback_metadata = dict(response.stream_metadata or {})
@@ -3272,13 +3692,6 @@ class HashiStageProvider(StageProvider):
             self.cost_usd += float(response.cost_usd or 0.0)
             self.tool_call_count += int(response.tool_call_count or 0)
             self.tool_loop_count += int(response.tool_loop_count or 0)
-            self._record_usage_line_item(
-                request_id=request.request_ref or request.turn_id,
-                phase=request.stage.value,
-                engine=profile.engine,
-                model=profile.model,
-                response=response,
-            )
             tool_receipts = (
                 evidence_registry.receipts if evidence_registry is not None else ()
             )
@@ -3309,11 +3722,46 @@ class HashiStageProvider(StageProvider):
                     if isinstance(part, Mapping)
                 ),
             )
-        except StageInvocationError:
+        except ProviderCallObserverError as exc:
+            raise self._accounting_observer_failure(exc) from exc
+        except StageInvocationError as exc:
+            if provider_request_inflight is not None:
+                engine, model, label, physically_observed = provider_request_inflight
+                if (
+                    exc.code != ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE
+                    and not physically_observed
+                ):
+                    self._record_unreceipted_provider_attempt(
+                        request,
+                        engine=engine,
+                        model=model,
+                        label=label,
+                        status="failed_without_receipt",
+                    )
             raise
         except asyncio.CancelledError:
+            if provider_request_inflight is not None:
+                engine, model, label, physically_observed = provider_request_inflight
+                if not physically_observed:
+                    self._record_unreceipted_provider_attempt(
+                        request,
+                        engine=engine,
+                        model=model,
+                        label=label,
+                        status="cancelled",
+                    )
             raise
         except Exception as exc:
+            if provider_request_inflight is not None:
+                engine, model, label, physically_observed = provider_request_inflight
+                if not physically_observed:
+                    self._record_unreceipted_provider_attempt(
+                        request,
+                        engine=engine,
+                        model=model,
+                        label=label,
+                        status="failed_without_receipt",
+                    )
             raise _provider_exception_error(
                 exc,
                 label=f"{profile.engine}/{profile.model} invocation failed",
@@ -3581,6 +4029,18 @@ class HashiStageProvider(StageProvider):
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     human_description="The Persona provider could not be initialized.",
                 )
+            self._bind_provider_call_observer(
+                backend,
+                request_id=request_id,
+                phase="persona",
+                engine=profile.engine,
+                model=profile.model,
+                invocation_id=request_id,
+                attempt=attempt,
+                recovery_kind=(
+                    "fresh_connection_retry" if attempt > 1 else "none"
+                ),
+            )
             effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):
                 effective_prompt = f"{system_prompt}\n\n{prompt}"
@@ -3629,6 +4089,8 @@ class HashiStageProvider(StageProvider):
             return text
         except asyncio.CancelledError:
             raise
+        except ProviderCallObserverError as exc:
+            raise self._accounting_observer_failure(exc) from exc
         except StageInvocationError:
             raise
         except Exception as exc:

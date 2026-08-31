@@ -590,9 +590,9 @@ class HerBackendSessionCoordinator:
         *,
         assistant_text: str,
         error_text: str = "",
-    ) -> None:
+    ) -> dict[str, Any]:
         try:
-            self.store.complete_turn(
+            return self.store.complete_turn(
                 session_id=accepted.session_id,
                 turn_id=accepted.turn_id,
                 assistant_text=str(assistant_text or ""),
@@ -601,9 +601,9 @@ class HerBackendSessionCoordinator:
         except HerSessionStoreError as exc:
             raise HerFixedProtocolError(exc.code, str(exc)) from exc
 
-    def cancel(self, accepted: AcceptedHerTurn, *, reason: str) -> None:
+    def cancel(self, accepted: AcceptedHerTurn, *, reason: str) -> dict[str, Any]:
         try:
-            self.store.cancel_turn(
+            return self.store.cancel_turn(
                 session_id=accepted.session_id,
                 turn_id=accepted.turn_id,
                 reason=str(reason or "HER turn was cancelled."),

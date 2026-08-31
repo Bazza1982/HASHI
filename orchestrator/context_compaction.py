@@ -29,6 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from adapters.openrouter_api import ProviderCallObserverError
 from orchestrator import ui_language
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
@@ -283,6 +284,9 @@ class ResolvedCompactRoute:
     lock_reason: str = ""
     crosses_provider: bool = False
     capabilities: Mapping[str, Any] = field(default_factory=dict)
+    routing_revision: int = 1
+    capability_revision: int = 1
+    pricing_revision: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -792,6 +796,67 @@ def resolve_capacity_profile(
     return None
 
 
+def preflight_route_context_fit(
+    runtime: Any,
+    selected: Any,
+    *,
+    targets: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    """Check every target in a proposed HER route against current context.
+
+    This is deliberately read-only.  A route change never compacts history as
+    a side effect, and an active Turn is never rewritten to make a target fit.
+    Unknown capacity remains explicit diagnostic state; a target with known
+    insufficient capacity is rejected before the routing revision is stored.
+    """
+
+    current_tokens = estimate_effective_context_tokens(
+        runtime,
+        use_last_runtime_measurement=True,
+    )
+    proposed_targets = (
+        tuple(targets)
+        if targets is not None
+        else getattr(selected, "all_targets", lambda: ())()
+    )
+    rows: list[dict[str, Any]] = []
+    insufficient: list[dict[str, Any]] = []
+    for target in proposed_targets:
+        provider = canonical_backend_engine(str(getattr(target, "provider", "")))
+        model = str(getattr(target, "model", "") or "").strip()
+        capacity = resolve_capacity_profile(runtime, provider, model)
+        row = {
+            "provider": provider,
+            "model": model,
+            "current_context_tokens": current_tokens,
+            "capacity_known": capacity is not None,
+            "context_window_tokens": (
+                capacity.context_window_tokens if capacity is not None else None
+            ),
+            "usable_input_tokens": (
+                capacity.usable_input_tokens if capacity is not None else None
+            ),
+            "response_headroom_tokens": (
+                capacity.response_headroom_tokens if capacity is not None else None
+            ),
+            "fits": (
+                current_tokens <= capacity.usable_input_tokens
+                if capacity is not None
+                else None
+            ),
+            "provenance": capacity.provenance if capacity is not None else "unknown",
+        }
+        rows.append(row)
+        if row["fits"] is False:
+            insufficient.append(row)
+    return {
+        "status": "insufficient" if insufficient else "fits_or_unknown",
+        "current_context_tokens": current_tokens,
+        "targets": rows,
+        "insufficient_targets": insufficient,
+    }
+
+
 def _effective_her_config(runtime: Any) -> Mapping[str, Any]:
     manager = getattr(runtime, "backend_manager", None)
     getter = getattr(manager, "_effective_her_v2_config", None)
@@ -909,6 +974,11 @@ def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
         capacity=capacity,
         eligible=True,
         crosses_provider=False,
+        routing_revision=max(1, int(getattr(selected, "routing_revision", 1))),
+        capability_revision=max(
+            1, int(getattr(selected, "capability_revision", 1))
+        ),
+        pricing_revision=str(getattr(selected, "pricing_revision", "unknown")),
     )
 
 
@@ -980,6 +1050,27 @@ def _read_turns(memory_store: Any) -> tuple[dict[str, Any], ...]:
     return tuple(dict(row) for row in rows)
 
 
+def _settled_history_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Exclude a trailing active exchange while retaining settled capsules."""
+
+    last_assistant = next(
+        (
+            index
+            for index in range(len(rows) - 1, -1, -1)
+            if str(rows[index].get("role") or "").casefold() == "assistant"
+        ),
+        -1,
+    )
+    return tuple(
+        dict(row)
+        for index, row in enumerate(rows)
+        if index <= last_assistant
+        or str(row.get("role") or "").casefold() == "recovery"
+    )
+
+
 def _recent_start(turns: Sequence[Mapping[str, Any]], recent_exchanges: int) -> int:
     if recent_exchanges <= 0:
         return len(turns)
@@ -1027,7 +1118,11 @@ def _snapshot(store: CompactionStore, memory_store: Any, policy: CompactionPolic
         if isinstance(active_pointer, Mapping)
         else ""
     )
-    turns = _read_turns(memory_store)
+    all_rows = _read_turns(memory_store)
+    # Compact owns settled conversation history only. A trailing user request
+    # (and every active tool/side-effect record, which lives outside this
+    # store) is excluded even when Compact runs concurrently with Execution.
+    turns = _settled_history_rows(all_rows)
     uncovered = tuple(row for row in turns if int(row.get("id") or 0) > covered)
     recent_index = _recent_start(uncovered, policy.recent_exchanges)
     eligible = uncovered[:recent_index]
@@ -1062,7 +1157,8 @@ def _snapshot(store: CompactionStore, memory_store: Any, policy: CompactionPolic
 
 
 def _raw_fallback_snapshot(memory_store: Any, policy: CompactionPolicy) -> HistorySnapshot:
-    turns = _read_turns(memory_store)
+    all_rows = _read_turns(memory_store)
+    turns = _settled_history_rows(all_rows)
     recent_index = _recent_start(turns, policy.recent_exchanges)
     eligible = turns[:recent_index]
     recent = turns[recent_index:]
@@ -1908,6 +2004,23 @@ class ContextCompactionCoordinator:
         user_prompt: str,
     ) -> Any:
         manager = self.runtime.backend_manager
+        current_backend = getattr(manager, "current_backend", None)
+        maintenance_recorder = getattr(
+            current_backend, "record_maintenance_provider_requests", None
+        )
+        accounting_ready = getattr(
+            current_backend, "can_record_maintenance_provider_requests", None
+        )
+        if (
+            callable(maintenance_recorder)
+            and callable(accounting_ready)
+            and not accounting_ready()
+        ):
+            raise CompactionFailure(
+                "COMPACTION_ACCOUNTING_UNAVAILABLE",
+                "Compact cannot call its Provider before a durable HER Session is bound",
+                retryable=False,
+            )
         backend = manager.create_ephemeral_backend(route.provider, target_model=route.model)
         if hasattr(backend, "tool_registry"):
             backend.tool_registry = None
@@ -1931,6 +2044,11 @@ class ContextCompactionCoordinator:
                 not in {"", "off", "none", "false", "0", "disabled"}
             )
         setter = getattr(backend, "set_system_prompt", None)
+        response = None
+        provider_request_started = False
+        usage_attempted = False
+        physical_observer_bound = False
+        observed_provider_request_ids: set[str] = set()
         try:
             initialized = await backend.initialize()
             if not initialized:
@@ -1944,6 +2062,28 @@ class ContextCompactionCoordinator:
                 backend.sys_prompt = system_prompt
             if hasattr(backend, "tool_registry"):
                 backend.tool_registry = None
+            physical_observer_setter = getattr(
+                backend, "set_provider_call_observer", None
+            )
+            if callable(maintenance_recorder) and callable(
+                physical_observer_setter
+            ):
+
+                def observe_physical_call(call: Mapping[str, Any]) -> None:
+                    self._record_provider_usage(
+                        route,
+                        request,
+                        None,
+                        status=str(call.get("status") or "completed"),
+                        calls_override=[call],
+                        observed_provider_request_ids=(
+                            observed_provider_request_ids
+                        ),
+                    )
+
+                physical_observer_setter(observe_physical_call)
+                physical_observer_bound = True
+            provider_request_started = True
             response = await asyncio.wait_for(
                 backend.generate_response(
                     user_prompt,
@@ -1954,6 +2094,18 @@ class ContextCompactionCoordinator:
                 ),
                 timeout=request.deadline_s,
             )
+            usage_attempted = True
+            self._record_provider_usage(
+                route,
+                request,
+                response,
+                status=(
+                    "completed"
+                    if bool(getattr(response, "is_success", False))
+                    else "failed_response"
+                ),
+                observed_provider_request_ids=observed_provider_request_ids,
+            )
             if not bool(getattr(response, "is_success", False)):
                 raise CompactionFailure(
                     str(getattr(response, "error_code", None) or "COMPACTION_PROVIDER_FAILURE"),
@@ -1961,10 +2113,183 @@ class ContextCompactionCoordinator:
                     retryable=bool(getattr(response, "error_retryable", False)),
                 )
             return response
+        except ProviderCallObserverError as exc:
+            usage_attempted = True
+            cause = exc.__cause__
+            if isinstance(cause, CompactionFailure):
+                raise cause
+            raise CompactionFailure(
+                "COMPACTION_ACCOUNTING_FAILURE",
+                "Compact Provider request settled but its durable usage record failed",
+                retryable=False,
+            ) from exc
         except asyncio.TimeoutError as exc:
+            usage_attempted = True
+            if not physical_observer_bound:
+                self._record_provider_usage(route, request, None, status="timeout")
             raise CompactionFailure("COMPACTION_TIMEOUT", "Compact provider attempt timed out", retryable=True) from exc
+        except asyncio.CancelledError:
+            if provider_request_started and not usage_attempted:
+                usage_attempted = True
+                if not physical_observer_bound:
+                    self._record_provider_usage(
+                        route, request, None, status="cancelled"
+                    )
+            raise
+        except BaseException:
+            if provider_request_started and not usage_attempted:
+                usage_attempted = True
+                if not physical_observer_bound:
+                    self._record_provider_usage(
+                        route,
+                        request,
+                        None,
+                        status="failed_without_receipt",
+                    )
+            raise
         finally:
             await backend.shutdown()
+
+    def _record_provider_usage(
+        self,
+        route: ResolvedCompactRoute,
+        request: CompactionRequest,
+        response: Any | None,
+        *,
+        status: str,
+        calls_override: Sequence[Mapping[str, Any]] | None = None,
+        observed_provider_request_ids: set[str] | None = None,
+    ) -> None:
+        """Persist each Compact provider call without coupling Compact success."""
+
+        backend = getattr(
+            getattr(self.runtime, "backend_manager", None), "current_backend", None
+        )
+        recorder = getattr(backend, "record_maintenance_provider_requests", None)
+        if not callable(recorder):
+            return
+        metadata = getattr(response, "stream_metadata", None)
+        meter = metadata.get("meter") if isinstance(metadata, Mapping) else None
+        raw_calls = meter.get("provider_calls") if isinstance(meter, Mapping) else None
+        calls = (
+            [dict(item) for item in calls_override if isinstance(item, Mapping)]
+            if calls_override is not None
+            else (
+                [dict(item) for item in raw_calls if isinstance(item, Mapping)]
+                if isinstance(raw_calls, list)
+                else [
+                {
+                    "input": int(
+                        getattr(getattr(response, "usage", None), "input_tokens", 0)
+                        or 0
+                    ),
+                    "output": int(
+                        getattr(getattr(response, "usage", None), "output_tokens", 0)
+                        or 0
+                    ),
+                    "thinking": int(
+                        getattr(getattr(response, "usage", None), "thinking_tokens", 0)
+                        or 0
+                    ),
+                    "cost_usd": getattr(response, "cost_usd", None),
+                    "token_source": "provider" if response is not None else "unknown",
+                }
+                ]
+            )
+        )
+        rows: list[dict[str, Any]] = []
+        from tools.token_tracker import PRICING_REVISION, calc_cost, resolve_cost_source
+
+        for index, call in enumerate(calls, start=1):
+            input_tokens = max(0, int(call.get("input") or 0))
+            output_tokens = max(0, int(call.get("output") or 0))
+            thinking_tokens = max(0, int(call.get("thinking") or 0))
+            cache_hit = call.get("prompt_cache_hit_tokens")
+            token_source = str(call.get("token_source") or "unknown")
+            if token_source == "unknown" and call.get("cost_usd") is None:
+                cost, source = None, "unknown"
+            else:
+                cost, source = resolve_cost_source(
+                    cost_usd=call.get("cost_usd"),
+                    model=route.model,
+                    engine=route.provider,
+                )
+            if cost is None and source == "pricing_table":
+                cost = calc_cost(
+                    input_tokens,
+                    output_tokens,
+                    route.model,
+                    thinking_tokens,
+                    cached_tokens=max(0, int(cache_hit or 0)),
+                    thinking_in_output=bool(call.get("thinking_in_output", True)),
+                )
+            provider_request_id = str(
+                call.get("provider_request_id")
+                or f"compact:{request.compaction_id}:{request.attempt}:provider-call:{index}"
+            )
+            if (
+                observed_provider_request_ids is not None
+                and provider_request_id in observed_provider_request_ids
+            ):
+                continue
+            rows.append(
+                {
+                    "provider_request_id": provider_request_id,
+                    "parent_request_id": request.request_ref,
+                    "phase": "compact",
+                    "engine": route.provider,
+                    "model": route.model,
+                    "input": input_tokens,
+                    "output": output_tokens,
+                    "thinking": thinking_tokens,
+                    "prompt_cache_hit_tokens": cache_hit,
+                    "prompt_cache_miss_tokens": call.get(
+                        "prompt_cache_miss_tokens"
+                    ),
+                    "token_source": token_source,
+                    "cost_usd": cost,
+                    "cost_source": source,
+                    "provider_call_latency_ms": call.get(
+                        "provider_call_latency_ms"
+                    ),
+                    "attempt": max(
+                        1, int(call.get("attempt") or request.attempt)
+                    ),
+                    "retry_count": max(
+                        0,
+                        int(
+                            call.get("retry_count")
+                            if call.get("retry_count") is not None
+                            else request.attempt - 1
+                        ),
+                    ),
+                    "recovery_kind": str(
+                        call.get("recovery_kind")
+                        or (
+                            "compact_retry" if request.attempt > 1 else "none"
+                        )
+                    ),
+                    "compact": True,
+                    "routing_revision": route.routing_revision,
+                    "capability_revision": route.capability_revision,
+                    "pricing_revision": route.pricing_revision or PRICING_REVISION,
+                    "status": str(call.get("status") or status),
+                }
+            )
+        if not rows:
+            return
+        try:
+            recorder(rows)
+        except Exception as exc:
+            raise CompactionFailure(
+                "COMPACTION_ACCOUNTING_FAILURE",
+                "Compact Provider request completed but its durable usage record failed",
+                retryable=False,
+            ) from exc
+        if observed_provider_request_ids is not None:
+            observed_provider_request_ids.update(
+                str(row["provider_request_id"]) for row in rows
+            )
 
     async def _call_capsule(
         self,

@@ -8,6 +8,11 @@ import pytest
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.her_v2.models import Route, Stage, TriageClassification
+from orchestrator.her_v2.runtime_configuration import (
+    HER_V2_CAPABILITY_REVISION,
+    HER_V2_PRICING_REVISION,
+    resolve_her_v2_configuration,
+)
 
 
 def _her_v2_config() -> dict:
@@ -324,6 +329,78 @@ def test_apply_replaces_live_config_without_mutating_turn_snapshot(tmp_path):
     assert manager.current_backend._v2_config.profile_for(Stage.PLANNING).engine == (
         "deepseek-api"
     )
+
+
+def test_routing_revision_advances_only_when_default_route_changes(tmp_path):
+    manager = _manager(tmp_path)
+    assert manager.get_her_v2_configuration().routing_revision == 1
+
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_provider("openrouter-api")
+    )
+    changed = manager.get_her_v2_configuration()
+    assert changed.routing_revision == 2
+
+    manager.apply_her_v2_configuration(changed)
+    unchanged = manager.get_her_v2_configuration()
+    assert unchanged.routing_revision == 2
+    persisted = json.loads(manager.state_file.read_text(encoding="utf-8"))
+    assert persisted["her_v2_configuration"]["routing_revision"] == 2
+
+
+def test_saved_route_cannot_pin_stale_capability_or_pricing_revisions():
+    selected = resolve_her_v2_configuration(
+        _her_v2_config(),
+        {
+            "routing_revision": 9,
+            "capability_revision": 999,
+            "pricing_revision": "stale-prices",
+        },
+    )
+
+    assert selected.routing_revision == 9
+    assert selected.capability_revision == HER_V2_CAPABILITY_REVISION
+    assert selected.pricing_revision == HER_V2_PRICING_REVISION
+
+
+def test_provider_switch_preflight_rejects_known_too_small_context(tmp_path):
+    manager = _manager(tmp_path)
+    for grant in manager.config.allowed_backends:
+        if grant.get("engine") == "openrouter-api":
+            grant["context_window_tokens"] = 32_000
+            grant["response_headroom_tokens"] = 4_000
+    runtime = SimpleNamespace(
+        backend_manager=manager,
+        global_config=manager.global_config,
+        workspace_dir=manager.config.workspace_dir,
+        _last_full_prompt_tokens=999_000,
+    )
+    manager.runtime = runtime
+    candidate = manager.prepare_her_v2_provider("openrouter-api")
+
+    with pytest.raises(ValueError, match="context is too small"):
+        manager.apply_her_v2_configuration(candidate)
+
+    assert manager.get_her_v2_configuration().routing_revision == 1
+
+
+def test_reasoning_only_switch_does_not_run_target_context_preflight(tmp_path):
+    manager = _manager(tmp_path)
+    runtime = SimpleNamespace(
+        backend_manager=manager,
+        global_config=manager.global_config,
+        workspace_dir=manager.config.workspace_dir,
+        _last_full_prompt_tokens=999_000,
+    )
+    manager.runtime = runtime
+
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_route_reasoning("planning", "medium")
+    )
+
+    assert manager.get_her_v2_configuration().routing_revision == 2
+    persisted = json.loads(manager.state_file.read_text(encoding="utf-8"))
+    assert persisted["her_v2_last_route_preflight"]["status"] == "not_required"
 
 
 def test_reselecting_active_provider_preserves_valid_slot_choices(tmp_path):

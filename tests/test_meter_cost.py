@@ -249,6 +249,27 @@ def test_her_stage_provider_preserves_deepseek_cache_and_call_latency():
     assert item.cost_usd == pytest.approx(0.000058)
 
 
+def test_her_stage_provider_does_not_invent_call_from_explicit_empty_meter():
+    provider = object.__new__(HashiStageProvider)
+    provider.usage_line_items = []
+    response = BackendResponse(
+        text="",
+        duration_ms=1,
+        is_success=False,
+        stream_metadata={"meter": {"provider_calls": []}},
+    )
+
+    provider._record_usage_line_item(
+        request_id="request-before-http",
+        phase="execution",
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        response=response,
+    )
+
+    assert provider.usage_line_items == []
+
+
 # ── Formatter ────────────────────────────────────────────────────────────────
 
 def test_formatter_pricing_table_has_approx():

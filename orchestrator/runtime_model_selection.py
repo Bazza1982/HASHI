@@ -649,8 +649,6 @@ def her_v2_route_model_keyboard(
 def apply_her_v2_configuration(runtime, selected) -> str | None:
     if runtime.config.active_backend != HER_V2_ENGINE:
         return ui_language.tr("menu.her.configuration_active_only")
-    if runtime._backend_busy():
-        return ui_language.tr("menu.her.configuration_busy")
     try:
         runtime.backend_manager.apply_her_v2_configuration(selected)
     except (OSError, TypeError, ValueError) as exc:
@@ -663,8 +661,6 @@ def save_her_v2_candidate(runtime, selected) -> str | None:
 
     if runtime.config.active_backend != HER_V2_ENGINE:
         return ui_language.tr("menu.her.configuration_active_only")
-    if runtime._backend_busy():
-        return ui_language.tr("menu.her.configuration_busy")
     try:
         if (
             selected.routing_mode == "hybrid"
@@ -759,8 +755,6 @@ async def cmd_provider(runtime, update, context: Any) -> None:
     provider = args[0].strip()
     try:
         if provider.casefold() == "hybrid":
-            if runtime._backend_busy():
-                raise ValueError(ui_language.tr("menu.her.configuration_busy"))
             runtime.backend_manager.begin_her_v2_hybrid_draft()
             await runtime._reply_text(
                 update,
@@ -854,12 +848,6 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
 
     action = args[0].strip().lower()
     if action == "apply" and len(args) == 1:
-        if runtime._backend_busy():
-            await runtime._reply_text(
-                update,
-                ui_language.tr("model.draft_busy"),
-            )
-            return
         try:
             runtime.backend_manager.apply_her_v2_configuration_draft()
         except (OSError, TypeError, ValueError) as exc:
@@ -1207,12 +1195,6 @@ async def callback_model(runtime, update, context: Any) -> None:
                 reply_markup=her_v2_compact_keyboard(runtime),
             )
         elif data == "her_model_apply":
-            if runtime._backend_busy():
-                await query.answer(
-                    ui_language.tr("model.draft_saved_busy"),
-                    show_alert=True,
-                )
-                return
             try:
                 runtime.backend_manager.apply_her_v2_configuration_draft()
             except (OSError, TypeError, ValueError) as exc:
@@ -1279,12 +1261,6 @@ async def callback_model(runtime, update, context: Any) -> None:
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
                     ui_language.tr("model.control.active_only"),
-                    show_alert=True,
-                )
-                return
-            if runtime._backend_busy():
-                await query.answer(
-                    ui_language.tr("model.configuration_busy"),
                     show_alert=True,
                 )
                 return

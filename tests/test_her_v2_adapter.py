@@ -372,6 +372,82 @@ async def test_adapter_fixed_backend_keeps_one_session_and_accepts_incremental_t
 
 
 @pytest.mark.asyncio
+async def test_fixed_route_freeze_failure_closes_turn_before_provider_work(
+    tmp_path,
+    monkeypatch,
+):
+    config = _agent_config(tmp_path)
+    provider = _DirectProvider()
+    setattr(config, "_her_v2_stage_provider", provider)
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(agent_mode="fixed"),
+        _request_meta_by_id={},
+        current_request_meta={},
+    )
+    setattr(config, "_hashi_runtime", runtime)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+    sections = [
+        {
+            "key": "permanent_system",
+            "title": "PERMANENT SYSTEM INSTRUCTIONS",
+            "text": "Follow policy.",
+            "authority": "permanent_system",
+            "rank": 0,
+            "protected": True,
+            "metadata": {},
+            "order": 0,
+        },
+        {
+            "key": "current_user_request",
+            "title": "CURRENT USER REQUEST",
+            "text": "placeholder",
+            "authority": "current_user",
+            "rank": 3,
+            "protected": True,
+            "metadata": {},
+            "order": 1,
+        },
+    ]
+    request_meta = {
+        "request_id": "request-route-failure",
+        "hashi_session_id": "hashi-session-route-failure",
+        "hashi_message_id": "message-route-failure",
+        "context_generation": 1,
+        "session_workspace": str(tmp_path / "session-route-failure"),
+    }
+    runtime._request_meta_by_id[request_meta["request_id"]] = request_meta
+    runtime.current_request_meta = request_meta
+    transport, _audit = adapter.prepare_fixed_turn_input(
+        prompt_payload={"transport_snapshot": {"version": 1, "sections": sections}},
+        user_message="Do not reach the Provider.",
+        request_id=request_meta["request_id"],
+        request_meta=request_meta,
+    )
+    payload = json.loads(transport.split("\n", 1)[1])
+
+    def fail_route_freeze(**_kwargs):
+        raise OSError("simulated canonical store failure")
+
+    monkeypatch.setattr(
+        adapter._session_coordinator.store,
+        "freeze_turn_routing",
+        fail_route_freeze,
+    )
+
+    response = await adapter.generate_response(transport, request_meta["request_id"])
+
+    assert response.is_success is False
+    assert response.error_code == ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE.value
+    assert provider.requests == []
+    turn = adapter._session_coordinator.store.turn_by_idempotency(
+        adapter._session_id,
+        payload["initial_turn"]["idempotency_key"],
+    )
+    assert turn["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_path):
     config = _agent_config(tmp_path)
     provider = _DirectProvider()

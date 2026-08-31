@@ -198,12 +198,19 @@ class HERv2Config:
     strategy_tools_enabled: bool = True
     planning_tools_enabled: bool = True
     shadow_mode: bool = False
+    # Control-plane revisions are snapshotted once per Turn. They are not
+    # provider reasoning controls and never mutate an in-flight runtime.
+    routing_revision: int = 1
+    capability_revision: int = 1
+    pricing_revision: str = "unknown"
 
     def __post_init__(self) -> None:
         if self.shadow_mode:
             raise HERv2ConfigurationError(
                 "HER v2 shadow mode has been permanently retired; use normal mode"
             )
+        if self.routing_revision < 1 or self.capability_revision < 1:
+            raise HERv2ConfigurationError("HER v2 revisions must be positive")
         if self.routing_mode not in {"single", "hybrid"}:
             raise HERv2ConfigurationError(
                 f"unknown HER v2 routing mode: {self.routing_mode!r}"
@@ -620,6 +627,9 @@ class HERv2Config:
                 "planning_tools_enabled",
             ),
             shadow_mode=_strict_bool(raw.get("shadow_mode", False), "shadow_mode"),
+            routing_revision=max(1, int(raw.get("routing_revision") or 1)),
+            capability_revision=max(1, int(raw.get("capability_revision") or 1)),
+            pricing_revision=str(raw.get("pricing_revision") or "unknown"),
         )
 
     def _configured_route_profile(

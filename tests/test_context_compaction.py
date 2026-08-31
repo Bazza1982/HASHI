@@ -1050,6 +1050,296 @@ async def test_compactor_does_not_require_capability_or_prompt_isolation_declara
 
 
 @pytest.mark.asyncio
+async def test_compactor_accounting_failure_is_terminal_and_backend_is_reaped(tmp_path):
+    runtime = _Runtime(tmp_path)
+
+    class Backend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+            self.shutdown_calls = 0
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, *_args, **_kwargs):
+            return BackendResponse(text="ok", duration_ms=1)
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+
+    backend = Backend()
+
+    def reject_usage(_rows):
+        raise RuntimeError("durable usage store unavailable")
+
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        record_maintenance_provider_requests=reject_usage,
+    )
+    runtime.backend_manager.create_ephemeral_backend = lambda *_args, **_kwargs: backend
+    route = resolve_compact_route(runtime)
+    request = CompactionRequest(
+        compaction_id="cmp-accounting-failure",
+        request_ref="req-accounting-failure",
+        trigger="test",
+        provider=route.provider,
+        model=route.model,
+        reasoning=route.reasoning,
+        her_effort=route.her_effort,
+        timeout_tier=route.timeout_tier,
+        deadline_s=1,
+        attempt=1,
+        source_digest="sha256:test",
+        source_segment_ids=("turn:1",),
+    )
+
+    with pytest.raises(CompactionFailure) as caught:
+        await ContextCompactionCoordinator(runtime)._invoke_model(
+            route,
+            request,
+            "direct compact system",
+            "quoted source",
+        )
+
+    assert caught.value.code == "COMPACTION_ACCOUNTING_FAILURE"
+    assert caught.value.retryable is False
+    assert backend.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compactor_records_provider_exception_without_response(tmp_path):
+    runtime = _Runtime(tmp_path)
+    recorded = []
+
+    class Backend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+            self.shutdown_calls = 0
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, *_args, **_kwargs):
+            raise RuntimeError("provider transport failed")
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+
+    backend = Backend()
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        record_maintenance_provider_requests=lambda rows: recorded.extend(rows),
+        can_record_maintenance_provider_requests=lambda: True,
+    )
+    runtime.backend_manager.create_ephemeral_backend = lambda *_args, **_kwargs: backend
+    route = resolve_compact_route(runtime)
+    request = CompactionRequest(
+        compaction_id="cmp-provider-exception",
+        request_ref="req-provider-exception",
+        trigger="test",
+        provider=route.provider,
+        model=route.model,
+        reasoning=route.reasoning,
+        her_effort=route.her_effort,
+        timeout_tier=route.timeout_tier,
+        deadline_s=1,
+        attempt=1,
+        source_digest="sha256:test",
+        source_segment_ids=("turn:1",),
+    )
+
+    with pytest.raises(RuntimeError, match="provider transport failed"):
+        await ContextCompactionCoordinator(runtime)._invoke_model(
+            route,
+            request,
+            "direct compact system",
+            "quoted source",
+        )
+
+    assert len(recorded) == 1
+    assert recorded[0]["status"] == "failed_without_receipt"
+    assert recorded[0]["token_source"] == "unknown"
+    assert backend.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compactor_records_physical_retry_immediately_without_final_duplicates(
+    tmp_path,
+):
+    runtime = _Runtime(tmp_path)
+    recorded = []
+    physical_calls = [
+        {
+            "provider_request_id": "compact-wire-1",
+            "input": 0,
+            "output": 0,
+            "thinking": 0,
+            "token_source": "unknown",
+            "cost_usd": None,
+            "attempt": 1,
+            "retry_count": 0,
+            "recovery_kind": "none",
+            "status": "failed_without_receipt",
+        },
+        {
+            "provider_request_id": "compact-wire-2",
+            "input": 90,
+            "output": 10,
+            "thinking": 2,
+            "token_source": "provider",
+            "thinking_in_output": True,
+            "cost_usd": 0.02,
+            "attempt": 2,
+            "retry_count": 1,
+            "recovery_kind": "provider_transport_retry",
+            "status": "completed",
+        },
+    ]
+
+    class Backend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+            self.shutdown_calls = 0
+            self.observer = None
+
+        def set_provider_call_observer(self, observer):
+            self.observer = observer
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, *_args, **_kwargs):
+            self.observer(physical_calls[0])
+            assert len(recorded) == 1
+            self.observer(physical_calls[1])
+            assert len(recorded) == 2
+            return BackendResponse(
+                text="ok",
+                duration_ms=1,
+                stream_metadata={"meter": {"provider_calls": physical_calls}},
+            )
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+
+    backend = Backend()
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        record_maintenance_provider_requests=lambda rows: recorded.extend(rows),
+        can_record_maintenance_provider_requests=lambda: True,
+    )
+    runtime.backend_manager.create_ephemeral_backend = lambda *_args, **_kwargs: backend
+    route = resolve_compact_route(runtime)
+    request = CompactionRequest(
+        compaction_id="cmp-physical-retry",
+        request_ref="req-physical-retry",
+        trigger="test",
+        provider=route.provider,
+        model=route.model,
+        reasoning=route.reasoning,
+        her_effort=route.her_effort,
+        timeout_tier=route.timeout_tier,
+        deadline_s=1,
+        attempt=1,
+        source_digest="sha256:test",
+        source_segment_ids=("turn:1",),
+    )
+
+    response = await ContextCompactionCoordinator(runtime)._invoke_model(
+        route,
+        request,
+        "direct compact system",
+        "quoted source",
+    )
+
+    assert response.text == "ok"
+    assert [row["provider_request_id"] for row in recorded] == [
+        "compact-wire-1",
+        "compact-wire-2",
+    ]
+    assert [row["status"] for row in recorded] == [
+        "failed_without_receipt",
+        "completed",
+    ]
+    assert recorded[0]["cost_source"] == "unknown"
+    assert backend.shutdown_calls == 1
+
+
+def test_compactor_does_not_invent_call_from_explicit_empty_meter(tmp_path):
+    runtime = _Runtime(tmp_path)
+    recorded = []
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        record_maintenance_provider_requests=lambda rows: recorded.extend(rows),
+    )
+    route = resolve_compact_route(runtime)
+    request = CompactionRequest(
+        compaction_id="cmp-before-http",
+        request_ref="req-before-http",
+        trigger="test",
+        provider=route.provider,
+        model=route.model,
+        reasoning=route.reasoning,
+        her_effort=route.her_effort,
+        timeout_tier=route.timeout_tier,
+        deadline_s=1,
+        attempt=1,
+        source_digest="sha256:test",
+        source_segment_ids=("turn:1",),
+    )
+
+    ContextCompactionCoordinator(runtime)._record_provider_usage(
+        route,
+        request,
+        BackendResponse(
+            text="",
+            duration_ms=1,
+            is_success=False,
+            stream_metadata={"meter": {"provider_calls": []}},
+        ),
+        status="failed_response",
+    )
+
+    assert recorded == []
+
+
+@pytest.mark.asyncio
+async def test_compactor_blocks_before_provider_when_durable_meter_is_unavailable(
+    tmp_path,
+):
+    runtime = _Runtime(tmp_path)
+    created = []
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        record_maintenance_provider_requests=lambda _rows: None,
+        can_record_maintenance_provider_requests=lambda: False,
+    )
+    runtime.backend_manager.create_ephemeral_backend = lambda *_args, **_kwargs: created.append(True)
+    route = resolve_compact_route(runtime)
+    request = CompactionRequest(
+        compaction_id="cmp-no-meter",
+        request_ref="req-no-meter",
+        trigger="test",
+        provider=route.provider,
+        model=route.model,
+        reasoning=route.reasoning,
+        her_effort=route.her_effort,
+        timeout_tier=route.timeout_tier,
+        deadline_s=1,
+        attempt=1,
+        source_digest="sha256:test",
+        source_segment_ids=("turn:1",),
+    )
+
+    with pytest.raises(CompactionFailure) as caught:
+        await ContextCompactionCoordinator(runtime)._invoke_model(
+            route,
+            request,
+            "direct compact system",
+            "quoted source",
+        )
+
+    assert caught.value.code == "COMPACTION_ACCOUNTING_UNAVAILABLE"
+    assert caught.value.retryable is False
+    assert created == []
+
+
+@pytest.mark.asyncio
 async def test_hierarchical_compaction_uses_multiple_calls_without_fixed_round_cap(tmp_path):
     runtime = _Runtime(tmp_path, capacity=20_000, headroom=512)
     runtime.state_store.value = {

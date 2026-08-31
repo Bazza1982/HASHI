@@ -495,11 +495,19 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
     provider_calls = response.stream_metadata["meter"]["provider_calls"]
+    accounting_fields = {
+        "attempt",
+        "retry_count",
+        "recovery_kind",
+        "status",
+        "provider_request_id",
+        "provider_call_latency_ms",
+    }
     assert [
         {
             key: value
             for key, value in call.items()
-            if key != "provider_call_latency_ms"
+            if key not in accounting_fields
         }
         for call in provider_calls
     ] == [
@@ -529,6 +537,11 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
         and call["provider_call_latency_ms"] >= 0
         for call in provider_calls
     )
+    assert [call["status"] for call in provider_calls] == [
+        "completed",
+        "completed",
+    ]
+    assert len({call["provider_request_id"] for call in provider_calls}) == 2
 
 
 @pytest.mark.asyncio
@@ -679,6 +692,8 @@ async def test_deepseek_retries_only_the_unfinished_call_after_completed_tool_lo
     adapter = _adapter(tmp_path)
     adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
     seen_messages = []
+    observed_provider_calls = []
+    adapter.set_provider_call_observer(observed_provider_calls.append)
     tool_calls = [
         {
             "id": "call_1",
@@ -720,6 +735,16 @@ async def test_deepseek_retries_only_the_unfinished_call_after_completed_tool_lo
     ]
     assert events.count(KIND_THINKING) == 1
     assert response.stream_metadata["provider_transport_retry_count"] == 1
+    provider_calls = response.stream_metadata["meter"]["provider_calls"]
+    assert provider_calls == observed_provider_calls
+    assert [call["status"] for call in provider_calls] == [
+        "completed",
+        "failed_without_receipt",
+        "completed",
+    ]
+    assert [call["retry_count"] for call in provider_calls] == [0, 0, 1]
+    assert provider_calls[-1]["recovery_kind"] == "provider_transport_retry"
+    assert len({call["provider_request_id"] for call in provider_calls}) == 3
 
 
 @pytest.mark.asyncio

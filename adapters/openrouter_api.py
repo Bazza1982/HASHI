@@ -11,7 +11,7 @@ import wave
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 from uuid import uuid4
 
 import httpx
@@ -88,6 +88,17 @@ _REASONING_EFFORT_VALUES = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
 _MEDIA_FALLBACK_TOOL_NAMES = frozenset({"media_read", "vision_inspect"})
+
+
+class ProviderCallObserverError(RuntimeError):
+    """A durable per-request observer failed after a real Provider call.
+
+    Adapters must let this escape unchanged instead of converting it into a
+    Provider failure response or retrying the already completed request.
+    """
+
+
+ProviderCallObserver = Callable[[Mapping[str, Any]], None]
 
 
 def _argument_string_values(value: Any) -> set[str]:
@@ -567,6 +578,51 @@ class OpenRouterAdapter(BaseBackend):
         self.reasoning_enabled: bool | None = None
         self.tool_registry = None   # Injected by FlexibleBackendManager if tools configured
         self._audio_asset_store: AudioAssetStore | None = None
+        self._provider_call_observer: ProviderCallObserver | None = None
+
+    def set_provider_call_observer(
+        self,
+        observer: ProviderCallObserver | None,
+    ) -> None:
+        """Install a synchronous durable observer for physical HTTP calls."""
+
+        self._provider_call_observer = observer
+
+    def _provider_call_record(
+        self,
+        *,
+        request_id: str,
+        serial: int,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Create and immediately publish one immutable physical-call fact."""
+
+        record = dict(payload)
+        record.setdefault(
+            "provider_request_id",
+            "hashi-provider:"
+            + hashlib.sha256(
+                "|".join(
+                    (
+                        type(self).__name__,
+                        str(getattr(self.config, "model", "") or ""),
+                        str(request_id or ""),
+                        str(max(1, int(serial))),
+                    )
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+        observer = getattr(self, "_provider_call_observer", None)
+        if observer is not None:
+            try:
+                observer(record)
+            except ProviderCallObserverError:
+                raise
+            except Exception as exc:
+                raise ProviderCallObserverError(
+                    "physical Provider request could not be durably observed"
+                ) from exc
+        return record
 
     def set_reasoning_enabled(self, enabled: bool | None) -> None:
         self.reasoning_enabled = None if enabled is None else bool(enabled)
@@ -1661,6 +1717,7 @@ class OpenRouterAdapter(BaseBackend):
         provider_cost_complete = True
         provider_calls: list[dict[str, Any]] = []
         provider_transport_retry_count = 0
+        provider_attempt_serial = 0
         total_tool_calls = 0
         tool_loop_count = 0
         media_routing: tuple[dict[str, Any], ...] = ()
@@ -1702,7 +1759,7 @@ class OpenRouterAdapter(BaseBackend):
 
             for loop_idx in count():
                 provider_call_retry_count = 0
-                provider_call_started = time.perf_counter()
+                next_provider_recovery_kind = "none"
                 while True:
                     payload = self._build_payload(
                         messages,
@@ -1733,6 +1790,10 @@ class OpenRouterAdapter(BaseBackend):
                         if on_stream_event is not None
                         else None
                     )
+                    provider_attempt_serial += 1
+                    provider_call_started = time.perf_counter()
+                    provider_attempt = provider_call_retry_count + 1
+                    provider_recovery_kind = next_provider_recovery_kind
                     try:
                         if use_streaming:
                             result = await self._stream_api_once(
@@ -1746,7 +1807,59 @@ class OpenRouterAdapter(BaseBackend):
                                 headers,
                                 call_stream_callback,
                             )
+                    except asyncio.CancelledError:
+                        provider_calls.append(
+                            self._provider_call_record(
+                                request_id=request_id,
+                                serial=provider_attempt_serial,
+                                payload={
+                                    "input": 0,
+                                    "output": 0,
+                                    "thinking": 0,
+                                    "token_source": "unknown",
+                                    "thinking_in_output": False,
+                                    "cost_usd": None,
+                                    "prompt_cache_hit_tokens": None,
+                                    "prompt_cache_miss_tokens": None,
+                                    "provider_call_latency_ms": round(
+                                        (time.perf_counter() - provider_call_started)
+                                        * 1000,
+                                        3,
+                                    ),
+                                    "attempt": provider_attempt,
+                                    "retry_count": provider_call_retry_count,
+                                    "recovery_kind": provider_recovery_kind,
+                                    "status": "cancelled",
+                                },
+                            )
+                        )
+                        raise
                     except Exception as exc:
+                        provider_calls.append(
+                            self._provider_call_record(
+                                request_id=request_id,
+                                serial=provider_attempt_serial,
+                                payload={
+                                    "input": 0,
+                                    "output": 0,
+                                    "thinking": 0,
+                                    "token_source": "unknown",
+                                    "thinking_in_output": False,
+                                    "cost_usd": None,
+                                    "prompt_cache_hit_tokens": None,
+                                    "prompt_cache_miss_tokens": None,
+                                    "provider_call_latency_ms": round(
+                                        (time.perf_counter() - provider_call_started)
+                                        * 1000,
+                                        3,
+                                    ),
+                                    "attempt": provider_attempt,
+                                    "retry_count": provider_call_retry_count,
+                                    "recovery_kind": provider_recovery_kind,
+                                    "status": "failed_without_receipt",
+                                },
+                            )
+                        )
                         if self._can_replay_typed_media_fallback(
                             exc,
                             media_routing=media_routing,
@@ -1769,6 +1882,7 @@ class OpenRouterAdapter(BaseBackend):
                             native_attachment_ids = set()
                             native_local_refs = set()
                             all_media_native = False
+                            next_provider_recovery_kind = "typed_media_fallback"
                             continue
                         retry_limit = max(
                             0,
@@ -1781,6 +1895,9 @@ class OpenRouterAdapter(BaseBackend):
                         ):
                             provider_call_retry_count += 1
                             provider_transport_retry_count += 1
+                            next_provider_recovery_kind = (
+                                "provider_transport_retry"
+                            )
                             await asyncio.sleep(
                                 _provider_call_retry_delay(
                                     exc,
@@ -1806,26 +1923,32 @@ class OpenRouterAdapter(BaseBackend):
                 total_thinking += result.thinking_tokens
                 provider_call_count += 1
                 provider_calls.append(
-                    {
-                        "input": int(result.prompt_tokens or 0),
-                        "output": int(result.completion_tokens or 0),
-                        "thinking": int(result.thinking_tokens or 0),
-                        "token_source": "provider",
-                        # OpenRouter reasoning_tokens is a detail within
-                        # completion_tokens, not an additional token bucket.
-                        "thinking_in_output": True,
-                        "cost_usd": result.cost_usd,
-                        "prompt_cache_hit_tokens": _optional_usage_token_count(
-                            getattr(result, "prompt_cache_hit_tokens", None)
-                        ),
-                        "prompt_cache_miss_tokens": _optional_usage_token_count(
-                            getattr(result, "prompt_cache_miss_tokens", None)
-                        ),
-                        # Wall-clock time HER waited for this provider
-                        # invocation.  Streaming includes delivery of the
-                        # complete stream, and tool execution starts later.
-                        "provider_call_latency_ms": provider_call_latency_ms,
-                    }
+                    self._provider_call_record(
+                        request_id=request_id,
+                        serial=provider_attempt_serial,
+                        payload={
+                            "input": int(result.prompt_tokens or 0),
+                            "output": int(result.completion_tokens or 0),
+                            "thinking": int(result.thinking_tokens or 0),
+                            "token_source": "provider",
+                            # OpenRouter reasoning_tokens is a detail within
+                            # completion_tokens, not an additional token bucket.
+                            "thinking_in_output": True,
+                            "cost_usd": result.cost_usd,
+                            "prompt_cache_hit_tokens": _optional_usage_token_count(
+                                getattr(result, "prompt_cache_hit_tokens", None)
+                            ),
+                            "prompt_cache_miss_tokens": _optional_usage_token_count(
+                                getattr(result, "prompt_cache_miss_tokens", None)
+                            ),
+                            # One physical call only; retries have their own row.
+                            "provider_call_latency_ms": provider_call_latency_ms,
+                            "attempt": provider_attempt,
+                            "retry_count": provider_call_retry_count,
+                            "recovery_kind": provider_recovery_kind,
+                            "status": "completed",
+                        },
+                    )
                 )
                 if result.cost_usd is None:
                     provider_cost_complete = False
@@ -1996,6 +2119,8 @@ class OpenRouterAdapter(BaseBackend):
         except asyncio.CancelledError:
             self.logger.warning(f"Request cancelled for {request_id}")
             raise
+        except ProviderCallObserverError:
+            raise
         except Exception as e:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             failure = _backend_failure_response(
@@ -2008,6 +2133,7 @@ class OpenRouterAdapter(BaseBackend):
             metadata["provider_transport_retry_count"] = (
                 provider_transport_retry_count
             )
+            metadata["meter"] = {"provider_calls": provider_calls}
             metadata["multimodal_routing"] = list(media_routing)
             metadata["multimodal_fallback_attempted"] = media_fallback_attempted
             if isinstance(e, MultimodalContractError) and e.attachment_id:

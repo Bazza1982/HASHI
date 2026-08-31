@@ -50,6 +50,15 @@ class PerCallUsageLineItem:
     prompt_cache_hit_tokens: int | None = None
     prompt_cache_miss_tokens: int | None = None
     provider_call_latency_ms: float | None = None
+    provider_request_id: str = ""
+    attempt: int = 1
+    retry_count: int = 0
+    recovery_kind: str = "none"
+    compact: bool = False
+    routing_revision: int = 1
+    capability_revision: int = 1
+    pricing_revision: str = "unknown"
+    status: str = "completed"
 
     @property
     def total_tokens(self) -> int:
@@ -73,6 +82,15 @@ class PerCallUsageLineItem:
             "prompt_cache_hit_tokens": self.prompt_cache_hit_tokens,
             "prompt_cache_miss_tokens": self.prompt_cache_miss_tokens,
             "provider_call_latency_ms": self.provider_call_latency_ms,
+            "provider_request_id": self.provider_request_id,
+            "attempt": self.attempt,
+            "retry_count": self.retry_count,
+            "recovery_kind": self.recovery_kind,
+            "compact": self.compact,
+            "routing_revision": self.routing_revision,
+            "capability_revision": self.capability_revision,
+            "pricing_revision": self.pricing_revision,
+            "status": self.status,
         }
 
 
@@ -124,6 +142,15 @@ def line_item_from_dict(data: dict[str, Any]) -> PerCallUsageLineItem:
         provider_call_latency_ms=_optional_nonnegative_float(
             data.get("provider_call_latency_ms")
         ),
+        provider_request_id=str(data.get("provider_request_id") or ""),
+        attempt=max(1, int(data.get("attempt") or 1)),
+        retry_count=max(0, int(data.get("retry_count") or 0)),
+        recovery_kind=str(data.get("recovery_kind") or "none"),
+        compact=bool(data.get("compact", False)),
+        routing_revision=max(1, int(data.get("routing_revision") or 1)),
+        capability_revision=max(1, int(data.get("capability_revision") or 1)),
+        pricing_revision=str(data.get("pricing_revision") or "unknown"),
+        status=str(data.get("status") or "completed"),
     )
 
 
