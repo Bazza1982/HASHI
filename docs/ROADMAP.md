@@ -54,16 +54,14 @@ The development accumulated after the first v4 foundation alpha is now
 consolidated as the `v4.0.0-alpha.2` release candidate:
 
 - provider-neutral HER v2 as the sole HER execution backend;
-- `zero`, `low`, `medium`, `high`, `xhigh`, and `max` execution-effort
-  policies, independent from provider reasoning and tool-call count; `zero`
-  is a single fully capable Direct agent with no other HER stage or automatic
-  upgrade;
+- Direct (`zero`), Strategic (`low`), and Planned (`medium`) production
+  execution modes, independent from provider reasoning and tool-call count;
 - persistent direct-conversation ordering, isolated scheduler execution,
   reply-target snapshots, explicit stream ownership, and idempotent delivery;
 - explicit staged orchestration, Tool Gateway/MCP, secure multimedia, and
   optional agent-local Habit/Meditation;
-- evidence-backed Reviewed and Assured modes, plus compulsory
-  Adaptive-or-above safe-boundary Replanning every 10 results or 300 seconds;
+- deferred redesign of the retained but non-public Adaptive, Reviewed, and
+  Assured implementation;
 - provider-aware native/fallback multimodal routing, configurable Single/Hybrid
   Quick and Pro routes, and the HASHI API provider;
 - automatic context maintenance that continues selected-model execution when

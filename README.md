@@ -140,9 +140,8 @@ and binary packages are no longer part of the active program.
   connector MVPs, Workbench enterprise surfaces, and deployment artifacts for
   alpha operator review. Production enterprise-server validation remains
   pending.
-- **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration,
-  evidence-backed Reviewed/Assured modes, compulsory Adaptive-or-above
-  safe-boundary Replanning,
+- **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration
+  converged on Direct, Strategic, and Planned production modes,
   provider-aware multimodal input, Hybrid routing, automatic context
   maintenance, stronger session and delivery continuity, and a Flex-only
   runtime architecture. This is the broader platform line, not the enterprise
@@ -177,27 +176,19 @@ profiles and bootstrap state.
 
 HER v2 is the sole supported HER execution backend:
 
-- **Provider-neutral orchestration** — Triage, Planning, Execution, Review,
-  Verification, and Finalisation are explicit, independently testable stages.
-- **HER execution modes** — Direct (`zero`), Fast path (`low`), Planned
-  (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`)
-  control orchestration depth without changing provider reasoning settings or
-  limiting ordinary tool-call count. Direct is one fully capable Quick-model
-  agent at default provider reasoning `high`; it never upgrades and invokes no
-  other HER stage. Scheduled cron and heartbeat prompt/skill work always uses
-  Direct so the authoritative job instruction reaches that agent without
-  Triage pre-processing.
-- **Evidence-backed assurance** — Reviewed performs an independent read-only
-  Review and one closure check after remediation. Assured adds latest-state
-  Verification with exact tool receipts and up to three attempts. Configured
-  recipes or direct argv checks run in the authoritative workspace with the
-  HASHI process's existing authority and an execution-derived timeout floor.
-- **Compulsory safe-boundary Replanning** — Adaptive (`high`), Reviewed
-  (`xhigh`), and Assured (`max`) Execution unconditionally Replan after 10
-  completed tool results or 300 seconds at the next safe boundary. Each cycle
-  reassesses completion and plan suitability, activates a plan version, and
-  sends one Persona-rendered progress update without interrupting active tools,
-  replaying side effects, or imposing a workflow ceiling.
+- **Provider-neutral orchestration** — Strategy, Planning, and Execution are
+  explicit, independently testable stages with mechanically enforced tool
+  boundaries.
+- **Three production execution modes** — Direct (`zero`), Strategic (`low`),
+  and Planned (`medium`) control orchestration depth without changing provider
+  reasoning settings or limiting ordinary tool-call count. Direct is one fully
+  capable Quick-model agent; Strategic adds task-matched Strategy before full
+  Execution; Planned adds no-tool Strategy and read-only Planning before full
+  Execution. Scheduled cron and heartbeat prompt/skill work always uses Direct.
+- **Deferred higher-mode redesign** — the existing Adaptive, Reviewed, and
+  Assured implementation remains in the codebase for future work and regression
+  evidence, but is not selectable. Persisted `high`, `xhigh`, or `max` HER
+  values safely migrate to Planned (`medium`).
 - **Provider-aware multimodal routing** — images and other supported media keep
   stable identity and order, travel natively to capable provider/models, and
   fall back only through authorised local media inspection when needed.
@@ -762,17 +753,18 @@ Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
 
 For HER v2, `/effort` opens the **HER execution mode** menu. It displays Direct
-(`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed
-(`xhigh`), and Assured (`max`). Direct makes one fully capable Quick-model call
+(`zero`), Strategic (`low`), and Planned (`medium`). Direct makes one fully capable Quick-model call
 at default provider reasoning `high`, with no Immediate Response, Triage,
 Planning, Replanning, delegation, Review, Verification, or Finalisation. It
 never auto-upgrades, and any successful natural-language return is completed,
 including a request for missing information. The descriptive names are
 accepted as command aliases; saved configuration and wire values remain
-canonical, so `/effort direct` stores `zero`, `/effort reviewed` stores `xhigh`,
-and `/effort assured` stores `max`. Planned (`medium`) uses a no-tool Strategy
-stage, a mechanically read-only Planning stage, and then fully capable
-Execution; Planning cannot mutate artifacts or complete the downstream work.
+canonical, so `/effort direct` stores `zero`, `/effort strategic` stores `low`,
+and `/effort planned` stores `medium`. Legacy `fast` and `fast_path` aliases
+still select Strategic. Planned uses a no-tool Strategy stage, a mechanically
+read-only Planning stage, and then fully capable Execution; Planning cannot
+mutate artifacts or complete the downstream work. Old saved `high`, `xhigh`,
+and `max` values migrate to Planned while those higher designs are postponed.
 Other backends keep their existing reasoning-effort menus and labels.
 
 The `/backend` and `/model` menus finish as one configuration flow. For HER v2,
@@ -1624,18 +1616,10 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Provider-neutral orchestration** — HER v2 owns explicit Triage, Planning,
   Execution, Review, Verification, and Finalisation stages without a native
   Claw runtime
-- **Task-matched execution modes** — Direct, Fast path, Planned, Adaptive,
-  Reviewed, and Assured remain independent from provider reasoning and
-  ordinary tool-call count; Direct is a single fully capable Quick-model agent
-  with zero HER orchestration and no automatic upgrade
-- **Hard-evidence assurance** — read-only Review and validation-only
-  Verification accept only exact completed current-invocation receipts;
-  Assured runs configured recipes or direct argv checks in the authoritative
-  workspace and re-verifies remediated state up to three times
-- **Compulsory execution Replanning** — every Adaptive-or-above cycle performs
-  a tool-free Replan at the safe boundary after 10 completed tool results or
-  300 seconds, with mandatory progress commentary and no Replan, tool, time,
-  token, turn, or completion ceiling
+- **Task-matched execution modes** — Direct, Strategic, and Planned remain
+  independent from provider reasoning and ordinary tool-call count; higher
+  Replanning/Review modes are retained internally but deferred and hidden from
+  the production selector
 - **Reliable conversation delivery** — direct-message continuity, scheduler
   isolation, explicit stream ownership, stable event IDs, and request-scoped
   idempotency

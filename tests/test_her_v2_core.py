@@ -252,7 +252,7 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
 def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
     assert [effort_display_label(item) for item in Effort] == [
         "Direct (zero)",
-        "Fast path (low)",
+        "Strategic (low)",
         "Planned (medium)",
         "Adaptive (high)",
         "Reviewed (xhigh)",
@@ -262,6 +262,7 @@ def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
     assert parse_effort("zero orchestration") is Effort.ZERO
     assert parse_effort("reviewed") is Effort.XHIGH
     assert parse_effort("assured") is Effort.MAX
+    assert parse_effort("strategic") is Effort.LOW
     assert parse_effort("Fast path") is Effort.LOW
 
 

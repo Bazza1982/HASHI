@@ -519,7 +519,7 @@
     "menu.backend.flex_confirm": "Switch to Flex and choose backend",
     "menu.backend.flex_keep": "← Keep {mode}",
     "menu.effort.keep": "Keep {effort}",
-    "menu.effort.her_effect": "Direct runs one Quick agent with no orchestration stages. Higher HER execution modes add Planning, Replanning, independent Review, and Assured Verification. /effort never changes provider reasoning.",
+    "menu.effort.her_effect": "Direct runs one Quick agent. Strategic adds task-matched Strategy before Execution. Planned adds read-only investigation and a concrete plan before full Execution. /effort never changes provider reasoning.",
     "menu.effort.standard_effect": "This optional step controls reasoning depth. If no selection is made, the current value remains active.",
     "menu.effort.standard_effect_direct": "Higher effort may improve difficult work but takes longer and can use more tokens.",
     "menu.effort.her_action": "Choose an execution mode, or keep the current value.",

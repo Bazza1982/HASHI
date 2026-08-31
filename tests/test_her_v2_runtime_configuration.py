@@ -92,6 +92,32 @@ def _manager(tmp_path, *, state: dict | None = None) -> FlexibleBackendManager:
     return FlexibleBackendManager(config, global_config, secrets={})
 
 
+def test_retired_configured_her_mode_normalizes_to_planned(tmp_path):
+    manager = _manager(tmp_path)
+    her_backend = next(
+        item for item in manager.config.allowed_backends if item["engine"] == "her-v2"
+    )
+
+    assert her_backend["effort"] == "medium"
+
+
+def test_retired_persisted_her_mode_migrates_to_planned(tmp_path):
+    manager = _manager(
+        tmp_path,
+        state={
+            "active_backend": "her-v2",
+            "backend_efforts": {"her-v2": "max"},
+        },
+    )
+    her_backend = next(
+        item for item in manager.config.allowed_backends if item["engine"] == "her-v2"
+    )
+    state = json.loads(manager.state_file.read_text(encoding="utf-8"))
+
+    assert her_backend["effort"] == "medium"
+    assert state["backend_efforts"] == {"her-v2": "medium"}
+
+
 def test_her_v2_provider_options_are_concrete_call_providers(tmp_path):
     manager = _manager(tmp_path)
     manager.config.allowed_backends[0]["models"].append("role-configured")
@@ -210,7 +236,7 @@ def test_hybrid_draft_applies_full_targets_and_custom_route_atomically(tmp_path)
             extra={"her_v2": _her_v2_config()},
         ),
         _v2_config=None,
-        effort="high",
+        effort="medium",
     )
     active_before = manager.get_her_v2_configuration()
     draft = manager.begin_her_v2_hybrid_draft()
@@ -282,7 +308,7 @@ def test_apply_replaces_live_config_without_mutating_turn_snapshot(tmp_path):
             extra={"her_v2": _her_v2_config()},
         ),
         _v2_config=None,
-        effort="high",
+        effort="medium",
     )
     manager.apply_her_v2_configuration(
         manager.prepare_her_v2_provider("openrouter-api")
@@ -391,7 +417,7 @@ def test_apply_configuration_persists_and_refreshes_live_adapter_atomically(tmp_
             extra={"her_v2": _her_v2_config()},
         ),
         _v2_config=None,
-        effort="high",
+        effort="medium",
     )
     candidate = manager.prepare_her_v2_route_model_slot("planning", "fast")
     candidate = manager.prepare_her_v2_route_reasoning(
@@ -407,9 +433,9 @@ def test_apply_configuration_persists_and_refreshes_live_adapter_atomically(tmp_
     assert state["her_v2_configuration"]["route_reasoning"] == {
         "planning": "medium"
     }
-    assert state["backend_efforts"] == {"her-v2": "high"}
+    assert state["backend_efforts"] == {"her-v2": "medium"}
     assert "provider_reasoning" not in state
-    assert manager.current_backend.effort == "high"
+    assert manager.current_backend.effort == "medium"
     planning = manager.current_backend._v2_config.profile_for(Stage.PLANNING)
     assert planning.model == "deepseek-v4-flash"
     assert planning.reasoning == "medium"
@@ -576,7 +602,7 @@ def test_persistence_failure_keeps_previous_live_configuration(tmp_path, monkeyp
             extra={"her_v2": _her_v2_config()},
         ),
         _v2_config=None,
-        effort="high",
+        effort="medium",
     )
     before = manager.get_her_v2_configuration()
     candidate = manager.prepare_her_v2_provider("openrouter")

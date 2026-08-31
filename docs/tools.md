@@ -102,7 +102,7 @@ events and known command/tool shapes; no model generates or paraphrases it.
 - `/compact [status|cancel]` — HER v2-only context maintenance with two independent phases. Any active WIP Journal is first converted without a model into bounded quoted Session context and cleared only after a verified durable write; this phase runs even below 64,000 tokens and failure preserves the Journal. Ordinary conversation compaction still uses the active Quick/Light provider and model at fixed high HER effort: below 64,000 effective tokens it reports the exact not-needed reason, from 64,000 tokens upward it executes, and above 128,000 tokens main Execution schedules the non-blocking automatic path. Active WIP and automatic compaction failures both produce mandatory warnings independently of `/verbose`.
 - `/model compact inherit_quick [auto|tier_2|tier_3]` or `/model compact off` — enable the approved inherited Quick/Light Compact policy, choose its isolated watchdog tier, or turn it off. Legacy inherited-Pro and explicit Compact records migrate to `inherit_quick`.
 - Non-HER backend/model selection continues to the existing optional effort step when supported. HER v2 keeps backend, provider, models/reasoning, and effort as independent controls.
-- `/effort [level]` — HER v2 opens the **HER execution mode** control: Direct (`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Direct invokes one fully capable Quick agent at default provider reasoning `high`, never upgrades itself, skips Immediate Response, Triage, Planning, Replanning, delegation, Review, and Finalisation, and treats any successful natural-language return—including a request for missing information—as completed. It still exposes normal `/verbose` provider/tool progress and uses the existing local attachment fallback. Planned fixes the measured stage boundary as no-tool Strategy, mechanically read-only Planning, then fully capable Execution; Planning may investigate but cannot mutate artifacts or perform the downstream implementation. Descriptive aliases are accepted and persisted as their canonical wire values. Reviewed adds one independent Review and closure; Assured repeats Review-driven remediation against the latest execution state until Review passes or reports a conditional pass. HER effort never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
+- `/effort [level]` — HER v2 opens the **HER execution mode** control: Direct (`zero`), Strategic (`low`), and Planned (`medium`). Direct invokes one fully capable Quick agent and skips HER orchestration. Strategic selects task-matched Strategy Cards before fully capable Execution. Planned uses no-tool Strategy, mechanically read-only Planning, then fully capable Execution; Planning may investigate but cannot mutate artifacts or perform the downstream implementation. Descriptive aliases persist as canonical wire values, while legacy `fast` and `fast_path` still select Strategic. Retired saved HER values `high`, `xhigh`, and `max` migrate to Planned; their Replanning/Review designs remain internal and are not selectable. HER effort never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
 
 ### HER v2 provider and model configuration
 
@@ -203,6 +203,13 @@ Complex execution, High-volume execution (including its sub-agents),
 Replanning, Review, and Finalisation follow Pro. Any task route may instead use
 a Custom target. This phase adds no
 automatic cross-provider failover and no picture/media-specific routing.
+
+### Dormant higher-mode internals
+
+The following Replanning and Review behaviour remains implemented for internal
+regression coverage, but Adaptive, Reviewed, and Assured are not exposed by the
+current three-mode production selector. It must not be treated as an available
+day-to-day `/effort` choice.
 
 Triage independently records each work turn as `STANDARD` or `HIGH_RISK` risk
 metadata. Adaptive (`high`) and above Execution, regardless of that label,

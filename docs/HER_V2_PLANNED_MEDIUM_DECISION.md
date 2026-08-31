@@ -58,11 +58,11 @@ single-variable A/B, so it supports but does not replace the result above.
 - The measured result is one difficult SAM3 task with one completed sample per
   arm. Its efficiency magnitude is directional until replicated across more
   tasks, but the stage ownership is accepted for product development.
-- Fast/Low keeps its existing no-Planning path and existing Strategy tool
+- Strategic/Low keeps its existing no-Planning path and existing Strategy tool
   ownership. Direct/Zero is unchanged.
-- Adaptive/High, Reviewed/XHigh, and Assured/Max keep their existing stage-tool
-  policy until separately evaluated. This Medium decision must not silently
-  choose their future policy.
+- Adaptive/High, Reviewed/XHigh, and Assured/Max are retained internally but
+  removed from the production selector while their design is postponed. This
+  Medium decision does not choose their future policy.
 - Planning receives only tools that HASHI mechanically exposes as read-only.
   A tool whose interface can mutate state is excluded even if the model
   promises not to use its mutating operation.

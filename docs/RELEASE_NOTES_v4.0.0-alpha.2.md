@@ -11,17 +11,21 @@ The independent Enterprise AAI package line remains
 `v0.1.0-alpha.1` / `0.1.0a1`; this document describes the broader HASHI v4
 platform line.
 
+> **Product-surface update (2026-08-31):** HER v2 now exposes only Direct
+> (`zero`), Strategic (`low`), and Planned (`medium`). The higher-mode sections
+> in these notes describe retained dormant implementation and regression
+> evidence, not selectable production modes. See
+> [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md).
+
 ## Why This Is a Significant HER Update
 
 HER v2 is HASHI-owned orchestration over provider, tool, delivery, and audit
 interfaces. Its release contract includes:
 
-- six task-matched execution modes using stable `zero` through `max` wire
-  values;
-- compulsory Adaptive-or-above Replanning at each 10-result or 300-second safe
-  boundary, independent of immutable Triage risk metadata;
-- adaptive Planning and Replanning, tool-backed independent Review, and
-  comprehensive latest-state Verification;
+- three task-matched production execution modes using stable `zero`, `low`, and
+  `medium` wire values;
+- retained but non-public Replanning, Review, and Verification internals whose
+  future product design is postponed;
 - hard evidence receipts that reject paper-only, fabricated, stale,
   cross-stage, incomplete, and failed passing claims;
 - configured recipes or direct argv checks in the authoritative workspace with

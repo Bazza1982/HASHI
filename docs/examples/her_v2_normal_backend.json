@@ -5,7 +5,7 @@
       "engine": "her-v2",
       "access_scope": "drive",
       "model": "role-configured",
-      "effort": "high",
+      "effort": "medium",
       "permission_mode": "danger-full-access",
       "tools": {
         "allowed": ["*"]

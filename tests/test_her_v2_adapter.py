@@ -791,9 +791,6 @@ def test_public_her_alias_resolves_forward_and_claw_id_is_removed():
         "zero",
         "low",
         "medium",
-        "high",
-        "xhigh",
-        "max",
     ]
     assert BACKEND_REGISTRY["her-v2"]["secret_keys"] == []
 

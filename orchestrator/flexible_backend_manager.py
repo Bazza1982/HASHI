@@ -25,6 +25,7 @@ from orchestrator.flexible_backend_registry import (
     PROVIDER_ONLY_ENGINE_IDS,
     canonical_backend_engine,
     get_secret_lookup_order,
+    normalize_effort,
 )
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.runtime_configuration import (
@@ -95,6 +96,20 @@ class FlexibleBackendManager:
             for backend_cfg in self.config.allowed_backends
             if backend_cfg.get("engine")
         }
+        # Keep ordinary Agent configuration inside the currently supported
+        # three-mode HER product surface.  The runtime still understands the
+        # retired higher values for historical artifacts and isolated tests.
+        for backend_cfg in self.config.allowed_backends:
+            engine = canonical_backend_engine(backend_cfg.get("engine"))
+            raw_effort = backend_cfg.get("effort")
+            if engine == HER_V2_ENGINE and isinstance(raw_effort, str):
+                normalized = normalize_effort(
+                    engine,
+                    raw_effort,
+                    backend_cfg.get("model"),
+                )
+                if normalized:
+                    backend_cfg["effort"] = normalized
         if self.state_file.exists():
             try:
                 state = self.state_store.read()
@@ -194,10 +209,30 @@ class FlexibleBackendManager:
                     for backend_cfg in self.config.allowed_backends:
                         engine = backend_cfg.get("engine")
                         effort = backend_efforts.get(engine)
-                        if effort is None and engine == HER_V2_ENGINE:
+                        canonical_engine = canonical_backend_engine(engine)
+                        if effort is None and canonical_engine == HER_V2_ENGINE:
                             effort = backend_efforts.get("her")
                         if isinstance(effort, str) and effort.strip():
-                            backend_cfg["effort"] = effort.strip().lower()
+                            raw_effort = effort.strip().lower()
+                            normalized = (
+                                normalize_effort(
+                                    canonical_engine,
+                                    raw_effort,
+                                    backend_cfg.get("model"),
+                                )
+                                if canonical_engine == HER_V2_ENGINE
+                                else raw_effort
+                            )
+                            if normalized:
+                                backend_cfg["effort"] = normalized
+                            if canonical_engine == HER_V2_ENGINE and (
+                                normalized != raw_effort
+                                or "her" in backend_efforts
+                                or backend_efforts.get(HER_V2_ENGINE) != normalized
+                            ):
+                                backend_efforts[HER_V2_ENGINE] = normalized
+                                backend_efforts.pop("her", None)
+                                state_needs_repair = True
                 if state_needs_repair:
                     self.state_store.replace(state)
             except Exception as e:

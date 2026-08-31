@@ -10,6 +10,13 @@
 | Product | Hashi Engine Runtime (HER) |
 | Implementation baseline | HASHI `her-v2` at `cc010d11d69b4eb24c62c134dc57ac62ea42c277` |
 
+> **Current product-surface override (2026-08-31):**
+> [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md) supersedes this
+> document wherever it describes user-selectable HER modes. Production exposes
+> only Direct (`zero`), Strategic (`low`), and Planned (`medium`). References to
+> Adaptive, Reviewed, and Assured below describe retained dormant implementation,
+> not current product choices.
+
 ## 1. Purpose
 
 Hashi Engine Runtime (HER) is a provider-neutral orchestration and execution framework for agentic AI systems.

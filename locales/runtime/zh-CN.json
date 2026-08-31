@@ -519,7 +519,7 @@
     "menu.backend.flex_confirm": "切换到 Flex 并选择后端",
     "menu.backend.flex_keep": "← 保留 {mode} 模式",
     "menu.effort.keep": "保留 {effort}",
-    "menu.effort.her_effect": "Direct 只运行一个 Quick 代理，不经过编排阶段。更高的 HER 执行模式会加入规划、重新规划、独立复核和有保障的验证。/effort 不会更改服务方推理强度。",
+    "menu.effort.her_effect": "Direct 只运行一个 Quick 代理。Strategic 在执行前加入任务匹配的策略。Planned 再加入只读调查与具体计划，然后完整执行。/effort 不会更改服务方推理强度。",
     "menu.effort.standard_effect": "此可选步骤控制推理深度；若不选择，当前值继续生效。",
     "menu.effort.standard_effect_direct": "较高的推理强度可能改善困难任务，但耗时更长，也可能使用更多 Token。",
     "menu.effort.her_action": "请选择执行模式，或保留当前值。",

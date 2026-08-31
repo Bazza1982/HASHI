@@ -112,8 +112,9 @@ deployment validation continues.
 - [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
 - [HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md](HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md) — proposed HASHI3 Strategic Fast design that reuses the implemented 38-card Strategy system and Smart Tool Registry inside one request-local Codex thread and turn
 - [HER_V2_PLANNED_MEDIUM_DECISION.md](HER_V2_PLANNED_MEDIUM_DECISION.md) — accepted Planned/Medium boundary: no-tool Strategy, read-only Planning, and fully capable Execution
+- [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md) — accepted production surface: Direct, Strategic, and Planned, with higher-mode redesign postponed
 - [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract
-- [HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md) — authoritative fixed 10-result/5-minute compulsory Adaptive-or-above Replanning contract, tests, and limit audit
+- [HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md) — historical implemented Replanning contract retained for dormant higher-mode regression coverage
 - [HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md) — retired incorrect optional-checkpoint design retained only as a migration pointer
 - [HER_V2_AUTO_COMPACTION_DESIGN.md](HER_V2_AUTO_COMPACTION_DESIGN.md) — HER v2 Quick/Light high-effort compaction policy, protected context, atomic commit, and Tier 2/Tier 3 isolation
 - [PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md](PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md) — current model-exact native/fallback media contract and remaining live multi-provider canary matrix

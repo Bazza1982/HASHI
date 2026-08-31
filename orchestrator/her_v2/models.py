@@ -48,7 +48,7 @@ class Effort(StrEnum):
 
 EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
     Effort.ZERO: "Direct",
-    Effort.LOW: "Fast path",
+    Effort.LOW: "Strategic",
     Effort.MEDIUM: "Planned",
     Effort.HIGH: "Adaptive",
     Effort.XHIGH: "Reviewed",
@@ -58,6 +58,7 @@ EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
 _EFFORT_ALIASES: Mapping[str, Effort] = {
     "direct": Effort.ZERO,
     "zero_orchestration": Effort.ZERO,
+    "strategic": Effort.LOW,
     "fast": Effort.LOW,
     "fast_path": Effort.LOW,
     "planned": Effort.MEDIUM,
