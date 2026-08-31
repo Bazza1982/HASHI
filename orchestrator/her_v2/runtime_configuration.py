@@ -19,7 +19,7 @@ from orchestrator.flexible_backend_registry import (
     get_backend_entry,
     get_backend_label,
 )
-from tools.token_tracker import PRICING_REVISION
+from tools import token_tracker
 
 from .config import DEFAULT_STAGE_ROLES
 from .models import DEFAULT_ROUTES_BY_STAGE, ROUTE_STAGES, Route, Stage
@@ -28,7 +28,28 @@ HER_V2_CONFIGURATION_STATE_KEY = "her_v2_configuration"
 HER_V2_CONFIGURATION_DRAFT_STATE_KEY = "her_v2_configuration_draft"
 HER_V2_CONFIGURATION_PRESETS_STATE_KEY = "her_v2_configuration_presets"
 HER_V2_CAPABILITY_REVISION = 1
-HER_V2_PRICING_REVISION = PRICING_REVISION
+HER_V2_PRICING_REVISION_FALLBACK = "2026-08-23.v1"
+
+
+def _loaded_pricing_revision() -> str:
+    """Read the pricing revision across the first mixed-generation reboot.
+
+    A running HASHI process can reload this consumer before the previously
+    imported token tracker. The fallback exactly identifies the pricing table
+    introduced with this control-plane revision; subsequent reboots reload the
+    token tracker first through ``FOUNDATION_PHASES``.
+    """
+
+    return str(
+        getattr(
+            token_tracker,
+            "PRICING_REVISION",
+            HER_V2_PRICING_REVISION_FALLBACK,
+        )
+    )
+
+
+HER_V2_PRICING_REVISION = _loaded_pricing_revision()
 HER_V2_MODEL_SLOTS = ("fast", "pro")
 HER_V2_ROUTING_MODES = ("single", "hybrid")
 HER_V2_MIXED_VALUE = "mixed"

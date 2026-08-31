@@ -29,6 +29,11 @@ FOUNDATION_PHASES = {
     # schemas, then the registry, then the context so a hot restart cannot
     # retain the pre-change ToolRegistry class after its constructor evolves.
     "tools.schemas": 0,
+    # Pricing revision is imported by HER runtime configuration. Reload it
+    # before that consumer so future price-table changes take effect in one
+    # reboot; runtime_configuration also carries a one-generation fallback for
+    # the first reboot that adopts this ordering rule.
+    "tools.token_tracker": 0,
     "tools.registry": 1,
     "tools.gateway.context": 2,
     "tools.gateway.mcp_stdio": 3,

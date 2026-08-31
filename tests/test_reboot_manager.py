@@ -246,6 +246,31 @@ def test_reload_project_modules_loads_tool_registry_before_gateway_context(monke
     ]
 
 
+def test_reload_project_modules_loads_pricing_before_her_route_consumer(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "orchestrator.her_v2.runtime_configuration",
+        "tools.token_tracker",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules(sorted(module_names, key=module_reload_key))
+
+    assert reloaded == [
+        "tools.token_tracker",
+        "orchestrator.her_v2.runtime_configuration",
+    ]
+
+
 def test_validate_agent_runtime_contract_accepts_current_modules():
     manager = RebootManager(kernel=object(), console_handler=None)
 

@@ -11,8 +11,10 @@ from orchestrator.her_v2.models import Route, Stage, TriageClassification
 from orchestrator.her_v2.runtime_configuration import (
     HER_V2_CAPABILITY_REVISION,
     HER_V2_PRICING_REVISION,
+    _loaded_pricing_revision,
     resolve_her_v2_configuration,
 )
+from tools import token_tracker
 
 
 def _her_v2_config() -> dict:
@@ -361,6 +363,12 @@ def test_saved_route_cannot_pin_stale_capability_or_pricing_revisions():
     assert selected.routing_revision == 9
     assert selected.capability_revision == HER_V2_CAPABILITY_REVISION
     assert selected.pricing_revision == HER_V2_PRICING_REVISION
+
+
+def test_pricing_revision_survives_first_mixed_generation_reboot(monkeypatch):
+    monkeypatch.delattr(token_tracker, "PRICING_REVISION")
+
+    assert _loaded_pricing_revision() == HER_V2_PRICING_REVISION
 
 
 def test_provider_switch_preflight_rejects_known_too_small_context(tmp_path):
