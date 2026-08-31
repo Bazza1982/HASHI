@@ -194,8 +194,9 @@ class HERv2Config:
     audit_failure_terminal: TerminalState = TerminalState.ERROR
     meditation_enabled: bool = False
     direct_strategy_self_selection: bool = False
+    # Capability gates. EffortPolicy owns which stage receives each surface.
     strategy_tools_enabled: bool = True
-    planning_tools_enabled: bool = False
+    planning_tools_enabled: bool = True
     shadow_mode: bool = False
 
     def __post_init__(self) -> None:
@@ -615,7 +616,7 @@ class HERv2Config:
                 "strategy_tools_enabled",
             ),
             planning_tools_enabled=_strict_bool(
-                raw.get("planning_tools_enabled", False),
+                raw.get("planning_tools_enabled", True),
                 "planning_tools_enabled",
             ),
             shadow_mode=_strict_bool(raw.get("shadow_mode", False), "shadow_mode"),

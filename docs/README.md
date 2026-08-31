@@ -111,6 +111,7 @@ deployment validation continues.
 - [her-v2-issues.md](her-v2-issues.md) — canonical HER v2-only defect and open-design-gap register
 - [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
 - [HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md](HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md) — proposed HASHI3 Strategic Fast design that reuses the implemented 38-card Strategy system and Smart Tool Registry inside one request-local Codex thread and turn
+- [HER_V2_PLANNED_MEDIUM_DECISION.md](HER_V2_PLANNED_MEDIUM_DECISION.md) — accepted Planned/Medium boundary: no-tool Strategy, read-only Planning, and fully capable Execution
 - [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract
 - [HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md) — authoritative fixed 10-result/5-minute compulsory Adaptive-or-above Replanning contract, tests, and limit audit
 - [HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md) — retired incorrect optional-checkpoint design retained only as a migration pointer

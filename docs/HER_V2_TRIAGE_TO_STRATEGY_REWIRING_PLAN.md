@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Fast/Low Strategy-to-Execution slice implemented and verified; broader paths pending |
+| Status | Fast/Low implemented; Planned/Medium stage-tool boundary accepted and frozen; broader paths pending |
 | Date | 2026-08-30 |
 | Experiment environment | HASHI3 only |
 | Current production effect | None until an authorised HASHI3 hot reload |
@@ -22,8 +22,10 @@ The first experimental slice is implemented in HASHI3:
 - Low effort skips Planning as before and passes one `strategy_handoff` to
   Execution containing only the selected Card snapshots and six-field
   `execution_brief`;
-- Medium and higher paths retain their existing Planning and downstream
-  behaviour for this slice; and
+- Planned/Medium now follows the separately measured no-tool Strategy,
+  read-only Planning, then fully capable Execution boundary;
+- High and higher paths retain their existing stage-tool behaviour until they
+  are evaluated independently; and
 - the HER v2 regression suite passes before activation.
 
 ## 1. Purpose

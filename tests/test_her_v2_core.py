@@ -212,12 +212,12 @@ def test_legacy_terminal_ledgers_load_into_current_plan_b_states(legacy, current
 
 def test_effort_is_orchestration_policy_not_provider_reasoning():
     cases = [
-        (Effort.ZERO, True, False, False, False, 0),
-        (Effort.LOW, False, False, False, False, 0),
-        (Effort.MEDIUM, False, True, False, False, 0),
-        (Effort.HIGH, False, True, True, False, 0),
-        (Effort.XHIGH, False, True, True, True, 1),
-        (Effort.MAX, False, True, True, True, 1),
+        (Effort.ZERO, True, False, False, False, False, False, 0),
+        (Effort.LOW, False, False, False, False, True, False, 0),
+        (Effort.MEDIUM, False, True, False, False, False, True, 0),
+        (Effort.HIGH, False, True, True, False, True, False, 0),
+        (Effort.XHIGH, False, True, True, True, True, False, 1),
+        (Effort.MAX, False, True, True, True, True, False, 1),
     ]
     for (
         effort,
@@ -225,6 +225,8 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
         planning,
         replanning,
         review,
+        strategy_tools,
+        planning_tools,
         reviews,
     ) in cases:
         policy = resolve_policy(effort, review_limit=reviews)
@@ -239,6 +241,8 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
             replanning,
             review,
         ), effort
+        assert policy.strategy_tools is strategy_tools, effort
+        assert policy.planning_tools is planning_tools, effort
         assert not hasattr(policy, "max_replans"), effort
         assert not hasattr(policy, "assurance"), effort
         assert not hasattr(policy, "max_verifications"), effort
@@ -285,7 +289,7 @@ def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
     assert direct.reasoning == "high"
     assert config.direct_strategy_self_selection is False
     assert config.strategy_tools_enabled is True
-    assert config.planning_tools_enabled is False
+    assert config.planning_tools_enabled is True
 
 
 def test_direct_strategy_self_selection_is_an_explicit_boolean_experiment():

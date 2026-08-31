@@ -1901,7 +1901,7 @@ async def test_deferred_clarification_resolution_is_deduplicated_by_delivery_sta
 
 
 @pytest.mark.asyncio
-async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_strategy_and_execution(
+async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_planning_and_execution(
     tmp_path,
 ):
     real_goal = "Implement and test the requested feature."
@@ -1953,7 +1953,7 @@ async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_strategy_and_e
     planning_call = next(
         call for _profile, call in provider.requests if call.stage is Stage.PLANNING
     )
-    assert planning_call.allow_tools is False
+    assert planning_call.allow_tools is True
     assert planning_call.allow_side_effects is False
     assert planning_call.context["strategy_handoff"]["execution_brief"]["strategy"]
     assert (
@@ -1963,19 +1963,19 @@ async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_strategy_and_e
     assert all(
         not call.allow_tools
         for _profile, call in provider.requests
-        if call.stage not in {Stage.TRIAGE, Stage.EXECUTION}
+        if call.stage not in {Stage.PLANNING, Stage.EXECUTION}
     )
     strategy_call = next(
         call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
     )
-    assert strategy_call.allow_tools is True
-    assert strategy_call.allow_side_effects is True
+    assert strategy_call.allow_tools is False
+    assert strategy_call.allow_side_effects is False
     assert strategy_call.role == "strategist"
 
 
 @pytest.mark.parametrize("planning_tools_enabled", [False, True])
 @pytest.mark.asyncio
-async def test_medium_stage_tool_access_is_controlled_independently(
+async def test_medium_stage_tool_access_uses_frozen_policy_and_capability_gate(
     tmp_path,
     planning_tools_enabled,
 ):
@@ -2000,7 +2000,7 @@ async def test_medium_stage_tool_access_is_controlled_independently(
         tmp_path,
         provider,
         config=_config(
-            strategy_tools_enabled=False,
+            strategy_tools_enabled=True,
             planning_tools_enabled=planning_tools_enabled,
         ),
     ).run_turn("Repair it", "request-stage-tool-access", effort=Effort.MEDIUM)

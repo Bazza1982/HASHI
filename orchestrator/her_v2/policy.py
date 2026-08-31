@@ -18,6 +18,8 @@ class EffortPolicy:
     planning: bool
     replanning: bool
     review: bool
+    strategy_tools: bool
+    planning_tools: bool
     max_reviews: int
 
 
@@ -31,6 +33,12 @@ def resolve_policy(
         planning=effort not in {Effort.ZERO, Effort.LOW},
         replanning=effort in {Effort.HIGH, Effort.XHIGH, Effort.MAX},
         review=(effort in {Effort.XHIGH, Effort.MAX} and int(review_limit) > 0),
+        # The measured Planned/Medium path keeps Strategy abstract and gives
+        # Planning the read-only investigation surface closest to Execution.
+        # Other effort tiers retain their existing tool ownership until they
+        # are evaluated independently.
+        strategy_tools=effort not in {Effort.ZERO, Effort.MEDIUM},
+        planning_tools=effort is Effort.MEDIUM,
         max_reviews=max(0, int(review_limit)),
     )
 

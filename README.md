@@ -770,8 +770,10 @@ never auto-upgrades, and any successful natural-language return is completed,
 including a request for missing information. The descriptive names are
 accepted as command aliases; saved configuration and wire values remain
 canonical, so `/effort direct` stores `zero`, `/effort reviewed` stores `xhigh`,
-and `/effort assured` stores `max`. Other backends keep their existing
-reasoning-effort menus and labels.
+and `/effort assured` stores `max`. Planned (`medium`) uses a no-tool Strategy
+stage, a mechanically read-only Planning stage, and then fully capable
+Execution; Planning cannot mutate artifacts or complete the downstream work.
+Other backends keep their existing reasoning-effort menus and labels.
 
 The `/backend` and `/model` menus finish as one configuration flow. For HER v2,
 `/provider` selects either a Single provider or Hybrid routing. Hybrid Quick,

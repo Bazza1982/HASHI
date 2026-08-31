@@ -77,7 +77,7 @@ from .models import (
     parse_effort,
     terminal_lifecycle,
 )
-from .policy import resolve_policy, terminal_for_execution
+from .policy import EffortPolicy, resolve_policy, terminal_for_execution
 from .presentation import RequiredPersonaRenderer
 from .progress import ProgressTracker
 from .prompts import extract_authoritative_current_request
@@ -710,6 +710,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 state, request_content_override=direct_content
             )
 
+        effort_policy = resolve_policy(
+            state.effort,
+            review_limit=self.config.review_limits[state.effort],
+        )
+
         habit_catalogue: Sequence[str] = ()
         if self.config.meditation_enabled:
             with suppress(Exception):
@@ -847,7 +852,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         setattr(validate_strategy, "_mapping_parser", validate_strategy_mapping)
 
         async def invoke_triage():
-            strategy_tools_enabled = self.config.strategy_tools_enabled
+            strategy_tools_enabled = (
+                effort_policy.strategy_tools and self.config.strategy_tools_enabled
+            )
             return await self._invoke_stage(
                 state,
                 Stage.TRIAGE,
@@ -1239,7 +1246,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "Triage returned an unsupported work classification"
             )
         if not immediate_pending_for_work:
-            return await self._run_work(state, triage.classification)
+            return await self._run_work(
+                state,
+                triage.classification,
+                policy=effort_policy,
+            )
 
         late_immediate = asyncio.create_task(
             self._deliver_pending_immediate(state, immediate_task)
@@ -1247,7 +1258,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         state.late_immediate_source_task = immediate_task
         state.late_immediate_delivery_task = late_immediate
         try:
-            return await self._run_work(state, triage.classification)
+            return await self._run_work(
+                state,
+                triage.classification,
+                policy=effort_policy,
+            )
         finally:
             await self._settle_late_immediate(
                 state,
@@ -1535,13 +1550,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         return tuple(catalogue)
 
     async def _run_work(
-        self, state: _TurnState, classification: TriageClassification
+        self,
+        state: _TurnState,
+        classification: TriageClassification,
+        *,
+        policy: EffortPolicy,
     ) -> TurnResult:
         state.ledger.assert_classification(classification)
-        policy = resolve_policy(
-            state.effort,
-            review_limit=self.config.review_limits[state.effort],
-        )
         if policy.planning:
             execution_tool_catalogue = self._execution_tool_catalogue()
 
@@ -1573,11 +1588,14 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 planning_context["available_sub_agent_profiles"] = list(
                     self.config.sub_agent_execution_profile_names()
                 )
+            planning_tools_enabled = (
+                policy.planning_tools and self.config.planning_tools_enabled
+            )
             _response, plan = await self._invoke_stage(
                 state,
                 Stage.PLANNING,
                 validate_plan,
-                allow_tools=self.config.planning_tools_enabled,
+                allow_tools=planning_tools_enabled,
                 # Planning may ground the paper plan with current evidence, but
                 # it never owns downstream mutations.  Keeping this boundary
                 # read-only also lets transient provider failures retry safely
