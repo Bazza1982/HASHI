@@ -578,6 +578,92 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     assert runtime._last_full_prompt_tokens == len(prompt.final_prompt) // 4
 
 
+def test_begin_queue_item_marks_typed_scheduled_jobs_isolated():
+    runtime = _runtime()
+    item = _item(
+        source="scheduler",
+        scheduler_context={
+            "kind": "cron",
+            "task_id": "sunny-scan-gmail",
+            "trigger": "scheduled",
+        },
+    )
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert (
+        runtime.current_request_meta["session_scope"]
+        == runtime_pipeline.SESSION_SCOPE_ISOLATED
+    )
+
+
+def test_begin_queue_item_does_not_isolate_untyped_scheduler_source():
+    runtime = _runtime()
+    item = _item(source="scheduler")
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert (
+        runtime.current_request_meta["session_scope"]
+        == runtime_pipeline.SESSION_SCOPE_PERSISTENT
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_job_prompt_excludes_prior_turn_context():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    observed = {}
+
+    class _IsolatedAssembler:
+        MAX_RECENT_EXCHANGES = 10
+        turns_injection_enabled = True
+
+        def build_prompt_payload(
+            self,
+            prompt,
+            backend,
+            *,
+            extra_sections,
+            inject_memory,
+            incremental,
+            recent_exchanges=None,
+        ):
+            observed["inject_memory"] = inject_memory
+            observed["recent_exchanges"] = recent_exchanges
+            observed["extra_sections"] = list(extra_sections)
+            return {
+                "final_prompt": prompt,
+                "audit": {"sections": []},
+            }
+
+    runtime.context_assembler = _IsolatedAssembler()
+    item = _item(
+        source="scheduler",
+        prompt="Run Gmail only",
+        scheduler_context={
+            "kind": "cron",
+            "task_id": "sunny-scan-gmail",
+            "trigger": "scheduled",
+        },
+    )
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert prompt.effective_prompt == "primer\nRun Gmail only"
+    assert prompt.incremental is False
+    assert observed == {
+        "inject_memory": False,
+        "recent_exchanges": [],
+        "extra_sections": [("Workzone", "/tmp/work")],
+    }
+
+
 @pytest.mark.asyncio
 async def test_fixed_session_backend_uses_incremental_prompt():
     runtime = _runtime()

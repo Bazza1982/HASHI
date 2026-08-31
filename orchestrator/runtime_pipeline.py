@@ -594,6 +594,21 @@ def _resolve_session_scope(item) -> str:
         SESSION_SCOPE_ISOLATED_RESUME,
     }:
         return explicit
+    scheduler_context = getattr(item, "scheduler_context", None)
+    if isinstance(scheduler_context, Mapping):
+        kind = str(scheduler_context.get("kind") or "").strip().lower()
+        task_id = str(scheduler_context.get("task_id") or "").strip()
+        trigger = str(scheduler_context.get("trigger") or "").strip().lower()
+        if (
+            kind in {"cron", "heartbeat"}
+            and task_id
+            and trigger in {"scheduled", "manual", "recovery"}
+        ):
+            # Scheduled prompt work is a standalone invocation. Sharing the
+            # ordinary Session timeline lets the immediately preceding job
+            # masquerade as context for the next job, even though the new job
+            # prompt is the authoritative request.
+            return SESSION_SCOPE_ISOLATED
     return SESSION_SCOPE_PERSISTENT
 
 
@@ -814,19 +829,29 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     )
     provider_session_id = getattr(backend, "_session_id", None)
     session_scope = str(request_meta.get("session_scope") or SESSION_SCOPE_PERSISTENT)
+    isolated_scheduler_run = session_scope == SESSION_SCOPE_ISOLATED
     incremental = (
         supports_sessions
         and provider_session_id is not None
         and runtime.backend_manager.agent_mode == "fixed"
         and session_scope == SESSION_SCOPE_PERSISTENT
     )
-    continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
+    continuity_enabled = (
+        is_memory_plus_enabled(runtime.workspace_dir)
+        and not isolated_scheduler_run
+    )
     session_scoped = bool(str(getattr(item, "session_id", "") or ""))
     session_workspace = runtime_session.item_session_workspace(runtime, item)
-    session_history = runtime_session.recent_exchanges(
-        runtime,
-        item,
-        limit=int(getattr(runtime.context_assembler, "MAX_RECENT_EXCHANGES", 8)),
+    session_history = (
+        []
+        if isolated_scheduler_run
+        else runtime_session.recent_exchanges(
+            runtime,
+            item,
+            limit=int(
+                getattr(runtime.context_assembler, "MAX_RECENT_EXCHANGES", 8)
+            ),
+        )
     )
     extra_sections = runtime._workzone_prompt_section()
     pre_turn_builder = runtime._build_pre_turn_context_sections
@@ -842,7 +867,10 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "session_workspace": str(session_workspace),
             "engine": runtime.config.active_backend,
         }
-    extra_sections += await pre_turn_builder(item, effective_prompt, **pre_turn_kwargs)
+    if not isolated_scheduler_run:
+        extra_sections += await pre_turn_builder(
+            item, effective_prompt, **pre_turn_kwargs
+        )
     base_extra_sections = list(extra_sections)
     context_profile = None
     if continuity_enabled:
@@ -850,7 +878,9 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     prompt_builder = runtime.context_assembler.build_prompt_payload
     prompt_kwargs = {
         "extra_sections": extra_sections,
-        "inject_memory": not item.skip_memory_injection,
+        "inject_memory": (
+            not item.skip_memory_injection and not isolated_scheduler_run
+        ),
         "incremental": incremental,
     }
     if "context_profile" in inspect.signature(prompt_builder).parameters:
@@ -867,6 +897,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         runtime.config.active_backend == "her-v2"
         and not incremental
         and not item.skip_memory_injection
+        and not isolated_scheduler_run
         and not is_bridge_request
         and bool(
             getattr(
