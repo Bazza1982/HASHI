@@ -11,6 +11,9 @@ Wrapper, Audit, and Dual Brain are retired and cannot be selected. Persisted
 legacy mode values migrate to the configured default without deleting their
 historical configuration blocks.
 
+See [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md) for the
+configuration, transition, migration, and regression contract.
+
 - **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
 - **Selectable backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
   `her-v2` (with `her` as a migration alias), `ollama-api`, and `xai-api`.

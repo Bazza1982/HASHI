@@ -723,6 +723,9 @@ examples, timing semantics, persistence, and cancellation, see
 | `/long` ... `/end` | Buffer text and Telegram media, submit everything as one request |
 | `/loop <interval> <task>` | Create recurring automated tasks via skill injection |
 
+The configuration, transition, and legacy-mode migration contract is documented
+in [Fixed and Flex Working Modes](docs/FIXED_FLEX_WORKING_MODES.md).
+
 `/retry` uses `/new`-equivalent cleanup for CLI backends and `/fresh`-equivalent
 cleanup for API backends. The last retryable prompt and resendable output are
 stored separately, so failed turns and Bridge-only outputs remain recoverable
@@ -1668,15 +1671,15 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 ### v3.2.0 — Slim Core, EXP, Browser Routing & Runtime Hardening (May 2026)
 
 - **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
-- **Wrapper Agent Mode implemented** — agents can run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
-  - `/core`, `/wrap`, and `/wrapper` configure core model, wrapper model/context, and persona/style slots with Telegram inline controls
-  - `/verbose on` shows a compact wrapper status, latency, and fallback summary without echoing raw answer drafts
-  - Foreground and background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries use wrapper-visible text where appropriate; active `bridge:hchat` sends remain wrapper-bypassed until the delivery-boundary HChat pipeline is implemented
-  - Core prompt memory stores core raw assistant output, while visible transcript, project chat, core transcript, and audit metadata remain separated for debugging and user-facing continuity
-  - `/reset CONFIRM` preserves wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear
+- **Wrapper Agent Mode implemented (historical; retired in v4)** — agents could run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
+  - `/core`, `/wrap`, and `/wrapper` configured the core model, wrapper model/context, and persona/style slots with Telegram inline controls
+  - `/verbose on` showed a compact wrapper status, latency, and fallback summary without echoing raw answer drafts
+  - Foreground and background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries used wrapper-visible text where appropriate; active `bridge:hchat` sends remained wrapper-bypassed pending a delivery-boundary HChat pipeline
+  - Core prompt memory stored core raw assistant output, while visible transcript, project chat, core transcript, and audit metadata remained separated for debugging and user-facing continuity
+  - `/reset CONFIRM` preserved wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remained a hard workspace clear
   - Final hardening commit `677212b` prevents wrapper persona from drifting back into the core model through prompt memory
 - **Anatta controls added** — `/anatta off`, `/anatta shadow`, and `/anatta on` switch per-agent live self-assembly mode by updating workspace config and reloading post-turn observers
-- **Audit Agent Mode implemented** — `/mode audit` and `/audit` configure a core model plus a separate audit model that emits follow-up findings while leaving the core answer unchanged
+- **Audit Agent Mode implemented (historical; retired in v4)** — `/mode audit` and `/audit` configured a core model plus a separate audit model that emitted follow-up findings while leaving the core answer unchanged
 - **EXP guidebook corpus imported** — `/exp <task>` consults context-specific guidebooks under `exp/`, including playbooks, validators, failure memory, templates, evidence, and training records
 - **Runtime slimming continued** — runtime session, workspace, control, remote command, lifecycle, queue processor, and pipeline responsibilities moved out of the main flex runtime file into focused modules
 - **Per-instance API Gateway ports** — API Gateway defaults to `workbench_port + 1`, launcher status uses configured ports, and HASHI API health reports gateway ownership/status

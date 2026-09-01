@@ -11,8 +11,8 @@ This directory contains developer documentation and operational notes for HASHI.
 > enterprise-server production validation pending.
 >
 > **Platform release candidate:** HASHI `v4.0.0-alpha.2` consolidates HER v2,
-> conversation/delivery hardening, task-matched execution effort, and the lean
-> Flex-only runtime architecture. See
+> conversation/delivery hardening, task-matched execution effort, and one Flex
+> Agent runtime with Fixed/Flex working modes. See
 > [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md).
 >
 > **Current integration checkpoint:** see
@@ -66,6 +66,7 @@ deployment validation continues.
 - [TELEGRAM_NOTIFICATION_MODES.md](TELEGRAM_NOTIFICATION_MODES.md) — `/notify on|quiet|off`, final/error notification policy, persistence, and Telegram sound/vibration boundary
 - [HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md) — client-neutral persistent Session, Run, Message and Event architecture for agentic frontends
 - [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted assertion migration and minimum 24-contract backend-neutral PCM verification gate
+- [FIXED_FLEX_WORKING_MODES.md](FIXED_FLEX_WORKING_MODES.md) — authoritative Fixed-by-default/Flex working-mode, configuration, transition, retirement-migration, and regression contract
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
 - [AGENT_PERSONA_SPEC.md](AGENT_PERSONA_SPEC.md) — persona block format and authoring guidance for new agents
 - [STEER_COMMAND.md](STEER_COMMAND.md) — Telegram `/steer` mid-task course correction (busy wrapper vs idle plain text, error suppression)

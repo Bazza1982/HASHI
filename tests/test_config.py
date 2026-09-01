@@ -176,6 +176,43 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
     assert "has no explicit type" not in caplog.text
 
 
+@pytest.mark.parametrize("default_mode", ["wrapper", "audit", "dual-brain"])
+def test_retired_default_mode_is_rejected(tmp_path, default_mode):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "retired-mode",
+            "type": "flex",
+            "workspace_dir": "workspaces/retired-mode",
+            "allowed_backends": [{"engine": "codex-cli", "model": "gpt-5.4"}],
+            "active_backend": "codex-cli",
+            "default_mode": default_mode,
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported default_mode"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+
+def test_fixed_default_mode_is_rejected_for_stateless_backend(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "stateless-fixed",
+            "type": "flex",
+            "workspace_dir": "workspaces/stateless-fixed",
+            "allowed_backends": [
+                {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"}
+            ],
+            "active_backend": "gemini-cli",
+            "default_mode": "fixed",
+        },
+    )
+
+    with pytest.raises(ValueError, match="stateless backend 'gemini-cli'"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+
 def test_public_her_configuration_id_resolves_forward_to_v2(tmp_path):
     config_path = tmp_path / "agents.json"
     secrets_path = tmp_path / "secrets.json"

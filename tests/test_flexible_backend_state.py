@@ -132,14 +132,16 @@ def test_persisted_mode_overrides_migrated_fixed_default(tmp_path):
     assert manager.agent_mode == "flex"
 
 
+@pytest.mark.parametrize("default_mode", ["fixed", "flex"])
 @pytest.mark.parametrize("retired_mode", ["wrapper", "audit", "dual-brain"])
-def test_retired_persisted_mode_migrates_to_fixed_and_preserves_blocks(
+def test_retired_persisted_mode_migrates_to_default_and_preserves_blocks(
     tmp_path,
     caplog,
     retired_mode,
+    default_mode,
 ):
-    workspace = tmp_path / retired_mode
-    workspace.mkdir()
+    workspace = tmp_path / default_mode / retired_mode
+    workspace.mkdir(parents=True)
     (workspace / "state.json").write_text(
         json.dumps(
             {
@@ -153,12 +155,13 @@ def test_retired_persisted_mode_migrates_to_fixed_and_preserves_blocks(
         encoding="utf-8",
     )
     config = FlexibleAgentConfig(
-        name="fixed-default",
+        name=f"{default_mode}-default",
         workspace_dir=workspace,
         system_md=workspace / "AGENT.md",
         telegram_token_key="fixed-default",
         allowed_backends=[{"engine": "codex-cli", "model": "gpt-5.4"}],
         active_backend="codex-cli",
+        default_mode=default_mode,
         project_root=workspace,
     )
     global_config = GlobalConfig(
@@ -168,12 +171,15 @@ def test_retired_persisted_mode_migrates_to_fixed_and_preserves_blocks(
         project_root=workspace,
     )
 
-    with caplog.at_level(logging.WARNING, logger="BackendMgr.fixed-default"):
+    with caplog.at_level(
+        logging.WARNING,
+        logger=f"BackendMgr.{default_mode}-default",
+    ):
         manager = FlexibleBackendManager(config, global_config, secrets={})
 
-    assert manager.agent_mode == "fixed"
+    assert manager.agent_mode == default_mode
     state = _read_state(workspace)
-    assert state["agent_mode"] == "fixed"
+    assert state["agent_mode"] == default_mode
     assert state["wrapper"] == {"keep": True}
     assert state["audit"] == {"keep": True}
     assert state["dual_brain"] == {"keep": True}

@@ -3,7 +3,10 @@
 > Design document. See `orchestrator/audit_mode.py` and
 > `orchestrator/flexible_agent_runtime.py` for the current implementation.
 
-Status: design draft for review.
+Status: **historical design and implementation record**. Audit working mode is
+retired from the selectable product surface in `v4.0.0-alpha.2`. Current
+behavior is defined in
+[Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
 
 Owner: HASHI1 implementation.
 

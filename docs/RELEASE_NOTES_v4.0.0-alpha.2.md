@@ -21,7 +21,8 @@ platform line.
 > session-capable backends, and Flex remains the explicit backend-switching
 > mode. Wrapper, Audit, and Dual-brain are no longer selectable. Persisted
 > legacy values migrate safely to Fixed or Flex while their historical
-> configuration blocks remain intact.
+> configuration blocks remain intact. See
+> [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
 
 ## Why This Is a Significant HER Update
 

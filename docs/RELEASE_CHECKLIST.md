@@ -48,8 +48,15 @@
   - the release candidate passes the explicit offline product suite once;
     repeated overlapping HER bundles are not separate gates
   - `python -m py_compile adapters/her_v2.py adapters/her_v2_provider.py orchestrator/her_v2/prompt_catalog.py orchestrator/her_v2/prompts.py orchestrator/her_v2/runtime.py orchestrator/her_v2/runtime_invocation.py orchestrator/her_v2/runtime_support.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
-  - Fixed mode proves incremental resume for session-based CLI backends; Flex,
-    Wrapper, Audit, and Dual Brain preserve their full-context contracts
+  - `python -m pytest -q tests/test_runtime_working_modes.py tests/test_config.py tests/test_flexible_backend_state.py tests/test_runtime_command_binding.py`
+  - the working-mode surface exposes only Fixed and Flex; session-capable
+    backends default to Fixed, stateless backends default to Flex, and invalid
+    Fixed/stateless configuration fails closed
+  - Fixed proves incremental native-session resume; Flex proves bridge-managed
+    context and explicit backend switching
+  - retired Wrapper, Audit, and Dual Brain state migrates to the valid
+    configured default without deleting historical configuration blocks;
+    former commands and callbacks are hidden compatibility notices
   - HER v2 remains the active Habit/Meditation owner and request-scoped
     eligibility prevents internal or ephemeral work from entering `/habit`
   - HER UI and status show only Direct, Strategic, and Planned while persisted/API
