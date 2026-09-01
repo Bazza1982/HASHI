@@ -1900,6 +1900,51 @@ TOOL_SCHEMAS.extend(
         {
             "type": "function",
             "function": {
+                "name": "wiki_search",
+                "description": (
+                    "Search or read the instance-configured curated Wiki. This capability is "
+                    "read-only, returns vault-relative provenance, and cannot access files "
+                    "outside the configured Wiki zones. Search first, then read a returned "
+                    "Markdown source when more context is needed."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["search", "read"],
+                            "default": "search",
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Required for search; plain-text Wiki query.",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": (
+                                "Required for read; vault-relative Markdown path returned by search."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 12,
+                            "default": 8,
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "minimum": 1000,
+                            "maximum": 24000,
+                            "default": 12000,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "workspace_inspect",
                 "description": (
                     "Read-only HER review tool for workspace snapshots, git status/diff, "

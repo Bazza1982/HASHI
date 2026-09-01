@@ -32,7 +32,7 @@ TOOL_TIERS: dict[str, list[str]] = {
     ],
     "web": ["web_search", "web_fetch", "http_request", "xai_imagine"],
     "communication": ["telegram_send"],
-    "memory": ["memory_search"],
+    "memory": ["memory_search", "wiki_search"],
     "scheduler": [
         "hashi_scheduler_list",
         "hashi_scheduler_status",
@@ -81,6 +81,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "media_read",
         "memory_search",
         "process_list",
+        "wiki_search",
         "web_fetch",
         "web_search",
         "windows_info",
@@ -857,6 +858,14 @@ class ToolRegistry:
                 )
             except (ValueError, MemorySearchAuthorizationError) as exc:
                 return f"Error: {exc}"
+
+        if tool_name == "wiki_search":
+            from tools.wiki_search import execute_wiki_search
+
+            return await execute_wiki_search(
+                arguments,
+                global_config=self._effective_audit_context().get("global_config"),
+            )
 
         if tool_name.startswith("hashi_scheduler_"):
             from tools.hashi_scheduler import execute_hashi_scheduler_tool

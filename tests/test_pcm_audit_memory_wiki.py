@@ -523,3 +523,58 @@ async def test_tool_registry_request_scope_filters_catalogue_and_admission(tmp_p
     denial = registry.evaluate_admission("file_read", {"path": "x"}, "call-1")
     assert denial is not None and denial.is_error is True
     assert "current request" in denial.output
+
+
+@pytest.mark.asyncio
+async def test_wiki_search_is_read_only_scoped_and_hides_configured_root(tmp_path):
+    vault = tmp_path / "private-vault"
+    topics = vault / "10_GENERATED_TOPICS"
+    topics.mkdir(parents=True)
+    (topics / "RCA_Applications.md").write_text(
+        "# RCA applications\n\nRenee prepared source documents and application templates.",
+        encoding="utf-8",
+    )
+    outside = vault / "Private"
+    outside.mkdir()
+    (outside / "Secret.md").write_text("not curated", encoding="utf-8")
+
+    global_config = SimpleNamespace(
+        wiki_provider={
+            "id": "curated-test",
+            "capability": "wiki_search",
+            "root": str(vault),
+            "zones": ["10_GENERATED_TOPICS"],
+        }
+    )
+    registry = ToolRegistry(
+        allowed_tools=["wiki_search"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"global_config": global_config},
+    )
+
+    search = await registry.execute(
+        "wiki_search", {"operation": "search", "query": "RCA applications Renee"}
+    )
+    assert search.is_error is False
+    payload = json.loads(search.output)
+    assert payload["results"][0]["source"] == "10_GENERATED_TOPICS/RCA_Applications.md"
+    assert "Renee prepared" in payload["results"][0]["excerpt"]
+    assert str(vault) not in search.output
+
+    read = await registry.execute(
+        "wiki_search",
+        {
+            "operation": "read",
+            "path": "10_GENERATED_TOPICS/RCA_Applications.md",
+        },
+    )
+    assert read.is_error is False
+    assert "application templates" in json.loads(read.output)["content"]
+
+    denied = await registry.execute(
+        "wiki_search", {"operation": "read", "path": "Private/Secret.md"}
+    )
+    assert denied.is_error is True
+    assert "outside configured zones" in denied.output
