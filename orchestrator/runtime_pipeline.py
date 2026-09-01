@@ -594,7 +594,100 @@ def _resolve_session_scope(item) -> str:
         SESSION_SCOPE_ISOLATED_RESUME,
     }:
         return explicit
+    scheduler_context = getattr(item, "scheduler_context", None)
+    if isinstance(scheduler_context, Mapping):
+        kind = str(scheduler_context.get("kind") or "").strip().lower()
+        task_id = str(scheduler_context.get("task_id") or "").strip()
+        trigger = str(scheduler_context.get("trigger") or "").strip().lower()
+        if (
+            kind in {"cron", "heartbeat"}
+            and task_id
+            and trigger in {"scheduled", "manual", "recovery"}
+        ):
+            # Scheduled prompt work is a standalone invocation. Sharing the
+            # ordinary Session timeline lets the immediately preceding job
+            # masquerade as context for the next job, even though the new job
+            # prompt is the authoritative request.
+            return SESSION_SCOPE_ISOLATED
     return SESSION_SCOPE_PERSISTENT
+
+
+@dataclass(frozen=True)
+class ProviderSessionIsolation:
+    backend: Any | None = None
+    original_session_id: str | None = None
+    active: bool = False
+
+
+def _begin_provider_session_isolation(
+    runtime: Any,
+    item: Any,
+) -> ProviderSessionIsolation:
+    """Start one fixed-backend request without resuming its owning Session.
+
+    Scheduled work is admitted through the ordinary HASHI Session so delivery,
+    auditing, and reply binding retain their normal ownership.  A fixed CLI
+    backend must nevertheless use a fresh provider thread for the run; otherwise
+    the provider can see the previous chat even after HASHI prompt history has
+    been removed.
+    """
+
+    request_meta = request_meta_for(runtime, item.request_id)
+    if (
+        str(request_meta.get("session_scope") or SESSION_SCOPE_PERSISTENT)
+        != SESSION_SCOPE_ISOLATED
+        or str(getattr(runtime.backend_manager, "agent_mode", "") or "").lower()
+        != "fixed"
+    ):
+        return ProviderSessionIsolation()
+
+    backend = getattr(runtime.backend_manager, "current_backend", None)
+    supports_sessions = bool(
+        getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+    )
+    if not supports_sessions:
+        return ProviderSessionIsolation()
+    if backend is None or not hasattr(backend, "_session_id"):
+        raise RuntimeError(
+            "Fixed session backend cannot isolate scheduled work because its "
+            "provider session binding is unavailable."
+        )
+
+    original_session_id = getattr(backend, "_session_id", None)
+    backend._session_id = None
+    runtime.logger.info(
+        "Provider session isolated for scheduled request %s via %s "
+        "(original_session_present=%s)",
+        item.request_id,
+        runtime.config.active_backend,
+        bool(original_session_id),
+    )
+    return ProviderSessionIsolation(
+        backend=backend,
+        original_session_id=original_session_id,
+        active=True,
+    )
+
+
+def _restore_provider_session_isolation(
+    runtime: Any,
+    item: Any,
+    isolation: ProviderSessionIsolation,
+) -> None:
+    """Discard an isolated run thread and restore the owning provider thread."""
+
+    if not isolation.active or isolation.backend is None:
+        return
+    isolated_session_id = getattr(isolation.backend, "_session_id", None)
+    isolation.backend._session_id = isolation.original_session_id
+    runtime.logger.info(
+        "Provider session restored after scheduled request %s via %s "
+        "(isolated_session_created=%s, original_session_present=%s)",
+        item.request_id,
+        runtime.config.active_backend,
+        bool(isolated_session_id),
+        bool(isolation.original_session_id),
+    )
 
 
 @dataclass(frozen=True)
@@ -814,19 +907,29 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     )
     provider_session_id = getattr(backend, "_session_id", None)
     session_scope = str(request_meta.get("session_scope") or SESSION_SCOPE_PERSISTENT)
+    isolated_scheduler_run = session_scope == SESSION_SCOPE_ISOLATED
     incremental = (
         supports_sessions
         and provider_session_id is not None
         and runtime.backend_manager.agent_mode == "fixed"
         and session_scope == SESSION_SCOPE_PERSISTENT
     )
-    continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
+    continuity_enabled = (
+        is_memory_plus_enabled(runtime.workspace_dir)
+        and not isolated_scheduler_run
+    )
     session_scoped = bool(str(getattr(item, "session_id", "") or ""))
     session_workspace = runtime_session.item_session_workspace(runtime, item)
-    session_history = runtime_session.recent_exchanges(
-        runtime,
-        item,
-        limit=int(getattr(runtime.context_assembler, "MAX_RECENT_EXCHANGES", 8)),
+    session_history = (
+        []
+        if isolated_scheduler_run
+        else runtime_session.recent_exchanges(
+            runtime,
+            item,
+            limit=int(
+                getattr(runtime.context_assembler, "MAX_RECENT_EXCHANGES", 8)
+            ),
+        )
     )
     extra_sections = runtime._workzone_prompt_section()
     pre_turn_builder = runtime._build_pre_turn_context_sections
@@ -842,7 +945,10 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "session_workspace": str(session_workspace),
             "engine": runtime.config.active_backend,
         }
-    extra_sections += await pre_turn_builder(item, effective_prompt, **pre_turn_kwargs)
+    if not isolated_scheduler_run:
+        extra_sections += await pre_turn_builder(
+            item, effective_prompt, **pre_turn_kwargs
+        )
     base_extra_sections = list(extra_sections)
     context_profile = None
     if continuity_enabled:
@@ -850,7 +956,9 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     prompt_builder = runtime.context_assembler.build_prompt_payload
     prompt_kwargs = {
         "extra_sections": extra_sections,
-        "inject_memory": not item.skip_memory_injection,
+        "inject_memory": (
+            not item.skip_memory_injection and not isolated_scheduler_run
+        ),
         "incremental": incremental,
     }
     if "context_profile" in inspect.signature(prompt_builder).parameters:
@@ -867,6 +975,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         runtime.config.active_backend == "her-v2"
         and not incremental
         and not item.skip_memory_injection
+        and not isolated_scheduler_run
         and not is_bridge_request
         and bool(
             getattr(
@@ -1053,7 +1162,7 @@ async def run_backend_generation(
     audit_active: bool,
 ) -> BackendGeneration:
     extra = runtime.config.extra or {}
-    background_mode = (
+    background_mode_requested = (
         extra.get("background_mode", False)
         and not item.silent
         and item.deliver_to_telegram
@@ -1077,54 +1186,67 @@ async def run_backend_generation(
     if request_content is not None:
         generation_kwargs["request_content"] = copy.deepcopy(request_content)
 
-    if background_mode:
-        generation_task = asyncio.create_task(
-            runtime.backend_manager.generate_response(
+    provider_isolation = _begin_provider_session_isolation(runtime, item)
+    # Fixed CLI adapters keep their provider thread on the adapter object.
+    # Keeping an isolated run in the foreground makes the temporary swap
+    # atomic and prevents a detached task from overwriting a later chat's
+    # restored binding when it completes.
+    background_mode = background_mode_requested and not provider_isolation.active
+    try:
+        if background_mode:
+            generation_task = asyncio.create_task(
+                runtime.backend_manager.generate_response(
+                    final_prompt,
+                    item.request_id,
+                    **generation_kwargs,
+                )
+            )
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.shield(generation_task),
+                    timeout=detach_after_s,
+                )
+                detached = False
+            except asyncio.TimeoutError:
+                response = None
+                detached = True
+            except asyncio.CancelledError:
+                generation_task.cancel()
+                try:
+                    await generation_task
+                except asyncio.CancelledError:
+                    pass
+                raise
+            finally:
+                runtime.is_generating = False
+            return BackendGeneration(
+                response=response,
+                detached=detached,
+                backend_started_monotonic=backend_started_monotonic,
+                detach_after_s=detach_after_s,
+                generation_task=generation_task,
+            )
+
+        try:
+            response = await runtime.backend_manager.generate_response(
                 final_prompt,
                 item.request_id,
                 **generation_kwargs,
             )
-        )
-        try:
-            response = await asyncio.wait_for(
-                asyncio.shield(generation_task),
-                timeout=detach_after_s,
-            )
-            detached = False
-        except asyncio.TimeoutError:
-            response = None
-            detached = True
-        except asyncio.CancelledError:
-            generation_task.cancel()
-            try:
-                await generation_task
-            except asyncio.CancelledError:
-                pass
-            raise
         finally:
             runtime.is_generating = False
         return BackendGeneration(
             response=response,
-            detached=detached,
+            detached=False,
             backend_started_monotonic=backend_started_monotonic,
             detach_after_s=detach_after_s,
-            generation_task=generation_task,
-        )
-
-    try:
-        response = await runtime.backend_manager.generate_response(
-            final_prompt,
-            item.request_id,
-            **generation_kwargs,
         )
     finally:
-        runtime.is_generating = False
-    return BackendGeneration(
-        response=response,
-        detached=False,
-        backend_started_monotonic=backend_started_monotonic,
-        detach_after_s=detach_after_s,
-    )
+        _restore_provider_session_isolation(
+            runtime,
+            item,
+            provider_isolation,
+        )
 
 
 def log_backend_finished(
