@@ -948,10 +948,19 @@ minimum they must prove:
   do not trigger;
 - unchanged cycles containing only explicitly classified polling tools remain
   available;
-- `NEW_HYPOTHESIS` requires a distinct hypothesis, unresolved question,
-  expected evidence, stop condition, and authorised tool subset;
+- one Turn-scoped TaskState object is shared across lifecycle stages and only
+  validated stage output is projected into it;
+- ordinary tool schemas require an inline `_hashi_task_delta`, the reserved
+  field is never forwarded to the real tool, and duplicate delta IDs are safe;
+- evidence-bound facts/resolutions change the progress signature while focus,
+  confidence, plan, and label churn do not;
+- different actions with an unchanged TaskState trigger deterministic
+  task-state stagnation recovery without a second LLM judge;
+- `REVISE_DIRECTION` requires a stable new focus, structurally different
+  direction, expected state change, stop condition, and authorised tool subset;
 - only the requested subset reopens in the same provider conversation;
-- recurrence of the same semantic cycle becomes `NO_MEANINGFUL_PROGRESS` and
+- recurrence of the same semantic/progress basin becomes
+  `NO_MEANINGFUL_PROGRESS` and
   permits only `FINALIZE` or `BLOCKED`; and
 - audit/state payloads contain typed conclusions and runtime facts, never
   hidden reasoning.

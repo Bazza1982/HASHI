@@ -1924,6 +1924,7 @@ class HERv2Adapter(BaseBackend):
                 },
                 "evidence_refs": list(result.evidence_refs),
                 "limitations": list(result.limitations),
+                "task_state": dict(result.task_state) if result.task_state else None,
                 "shadow_mode": self._v2_config.shadow_mode,
                 "effort": effort_resolution.metadata(),
             }

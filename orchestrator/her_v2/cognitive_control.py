@@ -1,10 +1,10 @@
 """Provider-neutral cognitive control for tool-enabled HER v2 stages.
 
-The controller deliberately stores decisions and observable evidence, never a
-model's hidden chain of thought.  It recognises semantic tool/result cycles,
-then replaces the ordinary tool catalogue with one typed decision boundary so
-the same model must decide whether to finish, change hypothesis, or report a
-blocker before tools can be used again.
+The controller stores observable decisions and evidence-linked task progress,
+never hidden chain-of-thought. It recognises both repeated semantic tool/result
+cycles and distinct-looking actions that leave the shared TaskState unchanged.
+At a detected stall it temporarily exposes one typed decision boundary so the
+same model can finish, revise direction, or report a blocker.
 """
 
 from __future__ import annotations
@@ -17,13 +17,17 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .task_state import HERTaskState
+
 COGNITIVE_DECISION_TOOL = "hashi_cognitive_decision"
-COGNITIVE_CONTROL_VERSION = 1
+COGNITIVE_CONTROL_VERSION = 2
 _CYCLE_REPETITIONS = 3
+_PROGRESS_STALL_THRESHOLD = 3
 _MAX_CYCLE_PERIOD = 12
 _MAX_OBSERVATIONS = _CYCLE_REPETITIONS * _MAX_CYCLE_PERIOD * 2
 
 _EVIDENCE_RECEIPT_RE = re.compile(r"(?m)^\s*HASHI_EVIDENCE_RECEIPT:\s*\S+\s*$")
+_TASK_STATE_RE = re.compile(r"(?m)^\s*HASHI_TASK_STATE:\s*\{.*\}\s*$")
 _HASHI_RECEIPT_RE = re.compile(r"hashi-tool:[^\s\"']+:call:[^\s\"']+:receipt:\d+")
 
 
@@ -53,17 +57,17 @@ def _normalise_result_value(value: Any) -> Any:
 
 def _normalise_text(value: str) -> str:
     text = _EVIDENCE_RECEIPT_RE.sub("", str(value or ""))
+    text = _TASK_STATE_RE.sub("", text)
     text = _HASHI_RECEIPT_RE.sub("<evidence-receipt>", text)
     return " ".join(text.split())
 
 
 def canonical_tool_arguments(arguments: Mapping[str, Any] | None) -> Any:
-    """Return the exact semantic arguments in stable mapping order.
+    """Return exact semantic arguments in stable mapping order.
 
-    Provider call IDs and receipts are not part of a tool's argument mapping.
-    Fields such as ``request_id`` or a timestamp can identify the user's real
-    target, so treating their values as transport noise would merge distinct
-    actions and create false cycle detections.
+    Request IDs and time ranges can identify the user's real target, so their
+    values are intentionally retained. Request-local TaskState metadata is
+    removed by the registry before this function is called.
     """
 
     return {
@@ -75,9 +79,10 @@ def canonical_tool_arguments(arguments: Mapping[str, Any] | None) -> Any:
 
 
 def canonical_tool_result(output: str, details: Mapping[str, Any] | None) -> Any:
-    """Return the semantic result while ignoring receipts and timing noise."""
+    """Return the semantic result while ignoring receipts and state projection."""
 
     text = _EVIDENCE_RECEIPT_RE.sub("", str(output or "")).strip()
+    text = _TASK_STATE_RE.sub("", text).strip()
     parsed: Any = None
     if text[:1] in {"{", "["}:
         try:
@@ -94,7 +99,6 @@ def canonical_tool_result(output: str, details: Mapping[str, Any] | None) -> Any
         # Smart Tool warnings are advisory and may first appear at the repeat
         # threshold. They must not make otherwise identical evidence look new.
         parsed = {key: value for key, value in parsed.items() if key != "warning"}
-    # Result details contain useful state/effect facts but also evidence IDs.
     semantic_details = {
         key: value
         for key, value in dict(details or {}).items()
@@ -109,9 +113,7 @@ def canonical_tool_result(output: str, details: Mapping[str, Any] | None) -> Any
             "unavailable",
         }
     }
-    return _normalise_result_value(
-        {"output": parsed, "details": semantic_details}
-    )
+    return _normalise_result_value({"output": parsed, "details": semantic_details})
 
 
 def _state_changed(output: str, details: Mapping[str, Any] | None) -> bool | None:
@@ -126,7 +128,8 @@ def _state_changed(output: str, details: Mapping[str, Any] | None) -> bool | Non
         return True
     if effect in {"no_change", "observed"}:
         return False
-    text = _EVIDENCE_RECEIPT_RE.sub("", str(output or "")).strip()
+    text = _TASK_STATE_RE.sub("", _EVIDENCE_RECEIPT_RE.sub("", str(output or "")))
+    text = text.strip()
     if text[:1] == "{":
         try:
             parsed = json.loads(text)
@@ -156,6 +159,7 @@ class ToolObservation:
     result_fingerprint: str
     state_changed: bool | None
     is_error: bool
+    progress_signature: str = ""
 
     @property
     def semantic_fingerprint(self) -> str:
@@ -179,6 +183,9 @@ class CognitiveInterrupt:
     cycle_signature: str
     repeated_after_intervention: bool
     observation_count: int
+    detection_kind: str = "semantic_cycle"
+    progress_signature: str = ""
+    stall_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -190,27 +197,43 @@ class CognitiveInterrupt:
             "cycle_signature": self.cycle_signature,
             "repeated_after_intervention": self.repeated_after_intervention,
             "observation_count": self.observation_count,
+            "detection_kind": self.detection_kind,
+            "progress_signature": self.progress_signature or None,
+            "stall_count": self.stall_count,
             "new_evidence": False,
             "state_changed": False,
         }
 
 
 class StageCognitiveController:
-    """Track one stage's observable decision state and semantic tool cycles."""
+    """Track one stage's observable decisions, cycles, and task progress."""
 
-    def __init__(self, *, stage: str, goal: str) -> None:
+    def __init__(
+        self,
+        *,
+        stage: str,
+        goal: str,
+        task_state: HERTaskState | None = None,
+    ) -> None:
         self.stage = str(stage or "tool").strip().casefold() or "tool"
         self.goal_sha256 = _digest(str(goal or ""))
+        self.task_state = task_state
         self._history: deque[ToolObservation] = deque(maxlen=_MAX_OBSERVATIONS)
         self._seen_cycle_signatures: set[str] = set()
         self._interrupt: CognitiveInterrupt | None = None
         self._mode = "observing"
         self._active_tool_allowlist: frozenset[str] | None = None
-        self._accepted_hypotheses: set[str] = set()
-        self._hypothesis = ""
-        self._unresolved_question = ""
-        self._expected_distinct_evidence = ""
+        self._accepted_directions: set[str] = set()
+        self._focus_target = ""
+        self._revised_direction = ""
+        self._expected_change = ""
         self._stop_condition = ""
+        self._progress_stall_count = 0
+        self._last_progress_signature = (
+            task_state.progress_signature() if task_state is not None else ""
+        )
+        self._intervention_progress_signature = ""
+        self._recovery_epoch = 0
         self._interrupt_count = 0
         self._decision_count = 0
         self._last_decision = ""
@@ -244,6 +267,9 @@ class StageCognitiveController:
         details: Mapping[str, Any] | None,
         is_error: bool,
         tool_profile: str = "generic",
+        progress_signature: str = "",
+        progress_tracking_armed: bool = False,
+        progress_boundary: bool = True,
     ) -> CognitiveInterrupt | None:
         if self._mode != "observing":
             return None
@@ -256,29 +282,121 @@ class StageCognitiveController:
             result_fingerprint=_digest(canonical_tool_result(output, details)),
             state_changed=_state_changed(output, details),
             is_error=bool(is_error),
+            progress_signature=str(progress_signature or ""),
         )
         self._history.append(observation)
         detected = self._detect_cycle()
-        if detected is None:
-            return None
-        period, block = detected
-        signature = self._cycle_signature(block)
-        repeated = signature in self._seen_cycle_signatures
-        self._seen_cycle_signatures.add(signature)
+        if detected is not None:
+            period, block = detected
+            signature = self._cycle_signature(block)
+            repeated = bool(
+                signature in self._seen_cycle_signatures and self._recovery_epoch
+            )
+            self._seen_cycle_signatures.add(signature)
+            return self._raise_interrupt(
+                code=(
+                    "NO_MEANINGFUL_PROGRESS" if repeated else "NO_NEW_INFORMATION_CYCLE"
+                ),
+                detection_kind="semantic_cycle",
+                cycle_period=period,
+                cycle_tools=tuple(item.tool_name for item in block),
+                cycle_signature=signature,
+                repeated_after_intervention=repeated,
+                progress_signature=observation.progress_signature,
+                stall_count=0,
+            )
+        return self._observe_progress(
+            observation,
+            armed=bool(progress_tracking_armed),
+            boundary=bool(progress_boundary),
+        )
+
+    def _raise_interrupt(
+        self,
+        *,
+        code: str,
+        detection_kind: str,
+        cycle_period: int,
+        cycle_tools: tuple[str, ...],
+        cycle_signature: str,
+        repeated_after_intervention: bool,
+        progress_signature: str,
+        stall_count: int,
+    ) -> CognitiveInterrupt:
         self._interrupt_count += 1
         interrupt = CognitiveInterrupt(
-            code=("NO_MEANINGFUL_PROGRESS" if repeated else "NO_NEW_INFORMATION_CYCLE"),
+            code=code,
             stage=self.stage,
-            cycle_period=period,
-            cycle_repetitions=_CYCLE_REPETITIONS,
-            cycle_tools=tuple(item.tool_name for item in block),
-            cycle_signature=signature,
-            repeated_after_intervention=repeated,
+            cycle_period=cycle_period,
+            cycle_repetitions=(
+                _CYCLE_REPETITIONS
+                if detection_kind == "semantic_cycle"
+                else _PROGRESS_STALL_THRESHOLD
+            ),
+            cycle_tools=cycle_tools,
+            cycle_signature=cycle_signature,
+            repeated_after_intervention=repeated_after_intervention,
             observation_count=len(self._history),
+            detection_kind=detection_kind,
+            progress_signature=progress_signature,
+            stall_count=stall_count,
         )
         self._interrupt = interrupt
-        self._mode = "terminal_decision_required" if repeated else "decision_required"
+        self._mode = (
+            "terminal_decision_required"
+            if repeated_after_intervention
+            else "decision_required"
+        )
         return interrupt
+
+    def _observe_progress(
+        self,
+        observation: ToolObservation,
+        *,
+        armed: bool,
+        boundary: bool,
+    ) -> CognitiveInterrupt | None:
+        signature = observation.progress_signature
+        if not armed or not signature:
+            self._progress_stall_count = 0
+            if signature:
+                self._last_progress_signature = signature
+            return None
+        # Parallel calls from one provider response deliberately carry the same
+        # delta ID. They are one cognitive boundary, not several stalled turns.
+        if not boundary:
+            return None
+        if observation.tool_profile == "poll" or observation.state_changed is True:
+            self._progress_stall_count = 0
+            self._last_progress_signature = signature
+            return None
+        if self._last_progress_signature and signature != self._last_progress_signature:
+            self._progress_stall_count = 0
+            self._last_progress_signature = signature
+            # Evidence-bound progress proves the previous direction recovered.
+            self._recovery_epoch = 0
+            self._intervention_progress_signature = ""
+            return None
+        self._last_progress_signature = signature
+        self._progress_stall_count += 1
+        if self._progress_stall_count < _PROGRESS_STALL_THRESHOLD:
+            return None
+        repeated = bool(
+            self._recovery_epoch and signature == self._intervention_progress_signature
+        )
+        recent = tuple(
+            item.tool_name for item in tuple(self._history)[-_PROGRESS_STALL_THRESHOLD:]
+        )
+        return self._raise_interrupt(
+            code="NO_MEANINGFUL_PROGRESS",
+            detection_kind="task_state_stagnation",
+            cycle_period=0,
+            cycle_tools=recent,
+            cycle_signature=_digest(["task-state", signature]),
+            repeated_after_intervention=repeated,
+            progress_signature=signature,
+            stall_count=self._progress_stall_count,
+        )
 
     def _detect_cycle(self) -> tuple[int, tuple[ToolObservation, ...]] | None:
         history = tuple(self._history)
@@ -295,18 +413,14 @@ class StageCognitiveController:
             )
             if any(block != semantic_blocks[0] for block in semantic_blocks[1:]):
                 continue
-            # An unchanged polling result is expected while a real external
-            # operation is still running.  Smart Tool profiles already mark
-            # that intent explicitly, so a pure polling cycle must remain
-            # available to the model.  Mixed query/action cycles are still
-            # examined normally.
             if all(item.tool_profile == "poll" for item in suffix):
                 continue
-            # A positively observed mutation is meaningful progress.  Unknown
-            # effect is not enough to excuse three semantically identical
-            # action/result cycles, because many useful query tools cannot
-            # authoritatively classify workspace mutation.
             if any(item.state_changed is True for item in suffix):
+                continue
+            progress = {
+                item.progress_signature for item in suffix if item.progress_signature
+            }
+            if len(progress) > 1:
                 continue
             return period, tuple(blocks[-1])
         return None
@@ -326,11 +440,7 @@ class StageCognitiveController:
         decisions = (
             ["FINALIZE", "BLOCKED"]
             if terminal
-            else [
-                "FINALIZE",
-                "NEW_HYPOTHESIS",
-                "BLOCKED",
-            ]
+            else ["FINALIZE", "REVISE_DIRECTION", "BLOCKED"]
         )
         return {
             "type": "HASHI_COGNITIVE_INTERRUPT",
@@ -338,19 +448,26 @@ class StageCognitiveController:
             "interrupt": self._interrupt.as_dict(),
             "cognitive_state": {
                 "goal_sha256": self.goal_sha256,
-                "current_hypothesis": self._hypothesis or None,
-                "unresolved_question": self._unresolved_question or None,
-                "expected_distinct_evidence": (
-                    self._expected_distinct_evidence or None
-                ),
+                "focus_target": self._focus_target or None,
+                "revised_direction": self._revised_direction or None,
+                "expected_change": self._expected_change or None,
                 "stop_condition": self._stop_condition or None,
+                # Compatibility aliases for v1 audit readers.
+                "current_hypothesis": self._revised_direction or None,
+                "unresolved_question": self._focus_target or None,
+                "expected_distinct_evidence": self._expected_change or None,
+                "task_state": (
+                    self.task_state.prompt_snapshot()
+                    if self.task_state is not None
+                    else None
+                ),
                 "tools_withheld": True,
             },
             "required_next_action": {
                 "tool": COGNITIVE_DECISION_TOOL,
                 "allowed_decisions": decisions,
                 "instruction": (
-                    "Do not repeat the observed tool sequence. Call the only "
+                    "Do not continue the stalled direction. Call the only "
                     "available cognitive decision tool. This requests a typed "
                     "decision conclusion, not hidden chain-of-thought."
                 ),
@@ -361,23 +478,23 @@ class StageCognitiveController:
         allowed = (
             ["FINALIZE", "BLOCKED"]
             if self._mode == "terminal_decision_required"
-            else ["FINALIZE", "NEW_HYPOTHESIS", "BLOCKED"]
+            else ["FINALIZE", "REVISE_DIRECTION", "BLOCKED"]
         )
         return {
             "type": "function",
             "function": {
                 "name": COGNITIVE_DECISION_TOOL,
                 "description": (
-                    "Resolve a HASHI no-new-information interrupt. This records "
-                    "a decision conclusion only; never include hidden reasoning."
+                    "Resolve a HASHI no-progress interrupt. This records a "
+                    "direction decision only; never include hidden reasoning."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "decision": {"type": "string", "enum": allowed},
-                        "hypothesis": {"type": "string"},
-                        "unresolved_question": {"type": "string"},
-                        "expected_distinct_evidence": {"type": "string"},
+                        "new_focus": {"type": "string"},
+                        "revised_direction": {"type": "string"},
+                        "expected_change": {"type": "string"},
                         "stop_condition": {"type": "string"},
                         "requested_tools": {
                             "type": "array",
@@ -385,6 +502,10 @@ class StageCognitiveController:
                             "uniqueItems": True,
                         },
                         "summary": {"type": "string"},
+                        # Accepted only as an in-flight v1 compatibility shape.
+                        "hypothesis": {"type": "string"},
+                        "unresolved_question": {"type": "string"},
+                        "expected_distinct_evidence": {"type": "string"},
                     },
                     "required": ["decision"],
                     "additionalProperties": False,
@@ -400,18 +521,23 @@ class StageCognitiveController:
     ) -> tuple[dict[str, Any], bool]:
         if not self.awaiting_decision:
             return (
-                {
-                    "status": "rejected",
-                    "code": "NO_COGNITIVE_DECISION_REQUIRED",
-                },
+                {"status": "rejected", "code": "NO_COGNITIVE_DECISION_REQUIRED"},
                 True,
             )
         payload = dict(arguments or {})
         decision = str(payload.get("decision") or "").strip().upper()
+        legacy_revision = decision == "NEW_HYPOTHESIS"
+        if legacy_revision and self._mode != "terminal_decision_required":
+            decision = "REVISE_DIRECTION"
+            payload.setdefault("new_focus", payload.get("unresolved_question"))
+            payload.setdefault("revised_direction", payload.get("hypothesis"))
+            payload.setdefault(
+                "expected_change", payload.get("expected_distinct_evidence")
+            )
         allowed_decisions = (
             {"FINALIZE", "BLOCKED"}
             if self._mode == "terminal_decision_required"
-            else {"FINALIZE", "NEW_HYPOTHESIS", "BLOCKED"}
+            else {"FINALIZE", "REVISE_DIRECTION", "BLOCKED"}
         )
         if decision not in allowed_decisions:
             return (
@@ -423,13 +549,13 @@ class StageCognitiveController:
                 True,
             )
 
-        if decision == "NEW_HYPOTHESIS":
+        if decision == "REVISE_DIRECTION":
             required = {
                 key: str(payload.get(key) or "").strip()
                 for key in (
-                    "hypothesis",
-                    "unresolved_question",
-                    "expected_distinct_evidence",
+                    "new_focus",
+                    "revised_direction",
+                    "expected_change",
                     "stop_condition",
                 )
             }
@@ -443,38 +569,59 @@ class StageCognitiveController:
             )
             available = {str(item) for item in available_tools}
             unknown = sorted(set(requested).difference(available))
-            hypothesis_key = _digest(_normalise_text(required["hypothesis"]))
             if missing or not requested or unknown:
                 return (
                     {
                         "status": "rejected",
-                        "code": "INCOMPLETE_NEW_HYPOTHESIS",
+                        "code": "INCOMPLETE_REVISED_DIRECTION",
                         "missing": missing + ([] if requested else ["requested_tools"]),
                         "unknown_tools": unknown,
                     },
                     True,
                 )
-            if hypothesis_key in self._accepted_hypotheses:
+            direction_key = _digest(
+                [
+                    _normalise_text(required["new_focus"]),
+                    _normalise_text(required["expected_change"]),
+                    sorted(requested),
+                ]
+            )
+            if direction_key in self._accepted_directions:
                 return (
                     {
                         "status": "rejected",
-                        "code": "HYPOTHESIS_NOT_DISTINCT",
+                        "code": "DIRECTION_NOT_STRUCTURALLY_DISTINCT",
                     },
                     True,
                 )
-            self._accepted_hypotheses.add(hypothesis_key)
-            self._hypothesis = required["hypothesis"]
-            self._unresolved_question = required["unresolved_question"]
-            self._expected_distinct_evidence = required["expected_distinct_evidence"]
+            self._accepted_directions.add(direction_key)
+            self._focus_target = required["new_focus"]
+            self._revised_direction = required["revised_direction"]
+            self._expected_change = required["expected_change"]
             self._stop_condition = required["stop_condition"]
             self._active_tool_allowlist = frozenset(requested)
+            if self.task_state is not None:
+                self.task_state.revise_direction(
+                    target_id=self._focus_target,
+                    direction=self._revised_direction,
+                    expected_change=self._expected_change,
+                    stop_condition=self._stop_condition,
+                    source=f"cognitive:{self.stage}",
+                )
+                self._intervention_progress_signature = (
+                    self.task_state.progress_signature()
+                )
+            else:
+                self._intervention_progress_signature = self._last_progress_signature
+            self._recovery_epoch += 1
+            self._progress_stall_count = 0
             self._history.clear()
             self._mode = "observing"
             self._interrupt = None
             instruction = (
-                "The distinct hypothesis was recorded and only the requested "
-                "tools are reopened. Seek the stated distinct evidence. If the "
-                "stop condition is reached, return the normal stage response."
+                "The structurally distinct direction was recorded and only the "
+                "requested tools are reopened. Seek the stated evidence change. "
+                "If the stop condition is reached, return the normal stage response."
             )
         else:
             self._active_tool_allowlist = frozenset()
@@ -494,9 +641,10 @@ class StageCognitiveController:
                 "version": COGNITIVE_CONTROL_VERSION,
                 "decision": decision,
                 "stage": self.stage,
+                "legacy_alias_used": legacy_revision,
                 "tools_reopened": (
                     sorted(self._active_tool_allowlist)
-                    if decision == "NEW_HYPOTHESIS"
+                    if decision == "REVISE_DIRECTION"
                     else []
                 ),
                 "instruction": instruction,
@@ -529,15 +677,27 @@ class StageCognitiveController:
             "interrupt_count": self._interrupt_count,
             "decision_count": self._decision_count,
             "last_decision": self._last_decision or None,
+            "progress_stall_count": self._progress_stall_count,
+            "last_progress_signature": self._last_progress_signature or None,
+            "recovery_epoch": self._recovery_epoch,
             "active_tool_allowlist": (
                 sorted(self._active_tool_allowlist)
                 if self._active_tool_allowlist is not None
                 else None
             ),
-            "current_hypothesis": self._hypothesis or None,
-            "unresolved_question": self._unresolved_question or None,
-            "expected_distinct_evidence": self._expected_distinct_evidence or None,
+            "focus_target": self._focus_target or None,
+            "revised_direction": self._revised_direction or None,
+            "expected_change": self._expected_change or None,
             "stop_condition": self._stop_condition or None,
+            # Compatibility aliases for consumers of the v1 audit payload.
+            "current_hypothesis": self._revised_direction or None,
+            "unresolved_question": self._focus_target or None,
+            "expected_distinct_evidence": self._expected_change or None,
+            "task_state": (
+                self.task_state.prompt_snapshot()
+                if self.task_state is not None
+                else None
+            ),
             "interrupt": self._interrupt.as_dict() if self._interrupt else None,
         }
 
@@ -549,15 +709,15 @@ def cognitive_system_contract() -> str:
 
 Treat every tool result as evidence, not as permission to keep acting. At each
 tool boundary, decide whether the result changed relevant state, answered the
-current question, falsified the current hypothesis, or satisfied the stage's
-completion criteria. Do not repeat a tool sequence when it yields no new
-information.
+current question, falsified the current direction, or satisfied the stage's
+completion criteria. Do not repeat actions that cannot change the task model.
 
 HASHI may temporarily replace the ordinary tools with
-`hashi_cognitive_decision` after detecting a semantic no-new-information cycle.
-When that happens, do not repeat the cycle. Record exactly one typed decision:
-FINALIZE, NEW_HYPOTHESIS, or BLOCKED. NEW_HYPOTHESIS must name a genuinely
-different hypothesis, the unresolved question, the distinct evidence sought,
+`hashi_cognitive_decision` after detecting either a semantic repeated sequence
+or a structurally unchanged TaskState across otherwise different actions. When
+that happens, do not continue the old direction. Record exactly one typed
+decision: FINALIZE, REVISE_DIRECTION, or BLOCKED. REVISE_DIRECTION must name a
+new focus, the changed direction, the evidence change that would make it useful,
 an explicit stop condition, and only the tools required to test it. This is a
 decision-state contract; never expose hidden chain-of-thought. After FINALIZE or
 BLOCKED, return the normal response required by the current stage."""

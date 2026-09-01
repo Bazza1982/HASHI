@@ -296,6 +296,7 @@ class RuntimeInvocationMixin:
                 provider_activity_callback=self._provider_activity_callback(
                     state, provider_activity
                 ),
+                task_state=state.task_state,
                 checkpoint_coordinator=checkpoint_coordinator,
             )
             attempt_prefix = (
@@ -397,6 +398,7 @@ class RuntimeInvocationMixin:
                         ),
                         "validation_pending": True,
                         "provider_activity": provider_activity.snapshot(),
+                        "cognitive_control": dict(response.cognitive_control),
                     },
                 )
                 state.ledger.add_log_ref(response_ref)
@@ -518,6 +520,59 @@ class RuntimeInvocationMixin:
                     validation_source=validation_source,
                 )
 
+                if state.task_state is not None:
+                    state.task_state.observe_evidence(
+                        tuple(
+                            receipt.evidence_ref
+                            for receipt in effective_response.tool_receipts
+                        )
+                    )
+                    response_data = (
+                        dict(effective_response.data)
+                        if effective_response.data
+                        else None
+                    )
+                    data_evidence = (
+                        response_data.get("evidence_refs") or []
+                        if isinstance(response_data, Mapping)
+                        else []
+                    )
+                    cited_evidence = tuple(
+                        dict.fromkeys(
+                            [
+                                str(item)
+                                for item in (
+                                    list(data_evidence)
+                                    if isinstance(data_evidence, (list, tuple))
+                                    else []
+                                )
+                                if str(item).strip()
+                            ]
+                            + list(effective_response.evidence_refs)
+                        )
+                    )
+                    state.task_state.record_stage_completion(
+                        stage=stage.value,
+                        output=response_data or effective_response.text,
+                        cited_evidence_refs=cited_evidence,
+                    )
+                    task_state_ref = self._audit(
+                        state,
+                        stage=stage.value,
+                        role=role,
+                        event="task_state_stage_projection",
+                        event_id=f"{attempt_prefix}:task-state",
+                        provider=effective_response.provider or selected.engine,
+                        model=effective_response.model or selected.model,
+                        attempt=attempt,
+                        plan_id=invocation_plan_id,
+                        payload={
+                            "validation_source": validation_source,
+                            "task_state": state.task_state.snapshot(),
+                        },
+                    )
+                    state.ledger.add_log_ref(task_state_ref)
+
                 complete_ref = self._audit(
                     state,
                     stage=stage.value,
@@ -546,6 +601,11 @@ class RuntimeInvocationMixin:
                         "validation_source": validation_source,
                         "retry_invariant_hash": retry_invariant_hash,
                         "provider_activity": provider_activity.snapshot(),
+                        "task_state": (
+                            state.task_state.snapshot()
+                            if state.task_state is not None
+                            else None
+                        ),
                     },
                 )
                 state.ledger.add_log_ref(complete_ref)

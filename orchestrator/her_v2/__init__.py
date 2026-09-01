@@ -54,6 +54,7 @@ from .presentation import (
     RequiredUserMessage,
 )
 from .runtime import HERv2Runtime
+from .task_state import HASHI_TASK_DELTA_ARGUMENT, HERTaskState
 
 __all__ = [
     "DEFAULT_ROUTES_BY_STAGE",
@@ -76,6 +77,8 @@ __all__ = [
     "HERv2Learning",
     "HERv2Runtime",
     "HERv2TurnLearning",
+    "HERTaskState",
+    "HASHI_TASK_DELTA_ARGUMENT",
     "HabitAdvisor",
     "LearningRecovery",
     "LedgerInvariantError",

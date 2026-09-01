@@ -1973,6 +1973,59 @@ async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_planning_and_e
     assert strategy_call.role == "strategist"
 
 
+@pytest.mark.asyncio
+async def test_enabled_task_state_is_shared_and_projected_across_lifecycle_stages(
+    tmp_path,
+):
+    real_goal = "Implement and verify the evidence-aware feature."
+    scripts = _initial("COMPLEX_TASK", real_goal=real_goal)
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["inspect", "implement", "verify"],
+                    "success_criteria": ["The evidence-aware feature is verified"],
+                }
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Implemented and verified.",
+                }
+            ],
+            Stage.FINALISATION: [{"report": "Implemented and verified."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(cognitive_control_enabled=True),
+    ).run_turn("Implement the feature", "request-shared-task-state", effort="medium")
+
+    lifecycle_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage
+        in {Stage.TRIAGE, Stage.PLANNING, Stage.EXECUTION, Stage.FINALISATION}
+    ]
+    assert lifecycle_requests
+    assert lifecycle_requests[0].task_state is not None
+    assert all(
+        request.task_state is lifecycle_requests[0].task_state
+        for request in lifecycle_requests
+    )
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.task_state["goal"] == real_goal
+    assert any(
+        item["criterion"] == "The evidence-aware feature is verified"
+        and item["status"] == "open"
+        for item in result.task_state["criteria"]
+    )
+    assert result.task_state["last_stage"] == Stage.EXECUTION.value
+
+
 @pytest.mark.parametrize("planning_tools_enabled", [False, True])
 @pytest.mark.asyncio
 async def test_medium_stage_tool_access_uses_frozen_policy_and_capability_gate(

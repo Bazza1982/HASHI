@@ -106,6 +106,7 @@ from .strategy_playbook import (
     StrategyPlaybookError,
     load_strategy_playbook,
 )
+from .task_state import HERTaskState
 
 Validator = Callable[[StageResponse], Any]
 
@@ -218,6 +219,7 @@ class _TurnState:
     effort: Effort
     ledger: ExecutionLedger
     control: TurnControl
+    task_state: HERTaskState | None = None
     request_content: Mapping[str, Any] | None = None
     attachment_manifest: tuple[Mapping[str, Any], ...] = ()
     habit_catalogue: tuple[str, ...] = ()
@@ -342,6 +344,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             effort=effort_value,
             ledger=ledger,
             control=control,
+            task_state=(
+                HERTaskState(
+                    goal=extract_authoritative_current_request(prompt) or prompt
+                )
+                if self.config.cognitive_control_enabled
+                else None
+            ),
             request_content=normalized_request_content,
             attachment_manifest=manifest,
         )

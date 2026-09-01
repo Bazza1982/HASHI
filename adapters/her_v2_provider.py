@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import inspect
 import json
@@ -84,6 +85,12 @@ from orchestrator.her_v2.prompts import (
 from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
+)
+from orchestrator.her_v2.task_state import (
+    HASHI_TASK_DELTA_ARGUMENT,
+    HERTaskState,
+    TaskDeltaApplication,
+    task_state_contract,
 )
 from orchestrator.multimodal_contract import (
     MultimodalContractError,
@@ -1468,14 +1475,14 @@ class _UnboundedToolRegistry:
 
 
 class _CognitiveControlToolRegistry:
-    """Expose a typed decision boundary when tool evidence stops changing.
+    """Maintain TaskState and expose a typed boundary when progress stalls.
 
     This wrapper is request-local and stage-neutral.  It does not count tool
-    calls or impose an execution ceiling.  Ordinary tools stay available for
-    as long as they produce semantically distinct evidence.  After a detected
-    cycle, only the internal cognitive decision tool is advertised until the
-    same model finalises, reports a blocker, or records a distinct hypothesis
-    with a narrow tool set and explicit stop condition.
+    calls or impose an execution ceiling. Each ordinary tool schema carries one
+    reserved inline TaskState delta that is removed before real execution. After
+    a detected cycle or structural progress stall, only the internal cognitive
+    decision tool is advertised until the same model finalises, reports a
+    blocker, or records a distinct direction with a narrow tool set.
     """
 
     def __init__(
@@ -1493,9 +1500,15 @@ class _CognitiveControlToolRegistry:
         self._provider = str(provider or "")
         self._model = str(model or "")
         self._audit_serial = 0
+        self.task_state = (
+            request.task_state
+            if isinstance(request.task_state, HERTaskState)
+            else HERTaskState(goal=request.goal)
+        )
         self.controller = StageCognitiveController(
             stage=request.stage.value,
             goal=request.goal,
+            task_state=self.task_state,
         )
         self.max_loops = None
 
@@ -1529,6 +1542,41 @@ class _CognitiveControlToolRegistry:
             )
         )
 
+    @staticmethod
+    def _task_delta_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "description": (
+                "TaskState delta from prior evidence; use the system contract. "
+                "Removed before the real tool executes."
+            ),
+            "properties": {"delta_id": {"type": "string"}},
+            "required": ["delta_id"],
+            "additionalProperties": True,
+        }
+
+    @classmethod
+    def _with_task_delta(cls, definition: Mapping[str, Any]) -> dict[str, Any]:
+        item = copy.deepcopy(dict(definition))
+        function = item.get("function")
+        if not isinstance(function, Mapping):
+            return item
+        function = dict(function)
+        parameters = function.get("parameters")
+        parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
+        parameters.setdefault("type", "object")
+        properties = parameters.get("properties")
+        properties = dict(properties) if isinstance(properties, Mapping) else {}
+        properties[HASHI_TASK_DELTA_ARGUMENT] = cls._task_delta_schema()
+        parameters["properties"] = properties
+        required = [str(value) for value in parameters.get("required", [])]
+        if HASHI_TASK_DELTA_ARGUMENT not in required:
+            required.append(HASHI_TASK_DELTA_ARGUMENT)
+        parameters["required"] = required
+        function["parameters"] = parameters
+        item["function"] = function
+        return item
+
     def get_tool_definitions(self, tiers=None):
         if self.controller.awaiting_decision:
             return [self.controller.decision_schema()]
@@ -1536,13 +1584,16 @@ class _CognitiveControlToolRegistry:
             return []
         definitions = self._base_definitions(tiers)
         allowed = self.controller.active_tool_allowlist
-        if allowed is None:
-            return definitions
-        return [
-            item
-            for item in definitions
-            if str((item.get("function") or {}).get("name") or "") in allowed
-        ]
+        selected = (
+            definitions
+            if allowed is None
+            else [
+                item
+                for item in definitions
+                if str((item.get("function") or {}).get("name") or "") in allowed
+            ]
+        )
+        return [self._with_task_delta(item) for item in selected]
 
     def allowed_tool_names(self) -> tuple[str, ...]:
         if self.controller.awaiting_decision:
@@ -1584,9 +1635,11 @@ class _CognitiveControlToolRegistry:
     ):
         if str(tool_name or "") == COGNITIVE_DECISION_TOOL:
             return None
+        semantic_arguments = dict(arguments or {})
+        semantic_arguments.pop(HASHI_TASK_DELTA_ARGUMENT, None)
         evaluator = getattr(self._base, "evaluate_admission", None)
         return (
-            evaluator(tool_name, arguments, tool_call_id)
+            evaluator(tool_name, semantic_arguments, tool_call_id)
             if callable(evaluator)
             else None
         )
@@ -1633,6 +1686,105 @@ class _CognitiveControlToolRegistry:
             is_error=bool(is_error),
             content=content,
             details=dict(details or {}),
+        )
+
+    @staticmethod
+    def _split_arguments(
+        arguments: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, Any], Mapping[str, Any] | None]:
+        semantic = dict(arguments or {})
+        delta = semantic.pop(HASHI_TASK_DELTA_ARGUMENT, None)
+        return semantic, delta if isinstance(delta, Mapping) else None
+
+    def _apply_task_delta(
+        self,
+        delta: Mapping[str, Any] | None,
+        *,
+        tool_call_id: str,
+    ) -> TaskDeltaApplication:
+        application = self.task_state.apply_delta(
+            delta,
+            source=(
+                f"{self._request.stage.value}:{tool_call_id or self._audit_serial + 1}"
+            ),
+            allow_focus=not self._request.role.startswith("sub_agent:"),
+        )
+        self._audit(
+            "task_state_delta",
+            {
+                "application": application.as_dict(),
+                "task_state": self.task_state.snapshot(),
+            },
+        )
+        return application
+
+    def _process_tool_result(
+        self,
+        *,
+        name: str,
+        arguments: Mapping[str, Any],
+        tool_call_id: str,
+        result: Any,
+        delta_application: TaskDeltaApplication,
+    ):
+        details = dict(getattr(result, "details", None) or {})
+        evidence_ref = str(details.get("evidence_ref") or "").strip()
+        if evidence_ref:
+            self.task_state.observe_evidence((evidence_ref,))
+        progress_signature = self.task_state.progress_signature()
+        interrupt = self.controller.observe(
+            tool_name=name,
+            tool_profile=smart_tool_spec(name).profile,
+            arguments=arguments,
+            output=str(getattr(result, "output", "") or ""),
+            details=details,
+            is_error=bool(getattr(result, "is_error", False)),
+            progress_signature=progress_signature,
+            progress_tracking_armed=self.task_state.model_delta_count > 0,
+            progress_boundary=delta_application.status not in {"missing", "duplicate"},
+        )
+        task_snapshot = self.task_state.prompt_snapshot()
+        output = str(getattr(result, "output", "") or "").rstrip()
+        output += "\n\nHASHI_TASK_STATE: " + json.dumps(
+            task_snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        details.update(
+            {
+                "task_state_delta": delta_application.as_dict(),
+                "task_state": task_snapshot,
+            }
+        )
+        if interrupt is not None:
+            payload = self.controller.interrupt_payload()
+            self._audit(
+                "cognitive_interrupt",
+                {
+                    "interrupt": interrupt.as_dict(),
+                    "state": self.controller.snapshot(),
+                },
+            )
+            output += "\n\nHASHI_COGNITIVE_INTERRUPT\n" + json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            details.update(
+                {
+                    "control_disposition": "cognitive_interrupt",
+                    "cognitive_interrupt": interrupt.as_dict(),
+                    "cognitive_control": self.controller.snapshot(),
+                }
+            )
+        return self._result(
+            tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
+            output=output,
+            is_error=bool(getattr(result, "is_error", False)),
+            details=details,
+            content=getattr(result, "content", None),
         )
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
@@ -1694,47 +1846,48 @@ class _CognitiveControlToolRegistry:
                 },
             )
 
-        result = await self._base.execute(name, arguments, tool_call_id)
-        details = dict(getattr(result, "details", None) or {})
-        interrupt = self.controller.observe(
-            tool_name=name,
-            tool_profile=smart_tool_spec(name).profile,
-            arguments=arguments,
-            output=str(getattr(result, "output", "") or ""),
-            details=details,
-            is_error=bool(getattr(result, "is_error", False)),
+        semantic_arguments, delta = self._split_arguments(arguments)
+        delta_application = self._apply_task_delta(
+            delta,
+            tool_call_id=tool_call_id,
         )
-        if interrupt is None:
-            return result
+        result = await self._base.execute(name, semantic_arguments, tool_call_id)
+        return self._process_tool_result(
+            name=name,
+            arguments=semantic_arguments,
+            tool_call_id=tool_call_id,
+            result=result,
+            delta_application=delta_application,
+        )
 
-        payload = self.controller.interrupt_payload()
-        self._audit(
-            "cognitive_interrupt",
-            {
-                "interrupt": interrupt.as_dict(),
-                "state": self.controller.snapshot(),
-            },
+    async def record_policy_denial(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str,
+        *,
+        output: str,
+        decision: str,
+    ):
+        semantic_arguments, delta = self._split_arguments(arguments)
+        delta_application = self._apply_task_delta(
+            delta,
+            tool_call_id=tool_call_id,
         )
-        output = str(getattr(result, "output", "") or "").rstrip()
-        output += "\n\nHASHI_COGNITIVE_INTERRUPT\n" + json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        details.update(
-            {
-                "control_disposition": "cognitive_interrupt",
-                "cognitive_interrupt": interrupt.as_dict(),
-                "cognitive_control": self.controller.snapshot(),
-            }
-        )
-        return self._result(
-            tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
+        recorder = getattr(self._base, "record_policy_denial")
+        result = await recorder(
+            tool_name,
+            semantic_arguments,
+            tool_call_id,
             output=output,
-            is_error=bool(getattr(result, "is_error", False)),
-            details=details,
-            content=getattr(result, "content", None),
+            decision=decision,
+        )
+        return self._process_tool_result(
+            name=str(tool_name or ""),
+            arguments=semantic_arguments,
+            tool_call_id=tool_call_id,
+            result=result,
+            delta_application=delta_application,
         )
 
     def note_provider_completion(self) -> str:
@@ -2844,6 +2997,9 @@ class HashiStageProvider(StageProvider):
                     "The configured provider cannot prove HASHI-owned tool isolation."
                 ),
             )
+        lifecycle_task_state = (
+            request.task_state if isinstance(request.task_state, HERTaskState) else None
+        )
         selected_registry = self.tool_registry if request.allow_tools else None
         delegated = (
             request.context.get("delegated_tools")
@@ -2928,6 +3084,7 @@ class HashiStageProvider(StageProvider):
                     provider=profile.engine,
                     model=profile.model,
                 )
+                lifecycle_task_state = cognitive_registry.task_state
                 selected_registry = cognitive_registry
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
@@ -3583,14 +3740,23 @@ class HashiStageProvider(StageProvider):
                         stage_prompt = request.goal
                     elif not installed:
                         stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
-            if cognitive_registry is not None:
-                contract = cognitive_system_contract()
+            if self.cognitive_control_enabled and lifecycle_task_state is not None:
+                contracts = []
+                if cognitive_registry is not None:
+                    contracts.append(cognitive_system_contract())
+                contracts.append(
+                    task_state_contract(
+                        lifecycle_task_state.prompt_snapshot(),
+                        stage=request.stage.value,
+                        tool_enabled=cognitive_registry is not None,
+                    )
+                )
+                contract = "\n\n".join(contracts)
                 current_system = str(getattr(backend, "sys_prompt", "") or "").strip()
                 if current_system:
-                    _install_system_prompt(
-                        backend,
-                        f"{current_system}\n\n{contract}",
-                    )
+                    combined_system = f"{current_system}\n\n{contract}"
+                    _install_system_prompt(backend, combined_system)
+                    system_prompt = combined_system
                 else:
                     stage_prompt = f"{contract}\n\n{stage_prompt}"
 
@@ -4038,7 +4204,16 @@ class HashiStageProvider(StageProvider):
                 cognitive_control=(
                     cognitive_registry.controller.snapshot()
                     if cognitive_registry is not None
-                    else {}
+                    else (
+                        {
+                            "version": 2,
+                            "stage": request.stage.value,
+                            "mode": "completed",
+                            "task_state": lifecycle_task_state.prompt_snapshot(),
+                        }
+                        if lifecycle_task_state is not None
+                        else {}
+                    )
                 ),
             )
         except ProviderCallObserverError as exc:
