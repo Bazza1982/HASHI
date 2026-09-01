@@ -19,8 +19,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   switchable backend via `/backend`.
 - Fixed is a session-preserving runtime mode inside a Flex Agent, not a second
   normal configured Agent type. The legacy fixed runtime is retired.
-- Runtime execution modes are `fixed`, `flex`, `wrapper`, `audit`, and
-  `dual-brain`. Memory+ is an independent continuity setting, not a sixth mode.
+- Runtime working modes are only `fixed` and `flex`. Fixed is the default when
+  the selected backend supports persistent sessions; stateless backends use
+  Flex. Wrapper, Audit, and Dual-brain are retired.
 
 ## Important Commands
 - `/help`: command list for this agent.
@@ -41,8 +42,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.
 - `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task. Large binary training/evidence assets are optional packs; check `python scripts/exp_assets.py status` and restore only when the selected guidebook needs them.
 - `/skill`: browse, apply, validate, enable/disable, install/link, and safely uninstall standard instruction Skills.
-- `/mode [fixed|flex|wrapper|audit|dual-brain]`: inspect or switch execution
-  mode. `/mode memory+` is a compatibility alias that enables continuity
+- `/mode [fixed|flex]`: inspect or switch working mode. `/mode memory+` is a
+  compatibility alias that enables continuity
   without changing the current mode.
 - `/memory [status|on|pause|saved on|saved off|plus on|plus off]`: control
   normal memory injection and Memory+ continuity independently.

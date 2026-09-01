@@ -19,7 +19,15 @@ from orchestrator.backend_timeout import (
     read_timeout_override,
     set_timeout_override,
 )
-from orchestrator.config import AgentConfig, FlexibleAgentConfig, GlobalConfig
+from orchestrator.config import (
+    DEFAULT_AGENT_MODE,
+    RETIRED_AGENT_MODES,
+    SESSION_MODE_BACKENDS,
+    SUPPORTED_AGENT_MODES,
+    AgentConfig,
+    FlexibleAgentConfig,
+    GlobalConfig,
+)
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     PROVIDER_ONLY_ENGINE_IDS,
@@ -85,11 +93,26 @@ class FlexibleBackendManager:
             pass
         return {}
 
+    @staticmethod
+    def _mode_for_backend(requested: str | None, engine: str | None) -> str:
+        mode = str(requested or DEFAULT_AGENT_MODE).strip().lower()
+        if mode not in SUPPORTED_AGENT_MODES:
+            mode = DEFAULT_AGENT_MODE
+        if (
+            mode == "fixed"
+            and canonical_backend_engine(engine) not in SESSION_MODE_BACKENDS
+        ):
+            return "flex"
+        return mode
+
     def _load_state(self):
         self._active_model_override = None
         self._her_v2_configuration_override: dict[str, Any] | None = None
         self._her_v2_configuration_draft: dict[str, Any] | None = None
-        self.agent_mode = self.config.default_mode
+        self.agent_mode = self._mode_for_backend(
+            self.config.default_mode,
+            self.config.active_backend,
+        )
         self.privacy_level = PrivacyLevel.PROVIDER_TRUST
         configured_backend = self.config.active_backend
         allowed_engines = {
@@ -142,6 +165,10 @@ class FlexibleBackendManager:
                         if "active_model" in state or "active_provider" in state:
                             state.pop("active_model", None)
                             state.pop("active_provider", None)
+                self.agent_mode = self._mode_for_backend(
+                    self.config.default_mode,
+                    self.config.active_backend,
+                )
                 persisted_her_v2 = state.get(HER_V2_CONFIGURATION_STATE_KEY)
                 if isinstance(persisted_her_v2, dict):
                     self._her_v2_configuration_override = dict(persisted_her_v2)
@@ -195,8 +222,43 @@ class FlexibleBackendManager:
                         state.pop("active_provider", None)
                         state_needs_repair = True
                 if "agent_mode" in state:
-                    persisted_mode = state["agent_mode"]
-                    self.agent_mode = persisted_mode
+                    persisted_mode = str(state["agent_mode"] or "").strip().lower()
+                    if persisted_mode == "memory+":
+                        # The lifecycle migration also enables the independent
+                        # Memory+ flag once backend capabilities are available.
+                        self.agent_mode = persisted_mode
+                    elif persisted_mode in SUPPORTED_AGENT_MODES:
+                        self.agent_mode = self._mode_for_backend(
+                            persisted_mode,
+                            self.config.active_backend,
+                        )
+                        if self.agent_mode != persisted_mode:
+                            self.logger.warning(
+                                "Persisted fixed mode is incompatible with stateless "
+                                "backend %s; migrated to flex.",
+                                self.config.active_backend,
+                            )
+                            state["agent_mode"] = self.agent_mode
+                            state_needs_repair = True
+                    else:
+                        self.agent_mode = self._mode_for_backend(
+                            self.config.default_mode,
+                            self.config.active_backend,
+                        )
+                        category = (
+                            "retired"
+                            if persisted_mode in RETIRED_AGENT_MODES
+                            else "unsupported"
+                        )
+                        self.logger.warning(
+                            "Migrated %s persisted agent mode %r to %s; "
+                            "mode-specific configuration blocks were preserved.",
+                            category,
+                            persisted_mode,
+                            self.agent_mode,
+                        )
+                        state["agent_mode"] = self.agent_mode
+                        state_needs_repair = True
                 if "privacy_level" in state:
                     try:
                         self.privacy_level = parse_privacy_level(state["privacy_level"])

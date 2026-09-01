@@ -111,14 +111,14 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 6. **SafeVoice** — Voice messages are transcribed and shown for confirmation before execution, preventing accidental commands
 7. **Context Recovery** — `/handoff` command instantly restores project context after compression
 8. **Tool Execution Layer** — HER v2 and tool-capable backends can take real local actions: run commands, read/write files, browse the web, call external APIs, and more
-9. **Flex/Fixed Mode Switching** — Agents can switch among selectable runtimes via `/backend`; OpenRouter and DeepSeek are selected inside HER v2 as providers
-10. **Wrapper Agent Mode** — Pair a strong core model with a stateless persona wrapper so GPT/Codex can do the work while another model controls the final visible voice
+9. **Fixed/Flex Mode Switching** — `/mode` exposes only Fixed and Flex; `/backend` remains the explicit Flex-only backend switch
+10. **Fixed-by-Default Continuity** — Session-capable backends keep one continuous native session unless the user explicitly selects Flex
 11. **Anatta Live Self-Assembly** — Optional per-agent mode (`off`, `shadow`, `on`) that can observe or inject transient self-state guidance while keeping `agent.md` as the stable identity
 12. **Cross-Instance Messaging** — Agents across different HASHI instances can communicate via HChat and Hashi Remote
 13. **EXP Guidebooks** — `/exp` lets agents consult context-specific operational playbooks, failure memory, validators, and training evidence before acting
 14. **Browser Route Dashboard** — `/browser` selects the right internet path: HASHI headless browser, CLI-native browsing, Brave Search, or the logged-in Chrome extension bridge
 15. **Hashi Remote File Transfer** — move release artifacts, EXP packs, and other files directly between HASHI instances
-16. **Audit Agent Mode** — run a core model plus a separate auditor that emits follow-up findings without rewriting the core answer
+16. **Evidence-Aware Lifecycle Control** — durable task state and receipts help long-running work recover direction and prove completion
 17. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
 18. **Managed Background Jobs** — `/bg` starts long OS/process tasks without
    blocking chat, records status and logs, notifies on terminal outcomes, and
@@ -143,8 +143,9 @@ and binary packages are no longer part of the active program.
 - **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration
   converged on Direct, Strategic, and Planned production modes,
   provider-aware multimodal input, Hybrid routing, automatic context
-  maintenance, stronger session and delivery continuity, and a Flex-only
-  runtime architecture. This is the broader platform line, not the enterprise
+  maintenance, stronger session and delivery continuity, and two Agent working
+  modes: Fixed by default plus explicit Flex. Wrapper, Audit, and Dual-brain
+  modes are retired. This is the broader platform line, not the enterprise
   package version line.
 - **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
@@ -223,7 +224,7 @@ HASHI 2.x proved that local agents could execute tools, browse, switch backends,
 
 - **From tools to agentic operations:** the v2 tool layer is now surrounded by optional HER Habit–Meditation, separate nightly Dream reflection, SafeVoice confirmation, token/cost audit, and behavior audit trails.
 - **From one machine to a HASHI network:** HChat and Hashi Remote let agents address peers across instances, with peer health, protocol handshakes, and direct file transfer for moving artifacts and EXP packs.
-- **From backend switching to runtime composition:** agents can run fixed, flex, wrapper, or audit modes, including a strong core model paired with a separate persona wrapper or auditor.
+- **From implicit runtime behavior to two clear working modes:** Fixed is the default for session-capable backends; Flex enables explicit backend switching and full context injection.
 - **From generic skills to learned expertise:** `/exp` adds context-specific guidebooks with playbooks, validators, failure memory, templates, evidence, and training runs for repeatable high-skill work.
 - **From browser automation to browser routing:** `/browser` exposes a route dashboard that chooses between headless browser tools, CLI-native browsing, Brave Search, and the real logged-in Chrome extension bridge.
 - **From a monolith to a hot-reloadable core:** v3.2's slim core moves frequently changed behavior into managers and runtime modules so `/reboot min` can adopt most code changes without a full process restart.
@@ -706,13 +707,10 @@ examples, timing semantics, persistence, and cancellation, see
 
 | Command | Description |
 |---------|-------------|
-| `/mode [fixed\|flex\|wrapper\|audit\|dual-brain]` | Switch execution mode; `/mode memory+` is a compatibility alias that only enables continuity |
-| `/backend [engine]` | Switch backend in Flex; other modes first offer an explicit switch-to-Flex confirmation |
+| `/mode [fixed\|flex]` | Switch working mode; Fixed is the session-capable default, while `/mode memory+` only enables independent continuity |
+| `/backend [engine]` | Switch backend in Flex; Fixed first offers an explicit switch-to-Flex confirmation |
 | `/provider [name\|hybrid]` | Choose a Single provider or open a HER v2 Hybrid routing draft |
 | `/model [name]` | Configure HER v2 Quick/Pro and task-route targets, or change the active model on other backends |
-| `/core` | View/change the functional core backend/model used by wrapper or audit mode |
-| `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
-| `/wrapper` | View/edit wrapper-mode persona/style slots |
 | `/anatta [status\|off\|shadow\|on]` | Inspect or switch Anatta live self-assembly mode for the current agent |
 | `/effort` | Change HER execution mode, or model reasoning effort on supported non-HER backends |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
@@ -1183,7 +1181,7 @@ stateless API backends receive the compact card plus at most two recent
 exchanges on each request.
 
 `/mode memory+` remains a compatibility alias that turns continuity on without
-changing the current `flex`, `fixed`, `wrapper`, `audit`, or `dual-brain` mode.
+changing the current `fixed` or `flex` mode.
 See [Memory+ v2 — Compact Work Continuity](docs/MEMORY_PLUS_V2.md) for storage,
 rollover, migration, and mode ownership details.
 

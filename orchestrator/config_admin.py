@@ -5,6 +5,7 @@ from pathlib import Path
 
 from orchestrator.pathing import BridgePaths
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
+from orchestrator.config import default_agent_mode_for_backend
 
 
 class ConfigAdmin:
@@ -128,7 +129,10 @@ class ConfigAdmin:
             safe_backend["engine"] = active_backend
             new_entry.setdefault("allowed_backends", [safe_backend])
             new_entry.setdefault("active_backend", active_backend)
-        new_entry.setdefault("default_mode", "flex")
+        new_entry.setdefault(
+            "default_mode",
+            default_agent_mode_for_backend(new_entry.get("active_backend")),
+        )
 
         raw.setdefault("agents", []).append(new_entry)
         self.write_raw_config(raw)

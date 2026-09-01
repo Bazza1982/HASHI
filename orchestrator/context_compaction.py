@@ -31,6 +31,7 @@ from typing import Any
 
 from adapters.openrouter_api import ProviderCallObserverError
 from orchestrator import ui_language
+from orchestrator.config import DEFAULT_AGENT_MODE
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
@@ -1557,7 +1558,10 @@ def install_history_section(
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
         return list(extra_sections), None
     manager = getattr(runtime, "backend_manager", None)
-    if str(getattr(manager, "agent_mode", "flex") or "flex").lower() != "flex":
+    if str(
+        getattr(manager, "agent_mode", DEFAULT_AGENT_MODE)
+        or DEFAULT_AGENT_MODE
+    ).lower() != "flex":
         return list(extra_sections), None
     coordinator = coordinator_for(
         runtime,

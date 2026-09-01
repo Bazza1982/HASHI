@@ -35,13 +35,13 @@ from orchestrator.post_turn_observer import TurnContextRequest, TurnObservationR
 from orchestrator.runtime_mode import mode_keyboard  # noqa: E402
 
 
-def test_mode_keyboard_contains_dual_brain_button() -> None:
-    keyboard = mode_keyboard("dual-brain")
+def test_mode_keyboard_only_contains_fixed_and_flex() -> None:
+    keyboard = mode_keyboard("fixed")
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
 
-    assert "✓ Dual brain" in labels
-    assert "tgl:mode:dual-brain" in callbacks
+    assert labels == ["✓ Fixed", "Flex"]
+    assert callbacks == ["tgl:mode:fixed", "tgl:mode:flex"]
 
 
 def test_ensure_dual_brain_observer_adds_factory(tmp_path: Path) -> None:

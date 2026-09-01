@@ -207,14 +207,18 @@ unreleased checkpoint above):
 
 ### Wrapper Agent Mode
 
-Status: **implemented in v3.2.0**.
+Status: **implemented in v3.2.0; retired from the product surface in v4.0.0-alpha.2**.
 
-Wrapper Agent Mode is a third runtime mode beside fixed and flex. It lets a strong core model do the actual work while a separate stateless wrapper model rewrites only the final user-facing tone/persona.
+Wrapper Agent Mode historically let a strong core model do the actual work
+while a separate stateless wrapper model rewrote the final user-facing
+tone/persona. HASHI now exposes only Fixed and Flex. Old mode state migrates to
+the configured default, and the saved wrapper blocks remain only as historical
+compatibility data.
 
-Implemented scope:
+Historical implemented scope:
 
 - Merge-safe `state.json` writes preserve `core`, `wrapper`, and `wrapper_slots`.
-- `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` configure wrapper agents.
+- The former `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` product controls now return a retirement notice.
 - Foreground/background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries use wrapper-visible output where appropriate; active `bridge:hchat` sends remain bypassed until the delivery-boundary HChat pipeline is implemented.
 - `/verbose on` shows compact wrapper status, latency, and fallback details without exposing raw answer drafts.
 - `/reset CONFIRM` preserves wrapper configuration and prompt slots, matching `/sys` preservation behavior.

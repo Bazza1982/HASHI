@@ -31,8 +31,6 @@ def test_bot_command_metadata_is_unique_and_covers_static_commands():
         "help",
         "status",
         "reboot",
-        "audit",
-        "wrapper",
         "remote",
         "say",
         "typing",
@@ -41,6 +39,8 @@ def test_bot_command_metadata_is_unique_and_covers_static_commands():
         "terminal",
     ):
         assert command in metadata_names
+    for retired_command in ("audit", "wrapper", "brain", "core", "wrap"):
+        assert retired_command not in metadata_names
     assert "stream" not in metadata_names
     assert "preview" not in metadata_names
     assert "paswd" not in metadata_names
@@ -54,6 +54,21 @@ def test_binding_and_menu_views_are_derived_from_command_specs():
     assert [binding.name for binding in runtime_command_binding.BOT_COMMAND_BINDINGS] == [
         spec.name for spec in COMMAND_SPECS if spec.menu_visible
     ]
+
+
+def test_retired_working_mode_commands_are_hidden_compatibility_notices():
+    retired = {
+        spec.name: spec
+        for spec in COMMAND_SPECS
+        if spec.name in {"wrapper", "audit", "brain", "core", "wrap"}
+    }
+
+    assert set(retired) == {"wrapper", "audit", "brain", "core", "wrap"}
+    assert all(
+        spec.method_name == "cmd_retired_agent_mode"
+        for spec in retired.values()
+    )
+    assert all(spec.menu_visible is False for spec in retired.values())
 
 
 def test_command_binding_method_names_exist_on_flexible_runtime():
@@ -152,6 +167,17 @@ def test_skill_callback_binding_includes_nudge_buttons():
         if binding.method_name == "callback_skill"
     ]
     assert patterns == [r"^(skill|skilljob|nudgejob):"]
+
+
+@pytest.mark.parametrize("callback_data", ["wcfg:menu", "acfg:menu", "bcfg:menu"])
+def test_retired_mode_callbacks_are_bound_to_compatibility_notice(callback_data):
+    matches = [
+        binding.method_name
+        for binding in runtime_command_binding.CALLBACK_BINDINGS
+        if re.match(binding.pattern, callback_data)
+    ]
+
+    assert matches == ["callback_retired_agent_mode"]
 
 
 @pytest.mark.parametrize(

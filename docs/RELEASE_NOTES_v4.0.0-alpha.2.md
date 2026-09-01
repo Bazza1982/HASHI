@@ -17,6 +17,12 @@ platform line.
 > evidence, not selectable production modes. See
 > [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md).
 
+> **Agent working-mode update (2026-09-01):** Fixed is now the default for
+> session-capable backends, and Flex remains the explicit backend-switching
+> mode. Wrapper, Audit, and Dual-brain are no longer selectable. Persisted
+> legacy values migrate safely to Fixed or Flex while their historical
+> configuration blocks remain intact.
+
 ## Why This Is a Significant HER Update
 
 HER v2 is HASHI-owned orchestration over provider, tool, delivery, and audit

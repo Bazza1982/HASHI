@@ -6,6 +6,7 @@ import pytest
 
 from orchestrator.config import (
     LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
+    SESSION_MODE_BACKENDS,
     ConfigManager,
 )
 from orchestrator.flexible_backend_registry import normalize_allowed_backends
@@ -131,7 +132,7 @@ def test_explicit_fixed_session_agent_keeps_fixed_working_mode(tmp_path, caplog)
     assert "default_mode=fixed" in caplog.text
 
 
-def test_her_v2_is_accepted_as_a_fixed_session_backend(tmp_path):
+def test_her_v2_defaults_to_fixed_as_a_session_backend(tmp_path):
     config_path, secrets_path = _write_base_files(
         tmp_path,
         {
@@ -143,7 +144,6 @@ def test_her_v2_is_accepted_as_a_fixed_session_backend(tmp_path):
                 {"engine": "her-v2", "model": "role-configured"}
             ],
             "active_backend": "her-v2",
-            "default_mode": "fixed",
         },
     )
 
@@ -172,6 +172,7 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
         _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
     assert agents[0].type == "flex"
+    assert agents[0].default_mode == "flex"
     assert "has no explicit type" not in caplog.text
 
 
@@ -266,6 +267,13 @@ def test_agents_sample_has_valid_her_v2_core_providers():
     her_entries = []
 
     for agent in sample["agents"]:
+        if agent.get("type") == "flex":
+            expected_mode = (
+                "fixed"
+                if agent.get("active_backend") in SESSION_MODE_BACKENDS
+                else "flex"
+            )
+            assert agent.get("default_mode") == expected_mode
         assert all(
             backend.get("engine") != "her"
             for backend in agent.get("allowed_backends", [])
