@@ -4,9 +4,15 @@
 |---|---|
 | Status | Implemented; WIP retirement remains in shadow-validation phase |
 | Date | 2026-08-31 |
-| Scope | HASHI3 HER v2 fixed backend |
+| Scope | HASHI HER v2 fixed Engine Session |
 | Session authority | HER SQLite session/event store |
 | Provider state | Rebuildable transport state, never Session authority |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
+
+This document governs HER v2's **Engine Session** only. PAO and the HASHI
+Session store retain authority over the enclosing HASHI Conversation Session,
+Messages, Runs, Events, Workzones, context generation, and Engine binding. In
+this document, `Provider` means a HER-internal Model Provider.
 
 ## Preserved invariants
 

@@ -1,8 +1,10 @@
 # HASHI Layered Runtime Boundaries
 
-Status: design rule
+Status: authoritative engineering-layer specification
 Scope: HASHI core, HASHI functions, platform config, instance config
 Decision: feature work must stay out of the immutable core unless explicitly authorized
+
+Parent architecture: [HASHI System Architecture](../ARCHITECTURE.md)
 
 ## Summary
 
@@ -18,6 +20,13 @@ Layer 4: instance configuration
 The core stays stable across platforms and instances. Feature changes should
 land in hot-reloadable functions or configuration layers. Pulling from `main`
 must not erase local platform or instance configuration.
+
+These are **engineering layers**, not HASHI's functional modules. The
+orthogonal functional dimension is PCM, PAO, HER v2, and Frontend Connectors.
+Every product capability must have one functional owner and one primary
+engineering-layer placement. Most module behaviour belongs in Layer 2;
+cross-module Core utilities may remain module-neutral only while they own no
+product policy or duplicate authoritative state.
 
 ## Canonical Engineering Rule
 
@@ -49,7 +58,7 @@ Current authoritative owners include:
 
 | Knowledge or lifecycle rule | Authoritative owner |
 |---|---|
-| backend models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
+| Engine/Model Provider compatibility entries, models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
 | built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
 | initial/hot manager construction | `orchestrator/manager_registry.py` |
 | hot-reload discovery, ordering, and source preflight | `orchestrator/hot_reload.py` |
@@ -58,6 +67,11 @@ Current authoritative owners include:
 | compatibility port defaults | `orchestrator/runtime_defaults.py` |
 | stable Remote port candidate/allocation policy | `orchestrator/stable_port_allocator.py` |
 | local instance identity and ports | ignored `agents.json` / `instances.json` |
+
+This table records current physical fact owners. Conceptual ownership remains
+governed by the Level 0 architecture. In particular, the current backend
+registry contains compatibility representations of both Engine Providers and
+Model Provider adapters; that physical shape must not erase the distinction.
 
 When adding a fact covered by this table, extend its owner and derive consumer
 views. Do not create another literal list or direct file writer.

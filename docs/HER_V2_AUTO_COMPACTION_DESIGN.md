@@ -3,9 +3,13 @@
 | Field | Value |
 |---|---|
 | Status | Implemented, merged, and offline-verified; live threshold-trigger acceptance pending |
-| Revised | 2026-08-28 |
-| Scope | HASHI-owned conversation capacity management and deterministic WIP recovery for HER v2 |
-| Decision | Compact follows the initiating Agent's active provider and Quick/Light model at high HER effort |
+| Revised | 2026-09-01 |
+| Scope | Settled HER Engine Session conversation-capacity management; active recovery evidence is excluded |
+| Decision | Compact follows the initiating Agent's active Model Provider and Quick/Light model at internal high HER maintenance effort |
+| Current recovery authority | [HER v2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md) |
+
+In this document, `provider` means HER's internal **Model Provider**. The
+enclosing HASHI Conversation Session remains PAO-owned.
 
 This revision supersedes the earlier independent Compact-route design. The
 previous `inherit_pro`, explicit provider/model/reasoning, cross-provider
@@ -29,9 +33,11 @@ Compact does not have an independent provider/model configuration path and
 does not silently fall back to Pro, a global default model, retired HER, or a
 different provider.
 
-This route does not apply to WIP Journal recovery. That phase is a
-deterministic HASHI transaction, invokes no model, and always runs before the
-conversation-history phase when `/compact` finds active WIP.
+This route never applies to active canonical recovery evidence. Current HER
+Engine Sessions compact settled history only. The WIP Journal remains a
+shadow/legacy projection and is not re-ingested when canonical recovery is
+available; only legacy Sessions without canonical state retain the old
+deterministic Journal recovery transaction.
 
 Legacy persisted `inherit_pro` and explicit Compact route records are read as
 `inherit_quick` without changing the active provider/model configuration.

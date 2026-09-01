@@ -1,5 +1,8 @@
 # Minato — AI-Assisted Project Management
 
+Architecture classification: lightweight PAO project/phase vocabulary and
+integration layer under [HASHI System Architecture](../ARCHITECTURE.md).
+
 ## Overview
 
 Minato is HASHI's project-management vocabulary and integration layer. Projects
@@ -16,7 +19,8 @@ Project (Minato)
 
 Minato is deliberately lightweight: it provides shared project context,
 auditable agent activity, and a common vocabulary rather than imposing a rigid
-task-tracking process.
+task-tracking process. It is not currently a full orchestration Engine and is
+not equivalent to Nagare or Superloop.
 
 ## HASHI Responsibilities
 

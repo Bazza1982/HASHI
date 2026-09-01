@@ -6,13 +6,16 @@
 | HASHI baseline | `174d6bde8119ae352d2ecc36f4a88cb17294ffe4` |
 | Rollback branch | `backup/multi-session-pre-insertion-20260827` |
 | Activation | Fail closed until the complete joint qualification passes |
+| Architecture | [HASHI Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) |
 
 ## 1. Goal
 
 Provide one source-locked HASHI release that any conforming desktop, web,
 mobile, IDE, or operations frontend can integrate without carrying a behavioural
-HASHI fork. HASHI remains authoritative for Sessions, Messages, Runs, Events,
-context, memory, execution controls, attachments, approvals, and fencing.
+HASHI fork. PAO remains authoritative for HASHI Conversation Sessions,
+Messages, Runs, Events, execution controls, attachments, approvals, and
+fencing. PCM remains authoritative for Context and Memory projection. The
+selected Engine remains authoritative only for its internal Engine Session.
 
 Insertion is based on protocol and declared size limits, not a frontend brand,
 product revision allow-list, or private release channel. A qualification receipt
@@ -33,8 +36,9 @@ hard-coded admission rule.
 
 ### HASHI
 
-- Own canonical Session, Message, Run and Event identity.
-- Select and compact canonical Session history before HER v2 Triage.
+- PAO owns canonical Conversation Session, Message, Run and Event identity.
+- PAO selects canonical Conversation Session history and PCM projects it before
+  HER v2 Triage.
 - Enforce owner, deployment, Agent, Session, Run and fencing boundaries.
 - Provide durable replay, consumer ACK, snapshots and restart interruption.
 - Keep capability publication fail-closed until the complete HASHI gate passes.

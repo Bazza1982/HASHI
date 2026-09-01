@@ -1,5 +1,9 @@
 # Debugging Guide
 
+Architecture and terminology: [HASHI System Architecture](../ARCHITECTURE.md).
+Exact log fields may retain `backend` for compatibility; diagnose them as
+Engine Provider or Model Provider failures according to the boundary involved.
+
 This document captures the debugging philosophy, failure patterns, and operational lessons learned while stabilizing `bridge-u-f`.
 
 It is not product documentation. It is internal engineering memory for maintaining and hardening the system.
@@ -34,12 +38,13 @@ Practical principles:
 ## System Model
 
 There is one supported configured Agent type: a Flex Agent with one workspace,
-one Telegram identity, and a switchable backend. Its execution modes include
+one Telegram identity, and a switchable Engine Provider. Its runtime composition modes include
 Fixed, Flex, Wrapper, Audit, and Dual Brain. Fixed is a session-preserving mode
 inside `FlexibleAgentRuntime`; it is not the retired legacy fixed Agent runtime.
 
-OpenRouter and DeepSeek are provider-only engines used through HER v2 and
-internal rendering. They are not selectable top-level `/backend` choices.
+OpenRouter and DeepSeek are Model Provider adapters used through HER v2 and
+internal rendering. They are not selectable top-level Engine choices in
+`/backend`.
 
 There are also two operator surfaces:
 
@@ -48,7 +53,9 @@ There are also two operator surfaces:
 
 Important shared rule:
 
-- Telegram and external clients feed the same runtime queues and shared backend sessions
+- Telegram and external clients feed the same PAO runtime queues and HASHI
+  Conversation Sessions; each selected Engine owns only its internal Engine
+  Session
 
 This means:
 

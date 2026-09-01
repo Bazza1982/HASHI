@@ -4,11 +4,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Approved design baseline |
-| Version | 1.3 |
-| Date | 2026-08-24 |
+| Status | Authoritative HER v2 module specification, subject to current accepted decision overrides |
+| Version | 1.4 |
+| Date | 2026-09-01 |
 | Product | Hashi Engine Runtime (HER) |
 | Implementation baseline | HASHI `her-v2` at `cc010d11d69b4eb24c62c134dc57ac62ea42c277` |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
 > **Current product-surface override (2026-08-31):**
 > [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md) supersedes this
@@ -16,10 +17,17 @@
 > only Direct (`zero`), Strategic (`low`), and Planned (`medium`). References to
 > Adaptive, Reviewed, and Assured below describe retained dormant implementation,
 > not current product choices.
+>
+> **Terminology and Session boundary:** HER v2 is an Engine (Harness) Provider
+> selected by PAO. In this document, an unqualified Provider means a **Model
+> Provider** inside HER unless explicitly stated otherwise. PAO owns the HASHI
+> Conversation Session; HER owns its durable HER Engine Session; provider-native
+> Context is rebuildable and never authoritative.
 
 ## 1. Purpose
 
-Hashi Engine Runtime (HER) is a provider-neutral orchestration and execution framework for agentic AI systems.
+Hashi Engine Runtime (HER) is HASHI's native Engine: a Model-Provider-neutral
+orchestration and execution Harness for agentic AI work.
 
 HER separates the following concerns from the underlying model provider:
 
@@ -32,7 +40,10 @@ HER separates the following concerns from the underlying model provider:
 - finalisation and reporting;
 - operational learning through Habits, Meditation, and Dream.
 
-HER is designed to work with any provider that can offer one or more suitable model profiles, including lightweight and premium models with provider-specific reasoning controls. Examples include DeepSeek, OpenAI, Anthropic, Gemini, xAI, OpenRouter-routed models, and future providers.
+HER is designed to work with any Model Provider that can offer one or more
+suitable model profiles, including lightweight and premium models with
+provider-specific reasoning controls. Examples include DeepSeek, OpenAI,
+Anthropic, Gemini, xAI, OpenRouter-routed models, and future providers.
 
 HER does not optimise for a single measure such as speed or maximum quality. It selects an orchestration policy appropriate to the request:
 
@@ -50,10 +61,10 @@ HER v2 replaces the current tightly coupled HER workflow with a smaller, modular
 - a lightweight execution ledger;
 - independently replaceable stages;
 - provider-neutral model selection;
-- HASHI-owned tools, permissions, delivery, logging, and audit;
+- PAO-owned HASHI tools, permissions, delivery coordination, logging, and audit;
 - conversational recovery instead of restoring a failed execution stack.
 
-HER v2 is the sole supported HER execution backend. The former monolithic HER
+HER v2 is the sole supported HER Engine. The former monolithic HER
 implementation is retired and must never be selected as an initialization,
 switching, preflight, recovery, or runtime fallback. The historical public ID
 `her` resolves forward to `her-v2`; the unrelated `claw-cli` ID is removed and
@@ -80,9 +91,10 @@ including:
 - review limits;
 - tool and permission policies.
 
-The compulsory Adaptive-or-above Replanning cadence is deliberately not a
-deployment-varying parameter: it is fixed at 10 completed results or 300
-seconds and has no count limit.
+When dormant Adaptive-or-above code is exercised in isolated regression tests,
+its compulsory Replanning cadence is deliberately not a deployment-varying
+parameter: it is fixed at 10 completed results or 300 seconds and has no count
+limit. No current production mode enters that path.
 
 #### 3.2.1 No unauthorised execution ceilings
 
@@ -430,33 +442,35 @@ reference, generic tool-use marker, stale receipt, or start event is not evidenc
 ## 5. HER Execution Modes
 
 HER execution mode controls orchestration behaviour, not provider reasoning.
-The existing `low` through `max` wire values remain compatible; `zero` adds the
-Direct route. User interfaces show the descriptive names below.
+The production surface uses `zero`, `low`, and `medium`. Persisted higher values
+remain migration inputs and retained internal enum values, not selectable
+product modes. User interfaces show only the three descriptive names below.
 
 | Display name | Wire value | Required orchestration behaviour |
 |---|---|---|
 | Direct | `zero` | Zero orchestration: exactly one fully capable Direct agent on the Quick model, with no Immediate Response, Triage, Planning, Replanning, delegation, Review, Verification, or Finalisation |
-| Fast path | `low` | Fast execution with minimal orchestration; no formal Planning stage |
-| Planned | `medium` | Formal Planning followed by Execution |
-| Adaptive | `high` | Planning and Execution with compulsory Replanning every 10 completed tool results or 300 seconds at the next safe boundary |
-| Reviewed | `xhigh` | Adaptive behaviour plus one independent Review; a failed Review permits exactly one Primary-Agent remediation, whose latest draft proceeds directly to Finalisation without another Review |
-| Assured | `max` | Adaptive behaviour plus an unbounded Review/Replan/Execution loop against the latest draft until Review returns `PASS` or `CONDITIONAL_PASS` |
+| Strategic | `low` | Task-matched Strategy and selected Cards followed by fully capable Execution, without formal Planning |
+| Planned | `medium` | No-tool Strategy, read-only Planning, then fully capable Execution |
+
+Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) are dormant retained
+implementations. They are hidden from menus, cannot be newly selected, and must
+not be used as current acceptance criteria. Saved higher values migrate to
+Planned (`medium`).
 
 ### Execution-mode terminology convention
 
 The descriptive execution-mode name and its canonical wire value are two names
-for the same policy, not separate settings. Normative prose uses both together:
-Direct (`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`),
-Reviewed (`xhigh`), and Assured (`max`). A bare wire value is reserved for
-schemas, configuration examples, persistence, commands, and code-level tests
-where the serialized value itself is the subject. A bare descriptive name is
-reserved for user-interface copy where exposing the wire value would be noise.
+for the same policy, not separate settings. Current normative prose uses both
+together: Direct (`zero`), Strategic (`low`), and Planned (`medium`). A bare
+wire value is reserved for schemas, configuration examples, persistence,
+commands, and code-level tests where the serialized value itself is the
+subject. A bare descriptive name is reserved for user-interface copy where
+exposing the wire value would be noise.
 
-Terms such as "medium-or-above", "high-or-above", and "xhigh path" are legacy
-shorthand. In product behaviour and acceptance criteria they mean,
-respectively, Planned (`medium`) through Assured (`max`), Adaptive (`high`)
-through Assured (`max`), and Reviewed (`xhigh`). They must not be interpreted as
-task risk, classification, model capability, or provider reasoning.
+Terms such as `Fast path`, "medium-or-above", "high-or-above", and "xhigh
+path" belong to the superseded six-mode design retained later in this document.
+They are historical or dormant implementation vocabulary, not current product
+behaviour or acceptance criteria.
 
 HER v2 does not impose a tool-call round or turn ceiling on tool-enabled
 Execution or delegated sub-agent invocations. Once tools are authorised for a
@@ -468,7 +482,7 @@ HER v2 termination condition. Effort never changes this rule.
 Execution mode determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected mode.
 
 Direct (`zero`) is a distinct pre-Triage route, not a simpler classification
-and not an alias for Fast path (`low`). Task difficulty never upgrades it. The
+and not an alias for Strategic (`low`). Task difficulty never upgrades it. The
 Direct agent receives the full Primary Execution Tool Registry, including
 side-effect-capable tools,
 while remaining bound by the user's actual authority and scope. It inspects and
@@ -487,7 +501,7 @@ model names.
 ### 5.1 Runtime configuration command boundary
 
 HER v2 presents two reusable task model slots, Quick and Pro. `/provider`
-selects the concrete call-provider engine that carries them. `/model` defines
+selects the concrete Model Provider route that carries them. `/model` defines
 those two models, independently assigns a model slot and provider reasoning to
 each effective task route, and exposes Compact enablement plus its Tier 2/Tier
 3 timeout policy. Compact always follows the initiating Agent's active
@@ -504,15 +518,17 @@ reasoning and never silently substitutes a model or reasoning value.
 `/backend` selects `her-v2` without exposing the internal `role-configured`
 sentinel.
 
-`/effort` is a separate orchestration-policy command. `reviewed` and `assured`
-are accepted aliases and persist as canonical `xhigh` and `max`; the other
-descriptive names are accepted in the same way. Changing the mode must not read,
-infer, normalize, or persist a provider reasoning value. Conversely, changing a
-provider, model slot, Compact enablement, timeout tier, or provider reasoning
+`/effort` is a separate orchestration-policy command. `direct`, `strategic`,
+and `planned` select canonical `zero`, `low`, and `medium`; legacy `fast` and
+`fast_path` aliases select Strategic (`low`). Adaptive, Reviewed, and Assured
+cannot be newly selected, and saved `high`, `xhigh`, or `max` values migrate to
+Planned (`medium`). Changing the mode must not read, infer, normalise, or
+persist a Model Provider reasoning value. Conversely, changing a Model
+Provider, model slot, Compact enablement, timeout tier, or provider reasoning
 setting must not change HER execution mode. Compact follows changes to the
 active Quick/Light route at invocation time. Legacy `inherit_pro` and explicit
 Compact records migrate to that policy without preserving a third route.
-Non-HER backends retain their established `/model` behaviour.
+Non-HER Engines retain their established `/model` behaviour.
 
 ### 5.2 Scheduled-job execution policy
 

@@ -1,20 +1,33 @@
-# HER v2 Fixed Backend Sessions and Provider-Neutral Strategy/Execution Implementation Plan
+# HER v2 Fixed Engine Sessions and Model-Provider-Neutral Strategy/Execution Implementation Record
 
 | Field | Value |
 |---|---|
-| Status | Proposed implementation plan; runtime code is not changed by this document |
-| Date | 2026-08-30 |
-| Product identity | HER v2 is a first-class fixed HASHI backend, alongside other fixed backends |
+| Status | Implemented architecture record; the later Session control-plane specification is current authority for recovery, accounting, and Compact |
+| Date | 2026-09-01 |
+| Product identity | HER v2 is HASHI's native fixed Engine Provider, alongside other Engine Providers selected by PAO |
 | External invariant | One HASHI conversation binding opens or resumes one durable HER backend session and thereafter sends only incremental turns, PCM deltas, resource deltas, and control events |
 | Session invariant | One ordered HER-owned canonical thread spans all accepted user turns until explicit close, expiry, or unrecoverable terminal corruption |
 | Provider invariant | HER may route internal stages through HASHI API, DeepSeek, OpenRouter, or any other capability-conformant model provider without changing HER core semantics |
 | Codex boundary | Codex remains a separate HASHI backend; HER never selects Codex, Codex CLI, or Codex app-server as an internal model provider |
 | Reasoning invariant | No HER lifecycle, authority, recovery, tool, evidence, or completion decision depends on reasoning being visible |
 | Preserved systems | HASHI PCM, Strategy Playbook and Cards, Habits, Smart Tool, Tool Registry, permissions, workzones, attachments, evidence receipts, Ledger, Replanning, Review, Finalisation, cancellation, and audit |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
+
+This document began as an implementation plan and now records the implemented
+fixed HER Engine Session boundary. The terms `backend` and
+`HerFixedBackendPort` below are retained compatibility identifiers for an
+**Engine Provider**. An unqualified `provider` in HER internals means a **Model
+Provider**. PAO owns the enclosing HASHI Conversation Session; HER owns the
+durable HER Engine Session.
+
+The current production-mode surface is Direct (`zero`), Strategic (`low`), and
+Planned (`medium`). Any retained higher-mode material is dormant. Canonical
+recovery, physical Model Provider accounting, and settled-history Compact are
+governed by [HER v2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md).
 
 ## 1. Decision
 
-HER v2 will become a sessionful fixed backend from HASHI's perspective.
+HER v2 is a sessionful fixed Engine from HASHI's perspective.
 
 HASHI opens or resumes a HER backend session once. After the initial session
 snapshot is acknowledged, HASHI does not rebuild and resend the complete HER
@@ -41,7 +54,8 @@ HER thread continuity is HER-owned. It does not require any provider to expose
 a native thread, session, response chain, hidden reasoning, or KV cache.
 Provider-native continuity is an optional adapter optimisation.
 
-The internal provider set is deliberately independent of HASHI's backend set:
+The internal Model Provider set is deliberately independent of PAO's Engine
+Provider set:
 
 - HER may call GPT-family models through `hashi-api`;
 - HER may call DeepSeek through its configured API adapter;
@@ -51,13 +65,13 @@ The internal provider set is deliberately independent of HASHI's backend set:
 - HER does not call Codex. If HASHI selects Codex, HASHI is using the separate
   Codex backend rather than HER v2.
 
-This plan retains a `ContinuousInvocation` inside each Primary Job, but it is
+The implementation retains a `ContinuousInvocation` inside each Primary Job, but it is
 now an inner execution object. It no longer defines the lifetime of the fixed
 backend session.
 
-## 2. What “fixed backend” means
+## 2. What “fixed Engine” means
 
-HER v2 qualifies as a fixed backend only when all of the following are true:
+HER v2 qualifies as a fixed Engine only when all of the following are true:
 
 1. HASHI binds one conversation and Agent identity to one HER session ID.
 2. The session survives multiple completed user turns.
@@ -74,7 +88,7 @@ HER v2 qualifies as a fixed backend only when all of the following are true:
 8. Explicit close, expiry, identity change, authority-boundary change, or an
    unrecoverable integrity failure terminates the session.
 
-A fixed backend does **not** require:
+A fixed Engine does **not** require:
 
 - one operating-system process for the entire session;
 - one provider, model, or reasoning effort for the entire session;
@@ -156,10 +170,13 @@ Invalid proposals, provider retries, and reconstructed provider inferences may
 exceed one. They do not create additional accepted Strategy commits, Primary
 Jobs, or terminal results.
 
-## 4. Four-layer architecture
+## 4. HER internal four-part stack
+
+This is an internal HER decomposition, not HASHI's four engineering layers
+(Core, Functions, Platform Configuration, and Instance Configuration).
 
 ~~~text
-HASHI Fixed Backend Contract
+HASHI Fixed Engine Contract
   - opens/resumes HER sessions
   - sends incremental turns and authoritative deltas
   - receives ordered activity and terminal events

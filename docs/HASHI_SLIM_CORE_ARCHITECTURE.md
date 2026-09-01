@@ -2,6 +2,11 @@
 
 Status: accepted for the `v3.2.0` release line on 2026-05-02.
 
+Architecture relationship: this document defines the Core/Functions
+engineering boundary under the Level 0
+[HASHI System Architecture](../ARCHITECTURE.md). It does not define a competing
+functional-module hierarchy.
+
 This document records the major structural change that moved HASHI from a large `main.py`-centered bridge into a slim process core with hot-reloadable orchestration managers.
 
 ## Summary
@@ -61,6 +66,10 @@ _startup_tasks
 global_cfg
 secrets
 ```
+
+`workbench_api` is the retained implementation handle for the HASHI Backend
+API. It is a compatibility identifier and does not represent the retired
+Workbench frontend.
 
 This rule prevents a manager rebuild from accidentally tearing down service handles, losing agent list identity, or garbage-collecting an active transport.
 
@@ -145,31 +154,23 @@ self.kernel.runtimes[:] = [
 ]
 ```
 
-## HER v2 Assurance Hot-Reload Boundary
+## HER v2 Function Hot-Reload Boundary
 
-HER v2 Reviewed and Assured execution is implemented in hot-reloadable adapter,
-runtime, prompt, policy, and Tool Registry modules. Reviewed (`xhigh`) performs
-one independent Review and permits at most one Primary-Agent remediation, with
-no closure Review. Assured (`max`) repeats fresh Review after each
-Review-driven Replanning and remediation until `PASS` or `CONDITIONAL_PASS`;
-there is no separate validation stage or fixed Review/fix round limit.
+HER v2's Engine Adapter, Session, runtime, prompt, policy, Tool Gateway, and
+Model Provider Adapter behaviour lives in hot-reloadable Functions-layer
+modules. The current production surface exposes Direct (`zero`), Strategic
+(`low`), and Planned (`medium`) only.
 
-Review is non-remediating and receives only its delegated inspection and
-validation tools. Configured `verification_run` recipes or direct argv checks
-run in the authoritative workspace and inherit the HASHI process's filesystem,
-environment, `HOME`, and network authority. Their timeout grows from cumulative
-Execution duration and cannot be shortened by the reviewer.
+Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) implementations are
+retained as dormant regression and future-redesign material. Their Replanning,
+Review, remediation, and verification behaviour is not a selectable product
+contract. The current authority is
+[HER v2 Three-Mode Decision](HER_V2_THREE_MODE_DECISION.md).
 
-Triage schema v2 resolves `real_goal` and selects `relevant_habits` from the
-complete candidate Habit catalogue before downstream work begins. Adaptive
-(`high`), Reviewed (`xhigh`), and Assured (`max`) Execution install a
-request-local provider-neutral cadence
-coordinator shared by the Primary Agent and bounded sub-agents. At the next
-safe boundary after 10 completed Tool Gateway receipts or 300 monotonic
-seconds, it unconditionally enters the principal tool-free `REPLANNING` state,
-activates a plan version, and sends one Persona-rendered or deterministic
-fallback progress update. It never cancels an active tool, limits total work or
-Replans, replaces Review, or fabricates provider resume state.
+HER v2 is fixed at the PAO-to-Engine boundary through its durable Engine
+Session and incremental PCM contract. It remains flexible inside the Engine:
+Model Provider, model, reasoning, and process may change without converting
+provider-native state into Session authority.
 
 These modules and schemas are adopted through the ordinary targeted reboot
 flow. Adding lifecycle states, routes, response fields, or public helper

@@ -4,10 +4,11 @@
 |---|---|
 | Status | Accepted and frozen for practical deployment |
 | Date | 2026-08-31 |
-| Scope | HASHI3 HER v2 public `/effort` surface |
+| Scope | HASHI HER v2 public `/effort` surface |
 | Public modes | Direct (`zero`), Strategic (`low`), Planned (`medium`) |
 | Default | Planned (`medium`) |
 | Deferred | Adaptive (`high`), Reviewed (`xhigh`), Assured (`max`) redesign |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
 ## Decision
 

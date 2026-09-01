@@ -1,10 +1,10 @@
 # HASHI Documentation
 
-- [多会话前台插入计划](MULTI_SESSION_FRONTEND_INSERTION_PLAN.md) — generic frontend responsibilities, capability and size gates, rollback points, and black-box qualification boundary.
-
-- [HASHI command UI style guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) — display contract for slash commands, Telegram cards, help text, and inline buttons
-
 This directory contains developer documentation and operational notes for HASHI.
+
+The Level 0 authority is [HASHI System Architecture](../ARCHITECTURE.md). It
+defines the two orthogonal dimensions—four functional modules and four
+engineering layers—and governs every lower-level design in this directory.
 
 > **Status:** HASHI AAI Enterprise v0.1.0-alpha.1 is the current enterprise
 > alpha target. It is deployment-artifact-ready for alpha testing, with full
@@ -15,10 +15,10 @@ This directory contains developer documentation and operational notes for HASHI.
 > Flex-only runtime architecture. See
 > [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md).
 >
-> **Current integration checkpoint:** see
+> **Latest dated integration record:** see the historical
 > [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md)
-> for the merged implementation baseline, verification evidence, known limits,
-> and GitHub push boundary.
+> for its merged implementation baseline, verification evidence, known limits,
+> and GitHub push boundary. It is not current architecture authority.
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
@@ -32,6 +32,9 @@ professional, governed human-AI work orchestration.
 
 Use these docs by intent:
 
+- **Understand HASHI architecture and terminology:** start with
+  [HASHI System Architecture](../ARCHITECTURE.md), then read the PCM, PAO, HER
+  v2, Frontend Connector, and engineering-layer specifications linked below.
 - **Understand the product direction:** start with
   [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
   and [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md).
@@ -41,11 +44,11 @@ Use these docs by intent:
   [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md).
 - **Understand the long-term route:** read [ROADMAP.md](ROADMAP.md) and
   [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md).
-- **Understand the latest integrated code:** read the
+- **Understand the v4 release-candidate baseline:** read the
   [v4.0.0-alpha.2 release candidate notes](RELEASE_NOTES_v4.0.0-alpha.2.md),
-  then the HER backend, execution-mode, checkpoint, compaction, multimodal, and
-  Habit contracts linked below. The 2026-08-13 checkpoint remains historical
-  native-HER integration evidence.
+  then the current HER Engine, execution-mode, Session control-plane,
+  compaction, multimodal, and Habit contracts linked below. Dated checkpoints
+  remain historical integration evidence.
 - **Operate the current alpha artifacts:** read
   [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) and the
   enterprise runbooks linked from the readiness review.
@@ -60,9 +63,14 @@ deployment validation continues.
 ## Active (keep these current)
 
 ### Core references
-- [HASHI_NATIVE_AUDIO_CHAT_DESIGN.md](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md) — implemented and qualified provider- and terminal-neutral native audio input/output, HER routing, Safe Voice, fallback, retention, and generic frontend Events
-- [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative target design for backend-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval and migration
-- [HER_V2_WIP_JOURNAL.md](HER_V2_WIP_JOURNAL.md) — crash-safe transient unfinished-work context, clear/preserve rules, and lifecycle audit evidence
+- [../ARCHITECTURE.md](../ARCHITECTURE.md) — Level 0 authoritative HASHI architecture: functional modules, engineering layers, terminology, Session authority, and future-development rules
+- [HASHI_PAO_SYSTEM_DESIGN.md](HASHI_PAO_SYSTEM_DESIGN.md) — authoritative PAO ownership of Agents, Conversation Sessions, Engine binding, Tools, workflows, Jobs, and cross-agent orchestration
+- [HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) — authoritative built-in TUI, messaging, API, compatible-client, and retired-Workbench boundary
+- [MULTI_SESSION_FRONTEND_INSERTION_PLAN.md](MULTI_SESSION_FRONTEND_INSERTION_PLAN.md) — generic frontend responsibilities, capability and size gates, rollback points, and black-box qualification boundary
+- [HASHI_COMMAND_UI_STYLE_GUIDE.md](HASHI_COMMAND_UI_STYLE_GUIDE.md) — display contract for slash commands, Telegram cards, help text, and inline buttons
+- [HASHI_NATIVE_AUDIO_CHAT_DESIGN.md](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md) — implemented and qualified Model-Provider- and terminal-neutral native audio input/output, HER routing, Safe Voice, fallback, retention, and generic frontend Events
+- [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative Engine-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval, and projection
+- [HER_V2_WIP_JOURNAL.md](HER_V2_WIP_JOURNAL.md) — legacy/shadow transient unfinished-work projection retained during canonical recovery validation; not current recovery authority
 - [TELEGRAM_NOTIFICATION_MODES.md](TELEGRAM_NOTIFICATION_MODES.md) — `/notify on|quiet|off`, final/error notification policy, persistence, and Telegram sound/vibration boundary
 - [HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md) — client-neutral persistent Session, Run, Message and Event architecture for agentic frontends
 - [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted assertion migration and minimum 24-contract backend-neutral PCM verification gate
@@ -104,16 +112,16 @@ deployment validation continues.
 - [HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md](HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md) — staged HASHI2 WSL rollout and full-function validation plan for stable Remote port allocation
 - [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
-- [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) — current HER v2, Session, notification, WIP Journal, multimodal, and publication checkpoint
+- [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) — historical HER v2, Session, notification, WIP Journal, multimodal, and publication checkpoint
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) — historical compulsory-Replanning integration and publication record, superseded by the 27 August checkpoint
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) — historical native-HER integration and release-preparation evidence
 - [HER_HABIT_MEDITATION.md](HER_HABIT_MEDITATION.md) — default-off adapter-direct HER Habit controls, JSON persistence, recovery, audit, and change notifications
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
 - [her-v2-issues.md](her-v2-issues.md) — canonical HER v2-only defect and open-design-gap register
 - [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
-- [HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md](HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md) — proposed HER v2 fixed-backend session plan with incremental PCM/turn input, provider-neutral HASHI API/DeepSeek/OpenRouter routing, reasoning-visibility independence, and preserved Strategy, Smart Tool, evidence, and Replanning authority
+- [HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md](HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md) — implemented HER v2 fixed Engine Session record with incremental PCM/turn input and Model-Provider-neutral routing; current recovery/accounting authority is the Session control-plane document
 - [HER_V2_SESSION_CONTROL_PLANE.md](HER_V2_SESSION_CONTROL_PLANE.md) — implemented durable routing, recovery, physical Provider accounting, settled-history compaction, and WIP shadow migration contract
-- [HER_V2_TRIAGE_TO_STRATEGY_REWIRING_PLAN.md](HER_V2_TRIAGE_TO_STRATEGY_REWIRING_PLAN.md) — Strategic Fast handoff and Strategy Card execution design
+- [HER_V2_TRIAGE_TO_STRATEGY_REWIRING_PLAN.md](HER_V2_TRIAGE_TO_STRATEGY_REWIRING_PLAN.md) — implemented historical Strategy-stage experiment record; current Strategic and Planned behaviour is governed by the three-mode decision
 - [HER_V2_PLANNED_MEDIUM_DECISION.md](HER_V2_PLANNED_MEDIUM_DECISION.md) — accepted Planned/Medium boundary: no-tool Strategy, read-only Planning, and fully capable Execution
 - [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md) — accepted production surface: Direct, Strategic, and Planned, with higher-mode redesign postponed
 - [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract

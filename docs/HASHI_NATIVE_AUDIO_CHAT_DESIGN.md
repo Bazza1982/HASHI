@@ -8,9 +8,10 @@
 | Decision date | 2026-08-28 |
 | Qualification date | 2026-08-28 |
 | Scope | Turn-based voice messages with native audio input and output |
-| Initial provider route | Configured OpenRouter GPT Audio Mini route |
+| Initial Model Provider route | Configured OpenRouter GPT Audio Mini route |
 | Initial delivery surfaces | Telegram and the generic Persistent Session API |
-| Architecture rule | Provider-, model-, and terminal-neutral |
+| Architecture rule | Model-Provider-, model-, and terminal-neutral |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) and [Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) |
 | Realtime calls | Explicitly out of scope for this stage |
 | Audio-model tools | Represented by the contract but disabled in the proof of concept |
 
@@ -19,6 +20,10 @@ real-time call work in
 [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md). The call plan covers
 continuous live audio transports. This design covers bounded voice messages
 submitted as one HASHI Turn.
+
+In this document, an unqualified Provider means an audio **Model Provider**.
+Frontend delivery remains a Connector responsibility, and the enclosing HASHI
+Conversation Session remains PAO-owned.
 
 It extends, rather than replaces, the following accepted contracts:
 
@@ -1172,9 +1177,9 @@ The default inline menu contains two compact groups:
 [ 👨 Warm ] [ 👨 Calm  ]
 ~~~
 
-The four voice choices are semantic profiles, aligned with Aptenra's
-`warm_female`, `clear_female`, `warm_male`, and `calm_male` profiles. A single
-selection controls both:
+The four voice choices are generic semantic profiles:
+`warm_female`, `clear_female`, `warm_male`, and `calm_male`. A compatible
+frontend may present equivalent labels. A single selection controls both:
 
 - the concrete native Audio model voice; and
 - the language-aware Edge TTS voice used by ordinary TTS and the local fallback.

@@ -4,19 +4,24 @@
 
 | Field | Value |
 |---|---|
-| Status | Approved testing baseline |
-| Version | 1.2 |
-| Date | 2026-08-24 |
+| Status | Approved HER v2 testing baseline under the Level 0 architecture |
+| Version | 1.3 |
+| Date | 2026-09-01 |
 | System | Hashi Engine Runtime (HER) v2 |
 | Testing approach | Intent-based, risk-focused, and scenario-driven |
 | Governing design | [HER v2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
 | Implementation baseline | HASHI `her-v2` at `cc010d11d69b4eb24c62c134dc57ac62ea42c277` |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
 > **Current product-surface override (2026-08-31):** production acceptance is
 > governed by [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md).
 > Adaptive, Reviewed, and Assured cases below remain internal regression tests
 > for retained code; they are not selectable execution modes or release-surface
 > promises.
+>
+> In this plan, `Provider` means HER's internal **Model Provider** unless
+> explicitly qualified. PAO owns the HASHI Conversation Session and outer Tool
+> authority; HER owns the HER Engine Session and its internal Turn lifecycle.
 
 ## 1. Purpose
 
@@ -237,23 +242,23 @@ Tests must prove that classification and effort remain separate concerns:
 - effort labels are never passed as provider reasoning settings merely because their names appear similar.
 
 Throughout this plan, an execution mode is named with both its descriptive
-label and canonical wire value: Direct (`zero`), Fast path (`low`), Planned
-(`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Bare
-wire values are used only when a test specifically exercises serialization,
-configuration, commands, or persistence. Range shorthand such as
-"medium-or-above" must be read and asserted as the named set of execution
-modes, never as task risk or provider reasoning.
+label and canonical wire value: Direct (`zero`), Strategic (`low`), and Planned
+(`medium`). Bare wire values are used only when a test specifically exercises
+serialization, configuration, commands, or persistence. Adaptive (`high`),
+Reviewed (`xhigh`), and Assured (`max`) references elsewhere in this plan are
+dormant-code regression cases only.
 
 Command, Telegram, Backend API, job, and status tests must also prove that HER
-shows Direct, Fast path, Planned, Adaptive, Reviewed, and Assured while preserving the
-canonical `zero`, `low`, `medium`, `high`, `xhigh`, and `max` wire values. Direct
+shows only Direct, Strategic, and Planned while preserving the canonical
+`zero`, `low`, and `medium` wire values. Direct
 must prove exactly one Quick-model call at default provider reasoning `high`, no
 automatic effort upgrade or other HER stage, complete primary tool authority,
 normal verbose progress, the existing attachment fallback, and a completed
-terminal state for any successful natural-language return. Descriptive
-aliases, especially `/effort reviewed` and `/effort assured`, must persist the
-canonical value. Non-HER backends must retain their existing Effort labels and
-model-aware choices.
+terminal state for any successful natural-language return. `/effort strategic`,
+plus legacy aliases `fast` and `fast_path`, must persist canonical `low`. Saved
+`high`, `xhigh`, or `max` state must migrate to Planned (`medium`), and those
+higher modes must not be newly selectable. Non-HER Engines retain their own
+reasoning-effort UI.
 
 The default routing policy should prefer:
 
@@ -284,19 +289,17 @@ Representative policy combinations must cover:
 |---|---|---|
 | `DIRECT_RESPONSE` | any | Immediate Response only |
 | `CONFIRMATION_REQUIRED` | any | Clarification only |
-| `SIMPLE_TASK` | Fast path (`low`) | Direct execution, no formal Planning |
-| `SIMPLE_TASK` | Adaptive (`high`) | Planning, then lightweight-preferred execution; classification unchanged |
-| `COMPLEX_TASK` | Fast path (`low`) | Premium-preferred execution without mandatory Planning |
-| `COMPLEX_TASK` | Planned (`medium`) | Planning then execution |
-| `COMPLEX_TASK` | Adaptive (`high`) | Planning and compulsory Replanning at every 10-result/300-second safe boundary |
-| `COMPLEX_TASK` | Reviewed (`xhigh`) | Planning, Replanning, one tool-backed Review, and at most one remediation without a closure Review |
-| `HIGH_VOLUME_TASK` | Assured (`max`) | Premium orchestration, sub-agents, and fresh tool-backed Review after each Review-driven remediation until `PASS` or `CONDITIONAL_PASS` |
+| `SIMPLE_TASK` | Direct (`zero`) | One fully capable Quick agent; no Strategy or Planning stage |
+| `SIMPLE_TASK` | Strategic (`low`) | Strategy and selected Cards, then fully capable Execution |
+| `COMPLEX_TASK` | Strategic (`low`) | Strategy and selected Cards, then fully capable Execution without formal Planning |
+| `COMPLEX_TASK` | Planned (`medium`) | No-tool Strategy, read-only Planning, then fully capable Execution |
+| `HIGH_VOLUME_TASK` | Planned (`medium`) | No-tool Strategy and read-only Planning may design multi-agent work; Execution retains full authorised capability |
 
 This representative matrix replaces a full classification-by-effort Cartesian product unless a production defect justifies an additional combination.
 
-One focused case must make an Adaptive (`high`) `SIMPLE_TASK` request Replanning,
-prove that the second execution may use the configured primary execution
-profile, and prove that the recorded classification remains `SIMPLE_TASK`.
+Dormant higher-mode tests may still prove their isolated retained-code
+invariants, but they cannot be product-surface, menu, migration, or release
+acceptance tests.
 
 #### 7.5.1 Scheduled-job request policy
 

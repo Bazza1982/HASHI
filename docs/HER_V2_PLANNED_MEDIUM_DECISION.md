@@ -8,6 +8,7 @@
 | Strategy | No tool access; resolve the goal, classify, select Strategy Cards and Habits, and provide strategic direction |
 | Planning | Mechanically read-only tools; investigate current evidence and produce the concrete execution plan |
 | Execution | Full authorised tool and side-effect access; implement, verify, and report |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
 ## Decision
 

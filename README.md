@@ -8,7 +8,7 @@
 > Enterprise `0.1.0a1` resets the enterprise-grade package version line for
 > alpha testing; it is not a production-certified deployment claim.
 >
-> **Current integration checkpoint:** see [`docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
+> **Current architecture:** see [`ARCHITECTURE.md`](ARCHITECTURE.md) · **Latest dated integration record:** see the historical [`2026-08-27 checkpoint`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
 
@@ -84,10 +84,19 @@ Throughout the codebase, you'll see references to **`bridge-u-f`** — this was 
 
 HASHI is a **universal multi-agent orchestration platform** that runs entirely locally by default. It routes user requests to AI backends through a flexible adapter system, eliminating the need to store sensitive OAuth tokens. HASHI AAI extends that foundation into a governed enterprise control plane while preserving the same personal/local default path.
 
-**Core Components:**
+**Top-level functional modules:**
+- **PCM** — authoritative Persona, Context, and Memory assembly and projection
+- **PAO** — Provider-Agnostic Orchestration for Agents, Conversation Sessions,
+  Engine binding, Tools, workflows, Jobs, and cross-agent control
+- **HER v2** — HASHI's native Engine (Harness), with a durable Engine Session
+  and internal Model Provider routing
+- **Frontend Connectors** — the built-in TUI, Telegram, WhatsApp, Backend API,
+  Persistent Session API, and compatible-client protocols
+
+**Major capabilities:**
 - **Onboarding** — Multi-language guided setup to create your first agent
 - **Backend API** — Local runtime API for authenticated clients and HASHI integrations
-- **Orchestrator** — Central runtime managing agents, memory, skills, and scheduling
+- **Orchestrator** — Current physical implementation of much of PAO, PCM integration, and connector coordination
 - **Nagare Flow System** — Multi-agent workflow orchestration engine
 - **Transports** — Connect via Telegram, WhatsApp, TUI, or the Backend API
 - **Skills** — Modular capabilities (prompts, toggles, actions) that extend agents
@@ -104,14 +113,17 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 **What makes HASHI different:**
 1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
-2. **Provider-Neutral Runtime** — HER v2 orchestrates OpenRouter and DeepSeek as providers while their adapters remain available internally
+2. **Provider-Neutral Runtime** — PAO is agnostic to Engine/Harness Providers;
+   HER v2 is agnostic to internal Model Providers such as OpenRouter and DeepSeek
 3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
 4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
 5. **Self-Improving HER Agents** — Optional `Planning → Execution → Meditation → Write` learning with agent-local files
 6. **SafeVoice** — Voice messages are transcribed and shown for confirmation before execution, preventing accidental commands
 7. **Context Recovery** — `/handoff` command instantly restores project context after compression
 8. **Tool Execution Layer** — HER v2 and tool-capable backends can take real local actions: run commands, read/write files, browse the web, call external APIs, and more
-9. **Flex/Fixed Mode Switching** — Agents can switch among selectable runtimes via `/backend`; OpenRouter and DeepSeek are selected inside HER v2 as providers
+9. **Engine Switching, Fixed Sessions** — PAO selects Engines via `/backend`;
+   HER v2 is fixed at the PAO-to-Engine Session boundary while Model Providers
+   such as OpenRouter and DeepSeek remain selectable inside HER
 10. **Wrapper Agent Mode** — Pair a strong core model with a stateless persona wrapper so GPT/Codex can do the work while another model controls the final visible voice
 11. **Anatta Live Self-Assembly** — Optional per-agent mode (`off`, `shadow`, `on`) that can observe or inject transient self-state guidance while keeping `agent.md` as the stable identity
 12. **Cross-Instance Messaging** — Agents across different HASHI instances can communicate via HChat and Hashi Remote
@@ -192,12 +204,11 @@ HER v2 is the sole supported HER execution backend:
 - **Provider-aware multimodal routing** — images and other supported media keep
   stable identity and order, travel natively to capable provider/models, and
   fall back only through authorised local media inspection when needed.
-- **Crash-safe WIP continuity** — HER v2 records observable work from an
-  unfinished turn in a bounded Session-scoped transient journal, exposes its
-  lifecycle in the durable audit log, and never recursively copies assembled
-  provider requests. Active WIP produces a mandatory visible warning;
-  `/compact` can commit a deterministic quoted recovery capsule without a
-  model and clears the exact Journal snapshot only after that write is durable.
+- **Canonical Session recovery** — HER v2 records typed Turn, Tool,
+  side-effect, checkpoint, and physical Model Provider request evidence in its
+  durable Engine Session control plane. Provider-native Context remains
+  rebuildable. The former WIP Journal is shadow compatibility evidence rather
+  than recovery authority.
 - **Quiet Telegram notifications** — `/notify quiet` keeps acknowledgements,
   commentary, reasoning, verbose activity, and other interim updates silent
   while final results, errors, warnings, recovery notices, and important alerts
@@ -214,10 +225,12 @@ HER v2 is the sole supported HER execution backend:
 - **Migration compatibility** — public engine ID `her` resolves forward to
   `her-v2`. The unrelated historical ID `claw-cli` is rejected.
 
-See [the HER v2 design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
-and [HER v2 testing plan](docs/HER_V2_TESTING_PLAN.md). The exact integrated
-baseline and GitHub publication boundary are recorded in the
-[2026-08-27 checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md).
+See [the Level 0 architecture](ARCHITECTURE.md),
+[the HER v2 design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md),
+and [HER v2 testing plan](docs/HER_V2_TESTING_PLAN.md). The
+[2026-08-27 checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) is a
+historical implementation and publication record, not current architecture
+authority.
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 
@@ -439,67 +452,35 @@ and `kubernetes` add only the selected feature. See
 
 ### Architecture
 
-The canonical layer boundaries, single-source owners, localized-change rule,
-and `/reboot` contract are documented in
+The Level 0 module ownership, Session authority, terminology, engineering
+layers, single-source rules, and `/reboot` boundary are documented in
 [`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor checks are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-HASHI uses a **Universal Orchestrator** pattern where a single Python process manages multiple concurrent agent runtimes:
+HASHI has two orthogonal architecture dimensions:
 
+```text
+Functional ownership                          Engineering placement
+
+Frontend Connectors                           Core
+  -> PAO Conversation Session and Run            -> Functions
+      -> PCM full/delta projection                    -> Platform Configuration
+      -> selected Engine Provider                         -> Instance Configuration
+           -> HER v2 Engine Session, or another Engine
+                -> Model Provider(s), where applicable
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    Universal Orchestrator                         │
-│                                                                  │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐     │
-│  │ Agent Runtime  │  │ Agent Runtime  │  │ Agent Runtime  │ ... │
-│  │   (Agent A)    │  │   (Agent B)    │  │   (Agent C)    │     │
-│  └────────────────┘  └────────────────┘  └────────────────┘     │
-│          ▲                  ▲                  ▲                  │
-│          └──────────────────┴──────────────────┘                  │
-│                          │                                        │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │              Flexible Backend Manager                      │  │
-│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────┐           │  │
-│  │  │Gemini  │ │Claude  │ │ Codex  │ │OpenRouter│           │  │
-│  │  │Adapter │ │Adapter │ │Adapter │ │ Adapter  │           │  │
-│  │  └────────┘ └────────┘ └────────┘ └──────────┘           │  │
-│  │  ┌──────────┐ ┌────────┐                                  │  │
-│  │  │DeepSeek  │ │ Ollama │                                  │  │
-│  │  │ Adapter  │ │Adapter │                                  │  │
-│  │  └──────────┘ └────────┘                                  │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                          ▲                                        │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │                Transport Layer                              │  │
-│  │    [Telegram] [WhatsApp] [Backend API] [HChat]             │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                                                                  │
-│  ┌────────────┐  ┌────────────┐  ┌────────────────────┐        │
-│  │   Skill    │  │  Scheduler │  │   Memory System    │        │
-│  │  Manager   │  │ (Jobs/Cron)│  │ (Vector + Recall)  │        │
-│  └────────────┘  └────────────┘  └────────────────────┘        │
-│                                                                  │
-│  ┌────────────────────────────┐  ┌────────────────────────┐    │
-│  │ HER Habit–Meditation       │  │   Token Audit          │    │
-│  │ (Backend-local, optional) │  │  (Usage + Cost Track)  │    │
-│  └────────────────────────────┘  └────────────────────────┘    │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │              Nagare Flow System                              │  │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐         │  │
-│  │  │FlowRunner│→ │ Workers  │→ │ Evaluation KB    │         │  │
-│  │  │(DAG Orch)│  │(Multi-AI)│  │(Self-Improving)  │         │  │
-│  │  └──────────┘  └──────────┘  └──────────────────┘         │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
-```
+
+Most functional-module behaviour lives in hot-reloadable Functions. The small
+Core stays continuously running so normal functions can be adopted without a
+cold restart. Platform and Instance Configuration adapt the same program
+without forking product policy.
 
 **Key Design Principles:**
-- **Backend Agnostic** — Agents work with any supported backend; you can switch mid-conversation
-- **Shared Sessions** — Telegram, TUI, and authenticated external clients share the same agent queues and memory
+- **Provider Agnostic** — PAO supports conforming Engine/Harness Providers, and Engines such as HER v2 can support multiple Model Providers
+- **Authoritative Sessions** — PAO owns HASHI Conversation Sessions; each selected Engine owns only its internal Engine Session
 - **Explicit over Automatic** — Skills, jobs, and features are user-activated, never magic
 - **Single Instance** — File-based locking prevents multiple HASHI processes from conflicting
-- **Remote Provider Policy** — Remote provider calls are permission-gated for automated flows to prevent runaway costs
+- **Qualified Provider Policy** — Remote Model Provider calls are permission-gated for automated flows to prevent runaway costs
 - **Slim Core** — process bootstrap stays small while hot-reloadable managers own feature behavior
 
 ### File Structure
@@ -611,6 +592,8 @@ HASHI supports multiple communication channels:
 - Workbench has retired and is no longer shipped or supported by HASHI.
 - The frontend, Node server, launchers, build assets, data, and UI tests have
   been removed from this repository.
+- Any successor graphical frontend is a separate product/repository. It may use
+  HASHI's generic Connector and API contracts but is not a HASHI module.
 - Legacy identifiers such as `workbench_port`, `workbench_api.py`, and
   `/workbench/v1/*` remain only for Backend API compatibility.
 
@@ -903,31 +886,32 @@ Jobs can be transferred between agents (same instance or cross-instance):
 
 ---
 
-### Backend Adapters
+### Engine and Model Provider Adapters
 
-HASHI's **adapter system** provides a unified interface to multiple AI backends:
+HASHI's adapter system separates Engine (Harness) Providers from Model
+Providers. Existing `backend` identifiers remain compatibility surfaces.
 
-#### Supported Backends
+#### Selectable Engine Providers
 
-| Backend | Engine ID | Requirements | Notes |
+| Engine Provider | Engine ID | Requirements | Notes |
 |---------|-----------|--------------|-------|
 | Gemini CLI | `gemini-cli` | `gemini` CLI installed | Local auth |
 | Claude Code | `claude-cli` | `claude` CLI installed | Local auth |
 | Codex CLI | `codex-cli` | `codex` CLI installed | Local auth |
 | Grok CLI | `grok-cli` | `grok` CLI installed and logged in | Local auth, streaming JSON |
 | xAI API | `xai-api` | Hermes xAI OAuth profile or `xai_api_key` | Grok chat, responses, Imagine image/video |
-| HER v2 | `her-v2` (`her` migration alias) | At least one configured HER v2 provider profile | Provider-neutral staged orchestration; `claw-cli` is retired |
+| HER v2 | `her-v2` (`her` migration alias) | At least one configured HER v2 Model Provider profile | Model-Provider-neutral staged orchestration with a durable Engine Session; `claw-cli` is retired |
 | Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |
 
-OpenRouter (`openrouter-api`) and DeepSeek (`deepseek-api`) are provider-only
-engines. Their adapters remain available to HER v2 and internal rendering, but
-they are not selectable as top-level backends in `/backend`.
+OpenRouter (`openrouter-api`) and DeepSeek (`deepseek-api`) are Model Provider
+adapters, not Engine Providers. They remain available to HER v2 and internal
+rendering, but are not selectable as top-level Engines in `/backend`.
 
 #### Remote Backend Policy
 
-Remote provider calls (including OpenRouter, DeepSeek, and xAI API) are protected by an automatic cost-control policy:
-- **User-initiated requests** → allowed on any backend
-- **Automated requests** (scheduler, HChat, transfers) → blocked on remote API backends, must use CLI or local backends
+Remote Model Provider calls (including OpenRouter, DeepSeek, and xAI API) are protected by an automatic cost-control policy:
+- **User-initiated requests** → allowed on any permitted Engine route
+- **Automated requests** (scheduler, HChat, transfers) → blocked on remote API routes, must use permitted CLI or local Engines
 
 This prevents runaway API costs from automated workflows.
 
@@ -938,8 +922,8 @@ This prevents runaway API costs from automated workflows.
 - Conversation memory managed by CLI
 - Grok CLI uses `--output-format streaming-json`; HASHI treats zero-exit empty answers as failures, retries once only for side-effect-free `thought`/`end` empty output, and refuses retry after side-effect events.
 
-#### API Providers and Backends
-- OpenRouter and DeepSeek run through HER v2 provider profiles; xAI remains a selectable API backend
+#### API Model Providers and Engine Surfaces
+- OpenRouter and DeepSeek run through HER v2 Model Provider profiles; xAI remains a selectable compatibility Engine surface
 - HTTP API with streaming support
 - Supports tool calls (function calling)
 - Stateless (HASHI manages conversation history)
@@ -955,9 +939,9 @@ This prevents runaway API costs from automated workflows.
 
 #### Tool Execution Layer
 
-HER v2 and other tool-capable runtimes can execute local actions through the
-HASHI Tool Registry. OpenRouter and DeepSeek remain provider adapters inside
-HER v2 rather than selectable top-level backends:
+HER v2 and other tool-capable Engines can execute local actions through the
+PAO-owned HASHI Tool Registry. OpenRouter and DeepSeek remain Model Provider
+adapters inside HER v2 rather than selectable top-level Engines:
 
 ```json
 {
@@ -1571,7 +1555,8 @@ field remains a one-model hint.
 
 ### TUI Interface
 
-`tui.py` provides a terminal-first interface built with [Textual](https://github.com/Textualize/textual):
+`tui.py` is HASHI's permanent built-in reference terminal Connector, built with
+[Textual](https://github.com/Textualize/textual):
 
 ```bash
 python tui.py
@@ -1580,7 +1565,7 @@ python tui.py
 **Panels:**
 - **Log panel** (upper) — real-time stdout/stderr from the bridge process
 - **Chat input bar** (lower) — send messages to any active agent
-- **Status bar** — current agent, backend, bridge uptime
+- **Status bar** — current Agent, Engine (legacy backend label), bridge uptime
 - **Agent selector** — hotkey to switch which agent receives input
 
 **Local TUI commands:**
@@ -1604,6 +1589,9 @@ switch leaves the existing API client, agent selection, and transcript offsets
 unchanged. The upper panel remains explicitly labeled as the launch instance's
 local log after switching. See
 [`docs/TUI_INSTANCE_SWITCHING.md`](docs/TUI_INSTANCE_SWITCHING.md).
+
+The current TUI uses the basic Backend API chat/transcript surface. It is not
+yet a complete Persistent Session API v1 multi-Session client.
 
 ---
 

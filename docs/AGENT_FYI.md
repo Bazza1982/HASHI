@@ -2,6 +2,13 @@
 
 This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 
+Canonical terminology and ownership are defined in
+[HASHI System Architecture](../ARCHITECTURE.md): PAO owns outer orchestration
+and HASHI Conversation Sessions, PCM owns Persona/Context/Memory projection,
+HER v2 is HASHI's native Engine (Harness), and frontends connect through HASHI
+Connectors. `Provider` should be qualified as Engine Provider or Model Provider
+when ambiguous.
+
 ## Agent Seeds and the Soul Repository
 - **Seed Location**: `/agent_seeds/`
 - **Contents**: pre-defined "Soul" templates (e.g., Zelda, Samantha, Jarvis, Pikachu).
@@ -18,17 +25,18 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 
 ## Agent Type and Runtime Modes
 - The supported configured Agent type is Flex: one bot, one workspace, and a
-  switchable backend via `/backend`.
+  switchable Engine Provider via `/backend`.
 - Fixed is a session-preserving runtime mode inside a Flex Agent, not a second
   normal configured Agent type. The legacy fixed runtime is retired.
-- Runtime execution modes are `fixed`, `flex`, `wrapper`, `audit`, and
-  `dual-brain`. Memory+ is an independent continuity setting, not a sixth mode.
+- Outer runtime-composition modes are `fixed`, `flex`, `wrapper`, `audit`, and
+  `dual-brain`. They are separate from HER v2's Direct, Strategic, and Planned
+  execution modes. Memory+ is an independent continuity setting.
 
 ## Important Commands
 - `/help`: command list for this agent.
-- `/new`: create and select a new HASHI Session for the originating channel; session-capable fixed backends also clear their native session.
-- `/fresh`: clean API context for non-CLI backends. On HER v2 it creates a persistent boundary across normal turns, completed exchanges, cross-session receipts, Compact capsules, and auxiliary continuity sources. Logs and memories remain stored but are not automatically injected.
-- `/handoff`: restore the latest 10 completed Bridge exchanges across retained HASHI Sessions into a fresh backend session.
+- `/new`: create and select a new HASHI Conversation Session for the originating channel; session-capable fixed Engines also clear their native Engine Session.
+- `/fresh`: advance the PAO Context generation for the selected Engine. On HER v2 it creates a persistent boundary across normal Turns, completed exchanges, cross-Session receipts, Compact capsules, and auxiliary continuity sources. Logs and Memories remain stored but are not automatically injected.
+- `/handoff`: restore the latest 10 completed exchanges across retained HASHI Conversation Sessions into a fresh Engine Session.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
 - `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat. If model-facing `background_job_*` tools are unavailable, use the live local Backend API `/api/background-jobs` endpoints instead of starting a temporary standalone manager. Start managed jobs with success/failure notification and completion/failure agent-event routing enabled when possible.
 - `/bg status [job_id]`, `/bg tail <job_id>`, `/bg cancel <job_id>`, `/bg list`: inspect or manage recorded background jobs.
@@ -88,7 +96,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   including after a runtime restart. An unrelated new request remains unrelated. The
   intentional process kill is not reported as a Backend error.
 - `/steer <direction>`: when busy, stop the current turn immediately (all backends), keep interim thinking/progress/artefacts, then continue with a mid-task wrapper. When idle, send the direction as a plain new request (no steer wrapper). Example: `/steer also include unit tests`. The intentional kill (e.g. exit `-9`) is suppressed — you should see the steer ack, not `❌ Backend error`. Full reference: [STEER_COMMAND.md](STEER_COMMAND.md).
-- `/focus`: one-off scope correction that does not cancel or finish the task. When busy, replace the active backend turn with an immediate continuation that preserves progress/artefacts, narrows execution to the original user-requested scope, and keeps working until the requested outcome is complete or genuinely blocked. When idle, apply the same continuation reminder to the most recent task; if no task is available, do nothing. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).
+- `/focus`: one-off scope correction that does not cancel or finish the task. When busy, replace the active Engine Turn with an immediate continuation that preserves progress/artefacts, narrows execution to the original user-requested scope, and keeps working until the requested outcome is complete or genuinely blocked. When idle, apply the same continuation reminder to the most recent task; if no task is available, do nothing. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).
 - `/delay <minutes> <message>`: persist a message in this agent's FUTURE queue, then append it to the normal READY FIFO no earlier than its due time. Use `/delay list` or `/delay cancel <delay-id>` to inspect or cancel it. Delays survive restart, do not make the agent busy, use the backend/configuration active at dispatch time, and never alter cron, heartbeat, nudge, or other `/jobs` records. A delayed payload beginning with `/` is delivered to the agent as text rather than executed as another command. Full reference: [DELAY_COMMAND.md](DELAY_COMMAND.md).
 - `/queue [list|show <id>|cancel <id>|clear|history]`: inspect or manage both READY requests and FUTURE delayed messages. The active request is never interrupted.
 - `/recall [count]`: remove requests still waiting in this agent's READY or FUTURE queue without interrupting the current task. With no count, remove both layers completely. The optional count may be any positive whole number and selects the newest requests across both layers by creation time. If `n` exceeds the combined queue length, all waiting requests are removed without error. Retained READY requests keep their original FIFO order. It does not restart the backend or affect cron, heartbeat, nudge, or other `/jobs` work. This command is separate from the hidden legacy recall-state compatibility setting. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).
@@ -105,28 +113,28 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/rebuild`: one-version compatibility notice for the retired native HER build workflow. It performs no build, reload, restart, or status lookup. Use `/reboot` to adopt HASHI Python updates.
 - `/terminate`: shut down this agent.
 
-## Backend and Model Configuration
-- `/backend`: in Flex, open the backend picker. HER v2 commits the backend
-  directly without exposing `role-configured`; other backends retain their
+## Engine and Model Provider Configuration
+- `/backend`: in Flex, open the Engine picker. HER v2 commits the Engine
+  directly without exposing `role-configured`; other Engines retain their
   existing model-selection flow. In another execution mode, first ask for
   confirmation to move to Flex; saved specialized-mode configuration and
   Memory+ are preserved.
-- OpenRouter and DeepSeek are HER v2 providers, not selectable top-level
-  backends. Legacy direct selections migrate to `her-v2` only when that Agent
+- OpenRouter and DeepSeek are HER v2 Model Providers, not selectable top-level
+  Engines. Legacy direct selections migrate to `her-v2` only when that Agent
   already has an explicit HER v2 row; otherwise startup fails with an
   actionable configuration error.
-- backend `+`: same flow, but rebuild handoff context after the backend switch.
-- `/provider`: while HER v2 is active, select a Single call provider or open a
-  Hybrid routing draft. Instance configuration is sufficient; a provider need
-  not be repeated in the Agent's backend list.
-- `/model`: while HER v2 is active, define Quick/Pro provider/model targets and
-  configure each effective task route's target and provider reasoning
-  separately. Hybrid edits take effect together through Apply. Other
-  active backends retain their existing behaviour.
-- Backend and model changes continue to an optional effort picker when the
+- `/backend +`: same flow, but rebuild handoff Context after the Engine switch.
+- `/provider`: while HER v2 is active, select a Single Model Provider or open a
+  Hybrid routing draft. Instance configuration is sufficient; a Model Provider
+  need not be repeated in the Agent's Engine list.
+- `/model`: while HER v2 is active, define Quick/Pro Model Provider/model
+  targets and configure each effective task route's target and provider
+  reasoning separately. Hybrid edits take effect together through Apply. Other
+  active Engines retain their existing behaviour.
+- Engine and model changes continue to an optional effort picker when the
   selected model supports effort. Keeping the current value leaves it unchanged;
   models without selectable effort finish with `n/a`.
-- `/effort [level]`: available when the active backend supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model. HER v2 instead shows exactly three **HER execution modes**: Direct (`zero`), Strategic (`low`), and Planned (`medium`). Direct is one fully capable Quick-model call without HER orchestration. Strategic selects task-matched Strategy Cards before fully capable Execution. Planned uses no-tool Strategy, mechanically read-only Planning, then fully capable Execution. Descriptive aliases normalize to canonical wire values; legacy `fast` and `fast_path` still select Strategic. Saved `high`, `xhigh`, or `max` HER values migrate to Planned because those higher designs are postponed and not user-selectable. HER effort does not change provider reasoning configured through `/model`.
+- `/effort [level]`: available when the active Engine supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model. HER v2 instead shows exactly three **HER execution modes**: Direct (`zero`), Strategic (`low`), and Planned (`medium`). Direct is one fully capable Quick-model call without HER orchestration. Strategic selects task-matched Strategy Cards before fully capable Execution. Planned uses no-tool Strategy, mechanically read-only Planning, then fully capable Execution. Descriptive aliases normalise to canonical wire values; legacy `fast` and `fast_path` still select Strategic. Saved `high`, `xhigh`, or `max` HER values migrate to Planned because those higher designs are postponed and not user-selectable. HER effort does not change Model Provider reasoning configured through `/model`.
 - Grok CLI `0.2.93` offers `grok-4.5` as the default model and
   `grok-composer-2.5-fast` as an alternate. An agent explicitly configured for
   Composer keeps that choice until `/model grok-4.5` is selected. `/effort`

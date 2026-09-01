@@ -2,12 +2,18 @@
 
 | Field | Value |
 |---|---|
-| Status | Fast/Low implemented; Planned/Medium stage-tool boundary accepted and frozen; broader paths pending |
-| Date | 2026-08-30 |
-| Experiment environment | HASHI3 only |
-| Current production effect | None until an authorised HASHI3 hot reload |
+| Status | Implemented historical experiment record; current product behaviour is governed by the three-mode decision |
+| Date | 2026-09-01 |
+| Experiment environment | Originally validated on HASHI3; no longer an instance-specific architecture boundary |
+| Current production effect | Strategic (`low`) and Planned (`medium`) are active production paths |
 | Core change | Replace prompt-only Triage with a tool-capable Strategy stage that classifies the request, selects Strategy Cards, and prepares a concise execution brief |
-| Activation | Fast/Low implementation is ready; activation still requires an authorised HASHI3 hot reload |
+| Activation | Implemented; current activation and mode surface follow [HER v2 Three-Mode Decision](HER_V2_THREE_MODE_DECISION.md) |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
+
+This document preserves the original HASHI3 experiment and implementation
+reasoning. References below to pending activation, Fast/Low, or higher modes are
+historical. Current terminology is Strategic (`low`) and Planned (`medium`);
+Adaptive, Reviewed, and Assured are dormant and not selectable.
 
 ## Implementation checkpoint — 2026-08-30
 

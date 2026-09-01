@@ -114,7 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **OpenRouter and DeepSeek are provider-only engines** — removed both from
+- **OpenRouter and DeepSeek are Model Provider adapters** — an earlier label
+  incorrectly treated them as Engines; removed both from
   top-level `/backend` selection while retaining their adapters for HER v2 and
   internal rendering. Legacy direct active selections migrate to `her-v2` only
   when the Agent already grants an explicit HER v2 row; otherwise startup fails
