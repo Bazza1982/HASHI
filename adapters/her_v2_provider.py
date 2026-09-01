@@ -295,6 +295,21 @@ def _backend_response_error(
             else inferred_retryable
         )
     )
+    details = {
+        "stop_reason": response.stop_reason,
+        "tool_call_count": int(response.tool_call_count or 0),
+        "tool_loop_count": int(response.tool_loop_count or 0),
+        "attachment_id": metadata.get("attachment_id"),
+        "media_routing": list(metadata.get("multimodal_routing") or []),
+    }
+    for key in (
+        "provider_http_failure",
+        "transport_audit_path",
+        "gateway_continuation",
+    ):
+        value = metadata.get(key)
+        if value not in (None, "", [], {}):
+            details[key] = value
     return StageInvocationError(
         response.error or fallback,
         retryable=retryable,
@@ -306,13 +321,7 @@ def _backend_response_error(
         provider_request_id=response.provider_request_id or "",
         retry_after_s=response.retry_after_s,
         side_effects_possible=bool(response.side_effects_possible),
-        details={
-            "stop_reason": response.stop_reason,
-            "tool_call_count": int(response.tool_call_count or 0),
-            "tool_loop_count": int(response.tool_loop_count or 0),
-            "attachment_id": metadata.get("attachment_id"),
-            "media_routing": list(metadata.get("multimodal_routing") or []),
-        },
+        details=details,
     )
 
 
@@ -552,7 +561,13 @@ def _provider_exception_error(
                 retry_after_s = max(0.0, float(raw_retry_after))
             except ValueError:
                 retry_after_s = None
-        for header in ("x-request-id", "request-id", "cf-ray", "x-amzn-requestid"):
+        for header in (
+            "x-hashi-gateway-request-id",
+            "x-request-id",
+            "request-id",
+            "cf-ray",
+            "x-amzn-requestid",
+        ):
             provider_request_id = str(response.headers.get(header) or "").strip()
             if provider_request_id:
                 break

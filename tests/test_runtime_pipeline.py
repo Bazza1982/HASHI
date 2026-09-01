@@ -31,6 +31,7 @@ from orchestrator import (
     runtime_retry,
     runtime_session,
     telegram_stream_policy,
+    ui_language,
 )
 from orchestrator import telegram_delivery_failover as failover
 from orchestrator.canonical_audit import CanonicalAuditStore
@@ -404,6 +405,16 @@ def test_begin_queue_item_records_processing_metadata():
     assert runtime.current_request_meta["habit_learning_eligible"] is True
     assert runtime.is_generating is True
     assert runtime.maintenance_events[0][0] == "processing"
+
+
+def test_begin_queue_item_resolves_locale_from_prefixed_session_owner():
+    runtime = _runtime()
+    ui_language.set_preferred_locale(runtime, "zh-CN", actor_id=123)
+    item = _item(owner_id="user:123")
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert runtime.current_request_meta["ui_locale_at_start"] == "zh-CN"
 
 
 @pytest.mark.asyncio
@@ -2818,6 +2829,30 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
         retry_after_s=2.5,
         tool_call_count=3,
         side_effects_possible=True,
+        stream_metadata={
+            "her_v2": {
+                "failure_chain": {
+                    "primary_failure": {
+                        "code": "PROVIDER_CAPACITY_UNAVAILABLE",
+                        "description": "Selected model is at capacity.",
+                        "side_effects_possible": True,
+                        "details": {
+                            "provider_http_failure": {
+                                "response": {
+                                    "status": 503,
+                                    "body": '{"error":{"code":"capacity"}}',
+                                },
+                                "transport_audit_refs": [
+                                    "hashi-transport:test:response"
+                                ],
+                            }
+                        },
+                    },
+                    "recovery_decision": {},
+                    "foreground_cleanup": {},
+                }
+            }
+        },
     )
 
     await runtime_pipeline.handle_backend_error(
@@ -2838,6 +2873,22 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
     assert payload["tool_call_count"] == 3
     assert payload["side_effects_possible"] is True
     assert runtime.sent_message["text"] == response.error
+    assert runtime.sent_message["error_context"] == {
+        "error_code": "PROVIDER_CAPACITY_UNAVAILABLE",
+        "error_retryable": True,
+        "http_status": 503,
+        "provider_request_id": "req_provider_1",
+        "retry_after_s": 2.5,
+        "tool_call_count": 3,
+        "side_effects_possible": True,
+    }
+    diagnostic_log = next(
+        message
+        for message in runtime.error_logger.messages
+        if message.startswith("Backend failure diagnostics")
+    )
+    assert '{\\"error\\":{\\"code\\":\\"capacity\\"}}' in diagnostic_log
+    assert "hashi-transport:test:response" in diagnostic_log
 
 
 @pytest.mark.asyncio
@@ -2900,6 +2951,10 @@ async def test_handle_backend_error_keeps_non_deliverable_silent_request_interna
     )
 
     assert not hasattr(runtime, "sent_message")
+    assert any(
+        "internal scheduled failure" in message
+        for message in runtime.error_logger.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -2919,6 +2974,7 @@ async def test_handle_backend_error_buffers_transfer_without_delivery():
 
     assert runtime.suppressed == {"success": False, "error": "buffer me"}
     assert not hasattr(runtime, "sent_message")
+    assert any("buffer me" in message for message in runtime.error_logger.messages)
 
 
 @pytest.mark.asyncio

@@ -12,19 +12,33 @@ from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     HER_V2_ENGINE,
     get_backend_label,
+    get_provider_reasoning_efforts,
     is_selectable_backend,
     normalize_effort,
     normalize_model,
 )
 from orchestrator.her_v2.models import Route
-from orchestrator.her_v2.runtime_configuration import HER_V2_STANDARD_REASONING
 from orchestrator.memory_plus_mode import set_memory_plus_enabled
 
-HER_V2_ROUTE_ORDER = tuple(Route)
+HER_V2_STAGE_ROUTE_ORDER = (
+    Route.DIRECT,
+    Route.TRIAGE,
+    Route.PLANNING,
+)
+HER_V2_EXECUTION_ROUTES = (
+    Route.EXECUTION_SIMPLE,
+    Route.EXECUTION_COMPLEX,
+    Route.EXECUTION_HIGH_VOLUME,
+)
+HER_V2_ADVANCED_ROUTE_ORDER = (
+    Route.TRIAGE,
+    Route.PLANNING,
+    *HER_V2_EXECUTION_ROUTES,
+)
 HER_V2_ROUTE_LABELS = {
     Route.DIRECT: "Direct",
     Route.IMMEDIATE_RESPONSE: "Immediate response",
-    Route.TRIAGE: "Triage",
+    Route.TRIAGE: "Strategy",
     Route.PLANNING: "Planning",
     Route.EXECUTION_SIMPLE: "Simple execution",
     Route.EXECUTION_COMPLEX: "Complex execution",
@@ -99,7 +113,9 @@ def her_v2_provider_keyboard(runtime) -> InlineKeyboardMarkup:
             )
         ]
     ]
-    for index, option in enumerate(runtime.backend_manager.get_her_v2_provider_options()):
+    for index, option in enumerate(
+        runtime.backend_manager.get_her_v2_provider_options()
+    ):
         label = str(option["label"])
         token = _her_v2_callback_token(option["engine"])
         if option["available"]:
@@ -135,31 +151,49 @@ def her_v2_provider_menu_text(runtime) -> str:
 def her_v2_model_keyboard(runtime) -> InlineKeyboardMarkup:
     selected = _her_v2_edit_configuration(runtime)
     buttons = [
-            [
-                InlineKeyboardButton(
-                    f"Quick · {selected.fast_provider} / {selected.fast_model}",
-                    callback_data="her_model_slot:fast",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    f"Pro · {selected.pro_provider} / {selected.pro_model}",
-                    callback_data="her_model_slot:pro",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    ui_language.tr("menu.her.task_routes"),
-                    callback_data="her_routes",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    ui_language.tr("menu.her.compact_route"),
-                    callback_data="her_model_compact",
-                )
-            ],
-        ]
+        [
+            InlineKeyboardButton(
+                f"Quick · {selected.fast_provider} / {selected.fast_model}",
+                callback_data="her_model_slot:fast",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Pro · {selected.pro_provider} / {selected.pro_model}",
+                callback_data="her_model_slot:pro",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                _her_v2_stage_button_label(runtime, Route.DIRECT),
+                callback_data="her_route_menu:direct",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                _her_v2_stage_button_label(runtime, Route.TRIAGE),
+                callback_data="her_route_menu:triage",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                _her_v2_stage_button_label(runtime, Route.PLANNING),
+                callback_data="her_route_menu:planning",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                _her_v2_execution_button_label(runtime),
+                callback_data="her_execution",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                ui_language.tr("menu.her.advanced_settings"),
+                callback_data="her_model_advanced",
+            )
+        ],
+    ]
     if runtime.backend_manager.has_her_v2_configuration_draft():
         buttons.extend(
             [
@@ -181,9 +215,7 @@ def her_v2_model_keyboard(runtime) -> InlineKeyboardMarkup:
 def her_v2_model_menu_text(runtime) -> str:
     selected = _her_v2_edit_configuration(runtime)
     return runtime_menu_views.her_v2_model_menu_text(
-        provider=(
-            "Hybrid" if selected.routing_mode == "hybrid" else selected.provider
-        ),
+        provider=("Hybrid" if selected.routing_mode == "hybrid" else selected.provider),
         routing_mode=selected.routing_mode,
         fast_provider=selected.fast_provider,
         fast_model=selected.fast_model,
@@ -235,7 +267,9 @@ def her_v2_compact_keyboard(runtime) -> InlineKeyboardMarkup:
 
 def her_v2_compact_provider_keyboard(runtime) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
-    for index, option in enumerate(runtime.backend_manager.get_her_v2_provider_options()):
+    for index, option in enumerate(
+        runtime.backend_manager.get_her_v2_provider_options()
+    ):
         if not option.get("available") or not option.get("models"):
             continue
         provider = str(option["engine"])
@@ -250,7 +284,9 @@ def her_v2_compact_provider_keyboard(runtime) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    buttons.append([InlineKeyboardButton(back_label(), callback_data="her_model_compact")])
+    buttons.append(
+        [InlineKeyboardButton(back_label(), callback_data="her_model_compact")]
+    )
     return InlineKeyboardMarkup(buttons)
 
 
@@ -272,7 +308,11 @@ def her_v2_compact_model_keyboard(runtime, provider_index: int) -> InlineKeyboar
         for model_index, model in enumerate(option.get("models") or [])
     ]
     buttons.append(
-        [InlineKeyboardButton(back_label(), callback_data="her_model_compact_providers")]
+        [
+            InlineKeyboardButton(
+                back_label(), callback_data="her_model_compact_providers"
+            )
+        ]
     )
     return InlineKeyboardMarkup(buttons)
 
@@ -292,9 +332,7 @@ def her_v2_compact_reasoning_keyboard(
     buttons = [
         [
             InlineKeyboardButton(
-                ui_language.tr(
-                    "menu.her.reasoning_value", reasoning=reasoning
-                ),
+                ui_language.tr("menu.her.reasoning_value", reasoning=reasoning),
                 callback_data=f"{prefix}:{reasoning}",
             )
         ]
@@ -398,12 +436,13 @@ def her_v2_target_provider_keyboard(runtime, slot: str) -> InlineKeyboardMarkup:
     selected = _her_v2_edit_configuration(runtime)
     target = selected.target_for_slot(slot)
     buttons: list[list[InlineKeyboardButton]] = []
-    for index, option in enumerate(runtime.backend_manager.get_her_v2_provider_options()):
+    for index, option in enumerate(
+        runtime.backend_manager.get_her_v2_provider_options()
+    ):
         provider = str(option["engine"])
         label = selected_label(str(option["label"]), provider == target.provider)
         callback = (
-            f"her_target_provider:{slot}:{index}:"
-            f"{_her_v2_callback_token(provider)}"
+            f"her_target_provider:{slot}:{index}:{_her_v2_callback_token(provider)}"
         )
         if not option.get("available"):
             label = f"🔒 {option['label']}"
@@ -427,7 +466,9 @@ def her_v2_target_model_keyboard(
     buttons = [
         [
             InlineKeyboardButton(
-                selected_label(model, provider == current.provider and model == current.model),
+                selected_label(
+                    model, provider == current.provider and model == current.model
+                ),
                 callback_data=(
                     f"her_target_model:{slot}:{provider_index}:"
                     f"{_her_v2_callback_token(provider)}:{model_index}:"
@@ -438,7 +479,11 @@ def her_v2_target_model_keyboard(
         for model_index, model in enumerate(option.get("models") or [])
     ]
     buttons.append(
-        [InlineKeyboardButton(back_label(), callback_data=f"her_target_providers:{slot}")]
+        [
+            InlineKeyboardButton(
+                back_label(), callback_data=f"her_target_providers:{slot}"
+            )
+        ]
     )
     return InlineKeyboardMarkup(buttons)
 
@@ -455,6 +500,13 @@ def _her_v2_route_slot_label(slot: str) -> str:
     key = f"menu.her.slot.{slot}"
     translated = ui_language.tr(key)
     return slot if translated == key else translated
+
+
+def _her_v2_reasoning_label(reasoning: str) -> str:
+    normalized = str(reasoning or "default").strip().casefold()
+    key = f"menu.her.reasoning.level.{normalized}"
+    translated = ui_language.tr(key)
+    return str(reasoning) if translated == key else translated
 
 
 def _her_v2_route_label(route: Route) -> str:
@@ -476,45 +528,102 @@ def _her_v2_route_effective_reasoning(runtime, route: Route) -> str:
     )
 
 
-def her_v2_routes_text(runtime) -> str:
+def _her_v2_distinct_reasoning_label(runtime, routes) -> str:
+    values: list[str] = []
+    for route in routes:
+        value = _her_v2_reasoning_label(
+            _her_v2_route_effective_reasoning(runtime, route)
+        )
+        if value not in values:
+            values.append(value)
+    return " / ".join(values) if values else _her_v2_reasoning_label("default")
+
+
+def _her_v2_stage_button_label(runtime, route: Route) -> str:
     selected = _her_v2_edit_configuration(runtime)
+    return ui_language.tr(
+        f"menu.her.stage_button.{route.value}",
+        target=_her_v2_route_slot_label(selected.route_target_mode(route)),
+        reasoning=_her_v2_reasoning_label(
+            _her_v2_route_effective_reasoning(runtime, route)
+        ),
+    )
+
+
+def _her_v2_execution_mode(runtime) -> str:
+    selected = _her_v2_edit_configuration(runtime)
+    modes = tuple(
+        selected.route_target_mode(route) for route in HER_V2_EXECUTION_ROUTES
+    )
+    if modes == ("fast", "pro", "pro"):
+        return "auto"
+    if modes == ("fast", "fast", "fast"):
+        return "fast"
+    if modes == ("pro", "pro", "pro"):
+        return "pro"
+    return "custom"
+
+
+def _her_v2_execution_button_label(runtime) -> str:
+    return ui_language.tr(
+        "menu.her.stage_button.execution",
+        target=_her_v2_route_slot_label(_her_v2_execution_mode(runtime)),
+        reasoning=_her_v2_distinct_reasoning_label(
+            runtime,
+            HER_V2_EXECUTION_ROUTES,
+        ),
+    )
+
+
+def her_v2_routes_text(runtime) -> str:
     return runtime_menu_views.her_v2_routes_text(
-        route_count=len(HER_V2_ROUTE_ORDER),
-        explicit_reasoning_count=len(selected.route_reasoning),
-        custom_target_count=len(selected.route_targets),
+        execution_mode=_her_v2_route_slot_label(_her_v2_execution_mode(runtime)),
+        execution_reasoning=_her_v2_distinct_reasoning_label(
+            runtime,
+            HER_V2_EXECUTION_ROUTES,
+        ),
         draft=runtime.backend_manager.has_her_v2_configuration_draft(),
     )
 
 
 def her_v2_routes_keyboard(runtime) -> InlineKeyboardMarkup:
-    selected = _her_v2_edit_configuration(runtime)
     buttons = [
         [
             InlineKeyboardButton(
-                (
-                    f"{_her_v2_route_label(route)} · "
-                    f"{_her_v2_route_slot_label(selected.route_target_mode(route))} · "
-                    f"{_her_v2_route_effective_reasoning(runtime, route)}"
-                ),
+                _her_v2_stage_button_label(runtime, route),
                 callback_data=f"her_route_menu:{route.value}",
             )
         ]
-        for route in HER_V2_ROUTE_ORDER
+        for route in HER_V2_STAGE_ROUTE_ORDER
     ]
-    buttons.append([InlineKeyboardButton(back_label(), callback_data="model_menu")])
+    buttons.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    _her_v2_execution_button_label(runtime),
+                    callback_data="her_execution",
+                )
+            ],
+            [InlineKeyboardButton(back_label(), callback_data="model_menu")],
+        ]
+    )
     return InlineKeyboardMarkup(buttons)
 
 
 def _her_v2_route_reasoning_choices(runtime, route: Route) -> tuple[str, list[str]]:
     current = _her_v2_route_effective_reasoning(runtime, route)
-    choices = list(HER_V2_STANDARD_REASONING)
-    if current not in {"default", "Follow source", *choices}:
-        choices.append(current)
+    target = _her_v2_edit_configuration(runtime).target_for_route(route)
+    choices = get_provider_reasoning_efforts(target.provider, target.model)
     choices.append("inherit")
     return current, choices
 
 
-def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
+def her_v2_route_keyboard(
+    runtime,
+    route: Route | str,
+    *,
+    advanced: bool = False,
+) -> InlineKeyboardMarkup:
     parsed = _her_v2_route(route)
     selected = _her_v2_edit_configuration(runtime)
     current_slot = selected.route_target_mode(parsed)
@@ -529,12 +638,16 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
                     ),
                     slot == current_slot,
                 ),
-                callback_data=f"her_route_slot:{parsed.value}:{slot}",
+                callback_data=(
+                    f"her_adv_slot:{parsed.value}:{slot}"
+                    if advanced
+                    else f"her_route_slot:{parsed.value}:{slot}"
+                ),
             )
             for slot in slots
         ]
     ]
-    if selected.routing_mode == "hybrid" and parsed is not Route.DIRECT:
+    if advanced and selected.routing_mode == "hybrid" and parsed is not Route.DIRECT:
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -545,35 +658,221 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
                         ),
                         current_slot == "custom",
                     ),
-                    callback_data=f"her_route_custom:{parsed.value}",
+                    callback_data=f"her_adv_custom:{parsed.value}",
                 )
             ]
         )
     current_reasoning, choices = _her_v2_route_reasoning_choices(runtime, parsed)
     explicit = selected.route_reasoning.get(parsed.value)
     for index, value in enumerate(choices):
-        is_selected = (
-            value == explicit if explicit is not None else value == "inherit"
-        )
+        is_selected = value == explicit if explicit is not None else value == "inherit"
         label = (
             ui_language.tr(
-                "menu.her.reasoning_inherit", reasoning=current_reasoning
+                "menu.her.reasoning_inherit",
+                reasoning=_her_v2_reasoning_label(current_reasoning),
             )
             if value == "inherit"
-            else ui_language.tr("menu.her.reasoning_value", reasoning=value)
+            else ui_language.tr(
+                "menu.her.reasoning_value",
+                reasoning=_her_v2_reasoning_label(value),
+            )
         )
         buttons.append(
             [
                 InlineKeyboardButton(
                     selected_label(label, is_selected),
                     callback_data=(
-                        f"her_route_reasoning:{parsed.value}:{index}:"
+                        f"{'her_adv_reason' if advanced else 'her_route_reasoning'}:"
+                        f"{parsed.value}:{index}:"
                         f"{_her_v2_callback_token(value)}"
                     ),
                 )
             ]
         )
-    buttons.append([InlineKeyboardButton(back_label(), callback_data="her_routes")])
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                back_label(),
+                callback_data="her_advanced_routes" if advanced else "model_menu",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(buttons)
+
+
+def _her_v2_execution_target_summary(runtime, route: Route) -> str:
+    selected = _her_v2_edit_configuration(runtime)
+    target = selected.target_for_route(route)
+    return ui_language.tr(
+        "menu.her.execution_target_summary",
+        target=_her_v2_route_slot_label(selected.route_target_mode(route)),
+        provider=target.provider,
+        model=target.model,
+        reasoning=_her_v2_reasoning_label(
+            _her_v2_route_effective_reasoning(runtime, route)
+        ),
+    )
+
+
+def her_v2_execution_text(runtime) -> str:
+    return runtime_menu_views.her_v2_execution_text(
+        mode=_her_v2_route_slot_label(_her_v2_execution_mode(runtime)),
+        reasoning=_her_v2_distinct_reasoning_label(
+            runtime,
+            HER_V2_EXECUTION_ROUTES,
+        ),
+        simple=_her_v2_execution_target_summary(runtime, Route.EXECUTION_SIMPLE),
+        complex_=_her_v2_execution_target_summary(
+            runtime,
+            Route.EXECUTION_COMPLEX,
+        ),
+        high_volume=_her_v2_execution_target_summary(
+            runtime,
+            Route.EXECUTION_HIGH_VOLUME,
+        ),
+        draft=runtime.backend_manager.has_her_v2_configuration_draft(),
+    )
+
+
+def _her_v2_execution_reasoning_choices(runtime) -> list[str]:
+    selected = _her_v2_edit_configuration(runtime)
+    choices: list[str] | None = None
+    for route in HER_V2_EXECUTION_ROUTES:
+        target = selected.target_for_route(route)
+        supported = get_provider_reasoning_efforts(target.provider, target.model)
+        if choices is None:
+            choices = list(supported)
+        else:
+            choices = [value for value in choices if value in supported]
+    return [*(choices or []), "inherit"]
+
+
+def _her_v2_execution_selected_reasoning(runtime) -> str | None:
+    selected = _her_v2_edit_configuration(runtime)
+    explicit = [
+        selected.route_reasoning.get(route.value) for route in HER_V2_EXECUTION_ROUTES
+    ]
+    if all(value is None for value in explicit):
+        return "inherit"
+    if explicit[0] is not None and all(value == explicit[0] for value in explicit):
+        return explicit[0]
+    return None
+
+
+def her_v2_execution_keyboard(runtime) -> InlineKeyboardMarkup:
+    current_mode = _her_v2_execution_mode(runtime)
+    buttons: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                selected_label(
+                    _her_v2_route_slot_label(mode),
+                    mode == current_mode,
+                ),
+                callback_data=f"her_execution_mode:{mode}",
+            )
+            for mode in ("auto", "fast", "pro")
+        ]
+    ]
+    selected_reasoning = _her_v2_execution_selected_reasoning(runtime)
+    effective_reasoning = _her_v2_distinct_reasoning_label(
+        runtime,
+        HER_V2_EXECUTION_ROUTES,
+    )
+    for index, value in enumerate(_her_v2_execution_reasoning_choices(runtime)):
+        label = (
+            ui_language.tr(
+                "menu.her.reasoning_inherit",
+                reasoning=effective_reasoning,
+            )
+            if value == "inherit"
+            else ui_language.tr(
+                "menu.her.reasoning_value",
+                reasoning=_her_v2_reasoning_label(value),
+            )
+        )
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    selected_label(label, value == selected_reasoning),
+                    callback_data=(
+                        f"her_execution_reasoning:{index}:"
+                        f"{_her_v2_callback_token(value)}"
+                    ),
+                )
+            ]
+        )
+    buttons.append([InlineKeyboardButton(back_label(), callback_data="model_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _her_v2_visible_custom_target_count(runtime) -> int:
+    selected = _her_v2_edit_configuration(runtime)
+    return sum(
+        route.value in selected.route_targets for route in HER_V2_ADVANCED_ROUTE_ORDER
+    )
+
+
+def her_v2_advanced_text(runtime) -> str:
+    selected = _her_v2_edit_configuration(runtime)
+    return runtime_menu_views.her_v2_advanced_text(
+        routing_mode=selected.routing_mode,
+        custom_target_count=_her_v2_visible_custom_target_count(runtime),
+        draft=runtime.backend_manager.has_her_v2_configuration_draft(),
+    )
+
+
+def her_v2_advanced_keyboard(runtime) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("menu.her.advanced_task_targets"),
+                    callback_data="her_advanced_routes",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("menu.her.compact_route"),
+                    callback_data="her_model_compact",
+                )
+            ],
+            [InlineKeyboardButton(back_label(), callback_data="model_menu")],
+        ]
+    )
+
+
+def her_v2_advanced_routes_text(runtime) -> str:
+    selected = _her_v2_edit_configuration(runtime)
+    return runtime_menu_views.her_v2_advanced_routes_text(
+        routing_mode=selected.routing_mode,
+        custom_target_count=_her_v2_visible_custom_target_count(runtime),
+        draft=runtime.backend_manager.has_her_v2_configuration_draft(),
+    )
+
+
+def her_v2_advanced_routes_keyboard(runtime) -> InlineKeyboardMarkup:
+    selected = _her_v2_edit_configuration(runtime)
+    buttons = []
+    for route in HER_V2_ADVANCED_ROUTE_ORDER:
+        target = selected.target_for_route(route)
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    ui_language.tr(
+                        "menu.her.advanced_route_button",
+                        stage=_her_v2_route_label(route),
+                        target=_her_v2_route_slot_label(
+                            selected.route_target_mode(route)
+                        ),
+                        model=target.model,
+                    ),
+                    callback_data=f"her_adv_route:{route.value}",
+                )
+            ]
+        )
+    buttons.append(
+        [InlineKeyboardButton(back_label(), callback_data="her_model_advanced")]
+    )
     return InlineKeyboardMarkup(buttons)
 
 
@@ -590,16 +889,24 @@ def her_v2_route_text(runtime, route: Route | str) -> str:
     )
 
 
-def her_v2_route_provider_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
+def her_v2_route_provider_keyboard(
+    runtime,
+    route: Route | str,
+    *,
+    advanced: bool = False,
+) -> InlineKeyboardMarkup:
     parsed = _her_v2_route(route)
     selected = _her_v2_edit_configuration(runtime)
     current = selected.target_for_route(parsed)
     buttons: list[list[InlineKeyboardButton]] = []
-    for index, option in enumerate(runtime.backend_manager.get_her_v2_provider_options()):
+    for index, option in enumerate(
+        runtime.backend_manager.get_her_v2_provider_options()
+    ):
         provider = str(option["engine"])
         label = selected_label(str(option["label"]), provider == current.provider)
         callback = (
-            f"her_route_provider:{parsed.value}:{index}:"
+            f"{'her_adv_provider' if advanced else 'her_route_provider'}:"
+            f"{parsed.value}:{index}:"
             f"{_her_v2_callback_token(provider)}"
         )
         if not option.get("available"):
@@ -607,7 +914,16 @@ def her_v2_route_provider_keyboard(runtime, route: Route | str) -> InlineKeyboar
             callback = f"her_provider_locked:{index}:{_her_v2_callback_token(provider)}"
         buttons.append([InlineKeyboardButton(label, callback_data=callback)])
     buttons.append(
-        [InlineKeyboardButton(back_label(), callback_data=f"her_route_menu:{parsed.value}")]
+        [
+            InlineKeyboardButton(
+                back_label(),
+                callback_data=(
+                    f"her_adv_route:{parsed.value}"
+                    if advanced
+                    else f"her_route_menu:{parsed.value}"
+                ),
+            )
+        ]
     )
     return InlineKeyboardMarkup(buttons)
 
@@ -616,6 +932,8 @@ def her_v2_route_model_keyboard(
     runtime,
     route: Route | str,
     provider_index: int,
+    *,
+    advanced: bool = False,
 ) -> InlineKeyboardMarkup:
     parsed = _her_v2_route(route)
     options = runtime.backend_manager.get_her_v2_provider_options()
@@ -625,9 +943,12 @@ def her_v2_route_model_keyboard(
     buttons = [
         [
             InlineKeyboardButton(
-                selected_label(model, provider == current.provider and model == current.model),
+                selected_label(
+                    model, provider == current.provider and model == current.model
+                ),
                 callback_data=(
-                    f"her_route_model:{parsed.value}:{provider_index}:"
+                    f"{'her_adv_model' if advanced else 'her_route_model'}:"
+                    f"{parsed.value}:{provider_index}:"
                     f"{_her_v2_callback_token(provider)}:{model_index}:"
                     f"{_her_v2_callback_token(model)}"
                 ),
@@ -639,7 +960,11 @@ def her_v2_route_model_keyboard(
         [
             InlineKeyboardButton(
                 back_label(),
-                callback_data=f"her_route_custom:{parsed.value}",
+                callback_data=(
+                    f"her_adv_custom:{parsed.value}"
+                    if advanced
+                    else f"her_route_custom:{parsed.value}"
+                ),
             )
         ]
     )
@@ -681,9 +1006,14 @@ def set_backend_model(runtime, engine: str, requested: str) -> None:
     backend_cfg = runtime._get_backend_cfg(engine)
     if backend_cfg is not None:
         backend_cfg["model"] = normalized
-    if engine == runtime.config.active_backend and runtime.backend_manager.current_backend:
+    if (
+        engine == runtime.config.active_backend
+        and runtime.backend_manager.current_backend
+    ):
         runtime.backend_manager.current_backend.config.model = normalized
-        current_effort = getattr(runtime.backend_manager.current_backend, "effort", None)
+        current_effort = getattr(
+            runtime.backend_manager.current_backend, "effort", None
+        )
         normalized_effort = normalize_effort(engine, current_effort, normalized)
         if normalized_effort:
             runtime.backend_manager.current_backend.effort = normalized_effort
@@ -723,9 +1053,7 @@ async def cmd_provider(runtime, update, context: Any) -> None:
             setting_card(
                 "🔌",
                 "HER v2 provider",
-                current=(
-                    f"<b>{html.escape(ui_language.tr('menu.her.managed'))}</b>"
-                ),
+                current=(f"<b>{html.escape(ui_language.tr('menu.her.managed'))}</b>"),
                 facts=[
                     f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
                     "<code>her-v2</code>",
@@ -821,9 +1149,7 @@ async def _cmd_her_v2_compact(runtime, update, args: list[str]) -> None:
     except (OSError, TypeError, ValueError) as exc:
         await runtime._reply_text(
             update,
-            ui_language.tr(
-                "model.compact_unchanged", reason=html.escape(str(exc))
-            ),
+            ui_language.tr("model.compact_unchanged", reason=html.escape(str(exc))),
             parse_mode="HTML",
         )
         return
@@ -1086,7 +1412,9 @@ async def cmd_model(runtime, update, context: Any) -> None:
 
         runtime._set_backend_model(runtime.config.active_backend, requested)
         text, reply_markup = runtime._configuration_followup("model")
-        await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
+        await runtime._reply_text(
+            update, text, parse_mode="HTML", reply_markup=reply_markup
+        )
         return
 
     available = runtime._get_available_models()
@@ -1125,6 +1453,9 @@ async def callback_model(runtime, update, context: Any) -> None:
     data = query.data
     her_v2_control = data.startswith(
         (
+            "her_adv",
+            "her_advanced",
+            "her_execution",
             "her_provider",
             "her_model",
             "her_route",
@@ -1193,6 +1524,97 @@ async def callback_model(runtime, update, context: Any) -> None:
                 her_v2_compact_text(runtime),
                 parse_mode="HTML",
                 reply_markup=her_v2_compact_keyboard(runtime),
+            )
+        elif data == "her_model_advanced":
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    ui_language.tr("model.control.active_only"),
+                    show_alert=True,
+                )
+                return
+            await query.edit_message_text(
+                her_v2_advanced_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v2_advanced_keyboard(runtime),
+            )
+        elif data == "her_advanced_routes":
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    ui_language.tr("model.control.active_only"),
+                    show_alert=True,
+                )
+                return
+            await query.edit_message_text(
+                her_v2_advanced_routes_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v2_advanced_routes_keyboard(runtime),
+            )
+        elif data == "her_execution":
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    ui_language.tr("model.control.active_only"),
+                    show_alert=True,
+                )
+                return
+            await query.edit_message_text(
+                her_v2_execution_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v2_execution_keyboard(runtime),
+            )
+        elif data.startswith("her_execution_mode:"):
+            try:
+                mode = data.split(":", 1)[1]
+                slots = {
+                    "auto": ("fast", "pro", "pro"),
+                    "fast": ("fast", "fast", "fast"),
+                    "pro": ("pro", "pro", "pro"),
+                }[mode]
+                candidate = _her_v2_edit_configuration(runtime)
+                for route, slot in zip(
+                    HER_V2_EXECUTION_ROUTES,
+                    slots,
+                    strict=True,
+                ):
+                    candidate = runtime.backend_manager.prepare_her_v2_route_model_slot(
+                        route.value,
+                        slot,
+                        current=candidate,
+                    )
+                error = save_her_v2_candidate(runtime, candidate)
+            except (KeyError, TypeError, ValueError) as exc:
+                error = str(exc)
+            if error:
+                await query.answer(error, show_alert=True)
+                return
+            await query.edit_message_text(
+                her_v2_execution_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v2_execution_keyboard(runtime),
+            )
+        elif data.startswith("her_execution_reasoning:"):
+            try:
+                _, raw_index, token = data.split(":", 2)
+                choices = _her_v2_execution_reasoning_choices(runtime)
+                _index, reasoning = _her_v2_indexed_choice(choices, raw_index)
+                if token != _her_v2_callback_token(reasoning):
+                    raise ValueError(ui_language.tr("model.menu.stale"))
+                candidate = _her_v2_edit_configuration(runtime)
+                for route in HER_V2_EXECUTION_ROUTES:
+                    candidate = runtime.backend_manager.prepare_her_v2_route_reasoning(
+                        route.value,
+                        None if reasoning == "inherit" else reasoning,
+                        current=candidate,
+                    )
+                error = save_her_v2_candidate(runtime, candidate)
+            except (IndexError, TypeError, ValueError) as exc:
+                error = str(exc)
+            if error:
+                await query.answer(error, show_alert=True)
+                return
+            await query.edit_message_text(
+                her_v2_execution_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v2_execution_keyboard(runtime),
             )
         elif data == "her_model_apply":
             try:
@@ -1298,8 +1720,7 @@ async def callback_model(runtime, update, context: Any) -> None:
                 ui_language.tr(
                     "model.provider_unavailable_reason",
                     provider=option["label"],
-                    reason=option.get("reason")
-                    or ui_language.tr("common.unavailable"),
+                    reason=option.get("reason") or ui_language.tr("common.unavailable"),
                 ),
                 show_alert=True,
             )
@@ -1343,7 +1764,9 @@ async def callback_model(runtime, update, context: Any) -> None:
                 return
             slot = data.split(":", 1)[1]
             if slot not in {"fast", "pro"}:
-                await query.answer(ui_language.tr("model.slot.invalid"), show_alert=True)
+                await query.answer(
+                    ui_language.tr("model.slot.invalid"), show_alert=True
+                )
                 return
             selected = _her_v2_edit_configuration(runtime)
             if selected.routing_mode == "hybrid":
@@ -1363,7 +1786,9 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("her_target_providers:"):
             slot = data.split(":", 1)[1]
             if slot not in {"fast", "pro"}:
-                await query.answer(ui_language.tr("model.slot.invalid"), show_alert=True)
+                await query.answer(
+                    ui_language.tr("model.slot.invalid"), show_alert=True
+                )
                 return
             await query.edit_message_text(
                 f"🧠 <b>{html.escape(ui_language.tr('model.select_target_provider'))}</b>\n\n"
@@ -1382,9 +1807,8 @@ async def callback_model(runtime, update, context: Any) -> None:
                     raw_index,
                 )
                 provider = str(option["engine"])
-                if (
-                    token != _her_v2_callback_token(provider)
-                    or not option.get("available")
+                if token != _her_v2_callback_token(provider) or not option.get(
+                    "available"
                 ):
                     raise ValueError(ui_language.tr("model.menu.stale"))
             except (IndexError, TypeError, ValueError) as exc:
@@ -1416,9 +1840,8 @@ async def callback_model(runtime, update, context: Any) -> None:
                     raw_provider_index,
                 )
                 provider = str(option["engine"])
-                if (
-                    provider_token != _her_v2_callback_token(provider)
-                    or not option.get("available")
+                if provider_token != _her_v2_callback_token(provider) or not option.get(
+                    "available"
                 ):
                     raise ValueError(ui_language.tr("model.menu.stale"))
                 _model_index, model = _her_v2_indexed_choice(
@@ -1467,9 +1890,10 @@ async def callback_model(runtime, update, context: Any) -> None:
                     options,
                     raw_provider_index,
                 )
-                if (
-                    option.get("engine") != target.provider
-                    or provider_token != _her_v2_callback_token(option["engine"])
+                if option.get(
+                    "engine"
+                ) != target.provider or provider_token != _her_v2_callback_token(
+                    option["engine"]
                 ):
                     raise ValueError(ui_language.tr("model.provider_menu.stale"))
                 _model_index, model = _her_v2_indexed_choice(
@@ -1515,17 +1939,37 @@ async def callback_model(runtime, update, context: Any) -> None:
                 return
             try:
                 route = _her_v2_route(data.split(":", 1)[1])
-            except ValueError:
-                await query.answer(ui_language.tr("model.route.invalid"), show_alert=True)
+                if route not in HER_V2_STAGE_ROUTE_ORDER:
+                    raise ValueError(ui_language.tr("model.old_route_menu_retired"))
+            except ValueError as exc:
+                await query.answer(str(exc), show_alert=True)
                 return
             await query.edit_message_text(
                 her_v2_route_text(runtime, route),
                 parse_mode="HTML",
                 reply_markup=her_v2_route_keyboard(runtime, route),
             )
-        elif data.startswith("her_route_custom:"):
+        elif data.startswith("her_adv_route:"):
             try:
                 route = _her_v2_route(data.split(":", 1)[1])
+                if route not in HER_V2_ADVANCED_ROUTE_ORDER:
+                    raise ValueError(ui_language.tr("model.route.invalid"))
+            except ValueError:
+                await query.answer(
+                    ui_language.tr("model.route.invalid"), show_alert=True
+                )
+                return
+            await query.edit_message_text(
+                her_v2_route_text(runtime, route),
+                parse_mode="HTML",
+                reply_markup=her_v2_route_keyboard(runtime, route, advanced=True),
+            )
+        elif data.startswith(("her_route_custom:", "her_adv_custom:")):
+            advanced = data.startswith("her_adv_")
+            try:
+                route = _her_v2_route(data.split(":", 1)[1])
+                if advanced and route not in HER_V2_ADVANCED_ROUTE_ORDER:
+                    raise ValueError(ui_language.tr("model.route.invalid"))
                 if _her_v2_edit_configuration(runtime).routing_mode != "hybrid":
                     raise ValueError(ui_language.tr("model.custom_requires_hybrid"))
             except ValueError as exc:
@@ -1533,22 +1977,28 @@ async def callback_model(runtime, update, context: Any) -> None:
                 return
             await query.edit_message_text(
                 f"🧭 <b>{html.escape(ui_language.tr('model.select_custom_provider'))}</b>\n\n"
-                f"<b>{html.escape(ui_language.tr('common.route'))}</b> · {html.escape(_her_v2_route_label(route))}",
+                f"<b>{html.escape(ui_language.tr('menu.her.stage_label'))}</b> · {html.escape(_her_v2_route_label(route))}",
                 parse_mode="HTML",
-                reply_markup=her_v2_route_provider_keyboard(runtime, route),
+                reply_markup=her_v2_route_provider_keyboard(
+                    runtime,
+                    route,
+                    advanced=advanced,
+                ),
             )
-        elif data.startswith("her_route_provider:"):
+        elif data.startswith(("her_route_provider:", "her_adv_provider:")):
+            advanced = data.startswith("her_adv_")
             try:
                 _, raw_route, raw_index, token = data.split(":", 3)
                 route = _her_v2_route(raw_route)
+                if advanced and route not in HER_V2_ADVANCED_ROUTE_ORDER:
+                    raise ValueError(ui_language.tr("model.route.invalid"))
                 provider_index, option = _her_v2_indexed_choice(
                     runtime.backend_manager.get_her_v2_provider_options(),
                     raw_index,
                 )
                 provider = str(option["engine"])
-                if (
-                    token != _her_v2_callback_token(provider)
-                    or not option.get("available")
+                if token != _her_v2_callback_token(provider) or not option.get(
+                    "available"
                 ):
                     raise ValueError(ui_language.tr("model.menu.stale"))
             except (IndexError, TypeError, ValueError) as exc:
@@ -1562,9 +2012,11 @@ async def callback_model(runtime, update, context: Any) -> None:
                     runtime,
                     route,
                     provider_index,
+                    advanced=advanced,
                 ),
             )
-        elif data.startswith("her_route_model:"):
+        elif data.startswith(("her_route_model:", "her_adv_model:")):
+            advanced = data.startswith("her_adv_")
             try:
                 (
                     _,
@@ -1575,15 +2027,16 @@ async def callback_model(runtime, update, context: Any) -> None:
                     model_token,
                 ) = data.split(":", 5)
                 route = _her_v2_route(raw_route)
+                if advanced and route not in HER_V2_ADVANCED_ROUTE_ORDER:
+                    raise ValueError(ui_language.tr("model.route.invalid"))
                 options = runtime.backend_manager.get_her_v2_provider_options()
                 _provider_index, option = _her_v2_indexed_choice(
                     options,
                     raw_provider_index,
                 )
                 provider = str(option["engine"])
-                if (
-                    provider_token != _her_v2_callback_token(provider)
-                    or not option.get("available")
+                if provider_token != _her_v2_callback_token(provider) or not option.get(
+                    "available"
                 ):
                     raise ValueError(ui_language.tr("model.menu.stale"))
                 _model_index, model = _her_v2_indexed_choice(
@@ -1608,9 +2061,14 @@ async def callback_model(runtime, update, context: Any) -> None:
             await query.edit_message_text(
                 her_v2_route_text(runtime, route),
                 parse_mode="HTML",
-                reply_markup=her_v2_route_keyboard(runtime, route),
+                reply_markup=her_v2_route_keyboard(
+                    runtime,
+                    route,
+                    advanced=advanced,
+                ),
             )
-        elif data.startswith("her_route_slot:"):
+        elif data.startswith(("her_route_slot:", "her_adv_slot:")):
+            advanced = data.startswith("her_adv_")
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
                     ui_language.tr("model.control.active_only"),
@@ -1620,6 +2078,8 @@ async def callback_model(runtime, update, context: Any) -> None:
             try:
                 _, raw_route, slot = data.split(":", 2)
                 route = _her_v2_route(raw_route)
+                if advanced and route not in HER_V2_ADVANCED_ROUTE_ORDER:
+                    raise ValueError(ui_language.tr("model.route.invalid"))
                 candidate = runtime.backend_manager.prepare_her_v2_route_model_slot(
                     route.value,
                     slot,
@@ -1637,9 +2097,14 @@ async def callback_model(runtime, update, context: Any) -> None:
             await query.edit_message_text(
                 her_v2_route_text(runtime, route),
                 parse_mode="HTML",
-                reply_markup=her_v2_route_keyboard(runtime, route),
+                reply_markup=her_v2_route_keyboard(
+                    runtime,
+                    route,
+                    advanced=advanced,
+                ),
             )
-        elif data.startswith("her_route_reasoning:"):
+        elif data.startswith(("her_route_reasoning:", "her_adv_reason:")):
+            advanced = data.startswith("her_adv_")
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
                     ui_language.tr("model.control.active_only"),
@@ -1649,6 +2114,8 @@ async def callback_model(runtime, update, context: Any) -> None:
             try:
                 _, raw_route, raw_index, token = data.split(":", 3)
                 route = _her_v2_route(raw_route)
+                if advanced and route not in HER_V2_ADVANCED_ROUTE_ORDER:
+                    raise ValueError(ui_language.tr("model.route.invalid"))
                 _current, choices = _her_v2_route_reasoning_choices(runtime, route)
                 _index, reasoning = _her_v2_indexed_choice(choices, raw_index)
                 if token != _her_v2_callback_token(reasoning):
@@ -1668,7 +2135,11 @@ async def callback_model(runtime, update, context: Any) -> None:
             await query.edit_message_text(
                 her_v2_route_text(runtime, route),
                 parse_mode="HTML",
-                reply_markup=her_v2_route_keyboard(runtime, route),
+                reply_markup=her_v2_route_keyboard(
+                    runtime,
+                    route,
+                    advanced=advanced,
+                ),
             )
         elif data.startswith(("her_reasoning_menu:", "her_reasoning:")):
             await query.answer(
@@ -1711,7 +2182,9 @@ async def callback_model(runtime, update, context: Any) -> None:
             if not available or model in available:
                 runtime._set_backend_model(runtime.config.active_backend, model)
                 text, reply_markup = runtime._configuration_followup("model")
-                await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+                await query.edit_message_text(
+                    text, parse_mode="HTML", reply_markup=reply_markup
+                )
             else:
                 await query.answer(
                     ui_language.tr("model.unavailable_provider"),
@@ -1727,7 +2200,9 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("backend:"):
             parts = data.split(":", 2)
             if len(parts) != 3:
-                await query.answer(ui_language.tr("model.invalid_callback"), show_alert=True)
+                await query.answer(
+                    ui_language.tr("model.invalid_callback"), show_alert=True
+                )
                 return
             _, target_engine, mode = parts
             if not is_selectable_backend(target_engine):
@@ -1757,12 +2232,16 @@ async def callback_model(runtime, update, context: Any) -> None:
                 await query.edit_message_text(
                     runtime._build_backend_model_prompt(target_engine, with_context),
                     parse_mode="HTML",
-                    reply_markup=runtime._backend_model_keyboard(target_engine, with_context),
+                    reply_markup=runtime._backend_model_keyboard(
+                        target_engine, with_context
+                    ),
                 )
         elif data.startswith("bmodel:"):
             parts = data.split(":", 3)
             if len(parts) != 4:
-                await query.answer(ui_language.tr("model.invalid_callback"), show_alert=True)
+                await query.answer(
+                    ui_language.tr("model.invalid_callback"), show_alert=True
+                )
                 return
             _, target_engine, mode_flag, model = parts
             with_context = mode_flag == "c"
@@ -1777,11 +2256,15 @@ async def callback_model(runtime, update, context: Any) -> None:
                 return
             if success:
                 text, reply_markup = runtime._configuration_followup("backend")
-                await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+                await query.edit_message_text(
+                    text, parse_mode="HTML", reply_markup=reply_markup
+                )
             else:
                 await query.edit_message_text(
                     message,
-                    reply_markup=runtime._backend_model_keyboard(target_engine, with_context, model),
+                    reply_markup=runtime._backend_model_keyboard(
+                        target_engine, with_context, model
+                    ),
                 )
         elif data.startswith("effort:"):
             parts = data.split(":")

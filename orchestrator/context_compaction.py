@@ -346,6 +346,8 @@ class CompactionOutcome:
     changed: bool = False
     code: str = ""
     message: str = ""
+    message_key: str = ""
+    message_values: Mapping[str, Any] = field(default_factory=dict)
     before_tokens: int = 0
     after_tokens: int = 0
     selected_segment_count: int = 0
@@ -2586,6 +2588,11 @@ class ContextCompactionCoordinator:
                         f"Current context is {current_tokens:,} tokens, below the "
                         f"{policy.manual_min_tokens:,}-token manual Compact threshold."
                     ),
+                    message_key="compact.message.below_manual_window",
+                    message_values={
+                        "current_tokens": f"{current_tokens:,}",
+                        "manual_min_tokens": f"{policy.manual_min_tokens:,}",
+                    },
                 )
         task = asyncio.current_task()
         async with self._operation_lock:
@@ -2634,6 +2641,11 @@ class ContextCompactionCoordinator:
                             "No historical conversation content is available to compact."
                             if manual_request
                             else "No eligible historical prefix exists outside the recent guard."
+                        ),
+                        message_key=(
+                            "compact.message.no_history"
+                            if manual_request
+                            else "compact.message.no_eligible_history"
                         ),
                         covered_through_turn_id=snapshot.covered_through_turn_id,
                         route_provider=route.provider,
@@ -2860,6 +2872,7 @@ class ContextCompactionCoordinator:
                     compaction_id=compaction_id,
                     changed=True,
                     message="Historical context was compacted and atomically committed.",
+                    message_key="compact.message.completed",
                     before_tokens=selection.before_tokens,
                     after_tokens=after_tokens,
                     selected_segment_count=len(candidate.source_hashes),
@@ -2986,6 +2999,11 @@ class ContextCompactionCoordinator:
                     f"Current context is {projected:,} tokens; automatic Compact "
                     f"starts only above {budget.high_projected_tokens:,} tokens."
                 ),
+                message_key="compact.message.automatic_below_threshold",
+                message_values={
+                    "projected_tokens": f"{projected:,}",
+                    "automatic_trigger_tokens": f"{budget.high_projected_tokens:,}",
+                },
             )
         required = max(
             1,

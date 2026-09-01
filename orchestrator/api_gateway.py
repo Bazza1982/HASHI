@@ -17,8 +17,10 @@ session cache (in-memory, TTL-based) for clients that don't resend full history.
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -82,6 +84,17 @@ _GATEWAY_SERVER_APP_KEY = web.AppKey("hashi-api-gateway-server", object)
 _CORRELATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 _INTERNAL_TOOL_WORKSPACE_FIELD = "hashi_tool_workspace"
 _TRUSTED_TOOL_WORKSPACE_FIELD = "_hashi_internal_tool_workspace"
+_GATEWAY_REQUEST_ID_FIELD = "hashi_gateway_request_id"
+_GATEWAY_VALIDATION_STAGE_FIELD = "hashi_gateway_validation_stage"
+_SENSITIVE_HTTP_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "set-cookie",
+        "x-api-key",
+    }
+)
 
 _ENGINE_FOR_MODEL = {
     model: engine
@@ -92,6 +105,37 @@ _ENGINE_FOR_MODEL = {
 _ALL_MODELS = list(_ENGINE_FOR_MODEL.keys())
 _GATEWAY_ENGINES = sorted(set(_ENGINE_FOR_MODEL.values()))
 DEFAULT_API_MODEL = catalog_default_gateway_model()
+
+
+def _gateway_audit_headers(headers: Any) -> dict[str, str]:
+    if not hasattr(headers, "items"):
+        return {}
+    return {
+        str(name): (
+            "[REDACTED]"
+            if str(name).strip().casefold() in _SENSITIVE_HTTP_HEADERS
+            else str(value)
+        )
+        for name, value in headers.items()
+    }
+
+
+def _gateway_body_evidence(payload: bytes) -> dict[str, Any]:
+    """Return a complete, untruncated representation of one HTTP body."""
+
+    raw = bytes(payload)
+    try:
+        body = raw.decode("utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        body = base64.b64encode(raw).decode("ascii")
+        encoding = "base64"
+    return {
+        "body": body,
+        "body_encoding": encoding,
+        "body_bytes": len(raw),
+        "body_sha256": hashlib.sha256(raw).hexdigest(),
+    }
 
 
 def _engine_owned_by(engine: str) -> str:
@@ -935,6 +979,11 @@ class APIGatewayServer:
             getattr(global_config, "base_logs_dir", workspace_root / "logs")
         )
         self.observability_path = logs_root / "api_gateway_observability.jsonl"
+        self.observability_fallback_path = (
+            self._workspace_root
+            / ".hashi"
+            / "api_gateway_observability_fallback.jsonl"
+        )
         self._sessions = _SessionCache()
         self._engine_status: dict[str, dict] = {}
         self._runner = None
@@ -961,8 +1010,8 @@ class APIGatewayServer:
         self.app.router.add_post("/v1/videos/generations", self.handle_video_generations)
         self.app.router.add_get("/health", self.handle_health)
 
-    def _observe(self, event: str, **fields: Any) -> None:
-        """Persist content-free request lifecycle evidence for postmortems."""
+    def _observe(self, event: str, *, required: bool = False, **fields: Any) -> None:
+        """Persist request lifecycle evidence, using a durable fallback spool."""
         record = {
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "event": event,
@@ -972,12 +1021,53 @@ class APIGatewayServer:
         }
         encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
         logger.info("API_GATEWAY_TRACE %s", encoded)
+        errors: list[OSError] = []
+        for path in (self.observability_path, self.observability_fallback_path):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(encoded + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                path.chmod(0o600)
+                if errors:
+                    logger.warning(
+                        "API Gateway observability used fallback %s after %s",
+                        path,
+                        errors[-1],
+                    )
+                return
+            except OSError as exc:
+                errors.append(exc)
+        logger.error(
+            "API Gateway observability write failed in primary and fallback: %s",
+            errors[-1] if errors else "unknown error",
+        )
+        if required:
+            raise RuntimeError(
+                "API Gateway mandatory observability persistence failed"
+            ) from (errors[-1] if errors else None)
+
+    @staticmethod
+    def _set_request_context(request: Any, key: str, value: Any) -> None:
         try:
-            self.observability_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.observability_path.open("a", encoding="utf-8") as handle:
-                handle.write(encoded + "\n")
-        except OSError as exc:
-            logger.warning("API Gateway observability write failed: %s", exc)
+            request[key] = value
+        except (TypeError, AttributeError):
+            setattr(request, f"_{key}", value)
+
+    @staticmethod
+    def _request_context(request: Any, key: str, default: Any = None) -> Any:
+        try:
+            return request.get(key, default)
+        except (TypeError, AttributeError):
+            return getattr(request, f"_{key}", default)
+
+    def _set_validation_stage(self, request: Any, stage: str) -> None:
+        self._set_request_context(
+            request,
+            _GATEWAY_VALIDATION_STAGE_FIELD,
+            str(stage),
+        )
 
     @staticmethod
     def _upstream_request_id(request: web.Request) -> str | None:
@@ -1083,32 +1173,168 @@ class APIGatewayServer:
         )
 
     async def _run_tracked_request(self, request, handler):
+        gateway_request_id = f"apireq-{uuid.uuid4().hex[:8]}"
+        self._set_request_context(
+            request,
+            _GATEWAY_REQUEST_ID_FIELD,
+            gateway_request_id,
+        )
+        self._set_validation_stage(request, "transport_body_read")
+        try:
+            raw_request_body = await request.read()
+        except BaseException as exc:
+            self._observe(
+                "gateway_request_body_read_failed",
+                required=True,
+                gateway_request_id=gateway_request_id,
+                upstream_request_id=self._upstream_request_id(request),
+                request_path=str(getattr(request, "path", "") or ""),
+                method=str(getattr(request, "method", "") or ""),
+                headers=_gateway_audit_headers(getattr(request, "headers", {})),
+                validation_stage="transport_body_read",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
+
+        self._observe(
+            "gateway_http_request_received",
+            required=True,
+            gateway_request_id=gateway_request_id,
+            upstream_request_id=self._upstream_request_id(request),
+            request_path=str(getattr(request, "path", "") or ""),
+            method=str(getattr(request, "method", "") or ""),
+            headers=_gateway_audit_headers(getattr(request, "headers", {})),
+            provider_call=getattr(request, "headers", {}).get(
+                "X-Hashi-Provider-Call"
+            ),
+            after_tool_end=(
+                str(
+                    getattr(request, "headers", {}).get(
+                        "X-Hashi-After-Tool-End", "false"
+                    )
+                ).casefold()
+                == "true"
+            ),
+            **_gateway_body_evidence(raw_request_body),
+        )
+
+        def record_response(response: web.StreamResponse) -> web.StreamResponse:
+            status = int(getattr(response, "status", 0) or 0)
+            validation_stage = str(
+                self._request_context(
+                    request,
+                    _GATEWAY_VALIDATION_STAGE_FIELD,
+                    "unknown",
+                )
+            )
+            try:
+                response.headers.setdefault(
+                    "X-Hashi-Gateway-Request-ID",
+                    gateway_request_id,
+                )
+                if status >= 400:
+                    response.headers.setdefault(
+                        "X-Hashi-Rejection-Stage",
+                        validation_stage,
+                    )
+            except (AttributeError, RuntimeError):
+                pass
+            raw_response_body = b""
+            response_body_available = isinstance(response, web.Response)
+            if response_body_available:
+                body_value = getattr(response, "body", b"")
+                if isinstance(body_value, bytes):
+                    raw_response_body = body_value
+                elif body_value is not None:
+                    raw_response_body = str(body_value).encode("utf-8")
+            response_fields = {
+                "gateway_request_id": gateway_request_id,
+                "upstream_request_id": self._upstream_request_id(request),
+                "request_path": str(getattr(request, "path", "") or ""),
+                "provider_call": getattr(request, "headers", {}).get(
+                    "X-Hashi-Provider-Call"
+                ),
+                "after_tool_end": (
+                    str(
+                        getattr(request, "headers", {}).get(
+                            "X-Hashi-After-Tool-End", "false"
+                        )
+                    ).casefold()
+                    == "true"
+                ),
+                "status": status,
+                "headers": _gateway_audit_headers(
+                    getattr(response, "headers", {})
+                ),
+                "validation_stage": validation_stage,
+                "response_body_available": response_body_available,
+                **_gateway_body_evidence(raw_response_body),
+            }
+            self._observe(
+                "gateway_http_response_returned",
+                required=True,
+                **response_fields,
+            )
+            if status >= 400:
+                self._observe(
+                    "request_rejected",
+                    required=True,
+                    **response_fields,
+                )
+            return response
+
         if not self._accepting_requests:
+            self._set_validation_stage(request, "gateway_admission")
             self._observe(
                 "request_rejected_not_accepting",
+                required=True,
+                gateway_request_id=gateway_request_id,
                 upstream_request_id=self._upstream_request_id(request),
                 request_path=str(getattr(request, "path", "") or ""),
                 draining=self._draining,
                 transport_closed=self._transport_closed,
                 active_requests=len(self._active_requests),
             )
-            return web.json_response(
-                {
-                    "error": {
-                        "message": "API Gateway is restarting; retry shortly",
-                        "type": "server_error",
-                        "code": "gateway_draining",
-                    }
-                },
-                status=503,
-                headers={"Retry-After": "1", "Connection": "close"},
+            return record_response(
+                web.json_response(
+                    {
+                        "error": {
+                            "message": "API Gateway is restarting; retry shortly",
+                            "type": "server_error",
+                            "code": "gateway_draining",
+                        }
+                    },
+                    status=503,
+                    headers={"Retry-After": "1", "Connection": "close"},
+                )
             )
 
         loop = asyncio.get_running_loop()
         completion: asyncio.Future[None] = loop.create_future()
         self._active_requests[completion] = asyncio.current_task()
         try:
-            return await handler(request)
+            response = await handler(request)
+        except BaseException as exc:
+            self._observe(
+                "gateway_request_raised",
+                required=True,
+                gateway_request_id=gateway_request_id,
+                upstream_request_id=self._upstream_request_id(request),
+                request_path=str(getattr(request, "path", "") or ""),
+                validation_stage=str(
+                    self._request_context(
+                        request,
+                        _GATEWAY_VALIDATION_STAGE_FIELD,
+                        "unknown",
+                    )
+                ),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
+        else:
+            return record_response(response)
         finally:
             self._active_requests.pop(completion, None)
             if not completion.done():
@@ -1297,10 +1523,12 @@ class APIGatewayServer:
 
     async def handle_chat_completions(self, request: web.Request) -> web.Response:
         self._sessions.purge_expired()
+        self._set_validation_stage(request, "json_decode")
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
+        self._set_validation_stage(request, "request_body_contract")
         if not isinstance(body, dict):
             return web.json_response({"error": "request body must be an object"}, status=400)
 
@@ -1311,6 +1539,7 @@ class APIGatewayServer:
             None,
         )
 
+        self._set_validation_stage(request, "model_resolution")
         model = str(body.get("model") or "").strip() or self.default_model
 
         engine = _ENGINE_FOR_MODEL.get(model)
@@ -1320,6 +1549,7 @@ class APIGatewayServer:
                 status=400,
             )
 
+        self._set_validation_stage(request, "messages_contract")
         messages = body.get("messages") or []
         if not isinstance(messages, list) or not messages:
             return web.json_response({"error": "messages is required"}, status=400)
@@ -1333,6 +1563,7 @@ class APIGatewayServer:
         external_tool_mode = _uses_external_tool_protocol(body, messages)
         structured_conversation_mode = _uses_structured_conversation(messages)
         if structured_conversation_mode:
+            self._set_validation_stage(request, "structured_conversation_contract")
             structured_error = _validate_structured_conversation(
                 messages,
                 engine=engine,
@@ -1341,6 +1572,7 @@ class APIGatewayServer:
             if structured_error is not None:
                 return structured_error
 
+        self._set_validation_stage(request, "reasoning_effort_contract")
         reasoning_effort, reasoning_error = _validate_reasoning_effort(
             body,
             engine=engine,
@@ -1355,6 +1587,7 @@ class APIGatewayServer:
 
         external_tools: list[dict] = []
         if external_tool_mode:
+            self._set_validation_stage(request, "external_tool_capability")
             if engine not in _EXTERNAL_TOOL_ENGINES:
                 return _external_tool_error(
                     f"model '{model}' does not support external tool passthrough; "
@@ -1363,6 +1596,7 @@ class APIGatewayServer:
                     param="model",
                 )
 
+        self._set_validation_stage(request, "engine_availability")
         engine_ok, engine_reason = self._engine_available(engine)
         if not engine_ok:
             return web.json_response(
@@ -1371,6 +1605,7 @@ class APIGatewayServer:
             )
 
         # Session cache support — client may pass session_id in extra_body or top-level
+        self._set_validation_stage(request, "session_envelope")
         extra_body = body.get("extra_body") or {}
         if not isinstance(extra_body, dict):
             return web.json_response({"error": "extra_body must be an object"}, status=400)
@@ -1394,6 +1629,7 @@ class APIGatewayServer:
 
         internal_continuation = False
         if external_tool_mode and session_id:
+            self._set_validation_stage(request, "continuation_contract")
             internal_continuation = (
                 str(
                     getattr(request, "headers", {}).get(
@@ -1411,6 +1647,7 @@ class APIGatewayServer:
                 )
 
         if requested_tool_workspace is not None:
+            self._set_validation_stage(request, "tool_workspace_contract")
             if not (external_tool_mode and session_id and internal_continuation):
                 return _external_tool_error(
                     "hashi_tool_workspace requires the HASHI internal "
@@ -1428,6 +1665,7 @@ class APIGatewayServer:
             body[_TRUSTED_TOOL_WORKSPACE_FIELD] = trusted_workspace
 
         if session_id and _contains_inline_media(messages):
+            self._set_validation_stage(request, "session_inline_media_contract")
             return _external_tool_error(
                 "session_id cannot be combined with inline media data URLs; "
                 "send the complete multimodal conversation without server-side "
@@ -1436,7 +1674,10 @@ class APIGatewayServer:
                 param="session_id",
             )
 
-        request_id = f"apireq-{uuid.uuid4().hex[:8]}"
+        request_id = str(
+            self._request_context(request, _GATEWAY_REQUEST_ID_FIELD, "")
+            or f"apireq-{uuid.uuid4().hex[:8]}"
+        )
         t_start = time.time()
         request_kwargs = {
             "body": body,
@@ -1454,8 +1695,10 @@ class APIGatewayServer:
             "reasoning_effort": reasoning_effort,
         }
         if session_id is None:
+            self._set_validation_stage(request, "validated_dispatch")
             return await self._handle_validated_chat(**request_kwargs)
 
+        self._set_validation_stage(request, "session_lease")
         lease_started = time.perf_counter()
         async with self._sessions.lease(session_id):
             self._observe(
@@ -1467,6 +1710,7 @@ class APIGatewayServer:
                     2,
                 ),
             )
+            self._set_validation_stage(request, "validated_dispatch")
             return await self._handle_validated_chat(**request_kwargs)
 
     async def _handle_validated_chat(
@@ -1489,11 +1733,16 @@ class APIGatewayServer:
         """Assemble session state, then invoke one exclusively leased adapter."""
 
         if session_id:
+            self._set_validation_stage(request, "session_reconstruction")
             cached = self._sessions.get(session_id)
             if cached:
                 messages = self._sessions.merge_messages(cached, messages)
             structured_conversation_mode = _uses_structured_conversation(messages)
             if structured_conversation_mode:
+                self._set_validation_stage(
+                    request,
+                    "reconstructed_structured_conversation_contract",
+                )
                 structured_error = _validate_structured_conversation(
                     messages,
                     engine=engine,
@@ -1503,6 +1752,7 @@ class APIGatewayServer:
                     return structured_error
 
         if external_tool_mode:
+            self._set_validation_stage(request, "external_tool_request_contract")
             # Session continuations may contain only the newly completed tool
             # messages. Validate after reconstructing the cached assistant
             # tool request so call/result pairing remains strict.
@@ -1515,6 +1765,7 @@ class APIGatewayServer:
 
         prompt = ""
         if not external_tool_mode and not structured_conversation_mode:
+            self._set_validation_stage(request, "prompt_assembly")
             prompt = _messages_to_prompt(messages)
             if not prompt.strip():
                 return web.json_response(
@@ -1530,6 +1781,7 @@ class APIGatewayServer:
         _print_api_in(model, user_preview)
 
         request_headers = getattr(request, "headers", {})
+        self._set_validation_stage(request, "adapter_initialization")
         self._observe(
             "request_received",
             gateway_request_id=request_id,
@@ -1542,6 +1794,17 @@ class APIGatewayServer:
             model=model,
             engine=engine,
             streaming=stream,
+            session_id=session_id,
+            message_count=len(messages),
+            message_chars=len(
+                json.dumps(
+                    messages,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            ),
+            external_tool_count=len(external_tools),
+            request_fields=sorted(str(key) for key in body),
             request_mode=(
                 "external_tool"
                 if external_tool_mode
@@ -1569,6 +1832,7 @@ class APIGatewayServer:
                 request_lock = asyncio.Lock()
                 setattr(adapter, "_hashi_gateway_request_lock", request_lock)
         lease_started = time.perf_counter()
+        self._set_validation_stage(request, "adapter_lease")
         async with request_lock:
             lease_wait_ms = round(
                 (time.perf_counter() - lease_started) * 1000,
@@ -1581,6 +1845,7 @@ class APIGatewayServer:
                 model=model,
                 wait_ms=lease_wait_ms,
             )
+            self._set_validation_stage(request, "backend_dispatch")
             return await self._dispatch_chat_request(
                 adapter=adapter,
                 prompt=prompt,

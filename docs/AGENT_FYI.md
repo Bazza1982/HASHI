@@ -62,8 +62,10 @@ when ambiguous.
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]`:
   inspect or maintain the bounded Memory+ work card and archive index.
 - `/model`: on HER v2, define complete Quick/Pro provider/model targets and
-  independently choose Follow Quick, Follow Pro, or Custom plus provider
-  reasoning for each effective task route; on other
+  configure Direct, Strategy, Planning, and grouped Execution. Execution Auto
+  uses Quick for simple tasks and Pro for complex or high-volume tasks. Custom
+  per-task targets and Compact are under Advanced settings, while reasoning
+  choices follow the active provider/model's declared capabilities. On other
   backends, retain the existing single-model behaviour.
 - `/habit [view|on|off|default|delete|reset]`: inspect or control the default-off,
   adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
@@ -131,9 +133,11 @@ when ambiguous.
   Hybrid routing draft. Instance configuration is sufficient; a Model Provider
   need not be repeated in the Agent's Engine list.
 - `/model`: while HER v2 is active, define Quick/Pro Model Provider/model
-  targets and configure each effective task route's target and provider
-  reasoning separately. Hybrid edits take effect together through Apply. Other
-  active Engines retain their existing behaviour.
+  targets and configure Direct, shared Strategy, Planned-only Planning, and
+  grouped Execution. Execution Auto maps simple work to Quick and complex or
+  high-volume work to Pro. Advanced settings contain per-task Custom targets
+  and Compact. Hybrid edits take effect together through Apply. Other active
+  Engines retain their existing behaviour.
 - Engine and model changes continue to an optional effort picker when the
   selected model supports effort. Keeping the current value leaves it unchanged;
   models without selectable effort finish with `n/a`.

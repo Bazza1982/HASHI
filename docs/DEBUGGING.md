@@ -126,6 +126,10 @@ Look at:
 
 - `logs/<agent>/<session>/events.log`
 - `logs/<agent>/<session>/errors.log`
+- `logs/hashi_api_transport.jsonl` for the complete local HTTP request,
+  response, and SSE record
+- `logs/api_gateway_observability.jsonl` for Gateway ingress, validation stage,
+  rejection, and response records
 - backend-specific workspace artifacts like:
   - `workspaces/<agent>/codex_exec_events.jsonl`
   - `workspaces/<agent>/history.json`
@@ -135,6 +139,14 @@ Look at:
 Codex event logs are bounded, credential-redacted JSONL with `.1`/`.2`
 backups. See [CODEX_FAILURE_CONTRACT.md](CODEX_FAILURE_CONTRACT.md) for
 terminal-event parsing, typed errors, replay safety, and retention settings.
+
+HASHI API transport and Gateway request/response bodies are retained without
+truncation and include byte counts and SHA-256 hashes. Reusable credential
+header values are masked. Mandatory HTTP-boundary records are flushed before
+execution continues; if the primary Gateway log is unavailable, HASHI uses
+`<workspace-root>/.hashi/api_gateway_observability_fallback.jsonl`. If neither
+location is writable, the Gateway fails the request instead of running it
+without an audit trail.
 
 Questions:
 

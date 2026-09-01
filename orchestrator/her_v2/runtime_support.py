@@ -661,6 +661,10 @@ class RuntimeSupportMixin:
                 "description": failure.human_description,
                 "attempts": failure.attempts,
                 "side_effects_possible": failure.side_effects_possible,
+                "http_status": failure.http_status,
+                "provider_request_id": failure.provider_request_id or None,
+                "retry_after_s": failure.retry_after_s,
+                "details": dict(failure.details),
             }
             if failure is not None
             else {}

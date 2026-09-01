@@ -9055,6 +9055,7 @@ class FlexibleAgentRuntime:
         request_id: Optional[str] = None,
         purpose: str = "response",
         parse_mode: str | None = None,
+        error_context: Mapping[str, Any] | None = None,
     ):
         return await runtime_delivery.send_long_message(
             self,
@@ -9063,6 +9064,7 @@ class FlexibleAgentRuntime:
             request_id=request_id,
             purpose=purpose,
             parse_mode=parse_mode,
+            error_context=error_context,
         )
 
     async def typing_loop(self, chat_id: int, stop_event: asyncio.Event):
@@ -10262,6 +10264,31 @@ class FlexibleAgentRuntime:
                 failure_fields = runtime_pipeline.backend_failure_fields(response)
                 receipt_error = err_msg
                 self._mark_error(err_msg)
+                self.error_logger.error(
+                    "Background task %s failed code=%s retryable=%s status=%s "
+                    "provider_request_id=%s side_effects=%s: %s",
+                    item.request_id,
+                    failure_fields.get("error_code") or "untyped",
+                    failure_fields.get("error_retryable"),
+                    failure_fields.get("http_status"),
+                    failure_fields.get("provider_request_id") or "none",
+                    failure_fields.get("side_effects_possible", False),
+                    err_msg,
+                )
+                failure_diagnostics = runtime_pipeline.backend_failure_diagnostics(
+                    response
+                )
+                if failure_diagnostics:
+                    self.error_logger.error(
+                        "Background failure diagnostics for %s: %s",
+                        item.request_id,
+                        json.dumps(
+                            failure_diagnostics,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ),
+                    )
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
                     item,
@@ -10288,17 +10315,6 @@ class FlexibleAgentRuntime:
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     return
-                self.error_logger.error(
-                    "Background task %s failed code=%s retryable=%s status=%s "
-                    "provider_request_id=%s side_effects=%s: %s",
-                    item.request_id,
-                    failure_fields.get("error_code") or "untyped",
-                    failure_fields.get("error_retryable"),
-                    failure_fields.get("http_status"),
-                    failure_fields.get("provider_request_id") or "none",
-                    failure_fields.get("side_effects_possible", False),
-                    err_msg,
-                )
                 clipped = (
                     err_msg
                     if len(err_msg) <= 3000

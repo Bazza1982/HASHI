@@ -122,7 +122,7 @@ async def test_token_summary_includes_localized_cache_savings_statistics(
 
     text, kwargs = replies[0]
     assert kwargs == {"parse_mode": "HTML"}
-    assert "Provider 请求 40" in text
+    assert "服务提供方请求 40" in text
     assert "输出:52.2K（其中推理 38.1K）" in text
     assert "缓存命中 2.683M/2.916M（92.0%）" in text
     assert "无缓存约 US$1.0965" in text

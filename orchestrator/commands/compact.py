@@ -307,8 +307,15 @@ def _outcome_text(
             f"<b>{html.escape(ui_language.tr('compact.current_context'))}</b> · "
             f"<code>{int(outcome.before_tokens):,} {html.escape(ui_language.tr('compact.tokens'))}</code>"
         )
-    if outcome.message:
-        lines.extend(["", html.escape(str(outcome.message))])
+    message = str(getattr(outcome, "message", "") or "")
+    message_key = str(getattr(outcome, "message_key", "") or "")
+    if message_key:
+        message = ui_language.tr(
+            message_key,
+            **dict(getattr(outcome, "message_values", {}) or {}),
+        )
+    if message:
+        lines.extend(["", html.escape(message)])
     if outcome.changed:
         lines.extend(["", ui_language.tr("compact.raw_retained")])
     return "\n".join(lines)

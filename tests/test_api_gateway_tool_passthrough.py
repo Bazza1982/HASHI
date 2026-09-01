@@ -1232,6 +1232,102 @@ async def test_external_tools_reject_gateway_session_cache(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_gateway_persists_complete_prelease_rejection_evidence(tmp_path):
+    adapter = _ExternalAdapter()
+    server = _server(tmp_path, adapter)
+    body = {
+        "model": "gpt-5.6-luna",
+        "messages": [
+            {
+                "role": "tool",
+                "tool_call_id": "call-missing",
+                "content": "diagnostic output that must remain in the raw log",
+            }
+        ],
+        "tools": [TOOL_SCHEMA],
+        "session_id": "internal-tool-session",
+    }
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={
+                "X-Hashi-Correlation-ID": "req-prelease-log-gap",
+                "X-Hashi-Provider-Call": "4",
+                "X-Hashi-After-Tool-End": "true",
+            },
+            json=body,
+        )
+        rejected_payload = await response.json()
+
+    assert response.status == 400
+    assert rejected_payload["error"]["code"] == "external_tools_session_unsupported"
+    records = [
+        json.loads(line)
+        for line in server.observability_path.read_text(encoding="utf-8").splitlines()
+    ]
+    received = next(
+        row for row in records if row["event"] == "gateway_http_request_received"
+    )
+    assert received["upstream_request_id"] == "req-prelease-log-gap"
+    assert received["provider_call"] == "4"
+    assert received["after_tool_end"] is True
+    assert json.loads(received["body"])["messages"] == body["messages"]
+    assert received["body_bytes"] > 0
+    assert received["body_sha256"]
+
+    rejected = next(row for row in records if row["event"] == "request_rejected")
+    assert rejected["gateway_request_id"] == received["gateway_request_id"]
+    assert rejected["validation_stage"] == "continuation_contract"
+    assert rejected["status"] == 400
+    assert json.loads(rejected["body"]) == rejected_payload
+    assert rejected["provider_call"] == "4"
+    assert rejected["after_tool_end"] is True
+    assert response.headers["X-Hashi-Gateway-Request-ID"] == received[
+        "gateway_request_id"
+    ]
+    assert response.headers["X-Hashi-Rejection-Stage"] == "continuation_contract"
+    assert all(row["event"] != "session_lease_acquired" for row in records)
+    assert all(row["event"] != "request_received" for row in records)
+    assert server._pool.calls == []
+
+
+def test_gateway_mandatory_observability_uses_fallback_and_fails_closed(
+    tmp_path,
+):
+    server = _server(tmp_path, _ExternalAdapter())
+    blocked_primary = tmp_path / "blocked-primary-log"
+    blocked_primary.mkdir()
+    server.observability_path = blocked_primary
+    server.observability_fallback_path = tmp_path / "fallback.jsonl"
+
+    server._observe(
+        "mandatory_test_event",
+        required=True,
+        gateway_request_id="apireq-fallback",
+    )
+
+    fallback_record = json.loads(
+        server.observability_fallback_path.read_text(encoding="utf-8").strip()
+    )
+    assert fallback_record["event"] == "mandatory_test_event"
+    assert fallback_record["gateway_request_id"] == "apireq-fallback"
+
+    blocked_fallback = tmp_path / "blocked-fallback-log"
+    blocked_fallback.mkdir()
+    server.observability_fallback_path = blocked_fallback
+    with pytest.raises(
+        RuntimeError,
+        match="mandatory observability persistence failed",
+    ):
+        server._observe(
+            "unpersistable_test_event",
+            required=True,
+            gateway_request_id="apireq-fail-closed",
+        )
+
+
+@pytest.mark.asyncio
 async def test_internal_external_tool_session_reconstructs_incremental_suffix(tmp_path):
     adapter = _ExternalAdapter()
     server = _server(tmp_path, adapter)

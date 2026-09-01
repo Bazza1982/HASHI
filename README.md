@@ -753,9 +753,14 @@ Other backends keep their existing reasoning-effort menus and labels.
 
 The `/backend` and `/model` menus finish as one configuration flow. For HER v2,
 `/provider` selects either a Single provider or Hybrid routing. Hybrid Quick,
-Pro, and Custom task routes each carry a full provider/model target and remain
+Pro, and Custom task targets each carry a full provider/model target and remain
 drafted until one Apply; Single-provider selection retains its immediate atomic
-flow. Models with selectable effort levels show an
+flow. The normal `/model` menu follows the public execution design: Direct,
+Strategy, Planning, and Execution. Execution `Auto` assigns simple tasks to
+Quick and complex or high-volume tasks to Pro. Per-task Custom targets and
+Compact live under Advanced settings; internal and background routes keep their
+saved defaults without appearing as ordinary task choices. Provider reasoning
+choices follow the current provider/model's declared capabilities. Models with selectable effort levels show an
 optional effort step; keeping the current value leaves it unchanged. Models
 without selectable effort skip that step and show `n/a` in the saved
 configuration summary.
@@ -1532,6 +1537,8 @@ field remains a one-model hint.
 |-----|----------|----------|
 | Bridge log | `logs/bridge.log` | Orchestrator events, backend checks, agent state |
 | Session errors | `logs/<session>/errors.log` | Per-session error details |
+| HASHI API transport | `logs/hashi_api_transport.jsonl` | Complete local Gateway request, response, and SSE evidence |
+| API Gateway observability | `logs/api_gateway_observability.jsonl` | Gateway ingress, validation stage, rejection, and response evidence |
 | Launch log | `logs/bridge_launch.log` | Startup sequence |
 | Token audit | `logs/token_usage.jsonl` | Token consumption records |
 

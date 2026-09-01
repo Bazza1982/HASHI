@@ -501,12 +501,17 @@ model names.
 ### 5.1 Runtime configuration command boundary
 
 HER v2 presents two reusable task model slots, Quick and Pro. `/provider`
-selects the concrete Model Provider route that carries them. `/model` defines
-those two models, independently assigns a model slot and provider reasoning to
-each effective task route, and exposes Compact enablement plus its Tier 2/Tier
-3 timeout policy. Compact always follows the initiating Agent's active
-Quick/Light provider and model at fixed high HER effort; it has no third
-provider/model path and never silently falls back to Pro or a global default.
+selects the concrete Model Provider route that carries them. The normal
+`/model` menu exposes Direct, Strategy, Planning, and grouped Execution so it
+matches the public Direct/Strategic/Planned execution design. Execution Auto
+assigns Simple to Quick and Complex/High-volume to Pro; Quick or Pro assigns
+all three execution classes together. Advanced settings expose per-task Custom
+targets and Compact. Internal/background routes retain their saved defaults and
+are not ordinary menu choices. Provider-reasoning choices are derived from the
+active provider/model's declared capabilities. Compact always follows the
+initiating Agent's active Quick/Light provider and model at fixed high HER
+effort; it has no third provider/model path and never silently falls back to
+Pro or a global default.
 Execution is split into Simple, Complex, and High-volume routes because
 classification changes the actual profile. JSON Repair inherits its rejected
 source stage's frozen provider/model target and is not a separately

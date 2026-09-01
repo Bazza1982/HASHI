@@ -2752,6 +2752,37 @@ def backend_failure_fields(response: Any) -> dict[str, Any]:
     return fields
 
 
+def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
+    """Return the complete local diagnostic envelope for an errors.log record."""
+
+    metadata = getattr(response, "stream_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return {}
+    her = metadata.get("her_v2")
+    if isinstance(her, Mapping):
+        chain = her.get("failure_chain")
+        primary = chain.get("primary_failure") if isinstance(chain, Mapping) else None
+        details = primary.get("details") if isinstance(primary, Mapping) else None
+        if isinstance(details, Mapping) and details:
+            return {
+                "primary_failure": dict(primary),
+                "recovery_decision": (
+                    dict(chain.get("recovery_decision") or {})
+                    if isinstance(chain, Mapping)
+                    else {}
+                ),
+                "foreground_cleanup": (
+                    dict(chain.get("foreground_cleanup") or {})
+                    if isinstance(chain, Mapping)
+                    else {}
+                ),
+            }
+    provider_http_failure = metadata.get("provider_http_failure")
+    if isinstance(provider_http_failure, Mapping) and provider_http_failure:
+        return {"provider_http_failure": dict(provider_http_failure)}
+    return {}
+
+
 def _typed_capacity_recovery_is_safe(response: Any) -> bool:
     if str(getattr(response, "error_code", "") or "") != "CONTEXT_CAPACITY_REJECTED":
         return False
@@ -3003,6 +3034,31 @@ async def handle_backend_error(
         return
 
     runtime._mark_error(err_msg)
+    runtime.error_logger.error(
+        "Flex Backend error for %s (%s, source=%s, code=%s, retryable=%s, "
+        "status=%s, provider_request_id=%s, side_effects=%s): %s",
+        item.request_id,
+        runtime.config.active_backend,
+        item.source,
+        failure_fields.get("error_code") or "untyped",
+        failure_fields.get("error_retryable"),
+        failure_fields.get("http_status"),
+        failure_fields.get("provider_request_id") or "none",
+        failure_fields.get("side_effects_possible", False),
+        err_msg,
+    )
+    failure_diagnostics = backend_failure_diagnostics(response)
+    if failure_diagnostics:
+        runtime.error_logger.error(
+            "Backend failure diagnostics for %s: %s",
+            item.request_id,
+            json.dumps(
+                failure_diagnostics,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ),
+        )
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
     await runtime._notify_request_listeners(
@@ -3032,19 +3088,6 @@ async def handle_backend_error(
             completion_path="foreground",
         )
         return
-    runtime.error_logger.error(
-        "Flex Backend error for %s (%s, source=%s, code=%s, retryable=%s, "
-        "status=%s, provider_request_id=%s, side_effects=%s): %s",
-        item.request_id,
-        runtime.config.active_backend,
-        item.source,
-        failure_fields.get("error_code") or "untyped",
-        failure_fields.get("error_retryable"),
-        failure_fields.get("http_status"),
-        failure_fields.get("provider_request_id") or "none",
-        failure_fields.get("side_effects_possible", False),
-        err_msg,
-    )
     if runtime._should_retry_codex_scheduler_failure(item, err_msg):
         runtime._schedule_codex_scheduler_retry(item)
     if not item.deliver_to_telegram:
@@ -3072,6 +3115,7 @@ async def handle_backend_error(
         text=err_msg,
         request_id=item.request_id,
         purpose="error",
+        error_context=failure_fields,
     )
     total_elapsed_s = (
         max(0.0, time.monotonic() - queued_monotonic)

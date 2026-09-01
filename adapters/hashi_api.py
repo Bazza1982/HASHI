@@ -12,11 +12,16 @@ Differences from OpenRouter:
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
+import os
+import threading
 import time
 import uuid
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from itertools import count
 from pathlib import Path
 from typing import Any
@@ -59,6 +64,54 @@ _HASHI_REASONING_EFFORTS = frozenset(
 _HASHI_REASONING_DISABLED_VALUES = frozenset(
     {"off", "false", "0", "disabled"}
 )
+_TRANSPORT_AUDIT_LOCK = threading.Lock()
+_SENSITIVE_HTTP_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "set-cookie",
+        "x-api-key",
+    }
+)
+
+
+class HashiApiTransportAuditError(RuntimeError):
+    """The local HASHI transport could not durably record an HTTP boundary."""
+
+
+def _audit_headers(headers: Mapping[str, Any]) -> dict[str, str]:
+    """Keep every header name while excluding reusable credential values."""
+
+    return {
+        str(name): (
+            "[REDACTED]"
+            if str(name).strip().casefold() in _SENSITIVE_HTTP_HEADERS
+            else str(value)
+        )
+        for name, value in headers.items()
+    }
+
+
+def _body_evidence(payload: bytes) -> dict[str, Any]:
+    """Represent an HTTP body without truncation and with a verification hash."""
+
+    raw = bytes(payload)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {
+            "body_encoding": "base64",
+            "body": base64.b64encode(raw).decode("ascii"),
+            "body_bytes": len(raw),
+            "body_sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    return {
+        "body_encoding": "utf-8",
+        "body": text,
+        "body_bytes": len(raw),
+        "body_sha256": hashlib.sha256(raw).hexdigest(),
+    }
 
 
 def _provider_base_url(global_config: Any) -> str:
@@ -124,6 +177,120 @@ class HashiApiAdapter(OpenRouterAdapter):
             or _provider_base_url(global_config)
         ).strip().rstrip("/")
         self.hashi_url = f"{configured}/chat/completions"
+        configured_audit_path = str(
+            extra.get("hashi_api_transport_log") or ""
+        ).strip()
+        if configured_audit_path:
+            self.transport_audit_path = Path(configured_audit_path).expanduser()
+        else:
+            logs_root = getattr(global_config, "base_logs_dir", None)
+            self.transport_audit_path = (
+                Path(logs_root).expanduser()
+                if logs_root
+                else Path(self.config.workspace_dir)
+            ) / "hashi_api_transport.jsonl"
+
+    def _record_transport_event(
+        self,
+        event: str,
+        *,
+        request_id: str,
+        provider_call: str,
+        streaming: bool,
+        request: httpx.Request | None = None,
+        response: httpx.Response | None = None,
+        response_body: bytes | None = None,
+        stream_lines: list[str] | None = None,
+        stream_complete: bool | None = None,
+        error: BaseException | None = None,
+    ) -> str:
+        """Append one complete local HTTP boundary record and fsync it."""
+
+        event_id = f"hashi-api-transport-{uuid.uuid4().hex}"
+        record: dict[str, Any] = {
+            "format": "hashi-api-transport-v1",
+            "event_id": event_id,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "event": str(event),
+            "process_id": os.getpid(),
+            "agent": str(getattr(self.config, "name", "") or ""),
+            "model": str(getattr(self.config, "model", "") or ""),
+            "request_id": str(request_id or ""),
+            "provider_call": str(provider_call or ""),
+            "streaming": bool(streaming),
+            "gateway_url": self.hashi_url,
+        }
+        if request is not None:
+            request_content = bytes(request.content)
+            record["http_request"] = {
+                "method": str(request.method),
+                "url": str(request.url),
+                "headers": _audit_headers(request.headers),
+                **_body_evidence(request_content),
+            }
+        if response is not None:
+            body = bytes(response_body) if response_body is not None else b""
+            record["http_response"] = {
+                "status": int(response.status_code),
+                "headers": _audit_headers(response.headers),
+                **_body_evidence(body),
+            }
+        if stream_lines is not None:
+            # Lines are retained individually so no SSE event is lost or
+            # confused with an embedded newline in provider content.
+            record["stream_lines"] = list(stream_lines)
+            record["stream_complete"] = bool(stream_complete)
+        if error is not None:
+            record["error"] = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+
+        encoded = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+        path = Path(self.transport_audit_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with _TRANSPORT_AUDIT_LOCK, path.open("a", encoding="utf-8") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            path.chmod(0o600)
+        except OSError as exc:
+            raise HashiApiTransportAuditError(
+                f"HASHI API transport audit persistence failed: {exc}"
+            ) from exc
+        return f"hashi-transport:{path}:{event_id}"
+
+    @staticmethod
+    def _attach_transport_refs(error: BaseException, refs: list[str]) -> None:
+        if refs:
+            setattr(error, "hashi_transport_audit_refs", tuple(refs))
+
+    def _build_audited_request(
+        self,
+        payload: dict,
+        headers: dict,
+        *,
+        streaming: bool,
+    ) -> tuple[httpx.Request, list[str]]:
+        """Build first, then persist the exact bytes before network activity."""
+
+        request = self.client.build_request(
+            "POST",
+            self.hashi_url,
+            json=payload,
+            headers=headers,
+        )
+        request_id = str(headers.get("X-Hashi-Correlation-ID") or "")
+        provider_call = str(headers.get("X-Hashi-Provider-Call") or "")
+        ref = self._record_transport_event(
+            "client_request_prepared",
+            request_id=request_id,
+            provider_call=provider_call,
+            streaming=streaming,
+            request=request,
+        )
+        return request, [ref]
 
     def _hashi_reasoning_effort(self) -> str:
         """Resolve provider reasoning without losing HER's request-time override."""
@@ -205,9 +372,47 @@ class HashiApiAdapter(OpenRouterAdapter):
         headers: dict,
         on_stream_event: StreamCallback,
     ) -> _APIResult:
-        response = await self.client.post(self.hashi_url, json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
+        request, audit_refs = self._build_audited_request(
+            payload,
+            headers,
+            streaming=False,
+        )
+        try:
+            response = await self.client.send(request)
+        except BaseException as exc:
+            failure_ref = self._record_transport_event(
+                "client_transport_failed",
+                request_id=str(headers.get("X-Hashi-Correlation-ID") or ""),
+                provider_call=str(headers.get("X-Hashi-Provider-Call") or ""),
+                streaming=False,
+                request=request,
+                error=exc,
+            )
+            audit_refs.append(failure_ref)
+            self._attach_transport_refs(exc, audit_refs)
+            raise
+
+        response_body = bytes(response.content)
+        response_ref = self._record_transport_event(
+            (
+                "client_response_rejected"
+                if response.status_code >= 400
+                else "client_response_received"
+            ),
+            request_id=str(headers.get("X-Hashi-Correlation-ID") or ""),
+            provider_call=str(headers.get("X-Hashi-Provider-Call") or ""),
+            streaming=False,
+            request=request,
+            response=response,
+            response_body=response_body,
+        )
+        audit_refs.append(response_ref)
+        try:
+            response.raise_for_status()
+            data = response.json()
+        except BaseException as exc:
+            self._attach_transport_refs(exc, audit_refs)
+            raise
         choices = data.get("choices") or []
         if not choices:
             return _APIResult(text="", tool_calls=None, finish_reason="error")
@@ -253,13 +458,50 @@ class HashiApiAdapter(OpenRouterAdapter):
         stream_usage: dict = {}
         saw_done = False
         provider_activity_observed = False
+        stream_lines: list[str] = []
+        request, audit_refs = self._build_audited_request(
+            payload,
+            headers,
+            streaming=True,
+        )
+        try:
+            response = await self.client.send(request, stream=True)
+        except BaseException as exc:
+            failure_ref = self._record_transport_event(
+                "client_transport_failed",
+                request_id=str(headers.get("X-Hashi-Correlation-ID") or ""),
+                provider_call=str(headers.get("X-Hashi-Provider-Call") or ""),
+                streaming=True,
+                request=request,
+                error=exc,
+            )
+            audit_refs.append(failure_ref)
+            self._attach_transport_refs(exc, audit_refs)
+            raise
 
-        async with self.client.stream(
-            "POST", self.hashi_url, json=payload, headers=headers
-        ) as response:
-            response.raise_for_status()
+        caught_error: BaseException | None = None
+        try:
+            if response.status_code >= 400:
+                response_body = await response.aread()
+                response_ref = self._record_transport_event(
+                    "client_response_rejected",
+                    request_id=str(headers.get("X-Hashi-Correlation-ID") or ""),
+                    provider_call=str(headers.get("X-Hashi-Provider-Call") or ""),
+                    streaming=True,
+                    request=request,
+                    response=response,
+                    response_body=response_body,
+                    stream_complete=True,
+                )
+                audit_refs.append(response_ref)
+                try:
+                    response.raise_for_status()
+                except BaseException as exc:
+                    self._attach_transport_refs(exc, audit_refs)
+                    raise
 
             async for line in response.aiter_lines():
+                stream_lines.append(line)
                 self._touch_activity()
 
                 if not line.startswith("data: "):
@@ -357,11 +599,44 @@ class HashiApiAdapter(OpenRouterAdapter):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
+            if not saw_done and not finish_reason:
+                raise httpx.RemoteProtocolError(
+                    "provider stream ended without a completion marker"
+                )
+        except BaseException as exc:
+            caught_error = exc
+            raise
+        finally:
+            if response.status_code < 400:
+                try:
+                    response_ref = self._record_transport_event(
+                        (
+                            "client_stream_received"
+                            if caught_error is None
+                            else "client_stream_interrupted"
+                        ),
+                        request_id=str(
+                            headers.get("X-Hashi-Correlation-ID") or ""
+                        ),
+                        provider_call=str(
+                            headers.get("X-Hashi-Provider-Call") or ""
+                        ),
+                        streaming=True,
+                        request=request,
+                        response=response,
+                        response_body="\n".join(stream_lines).encode("utf-8"),
+                        stream_lines=stream_lines,
+                        stream_complete=saw_done,
+                        error=caught_error,
+                    )
+                    audit_refs.append(response_ref)
+                    if caught_error is not None:
+                        self._attach_transport_refs(caught_error, audit_refs)
+                finally:
+                    await response.aclose()
+            else:
+                await response.aclose()
 
-        if not saw_done and not finish_reason:
-            raise httpx.RemoteProtocolError(
-                "provider stream ended without a completion marker"
-            )
         full_text = "".join(text_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
         return _APIResult(
@@ -502,6 +777,10 @@ class HashiApiAdapter(OpenRouterAdapter):
                                 headers,
                                 on_stream_event,
                             )
+                    except HashiApiTransportAuditError:
+                        # No further provider or tool activity is allowed when
+                        # the mandatory raw transport log is unavailable.
+                        raise
                     except asyncio.CancelledError:
                         provider_calls.append(
                             self._provider_call_record(
@@ -701,6 +980,32 @@ class HashiApiAdapter(OpenRouterAdapter):
                 tool_loop_count=tool_loop_count,
             )
 
+        except HashiApiTransportAuditError as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            return BackendResponse(
+                text="",
+                duration_ms=duration_ms,
+                error=str(exc),
+                is_success=False,
+                error_code="AUDIT_PERSISTENCE_FAILURE",
+                error_retryable=False,
+                side_effects_possible=bool(total_tool_calls),
+                tool_call_count=total_tool_calls,
+                tool_loop_count=tool_loop_count,
+                stream_metadata={
+                    "provider_failure_description": (
+                        "HASHI stopped because the mandatory local HTTP "
+                        "transport record could not be persisted."
+                    ),
+                    "transport_audit_path": str(self.transport_audit_path),
+                    "meter": {"provider_calls": provider_calls},
+                    "gateway_continuation": {
+                        "enabled": gateway_session_id is not None,
+                        "session_id": gateway_session_id,
+                        "transport_calls": gateway_transport_calls,
+                    },
+                },
+            )
         except asyncio.CancelledError:
             self.logger.warning(f"Request cancelled for {request_id}")
             raise
@@ -720,6 +1025,14 @@ class HashiApiAdapter(OpenRouterAdapter):
             metadata["meter"] = {"provider_calls": provider_calls}
             metadata["multimodal_routing"] = list(media_routing)
             metadata["multimodal_fallback_attempted"] = media_fallback_attempted
+            metadata["gateway_continuation"] = {
+                "enabled": gateway_session_id is not None,
+                "session_id": gateway_session_id,
+                "transport_calls": gateway_transport_calls,
+                "failed_provider_attempt": provider_attempt_count,
+                "after_tool_end": tool_loop_count > 0,
+            }
+            metadata["transport_audit_path"] = str(self.transport_audit_path)
             attachment_id = str(getattr(e, "attachment_id", "") or "")
             if attachment_id:
                 metadata["attachment_id"] = attachment_id

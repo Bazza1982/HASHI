@@ -114,6 +114,9 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "default_model": "deepseek-v4-pro",
         "efforts": [],
         "default_effort": None,
+        # HER provider reasoning is distinct from a top-level Engine effort.
+        # DeepSeek has only three different transport states: off, high, max.
+        "provider_reasoning_efforts": ["off", "high", "max"],
         "secret_keys": [
             "deepseek-api_key",
             "deepseek_api_key",
@@ -271,9 +274,7 @@ def normalize_allowed_backends(backends: list) -> list[dict]:
 
     normalized: list[dict] = []
     explicit_v2 = any(
-        str(
-            (raw if isinstance(raw, str) else dict(raw).get("engine")) or ""
-        ).strip()
+        str((raw if isinstance(raw, str) else dict(raw).get("engine")) or "").strip()
         == HER_V2_ENGINE
         for raw in backends or []
     )
@@ -310,7 +311,9 @@ def is_selectable_backend(engine: str | None) -> bool:
     return bool(canonical and canonical not in PROVIDER_ONLY_ENGINE_IDS)
 
 
-def migrate_provider_only_active_backend(engine: str | None, backends: list[dict]) -> str:
+def migrate_provider_only_active_backend(
+    engine: str | None, backends: list[dict]
+) -> str:
     """Move a legacy direct provider selection onto the HER v2 runtime.
 
     The provider rows remain in ``allowed_backends`` as HER authorisation and
@@ -413,6 +416,23 @@ def get_available_efforts(engine: str, model: str | None = None) -> list[str]:
     return list(entry.get("efforts") or [])
 
 
+def get_provider_reasoning_efforts(
+    engine: str,
+    model: str | None = None,
+) -> list[str]:
+    """Return provider-reasoning choices without changing Engine effort policy."""
+
+    entry = get_backend_entry(engine)
+    if model:
+        model_efforts = entry.get("model_provider_reasoning_efforts") or {}
+        if model in model_efforts:
+            return list(model_efforts[model] or [])
+    configured = entry.get("provider_reasoning_efforts")
+    if configured is not None:
+        return list(configured or [])
+    return get_available_efforts(engine, model)
+
+
 def get_default_effort(engine: str, model: str | None = None) -> str | None:
     default_effort = get_backend_entry(engine).get("default_effort")
     if default_effort:
@@ -421,7 +441,9 @@ def get_default_effort(engine: str, model: str | None = None) -> str | None:
     return efforts[0] if efforts else None
 
 
-def normalize_effort(engine: str, effort: str | None, model: str | None = None) -> str | None:
+def normalize_effort(
+    engine: str, effort: str | None, model: str | None = None
+) -> str | None:
     if effort in ("extra", "extra_high"):
         effort = "xhigh"
     if canonical_backend_engine(engine) == HER_V2_ENGINE:
@@ -436,11 +458,7 @@ def normalize_effort(engine: str, effort: str | None, model: str | None = None) 
             "reviewed": "xhigh",
             "assured": "max",
         }.get(
-            str(effort or "")
-            .strip()
-            .casefold()
-            .replace("-", "_")
-            .replace(" ", "_"),
+            str(effort or "").strip().casefold().replace("-", "_").replace(" ", "_"),
             effort,
         )
     efforts = get_available_efforts(engine, model)

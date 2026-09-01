@@ -2094,6 +2094,32 @@ class HERv2Adapter(BaseBackend):
                 )
                 serialized_line_items.append(payload)
             metadata.setdefault("meter", {})["line_items"] = serialized_line_items
+        primary_failure = (
+            dict(result.primary_failure)
+            if isinstance(result.primary_failure, Mapping)
+            else {}
+        )
+        failure_details = (
+            dict(primary_failure.get("details") or {})
+            if isinstance(primary_failure.get("details"), Mapping)
+            else {}
+        )
+        tool_call_count = max(
+            int(getattr(provider, "tool_call_count", 0) or 0),
+            int(failure_details.get("tool_call_count") or 0),
+        )
+        tool_loop_count = max(
+            int(getattr(provider, "tool_loop_count", 0) or 0),
+            int(failure_details.get("tool_loop_count") or 0),
+        )
+        raw_http_status = primary_failure.get("http_status")
+        http_status = (
+            int(raw_http_status) if raw_http_status is not None else None
+        )
+        raw_retry_after = primary_failure.get("retry_after_s")
+        retry_after_s = (
+            float(raw_retry_after) if raw_retry_after is not None else None
+        )
         return BackendResponse(
             text=result.text,
             duration_ms=duration_ms,
@@ -2102,11 +2128,19 @@ class HERv2Adapter(BaseBackend):
             stop_reason=result.terminal_state.value.lower(),
             usage=getattr(provider, "usage", None),
             cost_usd=(float(getattr(provider, "cost_usd", 0.0) or 0.0) or None),
-            tool_call_count=int(getattr(provider, "tool_call_count", 0) or 0),
-            tool_loop_count=int(getattr(provider, "tool_loop_count", 0) or 0),
+            tool_call_count=tool_call_count,
+            tool_loop_count=tool_loop_count,
             stream_metadata=metadata,
             error_code=terminal_error_code or None,
             error_retryable=False if technical_error else None,
+            http_status=http_status,
+            provider_request_id=(
+                str(primary_failure.get("provider_request_id") or "") or None
+            ),
+            retry_after_s=retry_after_s,
+            side_effects_possible=bool(
+                primary_failure.get("side_effects_possible")
+            ),
             content=tuple(result.content),
         )
 

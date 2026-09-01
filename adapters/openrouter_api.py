@@ -281,11 +281,98 @@ def _retry_after_seconds(response: httpx.Response | None) -> float | None:
 def _provider_request_id(response: httpx.Response | None) -> str:
     if response is None:
         return ""
-    for name in ("x-request-id", "request-id", "cf-ray", "x-amzn-requestid"):
+    for name in (
+        "x-hashi-gateway-request-id",
+        "x-request-id",
+        "request-id",
+        "cf-ray",
+        "x-amzn-requestid",
+    ):
         value = str(response.headers.get(name) or "").strip()
         if value:
             return value
     return ""
+
+
+_SENSITIVE_HTTP_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "set-cookie",
+        "x-api-key",
+    }
+)
+
+
+def _diagnostic_headers(headers: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        str(name): (
+            "[REDACTED]"
+            if str(name).strip().casefold() in _SENSITIVE_HTTP_HEADER_NAMES
+            else str(value)
+        )
+        for name, value in headers.items()
+    }
+
+
+def _diagnostic_body(payload: bytes) -> dict[str, Any]:
+    raw = bytes(payload)
+    try:
+        body = raw.decode("utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        body = base64.b64encode(raw).decode("ascii")
+        encoding = "base64"
+    return {
+        "body": body,
+        "body_encoding": encoding,
+        "body_bytes": len(raw),
+        "body_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _provider_http_failure_diagnostics(error: Exception) -> dict[str, Any]:
+    """Preserve the complete HTTP request/response evidence for local audit."""
+
+    diagnostics: dict[str, Any] = {}
+    response = getattr(error, "response", None)
+    request = getattr(error, "request", None)
+    if not isinstance(request, httpx.Request) and isinstance(response, httpx.Response):
+        try:
+            request = response.request
+        except RuntimeError:
+            request = None
+
+    if isinstance(request, httpx.Request):
+        try:
+            request_body = bytes(request.content)
+        except (httpx.RequestNotRead, TypeError, ValueError):
+            request_body = b""
+        diagnostics["request"] = {
+            "method": str(request.method),
+            "url": str(request.url),
+            "headers": _diagnostic_headers(request.headers),
+            **_diagnostic_body(request_body),
+        }
+
+    if isinstance(response, httpx.Response):
+        try:
+            response_body = bytes(response.content)
+        except (httpx.ResponseNotRead, TypeError, ValueError):
+            response_body = b""
+        diagnostics["response"] = {
+            "status": int(response.status_code),
+            "headers": _diagnostic_headers(response.headers),
+            **_diagnostic_body(response_body),
+        }
+
+    audit_refs = getattr(error, "hashi_transport_audit_refs", ())
+    if isinstance(audit_refs, (list, tuple)):
+        diagnostics["transport_audit_refs"] = [
+            str(item) for item in audit_refs if str(item).strip()
+        ]
+    return diagnostics
 
 
 def _backend_failure_response(
@@ -399,6 +486,7 @@ def _backend_failure_response(
             "provider_activity_observed": bool(
                 getattr(error, "provider_activity_observed", False)
             ),
+            "provider_http_failure": _provider_http_failure_diagnostics(error),
         },
     )
 

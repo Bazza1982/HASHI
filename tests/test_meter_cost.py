@@ -348,7 +348,7 @@ def test_formatter_provider_no_approx():
     ])
     tail = format_cost_tail(receipt, locale="zh-CN")
     assert "≈" not in tail.splitlines()[0]
-    assert "Provider 实报" in tail
+    assert "服务提供方实报" in tail
 
 
 def test_formatter_small_cost():
@@ -421,7 +421,7 @@ def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages
         "💰 前台回合：≈ US$0.1061 · 价目表 2026-08-23.v1",
         "📥 输入 2.916M · 缓存命中 2.683M（92.0%）",
         "📤 输出 52.2K（其中推理 38.1K）",
-        "🔁 Provider 请求 40 · 无缓存约 US$1.0965 · 缓存节省约 US$0.9904（90.3%）",
+        "🔁 服务提供方请求 40 · 无缓存约 US$1.0965 · 缓存节省约 US$0.9904（90.3%）",
     ]
     english = format_cost_tail(receipt, locale="en")
     assert english.splitlines()[0].startswith("💰 Foreground turn: ≈ US$0.1061")

@@ -712,6 +712,21 @@ class _SideEffectFailureProvider(_DirectProvider):
                 "provider stream ended before completion",
                 code=ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT,
                 human_description=("The provider response began but did not complete."),
+                http_status=400,
+                provider_request_id="gateway-reject-side-effect-1",
+                details={
+                    "tool_call_count": 3,
+                    "tool_loop_count": 3,
+                    "provider_http_failure": {
+                        "response": {
+                            "status": 400,
+                            "body": '{"error":{"code":"invalid_tool_result"}}',
+                        },
+                        "transport_audit_refs": [
+                            "hashi-transport:test:client_response_rejected"
+                        ],
+                    },
+                },
             )
         elif request.stage is Stage.FINALISATION:
             payload = {
@@ -1212,12 +1227,24 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
     recovery_code = ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
     assert response.is_success is False
     assert response.error_code == primary_code
+    assert response.http_status == 400
+    assert response.provider_request_id == "gateway-reject-side-effect-1"
+    assert response.side_effects_possible is True
+    assert response.tool_call_count == 3
+    assert response.tool_loop_count == 3
     assert primary_code in response.error
     assert primary_code in response.text
     assert recovery_code in response.text
     assert "Foreground cleanup:" in response.text
     chain = response.stream_metadata["her_v2"]["failure_chain"]
     assert chain["primary_failure"]["code"] == primary_code
+    assert chain["primary_failure"]["http_status"] == 400
+    assert chain["primary_failure"]["provider_request_id"] == (
+        "gateway-reject-side-effect-1"
+    )
+    assert chain["primary_failure"]["details"]["provider_http_failure"][
+        "response"
+    ]["body"] == '{"error":{"code":"invalid_tool_result"}}'
     assert chain["recovery_decision"]["code"] == recovery_code
     assert chain["recovery_decision"]["automatic_replay_attempted"] is False
     assert chain["foreground_cleanup"]["status"] == "terminated"

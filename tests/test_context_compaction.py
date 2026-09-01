@@ -12,9 +12,10 @@ import pytest
 
 from adapters.base import BackendResponse
 from adapters.her_v2 import _ExecutionStageCompactionProvider
-from orchestrator import runtime_pipeline, runtime_session
+from orchestrator import runtime_pipeline, runtime_session, ui_language
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+from orchestrator.commands.compact import _outcome_text
 from orchestrator.context_compaction import (
     CAPSULE_FORMAT,
     CONTEXT_PROTECTED_SET_TOO_LARGE,
@@ -39,15 +40,15 @@ from orchestrator.context_compaction import (
     install_history_section,
     load_policy,
     load_route_config,
+    render_history,
     resolve_compact_route,
     resolve_target_capacity,
     resolve_trigger_budget,
-    render_history,
     schedule_execution_stage,
 )
 from orchestrator.her_v2.interfaces import StageInvocationError
-from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.her_v2.models import Stage, StageRequest
+from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.runtime_pipeline import (
     _typed_capacity_recovery_is_safe,
     recover_typed_context_capacity_rejection,
@@ -661,6 +662,12 @@ async def test_manual_compact_is_unnecessary_only_below_64k(tmp_path):
     assert outcome.code == "BELOW_MANUAL_COMPACTION_WINDOW"
     assert outcome.before_tokens == DEFAULT_MANUAL_COMPACTION_MIN_TOKENS - 1
     assert f"{DEFAULT_MANUAL_COMPACTION_MIN_TOKENS:,}" in outcome.message
+    assert outcome.message_key == "compact.message.below_manual_window"
+    with ui_language.language_scope(runtime, locale="zh-CN"):
+        rendered = _outcome_text(outcome)
+    assert "当前上下文为 63,999 个 Token" in rendered
+    assert "低于 64,000 个 Token 的手动压缩阈值" in rendered
+    assert "Current context is" not in rendered
     assert calls == []
 
 
