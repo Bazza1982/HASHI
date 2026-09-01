@@ -181,4 +181,3 @@ New Connector work must:
 7. avoid private external product names and client-specific runtime branches;
    and
 8. preserve compatibility identifiers only where migration requires them.
-
