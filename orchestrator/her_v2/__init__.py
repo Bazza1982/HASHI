@@ -14,6 +14,11 @@ from .commentary import (
     PersonaCommentaryPipeline,
 )
 from .config import HERv2Config, ProviderProfile
+from .cognitive_control import (
+    COGNITIVE_DECISION_TOOL,
+    CognitiveInterrupt,
+    StageCognitiveController,
+)
 from .interfaces import DreamMaintainer, HabitAdvisor, MeditationRunner
 from .learning import HERv2Learning, HERv2TurnLearning, LearningRecovery
 from .ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
@@ -58,6 +63,8 @@ __all__ = [
     "CHECKPOINT_ELAPSED_THRESHOLD_S",
     "CHECKPOINT_RESULT_THRESHOLD",
     "CompulsoryReplanCoordinator",
+    "COGNITIVE_DECISION_TOOL",
+    "CognitiveInterrupt",
     "CommentaryPort",
     "DreamMaintainer",
     "DurableAuditLog",
@@ -89,6 +96,7 @@ __all__ = [
     "ReviewOutcome",
     "Route",
     "Stage",
+    "StageCognitiveController",
     "StrategyDecision",
     "TerminalState",
     "TriageClassification",

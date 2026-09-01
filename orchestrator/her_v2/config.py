@@ -197,6 +197,9 @@ class HERv2Config:
     # Capability gates. EffortPolicy owns which stage receives each surface.
     strategy_tools_enabled: bool = True
     planning_tools_enabled: bool = True
+    # Semantic no-new-information cycles enter a typed model decision boundary
+    # instead of relying on an arbitrary tool/call ceiling.
+    cognitive_control_enabled: bool = False
     shadow_mode: bool = False
     # Control-plane revisions are snapshotted once per Turn. They are not
     # provider reasoning controls and never mutate an in-flight runtime.
@@ -625,6 +628,10 @@ class HERv2Config:
             planning_tools_enabled=_strict_bool(
                 raw.get("planning_tools_enabled", True),
                 "planning_tools_enabled",
+            ),
+            cognitive_control_enabled=_strict_bool(
+                raw.get("cognitive_control_enabled", False),
+                "cognitive_control_enabled",
             ),
             shadow_mode=_strict_bool(raw.get("shadow_mode", False), "shadow_mode"),
             routing_revision=max(1, int(raw.get("routing_revision") or 1)),

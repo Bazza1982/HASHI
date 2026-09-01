@@ -43,6 +43,11 @@ Runtime timer heartbeats are intentionally excluded. Tool calls and other
 observable Execution activity remain owned by `/verbose`; the completed
 Execution outcome remains owned by the final response.
 
+All three modes may additionally use the lifecycle-wide semantic cognitive
+control when enabled for the Agent. It is independent of mode selection: it
+does not add a stage or tool-call ceiling, and it activates only when repeated
+semantic action/result cycles prove that no new information is arriving.
+
 ## Compatibility
 
 - Canonical persisted and wire values remain `zero`, `low`, and `medium`.

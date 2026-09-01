@@ -291,6 +291,7 @@ def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
     assert config.direct_strategy_self_selection is False
     assert config.strategy_tools_enabled is True
     assert config.planning_tools_enabled is True
+    assert config.cognitive_control_enabled is False
 
 
 def test_direct_strategy_self_selection_is_an_explicit_boolean_experiment():
@@ -327,6 +328,25 @@ def test_strategy_and_planning_tool_access_are_explicit_boolean_controls():
     for field in ("strategy_tools_enabled", "planning_tools_enabled"):
         with pytest.raises(HERv2ConfigurationError):
             HERv2Config.from_mapping({"profiles": _profiles(), field: "true"})
+
+
+def test_cognitive_control_is_an_explicit_boolean_rollout_gate():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "cognitive_control_enabled": True,
+        }
+    )
+
+    assert config.cognitive_control_enabled is True
+
+    with pytest.raises(HERv2ConfigurationError):
+        HERv2Config.from_mapping(
+            {
+                "profiles": _profiles(),
+                "cognitive_control_enabled": "true",
+            }
+        )
 
 
 def test_direct_route_reasoning_can_be_explicitly_overridden_but_model_stays_quick():
@@ -526,6 +546,7 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         ("direct_strategy_self_selection", 1),
         ("strategy_tools_enabled", 1),
         ("planning_tools_enabled", 1),
+        ("cognitive_control_enabled", 1),
         ("audit_failure_terminal", "COMPLETED"),
     ]
     for field, value in cases:

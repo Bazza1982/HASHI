@@ -257,6 +257,9 @@ class StageResponse:
     media_routing: tuple[Mapping[str, Any], ...] = ()
     validation_source: str = ""
     content: tuple[Mapping[str, Any], ...] = ()
+    # Observable decision state only.  This must never contain hidden model
+    # reasoning or reconstructed chain-of-thought.
+    cognitive_control: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

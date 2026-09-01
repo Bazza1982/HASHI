@@ -966,6 +966,9 @@ class HERv2Adapter(BaseBackend):
             runtime_context=self._runtime_context(),
             usage_observer=usage_observer,
             default_recovery_kind=default_recovery_kind,
+            cognitive_control_enabled=bool(
+                self._v2_config and self._v2_config.cognitive_control_enabled
+            ),
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:

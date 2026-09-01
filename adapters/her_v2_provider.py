@@ -38,6 +38,11 @@ from adapters.stream_events import (
     legacy_delivery_class,
 )
 from orchestrator.her_v2.audit import AuditPersistenceError, DurableAuditLog
+from orchestrator.her_v2.cognitive_control import (
+    COGNITIVE_DECISION_TOOL,
+    StageCognitiveController,
+    cognitive_system_contract,
+)
 from orchestrator.her_v2.commentary import (
     MAX_PACKAGED_COMMENTARY_CHARS,
     NeutralCommentary,
@@ -93,6 +98,7 @@ from orchestrator.multimodal_contract import (
 )
 from orchestrator.voice_transcript_gate import await_authorized_transcript
 from tools.meter_cost import PerCallUsageLineItem
+from tools.smart_tools import smart_tool_spec
 from tools.token_tracker import resolve_cost_source
 
 _HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
@@ -1461,6 +1467,289 @@ class _UnboundedToolRegistry:
         return getattr(self._base, name)
 
 
+class _CognitiveControlToolRegistry:
+    """Expose a typed decision boundary when tool evidence stops changing.
+
+    This wrapper is request-local and stage-neutral.  It does not count tool
+    calls or impose an execution ceiling.  Ordinary tools stay available for
+    as long as they produce semantically distinct evidence.  After a detected
+    cycle, only the internal cognitive decision tool is advertised until the
+    same model finalises, reports a blocker, or records a distinct hypothesis
+    with a narrow tool set and explicit stop condition.
+    """
+
+    def __init__(
+        self,
+        base: Any,
+        request: StageRequest,
+        *,
+        audit_log: DurableAuditLog | None = None,
+        provider: str = "",
+        model: str = "",
+    ) -> None:
+        self._base = base
+        self._request = request
+        self._audit_log = audit_log
+        self._provider = str(provider or "")
+        self._model = str(model or "")
+        self._audit_serial = 0
+        self.controller = StageCognitiveController(
+            stage=request.stage.value,
+            goal=request.goal,
+        )
+        self.max_loops = None
+
+    @property
+    def base(self) -> Any:
+        return getattr(self._base, "base", self._base)
+
+    @property
+    def cognitive_final_response_required(self) -> bool:
+        return self.controller.final_response_required
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def _base_definitions(self, tiers=None) -> list[dict[str, Any]]:
+        getter = getattr(self._base, "get_tool_definitions", None)
+        if not callable(getter):
+            return []
+        try:
+            raw = getter(tiers=tiers)
+        except TypeError:
+            raw = getter(tiers)
+        return [dict(item) for item in raw if isinstance(item, Mapping)]
+
+    def _all_base_tool_names(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                str((item.get("function") or {}).get("name") or "").strip()
+                for item in self._base_definitions(None)
+                if str((item.get("function") or {}).get("name") or "").strip()
+            )
+        )
+
+    def get_tool_definitions(self, tiers=None):
+        if self.controller.awaiting_decision:
+            return [self.controller.decision_schema()]
+        if self.controller.final_response_required:
+            return []
+        definitions = self._base_definitions(tiers)
+        allowed = self.controller.active_tool_allowlist
+        if allowed is None:
+            return definitions
+        return [
+            item
+            for item in definitions
+            if str((item.get("function") or {}).get("name") or "") in allowed
+        ]
+
+    def allowed_tool_names(self) -> tuple[str, ...]:
+        if self.controller.awaiting_decision:
+            return (COGNITIVE_DECISION_TOOL,)
+        if self.controller.final_response_required:
+            return ()
+        allowed = self.controller.active_tool_allowlist
+        names = self._all_base_tool_names()
+        return (
+            names
+            if allowed is None
+            else tuple(name for name in names if name in allowed)
+        )
+
+    def is_allowed(self, tool_name: str) -> bool:
+        name = str(tool_name or "")
+        if self.controller.awaiting_decision:
+            return name == COGNITIVE_DECISION_TOOL
+        if self.controller.final_response_required:
+            return False
+        allowed = self.controller.active_tool_allowlist
+        if allowed is not None and name not in allowed:
+            return False
+        checker = getattr(self._base, "is_allowed", None)
+        return (
+            bool(checker(name))
+            if callable(checker)
+            else name in self._all_base_tool_names()
+        )
+
+    def is_read_only(self, tool_name: str) -> bool:
+        if str(tool_name or "") == COGNITIVE_DECISION_TOOL:
+            return True
+        checker = getattr(self._base, "is_read_only", None)
+        return bool(checker(tool_name)) if callable(checker) else False
+
+    def evaluate_admission(
+        self, tool_name: str, arguments: dict, tool_call_id: str = ""
+    ):
+        if str(tool_name or "") == COGNITIVE_DECISION_TOOL:
+            return None
+        evaluator = getattr(self._base, "evaluate_admission", None)
+        return (
+            evaluator(tool_name, arguments, tool_call_id)
+            if callable(evaluator)
+            else None
+        )
+
+    def _audit(self, event: str, payload: Mapping[str, Any]) -> None:
+        if self._audit_log is None:
+            return
+        self._audit_serial += 1
+        invocation = str(
+            self._request.invocation_id
+            or (
+                f"{self._request.turn_id}:{self._request.stage.value}:"
+                f"{self._request.attempt}"
+            )
+        )
+        self._audit_log.append(
+            event_id=(f"{invocation}:cognitive:{self._audit_serial}:{event}"),
+            turn_id=self._request.turn_id,
+            request_ref=self._request.request_ref,
+            stage=self._request.stage.value,
+            role=self._request.role,
+            event=event,
+            provider=self._provider,
+            model=self._model,
+            attempt=self._request.attempt,
+            plan_id=self._request.plan_id or None,
+            payload=dict(payload),
+        )
+
+    @staticmethod
+    def _result(
+        *,
+        tool_call_id: str,
+        output: str,
+        is_error: bool,
+        details: Mapping[str, Any] | None = None,
+        content: Any = None,
+    ):
+        from tools.registry import ToolResult
+
+        return ToolResult(
+            tool_call_id=str(tool_call_id or ""),
+            output=str(output),
+            is_error=bool(is_error),
+            content=content,
+            details=dict(details or {}),
+        )
+
+    async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        name = str(tool_name or "")
+        if name == COGNITIVE_DECISION_TOOL:
+            decision, rejected = self.controller.decide(
+                arguments,
+                available_tools=self._all_base_tool_names(),
+            )
+            self._audit(
+                "cognitive_decision_rejected" if rejected else "cognitive_decision",
+                {
+                    "decision": decision,
+                    "state": self.controller.snapshot(),
+                },
+            )
+            return self._result(
+                tool_call_id=tool_call_id,
+                output=json.dumps(
+                    decision,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                is_error=rejected,
+                details={
+                    "control_disposition": (
+                        "cognitive_decision_rejected"
+                        if rejected
+                        else "cognitive_decision"
+                    ),
+                    "cognitive_control": self.controller.snapshot(),
+                },
+            )
+
+        if not self.is_allowed(name):
+            payload = self.controller.interrupt_payload()
+            return self._result(
+                tool_call_id=tool_call_id,
+                output=json.dumps(
+                    {
+                        "status": "blocked",
+                        "code": "COGNITIVE_DECISION_REQUIRED",
+                        "cognitive_interrupt": payload or None,
+                        "instruction": (
+                            "Use the currently advertised cognitive decision "
+                            "boundary or return the normal stage response; do not "
+                            "call another ordinary tool."
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                is_error=True,
+                details={
+                    "control_disposition": "cognitive_interrupt",
+                    "cognitive_control": self.controller.snapshot(),
+                },
+            )
+
+        result = await self._base.execute(name, arguments, tool_call_id)
+        details = dict(getattr(result, "details", None) or {})
+        interrupt = self.controller.observe(
+            tool_name=name,
+            tool_profile=smart_tool_spec(name).profile,
+            arguments=arguments,
+            output=str(getattr(result, "output", "") or ""),
+            details=details,
+            is_error=bool(getattr(result, "is_error", False)),
+        )
+        if interrupt is None:
+            return result
+
+        payload = self.controller.interrupt_payload()
+        self._audit(
+            "cognitive_interrupt",
+            {
+                "interrupt": interrupt.as_dict(),
+                "state": self.controller.snapshot(),
+            },
+        )
+        output = str(getattr(result, "output", "") or "").rstrip()
+        output += "\n\nHASHI_COGNITIVE_INTERRUPT\n" + json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        details.update(
+            {
+                "control_disposition": "cognitive_interrupt",
+                "cognitive_interrupt": interrupt.as_dict(),
+                "cognitive_control": self.controller.snapshot(),
+            }
+        )
+        return self._result(
+            tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
+            output=output,
+            is_error=bool(getattr(result, "is_error", False)),
+            details=details,
+            content=getattr(result, "content", None),
+        )
+
+    def note_provider_completion(self) -> str:
+        decision = self.controller.note_provider_completion()
+        if decision:
+            self._audit(
+                "cognitive_boundary_completed",
+                {
+                    "decision": decision,
+                    "state": self.controller.snapshot(),
+                },
+            )
+        return decision
+
+
 class _MediaRoutingToolRegistry:
     """Prevent one attachment from taking native and fallback routes together."""
 
@@ -1758,6 +2047,7 @@ class HashiStageProvider(StageProvider):
         runtime_context: Any = None,
         usage_observer: Callable[[PerCallUsageLineItem], None] | None = None,
         default_recovery_kind: str = "none",
+        cognitive_control_enabled: bool = False,
     ) -> None:
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
@@ -1769,6 +2059,7 @@ class HashiStageProvider(StageProvider):
         self.runtime_context = runtime_context
         self.usage_observer = usage_observer
         self.default_recovery_kind = str(default_recovery_kind or "none")
+        self.cognitive_control_enabled = bool(cognitive_control_enabled)
         self._persona_invocation_serial = 0
         self._persona_audit_contexts: dict[str, tuple[str, str]] = {}
         self.logger = logging.getLogger("HASHI.HERv2.StageProvider")
@@ -2602,6 +2893,7 @@ class HashiStageProvider(StageProvider):
                 ),
             )
         evidence_registry: _EvidenceRecordingToolRegistry | None = None
+        cognitive_registry: _CognitiveControlToolRegistry | None = None
         if selected_registry is not None:
             # The Agent-level registry owns permissions, not HER v2 execution
             # length.  HER tool-enabled stages continue until the model
@@ -2628,6 +2920,15 @@ class HashiStageProvider(StageProvider):
                     bound_plan_id=str(request.plan_id or ""),
                     enforce_plan_binding=request.role.startswith("sub_agent:"),
                 )
+            if self.cognitive_control_enabled:
+                cognitive_registry = _CognitiveControlToolRegistry(
+                    selected_registry,
+                    request,
+                    audit_log=self.audit_log,
+                    provider=profile.engine,
+                    model=profile.model,
+                )
+                selected_registry = cognitive_registry
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
             backend.tool_registry = selected_registry
@@ -3282,6 +3583,17 @@ class HashiStageProvider(StageProvider):
                         stage_prompt = request.goal
                     elif not installed:
                         stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
+            if cognitive_registry is not None:
+                contract = cognitive_system_contract()
+                current_system = str(getattr(backend, "sys_prompt", "") or "").strip()
+                if current_system:
+                    _install_system_prompt(
+                        backend,
+                        f"{current_system}\n\n{contract}",
+                    )
+                else:
+                    stage_prompt = f"{contract}\n\n{stage_prompt}"
+
             generation_kwargs: dict[str, Any] = {
                 "is_retry": request.attempt > 1,
                 "silent": self.silent,
@@ -3685,6 +3997,8 @@ class HashiStageProvider(StageProvider):
                     ),
                     details={"stop_reason": response.stop_reason},
                 )
+            if cognitive_registry is not None:
+                cognitive_registry.note_provider_completion()
             if response.usage:
                 self.usage.input_tokens += int(response.usage.input_tokens or 0)
                 self.usage.output_tokens += int(response.usage.output_tokens or 0)
@@ -3720,6 +4034,11 @@ class HashiStageProvider(StageProvider):
                     dict(part)
                     for part in getattr(response, "content", ())
                     if isinstance(part, Mapping)
+                ),
+                cognitive_control=(
+                    cognitive_registry.controller.snapshot()
+                    if cognitive_registry is not None
+                    else {}
                 ),
             )
         except ProviderCallObserverError as exc:

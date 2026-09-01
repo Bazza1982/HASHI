@@ -100,6 +100,9 @@ The only already-authorised controls that may stop or bound work are:
 
 - an explicit user `/stop`, `/steer`, cancellation, or process-lifecycle stop;
 - the configured meaningful-progress idle detector in section 19;
+- the semantic cognitive-control boundary in section 3.2.2, which withholds
+  ordinary tools only after three identical action/result cycles and asks the
+  active model to finalise, declare a blocker, or record a distinct hypothesis;
 - a connection, read-inactivity, or protocol-safety guard scoped inside the
   relevant transport/parser operation, which resets on qualifying activity and
   never encloses a complete HER stage or tool loop;
@@ -128,6 +131,40 @@ Legacy HER/Claw fields representing those ceilings remain invalid HER v2
 configuration and must be rejected rather than silently applied. Any new
 execution limit requires explicit user authorisation and an approved amendment
 to this section before implementation or supporting tests are added.
+
+#### 3.2.2 Lifecycle-wide cognitive control
+
+Every tool-enabled HER v2 stage may use the same provider-neutral cognitive
+control. This includes Direct, tool-enabled Strategy/Triage, Planning,
+Execution, Replanning, Review, and delegated execution. It is not a Planning
+special case and it is not a tool-round ceiling.
+
+The controller records only typed decisions and observable evidence. It must
+never store, reconstruct, request, or expose hidden chain-of-thought. Each
+tool/result observation is canonicalised without outer transport metadata,
+evidence receipt IDs, or advisory repeat warnings. Semantic tool arguments and
+result data—including target identifiers and requested time ranges—remain
+intact. A dead cycle requires three identical periodic sequences of semantic
+actions and semantic results with no positively observed state change. Repeated
+actions whose results continue to change are legitimate work and must not be
+interrupted.
+Pure cycles of tools explicitly classified as polling are also exempt because
+an unchanged external job state is valid evidence that waiting should continue.
+
+On the first dead-cycle observation, ordinary tools are temporarily replaced
+by one internal `hashi_cognitive_decision` boundary. The same active model must
+choose `FINALIZE`, `NEW_HYPOTHESIS`, or `BLOCKED`. A new hypothesis is accepted
+only when it names the unresolved question, the distinct evidence sought, an
+explicit stop condition, and a narrow set of already-authorised tools. Only
+those tools reopen. If the same semantic cycle returns after that intervention,
+the typed condition becomes `NO_MEANINGFUL_PROGRESS`; another new hypothesis
+is not accepted and the model must finalise or report the blocker truthfully.
+
+This boundary does not count arbitrary calls, impose elapsed time, reduce the
+Agent's underlying permissions, launch another stage, or fork the provider
+thread. It makes a decision boundary explicit inside the existing continuous
+tool conversation and retains normal `/stop`, cancellation, audit, and
+lifecycle authority.
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
