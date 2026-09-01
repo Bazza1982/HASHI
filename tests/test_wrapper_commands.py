@@ -48,6 +48,7 @@ def _make_manager(workspace: Path) -> FlexibleBackendManager:
             {"engine": "claude-cli", "model": "claude-haiku-4-5"},
         ],
         active_backend="codex-cli",
+        default_mode="flex",
         project_root=workspace,
     )
     global_cfg = GlobalConfig(
@@ -115,6 +116,7 @@ def _make_her_v2_manager(workspace: Path) -> FlexibleBackendManager:
             },
         ],
         active_backend="her-v2",
+        default_mode="flex",
         project_root=workspace,
     )
     global_cfg = GlobalConfig(
@@ -1125,18 +1127,24 @@ async def test_silent_audit_writes_transcript_without_user_notification(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_cmd_mode_wrapper_persists_mode(tmp_path):
+@pytest.mark.parametrize(
+    "retired_mode",
+    ["wrapper", "audit", "dual-brain", "dualbrain", "brain"],
+)
+async def test_cmd_mode_rejects_retired_modes_without_mutating_state(
+    tmp_path,
+    retired_mode,
+):
     manager = _make_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
-    update, context = _update(["wrapper"])
+    update, context = _update([retired_mode])
 
     await FlexibleAgentRuntime.cmd_mode(runtime, update, context)
 
-    state = _read_state(tmp_path / "agent")
-    assert state["agent_mode"] == "wrapper"
-    assert state["active_backend"] == "codex-cli"
-    assert state["active_model"] == "gpt-5.5"
-    assert "Switched to **wrapper** mode" in messages[-1]
+    assert manager.agent_mode == "flex"
+    assert not (tmp_path / "agent" / "state.json").exists()
+    assert "have been retired" in messages[-1]
+    assert "only Fixed and Flex" in messages[-1]
 
 
 @pytest.mark.asyncio
@@ -1144,7 +1152,7 @@ async def test_legacy_mode_memory_plus_enables_continuity_without_changing_mode(
     tmp_path,
 ):
     manager = _make_manager(tmp_path / "agent")
-    manager.agent_mode = "wrapper"
+    manager.agent_mode = "fixed"
     manager._save_state()
     runtime, messages = _make_runtime(manager)
     update, context = _update(["memory+"])
@@ -1152,10 +1160,10 @@ async def test_legacy_mode_memory_plus_enables_continuity_without_changing_mode(
     await FlexibleAgentRuntime.cmd_mode(runtime, update, context)
 
     state = _read_state(tmp_path / "agent")
-    assert manager.agent_mode == "wrapper"
-    assert state["agent_mode"] == "wrapper"
+    assert manager.agent_mode == "fixed"
+    assert state["agent_mode"] == "fixed"
     assert state["memory_plus"]["enabled"] is True
-    assert "Working mode remains **wrapper**" in messages[-1]
+    assert "Working mode remains **fixed**" in messages[-1]
 
 
 @pytest.mark.asyncio
@@ -1163,14 +1171,14 @@ async def test_memory_plus_command_switch_preserves_mode_and_files_when_paused(
     tmp_path,
 ):
     manager = _make_manager(tmp_path / "agent")
-    manager.agent_mode = "audit"
+    manager.agent_mode = "fixed"
     manager._save_state()
     runtime, messages = _make_runtime(manager)
 
     update, context = _update(["plus", "on"])
     await FlexibleAgentRuntime.cmd_memory(runtime, update, context)
     state = _read_state(tmp_path / "agent")
-    assert state["agent_mode"] == "audit"
+    assert state["agent_mode"] == "fixed"
     assert state["memory_plus"]["enabled"] is True
     card = tmp_path / "agent" / "memory" / "memory_plus_state.json"
     assert card.exists()
@@ -1178,7 +1186,7 @@ async def test_memory_plus_command_switch_preserves_mode_and_files_when_paused(
     update, context = _update(["plus", "off"])
     await FlexibleAgentRuntime.cmd_memory(runtime, update, context)
     state = _read_state(tmp_path / "agent")
-    assert state["agent_mode"] == "audit"
+    assert state["agent_mode"] == "fixed"
     assert state["memory_plus"]["enabled"] is False
     assert card.exists()
     assert "files were preserved" in messages[-1]
@@ -1222,22 +1230,18 @@ async def test_memory_menu_links_continuity_views_and_toggle(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cmd_mode_wrapper_does_not_activate_when_core_switch_fails(tmp_path):
+async def test_retired_mode_callback_does_not_mutate_state(tmp_path):
     manager = _make_manager(tmp_path / "agent")
-    runtime, messages = _make_runtime(manager)
+    runtime, _messages = _make_runtime(manager)
+    update, edits, answers = _callback_update("tgl:mode:wrapper")
 
-    async def fail_switch(chat_id, target_engine, target_model=None, with_context=False):
-        return False, "Backend not allowed"
-
-    runtime._switch_backend_mode = fail_switch
-    update, context = _update(["wrapper"])
-
-    await FlexibleAgentRuntime.cmd_mode(runtime, update, context)
+    await FlexibleAgentRuntime.callback_toggle(runtime, update, SimpleNamespace())
 
     assert manager.agent_mode == "flex"
     assert not (tmp_path / "agent" / "state.json").exists()
-    assert "Wrapper mode was not activated" in messages[-1]
-    assert "Backend not allowed" in messages[-1]
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "have been retired" in answers[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -1260,22 +1264,21 @@ async def test_backend_confirms_flex_while_model_guides_wrapper_mode(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["fixed", "memory+", "wrapper", "audit", "dual-brain"])
-async def test_backend_non_flex_modes_offer_confirmation_without_mutating(tmp_path, mode):
-    manager = _make_manager(tmp_path / mode.replace("+", "plus"))
-    manager.agent_mode = mode
+async def test_backend_fixed_mode_offers_confirmation_without_mutating(tmp_path):
+    manager = _make_manager(tmp_path / "fixed")
+    manager.agent_mode = "fixed"
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
     await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
 
     assert "SWITCH BACKEND" in messages[-1]
-    assert f"<code>{mode}</code>" in messages[-1]
+    assert "<code>fixed</code>" in messages[-1]
     assert "Switch to Flex and continue" in messages[-1]
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "backend_mode_confirm" in markup
-    assert f"backend_mode_cancel:{mode}" in markup
-    assert manager.agent_mode == mode
+    assert "backend_mode_cancel:fixed" in markup
+    assert manager.agent_mode == "fixed"
     assert not (manager.config.workspace_dir / "state.json").exists()
 
 
@@ -2432,7 +2435,7 @@ async def test_audit_config_buttons_update_delivery_and_threshold(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cmd_mode_audit_preserves_wrapper_and_unrelated_state(tmp_path):
+async def test_retired_mode_command_preserves_saved_configuration(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
     (workspace / "state.json").write_text(
@@ -2454,11 +2457,11 @@ async def test_cmd_mode_audit_preserves_wrapper_and_unrelated_state(tmp_path):
     await FlexibleAgentRuntime.cmd_mode(runtime, update, context)
 
     state = _read_state(workspace)
-    assert state["agent_mode"] == "audit"
+    assert state["agent_mode"] == "flex"
     assert state["wrapper"] == {"backend": "claude-cli", "model": "claude-haiku-4-5"}
     assert state["wrapper_slots"] == {"1": "Keep tone warm."}
     assert state["unrelated"] == {"keep": True}
-    assert "Switched to **audit** mode" in messages[-1]
+    assert "have been retired" in messages[-1]
 
 
 @pytest.mark.asyncio

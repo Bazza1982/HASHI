@@ -1,6 +1,9 @@
 # Dual-Brain Structure Design and Implementation Plan
 
-Status: implemented runtime baseline.
+Status: **historical implementation record**. Dual-brain working mode is
+retired from the selectable product surface in `v4.0.0-alpha.2`. Current
+behavior is defined in
+[Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
 
 Owner: HASHI1 implementation.
 

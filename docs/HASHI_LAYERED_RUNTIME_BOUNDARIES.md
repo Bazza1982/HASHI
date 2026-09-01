@@ -171,7 +171,8 @@ Examples:
 - menus and Telegram/UI command surfaces
 - scheduler and superloop behavior
 - hchat delivery logic
-- wrapper/audit/Anatta runtime features
+- Fixed/Flex working-mode behavior, retired Wrapper/Audit compatibility, and
+  Anatta runtime features
 - Remote route planner and profile resolver, once extracted from legacy core
 
 Rules:

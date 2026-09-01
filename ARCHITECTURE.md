@@ -347,6 +347,7 @@ architecturally complete.
 - [HASHI Slim Core Architecture](docs/HASHI_SLIM_CORE_ARCHITECTURE.md)
 - [HASHI PCM System Design](docs/HASHI_PCM_SYSTEM_DESIGN.md)
 - [HASHI PAO System Design](docs/HASHI_PAO_SYSTEM_DESIGN.md)
+- [Fixed and Flex Working Modes](docs/FIXED_FLEX_WORKING_MODES.md)
 - [HER v2 Product Requirements and Technical Design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
 - [HASHI Frontend Connector Architecture](docs/HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)
 - [HASHI Persistent Multi-Session Frontend Design](docs/HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md)

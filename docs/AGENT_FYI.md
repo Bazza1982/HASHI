@@ -28,9 +28,12 @@ when ambiguous.
   switchable Engine Provider via `/backend`.
 - Fixed is a session-preserving runtime mode inside a Flex Agent, not a second
   normal configured Agent type. The legacy fixed runtime is retired.
-- Outer runtime-composition modes are `fixed`, `flex`, `wrapper`, `audit`, and
-  `dual-brain`. They are separate from HER v2's Direct, Strategic, and Planned
-  execution modes. Memory+ is an independent continuity setting.
+- Runtime working modes are only `fixed` and `flex`. Fixed is the default when
+  the selected Engine supports persistent sessions; stateless Engines use
+  Flex. Wrapper, Audit, and Dual-brain are retired. These modes are separate
+  from HER v2's Direct, Strategic, and Planned execution modes; Memory+ remains
+  an independent continuity setting. See
+  [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
 
 ## Important Commands
 - `/help`: command list for this agent.
@@ -51,8 +54,8 @@ when ambiguous.
 - `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.
 - `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task. Large binary training/evidence assets are optional packs; check `python scripts/exp_assets.py status` and restore only when the selected guidebook needs them.
 - `/skill`: browse, apply, validate, enable/disable, install/link, and safely uninstall standard instruction Skills.
-- `/mode [fixed|flex|wrapper|audit|dual-brain]`: inspect or switch execution
-  mode. `/mode memory+` is a compatibility alias that enables continuity
+- `/mode [fixed|flex]`: inspect or switch working mode. `/mode memory+` is a
+  compatibility alias that enables continuity
   without changing the current mode.
 - `/memory [status|on|pause|saved on|saved off|plus on|plus off]`: control
   normal memory injection and Memory+ continuity independently.

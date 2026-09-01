@@ -299,6 +299,7 @@ def test_config_admin_creates_valid_lowercase_pcm_without_inheriting_tool_grants
     assert created["allowed_backends"] == [
         {"engine": "codex-cli", "model": "gpt-test"}
     ]
+    assert created["default_mode"] == "fixed"
 
 
 def test_pcm_envelope_preserves_authority_layers(tmp_path):

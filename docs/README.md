@@ -11,8 +11,8 @@ engineering layers—and governs every lower-level design in this directory.
 > enterprise-server production validation pending.
 >
 > **Platform release candidate:** HASHI `v4.0.0-alpha.2` consolidates HER v2,
-> conversation/delivery hardening, task-matched execution effort, and the lean
-> Flex-only runtime architecture. See
+> conversation/delivery hardening, task-matched execution effort, and one Flex
+> Agent runtime with Fixed/Flex working modes. See
 > [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md).
 >
 > **Latest dated integration record:** see the historical
@@ -74,6 +74,7 @@ deployment validation continues.
 - [TELEGRAM_NOTIFICATION_MODES.md](TELEGRAM_NOTIFICATION_MODES.md) — `/notify on|quiet|off`, final/error notification policy, persistence, and Telegram sound/vibration boundary
 - [HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md) — client-neutral persistent Session, Run, Message and Event architecture for agentic frontends
 - [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted assertion migration and minimum 24-contract backend-neutral PCM verification gate
+- [FIXED_FLEX_WORKING_MODES.md](FIXED_FLEX_WORKING_MODES.md) — authoritative Fixed-by-default/Flex working-mode, configuration, transition, retirement-migration, and regression contract
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
 - [AGENT_PERSONA_SPEC.md](AGENT_PERSONA_SPEC.md) — persona block format and authoring guidance for new agents
 - [STEER_COMMAND.md](STEER_COMMAND.md) — Telegram `/steer` mid-task course correction (busy wrapper vs idle plain text, error suppression)
@@ -92,7 +93,7 @@ deployment validation continues.
 - [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md) — v3.2 slim core architecture and hot manager rebuild contract
 - [HASHI_LAYERED_RUNTIME_BOUNDARIES.md](HASHI_LAYERED_RUNTIME_BOUNDARIES.md) — four-layer HASHI boundary: protected core, hot-reloadable functions, platform config, and instance config
 - [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — implementation plan and acceptance record for the slim core migration
-- [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — implemented v3.2 wrapper agent mode design, command model, state contract, and acceptance record
+- [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — historical v3.2 wrapper-mode design and acceptance record; the mode is retired in v4
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
 - [CODEX_API_TOOL_CALL_BRIDGE.md](CODEX_API_TOOL_CALL_BRIDGE.md) — Codex app-server bridge for caller-owned OpenAI function tools, structured history, isolation, and Agent usage contract
 - [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md) — xAI/Grok API backend design using Hermes-managed OAuth refresh and OpenAI-compatible gateway routes

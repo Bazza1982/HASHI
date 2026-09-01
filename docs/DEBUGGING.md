@@ -38,9 +38,12 @@ Practical principles:
 ## System Model
 
 There is one supported configured Agent type: a Flex Agent with one workspace,
-one Telegram identity, and a switchable Engine Provider. Its runtime composition modes include
-Fixed, Flex, Wrapper, Audit, and Dual Brain. Fixed is a session-preserving mode
-inside `FlexibleAgentRuntime`; it is not the retired legacy fixed Agent runtime.
+one Telegram identity, and an Engine Provider manager. Its working modes are
+only Fixed and Flex. Fixed is the session-capable default inside
+`FlexibleAgentRuntime`; Flex provides PCM-managed Context and explicit Engine
+switching. Wrapper, Audit, and Dual Brain are retired, and Fixed is not the
+retired legacy fixed Agent runtime. See `docs/FIXED_FLEX_WORKING_MODES.md` for
+the current contract.
 
 OpenRouter and DeepSeek are Model Provider adapters used through HER v2 and
 internal rendering. They are not selectable top-level Engine choices in

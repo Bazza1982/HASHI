@@ -282,7 +282,10 @@ and the default injection of only ten recent completed exchanges.
 
   - Recent conversation alone does not reliably highlight goals, decisions, incomplete tasks and important pointers.
 
-Memory+ is an agent-owned notepad containing structured, limited working state. It is not a chat log, a second long-term memory database or a separate execution mode. It can be added to any execution mode and turned on or off according to user needs.
+Memory+ is an Agent-owned notepad containing structured, limited working state.
+It is not a chat log, a second long-term Memory database, an Agent working mode,
+or a HER execution mode. It can be enabled independently in Fixed or Flex and
+with any HER execution mode.
 
 Notes remain available throughout the business day. When Memory+ is next loaded or updated after the local calendar date changes, HASHI performs a deterministic rollover. It archives the previous structured state and derives a bounded carryover from completed items, decisions, state changes, unresolved items and pointers according to fixed rules. This is not a scheduled night-time model call and the agent does not independently generate a free-form overnight summary.
 
@@ -314,7 +317,8 @@ completed exchanges as bootstrap Context. The Engine is then expected to
 maintain its logical continuity without depending on provider-native thread
 state. HER v2 implements this boundary through its durable HER Engine Session.
 
-After bootstrap, fixed mode uses delta PCM on every external user turn. HASHI sends:
+After bootstrap, the Fixed working mode uses delta PCM on every external user
+turn. HASHI sends:
 
   - the current user message; and
 

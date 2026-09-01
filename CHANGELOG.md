@@ -114,6 +114,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Fixed/Flex Agent working-mode convergence** — the normal Flex Agent runtime
+  now exposes only Fixed and Flex. Session-capable Engines default to Fixed for
+  native Engine Session continuation; stateless Engines default to Flex for
+  PCM-managed Context and explicit Engine switching. `default_mode`, `/mode`,
+  `/backend`, status/help metadata, locale text, sample configuration, and
+  migration behavior now share that contract.
 - **OpenRouter and DeepSeek are Model Provider adapters** — an earlier label
   incorrectly treated them as Engines; removed both from
   top-level `/backend` selection while retaining their adapters for HER v2 and
@@ -136,6 +142,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Wrapper, Audit, and Dual-brain selectable working modes** — removed their
+  buttons and command-picker entries. Old slash commands and inline callbacks
+  return a non-mutating compatibility notice, while persisted legacy mode
+  values migrate to Fixed or Flex and retain their historical configuration
+  blocks.
 - **HER v1 and legacy fixed runtime** — retired the Claw-derived native HER
   adapter, binaries/source integration, debug/certification tooling, old fixed
   runtime, and the standalone OpenClaw importer. `her` now resolves only to the

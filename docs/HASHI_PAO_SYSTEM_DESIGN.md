@@ -35,10 +35,13 @@ PAO owns the following product domains.
 - Agent identity, directory, lifecycle, and active runtime binding;
 - Engine Provider discovery, selection, availability, and migration aliases;
 - startup, stop, restart, hot-reload coordination, and runtime health; and
-- wrapper, audit, or other outer runtime composition that spans Engines.
+- Fixed/Flex working-mode policy, retired outer-composition migration, and any
+  future runtime composition that spans Engines.
 
 The stable process kernel belongs to the Core engineering layer. The Agent and
 runtime policies operated through that kernel belong functionally to PAO.
+The current working-mode contract is defined in
+[Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
 
 ### 2.2 HASHI Conversation Sessions
 
@@ -240,4 +243,3 @@ New PAO work must:
 6. keep Engine-internal cognitive policy inside the selected Engine;
 7. expose transport-neutral Events and controls where practical; and
 8. remain hot-reloadable unless a change genuinely alters the Core contract.
-

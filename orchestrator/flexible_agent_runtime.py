@@ -19,7 +19,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, constan
 from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
-from orchestrator.config import FlexibleAgentConfig, GlobalConfig
+from orchestrator.config import DEFAULT_AGENT_MODE, FlexibleAgentConfig, GlobalConfig
 from orchestrator.bootstrap_logging import refresh_console_output_filters
 from orchestrator.command_ui import (
     back_label,
@@ -1109,7 +1109,8 @@ class FlexibleAgentRuntime:
         if (
             str((metadata or {}).get("engine") or "") == HER_V2_ENGINE
             and str(
-                getattr(self.backend_manager, "agent_mode", "flex") or "flex"
+                getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE)
+                or DEFAULT_AGENT_MODE
             ).lower()
             == "flex"
         ):
@@ -6645,16 +6646,16 @@ class FlexibleAgentRuntime:
         )
 
     def _is_wrapper_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") == "wrapper"
+        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "wrapper"
 
     def _is_audit_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") == "audit"
+        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "audit"
 
     def _is_dual_brain_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") == "dual-brain"
+        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "dual-brain"
 
     def _is_managed_core_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") in {"wrapper", "audit"}
+        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) in {"wrapper", "audit"}
 
     async def _require_wrapper_mode(self, update: Update, command_name: str) -> bool:
         if self._is_wrapper_mode():
@@ -6997,7 +6998,7 @@ class FlexibleAgentRuntime:
             return
 
         state = self.backend_manager.get_state_snapshot()
-        mode = getattr(self.backend_manager, "agent_mode", "flex")
+        mode = getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE)
         cfg = load_wrapper_config(state) if mode == "wrapper" else load_audit_config(state)
         args = context.args or []
         if not args:
@@ -8119,6 +8120,18 @@ class FlexibleAgentRuntime:
 
     async def cmd_mode(self, update: Update, context: Any):
         await runtime_mode.cmd_mode(self, update, context)
+
+    async def cmd_retired_agent_mode(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        await self._reply_text(update, ui_language.tr("mode.retired"))
+
+    async def callback_retired_agent_mode(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            await query.answer()
+            return
+        await query.answer(ui_language.tr("mode.retired"), show_alert=True)
 
     async def cmd_privacy(self, update: Update, context: Any):
         await runtime_privacy.cmd_privacy(self, update, context)

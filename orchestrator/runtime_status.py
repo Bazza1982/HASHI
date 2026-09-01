@@ -8,6 +8,7 @@ from orchestrator import runtime_pending, telegram_delivery_failover, ui_languag
 from orchestrator import telegram_stream_policy
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator.command_ui import card_title
+from orchestrator.config import DEFAULT_AGENT_MODE
 from orchestrator.memory_plus_mode import get_memory_plus_status, is_memory_plus_enabled
 from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
 from orchestrator.her_v2.models import effort_display_label
@@ -248,7 +249,7 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
         telegram=tg_status,
         whatsapp=wa_status,
     )
-    mode_str = getattr(runtime.backend_manager, "agent_mode", "flex")
+    mode_str = getattr(runtime.backend_manager, "agent_mode", DEFAULT_AGENT_MODE)
     try:
         state_snapshot = runtime.backend_manager.get_state_snapshot()
     except Exception:

@@ -144,6 +144,7 @@ testpaths = [
     "tests/test_protocol_ack.py",
     "tests/test_request_activity.py",
     "tests/test_runtime_command_binding.py",
+    "tests/test_runtime_working_modes.py",
     "tests/test_runtime_lifecycle.py",
     "tests/test_smart_tool_registry.py",
 ]

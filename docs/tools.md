@@ -10,13 +10,18 @@ Providers into one concept.
 ## Universal Multi-Agent Telegram Orchestrator (`bridge-u-f`)
 The `bridge-u-f` project located at `<project_root>` is a local multi-agent bridge that connects Telegram bots (and optionally WhatsApp) to multiple AI Engine Providers, with TUI and authenticated Backend API surfaces.
 
-Five outer runtime-composition modes are available to a Flex Agent; these are
-separate from HER v2's Direct, Strategic, and Planned execution modes:
-- **Fixed mode:** keep one selected session-capable backend and its native session.
-- **Flex mode:** one bot, one workspace, one shared identity, and a switchable backend via `/backend`.
-- **Wrapper mode:** one shared identity with a functional core backend/model plus a stateless wrapper backend/model that rewrites only the final user-facing response.
-- **Audit mode:** a functional core response plus a separate auditor pass and findings.
-- **Dual Brain mode:** a left-brain continuity/planning pass plus right-brain execution.
+Two working modes are available to a Flex Agent:
+- **Fixed mode (default):** keep one selected session-capable Engine and its
+  native Engine Session.
+- **Flex mode:** one bot, one workspace, one shared identity, and a switchable
+  Engine Provider via `/backend`.
+
+Wrapper, Audit, and Dual Brain are retired and cannot be selected. Persisted
+legacy mode values migrate to the configured default without deleting their
+historical configuration blocks.
+
+See [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md) for the
+configuration, transition, migration, and regression contract.
 
 - **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
 - **Selectable Engine Providers:** `gemini-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
@@ -25,6 +30,7 @@ separate from HER v2's Direct, Strategic, and Planned execution modes:
   and internal rendering; they are hidden from `/backend`.
 - **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set `type` explicitly. New agents should normally use `type: "flex"`; omitted `type` is rejected so HASHI cannot accidentally fall back to the retired legacy fixed runtime.
   - Flex required fields: `name`, `type: "flex"`, `workspace_dir`, `allowed_backends`, `active_backend`, `is_active`; the workspace must contain a strict lower-case `agent.md`
+  - `default_mode` may be `fixed` or `flex`. If omitted, session-capable backends default to `fixed`; stateless backends use `flex`.
   - Legacy `type: "fixed"` and `system_md` values are one-time migration inputs only; successful startup converts the row to Flex shape, validates/writes `agent.md`, and removes `system_md`
   - Optional: `display_name`, `emoji`, `typing_message`, `typing_parse_mode`, `effort`, `resume_policy`
   - `access_scope` — filesystem boundary: `"workspace"` (agent dir only), `"project"` (repo root), `"drive"` (full `C:\`)
@@ -77,7 +83,7 @@ separate from HER v2's Direct, Strategic, and Planned execution modes:
 - `/resend` — replay the previous model or Bridge output without model work
 - `/retry` — stop stale execution, reset context, restore recent handoff continuity, and rerun the last request; see [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md)
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
-- `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
+- `/mode [fixed|flex]` — switch working mode; `/mode memory+` only enables Memory+ and keeps the current mode
 - `/language [en|zh|default]` — choose the HASHI interface language for this user across all agents. The setting applies to Telegram command menus, buttons, common cards, and system notices, without translating agent replies, terminal output, transcripts, or logs.
 - `/terminal [quiet|activity|debug|raw]` — control instance-wide terminal stdout. `quiet` is the default and shows lifecycle/failures/operator attention; `activity` adds content-free phases, timing, tool counts, and token counts; `debug` adds sanitised technical events and failure clues without chat or reasoning text; `raw` restores the historical plaintext console. This never filters external clients, TUI chat, Telegram, transcripts, or file logs.
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
@@ -241,17 +247,9 @@ Legacy provider/model and profile/stage reasoning fields remain readable as a
 migration fallback. The internal `role-configured` model remains an adapter
 sentinel only and is never presented as a user choice.
 
-**Wrapper-mode:**
-- `/mode wrapper` — switch a flex-capable agent into wrapper mode.
-- `/core [backend=<engine> model=<model>]` — show or change the functional core backend/model. Default: `codex-cli / gpt-5.5`.
-- `/wrap [backend=<engine> model=<model> context=<n>]` — show or change the stateless wrapper backend/model and recent visible context window. Default: `claude-cli / claude-haiku-4-5 / context=3`.
-- `/wrapper` — show wrapper configuration, persona/style slots, and navigation buttons.
-- `/wrapper set <slot> <text>` — set a wrapper persona/style slot.
-- `/wrapper clear <slot>` or `/wrapper clear all` — clear wrapper persona/style slots.
-- `/model` guides wrapper agents to `/core` or `/wrap`; `/backend` offers the explicit switch-to-Flex confirmation instead of silently changing modes.
-- `/reset CONFIRM` preserves wrapper mode config and wrapper slots; `/wipe CONFIRM` remains a hard workspace clear.
-
-Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Pro, and OpenRouter DeepSeek Flash/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
+**Retired working modes:** `/mode wrapper`, `/mode audit`, and
+`/mode dual-brain` return a compatibility notice. Their former configuration commands
+and old inline buttons do the same; none can reactivate a retired mode.
 
 **Backend-specific (fixed):**
 - `/effort` — Claude, Codex, and Grok CLI
