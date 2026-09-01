@@ -191,6 +191,7 @@ class RebootManager:
         stream_events = importlib.import_module("adapters.stream_events")
         backend_registry = importlib.import_module("adapters.registry")
         her_v2 = importlib.import_module("adapters.her_v2")
+        runtime_config = importlib.import_module("orchestrator.config")
         runtime_pipeline = importlib.import_module("orchestrator.runtime_pipeline")
         runtime_common = importlib.import_module("orchestrator.runtime_common")
         session_store = importlib.import_module("orchestrator.session_store")
@@ -223,6 +224,17 @@ class RebootManager:
         ):
             raise HotReloadError(
                 "Hot reload contract failed: a HER ID can reach a stale or retired adapter"
+            )
+        if (
+            getattr(runtime_config, "DEFAULT_AGENT_MODE", None) != "fixed"
+            or getattr(runtime_config, "SUPPORTED_AGENT_MODES", None)
+            != frozenset({"fixed", "flex"})
+            or not callable(
+                getattr(runtime_config, "default_agent_mode_for_backend", None)
+            )
+        ):
+            raise HotReloadError(
+                "Hot reload contract failed: fixed/flex configuration is not current"
             )
         if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
             raise HotReloadError(
@@ -308,8 +320,9 @@ class RebootManager:
                 "is unavailable"
             )
         contract_message = (
-            "Hot reload contract verified: HER compatibility facade, runtime "
-            "pipeline, and Telegram notification commands are current."
+            "Hot reload contract verified: fixed/flex configuration, HER "
+            "compatibility facade, runtime pipeline, and Telegram notification "
+            "commands are current."
         )
         main_logger.info(contract_message)
         bridge_logger.info(contract_message)

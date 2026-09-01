@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import runpy
 import sys
 import types
@@ -107,6 +108,46 @@ def test_reload_project_modules_loads_runtime_defaults_before_consumers(monkeypa
     lifecycle_idx = reloaded.index("orchestrator.remote_lifecycle")
     runtime_idx = reloaded.index("orchestrator.flexible_agent_runtime")
     assert defaults_idx < lifecycle_idx < runtime_idx
+
+
+def test_reload_project_modules_loads_config_before_mode_consumers(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "orchestrator.context_compaction",
+        "orchestrator.config",
+        "orchestrator.flexible_backend_manager",
+        "orchestrator.flexible_agent_runtime",
+        "orchestrator.runtime_status",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules(sorted(module_names, key=module_reload_key))
+
+    config_idx = reloaded.index("orchestrator.config")
+    for consumer in module_names:
+        if consumer != "orchestrator.config":
+            assert config_idx < reloaded.index(consumer)
+
+
+def test_first_mixed_generation_compaction_reload_tolerates_old_config(
+    monkeypatch,
+):
+    runtime_config = importlib.import_module("orchestrator.config")
+    compaction_module = importlib.import_module("orchestrator.context_compaction")
+    monkeypatch.delattr(runtime_config, "DEFAULT_AGENT_MODE")
+
+    namespace = runpy.run_path(compaction_module.__file__)
+
+    assert namespace["_default_agent_mode"]() == "fixed"
 
 
 def test_reload_project_modules_loads_instance_provider_before_consumers(monkeypatch):
@@ -275,6 +316,17 @@ def test_validate_agent_runtime_contract_accepts_current_modules():
     manager = RebootManager(kernel=object(), console_handler=None)
 
     manager.validate_agent_runtime_contract()
+
+
+def test_validate_agent_runtime_contract_requires_current_working_mode_config(
+    monkeypatch,
+):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    runtime_config = importlib.import_module("orchestrator.config")
+    monkeypatch.delattr(runtime_config, "DEFAULT_AGENT_MODE")
+
+    with pytest.raises(HotReloadError, match="fixed/flex configuration"):
+        manager.validate_agent_runtime_contract()
 
 
 def test_validate_agent_runtime_contract_rejects_stale_session_store(monkeypatch):

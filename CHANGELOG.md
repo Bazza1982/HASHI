@@ -167,6 +167,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Fixed/Flex first hot-reload adoption** — configuration now reloads before
+  working-mode consumers, Context Compact tolerates the one mixed-generation
+  reboot that installs this ordering, and the post-reload contract rejects a
+  runtime whose Fixed/Flex symbols are still stale.
 - **Notification-policy delivery and hot-reload safety** — notification helper
   signature mismatches or policy exceptions can no longer suppress a final
   message. Delivery uses a compatibility fallback or safe audible default, and

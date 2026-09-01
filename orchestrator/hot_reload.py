@@ -55,6 +55,13 @@ FOUNDATION_PHASES = {
     # a new enqueue method to the previous dataclass constructor.
     "orchestrator.runtime_common": 0,
     "orchestrator.runtime_defaults": 0,
+    # Config exports defaults and capability sets that are imported directly
+    # by compaction, status, backend-manager, and runtime consumers.  Reload it
+    # after its registry/default providers but before those consumers.  The
+    # first reboot that adopts this ordering is still computed by the previous
+    # RebootManager generation, so early consumers also carry a one-generation
+    # fallback for newly introduced config symbols.
+    "orchestrator.config": 2,
     "orchestrator.workspace_state": 0,
     # Workzone helpers are imported directly by overview, backend-manager and
     # runtime consumers. Refresh the provider before the first consumer so a
