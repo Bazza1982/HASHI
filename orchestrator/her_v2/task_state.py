@@ -641,8 +641,10 @@ def task_state_contract(
 For every ordinary tool call, include a sibling object argument named
 `{HASHI_TASK_DELTA_ARGUMENT}`. It updates conclusions from results received
 before that action and is stripped before the real tool executes. Do not add a
-reflection call. Use one stable `delta_id`; parallel calls from the same model
-turn may repeat that ID safely. The delta may contain:
+reflection call. Use a new unique `delta_id` for each sequential assistant
+response/cognitive boundary. Only parallel tool calls emitted together in the
+same assistant response should share one ID; those duplicates are applied once
+and are safe. The delta may contain:
 
 ```json
 {{

@@ -23,10 +23,23 @@ from orchestrator.her_v2.models import Effort, Stage, StageRequest
 from orchestrator.her_v2.task_state import (
     HASHI_TASK_DELTA_ARGUMENT,
     HERTaskState,
+    task_state_contract,
 )
 from tools.registry import ToolResult
 
 _TOOLS = ("probe_a", "probe_b", "probe_c", "probe_d", "probe_e")
+
+
+def test_task_state_contract_distinguishes_sequential_and_parallel_delta_ids():
+    prompt = task_state_contract(
+        HERTaskState(goal="Keep making evidence progress").prompt_snapshot(),
+        stage="execution",
+        tool_enabled=True,
+    )
+
+    assert "new unique `delta_id` for each sequential assistant" in prompt
+    assert "parallel tool calls emitted together" in prompt
+    assert "same assistant response should share one ID" in prompt
 
 
 def _request(stage: Stage, *, task_state=None) -> StageRequest:
