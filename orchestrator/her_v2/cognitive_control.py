@@ -1,10 +1,11 @@
 """Provider-neutral cognitive control for tool-enabled HER v2 stages.
 
 The controller stores observable decisions and evidence-linked task progress,
-never hidden chain-of-thought. It recognises both repeated semantic tool/result
-cycles and distinct-looking actions that leave the shared TaskState unchanged.
-At a detected stall it temporarily exposes one typed decision boundary so the
-same model can finish, revise direction, or report a blocker.
+never hidden chain-of-thought. A repeated semantic tool/result cycle is strong
+enough to expose one typed decision boundary. A structurally unchanged
+TaskState is retained only as a low-confidence advisory signal: models can omit
+or misuse deltas while doing real work, so that signal alone never withholds
+ordinary tools.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from typing import Any
 from .task_state import HERTaskState
 
 COGNITIVE_DECISION_TOOL = "hashi_cognitive_decision"
-COGNITIVE_CONTROL_VERSION = 2
+COGNITIVE_CONTROL_VERSION = 3
 _CYCLE_REPETITIONS = 3
 _PROGRESS_STALL_THRESHOLD = 3
 _MAX_CYCLE_PERIOD = 12
@@ -229,6 +230,8 @@ class StageCognitiveController:
         self._expected_change = ""
         self._stop_condition = ""
         self._progress_stall_count = 0
+        self._stagnation_signal_count = 0
+        self._last_stagnation_signal_signature = ""
         self._last_progress_signature = (
             task_state.progress_signature() if task_state is not None else ""
         )
@@ -305,11 +308,12 @@ class StageCognitiveController:
                 progress_signature=observation.progress_signature,
                 stall_count=0,
             )
-        return self._observe_progress(
+        self._observe_progress(
             observation,
             armed=bool(progress_tracking_armed),
             boundary=bool(progress_boundary),
         )
+        return None
 
     def _raise_interrupt(
         self,
@@ -355,48 +359,51 @@ class StageCognitiveController:
         *,
         armed: bool,
         boundary: bool,
-    ) -> CognitiveInterrupt | None:
+    ) -> None:
         signature = observation.progress_signature
         if not armed or not signature:
             self._progress_stall_count = 0
+            self._last_stagnation_signal_signature = ""
             if signature:
                 self._last_progress_signature = signature
-            return None
+            return
         # Parallel calls from one provider response deliberately carry the same
         # delta ID. They are one cognitive boundary, not several stalled turns.
         if not boundary:
-            return None
-        if observation.tool_profile == "poll" or observation.state_changed is True:
+            return
+        if (
+            observation.tool_profile
+            in {
+                "poll",
+                "verify",
+                "idempotent_action",
+                "side_effect_action",
+            }
+            and not observation.is_error
+        ) or observation.state_changed is True:
             self._progress_stall_count = 0
+            self._last_stagnation_signal_signature = ""
             self._last_progress_signature = signature
-            return None
+            return
         if self._last_progress_signature and signature != self._last_progress_signature:
             self._progress_stall_count = 0
+            self._last_stagnation_signal_signature = ""
             self._last_progress_signature = signature
             # Evidence-bound progress proves the previous direction recovered.
             self._recovery_epoch = 0
             self._intervention_progress_signature = ""
-            return None
+            return
         self._last_progress_signature = signature
         self._progress_stall_count += 1
         if self._progress_stall_count < _PROGRESS_STALL_THRESHOLD:
-            return None
-        repeated = bool(
-            self._recovery_epoch and signature == self._intervention_progress_signature
-        )
-        recent = tuple(
-            item.tool_name for item in tuple(self._history)[-_PROGRESS_STALL_THRESHOLD:]
-        )
-        return self._raise_interrupt(
-            code="NO_MEANINGFUL_PROGRESS",
-            detection_kind="task_state_stagnation",
-            cycle_period=0,
-            cycle_tools=recent,
-            cycle_signature=_digest(["task-state", signature]),
-            repeated_after_intervention=repeated,
-            progress_signature=signature,
-            stall_count=self._progress_stall_count,
-        )
+            return
+        # Missing/no-op model deltas are not proof that execution itself is
+        # stalled.  Saturate one advisory signal and keep the tools available;
+        # the independent semantic-cycle detector remains the hard safety net.
+        if signature != self._last_stagnation_signal_signature:
+            self._stagnation_signal_count += 1
+            self._last_stagnation_signal_signature = signature
+        self._progress_stall_count = _PROGRESS_STALL_THRESHOLD
 
     def _detect_cycle(self) -> tuple[int, tuple[ToolObservation, ...]] | None:
         history = tuple(self._history)
@@ -678,6 +685,8 @@ class StageCognitiveController:
             "decision_count": self._decision_count,
             "last_decision": self._last_decision or None,
             "progress_stall_count": self._progress_stall_count,
+            "stagnation_signal_count": self._stagnation_signal_count,
+            "stagnation_enforcement": "advisory_only",
             "last_progress_signature": self._last_progress_signature or None,
             "recovery_epoch": self._recovery_epoch,
             "active_tool_allowlist": (
@@ -712,11 +721,13 @@ tool boundary, decide whether the result changed relevant state, answered the
 current question, falsified the current direction, or satisfied the stage's
 completion criteria. Do not repeat actions that cannot change the task model.
 
-HASHI may temporarily replace the ordinary tools with
-`hashi_cognitive_decision` after detecting either a semantic repeated sequence
-or a structurally unchanged TaskState across otherwise different actions. When
-that happens, do not continue the old direction. Record exactly one typed
-decision: FINALIZE, REVISE_DIRECTION, or BLOCKED. REVISE_DIRECTION must name a
+HASHI treats a structurally unchanged TaskState as an advisory signal because
+missing model-authored deltas do not prove that real work stopped. That signal
+alone never withholds tools. HASHI may temporarily replace the ordinary tools
+with `hashi_cognitive_decision` only after detecting a repeated semantic
+tool/result sequence. When that happens, do not continue the old direction.
+Record exactly one typed decision: FINALIZE, REVISE_DIRECTION, or BLOCKED.
+REVISE_DIRECTION must name a
 new focus, the changed direction, the evidence change that would make it useful,
 an explicit stop condition, and only the tools required to test it. This is a
 decision-state contract; never expose hidden chain-of-thought. After FINALIZE or

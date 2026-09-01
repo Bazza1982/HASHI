@@ -58,8 +58,10 @@ def test_json_repair_prompt_is_generic_tool_free_and_data_driven() -> None:
     assert "rejected_output" in prompt
     assert "required_schema" in prompt
     assert "validation_error" in prompt
+    assert "semantic_invariants" in prompt
     assert "Do not call tools" in prompt
     assert "Do not introduce facts" in prompt
+    assert "no authority to change lifecycle routing" in prompt
     assert "Return only the repaired JSON" in prompt
 
     request = _request(
@@ -569,7 +571,10 @@ def test_prompt_tool_catalogue_keeps_guidance_without_duplicate_parameters() -> 
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "SECRET_SCHEMA_MARKER"}
+                            "path": {
+                                "type": "string",
+                                "description": "SECRET_SCHEMA_MARKER",
+                            }
                         },
                     },
                 },

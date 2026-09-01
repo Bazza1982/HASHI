@@ -22,6 +22,7 @@ def render_json_repair_input(
     rejected_output: str,
     required_schema: Mapping[str, Any],
     validation_error: str,
+    semantic_invariants: Mapping[str, Any] | None = None,
 ) -> str:
     """Render the sole user-message envelope accepted by JSON Repair.
 
@@ -30,18 +31,21 @@ def render_json_repair_input(
     ``system_json_repair`` contract.
     """
 
+    envelope = {
+        "rejected_output": _bounded_text(
+            rejected_output,
+            limit=MAX_REJECTED_OUTPUT_CHARS,
+        ),
+        "required_schema": dict(required_schema),
+        "validation_error": _bounded_text(
+            validation_error,
+            limit=MAX_VALIDATION_ERROR_CHARS,
+        ),
+    }
+    if semantic_invariants:
+        envelope["semantic_invariants"] = dict(semantic_invariants)
     return json.dumps(
-        {
-            "rejected_output": _bounded_text(
-                rejected_output,
-                limit=MAX_REJECTED_OUTPUT_CHARS,
-            ),
-            "required_schema": dict(required_schema),
-            "validation_error": _bounded_text(
-                validation_error,
-                limit=MAX_VALIDATION_ERROR_CHARS,
-            ),
-        },
+        envelope,
         ensure_ascii=False,
         sort_keys=True,
     )

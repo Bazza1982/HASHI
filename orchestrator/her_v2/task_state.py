@@ -135,6 +135,22 @@ class HERTaskState:
         with self._lock:
             return self._model_delta_count
 
+    def stagnation_baseline_ready(self) -> bool:
+        """Return whether structural no-progress observations are meaningful.
+
+        A delta ID or a rewritten working model is not a task baseline.  The
+        runtime may observe structural stagnation only after the lifecycle has
+        supplied completion criteria and the working state has a current focus,
+        an open question, or evidence-backed progress.  This deliberately keeps
+        early Direct/Strategy investigation out of no-progress accounting.
+        """
+
+        with self._lock:
+            return bool(
+                self._criteria
+                and (self._focus or self._questions or self._meaningful_revision > 0)
+            )
+
     def observe_evidence(self, evidence_refs: Sequence[str]) -> None:
         with self._lock:
             for ref in _string_items(evidence_refs):
@@ -609,6 +625,7 @@ class HERTaskState:
                 "last_stage": self._last_stage or None,
                 "stage_history": [dict(item) for item in self._stage_history[-8:]],
                 "progress_signature": _digest(self._progress_payload()),
+                "stagnation_baseline_ready": self.stagnation_baseline_ready(),
                 "truncated_counts": {
                     "criteria": max(0, len(self._criteria) - _MAX_PROMPT_ITEMS),
                     "facts": max(0, len(self._facts) - _MAX_PROMPT_ITEMS),

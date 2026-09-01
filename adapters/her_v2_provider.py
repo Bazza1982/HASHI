@@ -847,9 +847,7 @@ class _DelegatedToolRegistry:
         return None
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
-        return await self.execute_with_audit_context(
-            tool_name, arguments, tool_call_id
-        )
+        return await self.execute_with_audit_context(tool_name, arguments, tool_call_id)
 
     async def execute_with_audit_context(
         self,
@@ -1017,8 +1015,7 @@ class _EvidenceRecordingToolRegistry:
             )
         )
         operation_id = (
-            f"{invocation_id}:attempt:{self._request.attempt}:"
-            f"tool:{effective_call_id}"
+            f"{invocation_id}:attempt:{self._request.attempt}:tool:{effective_call_id}"
         )
         if self._audit_log is not None:
             arguments_digest = hashlib.sha256(
@@ -1059,9 +1056,7 @@ class _EvidenceRecordingToolRegistry:
             dict(arguments or {}), self._request.attachment_manifest
         )
         try:
-            scoped_execute = getattr(
-                self._base, "execute_with_audit_context", None
-            )
+            scoped_execute = getattr(self._base, "execute_with_audit_context", None)
             if callable(scoped_execute):
                 result = await scoped_execute(
                     tool_name,
@@ -1070,30 +1065,28 @@ class _EvidenceRecordingToolRegistry:
                     audit_context=self._audit_context,
                 )
             else:
-                result = await self._base.execute(
-                    tool_name, arguments, tool_call_id
-                )
+                result = await self._base.execute(tool_name, arguments, tool_call_id)
         except asyncio.CancelledError:
             receipt = self._receipt(
-                    tool_name=tool_name,
-                    tool_call_id=effective_call_id,
-                    result=None,
-                    completed=False,
-                    status=ToolReceiptStatus.CANCELLED,
-                    attachment_ids=matched_attachment_ids,
-                )
+                tool_name=tool_name,
+                tool_call_id=effective_call_id,
+                result=None,
+                completed=False,
+                status=ToolReceiptStatus.CANCELLED,
+                attachment_ids=matched_attachment_ids,
+            )
             self._receipts.append(receipt)
             self._record_recovery_receipt(receipt)
             raise
         except Exception:
             receipt = self._receipt(
-                    tool_name=tool_name,
-                    tool_call_id=effective_call_id,
-                    result=None,
-                    completed=False,
-                    status=ToolReceiptStatus.FAILED,
-                    attachment_ids=matched_attachment_ids,
-                )
+                tool_name=tool_name,
+                tool_call_id=effective_call_id,
+                result=None,
+                completed=False,
+                status=ToolReceiptStatus.FAILED,
+                attachment_ids=matched_attachment_ids,
+            )
             self._receipts.append(receipt)
             self._record_recovery_receipt(receipt)
             raise
@@ -1213,9 +1206,7 @@ class _EvidenceRecordingToolRegistry:
     ):
         denial_recorder = getattr(self.base, "record_delegated_denial", None)
         if callable(denial_recorder):
-            scoped_context = dict(
-                getattr(self._base, "audit_context", {}) or {}
-            )
+            scoped_context = dict(getattr(self._base, "audit_context", {}) or {})
             scoped_context.update(self._audit_context)
             recorded = denial_recorder(
                 tool_name,
@@ -1227,9 +1218,7 @@ class _EvidenceRecordingToolRegistry:
                 result = recorded
         receipt = self._receipt(
             tool_name=tool_name,
-            tool_call_id=str(
-                getattr(result, "tool_call_id", "") or tool_call_id
-            ),
+            tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
             result=result,
             completed=True,
             status=ToolReceiptStatus.FAILED,
@@ -1740,7 +1729,7 @@ class _CognitiveControlToolRegistry:
             details=details,
             is_error=bool(getattr(result, "is_error", False)),
             progress_signature=progress_signature,
-            progress_tracking_armed=self.task_state.model_delta_count > 0,
+            progress_tracking_armed=self.task_state.stagnation_baseline_ready(),
             progress_boundary=delta_application.status not in {"missing", "duplicate"},
         )
         task_snapshot = self.task_state.prompt_snapshot()
@@ -2101,8 +2090,7 @@ class _AdapterDelivery(DeliveryPort):
                 # not optional stage chatter. ``allow_immediate_response`` has
                 # no bearing on this reviewed-workflow message.
                 required=(
-                    commentary.draft_response
-                    or commentary.stage is Stage.REPLANNING
+                    commentary.draft_response or commentary.stage is Stage.REPLANNING
                 ),
                 provenance=commentary.provenance,
                 detail=(
@@ -2305,8 +2293,7 @@ class HashiStageProvider(StageProvider):
                     retryable=False,
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     human_description=(
-                        "The configured stage model exposes no exact input "
-                        "capability."
+                        "The configured stage model exposes no exact input capability."
                     ),
                 )
             backend_capabilities = getattr(backend, "capabilities", None)
@@ -2386,9 +2373,7 @@ class HashiStageProvider(StageProvider):
                         "text-to-audio converter is unavailable."
                     ),
                 )
-            agent_name = str(
-                getattr(self.runtime_context, "name", "hashi") or "hashi"
-            )
+            agent_name = str(getattr(self.runtime_context, "name", "hashi") or "hashi")
             try:
                 asset = await synthesizer(
                     agent_name,
@@ -2618,9 +2603,10 @@ class HashiStageProvider(StageProvider):
             )
             provider_request_id = str(call.get("provider_request_id") or "").strip()
             if not provider_request_id:
-                provider_request_id = "hashi-provider:" + hashlib.sha256(
-                    call_identity.encode("utf-8")
-                ).hexdigest()
+                provider_request_id = (
+                    "hashi-provider:"
+                    + hashlib.sha256(call_identity.encode("utf-8")).hexdigest()
+                )
             if provider_request_id in observed_provider_request_ids:
                 # Physical-call observers write immediately. The aggregate
                 # BackendResponse later repeats the same facts solely for
@@ -2636,9 +2622,9 @@ class HashiStageProvider(StageProvider):
             line_item = PerCallUsageLineItem(
                 request_id=(
                     f"{parent_request_id}:provider-call:"
-                    + hashlib.sha256(
-                        provider_request_id.encode("utf-8")
-                    ).hexdigest()[:16]
+                    + hashlib.sha256(provider_request_id.encode("utf-8")).hexdigest()[
+                        :16
+                    ]
                     if per_call
                     else parent_request_id
                 ),
@@ -2777,9 +2763,8 @@ class HashiStageProvider(StageProvider):
             token_source="unknown",
             cost_usd=None,
             cost_source="unknown",
-            provider_request_id="hashi-provider:" + hashlib.sha256(
-                identity.encode("utf-8")
-            ).hexdigest(),
+            provider_request_id="hashi-provider:"
+            + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
             attempt=max(1, int(request.attempt)),
             retry_count=max(0, int(request.attempt) - 1),
             recovery_kind=(
@@ -2858,17 +2843,13 @@ class HashiStageProvider(StageProvider):
         )
         catalogue: list[Mapping[str, Any]] = []
         for definition in _registry_tool_definitions(narrowed):
-            name = str(
-                (definition.get("function") or {}).get("name") or ""
-            ).strip()
+            name = str((definition.get("function") or {}).get("name") or "").strip()
             if not name:
                 continue
             catalogue.append(
                 {
                     **definition,
-                    "hashi_read_only": _registry_is_read_only(
-                        self.tool_registry, name
-                    ),
+                    "hashi_read_only": _registry_is_read_only(self.tool_registry, name),
                 }
             )
         return tuple(catalogue)
@@ -2957,8 +2938,8 @@ class HashiStageProvider(StageProvider):
             # one-time claim correlation to the outer HASHI request, not the
             # HER stage invocation ID used for provider tracing.
             request_ref = str(request.request_ref or "")
-            backend_extra["_native_audio_claim_request_id"] = (
-                request_ref.removeprefix("hashi-request:")
+            backend_extra["_native_audio_claim_request_id"] = request_ref.removeprefix(
+                "hashi-request:"
             )
         elif request_content_is_voice_origin(request.request_content):
             # Triage and work stages may hear audio, but they remain text-output
@@ -3099,13 +3080,14 @@ class HashiStageProvider(StageProvider):
             if request.allow_tools
             else frozenset()
         )
-        if (
-            request.stage is Stage.TRIAGE
-            and request_content_is_voice_origin(request.request_content)
+        if request.stage is Stage.TRIAGE and request_content_is_voice_origin(
+            request.request_content
         ):
-            triage_input_policy = str(
-                profile.options.get("_voice_triage_input_policy") or "auto"
-            ).strip().casefold()
+            triage_input_policy = (
+                str(profile.options.get("_voice_triage_input_policy") or "auto")
+                .strip()
+                .casefold()
+            )
             capability_resolver = getattr(backend, "resolve_input_capability", None)
             triage_capability = (
                 capability_resolver()
@@ -3113,8 +3095,7 @@ class HashiStageProvider(StageProvider):
                 else getattr(backend, "input_capability", None)
             )
             triage_hears_audio = bool(
-                triage_capability is not None
-                and triage_capability.supports("audio")
+                triage_capability is not None and triage_capability.supports("audio")
             )
             if triage_input_policy == "native" and not triage_hears_audio:
                 await backend.shutdown()
@@ -3460,9 +3441,7 @@ class HashiStageProvider(StageProvider):
                 recovery_kind=(
                     "json_repair"
                     if request.stage is Stage.JSON_REPAIR
-                    else (
-                        "fresh_connection_retry" if request.attempt > 1 else "none"
-                    )
+                    else ("fresh_connection_retry" if request.attempt > 1 else "none")
                 ),
             )
             prompt_request = request
@@ -3864,8 +3843,7 @@ class HashiStageProvider(StageProvider):
                         or profile.engine
                     ).strip()
                     fallback_model = str(
-                        profile.options.get("_voice_fallback_model")
-                        or profile.model
+                        profile.options.get("_voice_fallback_model") or profile.model
                     ).strip()
                     try:
                         fallback_backend = (
@@ -3894,9 +3872,9 @@ class HashiStageProvider(StageProvider):
                         if profile.reasoning is not None and hasattr(
                             fallback_backend, "set_reasoning_enabled"
                         ):
-                            normalized_reasoning = str(
-                                profile.reasoning or ""
-                            ).strip().casefold()
+                            normalized_reasoning = (
+                                str(profile.reasoning or "").strip().casefold()
+                            )
                             fallback_backend.set_reasoning_enabled(
                                 normalized_reasoning
                                 not in {
@@ -3908,24 +3886,18 @@ class HashiStageProvider(StageProvider):
                                     "disabled",
                                 }
                             )
-                        if not _install_system_prompt(
-                            fallback_backend, system_prompt
-                        ):
+                        if not _install_system_prompt(fallback_backend, system_prompt):
                             raise StageInvocationError(
                                 "native voice fallback backend cannot isolate the "
                                 "HER v2 system prompt",
                                 retryable=False,
-                                code=(
-                                    ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
-                                ),
+                                code=(ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR),
                             )
                         if not await fallback_backend.initialize():
                             raise StageInvocationError(
                                 "native voice fallback backend failed to initialize",
                                 retryable=False,
-                                code=(
-                                    ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
-                                ),
+                                code=(ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR),
                             )
                         self._bind_provider_call_observer(
                             fallback_backend,
@@ -4531,9 +4503,7 @@ class HashiStageProvider(StageProvider):
                 model=profile.model,
                 invocation_id=request_id,
                 attempt=attempt,
-                recovery_kind=(
-                    "fresh_connection_retry" if attempt > 1 else "none"
-                ),
+                recovery_kind=("fresh_connection_retry" if attempt > 1 else "none"),
             )
             effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):

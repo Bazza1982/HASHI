@@ -355,12 +355,17 @@ async def test_parallel_calls_with_one_delta_id_count_as_one_cognitive_boundary(
         assert "HASHI_COGNITIVE_INTERRUPT" not in result.output
 
     assert task_state.snapshot()["model_delta_count"] == 1
-    assert registry.controller.snapshot()["progress_stall_count"] == 1
+    assert task_state.stagnation_baseline_ready() is False
+    assert registry.controller.snapshot()["progress_stall_count"] == 0
 
 
 @pytest.mark.asyncio
-async def test_varied_actions_with_unchanged_task_state_trigger_progress_interrupt():
+async def test_varied_actions_with_unchanged_task_state_remain_advisory():
     task_state = HERTaskState(goal="Find one decisive fact")
+    task_state.record_stage_completion(
+        stage="planning",
+        output={"success_criteria": ["A decisive fact is evidence-backed"]},
+    )
     registry = _CognitiveControlToolRegistry(
         _Registry(),
         _request(Stage.EXECUTION, task_state=task_state),
@@ -385,52 +390,22 @@ async def test_varied_actions_with_unchanged_task_state_trigger_progress_interru
         )
 
     assert result is not None
-    assert "HASHI_COGNITIVE_INTERRUPT" in result.output
-    interrupt = registry.controller.interrupt_payload()["interrupt"]
-    assert interrupt["code"] == "NO_MEANINGFUL_PROGRESS"
-    assert interrupt["detection_kind"] == "task_state_stagnation"
-    assert interrupt["stall_count"] == 3
-    assert interrupt["repeated_after_intervention"] is False
-    assert _tool_names(registry.get_tool_definitions()) == [COGNITIVE_DECISION_TOOL]
-
-    decision = await registry.execute(
-        COGNITIVE_DECISION_TOOL,
-        {
-            "decision": "REVISE_DIRECTION",
-            "new_focus": "q-alternate",
-            "revised_direction": "Inspect the alternate evidence sources.",
-            "expected_change": "An evidence-bound fact or discarded path appears.",
-            "stop_condition": "Stop after one bounded alternate pass.",
-            "requested_tools": list(_TOOLS),
-        },
-        "stalled-decision",
-    )
-    assert decision.is_error is False
-
-    for index, name in enumerate(("probe_d", "probe_e", "probe_a"), start=4):
-        result = await registry.execute(
-            name,
-            {
-                "target": index,
-                HASHI_TASK_DELTA_ARGUMENT: {"delta_id": f"restalled-{index}"},
-            },
-            f"restalled-{index}",
-        )
-
-    terminal = registry.controller.interrupt_payload()["interrupt"]
-    assert terminal["code"] == "NO_MEANINGFUL_PROGRESS"
-    assert terminal["detection_kind"] == "task_state_stagnation"
-    assert terminal["repeated_after_intervention"] is True
-    schema = registry.get_tool_definitions()[0]
-    assert schema["function"]["parameters"]["properties"]["decision"]["enum"] == [
-        "FINALIZE",
-        "BLOCKED",
-    ]
+    assert "HASHI_COGNITIVE_INTERRUPT" not in result.output
+    snapshot = registry.controller.snapshot()
+    assert snapshot["interrupt_count"] == 0
+    assert snapshot["progress_stall_count"] == 3
+    assert snapshot["stagnation_signal_count"] == 1
+    assert snapshot["stagnation_enforcement"] == "advisory_only"
+    assert _tool_names(registry.get_tool_definitions()) == list(_TOOLS)
 
 
 @pytest.mark.asyncio
 async def test_evidence_progress_resets_stall_before_later_stagnation():
     task_state = HERTaskState(goal="Resolve a question, then finish")
+    task_state.record_stage_completion(
+        stage="planning",
+        output={"success_criteria": ["The question is evidence-backed"]},
+    )
     registry = _CognitiveControlToolRegistry(
         _Registry(),
         _request(Stage.EXECUTION, task_state=task_state),
@@ -482,9 +457,10 @@ async def test_evidence_progress_resets_stall_before_later_stagnation():
         )
 
     assert result is not None
-    interrupt = registry.controller.interrupt_payload()["interrupt"]
-    assert interrupt["detection_kind"] == "task_state_stagnation"
-    assert interrupt["stall_count"] == 3
+    assert "HASHI_COGNITIVE_INTERRUPT" not in result.output
+    snapshot = registry.controller.snapshot()
+    assert snapshot["progress_stall_count"] == 3
+    assert snapshot["stagnation_signal_count"] == 1
 
 
 @pytest.mark.asyncio
