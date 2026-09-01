@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import inspect
 import json
@@ -38,6 +39,11 @@ from adapters.stream_events import (
     legacy_delivery_class,
 )
 from orchestrator.her_v2.audit import AuditPersistenceError, DurableAuditLog
+from orchestrator.her_v2.cognitive_control import (
+    COGNITIVE_DECISION_TOOL,
+    StageCognitiveController,
+    cognitive_system_contract,
+)
 from orchestrator.her_v2.commentary import (
     MAX_PACKAGED_COMMENTARY_CHARS,
     NeutralCommentary,
@@ -80,6 +86,12 @@ from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
 )
+from orchestrator.her_v2.task_state import (
+    HASHI_TASK_DELTA_ARGUMENT,
+    HERTaskState,
+    TaskDeltaApplication,
+    task_state_contract,
+)
 from orchestrator.multimodal_contract import (
     MultimodalContractError,
     attachment_manifest,
@@ -93,6 +105,7 @@ from orchestrator.multimodal_contract import (
 )
 from orchestrator.voice_transcript_gate import await_authorized_transcript
 from tools.meter_cost import PerCallUsageLineItem
+from tools.smart_tools import smart_tool_spec
 from tools.token_tracker import resolve_cost_source
 
 _HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
@@ -835,9 +848,7 @@ class _DelegatedToolRegistry:
         return None
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
-        return await self.execute_with_audit_context(
-            tool_name, arguments, tool_call_id
-        )
+        return await self.execute_with_audit_context(tool_name, arguments, tool_call_id)
 
     async def execute_with_audit_context(
         self,
@@ -1005,8 +1016,7 @@ class _EvidenceRecordingToolRegistry:
             )
         )
         operation_id = (
-            f"{invocation_id}:attempt:{self._request.attempt}:"
-            f"tool:{effective_call_id}"
+            f"{invocation_id}:attempt:{self._request.attempt}:tool:{effective_call_id}"
         )
         if self._audit_log is not None:
             arguments_digest = hashlib.sha256(
@@ -1047,9 +1057,7 @@ class _EvidenceRecordingToolRegistry:
             dict(arguments or {}), self._request.attachment_manifest
         )
         try:
-            scoped_execute = getattr(
-                self._base, "execute_with_audit_context", None
-            )
+            scoped_execute = getattr(self._base, "execute_with_audit_context", None)
             if callable(scoped_execute):
                 result = await scoped_execute(
                     tool_name,
@@ -1058,30 +1066,28 @@ class _EvidenceRecordingToolRegistry:
                     audit_context=self._audit_context,
                 )
             else:
-                result = await self._base.execute(
-                    tool_name, arguments, tool_call_id
-                )
+                result = await self._base.execute(tool_name, arguments, tool_call_id)
         except asyncio.CancelledError:
             receipt = self._receipt(
-                    tool_name=tool_name,
-                    tool_call_id=effective_call_id,
-                    result=None,
-                    completed=False,
-                    status=ToolReceiptStatus.CANCELLED,
-                    attachment_ids=matched_attachment_ids,
-                )
+                tool_name=tool_name,
+                tool_call_id=effective_call_id,
+                result=None,
+                completed=False,
+                status=ToolReceiptStatus.CANCELLED,
+                attachment_ids=matched_attachment_ids,
+            )
             self._receipts.append(receipt)
             self._record_recovery_receipt(receipt)
             raise
         except Exception:
             receipt = self._receipt(
-                    tool_name=tool_name,
-                    tool_call_id=effective_call_id,
-                    result=None,
-                    completed=False,
-                    status=ToolReceiptStatus.FAILED,
-                    attachment_ids=matched_attachment_ids,
-                )
+                tool_name=tool_name,
+                tool_call_id=effective_call_id,
+                result=None,
+                completed=False,
+                status=ToolReceiptStatus.FAILED,
+                attachment_ids=matched_attachment_ids,
+            )
             self._receipts.append(receipt)
             self._record_recovery_receipt(receipt)
             raise
@@ -1201,9 +1207,7 @@ class _EvidenceRecordingToolRegistry:
     ):
         denial_recorder = getattr(self.base, "record_delegated_denial", None)
         if callable(denial_recorder):
-            scoped_context = dict(
-                getattr(self._base, "audit_context", {}) or {}
-            )
+            scoped_context = dict(getattr(self._base, "audit_context", {}) or {})
             scoped_context.update(self._audit_context)
             recorded = denial_recorder(
                 tool_name,
@@ -1215,9 +1219,7 @@ class _EvidenceRecordingToolRegistry:
                 result = recorded
         receipt = self._receipt(
             tool_name=tool_name,
-            tool_call_id=str(
-                getattr(result, "tool_call_id", "") or tool_call_id
-            ),
+            tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
             result=result,
             completed=True,
             status=ToolReceiptStatus.FAILED,
@@ -1462,6 +1464,435 @@ class _UnboundedToolRegistry:
         return getattr(self._base, name)
 
 
+class _CognitiveControlToolRegistry:
+    """Maintain TaskState and expose a typed boundary when progress stalls.
+
+    This wrapper is request-local and stage-neutral.  It does not count tool
+    calls or impose an execution ceiling. Each ordinary tool schema carries one
+    reserved inline TaskState delta that is removed before real execution. After
+    a detected cycle or structural progress stall, only the internal cognitive
+    decision tool is advertised until the same model finalises, reports a
+    blocker, or records a distinct direction with a narrow tool set.
+    """
+
+    def __init__(
+        self,
+        base: Any,
+        request: StageRequest,
+        *,
+        audit_log: DurableAuditLog | None = None,
+        provider: str = "",
+        model: str = "",
+    ) -> None:
+        self._base = base
+        self._request = request
+        self._audit_log = audit_log
+        self._provider = str(provider or "")
+        self._model = str(model or "")
+        self._audit_serial = 0
+        self.task_state = (
+            request.task_state
+            if isinstance(request.task_state, HERTaskState)
+            else HERTaskState(goal=request.goal)
+        )
+        self.controller = StageCognitiveController(
+            stage=request.stage.value,
+            goal=request.goal,
+            task_state=self.task_state,
+        )
+        self.max_loops = None
+
+    @property
+    def base(self) -> Any:
+        return getattr(self._base, "base", self._base)
+
+    @property
+    def cognitive_final_response_required(self) -> bool:
+        return self.controller.final_response_required
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def _base_definitions(self, tiers=None) -> list[dict[str, Any]]:
+        getter = getattr(self._base, "get_tool_definitions", None)
+        if not callable(getter):
+            return []
+        try:
+            raw = getter(tiers=tiers)
+        except TypeError:
+            raw = getter(tiers)
+        return [dict(item) for item in raw if isinstance(item, Mapping)]
+
+    def _all_base_tool_names(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                str((item.get("function") or {}).get("name") or "").strip()
+                for item in self._base_definitions(None)
+                if str((item.get("function") or {}).get("name") or "").strip()
+            )
+        )
+
+    @staticmethod
+    def _task_delta_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "description": (
+                "TaskState delta from prior evidence; use the system contract. "
+                "Removed before the real tool executes."
+            ),
+            "properties": {"delta_id": {"type": "string"}},
+            "required": ["delta_id"],
+            "additionalProperties": True,
+        }
+
+    @classmethod
+    def _with_task_delta(cls, definition: Mapping[str, Any]) -> dict[str, Any]:
+        item = copy.deepcopy(dict(definition))
+        function = item.get("function")
+        if not isinstance(function, Mapping):
+            return item
+        function = dict(function)
+        parameters = function.get("parameters")
+        parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
+        parameters.setdefault("type", "object")
+        properties = parameters.get("properties")
+        properties = dict(properties) if isinstance(properties, Mapping) else {}
+        properties[HASHI_TASK_DELTA_ARGUMENT] = cls._task_delta_schema()
+        parameters["properties"] = properties
+        required = [str(value) for value in parameters.get("required", [])]
+        if HASHI_TASK_DELTA_ARGUMENT not in required:
+            required.append(HASHI_TASK_DELTA_ARGUMENT)
+        parameters["required"] = required
+        function["parameters"] = parameters
+        item["function"] = function
+        return item
+
+    def get_tool_definitions(self, tiers=None):
+        if self.controller.awaiting_decision:
+            return [self.controller.decision_schema()]
+        if self.controller.final_response_required:
+            return []
+        definitions = self._base_definitions(tiers)
+        allowed = self.controller.active_tool_allowlist
+        selected = (
+            definitions
+            if allowed is None
+            else [
+                item
+                for item in definitions
+                if str((item.get("function") or {}).get("name") or "") in allowed
+            ]
+        )
+        return [self._with_task_delta(item) for item in selected]
+
+    def allowed_tool_names(self) -> tuple[str, ...]:
+        if self.controller.awaiting_decision:
+            return (COGNITIVE_DECISION_TOOL,)
+        if self.controller.final_response_required:
+            return ()
+        allowed = self.controller.active_tool_allowlist
+        names = self._all_base_tool_names()
+        return (
+            names
+            if allowed is None
+            else tuple(name for name in names if name in allowed)
+        )
+
+    def is_allowed(self, tool_name: str) -> bool:
+        name = str(tool_name or "")
+        if self.controller.awaiting_decision:
+            return name == COGNITIVE_DECISION_TOOL
+        if self.controller.final_response_required:
+            return False
+        allowed = self.controller.active_tool_allowlist
+        if allowed is not None and name not in allowed:
+            return False
+        checker = getattr(self._base, "is_allowed", None)
+        return (
+            bool(checker(name))
+            if callable(checker)
+            else name in self._all_base_tool_names()
+        )
+
+    def is_read_only(self, tool_name: str) -> bool:
+        if str(tool_name or "") == COGNITIVE_DECISION_TOOL:
+            return True
+        checker = getattr(self._base, "is_read_only", None)
+        return bool(checker(tool_name)) if callable(checker) else False
+
+    def evaluate_admission(
+        self, tool_name: str, arguments: dict, tool_call_id: str = ""
+    ):
+        if str(tool_name or "") == COGNITIVE_DECISION_TOOL:
+            return None
+        semantic_arguments = dict(arguments or {})
+        semantic_arguments.pop(HASHI_TASK_DELTA_ARGUMENT, None)
+        evaluator = getattr(self._base, "evaluate_admission", None)
+        return (
+            evaluator(tool_name, semantic_arguments, tool_call_id)
+            if callable(evaluator)
+            else None
+        )
+
+    def _audit(self, event: str, payload: Mapping[str, Any]) -> None:
+        if self._audit_log is None:
+            return
+        self._audit_serial += 1
+        invocation = str(
+            self._request.invocation_id
+            or (
+                f"{self._request.turn_id}:{self._request.stage.value}:"
+                f"{self._request.attempt}"
+            )
+        )
+        self._audit_log.append(
+            event_id=(f"{invocation}:cognitive:{self._audit_serial}:{event}"),
+            turn_id=self._request.turn_id,
+            request_ref=self._request.request_ref,
+            stage=self._request.stage.value,
+            role=self._request.role,
+            event=event,
+            provider=self._provider,
+            model=self._model,
+            attempt=self._request.attempt,
+            plan_id=self._request.plan_id or None,
+            payload=dict(payload),
+        )
+
+    @staticmethod
+    def _result(
+        *,
+        tool_call_id: str,
+        output: str,
+        is_error: bool,
+        details: Mapping[str, Any] | None = None,
+        content: Any = None,
+    ):
+        from tools.registry import ToolResult
+
+        return ToolResult(
+            tool_call_id=str(tool_call_id or ""),
+            output=str(output),
+            is_error=bool(is_error),
+            content=content,
+            details=dict(details or {}),
+        )
+
+    @staticmethod
+    def _split_arguments(
+        arguments: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, Any], Mapping[str, Any] | None]:
+        semantic = dict(arguments or {})
+        delta = semantic.pop(HASHI_TASK_DELTA_ARGUMENT, None)
+        return semantic, delta if isinstance(delta, Mapping) else None
+
+    def _apply_task_delta(
+        self,
+        delta: Mapping[str, Any] | None,
+        *,
+        tool_call_id: str,
+    ) -> TaskDeltaApplication:
+        application = self.task_state.apply_delta(
+            delta,
+            source=(
+                f"{self._request.stage.value}:{tool_call_id or self._audit_serial + 1}"
+            ),
+            allow_focus=not self._request.role.startswith("sub_agent:"),
+        )
+        self._audit(
+            "task_state_delta",
+            {
+                "application": application.as_dict(),
+                "task_state": self.task_state.snapshot(),
+            },
+        )
+        return application
+
+    def _process_tool_result(
+        self,
+        *,
+        name: str,
+        arguments: Mapping[str, Any],
+        tool_call_id: str,
+        result: Any,
+        delta_application: TaskDeltaApplication,
+    ):
+        details = dict(getattr(result, "details", None) or {})
+        evidence_ref = str(details.get("evidence_ref") or "").strip()
+        if evidence_ref:
+            self.task_state.observe_evidence((evidence_ref,))
+        progress_signature = self.task_state.progress_signature()
+        interrupt = self.controller.observe(
+            tool_name=name,
+            tool_profile=smart_tool_spec(name).profile,
+            arguments=arguments,
+            output=str(getattr(result, "output", "") or ""),
+            details=details,
+            is_error=bool(getattr(result, "is_error", False)),
+            progress_signature=progress_signature,
+            progress_tracking_armed=self.task_state.stagnation_baseline_ready(),
+            progress_boundary=delta_application.status not in {"missing", "duplicate"},
+        )
+        task_snapshot = self.task_state.prompt_snapshot()
+        output = str(getattr(result, "output", "") or "").rstrip()
+        output += "\n\nHASHI_TASK_STATE: " + json.dumps(
+            task_snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        details.update(
+            {
+                "task_state_delta": delta_application.as_dict(),
+                "task_state": task_snapshot,
+            }
+        )
+        if interrupt is not None:
+            payload = self.controller.interrupt_payload()
+            self._audit(
+                "cognitive_interrupt",
+                {
+                    "interrupt": interrupt.as_dict(),
+                    "state": self.controller.snapshot(),
+                },
+            )
+            output += "\n\nHASHI_COGNITIVE_INTERRUPT\n" + json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            details.update(
+                {
+                    "control_disposition": "cognitive_interrupt",
+                    "cognitive_interrupt": interrupt.as_dict(),
+                    "cognitive_control": self.controller.snapshot(),
+                }
+            )
+        return self._result(
+            tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
+            output=output,
+            is_error=bool(getattr(result, "is_error", False)),
+            details=details,
+            content=getattr(result, "content", None),
+        )
+
+    async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        name = str(tool_name or "")
+        if name == COGNITIVE_DECISION_TOOL:
+            decision, rejected = self.controller.decide(
+                arguments,
+                available_tools=self._all_base_tool_names(),
+            )
+            self._audit(
+                "cognitive_decision_rejected" if rejected else "cognitive_decision",
+                {
+                    "decision": decision,
+                    "state": self.controller.snapshot(),
+                },
+            )
+            return self._result(
+                tool_call_id=tool_call_id,
+                output=json.dumps(
+                    decision,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                is_error=rejected,
+                details={
+                    "control_disposition": (
+                        "cognitive_decision_rejected"
+                        if rejected
+                        else "cognitive_decision"
+                    ),
+                    "cognitive_control": self.controller.snapshot(),
+                },
+            )
+
+        if not self.is_allowed(name):
+            payload = self.controller.interrupt_payload()
+            return self._result(
+                tool_call_id=tool_call_id,
+                output=json.dumps(
+                    {
+                        "status": "blocked",
+                        "code": "COGNITIVE_DECISION_REQUIRED",
+                        "cognitive_interrupt": payload or None,
+                        "instruction": (
+                            "Use the currently advertised cognitive decision "
+                            "boundary or return the normal stage response; do not "
+                            "call another ordinary tool."
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                is_error=True,
+                details={
+                    "control_disposition": "cognitive_interrupt",
+                    "cognitive_control": self.controller.snapshot(),
+                },
+            )
+
+        semantic_arguments, delta = self._split_arguments(arguments)
+        delta_application = self._apply_task_delta(
+            delta,
+            tool_call_id=tool_call_id,
+        )
+        result = await self._base.execute(name, semantic_arguments, tool_call_id)
+        return self._process_tool_result(
+            name=name,
+            arguments=semantic_arguments,
+            tool_call_id=tool_call_id,
+            result=result,
+            delta_application=delta_application,
+        )
+
+    async def record_policy_denial(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str,
+        *,
+        output: str,
+        decision: str,
+    ):
+        semantic_arguments, delta = self._split_arguments(arguments)
+        delta_application = self._apply_task_delta(
+            delta,
+            tool_call_id=tool_call_id,
+        )
+        recorder = getattr(self._base, "record_policy_denial")
+        result = await recorder(
+            tool_name,
+            semantic_arguments,
+            tool_call_id,
+            output=output,
+            decision=decision,
+        )
+        return self._process_tool_result(
+            name=str(tool_name or ""),
+            arguments=semantic_arguments,
+            tool_call_id=tool_call_id,
+            result=result,
+            delta_application=delta_application,
+        )
+
+    def note_provider_completion(self) -> str:
+        decision = self.controller.note_provider_completion()
+        if decision:
+            self._audit(
+                "cognitive_boundary_completed",
+                {
+                    "decision": decision,
+                    "state": self.controller.snapshot(),
+                },
+            )
+        return decision
+
+
 class _MediaRoutingToolRegistry:
     """Prevent one attachment from taking native and fallback routes together."""
 
@@ -1660,8 +2091,7 @@ class _AdapterDelivery(DeliveryPort):
                 # not optional stage chatter. ``allow_immediate_response`` has
                 # no bearing on this reviewed-workflow message.
                 required=(
-                    commentary.draft_response
-                    or commentary.stage is Stage.REPLANNING
+                    commentary.draft_response or commentary.stage is Stage.REPLANNING
                 ),
                 provenance=commentary.provenance,
                 detail=(
@@ -1759,6 +2189,7 @@ class HashiStageProvider(StageProvider):
         runtime_context: Any = None,
         usage_observer: Callable[[PerCallUsageLineItem], None] | None = None,
         default_recovery_kind: str = "none",
+        cognitive_control_enabled: bool = False,
     ) -> None:
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
@@ -1770,6 +2201,7 @@ class HashiStageProvider(StageProvider):
         self.runtime_context = runtime_context
         self.usage_observer = usage_observer
         self.default_recovery_kind = str(default_recovery_kind or "none")
+        self.cognitive_control_enabled = bool(cognitive_control_enabled)
         self._persona_invocation_serial = 0
         self._persona_audit_contexts: dict[str, tuple[str, str]] = {}
         self.logger = logging.getLogger("HASHI.HERv2.StageProvider")
@@ -1862,8 +2294,7 @@ class HashiStageProvider(StageProvider):
                     retryable=False,
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     human_description=(
-                        "The configured stage model exposes no exact input "
-                        "capability."
+                        "The configured stage model exposes no exact input capability."
                     ),
                 )
             backend_capabilities = getattr(backend, "capabilities", None)
@@ -1943,9 +2374,7 @@ class HashiStageProvider(StageProvider):
                         "text-to-audio converter is unavailable."
                     ),
                 )
-            agent_name = str(
-                getattr(self.runtime_context, "name", "hashi") or "hashi"
-            )
+            agent_name = str(getattr(self.runtime_context, "name", "hashi") or "hashi")
             try:
                 asset = await synthesizer(
                     agent_name,
@@ -2175,9 +2604,10 @@ class HashiStageProvider(StageProvider):
             )
             provider_request_id = str(call.get("provider_request_id") or "").strip()
             if not provider_request_id:
-                provider_request_id = "hashi-provider:" + hashlib.sha256(
-                    call_identity.encode("utf-8")
-                ).hexdigest()
+                provider_request_id = (
+                    "hashi-provider:"
+                    + hashlib.sha256(call_identity.encode("utf-8")).hexdigest()
+                )
             if provider_request_id in observed_provider_request_ids:
                 # Physical-call observers write immediately. The aggregate
                 # BackendResponse later repeats the same facts solely for
@@ -2193,9 +2623,9 @@ class HashiStageProvider(StageProvider):
             line_item = PerCallUsageLineItem(
                 request_id=(
                     f"{parent_request_id}:provider-call:"
-                    + hashlib.sha256(
-                        provider_request_id.encode("utf-8")
-                    ).hexdigest()[:16]
+                    + hashlib.sha256(provider_request_id.encode("utf-8")).hexdigest()[
+                        :16
+                    ]
                     if per_call
                     else parent_request_id
                 ),
@@ -2334,9 +2764,8 @@ class HashiStageProvider(StageProvider):
             token_source="unknown",
             cost_usd=None,
             cost_source="unknown",
-            provider_request_id="hashi-provider:" + hashlib.sha256(
-                identity.encode("utf-8")
-            ).hexdigest(),
+            provider_request_id="hashi-provider:"
+            + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
             attempt=max(1, int(request.attempt)),
             retry_count=max(0, int(request.attempt) - 1),
             recovery_kind=(
@@ -2415,17 +2844,13 @@ class HashiStageProvider(StageProvider):
         )
         catalogue: list[Mapping[str, Any]] = []
         for definition in _registry_tool_definitions(narrowed):
-            name = str(
-                (definition.get("function") or {}).get("name") or ""
-            ).strip()
+            name = str((definition.get("function") or {}).get("name") or "").strip()
             if not name:
                 continue
             catalogue.append(
                 {
                     **definition,
-                    "hashi_read_only": _registry_is_read_only(
-                        self.tool_registry, name
-                    ),
+                    "hashi_read_only": _registry_is_read_only(self.tool_registry, name),
                 }
             )
         return tuple(catalogue)
@@ -2514,8 +2939,8 @@ class HashiStageProvider(StageProvider):
             # one-time claim correlation to the outer HASHI request, not the
             # HER stage invocation ID used for provider tracing.
             request_ref = str(request.request_ref or "")
-            backend_extra["_native_audio_claim_request_id"] = (
-                request_ref.removeprefix("hashi-request:")
+            backend_extra["_native_audio_claim_request_id"] = request_ref.removeprefix(
+                "hashi-request:"
             )
         elif request_content_is_voice_origin(request.request_content):
             # Triage and work stages may hear audio, but they remain text-output
@@ -2554,6 +2979,9 @@ class HashiStageProvider(StageProvider):
                     "The configured provider cannot prove HASHI-owned tool isolation."
                 ),
             )
+        lifecycle_task_state = (
+            request.task_state if isinstance(request.task_state, HERTaskState) else None
+        )
         selected_registry = self.tool_registry if request.allow_tools else None
         delegated = (
             request.context.get("delegated_tools")
@@ -2603,6 +3031,7 @@ class HashiStageProvider(StageProvider):
                 ),
             )
         evidence_registry: _EvidenceRecordingToolRegistry | None = None
+        cognitive_registry: _CognitiveControlToolRegistry | None = None
         if selected_registry is not None:
             # The Agent-level registry owns permissions, not HER v2 execution
             # length.  HER tool-enabled stages continue until the model
@@ -2629,6 +3058,16 @@ class HashiStageProvider(StageProvider):
                     bound_plan_id=str(request.plan_id or ""),
                     enforce_plan_binding=request.role.startswith("sub_agent:"),
                 )
+            if self.cognitive_control_enabled:
+                cognitive_registry = _CognitiveControlToolRegistry(
+                    selected_registry,
+                    request,
+                    audit_log=self.audit_log,
+                    provider=profile.engine,
+                    model=profile.model,
+                )
+                lifecycle_task_state = cognitive_registry.task_state
+                selected_registry = cognitive_registry
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
             backend.tool_registry = selected_registry
@@ -2642,13 +3081,14 @@ class HashiStageProvider(StageProvider):
             if request.allow_tools
             else frozenset()
         )
-        if (
-            request.stage is Stage.TRIAGE
-            and request_content_is_voice_origin(request.request_content)
+        if request.stage is Stage.TRIAGE and request_content_is_voice_origin(
+            request.request_content
         ):
-            triage_input_policy = str(
-                profile.options.get("_voice_triage_input_policy") or "auto"
-            ).strip().casefold()
+            triage_input_policy = (
+                str(profile.options.get("_voice_triage_input_policy") or "auto")
+                .strip()
+                .casefold()
+            )
             capability_resolver = getattr(backend, "resolve_input_capability", None)
             triage_capability = (
                 capability_resolver()
@@ -2656,8 +3096,7 @@ class HashiStageProvider(StageProvider):
                 else getattr(backend, "input_capability", None)
             )
             triage_hears_audio = bool(
-                triage_capability is not None
-                and triage_capability.supports("audio")
+                triage_capability is not None and triage_capability.supports("audio")
             )
             if triage_input_policy == "native" and not triage_hears_audio:
                 await backend.shutdown()
@@ -3003,9 +3442,7 @@ class HashiStageProvider(StageProvider):
                 recovery_kind=(
                     "json_repair"
                     if request.stage is Stage.JSON_REPAIR
-                    else (
-                        "fresh_connection_retry" if request.attempt > 1 else "none"
-                    )
+                    else ("fresh_connection_retry" if request.attempt > 1 else "none")
                 ),
             )
             prompt_request = request
@@ -3283,6 +3720,26 @@ class HashiStageProvider(StageProvider):
                         stage_prompt = request.goal
                     elif not installed:
                         stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
+            if self.cognitive_control_enabled and lifecycle_task_state is not None:
+                contracts = []
+                if cognitive_registry is not None:
+                    contracts.append(cognitive_system_contract())
+                contracts.append(
+                    task_state_contract(
+                        lifecycle_task_state.prompt_snapshot(),
+                        stage=request.stage.value,
+                        tool_enabled=cognitive_registry is not None,
+                    )
+                )
+                contract = "\n\n".join(contracts)
+                current_system = str(getattr(backend, "sys_prompt", "") or "").strip()
+                if current_system:
+                    combined_system = f"{current_system}\n\n{contract}"
+                    _install_system_prompt(backend, combined_system)
+                    system_prompt = combined_system
+                else:
+                    stage_prompt = f"{contract}\n\n{stage_prompt}"
+
             generation_kwargs: dict[str, Any] = {
                 "is_retry": request.attempt > 1,
                 "silent": self.silent,
@@ -3387,8 +3844,7 @@ class HashiStageProvider(StageProvider):
                         or profile.engine
                     ).strip()
                     fallback_model = str(
-                        profile.options.get("_voice_fallback_model")
-                        or profile.model
+                        profile.options.get("_voice_fallback_model") or profile.model
                     ).strip()
                     try:
                         fallback_backend = (
@@ -3417,9 +3873,9 @@ class HashiStageProvider(StageProvider):
                         if profile.reasoning is not None and hasattr(
                             fallback_backend, "set_reasoning_enabled"
                         ):
-                            normalized_reasoning = str(
-                                profile.reasoning or ""
-                            ).strip().casefold()
+                            normalized_reasoning = (
+                                str(profile.reasoning or "").strip().casefold()
+                            )
                             fallback_backend.set_reasoning_enabled(
                                 normalized_reasoning
                                 not in {
@@ -3431,24 +3887,18 @@ class HashiStageProvider(StageProvider):
                                     "disabled",
                                 }
                             )
-                        if not _install_system_prompt(
-                            fallback_backend, system_prompt
-                        ):
+                        if not _install_system_prompt(fallback_backend, system_prompt):
                             raise StageInvocationError(
                                 "native voice fallback backend cannot isolate the "
                                 "HER v2 system prompt",
                                 retryable=False,
-                                code=(
-                                    ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
-                                ),
+                                code=(ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR),
                             )
                         if not await fallback_backend.initialize():
                             raise StageInvocationError(
                                 "native voice fallback backend failed to initialize",
                                 retryable=False,
-                                code=(
-                                    ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
-                                ),
+                                code=(ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR),
                             )
                         self._bind_provider_call_observer(
                             fallback_backend,
@@ -3686,6 +4136,8 @@ class HashiStageProvider(StageProvider):
                     ),
                     details={"stop_reason": response.stop_reason},
                 )
+            if cognitive_registry is not None:
+                cognitive_registry.note_provider_completion()
             if response.usage:
                 self.usage.input_tokens += int(response.usage.input_tokens or 0)
                 self.usage.output_tokens += int(response.usage.output_tokens or 0)
@@ -3721,6 +4173,20 @@ class HashiStageProvider(StageProvider):
                     dict(part)
                     for part in getattr(response, "content", ())
                     if isinstance(part, Mapping)
+                ),
+                cognitive_control=(
+                    cognitive_registry.controller.snapshot()
+                    if cognitive_registry is not None
+                    else (
+                        {
+                            "version": 2,
+                            "stage": request.stage.value,
+                            "mode": "completed",
+                            "task_state": lifecycle_task_state.prompt_snapshot(),
+                        }
+                        if lifecycle_task_state is not None
+                        else {}
+                    )
                 ),
             )
         except ProviderCallObserverError as exc:
@@ -4038,9 +4504,7 @@ class HashiStageProvider(StageProvider):
                 model=profile.model,
                 invocation_id=request_id,
                 attempt=attempt,
-                recovery_kind=(
-                    "fresh_connection_retry" if attempt > 1 else "none"
-                ),
+                recovery_kind=("fresh_connection_retry" if attempt > 1 else "none"),
             )
             effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):

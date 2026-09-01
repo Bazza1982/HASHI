@@ -14,6 +14,11 @@ from .commentary import (
     PersonaCommentaryPipeline,
 )
 from .config import HERv2Config, ProviderProfile
+from .cognitive_control import (
+    COGNITIVE_DECISION_TOOL,
+    CognitiveInterrupt,
+    StageCognitiveController,
+)
 from .interfaces import DreamMaintainer, HabitAdvisor, MeditationRunner
 from .learning import HERv2Learning, HERv2TurnLearning, LearningRecovery
 from .ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
@@ -49,6 +54,7 @@ from .presentation import (
     RequiredUserMessage,
 )
 from .runtime import HERv2Runtime
+from .task_state import HASHI_TASK_DELTA_ARGUMENT, HERTaskState
 
 __all__ = [
     "DEFAULT_ROUTES_BY_STAGE",
@@ -58,6 +64,8 @@ __all__ = [
     "CHECKPOINT_ELAPSED_THRESHOLD_S",
     "CHECKPOINT_RESULT_THRESHOLD",
     "CompulsoryReplanCoordinator",
+    "COGNITIVE_DECISION_TOOL",
+    "CognitiveInterrupt",
     "CommentaryPort",
     "DreamMaintainer",
     "DurableAuditLog",
@@ -69,6 +77,8 @@ __all__ = [
     "HERv2Learning",
     "HERv2Runtime",
     "HERv2TurnLearning",
+    "HERTaskState",
+    "HASHI_TASK_DELTA_ARGUMENT",
     "HabitAdvisor",
     "LearningRecovery",
     "LedgerInvariantError",
@@ -89,6 +99,7 @@ __all__ = [
     "ReviewOutcome",
     "Route",
     "Stage",
+    "StageCognitiveController",
     "StrategyDecision",
     "TerminalState",
     "TriageClassification",

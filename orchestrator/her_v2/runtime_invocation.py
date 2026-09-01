@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
@@ -50,6 +51,11 @@ if TYPE_CHECKING:
 
 Validator = Callable[[StageResponse], Any]
 
+_CLASSIFICATION_ANCHOR_RE = re.compile(
+    r'"classification"\s*:\s*"(DIRECT_RESPONSE|SIMPLE_TASK|COMPLEX_TASK|'
+    r'HIGH_VOLUME_TASK|CONFIRMATION_REQUIRED)"'
+)
+
 
 def _rejected_output(response: StageResponse) -> str:
     """Preserve every provider-authored structured candidate as quoted data."""
@@ -65,6 +71,18 @@ def _rejected_output(response: StageResponse) -> str:
     if data:
         return json.dumps(data, ensure_ascii=False, sort_keys=True)
     return text
+
+
+def _repair_semantic_invariants(
+    source_stage: Stage,
+    response: StageResponse,
+) -> dict[str, str]:
+    """Freeze only an unambiguous lifecycle value already in source output."""
+
+    if source_stage is not Stage.TRIAGE:
+        return {}
+    values = set(_CLASSIFICATION_ANCHOR_RE.findall(_rejected_output(response)))
+    return {"classification": next(iter(values))} if len(values) == 1 else {}
 
 
 def _tool_receipt_payload(receipt: ToolEvidenceReceipt) -> dict[str, Any]:
@@ -296,6 +314,7 @@ class RuntimeInvocationMixin:
                 provider_activity_callback=self._provider_activity_callback(
                     state, provider_activity
                 ),
+                task_state=state.task_state,
                 checkpoint_coordinator=checkpoint_coordinator,
             )
             attempt_prefix = (
@@ -346,9 +365,7 @@ class RuntimeInvocationMixin:
                 Stage.JSON_REPAIR,
             }:
                 activity_kind = "review" if stage is Stage.REVIEW else "progress"
-                activity_type = (
-                    "recovery" if stage is Stage.JSON_REPAIR else "stage"
-                )
+                activity_type = "recovery" if stage is Stage.JSON_REPAIR else "stage"
                 await self._publish_activity(
                     state,
                     kind=activity_kind,
@@ -397,6 +414,7 @@ class RuntimeInvocationMixin:
                         ),
                         "validation_pending": True,
                         "provider_activity": provider_activity.snapshot(),
+                        "cognitive_control": dict(response.cognitive_control),
                     },
                 )
                 state.ledger.add_log_ref(response_ref)
@@ -518,6 +536,59 @@ class RuntimeInvocationMixin:
                     validation_source=validation_source,
                 )
 
+                if state.task_state is not None:
+                    state.task_state.observe_evidence(
+                        tuple(
+                            receipt.evidence_ref
+                            for receipt in effective_response.tool_receipts
+                        )
+                    )
+                    response_data = (
+                        dict(effective_response.data)
+                        if effective_response.data
+                        else None
+                    )
+                    data_evidence = (
+                        response_data.get("evidence_refs") or []
+                        if isinstance(response_data, Mapping)
+                        else []
+                    )
+                    cited_evidence = tuple(
+                        dict.fromkeys(
+                            [
+                                str(item)
+                                for item in (
+                                    list(data_evidence)
+                                    if isinstance(data_evidence, (list, tuple))
+                                    else []
+                                )
+                                if str(item).strip()
+                            ]
+                            + list(effective_response.evidence_refs)
+                        )
+                    )
+                    state.task_state.record_stage_completion(
+                        stage=stage.value,
+                        output=response_data or effective_response.text,
+                        cited_evidence_refs=cited_evidence,
+                    )
+                    task_state_ref = self._audit(
+                        state,
+                        stage=stage.value,
+                        role=role,
+                        event="task_state_stage_projection",
+                        event_id=f"{attempt_prefix}:task-state",
+                        provider=effective_response.provider or selected.engine,
+                        model=effective_response.model or selected.model,
+                        attempt=attempt,
+                        plan_id=invocation_plan_id,
+                        payload={
+                            "validation_source": validation_source,
+                            "task_state": state.task_state.snapshot(),
+                        },
+                    )
+                    state.ledger.add_log_ref(task_state_ref)
+
                 complete_ref = self._audit(
                     state,
                     stage=stage.value,
@@ -546,6 +617,11 @@ class RuntimeInvocationMixin:
                         "validation_source": validation_source,
                         "retry_invariant_hash": retry_invariant_hash,
                         "provider_activity": provider_activity.snapshot(),
+                        "task_state": (
+                            state.task_state.snapshot()
+                            if state.task_state is not None
+                            else None
+                        ),
                     },
                 )
                 state.ledger.add_log_ref(complete_ref)
@@ -733,6 +809,10 @@ class RuntimeInvocationMixin:
         role = "json_repair_specialist"
         invocation_id = f"{source_invocation_id}:json-repair"
         repair_mode = "json_schema"
+        semantic_invariants = _repair_semantic_invariants(
+            source_stage,
+            preserved_response,
+        )
         invariant_payload = {
             "provider": selected.engine,
             "model": selected.model,
@@ -741,6 +821,7 @@ class RuntimeInvocationMixin:
             "source_invocation_id": source_invocation_id,
             "source_attempt": source_attempt,
             "required_schema_sha256": _payload_hash(required_schema),
+            "semantic_invariants": semantic_invariants,
             "repair_mode": repair_mode,
             "allow_tools": False,
             "allow_side_effects": False,
@@ -760,6 +841,7 @@ class RuntimeInvocationMixin:
                 rejected_output=_rejected_output(current_rejected),
                 required_schema=required_schema,
                 validation_error=str(current_error),
+                semantic_invariants=semantic_invariants,
             )
             retry_invariant_hash = _payload_hash(
                 {
@@ -868,6 +950,24 @@ class RuntimeInvocationMixin:
                     validation_source="specialist_json_repair",
                 )
                 resolution = resolve_stage_response(candidate, validator)
+                expected_classification = semantic_invariants.get("classification")
+                if expected_classification:
+                    actual_classification = getattr(
+                        resolution.parsed,
+                        "classification",
+                        None,
+                    )
+                    actual_classification = getattr(
+                        actual_classification,
+                        "value",
+                        actual_classification,
+                    )
+                    if str(actual_classification or "") != expected_classification:
+                        raise StructuredOutputError(
+                            "JSON repair changed semantic invariant classification "
+                            f"from {expected_classification} to "
+                            f"{actual_classification or 'missing'}"
+                        )
                 effective = replace(
                     resolution.response,
                     validation_source="specialist_json_repair",
@@ -903,7 +1003,11 @@ class RuntimeInvocationMixin:
                 raise
             except StructuredOutputError as exc:
                 current_error = exc
-                if response is not None:
+                # An empty/transport-only repair attempt contains no semantics
+                # and must never replace the original rejected source. Losing
+                # that source allowed a later repair to invent a new lifecycle
+                # route from a blank envelope.
+                if response is not None and _rejected_output(response):
                     current_rejected = response
                 retry_kind = "structured_repair"
                 retry_reason = (
@@ -1105,9 +1209,7 @@ class RuntimeInvocationMixin:
         next_serial = state.execution_draft_serial + 1
         base_event_id = f"{state.ledger.turn_id}:execution:draft"
         event_id = (
-            base_event_id
-            if next_serial == 1
-            else f"{base_event_id}:{next_serial}"
+            base_event_id if next_serial == 1 else f"{base_event_id}:{next_serial}"
         )
         try:
             candidate = DraftResponseCommentary(
@@ -1125,9 +1227,7 @@ class RuntimeInvocationMixin:
 
         previous_event_id = state.execution_draft_event_id
         previous_text = state.execution_draft_text
-        previous_delivered = bool(
-            state.execution_draft_delivered and previous_event_id
-        )
+        previous_delivered = bool(state.execution_draft_delivered and previous_event_id)
         previous_solidified = False
         if previous_delivered:
             previous_solidified = await self._resolve_initial(
@@ -1309,9 +1409,7 @@ class RuntimeInvocationMixin:
             state,
             kind="progress",
             text=f"{retry_kind.replace('_', ' ')} retry scheduled",
-            event_id=(
-                f"{invocation_id}:activity:retry:{retry_kind}:{attempt}"
-            ),
+            event_id=(f"{invocation_id}:activity:retry:{retry_kind}:{attempt}"),
             phase=stage.value,
             metadata={
                 "activity_type": "recovery",

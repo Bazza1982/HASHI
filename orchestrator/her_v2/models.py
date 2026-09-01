@@ -235,6 +235,9 @@ class StageRequest:
     provider_activity_callback: Callable[[Mapping[str, Any]], None] | None = field(
         default=None, compare=False, repr=False
     )
+    # Turn-scoped, provider-neutral projection of task conclusions and evidence.
+    # ``Any`` avoids coupling the wire envelope to one persistence implementation.
+    task_state: Any | None = field(default=None, compare=False, repr=False)
     # Compatibility field name retained for provider adapters shipped with the
     # earlier checkpoint package; its active value is now a compulsory Replan
     # coordinator and is never risk-gated.
@@ -257,6 +260,9 @@ class StageResponse:
     media_routing: tuple[Mapping[str, Any], ...] = ()
     validation_source: str = ""
     content: tuple[Mapping[str, Any], ...] = ()
+    # Observable decision state only.  This must never contain hidden model
+    # reasoning or reconstructed chain-of-thought.
+    cognitive_control: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -395,6 +401,7 @@ class TurnResult:
     replan_count: int = 0
     checkpoint_count: int = 0
     assurance_status: str = ""
+    task_state: Mapping[str, Any] = field(default_factory=dict)
     content: tuple[Mapping[str, Any], ...] = ()
 
 

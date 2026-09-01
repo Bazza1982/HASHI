@@ -341,7 +341,7 @@ def test_runtime_event_projection_is_idempotent(tmp_path):
     assert comparison["parity"] is False
 
 
-def test_failed_side_effect_receipt_remains_truthfully_unknown(tmp_path):
+def test_completed_failed_side_effect_receipt_is_durable_not_inflight(tmp_path):
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     turn = _accept(coordinator, "turn-1", "Apply a change")
     coordinator.store.record_runtime_event(
@@ -371,6 +371,50 @@ def test_failed_side_effect_receipt_remains_truthfully_unknown(tmp_path):
                 "status": "failed",
                 "read_only": False,
                 "completed": True,
+                "output_sha256": "sha256:partial",
+            },
+        ),
+    )
+
+    recovery = coordinator.store.active_turn_recovery(turn.session_id, turn.turn_id)
+    assert recovery["side_effects"][0]["state"] == "failed"
+    assert recovery["side_effects"][0]["receipt_status"] == "failed"
+    assert recovery["safe_to_resume"] is True
+    closed = coordinator.complete(turn, assistant_text="Recovered and verified")
+    assert closed["status"] == "completed"
+    assert coordinator.store.settled_checkpoint(turn.session_id) is not None
+
+
+def test_incomplete_failed_side_effect_receipt_remains_truthfully_unknown(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-1", "Apply a change")
+    coordinator.store.record_runtime_event(
+        session_id=turn.session_id,
+        turn_id=turn.turn_id,
+        record=_runtime_event(
+            turn.turn_id,
+            "turn-1:tool:write:intent",
+            "tool_intent",
+            tool_call_id="write",
+            tool_name="hashi_file_write",
+            arguments_sha256="sha256:write",
+            read_only=False,
+        ),
+    )
+    coordinator.store.record_runtime_event(
+        session_id=turn.session_id,
+        turn_id=turn.turn_id,
+        record=_runtime_event(
+            turn.turn_id,
+            "turn-1:tool:write:receipt",
+            "tool_receipt",
+            tool_call_id="write",
+            receipt={
+                "tool_call_id": "write",
+                "tool_name": "hashi_file_write",
+                "status": "failed",
+                "read_only": False,
+                "completed": False,
                 "output_sha256": "sha256:partial",
             },
         ),

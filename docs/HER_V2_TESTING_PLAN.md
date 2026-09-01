@@ -934,6 +934,37 @@ False progress includes:
 
 Tests must prove that false progress cannot keep a stalled turn alive indefinitely.
 
+### 10.1.1 Semantic cognitive-control boundary
+
+Deterministic tests must cover the shared boundary in Direct, Strategy/Triage,
+Planning, Execution, Replanning, Review, and delegated tool contexts. At a
+minimum they must prove:
+
+- `A-B-C-D-E` repeated three times with identical semantic results triggers one
+  `NO_NEW_INFORMATION_CYCLE` decision boundary;
+- receipt IDs, call IDs, timestamps, durations, and repeat warnings do not hide
+  the cycle;
+- repeated actions with changing results or a positively observed state change
+  do not trigger;
+- unchanged cycles containing only explicitly classified polling tools remain
+  available;
+- one Turn-scoped TaskState object is shared across lifecycle stages and only
+  validated stage output is projected into it;
+- ordinary tool schemas require an inline `_hashi_task_delta`, the reserved
+  field is never forwarded to the real tool, and duplicate delta IDs are safe;
+- evidence-bound facts/resolutions change the progress signature while focus,
+  confidence, plan, and label churn do not;
+- different actions with an unchanged TaskState trigger deterministic
+  task-state stagnation recovery without a second LLM judge;
+- `REVISE_DIRECTION` requires a stable new focus, structurally different
+  direction, expected state change, stop condition, and authorised tool subset;
+- only the requested subset reopens in the same provider conversation;
+- recurrence of the same semantic/progress basin becomes
+  `NO_MEANINGFUL_PROGRESS` and
+  permits only `FINALIZE` or `BLOCKED`; and
+- audit/state payloads contain typed conclusions and runtime facts, never
+  hidden reasoning.
+
 ### 10.2 Failure-class provider recovery
 
 Tests must prove exactly one safe fresh-connection recovery after an eligible

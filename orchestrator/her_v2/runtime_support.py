@@ -700,6 +700,11 @@ class RuntimeSupportMixin:
             checkpoint_count=state.checkpoint_count,
             assurance_status="",
             replan_count=state.replan_count,
+            task_state=(
+                state.task_state.snapshot()
+                if state.task_state is not None
+                else {}
+            ),
             content=content,
         )
 

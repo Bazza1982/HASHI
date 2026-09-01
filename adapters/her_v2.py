@@ -967,6 +967,9 @@ class HERv2Adapter(BaseBackend):
             runtime_context=self._runtime_context(),
             usage_observer=usage_observer,
             default_recovery_kind=default_recovery_kind,
+            cognitive_control_enabled=bool(
+                self._v2_config and self._v2_config.cognitive_control_enabled
+            ),
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:
@@ -1922,6 +1925,7 @@ class HERv2Adapter(BaseBackend):
                 },
                 "evidence_refs": list(result.evidence_refs),
                 "limitations": list(result.limitations),
+                "task_state": dict(result.task_state) if result.task_state else None,
                 "shadow_mode": self._v2_config.shadow_mode,
                 "effort": effort_resolution.metadata(),
             }

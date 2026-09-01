@@ -1259,12 +1259,22 @@ class HerSessionStore:
                 )
                 if matches:
                     receipt_status = str(receipt.get("status") or "").casefold()
-                    effect["state"] = (
-                        "completed"
-                        if bool(receipt.get("completed"))
-                        and receipt_status in {"success", "completed"}
-                        else "unknown"
-                    )
+                    receipt_completed = bool(receipt.get("completed"))
+                    if receipt_completed:
+                        # A completed failure may have made a partial change,
+                        # but it is not an ambiguous in-flight operation: the
+                        # same Agent thread received a durable failed receipt
+                        # and can recover or verify before finishing. Never
+                        # replay it automatically; retain the failed state and
+                        # receipt details for audit. UNKNOWN_SIDE_EFFECT is
+                        # reserved for operations with no completed receipt.
+                        effect["state"] = (
+                            "completed"
+                            if receipt_status in {"success", "completed"}
+                            else "failed"
+                        )
+                    else:
+                        effect["state"] = "unknown"
                     effect["receipt_status"] = receipt_status
             receipts = cls._bounded_tool_receipts(receipts, effects)
         elif event == "transition":

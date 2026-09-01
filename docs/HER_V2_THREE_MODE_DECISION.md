@@ -43,6 +43,14 @@ Runtime timer heartbeats are intentionally excluded. Tool calls and other
 observable Execution activity remain owned by `/verbose`; the completed
 Execution outcome remains owned by the final response.
 
+All three modes may additionally use the lifecycle-wide semantic cognitive
+control when enabled for the Agent. One compact evidence-aware TaskState is
+shared across their active stages; tool calls carry its delta in the same model
+turn, and a structural progress signature complements exact-cycle detection.
+It is independent of mode selection and adds neither a stage nor a second
+model judge. Exact-cycle and TaskState-stagnation recovery remain a safety net,
+not a replacement for model-owned task semantics.
+
 ## Compatibility
 
 - Canonical persisted and wire values remain `zero`, `low`, and `medium`.
