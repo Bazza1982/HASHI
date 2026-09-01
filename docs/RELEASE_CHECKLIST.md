@@ -40,8 +40,9 @@
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
 - HER v2 mode gates:
-  - release scope names HASHI `v4.0.0-alpha.2` separately from Enterprise AAI
-    `v0.1.0-alpha.1` / package `0.1.0a1`
+  - release scope uses HASHI `v4.0.0-alpha.2` as the single current repository,
+    Python package (`4.0.0a2`), root Node package, and Helm application line;
+    Enterprise AAI `v0.1.0-alpha.1` is labelled only as historical provenance
   - HER v2 changes run the touched v2 module plus its direct adapter/runtime
     consumers; no active path imports the retired HER v1 implementation
   - `her` resolves forward to `her-v2`, while `claw-cli` is rejected
@@ -132,15 +133,17 @@
   - push only after the destination and publication scope are approved; never
     overwrite remote history implicitly
 
-## HASHI AAI Enterprise 0.1 Alpha
+## Historical HASHI AAI Enterprise 0.1 Alpha Revalidation
 
-This gate is for `HASHI AAI Enterprise v0.1.0-alpha.1`. It confirms that the
-enterprise control plane and deployment artifacts are coherent for alpha
-testing. It does not certify a production enterprise-server rollout.
+This optional historical gate revalidates the scope frozen at `HASHI AAI
+Enterprise v0.1.0-alpha.1`. It confirms that the inherited enterprise control
+plane and deployment artifacts remain coherent for alpha testing. It neither
+defines current package metadata nor certifies a production enterprise-server
+rollout.
 
-- Version metadata:
-  - `pyproject.toml` uses `0.1.0a1`
-  - `setup.py` uses `0.1.0a1`
+- Version provenance:
+  - annotated tag `v0.1.0-alpha.1` remains immutable
+  - current root package metadata uses the unified v4 release line
 - Scope docs:
   - `docs/HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md` includes the
     `HASHI AAI Enterprise 0.1 Alpha` cut line

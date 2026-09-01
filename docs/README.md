@@ -6,14 +6,16 @@ The Level 0 authority is [HASHI System Architecture](../ARCHITECTURE.md). It
 defines the two orthogonal dimensions—four functional modules and four
 engineering layers—and governs every lower-level design in this directory.
 
-> **Status:** HASHI AAI Enterprise v0.1.0-alpha.1 is the current enterprise
-> alpha target. It is deployment-artifact-ready for alpha testing, with full
-> enterprise-server production validation pending.
->
-> **Platform release candidate:** HASHI `v4.0.0-alpha.2` consolidates HER v2,
+> **Status:** HASHI `v4.0.0-alpha.2` is the single current repository and
+> package release candidate. It consolidates HER v2,
 > conversation/delivery hardening, task-matched execution effort, and one Flex
-> Agent runtime with Fixed/Flex working modes. See
+> Agent runtime with Fixed/Flex working modes, alongside the governed AAI
+> control plane. See
 > [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md).
+>
+> Enterprise AAI `v0.1.0-alpha.1` is a historical tagged milestone, not a
+> parallel current version. Its production-validation limits still apply to
+> claims inherited from that alpha.
 >
 > **Latest dated integration record:** see the historical
 > [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md)
@@ -38,7 +40,7 @@ Use these docs by intent:
 - **Understand the product direction:** start with
   [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
   and [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md).
-- **Understand the current alpha boundary:** read
+- **Understand the historical Enterprise AAI alpha boundary:** read
   [HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md](HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md)
   and
   [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md).
@@ -53,10 +55,11 @@ Use these docs by intent:
   [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) and the
   enterprise runbooks linked from the readiness review.
 
-The documentation should be read with one important boundary: Enterprise AAI
-`v0.1.0-alpha.1` is artifact-ready for alpha testing, not production-certified.
-Personal/local HASHI use remains the stable default path while enterprise
-deployment validation continues.
+The documentation should be read with one important boundary: the historical
+Enterprise AAI `v0.1.0-alpha.1` milestone was artifact-ready for alpha testing,
+not production-certified. Personal/local HASHI use remains the stable default
+path while enterprise deployment validation continues under the unified v4
+line.
 
 ---
 
@@ -155,9 +158,9 @@ deployment validation continues.
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — Troubleshooting guide
 
 ### Release Notes
-- [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — Enterprise AAI v0.1 alpha release notes and known limits
-- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — current broader HASHI v4 HER v2 release-candidate scope and alpha boundaries
-- [RELEASE_PREPARATION_v4.0.0-alpha.2.md](RELEASE_PREPARATION_v4.0.0-alpha.2.md) — consolidation, verification, publication-hygiene findings, and remaining tag/push boundary
+- [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — historical Enterprise AAI v0.1 alpha release notes and known limits
+- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — current unified HASHI v4 release-candidate scope and alpha boundaries
+- [RELEASE_PREPARATION_v4.0.0-alpha.2.md](RELEASE_PREPARATION_v4.0.0-alpha.2.md) — historical consolidation, verification, publication-hygiene findings, and original tag/push boundary
 - [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for HER mode and Superloop foundation
 - [RELEASE_NOTES_v1.1.md](RELEASE_NOTES_v1.1.md) — v1.1 release notes
 

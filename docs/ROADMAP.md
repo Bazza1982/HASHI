@@ -27,20 +27,21 @@ needed for professional enterprise adoption.
 
 Current version-line interpretation:
 
-- **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** is the current
-  enterprise alpha artifact-freeze line.
-- **HASHI `v4.0.0-alpha.2`** is the current broader platform release candidate,
-  led by the provider-neutral HASHI-native Python HER v2 runtime and its
-  evidence-backed execution contracts.
+- **HASHI `v4.0.0-alpha.2` / Python package `4.0.0a2`** is the single current
+  repository release candidate, led by the provider-neutral HASHI-native
+  Python HER v2 runtime, evidence-backed execution contracts, and governed AAI
+  control plane.
+- **Enterprise AAI `v0.1.0-alpha.1`** is a historical tagged milestone and no
+  longer a parallel active package line.
 
 ---
 
-## Enterprise AAI v0.1.0-alpha.1 (Current Enterprise Alpha)
+## Enterprise AAI v0.1.0-alpha.1 (Historical Alpha Milestone)
 
-HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise artifact-freeze
-line. It resets the enterprise-grade package version to `0.1.0a1` while the
-broader HASHI 4 line advances independently through the advanced HER
-`v4.0.0-alpha.2` release candidate.
+HASHI AAI Enterprise `v0.1.0-alpha.1` froze the first enterprise
+artifact-review line and reset its package metadata to `0.1.0a1`. That tag and
+its release notes remain historical provenance; current development and
+package metadata continue only under `v4.0.0-alpha.2`.
 
 This enterprise alpha includes governed profiles, identity/SSO/SCIM primitives,
 policy/approval/audit, connector MVPs, authenticated Backend API surfaces, and
@@ -89,8 +90,8 @@ of a source push.
 
 See [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md) for the delivered scope
 and alpha boundaries. The
-[2026-08-27 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) records the
-current integrated implementation and publication boundary. The
+[2026-08-27 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) records an
+earlier integrated implementation and publication boundary. The
 [2026-08-24 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) and
 [2026-08-13 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) remain
 historical records of earlier integration states.

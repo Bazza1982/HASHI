@@ -2,15 +2,17 @@
 
 Date: 2026-08-16
 
-Status: **local release candidate consolidated and verified; tag and GitHub
-push intentionally pending**
+Status at record date: **local release candidate consolidated and verified;
+tag and GitHub push intentionally pending**
 
 > Historical record: its native HER source/package and `/rebuild` scope was
 > superseded by the later HER v1 retirement series. It is retained only as
 > release provenance, not as the current runtime contract.
 
-This record covers the broader HASHI v4 platform line. It does not change the
-independent Enterprise AAI package version `0.1.0a1`.
+At the time of this record, the broader HASHI v4 platform line did not change
+the then-independent Enterprise AAI package version `0.1.0a1`. The 2026-09-01
+publication alignment later superseded that dual-line convention: current root
+package metadata now follows unified HASHI `v4.0.0-alpha.2`.
 
 ## Consolidated Scope
 

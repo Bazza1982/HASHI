@@ -1,12 +1,12 @@
 # HASHI
 
-> **Status:** HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise
-> alpha artifact-freeze line. HASHI `v4.0.0-alpha.2` is the current broader
-> platform release candidate, centred on the provider-neutral, HASHI-native
-> Python Engine Runtime (HER v2), evidence-backed assurance, and multimodal
-> provider routing.
-> Enterprise `0.1.0a1` resets the enterprise-grade package version line for
-> alpha testing; it is not a production-certified deployment claim.
+> **Status:** HASHI `v4.0.0-alpha.2` is the single current repository and
+> package release candidate (`4.0.0a2` in Python metadata). It centres on the
+> provider-neutral, HASHI-native Python Engine Runtime (HER v2),
+> evidence-backed assurance, multimodal provider routing, and the governed AAI
+> control plane.
+> Enterprise AAI `v0.1.0-alpha.1` remains a historical tagged milestone; it is
+> not a second active version line or a production-certification claim.
 >
 > **Current architecture:** see [`ARCHITECTURE.md`](ARCHITECTURE.md) · **Latest dated integration record:** see the historical [`2026-08-27 checkpoint`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
@@ -150,18 +150,17 @@ and binary packages are no longer part of the active program.
 
 ## Project Status
 
-- **Enterprise AAI v0.1.0-alpha.1** *(current enterprise alpha line)* — governed
-  AAI control plane, identity/SSO/SCIM primitives, policy/approval/audit,
-  connector MVPs, authenticated client surfaces, and deployment artifacts for
-  alpha operator review. Production enterprise-server validation remains
-  pending.
-- **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration
+- **v4.0.0-alpha.2** *(current unified release candidate)* — HER v2 orchestration
   converged on Direct, Strategic, and Planned production modes,
   provider-aware multimodal input, Hybrid routing, automatic context
   maintenance, stronger session and delivery continuity, and two Agent working
   modes: Fixed by default plus explicit Flex. Wrapper, Audit, and Dual-brain
-  modes are retired. This is the broader platform line, not the enterprise
-  package version line.
+  modes are retired. This is also the active root package and Enterprise AAI
+  integration line.
+- **Enterprise AAI v0.1.0-alpha.1** *(historical tagged milestone)* — froze the
+  first governed AAI control-plane and deployment-artifact alpha for operator
+  review. Its production enterprise-server validation limits remain recorded
+  in the historical release notes.
 - **v3.2.1** — Backend API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
@@ -174,19 +173,17 @@ and binary packages are no longer part of the active program.
 
 ## What's New Since v2
 
-### Version Lines At A Glance
+### Current Version At A Glance
 
-HASHI currently has two active alpha narratives:
+HASHI has one active repository release line:
 
-- **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** — the reset
-  enterprise-grade update line for governed AAI deployment artifacts and alpha
-  operator review.
-- **HASHI `v4.0.0-alpha.2`** — the broader platform release candidate for the
-  upgraded HER backend, Superloop operations, and local orchestration evolution.
+- **HASHI `v4.0.0-alpha.2` / Python package `4.0.0a2`** — the unified release
+  candidate for HER v2, Superloop operations, local orchestration, governed AAI
+  controls, and deployment artifacts.
 
-Both lines share one repository and one codebase. Personal/local mode remains
-the default smooth path; enterprise features are activated through explicit
-profiles and bootstrap state.
+Personal/local mode remains the default smooth path; enterprise features are
+activated through explicit profiles and bootstrap state. The older Enterprise
+AAI `v0.1.0-alpha.1` tag remains immutable release history.
 
 ### HER v2 Runtime in v4.0.0-alpha.2
 
@@ -1601,14 +1598,13 @@ yet a complete Persistent Session API v1 multi-Session client.
 
 ## Warnings
 
-### Current Enterprise Alpha
+### Current Alpha
 
-HASHI AAI Enterprise v0.1.0-alpha.1 is the current **enterprise alpha** line.
-It packages the governed control-plane work for alpha operator review while
-keeping production enterprise-server validation pending.
-
-HASHI v4.0.0-alpha.2 is the current **v4 platform release candidate**. The
-enterprise package version remains independently frozen at `0.1.0a1`.
+HASHI v4.0.0-alpha.2 is the single current **repository and package release
+candidate**. It includes the governed Enterprise AAI control-plane work while
+keeping production enterprise-server validation pending. Enterprise AAI
+v0.1.0-alpha.1 remains a historical tagged milestone, not an independent
+current package line.
 
 **Known Limitations:**
 - **Stability** — Expect edge cases and unexpected behavior
@@ -1657,7 +1653,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - Full scope and alpha limits are recorded in
   [the release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md).
 
-### Enterprise AAI v0.1.0-alpha.1 *(current enterprise alpha)* — Governed AAI Control Plane (June 2026)
+### Enterprise AAI v0.1.0-alpha.1 *(historical alpha milestone)* — Governed AAI Control Plane (June 2026)
 
 - **Enterprise control plane** — governed `personal`/`team`/`enterprise`
   profile model with identity, SSO/SCIM primitives, projects, roles, API tokens,

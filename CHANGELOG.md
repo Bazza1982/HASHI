@@ -114,6 +114,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Unified release identity** — made HASHI `v4.0.0-alpha.2` the single current
+  repository, Python package (`4.0.0a2`), root Node package, and Helm
+  application line. Enterprise AAI `v0.1.0-alpha.1` remains an immutable
+  historical milestone rather than a parallel active version.
+- **npm package hygiene** — excluded ignored Python bytecode and machine-local
+  skill state from the root package allow-list so a lived-in checkout packs
+  only Git-tracked release inputs.
 - **Fixed/Flex Agent working-mode convergence** — the normal Flex Agent runtime
   now exposes only Fixed and Flex. Session-capable Engines default to Fixed for
   native Engine Session continuation; stateless Engines default to Flex for

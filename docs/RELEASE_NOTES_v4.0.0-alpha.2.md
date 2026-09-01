@@ -7,9 +7,10 @@ into a clean-room, provider-neutral Python orchestration runtime. The retired
 HER v1 Rust executable, packaged binaries, and rebuild workflow are no longer
 reachable; `her` resolves forward to `her-v2`.
 
-The independent Enterprise AAI package line remains
-`v0.1.0-alpha.1` / `0.1.0a1`; this document describes the broader HASHI v4
-platform line.
+This release candidate is the single current repository and package line.
+Enterprise AAI `v0.1.0-alpha.1` remains a historical tagged milestone whose
+governance scope and known limits are carried forward here, not a parallel
+active version.
 
 > **Architecture note (2026-09-01):** this is a historical release-candidate
 > record, subordinate to the current
