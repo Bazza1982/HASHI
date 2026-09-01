@@ -30,8 +30,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from adapters.openrouter_api import ProviderCallObserverError
+from orchestrator import config as runtime_config
 from orchestrator import ui_language
-from orchestrator.config import DEFAULT_AGENT_MODE
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
@@ -62,6 +62,21 @@ DEFAULT_POST_COMPACTION_TARGET_TOKENS = 64_000
 # names.  They now describe the same universal 64k-128k operating window.
 DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS = DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
 DEFAULT_UNKNOWN_TARGET_LOW_TOKENS = DEFAULT_POST_COMPACTION_TARGET_TOKENS
+
+
+def _default_agent_mode() -> str:
+    """Resolve the mode default across the first fixed/flex hot reboot.
+
+    A live process upgrading from the pre-fixed/flex generation reloads this
+    module before its old reload plan reaches ``orchestrator.config``.  Keep a
+    module reference instead of importing the new constant eagerly so that
+    first mixed-generation reboot can continue; ``importlib.reload`` later
+    updates the same config module object in place.
+    """
+
+    return str(getattr(runtime_config, "DEFAULT_AGENT_MODE", "fixed") or "fixed")
+
+
 # Live HASHI API evidence showed that a 64k mixed-character estimate serializes
 # to roughly 100k provider tokens once the maintenance schema and provider
 # envelope are included.  Keep unknown-capacity maintenance chunks well below
@@ -1558,9 +1573,10 @@ def install_history_section(
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
         return list(extra_sections), None
     manager = getattr(runtime, "backend_manager", None)
+    default_agent_mode = _default_agent_mode()
     if str(
-        getattr(manager, "agent_mode", DEFAULT_AGENT_MODE)
-        or DEFAULT_AGENT_MODE
+        getattr(manager, "agent_mode", default_agent_mode)
+        or default_agent_mode
     ).lower() != "flex":
         return list(extra_sections), None
     coordinator = coordinator_for(
