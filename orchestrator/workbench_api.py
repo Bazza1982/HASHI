@@ -179,9 +179,12 @@ def _read_jsonl_increment(file_path: Path, offset: int = 0) -> dict:
             obj = json.loads(line)
         except Exception:
             continue
-        if obj.get("role") not in {"user", "assistant", "thinking"} or not obj.get(
-            "text"
-        ):
+        if obj.get("role") not in {
+            "user",
+            "assistant",
+            "assistant_core",
+            "thinking",
+        } or not obj.get("text"):
             continue
         messages.append(obj)
 
@@ -983,6 +986,7 @@ class WorkbenchApiServer:
         timeout_s: float,
         expected_source: str | None = None,
         expected_prompt: str | None = None,
+        expected_request_id: str | None = None,
     ) -> dict:
         deadline = time.monotonic() + timeout_s
         current_offset = offset
@@ -991,7 +995,21 @@ class WorkbenchApiServer:
             data = _read_jsonl_increment(transcript_path, current_offset)
             current_offset = data.get("offset", current_offset)
             new_messages = data.get("messages", [])
-            if expected_source or expected_prompt:
+            if expected_request_id:
+                for message in new_messages:
+                    if message.get("request_id") != expected_request_id:
+                        continue
+                    if message.get("role") not in {"assistant", "assistant_core"}:
+                        continue
+                    text = message.get("visible_text") or message.get("text")
+                    if text:
+                        return {
+                            "received": True,
+                            "offset": current_offset,
+                            "assistant_text": text,
+                            "new_messages": new_messages,
+                        }
+            elif expected_source or expected_prompt:
                 for message in new_messages:
                     role = message.get("role")
                     text = message.get("text")
@@ -6101,18 +6119,23 @@ class WorkbenchApiServer:
                     if agent_row
                     else Path(runtime.get_runtime_metadata()["transcript_path"])
                 )
+                response_path = Path(
+                    getattr(runtime, "core_transcript_log_path", transcript_path)
+                    or transcript_path
+                )
                 start_offset = (
-                    transcript_path.stat().st_size if transcript_path.exists() else 0
+                    response_path.stat().st_size if response_path.exists() else 0
                 )
                 request_id = await runtime.enqueue_api_text(
                     chat_text, source="api-smoke"
                 )
                 wait_result = await self._wait_for_assistant_reply(
-                    transcript_path,
+                    response_path,
                     start_offset,
                     timeout_s,
-                    expected_source="api-smoke",
-                    expected_prompt=chat_text,
+                    expected_source=None if request_id else "api-smoke",
+                    expected_prompt=None if request_id else chat_text,
+                    expected_request_id=request_id or None,
                 )
                 wait_result["request_id"] = request_id
                 wait_result["prompt"] = chat_text

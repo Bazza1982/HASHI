@@ -152,6 +152,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Workbench smoke-result correlation** — live Agent smoke checks now wait on
+  the current request ID in the canonical core transcript instead of watching
+  the legacy presentation transcript for an adjacent user/assistant pair. This
+  prevents successful HER v2 requests from being reported as 180-second false
+  timeouts and avoids cross-request response matches under concurrency.
 - **Fixed/Flex first hot-reload adoption** — configuration now reloads before
   working-mode consumers, Context Compact tolerates the one mixed-generation
   reboot that installs this ordering, and the post-reload contract rejects a
