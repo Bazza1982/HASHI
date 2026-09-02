@@ -566,6 +566,7 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         "max_replans",
         "max_subagents",
         "max_tokens",
+        "provider_wall_clock_timeout_s",
         "reporting_attempts",
         "replan_limit",
         "replan_limits",
@@ -579,17 +580,6 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
 def test_her_v2_rejects_removed_legacy_execution_limits(field):
     with pytest.raises(HERv2ConfigurationError, match="removed execution limit"):
         HERv2Config.from_mapping({"profiles": _profiles(), field: 1})
-
-
-def test_her_v2_accepts_distinct_provider_wall_clock_safety_timeout():
-    config = HERv2Config.from_mapping(
-        {
-            "profiles": _profiles(),
-            "provider_wall_clock_timeout_s": 912.5,
-        }
-    )
-
-    assert config.provider_wall_clock_timeout_s == 912.5
 
 
 @pytest.mark.parametrize(

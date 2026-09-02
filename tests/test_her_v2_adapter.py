@@ -1934,28 +1934,46 @@ class _FakeManager:
         return backend
 
 
-class _ThinkingForeverBackend(_FakeBackend):
+class _ControlledForegroundToolBackend(_FakeBackend):
+    def __init__(self, system_md=None):
+        super().__init__(system_md)
+        self.tool_started = asyncio.Event()
+        self.release_tool = asyncio.Event()
+
     async def generate_response(
         self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
     ):
         del request_id, is_retry, silent
         self.prompt = prompt
-        while True:
-            await on_stream_event(
-                StreamEvent(
-                    kind=KIND_THINKING,
-                    raw_delta="still thinking",
-                    summary="still thinking",
-                )
+        await on_stream_event(
+            StreamEvent(
+                kind=KIND_THINKING,
+                raw_delta="preparing foreground work",
+                summary="preparing foreground work",
             )
-            await asyncio.sleep(0.005)
+        )
+        await on_stream_event(
+            StreamEvent(
+                kind=KIND_TOOL_START,
+                summary="foreground tool is running",
+                tool_name="bash",
+            )
+        )
+        self.tool_started.set()
+        await self.release_tool.wait()
+        return BackendResponse(
+            text='{"disposition":"COMPLETED","summary":"done"}',
+            duration_ms=1,
+            tool_call_count=1,
+            tool_loop_count=1,
+        )
 
 
-class _ThinkingForeverManager(_FakeManager):
+class _ControlledForegroundToolManager(_FakeManager):
     def create_ephemeral_backend(self, engine, target_model=None):
         assert engine == "openrouter-api"
         assert target_model == "configured/model"
-        backend = _ThinkingForeverBackend(self.system_md)
+        backend = _ControlledForegroundToolBackend(self.system_md)
         self.backends.append(backend)
         return backend
 
@@ -2123,33 +2141,88 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
 
 
 @pytest.mark.asyncio
-async def test_provider_wall_clock_timeout_cannot_be_extended_by_thinking_stream():
-    manager = _ThinkingForeverManager()
+async def test_stage_provider_does_not_wrap_foreground_tool_in_absolute_timeout(
+    monkeypatch,
+):
+    manager = _ControlledForegroundToolManager()
     provider = HashiStageProvider(
         backend_manager=manager,
-        provider_wall_clock_timeout_s=0.04,
+        tool_registry=_BaseToolRegistry(),
     )
     profile = ProviderProfile(
-        "triage",
+        "execution",
         "openrouter-api",
         "configured/model",
         reasoning="provider-high",
     )
+    installed_deadlines = []
+    original_timeout = asyncio.timeout
 
-    with pytest.raises(StageInvocationError) as captured:
-        await provider.invoke(
+    def observe_absolute_timeout(delay):
+        installed_deadlines.append(delay)
+        return original_timeout(delay)
+
+    monkeypatch.setattr(asyncio, "timeout", observe_absolute_timeout)
+    invocation = asyncio.create_task(
+        provider.invoke(
             profile,
             _stage_request(
-                Stage.TRIAGE,
-                allow_tools=False,
-                allow_side_effects=False,
+                Stage.EXECUTION,
+                allow_tools=True,
+                allow_side_effects=True,
             ),
         )
+    )
 
-    assert captured.value.code == ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT
-    assert captured.value.details["timeout_kind"] == "absolute_wall_clock"
-    assert captured.value.details["provider_activity"]["reasoning_event_count"] > 1
-    assert manager.backends[0].shutdown_called is True
+    await asyncio.sleep(0)
+    backend = manager.backends[0]
+    await asyncio.wait_for(backend.tool_started.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+
+    assert invocation.done() is False
+    assert installed_deadlines == []
+
+    backend.release_tool.set()
+    response = await asyncio.wait_for(invocation, timeout=1)
+
+    assert json.loads(response.text)["disposition"] == "COMPLETED"
+    assert response.reasoning_trace == "preparing foreground work"
+    assert backend.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_still_cleans_up_active_foreground_tool():
+    manager = _ControlledForegroundToolManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    invocation = asyncio.create_task(
+        provider.invoke(
+            ProviderProfile(
+                "execution",
+                "openrouter-api",
+                "configured/model",
+            ),
+            _stage_request(
+                Stage.EXECUTION,
+                allow_tools=True,
+                allow_side_effects=True,
+            ),
+        )
+    )
+
+    await asyncio.sleep(0)
+    backend = manager.backends[0]
+    await asyncio.wait_for(backend.tool_started.wait(), timeout=1)
+    invocation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert backend.release_tool.is_set() is False
+    assert backend.shutdown_called is True
+    assert provider.interrupt_nowait("after-cancel") == 0
 
 
 def _adapter_replan_outcome(*, completion_percent: int = 50) -> ReplanningOutcome:
