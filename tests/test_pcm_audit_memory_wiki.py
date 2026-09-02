@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import sqlite3
 import sys
 import types
@@ -81,16 +82,17 @@ def test_canonical_audit_keeps_complete_chain_and_content_addressed_artifact(tmp
     ]
     assert events[1]["previous_record_digest"] == wrappers[0]["record_digest"]
     assert events[1]["payload"]["arguments"]["token"] == "unredacted"
-    for private_directory in (
-        store.base,
-        store.instance_root,
-        store.root,
-        store.artifacts_root,
-        store.artifact_dir,
-        artifact_path.parent,
-    ):
-        assert private_directory.stat().st_mode & 0o777 == 0o700
-    assert artifact_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        for private_directory in (
+            store.base,
+            store.instance_root,
+            store.root,
+            store.artifacts_root,
+            store.artifact_dir,
+            artifact_path.parent,
+        ):
+            assert private_directory.stat().st_mode & 0o777 == 0o700
+        assert artifact_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_canonical_audit_encryption_hides_plaintext_and_preserves_reasoning_semantics(
@@ -154,6 +156,57 @@ def test_canonical_audit_survives_workspace_lifecycle_and_has_no_expiry(tmp_path
     )
     assert reloaded.read_events(RAW_AUTH)[0]["event_id"] == event_id
     assert not hasattr(reloaded, "ttl") and not hasattr(reloaded, "prune")
+
+
+def test_canonical_audit_record_many_uses_one_durable_commit_and_keeps_chain(
+    tmp_path, monkeypatch
+):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI2", agent_id="rika")
+    real_fsync = os.fsync
+    fsync_calls: list[int] = []
+
+    def tracked_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr("orchestrator.canonical_audit.os.fsync", tracked_fsync)
+    event_ids = store.record_many(
+        {
+            "event_type": "provider_stream_event",
+            "payload": {"raw_delta": f"chunk-{index}"},
+            "request_id": "req-batch",
+        }
+        for index in range(200)
+    )
+
+    assert len(event_ids) == 200
+    assert len(fsync_calls) == 1
+    events = store.read_events(RAW_AUTH)
+    assert [event["event_id"] for event in events] == event_ids
+    wrappers = [
+        json.loads(line)
+        for line in store.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[0]["previous_record_digest"] == ""
+    for index in range(1, len(events)):
+        assert events[index]["previous_record_digest"] == wrappers[index - 1][
+            "record_digest"
+        ]
+
+
+def test_canonical_audit_fails_fast_when_durable_store_is_unavailable(
+    tmp_path, monkeypatch
+):
+    def denied_tail(_self):
+        raise PermissionError("audit volume is read-only")
+
+    monkeypatch.setattr(CanonicalAuditStore, "_last_digest", denied_tail)
+
+    with pytest.raises(
+        CanonicalAuditConfigurationError,
+        match="canonical audit store is not durably writable",
+    ):
+        CanonicalAuditStore(tmp_path, instance_id="HASHI2", agent_id="rika")
 
 
 def test_raw_audit_read_and_wipe_require_separate_explicit_authority(tmp_path):

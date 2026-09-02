@@ -13,7 +13,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from dual_brain_common import BackendContext, load_config, load_json, resolve_backend, write_json
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dual_brain_common import (  # noqa: E402
+    BackendContext,
+    load_config,
+    load_json,
+    resolve_backend,
+    write_json,
+)
+from orchestrator.process_execution import process_is_alive  # noqa: E402
 
 
 def _now_iso() -> str:
@@ -184,17 +195,7 @@ def _run_after_action(
 
 
 def _pid_is_alive(pid: Any) -> bool:
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    except (ValueError, TypeError):
-        return False
-    return True
+    return process_is_alive(pid)
 
 
 def _create_turn_lock(lock_path: Path, payload: dict[str, Any]) -> None:

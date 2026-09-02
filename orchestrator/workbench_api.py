@@ -5912,6 +5912,7 @@ class WorkbenchApiServer:
         payload = await request.json()
         argv = payload.get("argv")
         raw_command = payload.get("command")
+        shell = str(payload.get("shell") or "").strip() or None
         if argv is None and isinstance(raw_command, list):
             argv = raw_command
             command = None
@@ -5936,6 +5937,11 @@ class WorkbenchApiServer:
         if argv and command:
             return web.json_response(
                 {"ok": False, "error": "provide argv or command, not both"}, status=400
+            )
+        if argv and shell:
+            return web.json_response(
+                {"ok": False, "error": "shell is valid only with command mode"},
+                status=400,
             )
 
         cwd = str(
@@ -5970,6 +5976,7 @@ class WorkbenchApiServer:
                 cwd=cwd,
                 argv=argv,
                 command=command,
+                shell=shell,
                 origin=origin,
                 notify_on_complete=bool(payload.get("notify_on_complete", True)),
                 notify_on_failure=bool(payload.get("notify_on_failure", True)),

@@ -965,7 +965,7 @@ HER v2 rather than selectable top-level backends:
   "engine": "her-v2",
   "model": "role-configured",
   "tools": {
-    "allowed": ["bash", "file_read", "file_write", "file_list", "apply_patch",
+    "allowed": ["shell", "file_read", "file_write", "file_list", "apply_patch",
                 "web_search", "web_fetch", "http_request",
                 "process_list", "process_kill", "telegram_send"]
   }
@@ -976,7 +976,8 @@ HER v2 rather than selectable top-level backends:
 
 | Tool | Description |
 |------|-------------|
-| `bash` | Run shell commands (sandboxed, timeout + blocklist controls) |
+| `shell` | Run through an explicit shell contract: PowerShell on native Windows, Bash on Linux/WSL/macOS; select `cmd` only for CMD syntax |
+| `bash` | Deprecated compatibility alias that always means real Bash, never CMD |
 | `file_read` | Read files with offset/limit pagination |
 | `file_write` | Write/create files |
 | `file_list` | List directories with glob filter |
@@ -1408,7 +1409,7 @@ duplicate alias `/paswd` has been removed.
     "authorized_id": 123456789,
     "ui_language": "en",
     "default_tools": {
-      "allowed": ["bash", "file_read", "file_write", "file_list"]
+      "allowed": ["shell", "file_read", "file_write", "file_list"]
     },
     "her_providers": {
       "max_permission_mode": "danger-full-access",

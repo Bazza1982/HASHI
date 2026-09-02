@@ -25,6 +25,10 @@ from orchestrator.multimodal_contract import (
     routing_decisions_payload,
     validate_authorized_media_references,
 )
+from orchestrator.process_execution import (
+    process_group_kwargs,
+    resolve_argv_invocation,
+)
 from adapters.hashi_mcp import prepare_hashi_mcp
 
 _CODEX_REQUEST_REASONING_EFFORTS = frozenset(
@@ -61,8 +65,6 @@ class CodexCLIAdapter(BaseBackend):
         self._external_mcp_server_names: tuple[str, ...] | None = None
         self.effort = ((self.config.extra or {}).get("effort") or "medium").lower()
         self.cmd_base = self.global_config.codex_cmd
-        if os.name == "nt" and Path(self.cmd_base).suffix.lower() not in {".cmd", ".exe", ".bat", ".ps1"}:
-            self.cmd_base = f"{self.cmd_base}.cmd"
         self.access_root = str(self.config.resolve_access_root())
         self.events_log_path = self.config.workspace_dir / "codex_exec_events.jsonl"
         # Persistent session state
@@ -83,8 +85,11 @@ class CodexCLIAdapter(BaseBackend):
             return True
         if os.name != "nt":
             return False
-        cmd_suffix = Path(self.cmd_base).suffix.lower()
-        if cmd_suffix not in {".cmd", ".bat"}:
+        try:
+            invocation = resolve_argv_invocation((self.cmd_base,))
+        except (OSError, ValueError):
+            return False
+        if invocation.launcher != "cmd":
             return False
         # Windows .cmd launch goes through cmd.exe. Always use stdin to avoid
         # the 8191-char cmd.exe limit and quoting inflation from special characters.
@@ -94,11 +99,12 @@ class CodexCLIAdapter(BaseBackend):
         self.logger.info("Initializing Codex CLI backend...")
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         try:
+            invocation = resolve_argv_invocation((self.cmd_base, "--version"))
             proc = await asyncio.create_subprocess_exec(
-                self.cmd_base,
-                "--version",
+                *invocation.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_kwargs(),
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
@@ -115,17 +121,15 @@ class CodexCLIAdapter(BaseBackend):
 
     async def _discover_mcp_servers(self) -> tuple[str, ...]:
         """List configured MCP servers so the API bridge can disable all of them."""
-        extra_kwargs: dict[str, object] = {}
-        if os.name != "nt":
-            # force_kill_process_tree() terminates subprocess groups.  The MCP
-            # inventory process must never inherit HASHI's own process group.
-            extra_kwargs["start_new_session"] = True
+        # force_kill_process_tree() terminates subprocess trees. The inventory
+        # process must never inherit HASHI's own process group.
+        extra_kwargs: dict[str, object] = process_group_kwargs()
         for attempt in range(1, self.MCP_INVENTORY_MAX_ATTEMPTS + 1):
+            invocation = resolve_argv_invocation(
+                (self.cmd_base, "mcp", "list", "--json")
+            )
             proc = await asyncio.create_subprocess_exec(
-                self.cmd_base,
-                "mcp",
-                "list",
-                "--json",
+                *invocation.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.effective_workdir),
@@ -809,16 +813,14 @@ class CodexCLIAdapter(BaseBackend):
                 f"retry={is_retry}, stdin={stdin_data is not None}, "
                 f"prompt_len={len(built_prompt)}, cwd={effective_workdir})"
             )
-            _extra_kwargs = {}
-            if os.name != "nt":
-                _extra_kwargs["start_new_session"] = True
+            invocation = resolve_argv_invocation(cmd)
             self.current_proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *invocation.argv,
                 stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                **_extra_kwargs,
+                **process_group_kwargs(),
             )
             # Capture local ref to avoid race with shutdown() nulling self.current_proc
             proc = self.current_proc

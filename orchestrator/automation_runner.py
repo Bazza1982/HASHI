@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import sys
 from contextlib import suppress
 from pathlib import Path
+
+from orchestrator.process_execution import (
+    decode_process_output,
+    process_group_kwargs,
+    resolve_argv_invocation,
+    terminate_windows_process_tree,
+)
 
 AUTOMATION_SCRIPTS = {
     "agent-audit": Path("skills/agent-audit/scripts/agent_audit.py"),
@@ -61,8 +69,8 @@ async def run_automation(
         cmd = [sys.executable, str(run_path)]
     elif suffix == ".ps1":
         cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(run_path)]
-    elif suffix == ".bat":
-        cmd = ["cmd", "/c", str(run_path)]
+    elif suffix in {".bat", ".cmd"}:
+        cmd = [str(run_path)]
     else:
         cmd = [str(run_path)]
     if args.strip():
@@ -89,26 +97,31 @@ async def run_automation(
     proc: asyncio.subprocess.Process | None = None
     async with lock:
         try:
+            invocation = resolve_argv_invocation(cmd)
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *invocation.argv,
                 cwd=str(workspace_dir),
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_kwargs(),
             )
             stdout, stderr = await proc.communicate()
         except asyncio.CancelledError:
             if proc is not None:
                 with suppress(Exception):
-                    proc.kill()
+                    if os.name == "nt":
+                        await terminate_windows_process_tree(proc.pid, force=True)
+                    else:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 with suppress(Exception):
                     await proc.wait()
             raise
         except OSError as exc:
             return False, f"Automation '{canonical_id}' failed to start: {exc}"
 
-    out_text = stdout.decode("utf-8", errors="replace").strip()
-    err_text = stderr.decode("utf-8", errors="replace").strip()
+    out_text = decode_process_output(stdout).strip()
+    err_text = decode_process_output(stderr).strip()
     lines: list[str] = []
     if out_text:
         lines.append(out_text)

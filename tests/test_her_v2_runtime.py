@@ -795,7 +795,7 @@ async def test_zero_can_self_select_from_playbook_without_adding_a_stage(tmp_pat
     }.isdisjoint(item.stage for _profile, item in provider.requests)
     audit_rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     attached = next(
         row for row in audit_rows if row["event"] == "direct_strategy_playbook_attached"
@@ -858,7 +858,7 @@ async def test_native_audio_direct_disables_tools_in_request_and_audit(tmp_path)
     assert request.allow_side_effects is False
     audit_rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     started = next(
         row
@@ -1273,7 +1273,7 @@ async def test_direct_response_preserves_visible_immediate_content_without_fallb
     ]
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     compatibility = next(
         row
@@ -1547,7 +1547,7 @@ async def test_triage_first_work_starts_without_waiting_and_preserves_late_immed
     assert provider.cancelled[Stage.IMMEDIATE_RESPONSE] == 0
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     continued = next(row for row in rows if row["event"] == "optional_stage_continues")
     assert continued["payload"] == {
@@ -1597,7 +1597,7 @@ async def test_unrepairable_immediate_text_remains_visible_for_work(tmp_path):
     ]
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     compatibility = next(
         row
@@ -1640,7 +1640,7 @@ async def test_final_completion_supersedes_a_still_pending_immediate_response(tm
     assert provider.cancelled[Stage.IMMEDIATE_RESPONSE] == 1
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     superseded = next(
         row
@@ -1701,7 +1701,7 @@ async def test_triage_clarification_is_persona_rendered_without_changing_authori
     assert clarification.text == result.text
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     rendered = next(
         row for row in rows if row["event"] == "required_persona_render_completed"
@@ -1763,7 +1763,7 @@ async def test_optional_immediate_failure_does_not_block_authoritative_triage(
     assert result.terminal_state is expected
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     degraded = next(row for row in rows if row["event"] == "optional_stage_degraded")
     assert degraded["payload"]["authoritative_path_continued"] is True
@@ -1808,7 +1808,7 @@ async def test_invalid_presentation_data_keeps_structured_output_error_code(tmp_
     assert ProviderFailureCode.STRUCTURED_OUTPUT_INVALID.value in result.error
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     failures = [
         row
@@ -1940,6 +1940,19 @@ async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_planning_and_e
     ]
     assert all(call.goal == request for call in initial_calls)
     assert all(call.goal == real_goal for call in downstream_calls)
+    assert all(
+        "execution_environment" in call.context
+        for _profile, call in provider.requests
+    )
+    assert all(
+        call.context["execution_environment"]["shell_tool"]["name"] == "shell"
+        for _profile, call in provider.requests
+    )
+    assert all(
+        call.context["execution_environment"]["shell_tool"]["implicit_shell"]
+        is False
+        for _profile, call in provider.requests
+    )
     assert all(call.context["real_goal"] == real_goal for call in downstream_calls)
     assert all(call.context["relevant_habits"] == [] for call in downstream_calls)
     execution_calls = [
@@ -2174,7 +2187,7 @@ async def test_primary_execution_delivers_persona_message_without_second_rendere
     assert result.ledger["status"] == "COMPLETED"
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     delivery = next(
         row
@@ -2209,7 +2222,7 @@ async def test_removed_final_persona_renderer_cannot_change_execution_result(
     assert renderer.messages == []
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert not any(row["event"].startswith("required_persona_render") for row in rows)
 
@@ -2363,6 +2376,7 @@ async def test_normal_mode_enables_external_side_effect_authority(tmp_path):
     )
     assert set(execution.context) == {
         "active_plan",
+        "execution_environment",
         "real_goal",
         "relevant_habits",
         "strategy_handoff",
@@ -2442,6 +2456,7 @@ async def test_review_imposed_replanning_reuses_triage_selected_habits(tmp_path)
     assert set(replan_request.context) == {
         "active_plan",
         "available_execution_tools",
+        "execution_environment",
         "execution_allow_side_effects",
         "plan_edit_history",
         "real_goal",
@@ -2512,7 +2527,7 @@ async def test_xhigh_publishes_replaceable_draft_then_replaces_it_with_final(
     assert activity[-1]["metadata"]["lifecycle_state"] == "COMPLETED"
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     draft = next(
         row for row in rows if row["event"] == "draft_commentary_publish_result"
@@ -2585,7 +2600,7 @@ async def test_max_solidifies_old_draft_and_publishes_each_remediation_draft(
     assert delivery.records[2].event_id.endswith(":execution:draft:2")
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     published = [
         row for row in rows if row["event"] == "draft_commentary_publish_result"
@@ -4244,7 +4259,7 @@ async def test_provider_operations_have_no_elapsed_attempt_deadline(
     assert clock.now == 601
     assert observed_wait_timeouts
     assert all(timeout is None for timeout in observed_wait_timeouts)
-    audit_text = (tmp_path / "her-v2" / "audit.jsonl").read_text()
+    audit_text = (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8")
     assert "attempt_timeout_s" not in audit_text
     assert "retry_tier" not in audit_text
 
@@ -4351,7 +4366,7 @@ async def test_nonretryable_auth_failure_keeps_typed_code_and_single_attempt(tmp
     )
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     failure = next(
         row
@@ -4389,7 +4404,7 @@ async def test_rate_limit_retry_honours_retry_after_and_preserves_route(tmp_path
     assert result.terminal_state is TerminalState.COMPLETED
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     failure = next(
         row
@@ -4566,7 +4581,7 @@ async def test_execution_never_replays_after_side_effect_tool_starts(tmp_path):
     )
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     failure = next(
         row
@@ -4767,7 +4782,7 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
     assert result.classification is TriageClassification.COMPLEX_TASK
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     compatibility = next(
         row
@@ -4922,6 +4937,7 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
     assert set(second_execution.context) == {
         "active_plan",
         "continuation_rules",
+        "execution_environment",
         "real_goal",
         "relevant_habits",
         "replan_continuation",
@@ -4992,7 +5008,7 @@ async def test_primary_execution_natural_language_needs_no_json_or_finalisation(
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     original_response = next(
         row
@@ -5074,7 +5090,7 @@ async def test_nonempty_execution_natural_language_is_a_usable_result(
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert not any(
         row["event"] == "execution_structure_deferred_to_finalisation" for row in rows
@@ -5759,7 +5775,7 @@ async def test_audit_records_trace_or_explicit_unavailability_with_correlation(
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     reasoning = [row for row in rows if row["event"] == "reasoning_trace"]
     assert {row["stage"] for row in reasoning} == {

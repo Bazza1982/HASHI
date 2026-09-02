@@ -23,7 +23,7 @@ from tools.smart_tools import SmartToolRuntime
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["bash", "file_read", "file_write", "file_list"],
+    "core": ["shell", "file_read", "file_write", "file_list"],
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
     "verification": ["workspace_inspect", "verification_run"],
@@ -204,6 +204,11 @@ class ToolRegistry:
             if unknown:
                 self.logger.warning(f"Unknown tool names in config (ignored): {unknown}")
 
+        # ``bash`` remains executable for persisted/provider in-flight calls,
+        # while new tool catalogues expose only the platform-honest ``shell``.
+        if "bash" in self._allowed or "shell" in self._allowed:
+            self._allowed.update({"bash", "shell"})
+
         self.logger.info(f"ToolRegistry initialized. Allowed: {sorted(self._allowed)}")
         self._obsidian = None  # lazy-initialized on first obsidian_* tool call
 
@@ -309,7 +314,12 @@ class ToolRegistry:
             "request_tool_allowlist"
         )
         if isinstance(request_allowlist, list):
-            available.intersection_update(str(name) for name in request_allowlist)
+            normalized_allowlist = {str(name) for name in request_allowlist}
+            if "bash" in normalized_allowlist or "shell" in normalized_allowlist:
+                normalized_allowlist.update({"bash", "shell"})
+            available.intersection_update(normalized_allowlist)
+        if "shell" in available:
+            available.discard("bash")
         if tiers is not None:
             tier_tools = set(resolve_tiers(tiers))
             subset = available & tier_tools
@@ -332,7 +342,16 @@ class ToolRegistry:
         request_allowlist = self._effective_audit_context().get(
             "request_tool_allowlist"
         )
-        if isinstance(request_allowlist, list) and tool_name not in request_allowlist:
+        normalized_allowlist = (
+            {str(name) for name in request_allowlist}
+            if isinstance(request_allowlist, list)
+            else None
+        )
+        if normalized_allowlist is not None and (
+            "bash" in normalized_allowlist or "shell" in normalized_allowlist
+        ):
+            normalized_allowlist.update({"bash", "shell"})
+        if normalized_allowlist is not None and tool_name not in normalized_allowlist:
             return ToolResult(
                 tool_call_id=tool_call_id,
                 output=(
@@ -394,7 +413,7 @@ class ToolRegistry:
                 f"Error: tool '{tool_name}' cancelled"
                 + (
                     f"; foreground cleanup: {cleanup_status}"
-                    if tool_name == "bash"
+                    if tool_name in {"bash", "shell"}
                     else ""
                 )
             )
@@ -539,7 +558,7 @@ class ToolRegistry:
         )
 
     def _check_enterprise_shell_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
-        if tool_name not in {"bash", "background_job_start"}:
+        if tool_name not in {"bash", "shell", "background_job_start"}:
             return None
         context = self._effective_audit_context()
         org_id = str(context.get("org_id") or "").strip()
@@ -547,7 +566,12 @@ class ToolRegistry:
         if not org_id or not project_id:
             return None
         bash_opts = self.tool_options.get("bash", {})
-        enabled = bool(context.get("enterprise_shell_enabled") or bash_opts.get("enterprise_enabled"))
+        shell_opts = self.tool_options.get("shell", {})
+        enabled = bool(
+            context.get("enterprise_shell_enabled")
+            or shell_opts.get("enterprise_enabled")
+            or bash_opts.get("enterprise_enabled")
+        )
         if enabled:
             return None
         return ToolResult(
@@ -666,6 +690,7 @@ class ToolRegistry:
                 self.logger.error(
                     "Failed to persist canonical Tool audit evidence: %s", exc
                 )
+                raise
         if self.smart_tools.enabled:
             return
         try:
@@ -733,6 +758,7 @@ class ToolRegistry:
     async def _dispatch(self, tool_name: str, arguments: dict) -> str | StructuredToolOutput:
         from tools.builtins import (
             execute_bash,
+            execute_shell,
             execute_file_read,
             execute_file_write,
             execute_file_list,
@@ -754,18 +780,21 @@ class ToolRegistry:
 
         opts = self.tool_options
 
-        if tool_name == "bash":
-            bash_opts = opts.get("bash", {})
+        if tool_name in {"bash", "shell"}:
+            bash_opts = dict(opts.get("bash", {}) or {})
+            shell_opts = dict(opts.get("shell", {}) or {})
+            effective_opts = {**bash_opts, **shell_opts}
             configured_timeout_max = (
-                bash_opts.get("timeout_max")
-                if "timeout_max" in bash_opts
+                effective_opts.get("timeout_max")
+                if "timeout_max" in effective_opts
                 else None
             )
-            return await execute_bash(
+            executor = execute_bash if tool_name == "bash" else execute_shell
+            return await executor(
                 arguments,
                 workspace_dir=self.workspace_dir,
                 timeout_max=configured_timeout_max,
-                blocked_patterns=bash_opts.get("blocked_patterns"),
+                blocked_patterns=effective_opts.get("blocked_patterns"),
             )
 
         if tool_name == "file_read":

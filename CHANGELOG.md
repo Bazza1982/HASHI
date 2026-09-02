@@ -152,6 +152,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Reasoning-stream canonical audit hot path** — lossless provider stream
+  evidence now commits in bounded 200 ms / 8 KiB groups with one lock, chain-tail
+  read, append, flush, and `fsync`. Each raw delta retains its own sequence,
+  timestamp, event, and digest-chain link; one semantic reasoning record
+  references the batch instead of copying every delta a second time. Canonical
+  audit startup is fail-closed and uses native `fcntl` or `msvcrt` locking.
+- **Platform-truthful execution contracts** — replaced the misleading implicit
+  `bash` execution path with an explicit `shell` tool: PowerShell on native
+  Windows and Bash on Linux, WSL, and macOS, with selectable CMD and a real-Bash
+  compatibility alias. HER stages now receive authoritative OS, Shell, cwd,
+  path, encoding, Python, and argv facts. Windows process trees, `.cmd`/`.bat`
+  and `.ps1` entry points, UTF-8 output, native paths, WSL drive scopes,
+  background jobs, verification commands, CLI adapters, and CI are covered by
+  native Windows regression tests.
 - **Workbench smoke-result correlation** — live Agent smoke checks now wait on
   the current request ID in the canonical core transcript instead of watching
   the legacy presentation transcript for an adjacent user/assistant pair. This
@@ -172,9 +186,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response request metadata. Codex document/media fallback prompts continue
   through stdin rather than reverting to an oversized command-line argument.
 - **HER read-only search portability** — `workspace_inspect search` now uses
-  the system `grep` binary when `rg` is absent from the service process PATH,
-  preserving bounded, workzone-scoped Review and Verification evidence instead
-  of returning an unexpected tool failure.
+  the system `grep` binary when `rg` is absent, then a bounded built-in Python
+  search when neither binary exists. Pure native-Windows Review and
+  Verification therefore keep workzone-scoped evidence instead of returning an
+  unexpected tool failure.
 - **API Gateway hot-reload process-group crash** — isolated Codex MCP inventory
   subprocesses from HASHI's POSIX process group and made process-tree cleanup
   refuse any group kill that could target HASHI itself. Gateway shutdown now

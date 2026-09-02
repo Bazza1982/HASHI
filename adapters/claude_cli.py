@@ -1,6 +1,5 @@
 from __future__ import annotations
 import json
-import os
 import time
 import asyncio
 import logging
@@ -15,6 +14,10 @@ from adapters.stream_events import (
     KIND_TEXT_DELTA, KIND_PROGRESS,
 )
 from adapters.hashi_mcp import prepare_hashi_mcp, write_claude_mcp_config
+from orchestrator.process_execution import (
+    process_group_kwargs,
+    resolve_argv_invocation,
+)
 
 
 class ClaudeCLIAdapter(BaseBackend):
@@ -65,11 +68,12 @@ class ClaudeCLIAdapter(BaseBackend):
             self.logger.info(f"Detected system prompt source at {self.system_prompt_source}")
 
         try:
+            invocation = resolve_argv_invocation((self.cmd_base, "--version"))
             proc = await asyncio.create_subprocess_exec(
-                self.cmd_base,
-                "--version",
+                *invocation.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_kwargs(),
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
@@ -268,7 +272,13 @@ class ClaudeCLIAdapter(BaseBackend):
 
         prompt_arg = prompt
         stdin_data = None
-        if "\n" in prompt or "\r" in prompt or len(prompt) > self.MAX_PROMPT_ARG_CHARS:
+        wrapper_uses_cmd = resolve_argv_invocation((self.cmd_base,)).launcher == "cmd"
+        if (
+            wrapper_uses_cmd
+            or "\n" in prompt
+            or "\r" in prompt
+            or len(prompt) > self.MAX_PROMPT_ARG_CHARS
+        ):
             prompt_arg = "."
             stdin_data = prompt.encode("utf-8")
             self.logger.info(
@@ -321,16 +331,14 @@ class ClaudeCLIAdapter(BaseBackend):
                 f"(stateless=True, retry={is_retry}, stdin={stdin_data is not None}, "
                 f"streaming={use_streaming}, prompt_len={len(prompt)}, cwd={effective_workdir})"
             )
-            _extra_kwargs = {}
-            if os.name != "nt":
-                _extra_kwargs["start_new_session"] = True
+            invocation = resolve_argv_invocation(cmd)
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *invocation.argv,
                 stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                **_extra_kwargs,
+                **process_group_kwargs(),
             )
             self.current_proc = proc  # keep ref for shutdown/kill
             self.logger.info(
@@ -554,12 +562,14 @@ class ClaudeCLIAdapter(BaseBackend):
         silent: bool = False,
     ) -> BackendResponse:
         started = time.perf_counter()
+        invocation = resolve_argv_invocation(cmd)
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            *invocation.argv,
             stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.effective_workdir),
+            **process_group_kwargs(),
         )
         self.current_proc = proc
         self._touch_activity()

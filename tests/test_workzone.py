@@ -1,6 +1,10 @@
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from orchestrator import workzone as workzone_module
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.workzone import (
     access_root_for_workzone,
@@ -76,7 +80,9 @@ def test_workzone_rejects_file_paths(tmp_path: Path):
         raise AssertionError("file path should be rejected")
 
 
-def test_workzone_accepts_windows_absolute_paths(tmp_path: Path):
+@pytest.mark.skipif(os.name == "nt", reason="WSL path translation contract")
+def test_workzone_accepts_windows_absolute_paths(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(workzone_module, "is_wsl", lambda: True)
     project = tmp_path / "project"
     workspace = project / "workspaces" / "agent"
     zone = Path("/mnt/c/Users/tester/projects/demo")
@@ -100,7 +106,9 @@ def test_workzone_accepts_windows_relative_separators(tmp_path: Path):
     assert resolved == zone.resolve()
 
 
-def test_workzone_accepts_windows_wsl_unc_paths(tmp_path: Path):
+@pytest.mark.skipif(os.name == "nt", reason="WSL path translation contract")
+def test_workzone_accepts_windows_wsl_unc_paths(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(workzone_module, "is_wsl", lambda: True)
     project = tmp_path / "project"
     workspace = project / "workspaces" / "agent"
     zone = tmp_path / "wsl-home" / "repo"

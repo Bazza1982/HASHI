@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
+
+from orchestrator.process_execution import process_is_alive
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -370,24 +372,7 @@ def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout:
 
 
 def _process_exists(pid: int) -> bool:
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
-            process_query_limited_information = 0x1000
-            handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            return False
-        except Exception:
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    return process_is_alive(pid)
 
 
 def _read_hashi_pid_state() -> dict[str, Any]:

@@ -14,11 +14,12 @@ import json
 import os
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final, Iterable
+from typing import Any, Final, Iterable, Mapping
 from uuid import uuid4
 
 
@@ -44,21 +45,33 @@ def _safe_component(value: str, fallback: str) -> str:
     return fallback if cleaned in {"", ".", ".."} else cleaned
 
 
+def _tighten_permissions(path: Path, mode: int) -> None:
+    """Apply POSIX privacy modes without pretending they are Windows ACLs."""
+
+    if os.name != "nt":
+        os.chmod(path, mode)
+
+
+def _tighten_fd_permissions(fd: int, mode: int) -> None:
+    if os.name != "nt" and hasattr(os, "fchmod"):
+        os.fchmod(fd, mode)
+
+
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    _tighten_permissions(path.parent, 0o700)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(fd, 0o600)
+        _tighten_fd_permissions(fd, 0o600)
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        os.chmod(path, 0o600)
+        _tighten_permissions(path, 0o600)
     except Exception:
         try:
             os.close(fd)
@@ -142,27 +155,86 @@ class CanonicalAuditStore:
             self.artifacts_root,
             self.artifact_dir,
         ):
-            os.chmod(private_directory, 0o700)
+            _tighten_permissions(private_directory, 0o700)
         if self.events_path.exists():
-            os.chmod(self.events_path, 0o600)
+            _tighten_permissions(self.events_path, 0o600)
+        self.lock_path.touch(exist_ok=True)
+        _tighten_permissions(self.lock_path, 0o600)
+        self._validate_writable_store()
+
+    @staticmethod
+    def _lock_file(handle, *, exclusive: bool) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            mode = msvcrt.LK_NBLCK if exclusive else msvcrt.LK_NBRLCK
+            deadline = time.monotonic() + 30.0
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), mode, 1)
+                    return
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise CanonicalAuditConfigurationError(
+                            "timed out acquiring canonical audit chain lock"
+                        )
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(
+                handle.fileno(),
+                fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+            )
+
+    @staticmethod
+    def _unlock_file(handle) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @contextmanager
     def _chain_guard(self, *, exclusive: bool):
         """Serialise the digest chain across runtime and MCP subprocesses."""
 
-        import fcntl
-
         self.root.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+b") as handle:
-            os.chmod(self.lock_path, 0o600)
-            fcntl.flock(
-                handle.fileno(),
-                fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
-            )
+            self._lock_file(handle, exclusive=exclusive)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                self._unlock_file(handle)
+
+    def _validate_writable_store(self) -> None:
+        """Fail during runtime construction if durable audit cannot be used."""
+
+        try:
+            with self._lock:
+                with self._chain_guard(exclusive=True):
+                    # Validate an existing tail before accepting any new work.
+                    self._last_digest()
+                    with self.events_path.open("a+b") as handle:
+                        _tighten_permissions(self.events_path, 0o600)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+        except CanonicalAuditConfigurationError:
+            raise
+        except Exception as exc:
+            raise CanonicalAuditConfigurationError(
+                f"canonical audit store is not durably writable: {exc}"
+            ) from exc
 
     @property
     def encrypted(self) -> bool:
@@ -356,33 +428,78 @@ class CanonicalAuditStore:
         request_id: str = "",
         provenance: dict[str, Any] | None = None,
     ) -> str:
-        event_id = str(uuid4())
+        return self.record_many(
+            (
+                {
+                    "event_type": event_type,
+                    "payload": payload,
+                    "request_id": request_id,
+                    "provenance": provenance,
+                },
+            )
+        )[0]
+
+    def record_many(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
+        """Append multiple independent evidence records in one durable commit.
+
+        Each record keeps its own event id, timestamp, payload, provenance, and
+        digest-chain link.  Only the lock acquisition, tail lookup, file open,
+        flush, and fsync are grouped.
+        """
+
+        pending = [dict(record) for record in records]
+        if not pending:
+            return []
+        event_ids = [str(record.get("event_id") or uuid4()) for record in pending]
         with self._lock:
             with self._chain_guard(exclusive=True):
-                event = {
-                    "schema_version": AUDIT_SCHEMA_VERSION,
-                    "event_id": event_id,
-                    "event_type": str(event_type),
-                    "recorded_at": datetime.now(timezone.utc).isoformat(),
-                    "instance_id": self.instance_id,
-                    "agent_id": self.agent_id,
-                    "request_id": str(request_id or ""),
-                    "previous_record_digest": self._last_digest(),
-                    "provenance": self._externalize(dict(provenance or {})),
-                    "payload": self._externalize(payload),
-                }
-                self._append_event_unlocked(event)
-        return event_id
+                previous_digest = self._last_digest()
+                wrappers: list[dict[str, Any]] = []
+                for event_id, record in zip(event_ids, pending):
+                    event = {
+                        "schema_version": AUDIT_SCHEMA_VERSION,
+                        "event_id": event_id,
+                        "event_type": str(record.get("event_type") or ""),
+                        "recorded_at": str(
+                            record.get("recorded_at")
+                            or datetime.now(timezone.utc).isoformat()
+                        ),
+                        "instance_id": self.instance_id,
+                        "agent_id": self.agent_id,
+                        "request_id": str(record.get("request_id") or ""),
+                        "previous_record_digest": previous_digest,
+                        "provenance": self._externalize(
+                            dict(record.get("provenance") or {})
+                        ),
+                        "payload": self._externalize(record.get("payload")),
+                    }
+                    wrapper = self._encode_record(event)
+                    wrappers.append(wrapper)
+                    previous_digest = str(wrapper["record_digest"])
+                self._append_wrappers_unlocked(wrappers)
+        return event_ids
 
     def _append_event_unlocked(self, event: dict[str, Any]) -> None:
-        wrapper = self._encode_record(event)
+        self._append_wrappers_unlocked((self._encode_record(event),))
+
+    def _append_wrappers_unlocked(
+        self, wrappers: Iterable[Mapping[str, Any]]
+    ) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        content = b"".join(
+            json.dumps(
+                dict(wrapper),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+            for wrapper in wrappers
+        )
+        if not content:
+            return
         with self.events_path.open("ab") as handle:
-            os.chmod(self.events_path, 0o600)
-            line = json.dumps(
-                wrapper, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            ).encode("utf-8") + b"\n"
-            handle.write(line)
+            handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
 

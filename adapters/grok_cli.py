@@ -24,6 +24,10 @@ from adapters.stream_events import (
     StreamCallback,
     StreamEvent,
 )
+from orchestrator.process_execution import (
+    process_group_kwargs,
+    resolve_argv_invocation,
+)
 
 
 class GrokCLIAdapter(BaseBackend):
@@ -50,8 +54,6 @@ class GrokCLIAdapter(BaseBackend):
         self.current_proc = None
         self._active_read_tasks: list[asyncio.Task] = []
         self.cmd_base = getattr(self.global_config, "grok_cmd", "grok")
-        if os.name == "nt" and Path(self.cmd_base).suffix.lower() not in {".cmd", ".exe", ".bat", ".ps1"}:
-            self.cmd_base = f"{self.cmd_base}.cmd"
         self.access_root = str(self.config.resolve_access_root())
         self._session_id: str | None = None
         self._session_mode: bool = bool((self.config.extra or {}).get("session_mode", False))
@@ -80,11 +82,12 @@ class GrokCLIAdapter(BaseBackend):
         self.logger.info("Initializing Grok CLI backend...")
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         try:
+            invocation = resolve_argv_invocation((self.cmd_base, "--version"))
             proc = await asyncio.create_subprocess_exec(
-                self.cmd_base,
-                "--version",
+                *invocation.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_kwargs(),
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
@@ -392,17 +395,14 @@ class GrokCLIAdapter(BaseBackend):
         final_text = ""
         plain_lines: list[str] = []
 
-        extra_kwargs = {}
-        if os.name != "nt":
-            extra_kwargs["start_new_session"] = True
-
         try:
+            invocation = resolve_argv_invocation(cmd)
             self.current_proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *invocation.argv,
                 cwd=str(self.config.workspace_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                **extra_kwargs,
+                **process_group_kwargs(),
             )
             proc = self.current_proc
             self.logger.info(f"Grok subprocess started for {request_id} (pid={proc.pid})")

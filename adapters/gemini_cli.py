@@ -1,7 +1,6 @@
 from __future__ import annotations
 import re
 import json
-import os
 import time
 import asyncio
 import logging
@@ -14,6 +13,10 @@ from adapters.stream_events import (
     KIND_TOOL_START, KIND_TOOL_END,
     KIND_FILE_READ, KIND_FILE_EDIT, KIND_SHELL_EXEC,
     KIND_TEXT_DELTA, KIND_PROGRESS, KIND_ERROR,
+)
+from orchestrator.process_execution import (
+    process_group_kwargs,
+    resolve_argv_invocation,
 )
 
 
@@ -63,11 +66,12 @@ class GeminiCLIAdapter(BaseBackend):
 
         # Verify the Gemini CLI is actually accessible (like claude_cli does)
         try:
+            invocation = resolve_argv_invocation((self.cmd_base, "--version"))
             proc = await asyncio.create_subprocess_exec(
-                self.cmd_base,
-                "--version",
+                *invocation.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_kwargs(),
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
@@ -239,7 +243,13 @@ class GeminiCLIAdapter(BaseBackend):
 
         prompt_arg = prompt
         stdin_data = None
-        if "\n" in prompt or "\r" in prompt or len(prompt) > self.MAX_PROMPT_ARG_CHARS:
+        wrapper_uses_cmd = resolve_argv_invocation((self.cmd_base,)).launcher == "cmd"
+        if (
+            wrapper_uses_cmd
+            or "\n" in prompt
+            or "\r" in prompt
+            or len(prompt) > self.MAX_PROMPT_ARG_CHARS
+        ):
             prompt_arg = "."
             stdin_data = prompt.encode("utf-8")
             self.logger.info(
@@ -273,19 +283,16 @@ class GeminiCLIAdapter(BaseBackend):
                 f"streaming={use_streaming}, "
                 f"prompt_len={len(prompt)}, cwd={effective_workdir}, system_md={self.system_md_path})"
             )
-            _extra_kwargs = {}
-            if os.name != "nt":
-                # Put the subprocess in its own process group so force_kill_process_tree
-                # can kill all child processes (Node workers, tool subprocesses, etc.)
-                # via os.killpg, preventing orphaned pipe holders after /stop.
-                _extra_kwargs["start_new_session"] = True
+            # Keep the CLI in a separately terminable process tree so /stop
+            # cannot leave Node workers holding inherited pipes.
+            invocation = resolve_argv_invocation(cmd)
             self.current_proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *invocation.argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                **_extra_kwargs,
+                **process_group_kwargs(),
             )
             self.logger.info(
                 f"Gemini subprocess started for {request_id} "
