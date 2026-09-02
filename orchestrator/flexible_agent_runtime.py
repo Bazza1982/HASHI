@@ -2882,13 +2882,7 @@ class FlexibleAgentRuntime:
             )
 
         elif target == "verbose":
-            self._verbose = value == "on"
-            telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
-            _f = self.workspace_dir / ".verbose_off"
-            if self._verbose:
-                _f.unlink(missing_ok=True)
-            else:
-                _f.touch()
+            self._set_verbose_enabled(value == "on")
             await query.edit_message_text(
                 self._verbose_menu_text(),
                 parse_mode="HTML",
@@ -2901,13 +2895,7 @@ class FlexibleAgentRuntime:
             )
 
         elif target == "think":
-            self._think = value == "on"
-            telegram_stream_policy.set_display_preference(self, "think", self._think)
-            _f = self.workspace_dir / ".think_off"
-            if self._think:
-                _f.unlink(missing_ok=True)
-            else:
-                _f.touch()
+            self._set_think_enabled(value == "on")
             await query.edit_message_text(
                 self._think_menu_text(),
                 parse_mode="HTML",
@@ -5051,23 +5039,28 @@ class FlexibleAgentRuntime:
             action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
         )
 
+    def _set_verbose_enabled(self, enabled: bool) -> None:
+        self._verbose = bool(enabled)
+        marker = self.workspace_dir / ".verbose_off"
+        if self._verbose:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.touch()
+        telegram_stream_policy.set_display_preference(
+            self,
+            "verbose",
+            self._verbose,
+        )
+        runtime_pipeline.notify_display_preference_change(self)
+
     async def cmd_verbose(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if args and args[0] in {"on", "true", "1"}:
-            self._verbose = True
+            self._set_verbose_enabled(True)
         elif args and args[0] in {"off", "false", "0"}:
-            self._verbose = False
-        else:
-            self._verbose = not self._verbose
-        # Persist so it survives restarts
-        _verbose_file = self.workspace_dir / ".verbose_off"
-        if self._verbose:
-            _verbose_file.unlink(missing_ok=True)
-        else:
-            _verbose_file.touch()
-        telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
+            self._set_verbose_enabled(False)
         await self._reply_text(
             update,
             self._verbose_menu_text(),
@@ -5099,22 +5092,34 @@ class FlexibleAgentRuntime:
             commentary_available=commentary_available,
         )
 
+    def _set_think_enabled(self, enabled: bool) -> None:
+        self._think = bool(enabled)
+        marker = self.workspace_dir / ".think_off"
+        if self._think:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.touch()
+            # A menu selection is the visibility boundary.  Never flush
+            # provider reasoning that was buffered before the user selected
+            # Off, and never replay it after a later On selection.
+            self._think_buffer.clear()
+            self._openrouter_think_chunk = ""
+            self._last_openrouter_think_snippet = None
+        telegram_stream_policy.set_display_preference(
+            self,
+            "think",
+            self._think,
+        )
+        runtime_pipeline.notify_display_preference_change(self)
+
     async def cmd_think(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if args and args[0] in {"on", "true", "1"}:
-            self._think = True
+            self._set_think_enabled(True)
         elif args and args[0] in {"off", "false", "0"}:
-            self._think = False
-        else:
-            self._think = not self._think
-        _think_file = self.workspace_dir / ".think_off"
-        if self._think:
-            _think_file.unlink(missing_ok=True)
-        else:
-            _think_file.touch()
-        telegram_stream_policy.set_display_preference(self, "think", self._think)
+            self._set_think_enabled(False)
         await self._reply_text(
             update,
             self._think_menu_text(),
@@ -5142,6 +5147,7 @@ class FlexibleAgentRuntime:
             "commentary",
             self._commentary,
         )
+        runtime_pipeline.notify_display_preference_change(self)
 
     def _commentary_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
@@ -9294,6 +9300,9 @@ class FlexibleAgentRuntime:
 
         async def _edit_placeholder():
             nonlocal last_edit_at, last_rendered_text, dirty, edit_attempts, display_disabled
+            if not bool(getattr(self, "_verbose", True)):
+                dirty = False
+                return
             if display_disabled:
                 dirty = False
                 return
@@ -9369,12 +9378,18 @@ class FlexibleAgentRuntime:
                     await asyncio.gather(*pending, return_exceptions=True)
 
             if stop_task in done and stop_task.result():
-                if event_task in done:
+                if (
+                    event_task in done
+                    and bool(getattr(self, "_verbose", True))
+                ):
                     dirty = (
                         digest.record(event_task.result(), now=time.monotonic())
                         or dirty
                     )
-                while not event_queue.empty():
+                while (
+                    bool(getattr(self, "_verbose", True))
+                    and not event_queue.empty()
+                ):
                     try:
                         queued_event = event_queue.get_nowait()
                     except asyncio.QueueEmpty:
@@ -9384,11 +9399,11 @@ class FlexibleAgentRuntime:
                     )
                 break
 
-            if event_task in done:
+            if event_task in done and bool(getattr(self, "_verbose", True)):
                 event = event_task.result()
                 dirty = digest.record(event, now=time.monotonic()) or dirty
                 last_heartbeat_at = time.monotonic()
-            else:
+            elif event_task not in done:
                 now = time.monotonic()
                 if (now - last_heartbeat_at) >= HEARTBEAT_INTERVAL:
                     dirty = digest.mark_waiting(now=now) or dirty
@@ -9398,6 +9413,13 @@ class FlexibleAgentRuntime:
             if dirty and (now - last_edit_at) >= MIN_EDIT_INTERVAL:
                 await _edit_placeholder()
 
+        if not bool(getattr(self, "_verbose", True)):
+            while not event_queue.empty():
+                try:
+                    event_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            return
         while not event_queue.empty():
             try:
                 queued_event = event_queue.get_nowait()
@@ -9454,6 +9476,7 @@ class FlexibleAgentRuntime:
             owner = explicit_owner or legacy_delivery_class(event.kind)
             if (
                 event_queue is not None
+                and bool(getattr(self, "_verbose", True))
                 and owner == DELIVERY_TECHNICAL
                 and event.kind in verbose_kinds
             ):
@@ -9476,7 +9499,7 @@ class FlexibleAgentRuntime:
                     with suppress(Exception):
                         value = detail.split("=", 1)[1].split(";", 1)[0]
                         self._thinking_chars_this_req += max(0, int(value))
-            if think_buffer is not None:
+            if think_buffer is not None and bool(getattr(self, "_think", True)):
                 if not explicit_owner and event.kind == KIND_COMMENTARY:
                     # Commentary is already a complete model-authored update.
                     # Preserve it verbatim instead of folding it into the short
@@ -9537,6 +9560,11 @@ class FlexibleAgentRuntime:
 
     async def _flush_thinking(self, chat_id: int):
         """Send accumulated thinking events to Telegram, console, and transcript."""
+        if not bool(getattr(self, "_think", True)):
+            self._think_buffer.clear()
+            self._openrouter_think_chunk = ""
+            self._last_openrouter_think_snippet = None
+            return
         if self._openrouter_think_chunk:
             self._think_buffer.append(self._openrouter_think_chunk)
             self._openrouter_think_chunk = ""

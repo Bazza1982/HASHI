@@ -89,6 +89,7 @@ configuration, transition, migration, and regression contract.
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
 - `/commentary [on|off]` — HER only: show explicitly model-authored Persona acknowledgements and interim reports once each; independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show one temporary deterministic activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status. The same Telegram card is edited as work advances; raw technical events remain in logs, while Persona speech, reasoning, and answer drafts stay excluded.
+- Bare `/think`, `/commentary`, and `/verbose` commands only open their menus. Choosing On or Off applies to the active turn immediately; display events produced while Off are not replayed later.
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/notify [on|quiet|off]` — `on` notifies for every message; `quiet` silences interim activity but not final results, errors, warnings, recovery, or important alerts; `off` delivers every message silently
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete

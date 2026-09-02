@@ -782,6 +782,10 @@ configuration summary.
 | `/say` | Read the last assistant reply as voice; forces one TTS attempt even when `/voice off` if a voice is configured |
 | `/api [status\|on\|off\|model <name>]` | Show API Gateway address, switch it on/off, or set its default model |
 
+For `/verbose`, `/think`, and `/commentary`, the bare command only opens the
+menu. Choosing On or Off (or passing it explicitly) changes the active turn
+immediately. Events emitted while a display is Off are not replayed later.
+
 #### Lifecycle Commands
 
 | Command | Description |

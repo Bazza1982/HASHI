@@ -40,6 +40,7 @@ from orchestrator.canonical_audit import (
     CanonicalAuditConfigurationError,
     CanonicalAuditStore,
 )
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.session_store import SessionStore
 
 
@@ -54,6 +55,9 @@ class _Logger:
         self.messages.append(message % args if args else message)
 
     def error(self, message, *args):
+        self.messages.append(message % args if args else message)
+
+    def debug(self, message, *args):
         self.messages.append(message % args if args else message)
 
 
@@ -1287,6 +1291,54 @@ async def test_cleanup_verbose_rollover_deletes_only_active_message():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_does_not_delete_live_verbose_placeholder_twice():
+    runtime = _runtime()
+    placeholder = SimpleNamespace(message_id=77)
+    display_state = runtime_pipeline.VerboseDisplayState(
+        current_message=None,
+        message_ids=[77],
+        deleted_message_ids={77},
+    )
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=None,
+        typing_task=None,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+        verbose_display_state=display_state,
+    )
+
+    assert runtime.app.bot.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_older_verbose_card_after_live_display_stopped():
+    runtime = _runtime()
+    placeholder = SimpleNamespace(message_id=77)
+    display_state = runtime_pipeline.VerboseDisplayState(
+        current_message=None,
+        message_ids=[77, 78],
+        ever_activated=True,
+    )
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=None,
+        typing_task=None,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+        verbose_display_state=display_state,
+    )
+
+    assert runtime.app.bot.deleted == []
+
+
+@pytest.mark.asyncio
 async def test_cleanup_interactive_feedback_propagates_queue_worker_cancellation():
     runtime = _runtime()
     child_started = asyncio.Event()
@@ -1386,13 +1438,21 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     ]
     assert feedback.placeholder.message_id == 77
     assert feedback.typing_task is not None
-    assert feedback.escalation_task is None
+    assert feedback.escalation_task is not None
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
+    assert feedback.think_flush_task is not None
+    assert feedback.preference_event is not None
     assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
 
 @pytest.mark.asyncio
@@ -2021,7 +2081,7 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
         audit_collector=None,
     )
 
-    feedback.stop_typing.set()
+    assert feedback.stop_typing is None
     assert feedback.typing_task is None
 
     saved = failover.load_health_state(runtime)
@@ -2120,15 +2180,25 @@ async def test_typing_off_skips_typing_ui_and_uses_final_delivery_once():
         audit_collector=None,
     )
 
-    assert feedback.stop_typing is None
+    assert feedback.stop_typing is not None
     assert feedback.typing_task is None
-    assert feedback.escalation_task is None
+    assert feedback.escalation_task is not None
     assert feedback.answer_preview_task is None
     assert feedback.placeholder is None
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
+    assert feedback.think_flush_task is not None
+    assert feedback.preference_event is not None
     assert callable(feedback.on_stream_event)
     assert runtime.app.bot.sent == []
     assert runtime.app.bot.edits == []
+
+    feedback.stop_typing.set()
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
     await runtime_pipeline.handle_success_delivery(
         runtime,
@@ -2226,12 +2296,18 @@ async def test_typing_only_does_not_route_answer_deltas_or_edit_placeholder():
         audit_collector=None,
     )
 
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
     assert callable(feedback.on_stream_event)
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
     assert runtime.app.bot.edits == []
 
 
@@ -2539,11 +2615,17 @@ async def test_legacy_preview_flag_stays_inactive_without_verbose():
 
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
-    assert feedback.escalation_task is None
-    assert feedback.stream_callback is None
+    assert feedback.escalation_task is not None
+    assert feedback.stream_callback is not None
     assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
 
 @pytest.mark.asyncio
@@ -2645,6 +2727,96 @@ async def test_verbose_alone_forces_placeholder_and_progress_stream():
     await feedback.typing_task
     await feedback.escalation_task
     assert runtime.streaming_loops == [("req-1", True, True)]
+
+
+@pytest.mark.asyncio
+async def test_live_verbose_and_think_changes_apply_without_replaying_hidden_events():
+    runtime = _runtime()
+    runtime.telegram_connected = True
+    make_stream_callback = FlexibleAgentRuntime._make_stream_callback.__get__(
+        runtime,
+        FlexibleAgentRuntime,
+    )
+
+    def _capturing_stream_callback(**kwargs):
+        runtime.stream_callbacks.append(kwargs)
+        return make_stream_callback(**kwargs)
+
+    runtime._make_stream_callback = _capturing_stream_callback
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    stream_queue = runtime.stream_callbacks[0]["event_queue"]
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="hidden before On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="hidden reasoning before On")
+    )
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, True)
+    FlexibleAgentRuntime._set_think_enabled(runtime, True)
+    for _ in range(50):
+        if runtime.streaming_loops:
+            break
+        await asyncio.sleep(0.01)
+    assert len(runtime.streaming_loops) == 1
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="visible after On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="R" * 160)
+    )
+    assert stream_queue.qsize() == 1
+    assert runtime._think_buffer == ["R" * 160]
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, False)
+    FlexibleAgentRuntime._set_think_enabled(runtime, False)
+    for _ in range(50):
+        if runtime.app.bot.deleted:
+            break
+        await asyncio.sleep(0.01)
+    assert runtime.app.bot.deleted
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, True)
+    FlexibleAgentRuntime._set_think_enabled(runtime, True)
+    for _ in range(50):
+        if len(runtime.streaming_loops) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert len(runtime.streaming_loops) == 2
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="visible after second On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="N" * 160)
+    )
+    assert stream_queue.qsize() == 1
+    assert runtime._think_buffer == ["N" * 160]
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, False)
+    FlexibleAgentRuntime._set_think_enabled(runtime, False)
+    feedback.stop_typing.set()
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
 
 @pytest.mark.asyncio

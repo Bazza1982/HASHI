@@ -91,6 +91,9 @@ when ambiguous.
   Persona acknowledgements and interim reports. Each logical event is durable
   and delivered at most once, independently from `/think` and `/verbose`; other
   backends retain their own display rules.
+  For these three display commands, the bare command only opens its menu. An
+  On/Off selection applies to the active turn immediately, and output produced
+  while Off is never replayed after a later On.
 - `/typing [on|off|status]`: control both the temporary typing bubble and Telegram's native typing indicator, independently from `/verbose` and `/think`.
 - `/notify [on|quiet|off]`: control Telegram notification sound. `quiet`
   silences acknowledgements, commentary, reasoning, verbose activity, and

@@ -9,7 +9,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -910,6 +910,8 @@ class VerboseDisplayState:
     current_message: Any
     message_ids: list[int]
     rollover_count: int = 0
+    deleted_message_ids: set[int] = field(default_factory=set)
+    ever_activated: bool = False
 
 
 @dataclass(frozen=True)
@@ -934,6 +936,32 @@ class InteractiveFeedback:
     on_stream_event: Any | None
     her_message_router: Any | None
     verbose_display_state: VerboseDisplayState | None = None
+    preference_event: asyncio.Event | None = None
+
+
+def _display_preference_events(runtime) -> set[asyncio.Event]:
+    events = getattr(runtime, "_display_preference_events", None)
+    if not isinstance(events, set):
+        events = set()
+        runtime._display_preference_events = events
+    return events
+
+
+def notify_display_preference_change(runtime) -> None:
+    """Wake every in-flight presentation session for this Agent."""
+
+    for event in tuple(_display_preference_events(runtime)):
+        event.set()
+
+
+def release_display_preference_event(
+    runtime,
+    event: asyncio.Event | None,
+) -> None:
+    if event is None:
+        return
+    _display_preference_events(runtime).discard(event)
+    event.set()
 
 
 def begin_queue_item(runtime, item) -> QueueItemStart:
@@ -1587,9 +1615,13 @@ async def cleanup_interactive_feedback(
     placeholder,
     delete_placeholder: bool = True,
     verbose_display_state: VerboseDisplayState | None = None,
+    preference_event: asyncio.Event | None = None,
 ) -> None:
     if stop_typing:
         stop_typing.set()
+    # Detach from command notifications before awaiting child shutdown so a
+    # cancelled cleanup cannot leave a stale per-request Event registered.
+    release_display_preference_event(runtime, preference_event)
     await settle_interactive_feedback_task(runtime, typing_task, label="typing")
     await settle_interactive_feedback_task(runtime, escalation_task, label="escalation")
     await settle_interactive_feedback_task(
@@ -1611,12 +1643,20 @@ async def cleanup_interactive_feedback(
             label="thinking-flush-final",
         )
 
-    active_placeholder = (
-        verbose_display_state.current_message
-        if verbose_display_state is not None
-        else placeholder
+    if verbose_display_state is None:
+        active_placeholder = placeholder
+    elif verbose_display_state.current_message is not None:
+        active_placeholder = verbose_display_state.current_message
+    elif verbose_display_state.ever_activated:
+        active_placeholder = None
+    else:
+        active_placeholder = placeholder
+    active_message_id = getattr(active_placeholder, "message_id", None)
+    already_deleted = bool(
+        verbose_display_state is not None
+        and active_message_id in verbose_display_state.deleted_message_ids
     )
-    if active_placeholder and delete_placeholder:
+    if active_placeholder and delete_placeholder and not already_deleted:
         delete_started = time.monotonic()
         deleted = await _run_interactive_feedback_cleanup_step(
             runtime,
@@ -1627,6 +1667,8 @@ async def cleanup_interactive_feedback(
             label="placeholder-delete",
         )
         if deleted:
+            if verbose_display_state is not None and active_message_id is not None:
+                verbose_display_state.deleted_message_ids.add(active_message_id)
             delete_elapsed_s = max(0.0, time.monotonic() - delete_started)
             runtime.telegram_logger.info(
                 f"Deleted placeholder for {item.request_id} "
@@ -2224,6 +2266,188 @@ def wrap_her_persona_stream(
     return callback
 
 
+async def _send_live_verbose_placeholder(runtime, item):
+    try:
+        if await telegram_delivery_failover.handle_blocked_send(
+            runtime,
+            chat_id=item.chat_id,
+            request_id=item.request_id,
+            purpose="placeholder",
+        ):
+            return None
+        text, parse_mode = runtime.get_progress_placeholder()
+        message = await runtime.app.bot.send_message(
+            chat_id=item.chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            disable_notification=telegram_notifications.disable_notification(
+                runtime,
+                purpose="placeholder",
+            ),
+        )
+        runtime.telegram_logger.info(
+            "Started live verbose display for %s after preference activation.",
+            item.request_id,
+        )
+        return message
+    except RetryAfter as exc:
+        await telegram_delivery_failover.handle_retry_after(
+            runtime,
+            exc=exc,
+            chat_id=item.chat_id,
+            request_id=item.request_id,
+            purpose="placeholder",
+        )
+        runtime.telegram_logger.warning(
+            "Live verbose display blocked by flood control for %s: %s",
+            item.request_id,
+            exc,
+        )
+    except Exception as exc:
+        runtime.telegram_logger.warning(
+            "Live verbose display could not start for %s: %s",
+            item.request_id,
+            exc,
+        )
+    return None
+
+
+async def _delete_live_verbose_placeholder(runtime, item, message) -> bool:
+    if message is None:
+        return True
+    try:
+        await runtime.app.bot.delete_message(
+            chat_id=item.chat_id,
+            message_id=message.message_id,
+        )
+        return True
+    except Exception as exc:
+        debug = getattr(runtime.telegram_logger, "debug", None)
+        if callable(debug):
+            debug(
+                "Live verbose placeholder cleanup will be retried for %s: %s",
+                item.request_id,
+                type(exc).__name__,
+            )
+        return False
+
+
+def _drain_stream_queue(event_queue: asyncio.Queue) -> None:
+    while not event_queue.empty():
+        try:
+            event_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
+
+async def live_verbose_display_loop(
+    runtime,
+    item,
+    *,
+    request_stop: asyncio.Event,
+    preference_event: asyncio.Event,
+    event_queue: asyncio.Queue,
+    backend,
+    display_state: VerboseDisplayState,
+    seed_placeholder=None,
+) -> None:
+    """Lazily start and stop the current turn's verbose presentation.
+
+    Provider events are never replayed: the stream callback admits technical
+    events only while ``runtime._verbose`` is true, and every Off transition
+    drains anything already queued at that visibility boundary.
+    """
+
+    active_task: asyncio.Task | None = None
+    active_stop: asyncio.Event | None = None
+    available_placeholder = seed_placeholder
+
+    async def deactivate(*, delete_message: bool) -> None:
+        nonlocal active_task, active_stop, available_placeholder
+        if delete_message:
+            # Off is a visibility boundary.  Drop admitted-but-not-yet-rendered
+            # events before asking the child display loop to stop.
+            _drain_stream_queue(event_queue)
+        if active_stop is not None:
+            active_stop.set()
+        if active_task is not None:
+            await settle_interactive_feedback_task(
+                runtime,
+                active_task,
+                label="live-verbose-display",
+            )
+        active_task = None
+        active_stop = None
+        current = display_state.current_message
+        if delete_message and current is not None:
+            deleted = await _delete_live_verbose_placeholder(runtime, item, current)
+            if deleted:
+                display_state.deleted_message_ids.add(current.message_id)
+                if available_placeholder is current:
+                    available_placeholder = None
+                display_state.current_message = None
+        _drain_stream_queue(event_queue)
+
+    async def activate() -> None:
+        nonlocal active_task, active_stop, available_placeholder
+        if active_task is not None and not active_task.done():
+            return
+        message = display_state.current_message or available_placeholder
+        if message is None:
+            message = await _send_live_verbose_placeholder(runtime, item)
+        if message is None:
+            return
+        available_placeholder = None
+        display_state.ever_activated = True
+        display_state.current_message = message
+        if message.message_id not in display_state.message_ids:
+            display_state.message_ids.append(message.message_id)
+        active_stop = asyncio.Event()
+        active_task = asyncio.create_task(
+            runtime._streaming_display_loop(
+                item.chat_id,
+                message,
+                item.request_id,
+                active_stop,
+                event_queue,
+                backend=backend,
+                display_state=display_state,
+            ),
+            name=f"live-verbose-{item.request_id}",
+        )
+
+    try:
+        while not request_stop.is_set():
+            preference_event.clear()
+            if bool(getattr(runtime, "_verbose", False)):
+                await activate()
+            else:
+                await deactivate(delete_message=True)
+
+            stop_wait = asyncio.create_task(request_stop.wait())
+            preference_wait = asyncio.create_task(preference_event.wait())
+            done: set[asyncio.Task] = set()
+            try:
+                done, _pending = await asyncio.wait(
+                    {stop_wait, preference_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                pending = {stop_wait, preference_wait} - done
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+        await deactivate(delete_message=False)
+    except asyncio.CancelledError:
+        if active_stop is not None:
+            active_stop.set()
+        if active_task is not None:
+            active_task.cancel()
+            await asyncio.gather(active_task, return_exceptions=True)
+        raise
+
+
 async def setup_interactive_feedback(
     runtime,
     item,
@@ -2240,6 +2464,7 @@ async def setup_interactive_feedback(
     answer_preview_task = None
     answer_stream_state = None
     verbose_display_state = None
+    preference_event = None
     delivery_requested = not item.silent and item.deliver_to_telegram
     display_policy = telegram_stream_policy.get_display_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
@@ -2261,9 +2486,6 @@ async def setup_interactive_feedback(
             f"think={think_delivery_enabled}, source={display_policy.source}, "
             f"blocked={delivery_blocked}"
         )
-
-    if typing_delivery_enabled or verbose_delivery_enabled or think_delivery_enabled:
-        stop_typing = asyncio.Event()
 
     if typing_delivery_enabled or verbose_delivery_enabled:
         if typing_delivery_enabled:
@@ -2313,51 +2535,74 @@ async def setup_interactive_feedback(
         typing_delivery_enabled = typing_delivery_enabled and not delivery_blocked
         verbose_delivery_enabled = verbose_delivery_enabled and not delivery_blocked
         think_delivery_enabled = think_delivery_enabled and not delivery_blocked
-        if typing_delivery_enabled and stop_typing is not None:
-            typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
+    capabilities = getattr(backend, "capabilities", None)
+    runtime.logger.info(
+        f"Verbose event eligibility {item.request_id}: enabled={verbose_delivery_enabled}, "
+        f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
+        f"progress={bool(getattr(capabilities, 'supports_progress_stream', False))}, "
+        f"tools={bool(getattr(capabilities, 'supports_tool_stream', False))}"
+    )
 
-        capabilities = getattr(backend, "capabilities", None)
-        runtime.logger.info(
-            f"Verbose event eligibility {item.request_id}: enabled={verbose_delivery_enabled}, "
-            f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
-            f"progress={bool(getattr(capabilities, 'supports_progress_stream', False))}, "
-            f"tools={bool(getattr(capabilities, 'supports_tool_stream', False))}"
-        )
-        if verbose_delivery_enabled and placeholder is not None and stop_typing is not None:
-            verbose_display_state = VerboseDisplayState(
-                current_message=placeholder,
-                message_ids=[placeholder.message_id],
-            )
-            stream_queue = asyncio.Queue(maxsize=200)
-            stream_callback = runtime._make_stream_callback(
-                event_queue=stream_queue,
-                think_buffer=runtime._think_buffer if think_delivery_enabled else None,
-                audit_collector=None if is_her_backend else audit_collector,
-            )
-            escalation_task = asyncio.create_task(
-                runtime._streaming_display_loop(
-                    item.chat_id,
-                    placeholder,
-                    item.request_id,
-                    stop_typing,
-                    stream_queue,
-                    backend=backend,
-                    display_state=verbose_display_state,
-                )
+    # Presentation receivers remain attached for the lifetime of the request.
+    # The live flags admit only events emitted after the user's menu choice;
+    # no disabled interval is buffered for later replay.
+    if delivery_requested and not delivery_blocked:
+        runtime._verbose = bool(getattr(runtime, "_verbose", False))
+        runtime._think = bool(getattr(runtime, "_think", False))
+        if not isinstance(getattr(runtime, "_think_buffer", None), list):
+            runtime._think_buffer = []
+        if not isinstance(getattr(runtime, "_openrouter_think_chunk", None), str):
+            runtime._openrouter_think_chunk = ""
+        if not hasattr(runtime, "_last_openrouter_think_snippet"):
+            runtime._last_openrouter_think_snippet = None
+        stop_typing = asyncio.Event()
+        preference_event = asyncio.Event()
+        _display_preference_events(runtime).add(preference_event)
+        if typing_delivery_enabled:
+            typing_task = asyncio.create_task(
+                runtime.typing_loop(item.chat_id, stop_typing)
             )
 
-    if think_delivery_enabled and stop_typing is not None:
         runtime._think_buffer.clear()
         runtime._openrouter_think_chunk = ""
         runtime._last_openrouter_think_snippet = None
-        if stream_callback is None:
-            stream_callback = runtime._make_stream_callback(
-                think_buffer=runtime._think_buffer,
-                audit_collector=None if is_her_backend else audit_collector,
-            )
-        think_flush_task = asyncio.create_task(
-            runtime._thinking_flush_loop(item.chat_id, stop_typing)
+        stream_queue = asyncio.Queue(maxsize=200)
+        stream_callback = runtime._make_stream_callback(
+            event_queue=stream_queue,
+            think_buffer=runtime._think_buffer,
+            audit_collector=None if is_her_backend else audit_collector,
         )
+        verbose_display_state = VerboseDisplayState(
+            current_message=(placeholder if verbose_delivery_enabled else None),
+            message_ids=(
+                [placeholder.message_id]
+                if verbose_delivery_enabled and placeholder is not None
+                else []
+            ),
+            ever_activated=bool(verbose_delivery_enabled and placeholder is not None),
+        )
+        escalation_task = asyncio.create_task(
+            live_verbose_display_loop(
+                runtime,
+                item,
+                request_stop=stop_typing,
+                preference_event=preference_event,
+                event_queue=stream_queue,
+                backend=backend,
+                display_state=verbose_display_state,
+                seed_placeholder=placeholder,
+            ),
+            name=f"live-verbose-supervisor-{item.request_id}",
+        )
+        think_flush_task = asyncio.create_task(
+            runtime._thinking_flush_loop(item.chat_id, stop_typing),
+            name=f"live-think-{item.request_id}",
+        )
+        if verbose_delivery_enabled:
+            # Preserve the old guarantee that a request which starts in
+            # verbose mode has its display consumer active before generation
+            # begins.  Later menu changes are woken by ``preference_event``.
+            await asyncio.sleep(0)
 
     if stream_callback is None and audit_active and not is_her_backend:
         stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
@@ -2385,7 +2630,7 @@ async def setup_interactive_feedback(
 
         async def _activity_callback(event):
             activity_store.publish_stream(item.request_id, event)
-            if downstream_callback is not None:
+            if callable(downstream_callback):
                 result = downstream_callback(event)
                 if inspect.isawaitable(result):
                     await result
@@ -2448,6 +2693,7 @@ async def setup_interactive_feedback(
         on_stream_event=on_stream_event,
         her_message_router=her_message_router,
         verbose_display_state=verbose_display_state,
+        preference_event=preference_event,
     )
 
 
