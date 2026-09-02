@@ -3283,10 +3283,18 @@ async def test_handle_backend_error_buffers_transfer_without_delivery():
 
 
 @pytest.mark.asyncio
-async def test_handle_success_delivery_sends_response_and_routes_hchat():
+async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypatch):
     runtime = _runtime()
     item = _item(prompt="user text")
     response = SimpleNamespace(text="core text")
+    delivery_outcomes = []
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda current_runtime, current_item, **fields: delivery_outcomes.append(
+            (current_runtime, current_item, fields)
+        ),
+    )
 
     await runtime_pipeline.handle_success_delivery(
         runtime,
@@ -3308,6 +3316,60 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat():
     assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"
+    assert delivery_outcomes == [
+        (
+            runtime,
+            item,
+            {
+                "delivered": True,
+                "assistant_text": "visible text",
+                "transport": "telegram",
+                "completion_path": "foreground",
+                "disposition": "transport_delivered",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_records_failed_transport_outcome(monkeypatch):
+    runtime = _runtime()
+    item = _item(prompt="user text")
+    outcomes = []
+
+    async def no_transport_receipt(**kwargs):
+        return 0.0, 0
+
+    runtime.send_long_message = no_transport_receipt
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda current_runtime, current_item, **fields: outcomes.append(fields),
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="backend output"),
+        visible_text="visible output",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert outcomes == [
+        {
+            "delivered": False,
+            "assistant_text": "visible output",
+            "transport": "telegram",
+            "completion_path": "foreground",
+            "disposition": "transport_returned_no_receipt",
+        }
+    ]
 
 
 @pytest.mark.asyncio

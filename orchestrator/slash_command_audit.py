@@ -4,6 +4,9 @@ import json
 import re
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +22,10 @@ _SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|token|password|passwd|secret|bearer)\s*[:=]\s*\S+"
 )
 _MAX_ARG_CHARS = 240
+_ACTIVE_SLASH_COMMAND_AUDIT_SESSION: ContextVar[Any | None] = ContextVar(
+    "hashi_active_slash_command_audit_session",
+    default=None,
+)
 
 
 def default_audit_path(workspace_dir: Path) -> Path:
@@ -200,6 +207,32 @@ class SlashCommandAuditSession:
             blocked_reason=self.blocked_reason,
             side_effects=self.side_effects,
         )
+
+
+@contextmanager
+def bind_slash_command_audit_session(
+    session: SlashCommandAuditSession,
+) -> Iterator[SlashCommandAuditSession]:
+    """Bind one command audit session to the current async execution context.
+
+    Telegram processes multiple updates concurrently.  A runtime attribute is
+    therefore not safe for associating side effects with the command that
+    caused them: another update can overwrite it while the first command is
+    awaiting I/O.  ``ContextVar`` values follow the current asyncio task and
+    also work for local/API command dispatch.
+    """
+
+    token = _ACTIVE_SLASH_COMMAND_AUDIT_SESSION.set(session)
+    try:
+        yield session
+    finally:
+        _ACTIVE_SLASH_COMMAND_AUDIT_SESSION.reset(token)
+
+
+def active_slash_command_audit_session() -> SlashCommandAuditSession | None:
+    session = _ACTIVE_SLASH_COMMAND_AUDIT_SESSION.get()
+    return session if isinstance(session, SlashCommandAuditSession) else None
+
 
 def looks_like_slash_command(text: str) -> bool:
     raw = (text or "").strip()

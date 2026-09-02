@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
 import runpy
+import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,6 +107,148 @@ def _complete(
     )
     assert run and run["state"] == "completed"
     return accepted
+
+
+def test_assistant_delivery_receipts_are_route_scoped_and_success_only(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+
+    first = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-delivered",
+        key="delivery-1",
+        text="first prompt",
+        answer="last delivered in chat one",
+        source="text",
+    )
+    delivered = store.record_assistant_delivery(
+        first.request_id,
+        delivered=True,
+        surface="telegram",
+        channel_key="chat-1",
+        transport="telegram",
+        completion_path="foreground",
+        disposition="transport_delivered",
+    )
+    duplicate = store.record_assistant_delivery(
+        first.request_id,
+        delivered=True,
+        surface="telegram",
+        channel_key="chat-1",
+        transport="telegram",
+        completion_path="foreground",
+        disposition="transport_delivered",
+    )
+
+    failed = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-failed-delivery",
+        key="delivery-2",
+        text="second prompt",
+        answer="newer but not delivered",
+        source="text",
+    )
+    store.record_assistant_delivery(
+        failed.request_id,
+        delivered=False,
+        surface="telegram",
+        channel_key="chat-1",
+        transport="telegram",
+        completion_path="foreground",
+        disposition="transport_returned_no_receipt",
+    )
+
+    other_route = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-other-chat",
+        key="delivery-3",
+        text="third prompt",
+        answer="delivered in chat two",
+        source="text",
+    )
+    store.record_assistant_delivery(
+        other_route.request_id,
+        delivered=True,
+        assistant_text="transport presentation override",
+        surface="telegram",
+        channel_key="chat-2",
+        transport="telegram",
+        completion_path="background",
+        disposition="transport_delivered",
+    )
+
+    assert delivered is not None
+    assert duplicate is not None
+    assert duplicate["event_id"] == delivered["event_id"]
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="telegram", channel_key="chat-1"
+    ) == "last delivered in chat one"
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="telegram", channel_key="chat-2"
+    ) == "transport presentation override"
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="workbench", channel_key="chat-1"
+    ) is None
+    assert store.has_assistant_delivery_outcome(
+        session["session_id"], surface="telegram", channel_key="chat-1"
+    ) is True
+    assert store.has_assistant_delivery_outcome(
+        session["session_id"], surface="telegram", channel_key="unseen-chat"
+    ) is False
+
+
+def test_say_delivery_lookup_targets_telegram_when_command_arrives_via_workbench(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    accepted = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-api-controlled-say",
+        key="api-controlled-say",
+        text="prompt",
+        answer="telegram-delivered answer",
+        source="text",
+    )
+    store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=True,
+        surface="telegram",
+        channel_key="99",
+        transport="telegram",
+        completion_path="foreground",
+    )
+    runtime = SimpleNamespace(
+        name="lily",
+        workspace_dir=tmp_path,
+        session_store=store,
+        global_config=SimpleNamespace(authorized_id=7, instance_id="HASHI1"),
+    )
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=99),
+        callback_query=None,
+        _hashi_session_surface="workbench",
+        _hashi_session_channel_key="default",
+        _hashi_session_owner_id=None,
+        _hashi_session_id=None,
+    )
+
+    text, tracking_started = runtime_session.telegram_delivery_state_for_update(
+        runtime, update
+    )
+
+    assert text == "telegram-delivered answer"
+    assert tracking_started is True
 
 
 def test_default_session_is_permanent_and_channel_bindings_are_isolated(tmp_path):

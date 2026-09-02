@@ -3861,6 +3861,15 @@ async def handle_success_delivery(
             else ""
         ),
     )
+    runtime_session.record_assistant_delivery(
+        runtime,
+        item,
+        delivered=final_delivered,
+        assistant_text=response_text,
+        transport="telegram",
+        completion_path="foreground",
+        disposition=receipt_disposition,
+    )
     runtime_cross_session.record_turn_result(
         runtime,
         item,

@@ -71,6 +71,8 @@ from orchestrator import runtime_wrapper
 from orchestrator import runtime_workzone
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
+    active_slash_command_audit_session,
+    bind_slash_command_audit_session,
     default_audit_path,
     parse_inline_callback_command,
     resolve_handler_kind,
@@ -610,7 +612,8 @@ class FlexibleAgentRuntime:
                     ):
                         session.block("channel_denied")
                         return
-                    await handler(update, context)
+                    with bind_slash_command_audit_session(session):
+                        await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -654,13 +657,12 @@ class FlexibleAgentRuntime:
                             ui_language.tr("command.disabled", command=cmd),
                         )
                         return
-                    self._active_slash_audit_session = session
-                    await handler(update, context)
+                    with bind_slash_command_audit_session(session):
+                        await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
             finally:
-                self._active_slash_audit_session = None
                 session.finish()
         return _wrapped
 
@@ -1793,7 +1795,21 @@ class FlexibleAgentRuntime:
     def _job_counts(self) -> tuple[int, int]:
         return runtime_status.job_counts(self)
 
-    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str, force: bool = False) -> bool:
+    async def _send_voice_reply(
+        self,
+        chat_id: int,
+        text: str,
+        request_id: str,
+        force: bool = False,
+    ) -> bool | None:
+        """Send a voice reply.
+
+        ``True`` means Telegram acknowledged delivery, ``False`` means the
+        synthesis/send failed, and ``None`` means Telegram timed out after the
+        request may already have arrived.  The ambiguous case must not be
+        retried because that can duplicate the voice message.
+        """
+
         # Guard: skip if Telegram not connected
         if not self.telegram_connected:
             return False
@@ -1821,7 +1837,7 @@ class FlexibleAgentRuntime:
                     self.telegram_logger.warning(
                         f"Voice reply timed out for {request_id} (not retrying to avoid duplicate): {e}"
                     )
-                    raise
+                    return None
                 except Exception as e:
                     last_error = e
                     if attempt >= max_attempts:
@@ -4197,18 +4213,22 @@ class FlexibleAgentRuntime:
         """One-shot TTS: synthesize the last assistant message and send as voice."""
         if not self._is_authorized_user(update.effective_user.id):
             return
-        text = self._load_last_visible_assistant_text()
+        text = self._load_last_visible_assistant_text(update)
         if not text:
             await self._reply_text(update, ui_language.tr("voice.no_recent"))
             return
         chat_id = update.effective_chat.id
         request_id = f"say-{int(time.time())}"
         ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
-        if ok:
-            session = getattr(self, "_active_slash_audit_session", None)
-            if session is not None and hasattr(session, "add_side_effect"):
+        session = active_slash_command_audit_session()
+        if ok is True:
+            if session is not None:
                 session.add_side_effect("voice_reply_sent")
-        if not ok:
+        elif ok is None:
+            if session is not None:
+                session.add_side_effect("voice_reply_delivery_unknown")
+            await self._reply_text(update, ui_language.tr("voice.delivery_unknown"))
+        else:
             await self._reply_text(update, ui_language.tr("voice.synthesis_failed"))
 
     # ── /loop — recurring task management ──────────────────────────
@@ -9701,15 +9721,82 @@ class FlexibleAgentRuntime:
             )
         return entry.get("role") == "assistant" and bool((entry.get("text") or "").strip())
 
-    def _load_last_visible_assistant_text(self) -> str | None:
+    @staticmethod
+    def _is_legacy_interactive_reply_source(entry: dict) -> bool:
+        """Exclude known non-user delivery surfaces from legacy transcripts."""
+
+        source = str(entry.get("source") or "").strip().casefold()
+        if not source:
+            return True
+        if source in {
+            "api",
+            "cron",
+            "scheduler",
+            "heartbeat",
+            "proactive",
+            "background-job-event",
+            "background_job_event",
+            "startup",
+            "system",
+            "session_reset",
+        }:
+            return False
+        return not source.startswith(
+            (
+                "api-",
+                "api:",
+                "browser",
+                "workbench",
+                "session-api",
+                "scheduler:",
+                "cron:",
+                "heartbeat:",
+                "proactive:",
+                "bridge:",
+                "bridge-transfer:",
+                "bridge-fork:",
+                "hchat",
+                "background-",
+                "background_",
+            )
+        )
+
+    def _load_last_visible_assistant_text(
+        self, update: Update | None = None
+    ) -> str | None:
         """Return the latest visible assistant reply for /say.
 
-        Prefer the most recent ``role == "assistant_core"`` entry in
-        ``core_transcript.jsonl`` (the durable visible-reply record) and fall
-        back to the last real ``role == "assistant"`` entry in
-        ``transcript.jsonl``.  Missing, empty, or malformed files degrade
-        gracefully to ``None`` without raising.
+        The authoritative path is the newest response with a successful
+        transport receipt in the current Session and channel.  Before the
+        first post-upgrade delivery outcome exists, use a compatibility scan
+        of legacy transcripts while excluding scheduler, API, Bridge/HChat,
+        and background sources.  Once delivery tracking starts for the route,
+        failed or ambiguous sends never fall back to an unconfirmed record.
         """
+        session_store_available = getattr(self, "session_store", None) is not None
+        if update is not None and session_store_available:
+            try:
+                delivered_text, tracking_started = (
+                    runtime_session.telegram_delivery_state_for_update(self, update)
+                )
+                if delivered_text:
+                    return delivered_text
+                if tracking_started:
+                    return None
+            except Exception as exc:
+                # A live Session lookup failure must fail closed: falling back
+                # to a pre-transport transcript could speak an undelivered or
+                # cross-channel response.  Only runtimes with no Session store
+                # at all use the compatibility path below.
+                logger = getattr(self, "error_logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "Could not resolve /say delivery history safely: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                return None
+
         try:
             core_path = getattr(self, "core_transcript_log_path", None)
             if core_path is not None and core_path.exists():
@@ -9723,7 +9810,10 @@ class FlexibleAgentRuntime:
                             entry = json.loads(line)
                         except Exception:
                             continue
-                        if self._is_visible_assistant_entry(entry, core=True):
+                        if (
+                            self._is_visible_assistant_entry(entry, core=True)
+                            and self._is_legacy_interactive_reply_source(entry)
+                        ):
                             last_core = entry
                 if last_core is not None:
                     text = last_core.get("visible_text") or last_core.get("text") or ""
@@ -9745,7 +9835,10 @@ class FlexibleAgentRuntime:
                             entry = json.loads(line)
                         except Exception:
                             continue
-                        if self._is_visible_assistant_entry(entry, core=False):
+                        if (
+                            self._is_visible_assistant_entry(entry, core=False)
+                            and self._is_legacy_interactive_reply_source(entry)
+                        ):
                             last_text = entry.get("text") or ""
                 if last_text and last_text.strip():
                     return last_text
@@ -10486,6 +10579,15 @@ class FlexibleAgentRuntime:
                     completion_path="background",
                     error_type=receipt_error_type,
                 )
+            runtime_session.record_assistant_delivery(
+                self,
+                item,
+                delivered=receipt_delivered,
+                assistant_text=receipt_text,
+                transport="telegram",
+                completion_path="background",
+                disposition=receipt_disposition,
+            )
             runtime_cross_session.record_turn_result(
                 self, item, assistant_text=receipt_text, response=receipt_response,
                 error=receipt_error, delivered=receipt_delivered, completion_path="background",

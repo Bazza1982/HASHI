@@ -2097,6 +2097,7 @@
     "voice.rate_integer": "Voice rate must be an integer.",
     "voice.no_recent": "No recent message is available to read.",
     "voice.synthesis_failed": "Voice synthesis failed. Check /voice status for provider settings.",
+    "voice.delivery_unknown": "Telegram did not confirm the voice delivery. It may already have arrived, so HASHI did not retry and risk sending a duplicate.",
     "skill.system_unconfigured": "The Skill system is not configured.",
     "skill.manager_unavailable": "Skill manager is not available.",
     "skill.usage.prompt": "Usage: /{skill_id} <prompt>",

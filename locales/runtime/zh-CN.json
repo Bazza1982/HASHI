@@ -2097,6 +2097,7 @@
     "voice.rate_integer": "语速必须是整数。",
     "voice.no_recent": "没有可朗读的近期消息。",
     "voice.synthesis_failed": "语音合成失败。请使用 /voice status 检查服务提供方设置。",
+    "voice.delivery_unknown": "Telegram 未确认语音是否送达。消息可能已经到达；为避免重复发送，HASHI 没有重试。",
     "skill.system_unconfigured": "尚未配置技能系统。",
     "skill.manager_unavailable": "技能管理器当前不可用。",
     "skill.usage.prompt": "用法：/{skill_id} <提示词>",
