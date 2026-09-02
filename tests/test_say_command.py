@@ -67,7 +67,7 @@ async def test_cmd_say_forces_voice_even_when_voice_replies_are_off():
 
     runtime = SimpleNamespace(
         _is_authorized_user=lambda user_id: True,
-        _load_last_text_from_transcript=lambda role: "last assistant reply",
+        _load_last_visible_assistant_text=lambda: "last assistant reply",
         _send_voice_reply=send_voice,
         _reply_text=lambda update, text: replies.append(text),
     )

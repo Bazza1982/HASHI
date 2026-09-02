@@ -654,11 +654,13 @@ class FlexibleAgentRuntime:
                             ui_language.tr("command.disabled", command=cmd),
                         )
                         return
+                    self._active_slash_audit_session = session
                     await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
             finally:
+                self._active_slash_audit_session = None
                 session.finish()
         return _wrapped
 
@@ -4195,13 +4197,17 @@ class FlexibleAgentRuntime:
         """One-shot TTS: synthesize the last assistant message and send as voice."""
         if not self._is_authorized_user(update.effective_user.id):
             return
-        text = self._load_last_text_from_transcript("assistant")
+        text = self._load_last_visible_assistant_text()
         if not text:
             await self._reply_text(update, ui_language.tr("voice.no_recent"))
             return
         chat_id = update.effective_chat.id
         request_id = f"say-{int(time.time())}"
         ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
+        if ok:
+            session = getattr(self, "_active_slash_audit_session", None)
+            if session is not None and hasattr(session, "add_side_effect"):
+                session.add_side_effect("voice_reply_sent")
         if not ok:
             await self._reply_text(update, ui_language.tr("voice.synthesis_failed"))
 
@@ -9676,6 +9682,76 @@ class FlexibleAgentRuntime:
             return last_text
         except Exception:
             return None
+
+    @staticmethod
+    def _is_visible_assistant_entry(entry: dict, *, core: bool) -> bool:
+        """Return True for a real, speakable assistant reply entry.
+
+        Thinking traces are excluded regardless of file: ``role == "thinking"``,
+        ``source == "think"``, or 💭-prefixed text.
+        """
+        if entry.get("role") == "thinking" or entry.get("source") == "think":
+            return False
+        text = (entry.get("text") or entry.get("visible_text") or "")
+        if isinstance(text, str) and text.startswith("💭"):
+            return False
+        if core:
+            return entry.get("role") == "assistant_core" and bool(
+                (entry.get("visible_text") or entry.get("text") or "").strip()
+            )
+        return entry.get("role") == "assistant" and bool((entry.get("text") or "").strip())
+
+    def _load_last_visible_assistant_text(self) -> str | None:
+        """Return the latest visible assistant reply for /say.
+
+        Prefer the most recent ``role == "assistant_core"`` entry in
+        ``core_transcript.jsonl`` (the durable visible-reply record) and fall
+        back to the last real ``role == "assistant"`` entry in
+        ``transcript.jsonl``.  Missing, empty, or malformed files degrade
+        gracefully to ``None`` without raising.
+        """
+        try:
+            core_path = getattr(self, "core_transcript_log_path", None)
+            if core_path is not None and core_path.exists():
+                last_core = None
+                with core_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except Exception:
+                            continue
+                        if self._is_visible_assistant_entry(entry, core=True):
+                            last_core = entry
+                if last_core is not None:
+                    text = last_core.get("visible_text") or last_core.get("text") or ""
+                    if text.strip():
+                        return text
+        except Exception:
+            pass
+
+        try:
+            path = getattr(self, "transcript_log_path", None)
+            if path is not None and path.exists():
+                last_text = None
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except Exception:
+                            continue
+                        if self._is_visible_assistant_entry(entry, core=False):
+                            last_text = entry.get("text") or ""
+                if last_text and last_text.strip():
+                    return last_text
+        except Exception:
+            pass
+        return None
 
     async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
         return await runtime_wrapper.send_wrapper_polishing_placeholder(self, item)
