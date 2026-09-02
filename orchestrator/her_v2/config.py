@@ -191,6 +191,10 @@ class HERv2Config:
         }
     )
     user_idle_timeout_s: float = 1800.0
+    # Absolute deadline for one physical provider operation.  Unlike the
+    # meaningful-progress and transport-idle watchdogs, provider output (even
+    # a continuous thinking stream) never extends this wall-clock boundary.
+    provider_wall_clock_timeout_s: float = 1800.0
     audit_failure_terminal: TerminalState = TerminalState.ERROR
     meditation_enabled: bool = False
     direct_strategy_self_selection: bool = False
@@ -266,6 +270,10 @@ class HERv2Config:
                 )
         if self.user_idle_timeout_s <= 0:
             raise HERv2ConfigurationError("idle-progress timeout must be positive")
+        if self.provider_wall_clock_timeout_s <= 0:
+            raise HERv2ConfigurationError(
+                "provider wall-clock timeout must be positive"
+            )
         if self.audit_failure_terminal not in {
             TerminalState.ERROR,
             TerminalState.STOPPED,
@@ -611,6 +619,9 @@ class HERv2Config:
             voice_options=voice_options,
             review_limits=review_limits,
             user_idle_timeout_s=float(raw.get("user_idle_timeout_s", 1800.0)),
+            provider_wall_clock_timeout_s=float(
+                raw.get("provider_wall_clock_timeout_s", 1800.0)
+            ),
             audit_failure_terminal=_audit_failure_terminal(
                 raw.get("audit_failure_terminal", "ERROR")
             ),

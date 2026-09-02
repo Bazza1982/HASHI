@@ -18,6 +18,7 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 from orchestrator.bridge_memory import BridgeMemoryStore
 from orchestrator import runtime_workspace
 from orchestrator.canonical_audit import (
+    BufferedCanonicalAuditWriter,
     CanonicalAuditAccessError,
     CanonicalAuditConfigurationError,
     CanonicalAuditStore,
@@ -245,6 +246,65 @@ def test_canonical_audit_tail_lookup_does_not_scan_large_history(tmp_path):
 
     assert store._last_digest() == expected_digest
     assert observed_file.bytes_read <= 128 * 1024
+
+
+def test_canonical_audit_batch_preserves_chain_with_one_fsync(tmp_path, monkeypatch):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI1", agent_id="zhaojun")
+    fsync_calls = 0
+    original_fsync = __import__("os").fsync
+
+    def counting_fsync(fd):
+        nonlocal fsync_calls
+        fsync_calls += 1
+        return original_fsync(fd)
+
+    monkeypatch.setattr("orchestrator.canonical_audit.os.fsync", counting_fsync)
+    event_ids = store.record_batch(
+        {
+            "event_type": "provider_stream_event",
+            "payload": {"index": index},
+            "request_id": "req-batch",
+        }
+        for index in range(3)
+    )
+
+    assert len(event_ids) == 3
+    assert fsync_calls == 1
+    events = store.read_events(RAW_AUTH)
+    assert [event["payload"]["index"] for event in events] == [0, 1, 2]
+
+
+def test_buffered_audit_losslessly_coalesces_thinking_deltas(tmp_path):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI1", agent_id="zhaojun")
+    writer = BufferedCanonicalAuditWriter(store, coalesce_window_s=5.0)
+    try:
+        for raw_delta in ("alpha", "-", "omega"):
+            writer.record_thinking(
+                {
+                    "kind": "thinking",
+                    "raw_delta": raw_delta,
+                    "summary": raw_delta,
+                    "detail": "",
+                },
+                request_id="req-thinking",
+                provenance={
+                    "source": "her_v2:deepseek-api",
+                    "provider_provenance": "provider_native",
+                },
+            )
+        writer.flush()
+    finally:
+        writer.close()
+
+    events = store.read_events(RAW_AUTH)
+    assert [event["event_type"] for event in events] == [
+        "provider_stream_event",
+        "provider_reasoning",
+    ]
+    assert events[0]["payload"]["raw_delta"] == "alpha-omega"
+    assert events[1]["payload"]["raw_delta"] == "alpha-omega"
+    assert events[0]["payload"]["coalesced_delta_count"] == 3
+    assert events[1]["provenance"]["fabricated"] is False
 
 
 @pytest.mark.parametrize("damage", ["partial-record", "missing-newline"])

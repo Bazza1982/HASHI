@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import ssl
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -2205,6 +2206,7 @@ class HashiStageProvider(StageProvider):
         usage_observer: Callable[[PerCallUsageLineItem], None] | None = None,
         default_recovery_kind: str = "none",
         cognitive_control_enabled: bool = False,
+        provider_wall_clock_timeout_s: float = 1800.0,
     ) -> None:
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
@@ -2217,6 +2219,11 @@ class HashiStageProvider(StageProvider):
         self.usage_observer = usage_observer
         self.default_recovery_kind = str(default_recovery_kind or "none")
         self.cognitive_control_enabled = bool(cognitive_control_enabled)
+        self.provider_wall_clock_timeout_s = float(provider_wall_clock_timeout_s)
+        if self.provider_wall_clock_timeout_s <= 0:
+            raise ValueError("provider wall-clock timeout must be positive")
+        self._active_backend_lock = threading.RLock()
+        self._active_backends: dict[int, Any] = {}
         self._persona_invocation_serial = 0
         self._persona_audit_contexts: dict[str, tuple[str, str]] = {}
         self.logger = logging.getLogger("HASHI.HERv2.StageProvider")
@@ -2233,6 +2240,91 @@ class HashiStageProvider(StageProvider):
         # profile.engine / profile.model / stage are still known.
         self.usage_line_items: list[PerCallUsageLineItem] = []
         self._observed_provider_request_ids: set[str] = set()
+
+    def _track_active_backend(self, backend: Any) -> None:
+        with self._active_backend_lock:
+            self._active_backends[id(backend)] = backend
+
+    def _untrack_active_backend(self, backend: Any) -> None:
+        with self._active_backend_lock:
+            self._active_backends.pop(id(backend), None)
+
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
+        """Interrupt active provider subprocesses from the control thread.
+
+        API operations are cancelled by ``TurnControl`` on their owning loop;
+        CLI process groups can additionally be terminated here without waiting
+        for that potentially congested loop to run another coroutine.
+        """
+
+        with self._active_backend_lock:
+            active = tuple(self._active_backends.values())
+        interrupted = 0
+        for backend in active:
+            interrupt = getattr(backend, "interrupt_nowait", None)
+            if not callable(interrupt):
+                continue
+            try:
+                interrupted += int(bool(interrupt(reason)))
+            except Exception as exc:
+                self.logger.warning(
+                    "Out-of-band provider interrupt failed for %s: %s",
+                    type(backend).__name__,
+                    exc,
+                )
+        return interrupted
+
+    async def _await_provider_operation(
+        self,
+        operation,
+        *,
+        profile: ProviderProfile,
+        label: str,
+        activity_snapshot: Callable[[], Mapping[str, Any]],
+    ) -> BackendResponse:
+        """Apply one absolute deadline that stream activity cannot refresh."""
+
+        try:
+            async with asyncio.timeout(self.provider_wall_clock_timeout_s):
+                return await operation
+        except TimeoutError as exc:
+            snapshot = dict(activity_snapshot())
+            reasoning_seen = bool(snapshot.get("reasoning_event_count"))
+            text_seen = bool(snapshot.get("text_event_count"))
+            tool_seen = bool(snapshot.get("tool_started"))
+            if reasoning_seen and not text_seen and not tool_seen:
+                code = ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT
+                description = (
+                    "The provider emitted reasoning but did not finish before "
+                    "HASHI's absolute wall-clock deadline."
+                )
+            elif text_seen or tool_seen:
+                code = ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT
+                description = (
+                    "The provider began a usable response but did not finish before "
+                    "HASHI's absolute wall-clock deadline."
+                )
+            else:
+                code = ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT
+                description = (
+                    "The provider did not begin a response before HASHI's absolute "
+                    "wall-clock deadline."
+                )
+            raise StageInvocationError(
+                f"{label} exceeded the {self.provider_wall_clock_timeout_s:g}s "
+                "absolute provider wall-clock timeout",
+                retryable=True,
+                code=code,
+                human_description=description,
+                side_effects_possible=tool_seen,
+                details={
+                    "timeout_kind": "absolute_wall_clock",
+                    "provider_wall_clock_timeout_s": self.provider_wall_clock_timeout_s,
+                    "provider": profile.engine,
+                    "model": profile.model,
+                    "provider_activity": snapshot,
+                },
+            ) from exc
 
     async def resolve_stage_modalities(
         self, profile: ProviderProfile
@@ -2940,6 +3032,7 @@ class HashiStageProvider(StageProvider):
                 code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                 human_description="The configured provider backend could not be created.",
             ) from exc
+        self._track_active_backend(backend)
 
         # Provider reasoning remains provider-specific and never receives the
         # HER effort label.  Adapters may consume either the explicit option or
@@ -2975,6 +3068,7 @@ class HashiStageProvider(StageProvider):
 
         supports_tools, controls_tools = _backend_tool_control(backend)
         if request.allow_tools and not supports_tools:
+            self._untrack_active_backend(backend)
             await backend.shutdown()
             raise StageInvocationError(
                 f"provider engine {profile.engine!r} does not support requested tool use",
@@ -2985,6 +3079,7 @@ class HashiStageProvider(StageProvider):
                 ),
             )
         if supports_tools and not controls_tools:
+            self._untrack_active_backend(backend)
             await backend.shutdown()
             raise StageInvocationError(
                 f"provider engine {profile.engine!r} cannot prove HASHI tool isolation",
@@ -3016,6 +3111,7 @@ class HashiStageProvider(StageProvider):
                     and _registry_is_read_only(selected_registry, name)
                 )
             if not isinstance(delegated, list):
+                self._untrack_active_backend(backend)
                 await backend.shutdown()
                 raise StageInvocationError(
                     "sub-agent delegated_tools must be a list",
@@ -3061,6 +3157,7 @@ class HashiStageProvider(StageProvider):
             selected_registry = evidence_registry
             if request.checkpoint_coordinator is not None:
                 if request.stage is not Stage.EXECUTION:
+                    self._untrack_active_backend(backend)
                     await backend.shutdown()
                     raise StageInvocationError(
                         "compulsory Replan coordinator may be installed only for Execution",
@@ -3114,6 +3211,7 @@ class HashiStageProvider(StageProvider):
                 triage_capability is not None and triage_capability.supports("audio")
             )
             if triage_input_policy == "native" and not triage_hears_audio:
+                self._untrack_active_backend(backend)
                 await backend.shutdown()
                 raise StageInvocationError(
                     "voice Triage is configured native but its exact model cannot consume audio",
@@ -3149,6 +3247,7 @@ class HashiStageProvider(StageProvider):
                         }
                         for item in original_manifest
                     )
+                    self._untrack_active_backend(backend)
                     await backend.shutdown()
                     return StageResponse(
                         data={
@@ -3377,13 +3476,16 @@ class HashiStageProvider(StageProvider):
         reasoning_chunks: list[str] = []
         provider_tool_activity = False
         provider_replay_activity = False
+        provider_text_activity = False
         provider_request_inflight: tuple[str, str, str, bool] | None = None
 
         async def _capture(event: StreamEvent) -> None:
-            nonlocal provider_replay_activity, provider_tool_activity
+            nonlocal provider_replay_activity, provider_text_activity, provider_tool_activity
             content = str(event.raw_delta or event.summary or "")
             if content or event.tool_name:
                 provider_replay_activity = True
+            if event.kind == KIND_TEXT_DELTA and content:
+                provider_text_activity = True
             if event.kind in {KIND_TOOL_START, KIND_TOOL_END} or event.tool_name:
                 provider_tool_activity = True
             owner = str(event.delivery_class or "") or legacy_delivery_class(event.kind)
@@ -3782,10 +3884,20 @@ class HashiStageProvider(StageProvider):
                 "stage",
                 callable(getattr(backend, "set_provider_call_observer", None)),
             )
-            response = await backend.generate_response(
-                stage_prompt,
-                f"{request.turn_id}:{request.stage.value}:{request.attempt}",
-                **generation_kwargs,
+            response = await self._await_provider_operation(
+                backend.generate_response(
+                    stage_prompt,
+                    f"{request.turn_id}:{request.stage.value}:{request.attempt}",
+                    **generation_kwargs,
+                ),
+                profile=profile,
+                label=f"{profile.engine}/{profile.model} {request.stage.value}",
+                activity_snapshot=lambda: {
+                    "response_started": provider_replay_activity,
+                    "reasoning_event_count": len(reasoning_chunks),
+                    "text_event_count": int(provider_text_activity),
+                    "tool_started": provider_tool_activity,
+                },
             )
             provider_request_inflight = None
             response_metadata = (
@@ -3879,6 +3991,7 @@ class HashiStageProvider(StageProvider):
                                 "not be created."
                             ),
                         ) from exc
+                    self._track_active_backend(fallback_backend)
                     try:
                         fallback_backend.privacy_level = (
                             self.backend_manager.privacy_level
@@ -3939,15 +4052,33 @@ class HashiStageProvider(StageProvider):
                                 )
                             ),
                         )
-                        response = await fallback_backend.generate_response(
-                            f"[Local voice transcription]\n{transcript}",
-                            (
-                                f"{request.turn_id}:{request.stage.value}:"
-                                f"{request.attempt}:native-audio-fallback"
+                        fallback_profile = replace(
+                            profile,
+                            engine=fallback_provider,
+                            model=fallback_model,
+                        )
+                        response = await self._await_provider_operation(
+                            fallback_backend.generate_response(
+                                f"[Local voice transcription]\n{transcript}",
+                                (
+                                    f"{request.turn_id}:{request.stage.value}:"
+                                    f"{request.attempt}:native-audio-fallback"
+                                ),
+                                is_retry=True,
+                                silent=self.silent,
+                                on_stream_event=_capture,
                             ),
-                            is_retry=True,
-                            silent=self.silent,
-                            on_stream_event=_capture,
+                            profile=fallback_profile,
+                            label=(
+                                f"{fallback_provider}/{fallback_model} "
+                                "native-audio-fallback"
+                            ),
+                            activity_snapshot=lambda: {
+                                "response_started": provider_replay_activity,
+                                "reasoning_event_count": len(reasoning_chunks),
+                                "text_event_count": int(provider_text_activity),
+                                "tool_started": provider_tool_activity,
+                            },
                         )
                         provider_request_inflight = None
                         self._record_usage_line_item(
@@ -3961,6 +4092,7 @@ class HashiStageProvider(StageProvider):
                             recovery_kind="native_audio_fallback",
                         )
                     finally:
+                        self._untrack_active_backend(fallback_backend)
                         await fallback_backend.shutdown()
                     response_metadata = (
                         dict(response.stream_metadata)
@@ -4101,12 +4233,22 @@ class HashiStageProvider(StageProvider):
                     "media_fallback",
                     callable(getattr(backend, "set_provider_call_observer", None)),
                 )
-                response = await backend.generate_response(
-                    stage_prompt,
-                    f"{request.turn_id}:{request.stage.value}:{request.attempt}:media-fallback",
-                    is_retry=True,
-                    silent=self.silent,
-                    on_stream_event=_capture,
+                response = await self._await_provider_operation(
+                    backend.generate_response(
+                        stage_prompt,
+                        f"{request.turn_id}:{request.stage.value}:{request.attempt}:media-fallback",
+                        is_retry=True,
+                        silent=self.silent,
+                        on_stream_event=_capture,
+                    ),
+                    profile=profile,
+                    label=f"{profile.engine}/{profile.model} media-fallback",
+                    activity_snapshot=lambda: {
+                        "response_started": provider_replay_activity,
+                        "reasoning_event_count": len(reasoning_chunks),
+                        "text_event_count": int(provider_text_activity),
+                        "tool_started": provider_tool_activity,
+                    },
                 )
                 provider_request_inflight = None
                 self._record_usage_line_item(
@@ -4249,6 +4391,7 @@ class HashiStageProvider(StageProvider):
                 label=f"{profile.engine}/{profile.model} invocation failed",
             ) from exc
         finally:
+            self._untrack_active_backend(backend)
             await backend.shutdown()
 
     async def package_persona_commentary(
@@ -4467,6 +4610,7 @@ class HashiStageProvider(StageProvider):
             backend = self.backend_manager.create_ephemeral_backend(
                 profile.engine, target_model=profile.model
             )
+            self._track_active_backend(backend)
             backend_extra = dict(getattr(backend.config, "extra", None) or {})
             if profile.reasoning is not None:
                 backend_extra["provider_reasoning"] = profile.reasoning
@@ -4524,12 +4668,17 @@ class HashiStageProvider(StageProvider):
             effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):
                 effective_prompt = f"{system_prompt}\n\n{prompt}"
-            response = await backend.generate_response(
-                effective_prompt,
-                request_id,
-                is_retry=attempt > 1,
-                silent=True,
-                on_stream_event=_discard_stream,
+            response = await self._await_provider_operation(
+                backend.generate_response(
+                    effective_prompt,
+                    request_id,
+                    is_retry=attempt > 1,
+                    silent=True,
+                    on_stream_event=_discard_stream,
+                ),
+                profile=profile,
+                label=f"{profile.engine}/{profile.model} persona-{message_label}",
+                activity_snapshot=activity.snapshot,
             )
             if not response.is_success:
                 raise _backend_response_error(
@@ -4580,6 +4729,7 @@ class HashiStageProvider(StageProvider):
             ) from exc
         finally:
             if backend is not None:
+                self._untrack_active_backend(backend)
                 await backend.shutdown()
 
 

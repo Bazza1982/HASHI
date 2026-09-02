@@ -492,6 +492,80 @@ class BaseBackend(ABC):
                 return f"<tasklist failed: {exc}>"
         return f"pid={pid}"
 
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> bool:
+        """Synchronously terminate active CLI children from a control thread.
+
+        This deliberately performs no asyncio work.  It is the emergency half
+        of cancellation: the owning event loop still performs normal task
+        cancellation and ``shutdown()``, while a congested loop cannot prevent
+        HASHI from terminating an isolated provider process group immediately.
+        API-only backends have no local process and therefore return ``False``.
+        """
+
+        candidates: list[Any] = []
+        current = getattr(self, "current_proc", None)
+        if current is not None:
+            candidates.append(current)
+        external = getattr(self, "_external_tool_processes", None)
+        if external is not None:
+            try:
+                candidates.extend(tuple(external))
+            except (RuntimeError, TypeError):
+                pass
+
+        interrupted = False
+        seen: set[int] = set()
+        logger = getattr(self, "logger", None)
+        for proc in candidates:
+            pid = getattr(proc, "pid", None)
+            if (
+                not isinstance(pid, int)
+                or pid <= 0
+                or pid == os.getpid()
+                or pid in seen
+                or getattr(proc, "returncode", None) is not None
+            ):
+                continue
+            seen.add(pid)
+            try:
+                if os.name == "nt":
+                    completed = subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if completed.returncode not in {0, 128}:
+                        raise RuntimeError(
+                            self._preview_text(completed.stderr or completed.stdout)
+                        )
+                else:
+                    pgid = os.getpgid(pid)
+                    own_pgid = os.getpgrp()
+                    if pgid == pid and pgid != own_pgid:
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                interrupted = True
+                if logger:
+                    logger.warning(
+                        "Out-of-band provider interrupt pid=%s reason=%r",
+                        pid,
+                        reason,
+                    )
+            except ProcessLookupError:
+                continue
+            except Exception as exc:
+                if logger:
+                    logger.warning(
+                        "Out-of-band provider interrupt failed pid=%s "
+                        "reason=%r: %s",
+                        pid,
+                        reason,
+                        exc,
+                    )
+        return interrupted
+
     async def force_kill_process_tree(self, proc, logger=None, reason: str = "") -> bool:
         if not proc:
             return False

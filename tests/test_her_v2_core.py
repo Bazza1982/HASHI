@@ -581,6 +581,17 @@ def test_her_v2_rejects_removed_legacy_execution_limits(field):
         HERv2Config.from_mapping({"profiles": _profiles(), field: 1})
 
 
+def test_her_v2_accepts_distinct_provider_wall_clock_safety_timeout():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "provider_wall_clock_timeout_s": 912.5,
+        }
+    )
+
+    assert config.provider_wall_clock_timeout_s == 912.5
+
+
 @pytest.mark.parametrize(
     "field",
     [

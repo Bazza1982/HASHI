@@ -1934,6 +1934,32 @@ class _FakeManager:
         return backend
 
 
+class _ThinkingForeverBackend(_FakeBackend):
+    async def generate_response(
+        self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+    ):
+        del request_id, is_retry, silent
+        self.prompt = prompt
+        while True:
+            await on_stream_event(
+                StreamEvent(
+                    kind=KIND_THINKING,
+                    raw_delta="still thinking",
+                    summary="still thinking",
+                )
+            )
+            await asyncio.sleep(0.005)
+
+
+class _ThinkingForeverManager(_FakeManager):
+    def create_ephemeral_backend(self, engine, target_model=None):
+        assert engine == "openrouter-api"
+        assert target_model == "configured/model"
+        backend = _ThinkingForeverBackend(self.system_md)
+        self.backends.append(backend)
+        return backend
+
+
 class _CommentaryFakeBackend(_FakeBackend):
     async def generate_response(
         self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
@@ -2094,6 +2120,36 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
         allow_tools=allow_tools,
         allow_side_effects=allow_side_effects,
     )
+
+
+@pytest.mark.asyncio
+async def test_provider_wall_clock_timeout_cannot_be_extended_by_thinking_stream():
+    manager = _ThinkingForeverManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        provider_wall_clock_timeout_s=0.04,
+    )
+    profile = ProviderProfile(
+        "triage",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-high",
+    )
+
+    with pytest.raises(StageInvocationError) as captured:
+        await provider.invoke(
+            profile,
+            _stage_request(
+                Stage.TRIAGE,
+                allow_tools=False,
+                allow_side_effects=False,
+            ),
+        )
+
+    assert captured.value.code == ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT
+    assert captured.value.details["timeout_kind"] == "absolute_wall_clock"
+    assert captured.value.details["provider_activity"]["reasoning_event_count"] > 1
+    assert manager.backends[0].shutdown_called is True
 
 
 def _adapter_replan_outcome(*, completion_percent: int = 50) -> ReplanningOutcome:

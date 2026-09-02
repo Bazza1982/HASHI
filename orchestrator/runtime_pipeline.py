@@ -101,7 +101,9 @@ def _canonical_record(
     request_id: str = "",
     provenance: dict[str, Any] | None = None,
 ) -> None:
-    store = getattr(runtime, "canonical_audit", None)
+    store = getattr(runtime, "canonical_audit_buffer", None) or getattr(
+        runtime, "canonical_audit", None
+    )
     if store is None:
         return
     try:
@@ -2141,38 +2143,52 @@ async def setup_interactive_feedback(
     async def _canonical_stream_callback(event):
         terminal_console.record_stream_event(runtime.name, item.request_id, event)
         payload = dict(vars(event)) if hasattr(event, "__dict__") else {"repr": repr(event)}
-        _canonical_record(
-            runtime,
-            "provider_stream_event",
-            payload,
-            request_id=item.request_id,
-            provenance={
-                "source": str(getattr(event, "origin", "") or "active_backend"),
-                "provider_provenance": str(getattr(event, "provenance", "") or ""),
-            },
-        )
-        if str(getattr(event, "kind", "") or "") == "thinking":
+        provenance = {
+            "source": str(getattr(event, "origin", "") or "active_backend"),
+            "provider_provenance": str(getattr(event, "provenance", "") or ""),
+        }
+        is_thinking = str(getattr(event, "kind", "") or "") == "thinking"
+        thinking_writer = getattr(runtime, "canonical_audit_buffer", None)
+        if is_thinking and thinking_writer is not None:
+            try:
+                thinking_writer.record_thinking(
+                    payload,
+                    request_id=item.request_id,
+                    provenance=provenance,
+                )
+            except Exception as exc:
+                runtime.error_logger.error(
+                    "Canonical thinking audit enqueue failed for %s: %s",
+                    item.request_id,
+                    exc,
+                )
+        else:
+            _canonical_record(
+                runtime,
+                "provider_stream_event",
+                payload,
+                request_id=item.request_id,
+                provenance=provenance,
+            )
+        if is_thinking:
             seen = getattr(runtime, "_canonical_reasoning_seen", None)
             if not isinstance(seen, set):
                 seen = set()
                 runtime._canonical_reasoning_seen = seen
             seen.add(item.request_id)
-            _canonical_record(
-                runtime,
-                "provider_reasoning",
-                {
-                    "availability": "available",
-                    "raw_delta": str(getattr(event, "raw_delta", "") or ""),
-                    "summary": str(getattr(event, "summary", "") or ""),
-                    "detail": str(getattr(event, "detail", "") or ""),
-                },
-                request_id=item.request_id,
-                provenance={
-                    "source": str(getattr(event, "origin", "") or "active_backend"),
-                    "provider_provenance": str(getattr(event, "provenance", "") or ""),
-                    "fabricated": False,
-                },
-            )
+            if thinking_writer is None:
+                _canonical_record(
+                    runtime,
+                    "provider_reasoning",
+                    {
+                        "availability": "available",
+                        "raw_delta": str(getattr(event, "raw_delta", "") or ""),
+                        "summary": str(getattr(event, "summary", "") or ""),
+                        "detail": str(getattr(event, "detail", "") or ""),
+                    },
+                    request_id=item.request_id,
+                    provenance={**provenance, "fabricated": False},
+                )
         if presentation_callback is not None:
             result = presentation_callback(event)
             if inspect.isawaitable(result):

@@ -261,7 +261,15 @@ class FlexibleAgentRuntime:
         self._pending_auto_recall_context: str | None = None
         self._pending_auto_recall_session_id: str | None = None
 
-        self.app = ApplicationBuilder().token(self.token).get_updates_connection_pool_size(8).build()
+        # Telegram control updates must not queue behind a long-running handler.
+        # Agent work itself remains serialized by HASHI's request queue.
+        self.app = (
+            ApplicationBuilder()
+            .token(self.token)
+            .get_updates_connection_pool_size(8)
+            .concurrent_updates(16)
+            .build()
+        )
 
         # Workspace structure
         self.workspace_dir = config.workspace_dir
@@ -350,13 +358,20 @@ class FlexibleAgentRuntime:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.backend_state_dir.mkdir(parents=True, exist_ok=True)
-        from orchestrator.canonical_audit import CanonicalAuditStore
+        from orchestrator.canonical_audit import (
+            BufferedCanonicalAuditWriter,
+            CanonicalAuditStore,
+        )
 
         self.canonical_audit = CanonicalAuditStore(
             self.global_config.bridge_home,
             instance_id=self.global_config.instance_id,
             agent_id=self.config.name,
             config=getattr(self.global_config, "canonical_audit", None),
+        )
+        self.canonical_audit_buffer = BufferedCanonicalAuditWriter(
+            self.canonical_audit,
+            name=f"canonical-audit-{self.config.name}",
         )
         if self.transfer_state_path.exists():
             try:
@@ -385,6 +400,9 @@ class FlexibleAgentRuntime:
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
         self.backend_manager.runtime = self
+        from orchestrator.out_of_band_control import AgentControlLane
+
+        self.control_lane = AgentControlLane(self)
         self._sidecar_invoker, self._sidecar_context_getter = make_backend_sidecar_invoker(
             self.backend_manager,
             session_id_getter=lambda: self.session_id_dt,
@@ -1021,7 +1039,9 @@ class FlexibleAgentRuntime:
         return match.group(1) if match else None
 
     def _log_maintenance(self, item: QueuedRequest, stage: str, **fields):
-        canonical = getattr(self, "canonical_audit", None)
+        canonical = getattr(self, "canonical_audit_buffer", None) or getattr(
+            self, "canonical_audit", None
+        )
         if canonical is not None:
             try:
                 canonical.record(

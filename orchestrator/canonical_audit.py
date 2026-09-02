@@ -8,17 +8,20 @@ has no expiry path, and lives outside mutable Agent workspaces.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
 import os
+import queue
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final, Iterable
+from typing import Any, Final, Iterable, Mapping
 from uuid import uuid4
 
 
@@ -356,33 +359,76 @@ class CanonicalAuditStore:
         request_id: str = "",
         provenance: dict[str, Any] | None = None,
     ) -> str:
-        event_id = str(uuid4())
+        return self.record_batch(
+            (
+                {
+                    "event_type": event_type,
+                    "payload": payload,
+                    "request_id": request_id,
+                    "provenance": provenance,
+                },
+            )
+        )[0]
+
+    def record_batch(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
+        """Append multiple canonical events under one chain lock and fsync."""
+
+        pending = [dict(record) for record in records]
+        if not pending:
+            return []
+        event_ids: list[str] = []
         with self._lock:
             with self._chain_guard(exclusive=True):
-                event = {
-                    "schema_version": AUDIT_SCHEMA_VERSION,
-                    "event_id": event_id,
-                    "event_type": str(event_type),
-                    "recorded_at": datetime.now(timezone.utc).isoformat(),
-                    "instance_id": self.instance_id,
-                    "agent_id": self.agent_id,
-                    "request_id": str(request_id or ""),
-                    "previous_record_digest": self._last_digest(),
-                    "provenance": self._externalize(dict(provenance or {})),
-                    "payload": self._externalize(payload),
-                }
-                self._append_event_unlocked(event)
-        return event_id
+                previous_digest = self._last_digest()
+                wrappers: list[dict[str, Any]] = []
+                for record in pending:
+                    event_id = str(record.get("event_id") or uuid4())
+                    event = {
+                        "schema_version": AUDIT_SCHEMA_VERSION,
+                        "event_id": event_id,
+                        "event_type": str(record.get("event_type") or "unknown"),
+                        "recorded_at": str(
+                            record.get("recorded_at")
+                            or datetime.now(timezone.utc).isoformat()
+                        ),
+                        "instance_id": self.instance_id,
+                        "agent_id": self.agent_id,
+                        "request_id": str(record.get("request_id") or ""),
+                        "previous_record_digest": previous_digest,
+                        "provenance": self._externalize(
+                            dict(record.get("provenance") or {})
+                        ),
+                        "payload": self._externalize(record.get("payload")),
+                    }
+                    wrapper = self._encode_record(event)
+                    wrappers.append(wrapper)
+                    event_ids.append(event_id)
+                    previous_digest = str(wrapper["record_digest"])
+                self._append_wrappers_unlocked(wrappers)
+        return event_ids
 
     def _append_event_unlocked(self, event: dict[str, Any]) -> None:
-        wrapper = self._encode_record(event)
+        self._append_wrappers_unlocked((self._encode_record(event),))
+
+    def _append_wrappers_unlocked(
+        self, wrappers: Iterable[Mapping[str, Any]]
+    ) -> None:
+        encoded_lines = b"".join(
+            json.dumps(
+                dict(wrapper),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+            for wrapper in wrappers
+        )
+        if not encoded_lines:
+            return
         self.root.mkdir(parents=True, exist_ok=True)
         with self.events_path.open("ab") as handle:
             os.chmod(self.events_path, 0o600)
-            line = json.dumps(
-                wrapper, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            ).encode("utf-8") + b"\n"
-            handle.write(line)
+            handle.write(encoded_lines)
             handle.flush()
             os.fsync(handle.fileno())
 
@@ -541,3 +587,287 @@ class CanonicalAuditStore:
                 }
                 self._append_event_unlocked(wipe_event)
                 return len(removed)
+
+
+@dataclass
+class _BufferedAuditRecord:
+    record: dict[str, Any]
+    thinking: bool = False
+
+
+@dataclass
+class _BufferedAuditBarrier:
+    future: concurrent.futures.Future[None]
+
+
+@dataclass
+class _ThinkingAggregate:
+    request_id: str
+    provenance: dict[str, Any]
+    stream_payload: dict[str, Any]
+    raw_delta: str
+    summaries: list[str]
+    details: list[str]
+    delta_count: int
+    first_recorded_at: str
+    last_monotonic: float
+    character_count: int
+
+
+class BufferedCanonicalAuditWriter:
+    """Lossless asynchronous writer with bounded-frequency thinking records."""
+
+    def __init__(
+        self,
+        store: CanonicalAuditStore,
+        *,
+        coalesce_window_s: float = 0.25,
+        max_coalesced_deltas: int = 128,
+        max_coalesced_chars: int = 64 * 1024,
+        name: str = "canonical-audit",
+    ) -> None:
+        self.store = store
+        self.coalesce_window_s = max(0.01, float(coalesce_window_s))
+        self.max_coalesced_deltas = max(1, int(max_coalesced_deltas))
+        self.max_coalesced_chars = max(1024, int(max_coalesced_chars))
+        self._queue: queue.Queue[
+            _BufferedAuditRecord | _BufferedAuditBarrier | None
+        ] = queue.Queue()
+        self._closed = threading.Event()
+        self._error_lock = threading.Lock()
+        self._error: Exception | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"hashi-{name}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _raise_if_failed(self) -> None:
+        with self._error_lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError("canonical audit writer failed") from error
+        if self._closed.is_set():
+            raise RuntimeError("canonical audit writer is closed")
+
+    def record(
+        self,
+        event_type: str,
+        payload: Any,
+        *,
+        request_id: str = "",
+        provenance: dict[str, Any] | None = None,
+    ) -> str:
+        self._raise_if_failed()
+        event_id = str(uuid4())
+        self._queue.put(
+            _BufferedAuditRecord(
+                {
+                    "event_id": event_id,
+                    "event_type": str(event_type),
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "payload": payload,
+                    "request_id": str(request_id or ""),
+                    "provenance": dict(provenance or {}),
+                }
+            )
+        )
+        return event_id
+
+    def record_thinking(
+        self,
+        stream_payload: Mapping[str, Any],
+        *,
+        request_id: str,
+        provenance: dict[str, Any] | None = None,
+    ) -> str:
+        """Queue one exact delta; the worker merges adjacent deltas losslessly."""
+
+        self._raise_if_failed()
+        event_id = str(uuid4())
+        self._queue.put(
+            _BufferedAuditRecord(
+                {
+                    "event_id": event_id,
+                    "event_type": "provider_stream_event",
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "payload": dict(stream_payload),
+                    "request_id": str(request_id or ""),
+                    "provenance": dict(provenance or {}),
+                },
+                thinking=True,
+            )
+        )
+        return event_id
+
+    def flush(self, timeout_s: float = 5.0) -> None:
+        self._raise_if_failed()
+        future: concurrent.futures.Future[None] = concurrent.futures.Future()
+        self._queue.put(_BufferedAuditBarrier(future))
+        future.result(timeout=max(0.1, float(timeout_s)))
+        self._raise_if_failed()
+
+    def close(self, timeout_s: float = 5.0) -> None:
+        if self._closed.is_set():
+            return
+        self.flush(timeout_s=timeout_s)
+        self._closed.set()
+        self._queue.put(None)
+        self._thread.join(timeout=max(0.1, float(timeout_s)))
+        if self._thread.is_alive():
+            raise TimeoutError("canonical audit writer did not stop")
+        with self._error_lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError("canonical audit writer failed") from error
+
+    @staticmethod
+    def _merge_text(current: list[str], value: Any) -> None:
+        text = str(value or "")
+        if text:
+            current.append(text)
+
+    def _merge_thinking(
+        self,
+        pending: dict[tuple[str, str, str], _ThinkingAggregate],
+        item: _BufferedAuditRecord,
+    ) -> bool:
+        record = item.record
+        request_id = str(record.get("request_id") or "")
+        provenance = dict(record.get("provenance") or {})
+        key = (
+            request_id,
+            str(provenance.get("source") or ""),
+            str(provenance.get("provider_provenance") or ""),
+        )
+        payload = dict(record.get("payload") or {})
+        raw_delta = str(payload.get("raw_delta") or "")
+        now = time.monotonic()
+        aggregate = pending.get(key)
+        if aggregate is None:
+            aggregate = _ThinkingAggregate(
+                request_id=request_id,
+                provenance=provenance,
+                stream_payload=payload,
+                raw_delta=raw_delta,
+                summaries=[],
+                details=[],
+                delta_count=0,
+                first_recorded_at=str(record.get("recorded_at") or ""),
+                last_monotonic=now,
+                character_count=0,
+            )
+            pending[key] = aggregate
+        else:
+            for field, value in payload.items():
+                if field not in {"raw_delta", "summary", "detail"}:
+                    aggregate.stream_payload[field] = value
+            aggregate.raw_delta += raw_delta
+        self._merge_text(aggregate.summaries, payload.get("summary"))
+        self._merge_text(aggregate.details, payload.get("detail"))
+        aggregate.delta_count += 1
+        aggregate.last_monotonic = now
+        aggregate.character_count += len(raw_delta)
+        return (
+            aggregate.delta_count >= self.max_coalesced_deltas
+            or aggregate.character_count >= self.max_coalesced_chars
+        )
+
+    def _thinking_records(
+        self, pending: dict[tuple[str, str, str], _ThinkingAggregate]
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for aggregate in pending.values():
+            stream_payload = dict(aggregate.stream_payload)
+            stream_payload.update(
+                {
+                    "raw_delta": aggregate.raw_delta,
+                    "summary": "".join(aggregate.summaries),
+                    "detail": "".join(aggregate.details),
+                    "coalesced_delta_count": aggregate.delta_count,
+                    "audit_coalesce_window_s": self.coalesce_window_s,
+                }
+            )
+            records.extend(
+                (
+                    {
+                        "event_type": "provider_stream_event",
+                        "recorded_at": aggregate.first_recorded_at,
+                        "payload": stream_payload,
+                        "request_id": aggregate.request_id,
+                        "provenance": aggregate.provenance,
+                    },
+                    {
+                        "event_type": "provider_reasoning",
+                        "recorded_at": aggregate.first_recorded_at,
+                        "payload": {
+                            "availability": "available",
+                            "raw_delta": aggregate.raw_delta,
+                            "summary": "".join(aggregate.summaries),
+                            "detail": "".join(aggregate.details),
+                            "coalesced_delta_count": aggregate.delta_count,
+                            "audit_coalesce_window_s": self.coalesce_window_s,
+                        },
+                        "request_id": aggregate.request_id,
+                        "provenance": {
+                            **aggregate.provenance,
+                            "fabricated": False,
+                        },
+                    },
+                )
+            )
+        return records
+
+    def _write(self, records: list[dict[str, Any]]) -> None:
+        if records:
+            self.store.record_batch(records)
+
+    def _run(self) -> None:
+        pending: dict[tuple[str, str, str], _ThinkingAggregate] = {}
+        last_flush = time.monotonic()
+        while True:
+            timeout = (
+                max(0.0, self.coalesce_window_s - (time.monotonic() - last_flush))
+                if pending
+                else None
+            )
+            try:
+                item = self._queue.get(timeout=timeout)
+            except queue.Empty:
+                item = "flush"
+            try:
+                if item is None:
+                    self._write(self._thinking_records(pending))
+                    return
+                if item == "flush":
+                    self._write(self._thinking_records(pending))
+                    pending.clear()
+                    last_flush = time.monotonic()
+                    continue
+                if isinstance(item, _BufferedAuditBarrier):
+                    self._write(self._thinking_records(pending))
+                    pending.clear()
+                    last_flush = time.monotonic()
+                    item.future.set_result(None)
+                    continue
+                if item.thinking:
+                    threshold_reached = self._merge_thinking(pending, item)
+                    if threshold_reached or (
+                        time.monotonic() - last_flush >= self.coalesce_window_s
+                    ):
+                        self._write(self._thinking_records(pending))
+                        pending.clear()
+                        last_flush = time.monotonic()
+                    continue
+                records = self._thinking_records(pending)
+                pending.clear()
+                records.append(item.record)
+                self._write(records)
+                last_flush = time.monotonic()
+            except Exception as exc:
+                with self._error_lock:
+                    self._error = exc
+                if isinstance(item, _BufferedAuditBarrier) and not item.future.done():
+                    item.future.set_exception(exc)
+                return

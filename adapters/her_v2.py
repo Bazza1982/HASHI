@@ -970,6 +970,11 @@ class HERv2Adapter(BaseBackend):
             cognitive_control_enabled=bool(
                 self._v2_config and self._v2_config.cognitive_control_enabled
             ),
+            provider_wall_clock_timeout_s=float(
+                self._v2_config.provider_wall_clock_timeout_s
+                if self._v2_config is not None
+                else 1800.0
+            ),
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:
@@ -2220,6 +2225,24 @@ class HERv2Adapter(BaseBackend):
             self._session_id,
             turn_id=turn_id,
         )
+
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
+        """Interrupt active HER turns without depending on their asyncio loop."""
+
+        try:
+            active = tuple(self._active_runtimes.values())
+        except RuntimeError:
+            active = tuple(
+                runtime
+                for key in tuple(self._active_runtimes)
+                if (runtime := self._active_runtimes.get(key)) is not None
+            )
+        interrupted = 0
+        for runtime in active:
+            interrupt = getattr(runtime, "interrupt_nowait", None)
+            if callable(interrupt):
+                interrupted += int(interrupt(reason) or 0)
+        return interrupted
 
     async def shutdown(self):
         runtime_context = self._runtime_context()

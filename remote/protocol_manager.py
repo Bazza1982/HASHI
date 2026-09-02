@@ -103,7 +103,7 @@ TERMINAL_INFLIGHT_STATES = {
 def build_default_capabilities(*, rescue_start_enabled: bool = False) -> list[str]:
     capabilities = list(DEFAULT_CAPABILITIES)
     if rescue_start_enabled:
-        capabilities.append("rescue_start")
+        capabilities.extend(("rescue_start", "rescue_restart", "rescue_reboot"))
     return capabilities
 
 

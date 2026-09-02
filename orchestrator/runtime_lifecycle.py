@@ -224,6 +224,16 @@ async def shutdown(runtime: Any) -> None:
         )
         and clean
     )
+    control_lane = getattr(runtime, "control_lane", None)
+    if control_lane is not None:
+        clean = (
+            await _run_shutdown_step(
+                runtime,
+                asyncio.to_thread(control_lane.close),
+                label="agent-control-lane",
+            )
+            and clean
+        )
 
     if runtime.startup_success:
         for label, action, timeout_s in (
@@ -255,6 +265,17 @@ async def shutdown(runtime: Any) -> None:
             )
         if clean:
             runtime.logger.info("Telegram app shut down cleanly.")
+
+    canonical_audit_buffer = getattr(runtime, "canonical_audit_buffer", None)
+    if canonical_audit_buffer is not None:
+        clean = (
+            await _run_shutdown_step(
+                runtime,
+                asyncio.to_thread(canonical_audit_buffer.close),
+                label="canonical-audit-buffer",
+            )
+            and clean
+        )
 
     runtime._mark_runtime_shutdown(clean=clean)
     if not clean:

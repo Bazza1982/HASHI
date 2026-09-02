@@ -81,18 +81,31 @@ unit_quote() {
     printf '"%s"' "$value"
 }
 
+unit_directive_value() {
+    # Path-valued systemd directives treat quote characters literally on some
+    # deployed versions.  They consume the complete value (including spaces),
+    # so leave it unquoted while escaping only systemd's '%' specifier marker.
+    local value="$1"
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        echo "Unit directive value contains a newline." >&2
+        return 64
+    fi
+    value="${value//%/%%}"
+    printf '%s' "$value"
+}
+
 write_service() {
     mkdir -p "$SYSTEMD_USER_DIR" "$LOG_DIR"
     local temp_path working_directory instance_environment exec_start log_target arg
     temp_path="$(mktemp "$SYSTEMD_USER_DIR/.${SERVICE_NAME}.XXXXXX")"
-    working_directory="$(unit_quote "$HASHI_ROOT")"
+    working_directory="$(unit_directive_value "$HASHI_ROOT")"
     instance_environment="$(unit_quote "HASHI_INSTANCE_ID=$INSTANCE_ID")"
     exec_start=""
     for arg in "$PYTHON_BIN" -m remote "${REMOTE_ARGS[@]}"; do
         [[ -z "$exec_start" ]] || exec_start+=" "
         exec_start+="$(unit_quote "$arg")"
     done
-    log_target="$(unit_quote "append:$LOG_PATH")"
+    log_target="$(unit_directive_value "append:$LOG_PATH")"
     cat > "$temp_path" <<EOF
 [Unit]
 Description=Hashi Remote side program ($INSTANCE_SLUG)

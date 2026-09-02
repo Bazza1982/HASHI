@@ -418,6 +418,29 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         control.stop(reason)
         return True
 
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
+        """Signal live turns and provider children from the control lane."""
+
+        try:
+            controls = tuple(self._controls.values())
+        except RuntimeError:
+            controls = tuple(
+                control
+                for key in tuple(self._controls)
+                if (control := self._controls.get(key)) is not None
+            )
+        interrupted = 0
+        for control in controls:
+            control.stop(reason)
+            interrupted += 1
+        provider_interrupt = getattr(self.provider, "interrupt_nowait", None)
+        if callable(provider_interrupt):
+            try:
+                interrupted += int(provider_interrupt(reason) or 0)
+            except Exception:
+                self.logger.exception("Out-of-band provider interruption failed")
+        return interrupted
+
     async def steer(
         self,
         old_turn_id: str,

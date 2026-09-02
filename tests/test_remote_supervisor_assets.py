@@ -81,7 +81,13 @@ def test_linux_remote_supervisor_units_are_isolated_per_instance(tmp_path):
     assert hashi1_unit != hashi2_unit
     assert hashi1_unit.exists()
     assert hashi2_unit.exists()
-    assert "hashi one" in hashi1_unit.read_text(encoding="utf-8")
-    assert "hashi two" in hashi2_unit.read_text(encoding="utf-8")
+    hashi1_text = hashi1_unit.read_text(encoding="utf-8")
+    hashi2_text = hashi2_unit.read_text(encoding="utf-8")
+    assert "hashi one" in hashi1_text
+    assert "hashi two" in hashi2_text
+    assert 'WorkingDirectory="' not in hashi1_text
+    assert 'StandardOutput="' not in hashi1_text
+    assert "WorkingDirectory=" in hashi1_text
+    assert "StandardOutput=append:" in hashi1_text
     assert "Instance HASHI1 (agents_json)" in hashi1_output
     assert "Instance HASHI2 (agents_json)" in hashi2_output
