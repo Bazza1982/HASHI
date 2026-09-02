@@ -770,3 +770,43 @@ def test_restart_reconciliation_terminalizes_queued_and_running_runs_once(tmp_pa
         assert terminal[0]["detail"]["prior_state"] == prior_state
 
     assert restarted.reconcile_incomplete_runs() == []
+
+
+def test_agent_restart_reconciliation_does_not_interrupt_other_agents(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    alpha_session = store.ensure_default_session(owner_id=owner, agent_id="alpha")
+    beta_session = store.ensure_default_session(owner_id=owner, agent_id="beta")
+    alpha = store.accept_run(
+        session_id=alpha_session["session_id"],
+        owner_id=owner,
+        agent_id="alpha",
+        request_id="req-alpha-restart",
+        text="alpha work",
+        source="test",
+        idempotency_key="alpha-restart",
+    )
+    beta = store.accept_run(
+        session_id=beta_session["session_id"],
+        owner_id=owner,
+        agent_id="beta",
+        request_id="req-beta-still-live",
+        text="beta work",
+        source="test",
+        idempotency_key="beta-still-live",
+    )
+    store.mark_request_running(alpha.request_id, worker_id="alpha-before-restart")
+    store.mark_request_running(beta.request_id, worker_id="beta-still-live")
+
+    reconciled = store.reconcile_incomplete_runs(agent_id="alpha")
+
+    assert [row["run_id"] for row in reconciled] == [alpha.run_id]
+    alpha_run = store.get_run(alpha.run_id, owner_id=owner)
+    assert alpha_run["state"] == "interrupted"
+    assert alpha_run["error_code"] == "runtime_restart_interrupted"
+    assert store.get_run(beta.run_id, owner_id=owner)["state"] == "running"
+    alpha_events = store.events(alpha_session["session_id"], owner_id=owner)
+    terminal = [event for event in alpha_events if event["kind"] == "run.interrupted"]
+    assert len(terminal) == 1
+    assert terminal[0]["detail"]["agent_id"] == "alpha"
+    assert terminal[0]["detail"]["recovery_scope"] == "agent"

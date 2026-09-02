@@ -167,6 +167,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agent-restart Session convergence** — Agent stop/start lifecycle boundaries
+  now terminalize only that Agent's orphaned queued/running Runs as
+  `interrupted`, including the first hot reload that adopts the fix. The
+  warm Backend API replacement no longer repeats the process-start instance
+  sweep and interrupt Runs owned by other live Agents. The Activity API
+  recovers the terminal durable projection after the replacement Runtime loses
+  its in-memory stream, so Session clients no longer wait forever on work whose
+  executor was destroyed.
 - **Workbench smoke-result correlation** — live Agent smoke checks now wait on
   the current request ID in the canonical core transcript instead of watching
   the legacy presentation transcript for an adjacent user/assistant pair. This

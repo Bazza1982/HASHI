@@ -26,6 +26,48 @@ class AgentLifecycleManager:
     def __init__(self, kernel):
         self.kernel = kernel
 
+    def _reconcile_interrupted_session_runs(
+        self,
+        runtime,
+        *,
+        lifecycle_reason: str,
+    ) -> list[dict]:
+        """Fence durable Runs whose executor disappears across Agent lifecycle."""
+
+        store = getattr(runtime, "session_store", None)
+        reconcile = getattr(store, "reconcile_incomplete_runs", None)
+        if not callable(reconcile):
+            return []
+        reconciled = reconcile(agent_id=runtime.name)
+        if not reconciled:
+            return []
+
+        activity_store = getattr(runtime, "request_activity", None)
+        complete_activity = getattr(activity_store, "complete", None)
+        if callable(complete_activity):
+            for run in reconciled:
+                try:
+                    complete_activity(
+                        run["request_id"],
+                        success=False,
+                        error=run.get("error_text")
+                        or "Agent restarted while the request was active",
+                    )
+                except Exception as exc:
+                    bridge_logger.warning(
+                        "%s: could not terminalize in-memory activity for %s: %s",
+                        runtime.name,
+                        run.get("request_id") or "<unknown>",
+                        exc,
+                    )
+        bridge_logger.warning(
+            "%s: reconciled %s interrupted Session Run(s) at %s",
+            runtime.name,
+            len(reconciled),
+            lifecycle_reason,
+        )
+        return reconciled
+
     def build_runtime(self, agent_cfg, global_cfg, secrets):
         # Local imports so hot restart picks up reloaded module code.
         from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime as _FlexRT
@@ -241,6 +283,21 @@ class AgentLifecycleManager:
                     bridge_logger.exception(message)
                     return False, message
 
+                try:
+                    self._reconcile_interrupted_session_runs(
+                        runtime,
+                        lifecycle_reason="agent-start",
+                    )
+                except Exception as e:
+                    message = (
+                        f"Failed to reconcile interrupted Session Runs for '{agent_name}': "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    main_logger.exception(message)
+                    bridge_logger.exception(message)
+                    await self.cleanup_runtime_start_failure(runtime)
+                    return False, message
+
                 ok, message = await self.start_runtime(runtime)
                 if not ok:
                     await self.cleanup_runtime_start_failure(runtime)
@@ -281,6 +338,27 @@ class AgentLifecycleManager:
                 main_logger.error(message)
                 bridge_logger.error("%s (reason=%s)", message, reason)
                 return False, message
+
+            try:
+                self._reconcile_interrupted_session_runs(
+                    runtime,
+                    lifecycle_reason=reason,
+                )
+            except Exception as exc:
+                # The executor is already stopped and must not remain registered
+                # as live.  A following start retries reconciliation before the
+                # replacement runtime can accept work.
+                main_logger.exception(
+                    "Agent '%s' stopped but Session Run reconciliation failed: %s",
+                    agent_name,
+                    exc,
+                )
+                bridge_logger.exception(
+                    "%s: Session Run reconciliation failed after stop (%s): %s",
+                    agent_name,
+                    reason,
+                    exc,
+                )
 
             self.kernel.runtimes[:] = [rt for rt in self.kernel.runtimes if rt.name != agent_name]
             main_logger.info("Agent '%s' stopped.", agent_name)

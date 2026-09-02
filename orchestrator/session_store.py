@@ -2608,7 +2608,11 @@ class SessionStore:
         result["scope"] = _json_object(result.pop("scope_json"))
         return result
 
-    def reconcile_incomplete_runs(self) -> list[dict[str, Any]]:
+    def reconcile_incomplete_runs(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Terminalize Runs whose in-memory executor was lost on restart.
 
         The current runtime has no durable queue or safe execution-stack replay.
@@ -2617,30 +2621,49 @@ class SessionStore:
         fences every pre-existing non-terminal Run as ``interrupted``, preserves
         its user Message and evidence, and appends one durable terminal Event.
         A later user continuation is a new child Run with a new idempotency key.
+
+        Process startup reconciles the whole instance.  Agent lifecycle restart
+        passes ``agent_id`` so one restarted executor cannot interrupt Runs that
+        still belong to another live Agent in the same HASHI process.
         """
 
         now = _utc_now()
+        target_agent_id = str(agent_id or "").strip() or None
         reconciled_ids: list[str] = []
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            agent_clause = " AND r.agent_id = ?" if target_agent_id else ""
+            params: tuple[str, ...] = (
+                (self.instance_id, target_agent_id)
+                if target_agent_id
+                else (self.instance_id,)
+            )
             rows = connection.execute(
-                """
+                f"""
                 SELECT r.* FROM runs AS r
                 JOIN sessions AS s ON s.session_id = r.session_id
                 WHERE s.instance_id = ? AND r.state IN ('queued', 'running')
+                {agent_clause}
                 ORDER BY r.created_at, r.run_id
                 """,
-                (self.instance_id,),
+                params,
             ).fetchall()
             for run in rows:
                 prior_state = str(run["state"])
                 run_id = str(run["run_id"])
                 session_id = str(run["session_id"])
-                reason = (
-                    "HASHI restarted before the accepted Run began"
-                    if prior_state == "queued"
-                    else "HASHI restarted while the Run was executing"
-                )
+                if target_agent_id:
+                    reason = (
+                        f"Agent '{target_agent_id}' restarted before the accepted Run began"
+                        if prior_state == "queued"
+                        else f"Agent '{target_agent_id}' restarted while the Run was executing"
+                    )
+                else:
+                    reason = (
+                        "HASHI restarted before the accepted Run began"
+                        if prior_state == "queued"
+                        else "HASHI restarted while the Run was executing"
+                    )
                 updated = connection.execute(
                     """
                     UPDATE runs
@@ -2673,8 +2696,10 @@ class SessionStore:
                     phase="recovery",
                     summary=reason,
                     detail={
+                        "agent_id": str(run["agent_id"]),
                         "error_code": "runtime_restart_interrupted",
                         "prior_state": prior_state,
+                        "recovery_scope": "agent" if target_agent_id else "instance",
                     },
                     outbox=True,
                 )

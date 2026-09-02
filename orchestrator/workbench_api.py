@@ -219,6 +219,7 @@ class WorkbenchApiServer:
         secrets: dict | None = None,
         orchestrator=None,
         connectors: list | None = None,
+        reconcile_session_runs: bool = True,
     ):
         self.config_path = config_path
         self.global_config = global_config
@@ -229,7 +230,11 @@ class WorkbenchApiServer:
         self._agent_config_lock = asyncio.Lock()
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
-        self.reconciled_session_runs = self.session_store.reconcile_incomplete_runs()
+        self.reconciled_session_runs = (
+            self.session_store.reconcile_incomplete_runs()
+            if reconcile_session_runs
+            else []
+        )
         self._audio_cleanup_task: asyncio.Task | None = None
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self.identity_service = self._build_identity_service()
