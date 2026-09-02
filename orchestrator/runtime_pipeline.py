@@ -10,7 +10,7 @@ import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from orchestrator import (
     ui_language,
 )
 from orchestrator.command_ui import card_title
+from orchestrator.canonical_audit import CanonicalAuditConfigurationError
 from orchestrator.flexible_backend_registry import canonical_backend_engine
 from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
@@ -44,6 +45,8 @@ EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
     "Please check that all required API keys (e.g. brave_api_key for web search) are configured in secrets.json."
 )
 INTERACTIVE_FEEDBACK_CLEANUP_TIMEOUT_SECONDS = 5.0
+CANONICAL_STREAM_BATCH_MAX_AGE_S = 0.2
+CANONICAL_STREAM_BATCH_MAX_CHARS = 8 * 1024
 
 SESSION_SCOPE_PERSISTENT = "persistent"
 SESSION_SCOPE_ISOLATED = "isolated_per_run"
@@ -120,6 +123,239 @@ def _canonical_record(
             event_type,
             exc,
         )
+        raise
+
+
+class _CanonicalStreamAuditBatch:
+    """Losslessly group high-frequency provider stream evidence commits."""
+
+    _HIGH_FREQUENCY_KINDS = frozenset(
+        {"thinking", "text_delta", "provider_activity"}
+    )
+
+    def __init__(self, runtime: Any, request_id: str):
+        self.runtime = runtime
+        self.request_id = str(request_id)
+        self.store = getattr(runtime, "canonical_audit_buffer", None) or getattr(
+            runtime, "canonical_audit", None
+        )
+        self._records: list[dict[str, Any]] = []
+        self._pending_chars = 0
+        self._started_monotonic: float | None = None
+        self._flush_handle: asyncio.TimerHandle | None = None
+        self._reasoning_chunks = 0
+        self._reasoning_chars = 0
+        self._reasoning_first_sequence: int | None = None
+        self._reasoning_last_sequence: int | None = None
+        self._reasoning_recorded_at = ""
+        self._reasoning_source = ""
+        self._reasoning_provider_provenance = ""
+        self._stream_sequence = 0
+        self._batch_sequence = 1
+        self._failure: Exception | None = None
+
+    def _require_healthy(self) -> None:
+        if self._failure is None:
+            return
+        raise CanonicalAuditConfigurationError(
+            f"canonical stream audit is unavailable for {self.request_id}: "
+            f"{self._failure}"
+        ) from self._failure
+
+    def _schedule_deadline_flush(self) -> None:
+        if self._flush_handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        def _flush_on_deadline() -> None:
+            self._flush_handle = None
+            try:
+                self.flush(reason="time_threshold")
+            except Exception:
+                # ``flush`` records the durable failure. The next stream event
+                # or provider/stage boundary raises it into request control.
+                return
+
+        self._flush_handle = loop.call_later(
+            CANONICAL_STREAM_BATCH_MAX_AGE_S,
+            _flush_on_deadline,
+        )
+
+    def capture(self, event: Any) -> None:
+        if self.store is None:
+            return
+        self._require_healthy()
+        now_monotonic = time.monotonic()
+        if self._started_monotonic is None:
+            self._started_monotonic = now_monotonic
+            self._schedule_deadline_flush()
+        self._stream_sequence += 1
+        stream_sequence = self._stream_sequence
+        captured_at = datetime.now(timezone.utc).isoformat()
+        kind = str(getattr(event, "kind", "") or "")
+        origin = str(getattr(event, "origin", "") or "active_backend")
+        provider_provenance = str(getattr(event, "provenance", "") or "")
+        payload = (
+            dict(vars(event))
+            if hasattr(event, "__dict__")
+            else {"repr": repr(event)}
+        )
+        payload["_canonical_capture"] = {
+            "captured_at": captured_at,
+            "stream_sequence": stream_sequence,
+        }
+        self._records.append(
+            {
+                "event_type": "provider_stream_event",
+                "payload": payload,
+                "request_id": self.request_id,
+                "recorded_at": captured_at,
+                "provenance": {
+                    "source": origin,
+                    "provider_provenance": provider_provenance,
+                },
+            }
+        )
+        raw_delta = str(getattr(event, "raw_delta", "") or "")
+        summary = str(getattr(event, "summary", "") or "")
+        detail = str(getattr(event, "detail", "") or "")
+        self._pending_chars += len(raw_delta or summary) + len(detail)
+
+        if kind == "thinking":
+            seen = getattr(self.runtime, "_canonical_reasoning_seen", None)
+            if not isinstance(seen, set):
+                seen = set()
+                self.runtime._canonical_reasoning_seen = seen
+            seen.add(self.request_id)
+            self._reasoning_chunks += 1
+            self._reasoning_chars += len(raw_delta)
+            if self._reasoning_first_sequence is None:
+                self._reasoning_first_sequence = stream_sequence
+                self._reasoning_source = origin
+                self._reasoning_provider_provenance = provider_provenance
+            self._reasoning_last_sequence = stream_sequence
+            self._reasoning_recorded_at = captured_at
+
+        age = now_monotonic - self._started_monotonic
+        if kind not in self._HIGH_FREQUENCY_KINDS:
+            self.flush(reason=f"event_boundary:{kind or 'unknown'}")
+        elif self._pending_chars >= CANONICAL_STREAM_BATCH_MAX_CHARS:
+            self.flush(reason="character_threshold")
+        elif age >= CANONICAL_STREAM_BATCH_MAX_AGE_S:
+            self.flush(reason="time_threshold")
+
+    def flush(self, *, reason: str) -> int:
+        self._require_healthy()
+        if self.store is None:
+            return 0
+        durable_boundary = str(reason).startswith(
+            (
+                "provider_request_end",
+                "capacity_recovery_request_end",
+                "detached_provider_request_end",
+                "her_stage_end",
+            )
+        )
+        if not self._records:
+            barrier = getattr(self.store, "flush", None)
+            if durable_boundary and callable(barrier):
+                barrier()
+            return 0
+        records = list(self._records)
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        batch_id = f"{self.request_id}:stream-batch:{self._batch_sequence}"
+        reasoning_chunks = self._reasoning_chunks
+        if reasoning_chunks:
+            # Raw deltas already live losslessly in the stream records. One
+            # semantic record references the batch instead of duplicating one
+            # reasoning record (and its payload) for every provider token.
+            records.append(
+                {
+                    "event_type": "provider_reasoning",
+                    "payload": {
+                        "availability": "available",
+                        "stream_batch_ref": {
+                            "audit_batch_id": batch_id,
+                            "request_id": self.request_id,
+                            "first_stream_sequence": self._reasoning_first_sequence,
+                            "last_stream_sequence": self._reasoning_last_sequence,
+                            "event_kind": "thinking",
+                        },
+                        "chunk_count": reasoning_chunks,
+                        "raw_delta_char_count": self._reasoning_chars,
+                    },
+                    "request_id": self.request_id,
+                    "recorded_at": self._reasoning_recorded_at,
+                    "provenance": {
+                        "source": self._reasoning_source,
+                        "provider_provenance": (
+                            self._reasoning_provider_provenance
+                        ),
+                        "fabricated": False,
+                        "payload_reference": "provider_stream_event_batch",
+                    },
+                }
+            )
+        for index, record in enumerate(records, start=1):
+            provenance = dict(record.get("provenance") or {})
+            provenance.update(
+                {
+                    "audit_batch_id": batch_id,
+                    "audit_batch_index": index,
+                    "audit_batch_size": len(records),
+                    "audit_batch_reason": str(reason),
+                    "reasoning_chunk_count": reasoning_chunks,
+                }
+            )
+            record["provenance"] = provenance
+        try:
+            recorder = getattr(self.store, "record_many", None)
+            if callable(recorder):
+                recorder(records)
+            else:
+                for record in records:
+                    self.store.record(
+                        record["event_type"],
+                        record.get("payload"),
+                        request_id=self.request_id,
+                        provenance=record.get("provenance"),
+                    )
+            barrier = getattr(self.store, "flush", None)
+            if durable_boundary and callable(barrier):
+                barrier()
+        except Exception as exc:
+            self._failure = exc
+            self.runtime.error_logger.error(
+                "Canonical stream audit batch failed for %s/%s: %s",
+                self.request_id,
+                batch_id,
+                exc,
+            )
+            raise
+        self._records = []
+        self._pending_chars = 0
+        self._started_monotonic = None
+        self._reasoning_chunks = 0
+        self._reasoning_chars = 0
+        self._reasoning_first_sequence = None
+        self._reasoning_last_sequence = None
+        self._reasoning_recorded_at = ""
+        self._reasoning_source = ""
+        self._reasoning_provider_provenance = ""
+        self._batch_sequence += 1
+        return len(records)
+
+
+def _flush_canonical_stream_callback(callback: Any, *, reason: str) -> int:
+    flush = getattr(callback, "flush_canonical_audit", None)
+    if not callable(flush):
+        return 0
+    return int(flush(reason=reason) or 0)
 
 
 @dataclass
@@ -1174,6 +1410,21 @@ async def run_backend_generation(
             raise
         finally:
             runtime.is_generating = False
+            if generation_task.done():
+                _flush_canonical_stream_callback(
+                    on_stream_event, reason="provider_request_end"
+                )
+            else:
+                _flush_canonical_stream_callback(
+                    on_stream_event, reason="provider_detached"
+                )
+
+                def _flush_detached_stream(_task: asyncio.Task) -> None:
+                    _flush_canonical_stream_callback(
+                        on_stream_event, reason="detached_provider_request_end"
+                    )
+
+                generation_task.add_done_callback(_flush_detached_stream)
         return BackendGeneration(
             response=response,
             detached=detached,
@@ -1190,6 +1441,9 @@ async def run_backend_generation(
         )
     finally:
         runtime.is_generating = False
+        _flush_canonical_stream_callback(
+            on_stream_event, reason="provider_request_end"
+        )
     return BackendGeneration(
         response=response,
         detached=False,
@@ -2139,56 +2393,11 @@ async def setup_interactive_feedback(
         stream_callback = _activity_callback
 
     presentation_callback = stream_callback
+    canonical_stream_batch = _CanonicalStreamAuditBatch(runtime, item.request_id)
 
     async def _canonical_stream_callback(event):
         terminal_console.record_stream_event(runtime.name, item.request_id, event)
-        payload = dict(vars(event)) if hasattr(event, "__dict__") else {"repr": repr(event)}
-        provenance = {
-            "source": str(getattr(event, "origin", "") or "active_backend"),
-            "provider_provenance": str(getattr(event, "provenance", "") or ""),
-        }
-        is_thinking = str(getattr(event, "kind", "") or "") == "thinking"
-        thinking_writer = getattr(runtime, "canonical_audit_buffer", None)
-        if is_thinking and thinking_writer is not None:
-            try:
-                thinking_writer.record_thinking(
-                    payload,
-                    request_id=item.request_id,
-                    provenance=provenance,
-                )
-            except Exception as exc:
-                runtime.error_logger.error(
-                    "Canonical thinking audit enqueue failed for %s: %s",
-                    item.request_id,
-                    exc,
-                )
-        else:
-            _canonical_record(
-                runtime,
-                "provider_stream_event",
-                payload,
-                request_id=item.request_id,
-                provenance=provenance,
-            )
-        if is_thinking:
-            seen = getattr(runtime, "_canonical_reasoning_seen", None)
-            if not isinstance(seen, set):
-                seen = set()
-                runtime._canonical_reasoning_seen = seen
-            seen.add(item.request_id)
-            if thinking_writer is None:
-                _canonical_record(
-                    runtime,
-                    "provider_reasoning",
-                    {
-                        "availability": "available",
-                        "raw_delta": str(getattr(event, "raw_delta", "") or ""),
-                        "summary": str(getattr(event, "summary", "") or ""),
-                        "detail": str(getattr(event, "detail", "") or ""),
-                    },
-                    request_id=item.request_id,
-                    provenance={**provenance, "fabricated": False},
-                )
+        canonical_stream_batch.capture(event)
         if presentation_callback is not None:
             result = presentation_callback(event)
             if inspect.isawaitable(result):
@@ -2218,6 +2427,11 @@ async def setup_interactive_feedback(
                     getattr(presentation_callback, attribute),
                 )
     setattr(_canonical_stream_callback, "presentation_callback", presentation_callback)
+    setattr(
+        _canonical_stream_callback,
+        "flush_canonical_audit",
+        canonical_stream_batch.flush,
+    )
 
     # Canonical evidence collection is independent of Telegram visibility and
     # the sanitised operational audit toggle.
@@ -2977,6 +3191,9 @@ async def recover_typed_context_capacity_rejection(
         )
     finally:
         runtime.is_generating = False
+        _flush_canonical_stream_callback(
+            on_stream_event, reason="capacity_recovery_request_end"
+        )
     state["final_prompt"] = retry_prompt
     state["prompt_tokens"] = retry_tokens
     request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)

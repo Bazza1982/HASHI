@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import logging
 from pathlib import Path
@@ -23,7 +24,7 @@ def _agent_config(tmp_path: Path):
 
 
 def _write_fake_grok(tmp_path: Path, *, fail_version: bool = False) -> Path:
-    script = tmp_path / "grok"
+    script = tmp_path / ("grok.py" if os.name == "nt" else "grok")
     version_block = (
         "if '--version' in sys.argv:\n"
         "    print('grok 0.1.0')\n"
@@ -95,6 +96,13 @@ print(json.dumps({{"type": "end", "sessionId": "sess-123", "stopReason": "EndTur
         encoding="utf-8",
     )
     script.chmod(0o755)
+    if os.name == "nt":
+        wrapper = tmp_path / "grok.cmd"
+        wrapper.write_text(
+            f'@echo off\n"{sys.executable}" "{script}" %*\n',
+            encoding="utf-8",
+        )
+        return wrapper
     return script
 
 

@@ -47,21 +47,33 @@ def _safe_component(value: str, fallback: str) -> str:
     return fallback if cleaned in {"", ".", ".."} else cleaned
 
 
+def _tighten_permissions(path: Path, mode: int) -> None:
+    """Apply POSIX privacy modes without pretending they are Windows ACLs."""
+
+    if os.name != "nt":
+        os.chmod(path, mode)
+
+
+def _tighten_fd_permissions(fd: int, mode: int) -> None:
+    if os.name != "nt" and hasattr(os, "fchmod"):
+        os.fchmod(fd, mode)
+
+
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    _tighten_permissions(path.parent, 0o700)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(fd, 0o600)
+        _tighten_fd_permissions(fd, 0o600)
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        os.chmod(path, 0o600)
+        _tighten_permissions(path, 0o600)
     except Exception:
         try:
             os.close(fd)
@@ -145,27 +157,86 @@ class CanonicalAuditStore:
             self.artifacts_root,
             self.artifact_dir,
         ):
-            os.chmod(private_directory, 0o700)
+            _tighten_permissions(private_directory, 0o700)
         if self.events_path.exists():
-            os.chmod(self.events_path, 0o600)
+            _tighten_permissions(self.events_path, 0o600)
+        self.lock_path.touch(exist_ok=True)
+        _tighten_permissions(self.lock_path, 0o600)
+        self._validate_writable_store()
+
+    @staticmethod
+    def _lock_file(handle, *, exclusive: bool) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            mode = msvcrt.LK_NBLCK if exclusive else msvcrt.LK_NBRLCK
+            deadline = time.monotonic() + 30.0
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), mode, 1)
+                    return
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise CanonicalAuditConfigurationError(
+                            "timed out acquiring canonical audit chain lock"
+                        )
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(
+                handle.fileno(),
+                fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
+            )
+
+    @staticmethod
+    def _unlock_file(handle) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @contextmanager
     def _chain_guard(self, *, exclusive: bool):
         """Serialise the digest chain across runtime and MCP subprocesses."""
 
-        import fcntl
-
         self.root.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+b") as handle:
-            os.chmod(self.lock_path, 0o600)
-            fcntl.flock(
-                handle.fileno(),
-                fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH,
-            )
+            self._lock_file(handle, exclusive=exclusive)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                self._unlock_file(handle)
+
+    def _validate_writable_store(self) -> None:
+        """Fail during runtime construction if durable audit cannot be used."""
+
+        try:
+            with self._lock:
+                with self._chain_guard(exclusive=True):
+                    # Validate an existing tail before accepting any new work.
+                    self._last_digest()
+                    with self.events_path.open("a+b") as handle:
+                        _tighten_permissions(self.events_path, 0o600)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+        except CanonicalAuditConfigurationError:
+            raise
+        except Exception as exc:
+            raise CanonicalAuditConfigurationError(
+                f"canonical audit store is not durably writable: {exc}"
+            ) from exc
 
     @property
     def encrypted(self) -> bool:
@@ -359,7 +430,7 @@ class CanonicalAuditStore:
         request_id: str = "",
         provenance: dict[str, Any] | None = None,
     ) -> str:
-        return self.record_batch(
+        return self.record_many(
             (
                 {
                     "event_type": event_type,
@@ -370,19 +441,23 @@ class CanonicalAuditStore:
             )
         )[0]
 
-    def record_batch(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
-        """Append multiple canonical events under one chain lock and fsync."""
+    def record_many(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
+        """Append multiple independent evidence records in one durable commit.
+
+        Each record keeps its own event id, timestamp, payload, provenance, and
+        digest-chain link.  Only the lock acquisition, tail lookup, file open,
+        flush, and fsync are grouped.
+        """
 
         pending = [dict(record) for record in records]
         if not pending:
             return []
-        event_ids: list[str] = []
+        event_ids = [str(record.get("event_id") or uuid4()) for record in pending]
         with self._lock:
             with self._chain_guard(exclusive=True):
                 previous_digest = self._last_digest()
                 wrappers: list[dict[str, Any]] = []
-                for record in pending:
-                    event_id = str(record.get("event_id") or uuid4())
+                for event_id, record in zip(event_ids, pending):
                     event = {
                         "schema_version": AUDIT_SCHEMA_VERSION,
                         "event_id": event_id,
@@ -402,10 +477,14 @@ class CanonicalAuditStore:
                     }
                     wrapper = self._encode_record(event)
                     wrappers.append(wrapper)
-                    event_ids.append(event_id)
                     previous_digest = str(wrapper["record_digest"])
                 self._append_wrappers_unlocked(wrappers)
         return event_ids
+
+    def record_batch(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
+        """Compatibility alias for callers created before ``record_many``."""
+
+        return self.record_many(records)
 
     def _append_event_unlocked(self, event: dict[str, Any]) -> None:
         self._append_wrappers_unlocked((self._encode_record(event),))
@@ -413,7 +492,8 @@ class CanonicalAuditStore:
     def _append_wrappers_unlocked(
         self, wrappers: Iterable[Mapping[str, Any]]
     ) -> None:
-        encoded_lines = b"".join(
+        self.root.mkdir(parents=True, exist_ok=True)
+        content = b"".join(
             json.dumps(
                 dict(wrapper),
                 ensure_ascii=False,
@@ -423,12 +503,11 @@ class CanonicalAuditStore:
             + b"\n"
             for wrapper in wrappers
         )
-        if not encoded_lines:
+        if not content:
             return
-        self.root.mkdir(parents=True, exist_ok=True)
         with self.events_path.open("ab") as handle:
-            os.chmod(self.events_path, 0o600)
-            handle.write(encoded_lines)
+            _tighten_permissions(self.events_path, 0o600)
+            handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
 
@@ -596,6 +675,11 @@ class _BufferedAuditRecord:
 
 
 @dataclass
+class _BufferedAuditBatch:
+    records: list[dict[str, Any]]
+
+
+@dataclass
 class _BufferedAuditBarrier:
     future: concurrent.futures.Future[None]
 
@@ -631,7 +715,7 @@ class BufferedCanonicalAuditWriter:
         self.max_coalesced_deltas = max(1, int(max_coalesced_deltas))
         self.max_coalesced_chars = max(1024, int(max_coalesced_chars))
         self._queue: queue.Queue[
-            _BufferedAuditRecord | _BufferedAuditBarrier | None
+            _BufferedAuditRecord | _BufferedAuditBatch | _BufferedAuditBarrier | None
         ] = queue.Queue()
         self._closed = threading.Event()
         self._error_lock = threading.Lock()
@@ -674,6 +758,38 @@ class BufferedCanonicalAuditWriter:
             )
         )
         return event_id
+
+    def record_many(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
+        """Queue one already-grouped durable batch without blocking the caller."""
+
+        self._raise_if_failed()
+        pending: list[dict[str, Any]] = []
+        event_ids: list[str] = []
+        for source in records:
+            record = dict(source)
+            event_id = str(record.get("event_id") or uuid4())
+            record.update(
+                {
+                    "event_id": event_id,
+                    "event_type": str(record.get("event_type") or "unknown"),
+                    "recorded_at": str(
+                        record.get("recorded_at")
+                        or datetime.now(timezone.utc).isoformat()
+                    ),
+                    "request_id": str(record.get("request_id") or ""),
+                    "provenance": dict(record.get("provenance") or {}),
+                }
+            )
+            pending.append(record)
+            event_ids.append(event_id)
+        if pending:
+            self._queue.put(_BufferedAuditBatch(pending))
+        return event_ids
+
+    def record_batch(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
+        """Compatibility alias for the original buffered-writer API."""
+
+        return self.record_many(records)
 
     def record_thinking(
         self,
@@ -850,6 +966,13 @@ class BufferedCanonicalAuditWriter:
                     pending.clear()
                     last_flush = time.monotonic()
                     item.future.set_result(None)
+                    continue
+                if isinstance(item, _BufferedAuditBatch):
+                    records = self._thinking_records(pending)
+                    pending.clear()
+                    records.extend(item.records)
+                    self._write(records)
+                    last_flush = time.monotonic()
                     continue
                 if item.thinking:
                     threshold_reached = self._merge_thinking(pending, item)

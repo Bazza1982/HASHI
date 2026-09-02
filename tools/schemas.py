@@ -7,19 +7,61 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "bash",
+            "name": "shell",
             "description": (
-                "Execute one foreground shell command and return stdout/stderr. "
-                "This does not manage long-running jobs or prove code correctness. "
-                "Exit code 0 is success; non-zero is failure. Use background_job_start "
-                "for managed jobs and verification_run for correctness checks."
+                "Execute one foreground command through an explicit HASHI shell contract. "
+                "Native Windows defaults to PowerShell; Linux, WSL, and macOS default "
+                "to Bash. Set shell='cmd' only for CMD/.bat/.cmd syntax. Output is UTF-8. "
+                "Use background_job_start for managed jobs and verification_run for "
+                "correctness checks."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The bash command to run.",
+                        "description": (
+                            "Command text in the syntax of the selected shell. Do not mix "
+                            "POSIX, PowerShell, and CMD syntax."
+                        ),
+                    },
+                    "shell": {
+                        "type": "string",
+                        "enum": ["bash", "powershell", "cmd"],
+                        "description": (
+                            "Optional explicit shell. Omit for the platform default reported "
+                            "in execution_environment."
+                        ),
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": (
+                            "Optional timeout in seconds for this command only. "
+                            "Omit it to run without a time limit."
+                        ),
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": (
+                "Deprecated compatibility alias that always invokes a real Bash "
+                "executable. New calls must use shell, whose native Windows default is "
+                "PowerShell. This alias never means CMD."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "A Bash command to run.",
                     },
                     "timeout": {
                         "type": "number",
@@ -360,8 +402,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "process_kill",
             "description": (
-                "Send a signal to a process by PID. "
-                "Default signal is SIGTERM (graceful). Use signal=9 for SIGKILL."
+                "Terminate a process by PID. Default signal is 15; use signal=9 "
+                "for a forced kill. Other POSIX signal numbers are unavailable on "
+                "native Windows."
             ),
             "parameters": {
                 "type": "object",
@@ -372,7 +415,10 @@ TOOL_SCHEMAS = [
                     },
                     "signal": {
                         "type": "integer",
-                        "description": "Signal number (default 15 = SIGTERM, 9 = SIGKILL).",
+                        "description": (
+                            "Signal number (default 15 = terminate, 9 = force kill). "
+                            "Other values are POSIX-only."
+                        ),
                     },
                 },
                 "required": ["pid"],
@@ -1603,7 +1649,7 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
             "name": "background_job_start",
             "description": (
                 "Start a long-running local OS command through HASHI BackgroundJobManager. "
-                "Use instead of bash for tasks that may outlive the chat turn. The manager "
+                "Use instead of shell for tasks that may outlive the chat turn. The manager "
                 "records stdout/stderr and sends completion/failure notifications when possible."
             ),
             "parameters": {
@@ -1611,7 +1657,18 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to run in the background. Do not provide with argv.",
+                        "description": (
+                            "Shell command to run in the background. Native Windows defaults "
+                            "to PowerShell; Linux/WSL/macOS default to Bash. Do not provide with argv."
+                        ),
+                    },
+                    "shell": {
+                        "type": "string",
+                        "enum": ["bash", "powershell", "cmd"],
+                        "description": (
+                            "Optional shell for command mode. Omit for the platform default; "
+                            "use cmd only for CMD/.bat/.cmd syntax. Invalid with argv."
+                        ),
                     },
                     "argv": {
                         "type": "array",

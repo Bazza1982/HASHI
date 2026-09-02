@@ -1324,7 +1324,7 @@ class OpenRouterAdapter(BaseBackend):
             raw_args = fn.get("arguments", "{}")
 
             # Determine stream event kind
-            if tool_name == "bash":
+            if tool_name in {"bash", "shell"}:
                 evt_kind = KIND_SHELL_EXEC
             elif tool_name == "file_read":
                 evt_kind = KIND_FILE_READ
@@ -1357,7 +1357,7 @@ class OpenRouterAdapter(BaseBackend):
             event_metadata: dict[str, Any] = {}
             event_path = ""
             if isinstance(arguments, Mapping):
-                if tool_name == "bash":
+                if tool_name in {"bash", "shell"}:
                     command = arguments.get("command") or arguments.get("cmd")
                     if command:
                         event_metadata["command"] = str(command)
@@ -1486,8 +1486,16 @@ class OpenRouterAdapter(BaseBackend):
 
     def _tool_policy_action_resource(self, tool_name: str, arguments: dict) -> tuple[str, str]:
         normalized = (tool_name or "").strip().lower()
-        if normalized == "bash":
-            return "shell.execute", "shell:bash"
+        if normalized in {"bash", "shell"}:
+            if normalized == "bash":
+                selected_shell = "bash"
+            else:
+                from orchestrator.process_execution import default_shell_name
+
+                selected_shell = str(
+                    arguments.get("shell") or default_shell_name()
+                ).strip().casefold()
+            return "shell.execute", f"shell:{selected_shell}"
         if normalized == "file_write":
             return "file.write", _file_resource(arguments)
         if normalized == "file_read":

@@ -1,0 +1,70 @@
+name: Windows runtime contract
+
+on:
+  push:
+    paths:
+      - "adapters/claude_cli.py"
+      - "adapters/codex_app_server.py"
+      - "adapters/codex_cli.py"
+      - "adapters/gemini_cli.py"
+      - "adapters/grok_cli.py"
+      - "adapters/her_v2_provider.py"
+      - "orchestrator/background_jobs.py"
+      - "orchestrator/canonical_audit.py"
+      - "orchestrator/config.py"
+      - "orchestrator/her_v2/**"
+      - "orchestrator/process_execution.py"
+      - "orchestrator/runtime_pipeline.py"
+      - "orchestrator/workzone.py"
+      - "tools/builtins.py"
+      - "tools/her_verification.py"
+      - "tools/registry.py"
+      - "tools/schemas.py"
+      - "tests/test_process_execution.py"
+      - ".github/workflows/windows-runtime-contract.yml"
+  pull_request:
+    paths:
+      - "adapters/claude_cli.py"
+      - "adapters/codex_app_server.py"
+      - "adapters/codex_cli.py"
+      - "adapters/gemini_cli.py"
+      - "adapters/grok_cli.py"
+      - "adapters/her_v2_provider.py"
+      - "orchestrator/background_jobs.py"
+      - "orchestrator/canonical_audit.py"
+      - "orchestrator/config.py"
+      - "orchestrator/her_v2/**"
+      - "orchestrator/process_execution.py"
+      - "orchestrator/runtime_pipeline.py"
+      - "orchestrator/workzone.py"
+      - "tools/builtins.py"
+      - "tools/her_verification.py"
+      - "tools/registry.py"
+      - "tools/schemas.py"
+      - "tests/test_process_execution.py"
+      - ".github/workflows/windows-runtime-contract.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install runtime and test dependencies
+        run: python -m pip install ".[test]"
+      - name: Verify native Windows audit, shell, path, argv, and process contracts
+        run: >-
+          python -m pytest -q
+          tests/test_process_execution.py
+          tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_record_many_uses_one_durable_commit_and_keeps_chain
+          tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_fails_fast_when_durable_store_is_unavailable
+          tests/test_runtime_pipeline.py::test_reasoning_stream_audit_batches_without_copying_raw_delta

@@ -223,6 +223,7 @@ async def send_long_message(
                 request_id or "<none>",
                 exc,
             )
+            raise
 
     record_delivery("requested")
     await runtime_delivery_order.wait_for_turn(runtime, request_id)

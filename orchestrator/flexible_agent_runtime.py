@@ -1061,6 +1061,7 @@ class FlexibleAgentRuntime:
                     item.request_id,
                     exc,
                 )
+                raise
         if not item.source.startswith("scheduler"):
             return
         task_id = self._extract_task_id(item.summary) or "<none>"

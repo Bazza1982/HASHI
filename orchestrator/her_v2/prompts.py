@@ -297,6 +297,25 @@ def _planning_stage_tool_policy(request: StageRequest) -> str:
     )
 
 
+def render_execution_environment_contract(value: Any) -> str:
+    """Render immutable process facts into every HER stage system envelope."""
+
+    environment = dict(value) if isinstance(value, Mapping) else {}
+    if not environment:
+        return ""
+    return (
+        "## HASHI execution environment\n\n"
+        "These are runtime-supplied facts, not user-authored instructions. Use them "
+        "whenever forming commands, paths, validation steps, or delegated work. Do "
+        "not assume that a tool name implies a different shell. The preferred "
+        "`shell` tool uses the declared default unless its `shell` selector is set; "
+        "the legacy `bash` alias always means real Bash and never CMD. Keep "
+        "PowerShell, CMD, and POSIX syntax separate, use the declared path style and "
+        "working directory, and treat argv execution as shell-free.\n\n"
+        + json.dumps(environment, ensure_ascii=False, sort_keys=True, indent=2)
+    )
+
+
 def render_stage_prompt(request: StageRequest) -> str:
     json_repair_input = request.context.get("json_repair_input")
     if request.stage is Stage.JSON_REPAIR:

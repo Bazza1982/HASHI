@@ -74,6 +74,7 @@ from orchestrator.her_v2.presentation import (
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.prompts import (
     render_direct_system_prompt,
+    render_execution_environment_contract,
     render_execution_system_prompt,
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
@@ -780,6 +781,8 @@ class _DelegatedToolRegistry:
     ):
         self._base = base
         requested = {str(item) for item in delegated_tools if str(item).strip()}
+        if "bash" in requested or "shell" in requested:
+            requested.update({"bash", "shell"})
         self._allowed = {
             name for name in requested if bool(getattr(base, "is_allowed")(name))
         }
@@ -1548,6 +1551,15 @@ class _CognitiveControlToolRegistry:
             )
         )
 
+    def _active_tool_allowlist(self) -> frozenset[str] | None:
+        allowed = self.controller.active_tool_allowlist
+        if allowed is None:
+            return None
+        normalized = set(allowed)
+        if "bash" in normalized or "shell" in normalized:
+            normalized.update({"bash", "shell"})
+        return frozenset(normalized)
+
     @staticmethod
     def _task_delta_schema() -> dict[str, Any]:
         return {
@@ -1589,7 +1601,7 @@ class _CognitiveControlToolRegistry:
         if self.controller.final_response_required:
             return []
         definitions = self._base_definitions(tiers)
-        allowed = self.controller.active_tool_allowlist
+        allowed = self._active_tool_allowlist()
         selected = (
             definitions
             if allowed is None
@@ -1606,7 +1618,7 @@ class _CognitiveControlToolRegistry:
             return (COGNITIVE_DECISION_TOOL,)
         if self.controller.final_response_required:
             return ()
-        allowed = self.controller.active_tool_allowlist
+        allowed = self._active_tool_allowlist()
         names = self._all_base_tool_names()
         return (
             names
@@ -1620,7 +1632,7 @@ class _CognitiveControlToolRegistry:
             return name == COGNITIVE_DECISION_TOOL
         if self.controller.final_response_required:
             return False
-        allowed = self.controller.active_tool_allowlist
+        allowed = self._active_tool_allowlist()
         if allowed is not None and name not in allowed:
             return False
         checker = getattr(self._base, "is_allowed", None)
@@ -3837,6 +3849,45 @@ class HashiStageProvider(StageProvider):
                         stage_prompt = request.goal
                     elif not installed:
                         stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
+            environment_contract = render_execution_environment_contract(
+                request.context.get("execution_environment")
+            )
+            if environment_contract:
+                current_system = str(
+                    getattr(backend, "sys_prompt", "") or ""
+                ).strip()
+                if current_system:
+                    combined_system = f"{current_system}\n\n{environment_contract}"
+                    if _install_system_prompt(backend, combined_system):
+                        system_prompt = combined_system
+                    elif request.allow_tools:
+                        raise StageInvocationError(
+                            f"{request.stage.value} backend cannot install the execution environment contract",
+                            retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                f"The configured {request.stage.value} provider cannot "
+                                "isolate HASHI's required execution environment facts."
+                            ),
+                        )
+                    else:
+                        stage_prompt = f"{environment_contract}\n\n{stage_prompt}"
+                else:
+                    if _install_system_prompt(backend, environment_contract):
+                        system_prompt = environment_contract
+                    elif request.allow_tools:
+                        raise StageInvocationError(
+                            f"{request.stage.value} backend cannot install the execution environment contract",
+                            retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                f"The configured {request.stage.value} provider cannot "
+                                "isolate HASHI's required execution environment facts."
+                            ),
+                        )
+                    else:
+                        stage_prompt = f"{environment_contract}\n\n{stage_prompt}"
+
             if self.cognitive_control_enabled and lifecycle_task_state is not None:
                 contracts = []
                 if cognitive_registry is not None:
@@ -4392,7 +4443,16 @@ class HashiStageProvider(StageProvider):
             ) from exc
         finally:
             self._untrack_active_backend(backend)
-            await backend.shutdown()
+            try:
+                await backend.shutdown()
+            finally:
+                flush_audit = getattr(
+                    self.on_stream_event,
+                    "flush_canonical_audit",
+                    None,
+                )
+                if callable(flush_audit):
+                    flush_audit(reason=f"her_stage_end:{request.stage.value}")
 
     async def package_persona_commentary(
         self,

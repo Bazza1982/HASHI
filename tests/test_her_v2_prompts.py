@@ -15,6 +15,7 @@ from orchestrator.her_v2.prompt_catalog import PromptAssetError
 from orchestrator.her_v2.prompts import (
     json_repair_schema_for_stage,
     render_direct_system_prompt,
+    render_execution_environment_contract,
     render_execution_system_prompt,
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
@@ -37,6 +38,28 @@ def _request(stage: Stage, **context: object) -> StageRequest:
         effort=Effort.MEDIUM,
         context=context,
     )
+
+
+def test_execution_environment_contract_is_explicit_and_platform_honest() -> None:
+    rendered = render_execution_environment_contract(
+        {
+            "runtime_platform": "windows_native",
+            "working_directory": r"C:\Users\tester\project",
+            "path_style": "windows",
+            "shell_tool": {
+                "name": "shell",
+                "legacy_alias": "bash",
+                "default_shell": "powershell",
+            },
+            "argv_execution": {"implicit_shell": False},
+        }
+    )
+
+    assert "runtime-supplied facts" in rendered
+    assert '"runtime_platform": "windows_native"' in rendered
+    assert '"default_shell": "powershell"' in rendered
+    assert "legacy `bash` alias always means real Bash and never CMD" in rendered
+    assert "PowerShell, CMD, and POSIX syntax separate" in rendered
 
 
 def test_external_prompt_inventory_is_complete_and_cwd_independent(

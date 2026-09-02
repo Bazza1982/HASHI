@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import types
@@ -23,6 +24,7 @@ from adapters.stream_events import (
     KIND_PROGRESS,
     KIND_REVIEW,
     KIND_TEXT_DELTA,
+    KIND_THINKING,
     StreamEvent,
 )
 from orchestrator import (
@@ -34,7 +36,10 @@ from orchestrator import (
     ui_language,
 )
 from orchestrator import telegram_delivery_failover as failover
-from orchestrator.canonical_audit import CanonicalAuditStore
+from orchestrator.canonical_audit import (
+    CanonicalAuditConfigurationError,
+    CanonicalAuditStore,
+)
 from orchestrator.session_store import SessionStore
 
 
@@ -473,6 +478,133 @@ async def test_canonical_audit_correlates_complete_foreground_request_chain(tmp_
     assert {event["request_id"] for event in events} == {"req-audit"}
     assert events[-1]["payload"]["assistant_provider_text"] == "provider raw answer"
     assert events[-1]["payload"]["assistant_delivered_text"] == "delivered answer"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_stream_audit_batches_without_copying_raw_delta(
+    monkeypatch,
+):
+    monkeypatch.setattr(runtime_pipeline, "CANONICAL_STREAM_BATCH_MAX_AGE_S", 0.01)
+
+    class BatchStore:
+        def __init__(self):
+            self.commits: list[list[dict]] = []
+
+        def record_many(self, records):
+            self.commits.append([dict(record) for record in records])
+
+    store = BatchStore()
+    runtime = SimpleNamespace(canonical_audit=store, error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-reasoning")
+
+    for index in range(100):
+        batch.capture(
+            StreamEvent(
+                kind=KIND_THINKING,
+                summary="",
+                raw_delta=f"delta-{index}",
+                event_id=f"provider-{index}",
+                origin="deepseek",
+                provenance="provider_returned",
+            )
+        )
+
+    assert store.commits == []
+    await asyncio.sleep(0.03)
+
+    assert len(store.commits) == 1
+    records = store.commits[0]
+    assert len(records) == 101
+    stream_records = [
+        record for record in records if record["event_type"] == "provider_stream_event"
+    ]
+    reasoning_records = [
+        record for record in records if record["event_type"] == "provider_reasoning"
+    ]
+    assert [record["payload"]["raw_delta"] for record in stream_records] == [
+        f"delta-{index}" for index in range(100)
+    ]
+    assert len(reasoning_records) == 1
+    reasoning_payload = reasoning_records[0]["payload"]
+    assert "raw_delta" not in reasoning_payload
+    assert reasoning_payload["chunk_count"] == 100
+    assert reasoning_payload["raw_delta_char_count"] == sum(
+        len(f"delta-{index}") for index in range(100)
+    )
+    assert reasoning_payload["stream_batch_ref"] == {
+        "audit_batch_id": "req-reasoning:stream-batch:1",
+        "request_id": "req-reasoning",
+        "first_stream_sequence": 1,
+        "last_stream_sequence": 100,
+        "event_kind": "thinking",
+    }
+    assert {record["provenance"]["audit_batch_id"] for record in records} == {
+        "req-reasoning:stream-batch:1"
+    }
+    assert runtime._canonical_reasoning_seen == {"req-reasoning"}
+
+
+def test_canonical_stream_audit_failure_is_not_silently_ignored():
+    class FailingStore:
+        def record_many(self, _records):
+            raise OSError("audit volume full")
+
+    runtime = SimpleNamespace(canonical_audit=FailingStore(), error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-audit-fail")
+    event = StreamEvent(
+        kind=KIND_THINKING,
+        summary="",
+        raw_delta="evidence",
+        origin="provider",
+    )
+    batch.capture(event)
+
+    with pytest.raises(OSError, match="audit volume full"):
+        batch.flush(reason="provider_end")
+    with pytest.raises(CanonicalAuditConfigurationError, match="audit volume full"):
+        batch.capture(event)
+    assert any("Canonical stream audit batch failed" in message for message in runtime.error_logger.messages)
+
+
+def test_canonical_stream_audit_prefers_buffer_and_barriers_at_provider_end():
+    class BufferedStore:
+        def __init__(self):
+            self.commits: list[list[dict]] = []
+            self.flushes = 0
+
+        def record_many(self, records):
+            self.commits.append([dict(record) for record in records])
+
+        def flush(self):
+            self.flushes += 1
+
+    class ForbiddenDirectStore:
+        def record_many(self, _records):
+            raise AssertionError("stream evidence bypassed the async buffer")
+
+    buffered = BufferedStore()
+    runtime = SimpleNamespace(
+        canonical_audit=ForbiddenDirectStore(),
+        canonical_audit_buffer=buffered,
+        error_logger=_Logger(),
+    )
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-buffered")
+    batch.capture(
+        StreamEvent(
+            kind=KIND_THINKING,
+            summary="",
+            raw_delta="evidence",
+            origin="provider",
+        )
+    )
+
+    assert batch.flush(reason="provider_request_end") == 2
+    assert len(buffered.commits) == 1
+    assert [record["event_type"] for record in buffered.commits[0]] == [
+        "provider_stream_event",
+        "provider_reasoning",
+    ]
+    assert buffered.flushes == 1
 
 
 def test_begin_queue_item_preserves_explicit_habit_ineligibility():
@@ -1349,7 +1481,8 @@ async def test_her_message_audit_preserves_exact_commentary_and_transport_status
     assert records[0]["text_sha256"] == records[1]["text_sha256"]
     assert records[0]["provenance"] == "persona_renderer"
     assert records[0]["detail"] == "persona_renderer_fallback=false"
-    assert audit_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert audit_path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio

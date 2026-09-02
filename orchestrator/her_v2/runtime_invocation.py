@@ -17,6 +17,7 @@ from orchestrator.multimodal_contract import (
     request_content_is_voice_origin,
     subset_request_content,
 )
+from orchestrator.process_execution import execution_environment_descriptor
 
 from .audit import AuditPersistenceError
 from .checkpoint import CompulsoryReplanCoordinator
@@ -144,6 +145,17 @@ class RuntimeInvocationMixin:
             else self.config.stage_roles.get(stage, selected.name)
         )
         base_context = copy.deepcopy(dict(context or {}))
+        registry = getattr(self.provider, "tool_registry", None)
+        execution_cwd = (
+            getattr(registry, "workspace_dir", None)
+            or self.workzone_ref
+            or None
+        )
+        # Runtime facts are authoritative and identical across Strategy,
+        # Planning, Direct, Execution, sub-agent, Review, and recovery stages.
+        base_context["execution_environment"] = execution_environment_descriptor(
+            execution_cwd
+        )
         if stage in {
             Stage.PLANNING,
             Stage.EXECUTION,
@@ -253,6 +265,7 @@ class RuntimeInvocationMixin:
             "allow_tools": allow_tools,
             "allow_side_effects": allow_side_effects,
             "delegated_tools": base_context.get("delegated_tools"),
+            "execution_environment": base_context["execution_environment"],
             "workzone": self.workzone_ref or None,
             "plan_id": invocation_plan_id,
             "attachments": [

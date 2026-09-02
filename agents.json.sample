@@ -381,7 +381,7 @@
           "model": "moonshotai/kimi-k2",
           "image_input": "tool",
           "tools": {
-            "allowed": ["bash", "file_read", "file_write", "web_search", "web_fetch", "vision_inspect"],
+            "allowed": ["shell", "file_read", "file_write", "web_search", "web_fetch", "vision_inspect"],
             "vision_inspect": {
               "provider": "llama_cpp",
               "endpoint": "http://127.0.0.1:8081/v1",

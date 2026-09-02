@@ -139,6 +139,7 @@ _SIDE_EFFECT_ACTION_TOOLS = frozenset(
 
 _TOOL_ADAPTERS = {
     "bash": "bash",
+    "shell": "bash",
     "apply_patch": "apply_patch",
     "hashi_scheduler_list": "scheduler",
     "hashi_scheduler_status": "scheduler",

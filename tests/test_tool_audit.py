@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -43,6 +44,45 @@ def test_bash_schema_exposes_only_an_optional_positive_timeout():
     assert timeout["type"] == "number"
     assert timeout["exclusiveMinimum"] == 0
     assert "Omit it to run without a time limit" in timeout["description"]
+
+
+def test_shell_schema_declares_platform_default_and_explicit_selectors():
+    function = TOOL_SCHEMA_MAP["shell"]["function"]
+    parameters = function["parameters"]
+
+    assert parameters["properties"]["shell"]["enum"] == [
+        "bash",
+        "powershell",
+        "cmd",
+    ]
+    assert "Native Windows defaults to PowerShell" in function["description"]
+    assert "Do not mix POSIX, PowerShell, and CMD syntax" in parameters[
+        "properties"
+    ]["command"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_fails_closed_when_canonical_audit_write_fails(tmp_path):
+    class FailingCanonicalAudit:
+        def record(self, *_args, **_kwargs):
+            raise OSError("canonical audit volume full")
+
+    target = tmp_path / "evidence.txt"
+    target.write_text("evidence", encoding="utf-8")
+    registry = ToolRegistry(
+        allowed_tools=["file_read"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        canonical_audit=FailingCanonicalAudit(),
+    )
+
+    with pytest.raises(OSError, match="canonical audit volume full"):
+        await registry.execute(
+            "file_read",
+            {"path": "evidence.txt"},
+            tool_call_id="audit-must-persist",
+        )
 
 
 @pytest.mark.parametrize(
@@ -251,7 +291,7 @@ async def test_tool_registry_auto_registers_file_write_artifact_with_enterprise_
     assert len(artifacts) == 1
     artifact = artifacts[0]
     assert artifact.type == "file"
-    assert artifact.path.endswith("deliverables/report.md")
+    assert Path(artifact.path).parts[-2:] == ("deliverables", "report.md")
     assert artifact.hash.startswith("sha256:")
     assert artifact.metadata["source"] == "tool_registry.file_write"
     assert artifact.metadata["tool_call_id"] == "call-artifact"

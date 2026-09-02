@@ -207,7 +207,7 @@ async def test_codex_document_keeps_established_local_file_fallback(
     stdin_prompt = proc.stdin.data.decode("utf-8")
     assert proc.stdin.closed is True
     assert "attachment-document" in stdin_prompt
-    assert str(document) in stdin_prompt
+    assert json.dumps(str(document))[1:-1] in stdin_prompt
     assert "media bytes were not sent natively" in stdin_prompt
     assert response.stream_metadata["multimodal_routing"][0]["route"] == (
         "local_fallback"
