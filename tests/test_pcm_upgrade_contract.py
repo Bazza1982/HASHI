@@ -12,7 +12,11 @@ import pytest
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from orchestrator import runtime_session
-from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+from orchestrator.bridge_memory import (
+    CURRENT_REQUEST_SEPARATOR,
+    BridgeContextAssembler,
+    BridgeMemoryStore,
+)
 from orchestrator.config import LEGACY_PCM_CONFIG_BACKUP_SUFFIX, ConfigManager
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -412,7 +416,10 @@ def test_fixed_transport_order_survives_initial_only_section_omissions(tmp_path)
     )
 
 
-def test_non_her_budget_removes_oldest_whole_exchanges_first(tmp_path, monkeypatch):
+def test_non_her_token_budget_compacts_oldest_whole_exchanges_into_capsule(
+    tmp_path,
+    monkeypatch,
+):
     store, assembler = _assembler(tmp_path)
     for index in range(5):
         store.record_completed_exchange(
@@ -420,17 +427,136 @@ def test_non_her_budget_removes_oldest_whole_exchanges_first(tmp_path, monkeypat
             f"ASSISTANT-{index}-" + (str(index) * 450),
             "text",
         )
-    monkeypatch.setitem(assembler.PROMPT_BUDGETS, "openrouter-api", 3100)
+    monkeypatch.setitem(
+        assembler.PROMPT_TOKEN_BUDGETS,
+        "openrouter-api",
+        1_500,
+    )
 
     payload = assembler.build_prompt_payload("PROTECTED CURRENT", "openrouter-api")
 
     assert payload["audit"]["history_omitted"]
     assert "PROTECTED CURRENT" in payload["final_prompt"]
     assert "USER-4-" in payload["final_prompt"]
+    assert "COMPACTED HISTORY CONTINUITY CAPSULE" in payload["final_prompt"]
+    assert "USER_EXCERPT: USER-0-" in payload["final_prompt"]
     omitted = payload["audit"]["history_omitted"]
     assert [item["sequence"] for item in omitted] == sorted(
         item["sequence"] for item in omitted
     )
+    assert all(
+        item["represented_by"] == "history_continuity_capsule"
+        and re.fullmatch(r"[0-9a-f]{64}", item["source_content_sha256"])
+        for item in omitted
+    )
+    assert payload["audit"]["budget_limit_chars"] is None
+    assert payload["audit"]["budget_limit_tokens"] == 1_500
+    assert payload["audit"]["budget_unit"] == "estimated_tokens"
+    assert payload["audit"]["final_prompt_tokens_after_budget"] <= 1_500
+    assert payload["audit"]["history_capsule"] == {
+        "present": True,
+        "key": "history_continuity_capsule",
+        "item_count": len(omitted),
+        "method": "deterministic_salient_excerpt_v1",
+    }
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        "codex-cli",
+        "claude-cli",
+        "grok-cli",
+        "gemini-cli",
+        "openrouter-api",
+        "deepseek-api",
+        "xai-api",
+        "hashi-api",
+        "ollama-api",
+    ],
+)
+def test_non_her_64k_token_budget_retains_incident_sized_history(tmp_path, engine):
+    _store, assembler = _assembler(tmp_path / engine)
+    exchanges = []
+    for index in range(8):
+        user_text = f"USER-{index}-" + ("u" * (21_566 if index == 0 else 1_800))
+        exchanges.append(
+            {
+                "sequence": index + 1,
+                "user_ts": f"2026-09-03T0{index}:00:00+10:00",
+                "assistant_ts": f"2026-09-03T0{index}:01:00+10:00",
+                "user_text": user_text,
+                "assistant_text": f"ASSISTANT-{index}-" + ("a" * 1_800),
+            }
+        )
+
+    payload = assembler.build_prompt_payload(
+        "CURRENT",
+        engine,
+        recent_exchanges=exchanges,
+    )
+
+    assert payload["audit"]["final_prompt_chars_before_budget"] > 24_000
+    assert payload["audit"]["budget_limit_tokens"] == 64_000
+    assert payload["audit"]["budget_provenance"] == (
+        "hashi_pcm_non_her_64k_tokens_v1"
+    )
+    assert payload["audit"]["history_requested"] == 8
+    assert payload["audit"]["history_included"] == 8
+    assert payload["audit"]["history_omitted"] == []
+    assert payload["audit"]["history_capsule"]["present"] is False
+    assert "USER-0-" in payload["final_prompt"]
+
+
+def test_handoff_capsule_prefers_authoritative_request_over_pcm_boilerplate(tmp_path):
+    _store, assembler = _assembler(tmp_path)
+    handoff = (
+        "Bridge-managed PCM follows. Old boilerplate that should not lead the capsule."
+        + CURRENT_REQUEST_SEPARATOR
+        + "Fix the exact continuity issue.\n\n--- DATE AND TIME ---\nold timestamp"
+    )
+    payload = assembler.build_prompt_payload(
+        "CURRENT",
+        "codex-cli",
+        recent_exchanges=[
+            {
+                "sequence": 1,
+                "user_text": handoff + ("x" * 20_000),
+                "assistant_text": "The continuity issue was diagnosed.",
+            }
+        ],
+        prompt_budget_tokens=800,
+    )
+
+    assert payload["audit"]["history_omitted"]
+    assert "USER_EXCERPT: Fix the exact continuity issue." in payload["final_prompt"]
+    assert "Old boilerplate that should not lead" not in payload["final_prompt"]
+    assert payload["audit"]["budget_provenance"] == (
+        "backend_config_pcm_prompt_token_budget"
+    )
+
+
+def test_her_v2_bypasses_non_her_budget_and_capsule(tmp_path):
+    _store, assembler = _assembler(tmp_path)
+    payload = assembler.build_prompt_payload(
+        "CURRENT",
+        "her-v2",
+        recent_exchanges=[
+            {
+                "sequence": 1,
+                "user_text": "HER-HISTORY-" + ("x" * 20_000),
+                "assistant_text": "HER-RESPONSE",
+            }
+        ],
+        prompt_budget_tokens=1,
+    )
+
+    assert "HER-HISTORY" in payload["final_prompt"]
+    assert payload["audit"]["budget_limit_tokens"] is None
+    assert payload["audit"]["budget_unit"] == "her_v2_managed"
+    assert payload["audit"]["budget_provenance"] == "her_v2_managed_compaction"
+    assert payload["audit"]["history_omitted"] == []
+    assert payload["audit"]["history_capsule"]["present"] is False
 
 
 def test_catalogues_contain_only_metadata_not_skill_body(tmp_path):

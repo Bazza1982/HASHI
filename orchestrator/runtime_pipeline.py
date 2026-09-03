@@ -1241,6 +1241,12 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         and "recent_exchanges" in inspect.signature(prompt_builder).parameters
     ):
         prompt_kwargs["recent_exchanges"] = session_history
+    if "prompt_budget_tokens" in inspect.signature(prompt_builder).parameters:
+        backend_extra = getattr(getattr(backend, "config", None), "extra", None)
+        if isinstance(backend_extra, dict):
+            configured_budget = backend_extra.get("pcm_prompt_token_budget")
+            if configured_budget is not None:
+                prompt_kwargs["prompt_budget_tokens"] = configured_budget
     compaction_snapshot = None
     history_compaction_enabled = False
     cross_session_timeline_entries: list[dict[str, Any]] = []
@@ -1404,8 +1410,13 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     prompt_audit = prompt_payload.get("audit", {})
     runtime._last_prompt_audit = prompt_audit
     runtime._thinking_chars_this_req = 0
-    if runtime.config.active_backend != "her-v2" or incremental:
-        runtime._last_full_prompt_tokens = len(final_prompt) // 4
+    if runtime.config.active_backend != "her-v2":
+        runtime._last_full_prompt_tokens = int(
+            prompt_audit.get("final_prompt_tokens_after_budget")
+            or max(1, len(final_prompt) // 4)
+        )
+    elif incremental:
+        runtime._last_full_prompt_tokens = max(1, len(final_prompt) // 4)
     terminal_console.observe_estimated_usage(
         runtime.name,
         item.request_id,
@@ -3179,7 +3190,29 @@ def record_foreground_usage_audit(
                 "tool_max_loops": 0,
                 "budget_applied": bool(prompt_audit.get("budget_applied")),
                 "budget_limit_chars": prompt_audit.get("budget_limit_chars"),
+                "budget_limit_tokens": prompt_audit.get("budget_limit_tokens"),
+                "budget_unit": prompt_audit.get("budget_unit"),
+                "budget_provenance": prompt_audit.get("budget_provenance"),
+                "budget_unresolved": bool(prompt_audit.get("budget_unresolved")),
                 "context_chars_before_budget": prompt_audit.get("context_chars_before_budget", 0),
+                "context_tokens_before_budget": prompt_audit.get(
+                    "context_tokens_before_budget",
+                    0,
+                ),
+                "final_prompt_tokens_before_budget": prompt_audit.get(
+                    "final_prompt_tokens_before_budget",
+                    0,
+                ),
+                "final_prompt_tokens_after_budget": prompt_audit.get(
+                    "final_prompt_tokens_after_budget",
+                    0,
+                ),
+                "history_requested": prompt_audit.get("history_requested", 0),
+                "history_included": prompt_audit.get("history_included", 0),
+                "history_omitted_count": len(
+                    prompt_audit.get("history_omitted") or []
+                ),
+                "history_capsule": dict(prompt_audit.get("history_capsule") or {}),
                 "time_fyi_chars": prompt_audit.get("time_fyi_chars", 0),
                 "context_expansion_ratio": round(len(final_prompt) / max(len(item.prompt), 1), 3),
                 "context_fingerprint": prompt_audit.get("context_fingerprint", ""),

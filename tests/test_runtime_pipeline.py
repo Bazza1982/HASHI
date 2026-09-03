@@ -250,7 +250,18 @@ def _runtime():
     runtime._last_full_prompt_tokens = 0
     runtime._last_prompt_audit = {
         "sections": [{"key": "Workzone", "chars": 8, "tokens_est": 2, "item_count": 1}],
-        "budget_applied": False,
+        "budget_applied": True,
+        "budget_limit_tokens": 64_000,
+        "budget_unit": "estimated_tokens",
+        "budget_provenance": "hashi_pcm_non_her_64k_tokens_v1",
+        "budget_unresolved": False,
+        "context_tokens_before_budget": 65_000,
+        "final_prompt_tokens_before_budget": 65_100,
+        "final_prompt_tokens_after_budget": 63_000,
+        "history_requested": 8,
+        "history_included": 7,
+        "history_omitted": [{"sequence": 1}],
+        "history_capsule": {"present": True, "item_count": 1},
         "context_fingerprint": "fp",
     }
     runtime._thinking_chars_this_req = 12
@@ -837,6 +848,54 @@ async def test_fixed_session_backend_uses_incremental_prompt():
 
     assert runtime.current_request_meta["session_scope"] == "persistent"
     assert prompt.incremental is True
+
+
+@pytest.mark.asyncio
+async def test_build_turn_prompt_passes_backend_pcm_token_budget():
+    runtime = _runtime()
+    runtime.config.active_backend = "openrouter-api"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        config=SimpleNamespace(extra={"pcm_prompt_token_budget": 32_000}),
+        capabilities=SimpleNamespace(
+            supports_sessions=False,
+            supports_thinking_stream=True,
+        ),
+    )
+    observed = {}
+
+    class _BudgetAssembler:
+        MAX_RECENT_EXCHANGES = 10
+
+        def build_prompt_payload(
+            self,
+            prompt,
+            backend,
+            *,
+            extra_sections,
+            inject_memory,
+            incremental,
+            recent_exchanges=None,
+            prompt_budget_tokens,
+        ):
+            observed["backend"] = backend
+            observed["prompt_budget_tokens"] = prompt_budget_tokens
+            return {"final_prompt": prompt, "audit": {"sections": []}}
+
+    runtime.context_assembler = _BudgetAssembler()
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert observed == {
+        "backend": "openrouter-api",
+        "prompt_budget_tokens": 32_000,
+    }
 
 
 @pytest.mark.asyncio
@@ -3202,6 +3261,17 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
         }
     ]
     assert event["section_chars"] == {"Workzone": 8}
+    assert event["budget_limit_tokens"] == 64_000
+    assert event["budget_unit"] == "estimated_tokens"
+    assert event["budget_provenance"] == "hashi_pcm_non_her_64k_tokens_v1"
+    assert event["budget_unresolved"] is False
+    assert event["context_tokens_before_budget"] == 65_000
+    assert event["final_prompt_tokens_before_budget"] == 65_100
+    assert event["final_prompt_tokens_after_budget"] == 63_000
+    assert event["history_requested"] == 8
+    assert event["history_included"] == 7
+    assert event["history_omitted_count"] == 1
+    assert event["history_capsule"] == {"present": True, "item_count": 1}
     assert event["wrapper_applied"] is True
 
 
