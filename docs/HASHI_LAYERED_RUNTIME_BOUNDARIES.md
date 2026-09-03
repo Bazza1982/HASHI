@@ -52,7 +52,9 @@ Current authoritative owners include:
 | backend models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
 | built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
 | initial/hot manager construction | `orchestrator/manager_registry.py` |
-| hot-reload discovery, ordering, and source preflight | `orchestrator/hot_reload.py` |
+| Python, ABI, dependency and protected-Core identity | `orchestrator/runtime_contract.py` and `[tool.hashi.runtime]` |
+| transactional function-generation staging and rollback | `orchestrator/function_generation.py` |
+| function discovery, ordering, and public contract | `orchestrator/hot_reload.py` |
 | shared workspace `state.json` persistence | `orchestrator/workspace_state.py` |
 | instance process lock and PID paths | `orchestrator/pathing.py` |
 | compatibility port defaults | `orchestrator/runtime_defaults.py` |
@@ -93,25 +95,19 @@ authorization unless the current task already names those files or says core
 changes are allowed.
 ```
 
-Canonical protected paths live in
-`scripts/check_protected_core_changes.py::PROTECTED_CORE_PATHS`. The list below
-is a human-readable copy and must not be treated as the source of truth:
-
-```yaml
-protected_core_paths:
-  - __main__.py
-  - main.py
-  - orchestrator/config.py
-  - orchestrator/instance_lock.py
-  - orchestrator/pathing.py
-  - orchestrator/manager_registry.py
-  - orchestrator/hot_reload.py
-  - orchestrator/reboot_manager.py
-  - orchestrator/startup_manager.py
-  - orchestrator/shutdown_manager.py
-  - remote/protocol_manager.py
-  - remote/peer/base.py
-```
+Canonical protected paths live only in
+`orchestrator.runtime_contract.CORE_SOURCE_PATHS`.
+`scripts/check_protected_core_changes.py`, the runtime fingerprint and the
+function-generation exclusion set all derive from that tuple; documentation
+must not duplicate a path list. It covers process entry, configuration and
+path identity, runtime/event interfaces, terminal and logging surfaces,
+process-owned resources, generation/reboot orchestration, Manager construction,
+and process startup/shutdown. Remote peers remain function/sidecar protocol
+implementations and cross Core only through versioned messages.
+The Windows helper (`tools.windows_helper` and
+`tools.windows_use_mcp_client`) is one such external-runtime sidecar: its
+modules are excluded from the in-process function generation and are launched
+with their own declared `uv` dependency set.
 
 Hot-reloadable manager implementations are Layer 2 unless they define or mutate
 the kernel/process contract. For example, `orchestrator/service_manager.py` is a
@@ -263,16 +259,25 @@ the process bootstrap contract itself did not change:
 
 1. Resolve the requested lifecycle scope once; targeted modes must contain
    exactly one immutable target, and malformed input must not fall back to all.
-2. Compile all loaded project sources before stopping an agent.
-3. Reject the reboot without touching running agents if preflight fails.
-4. Reload dependencies before consumers and fail fast on the first reload
-   error; never continue into a mixed manager rebuild silently.
-5. Build the complete manager bundle before installing any replacement.
-6. Restart only the previously selected agents.
-7. Recreate warm services—Workbench API, enabled API Gateway, scheduler,
-   delivery watcher, and background jobs—only after a successful reload.
-8. Keep the process lock, kernel identity, and live WhatsApp transport outside
-   the warm-service refresh.
+2. Fingerprint and compile the candidate source without creating bytecode or
+   changing live state.
+3. Import the complete runtime closure in an isolated staging process using
+   the exact running Core executable, ABI, dependency and Core-source digest.
+4. Materialise fresh module objects, validate cross-module identity, and build
+   the complete Manager bundle while the old canonical generation remains
+   installed. In-place `importlib.reload()` is forbidden.
+5. Reject any pre-commit failure without stopping an Agent.
+6. Stop only the resolved target(s), verify the candidate source digest again,
+   and atomically install module bindings plus the Manager bundle.
+7. Start only the selected Agent(s), then recreate and health-check warm
+   services—Workbench API, enabled API Gateway and WhatsApp transport,
+   scheduler, delivery watcher, and background jobs.
+8. If Agent or service cutover fails, stop any new target, restore the prior
+   module map and Manager bundle, and restart the prior target generation.
+9. Keep the process lock, Core runtime fingerprint, kernel identity, and
+   process-wide persistence locks outside the function-generation replacement.
+   The live WhatsApp handle stays on the kernel but its transport object is
+   replaced transactionally when it is enabled.
 
 Cold process restart is not an allowed function-change adoption or recovery
 path. Process bootstrap, lock implementation, and native supervision are core
@@ -281,6 +286,11 @@ those boundaries must include an explicit warm-handoff mechanism before it can
 be promoted. `orchestrator.hot_reload.PROCESS_IDENTITY_MODULES` excludes the
 already-held process lock and path-identity objects so `/reboot` cannot falsely
 claim to have replaced them.
+
+The exact Python and generation rules are normative in
+`docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`. A Python, dependency, platform-ABI,
+protected-Core source, Core API, or Function API change is a planned Core
+migration and is rejected by `/reboot` before lifecycle cutover.
 
 Hot reload discovery is also rooted to the checked-out project. A third-party
 module whose name happens to start with `tools.` or `orchestrator.` must never

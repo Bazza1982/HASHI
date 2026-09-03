@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-import importlib
 
 from orchestrator import workspace_state
+from orchestrator.process_resources import path_lock as process_path_lock
 from orchestrator.workspace_state import WorkspaceStateStore
 
 
@@ -29,10 +29,7 @@ def test_workspace_state_replace_is_valid_json_and_leaves_no_temp_file(tmp_path)
     assert list(tmp_path.glob(".state.json.tmp-*")) == []
 
 
-def test_workspace_state_lock_survives_hot_module_reload(tmp_path):
-    before = workspace_state._path_lock(tmp_path / "state.json")
+def test_workspace_state_lock_is_owned_by_stable_core_registry(tmp_path):
+    path = tmp_path / "state.json"
 
-    reloaded = importlib.reload(workspace_state)
-    after = reloaded._path_lock(tmp_path / "state.json")
-
-    assert after is before
+    assert workspace_state._path_lock(path) is process_path_lock(path)

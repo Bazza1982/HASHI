@@ -381,7 +381,7 @@ Run HASHI on any Windows or macOS machine straight from a USB drive — no Pytho
 **Windows:**
 ```
 # On your machine (with internet):
-windows\prepare_usb.bat           # builds USB with embedded Python + all deps
+windows\prepare_usb.bat           # builds USB with approved portable Python + locked deps
 
 # First time on any Windows PC:
 windows\TUI_onboarding.bat        # first-run setup + chat
@@ -419,7 +419,7 @@ python main.py            # Any platform
 ```
 
 ### Prerequisites
-- Python 3.10+
+- CPython 3.12.13 (the exact Core contract is defined in `pyproject.toml`)
 - At least one AI backend:
   - [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`)
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`)

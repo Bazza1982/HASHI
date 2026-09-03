@@ -1,15 +1,31 @@
 from __future__ import annotations
-import os
-import sys
-import asyncio
-import argparse
-import logging
-import signal
-import traceback
-from pathlib import Path
-from datetime import datetime
 
-from orchestrator.pathing import BridgePaths, build_bridge_paths
+# ruff: noqa: E402 -- Core must enforce its runtime before project imports.
+
+import argparse
+import asyncio
+import logging
+import os
+import signal
+import sys
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+# The Core runtime contract is the first project import.  Function modules are
+# not allowed to execute until the interpreter and ABI have been accepted.
+CODE_ROOT = Path(__file__).resolve().parent
+from orchestrator.runtime_contract import (
+    RuntimeContractError,
+    enforce_runtime_contract,
+)
+
+try:
+    RUNTIME_FINGERPRINT = enforce_runtime_contract(CODE_ROOT)
+except RuntimeContractError as exc:
+    print(f"HASHI Core runtime rejected: {exc}", file=sys.stderr, flush=True)
+    raise SystemExit(78) from exc
+
 from orchestrator.bootstrap_logging import (
     configure_terminal_console,
     emit_bridge_audit,
@@ -18,11 +34,12 @@ from orchestrator.bootstrap_logging import (
 )
 from orchestrator.instance_lock import InstanceLock
 from orchestrator.lifecycle_state import LifecycleState
-from orchestrator.manager_registry import build_hot_manager_bundle, install_hot_manager_bundle
+from orchestrator.manager_registry import (
+    build_hot_manager_bundle,
+    install_hot_manager_bundle,
+)
 from orchestrator.onboarding_gate import run_onboarding_gate
-
-# --- Global Orchestrator Setup ---
-CODE_ROOT = Path(__file__).resolve().parent
+from orchestrator.pathing import BridgePaths, build_bridge_paths
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")  # file-only orchestrator log
@@ -42,6 +59,12 @@ class UniversalOrchestrator:
         self.enable_api_gateway = enable_api_gateway
         self.global_cfg = None
         self.secrets = {}
+        self.runtime_fingerprint = RUNTIME_FINGERPRINT
+        self.function_generation = {
+            "generation_id": "bootstrap",
+            "module_count": 0,
+            "runtime_id": RUNTIME_FINGERPRINT.runtime_id,
+        }
         install_hot_manager_bundle(
             self,
             build_hot_manager_bundle(self, _handler),
@@ -208,12 +231,6 @@ class UniversalOrchestrator:
     async def _shutdown_all_agents(self, timeout: float = 30.0):
         await self.agent_lifecycle.shutdown_all_agents(timeout)
 
-    def _rebuild_hot_managers(self):
-        self.reboot_manager.rebuild_hot_managers()
-
-    def _reload_project_modules(self):
-        self.reboot_manager.reload_project_modules()
-
     async def _do_hot_restart(self, restart: dict):
         await self.reboot_manager.hot_restart(restart)
 
@@ -244,7 +261,9 @@ class UniversalOrchestrator:
             "Process bootstrap: "
             f"pid={os.getpid()} ppid={os.getppid()} exe={sys.executable} cwd={Path.cwd()} "
             f"code_root={self.paths.code_root} bridge_home={self.paths.bridge_home} "
-            f"config={self.paths.config_path}"
+            f"config={self.paths.config_path} runtime={self.runtime_fingerprint.runtime_id} "
+            f"platform_abi={self.runtime_fingerprint.platform_abi} "
+            f"dependencies={self.runtime_fingerprint.dependency_digest}"
         )
 
         startup_ok, wa_cfg = await self.startup_manager.start_initial_agents(global_cfg, agent_configs, secrets)

@@ -365,10 +365,13 @@ def test_saved_route_cannot_pin_stale_capability_or_pricing_revisions():
     assert selected.pricing_revision == HER_V2_PRICING_REVISION
 
 
-def test_pricing_revision_survives_first_mixed_generation_reboot(monkeypatch):
+def test_missing_pricing_revision_is_rejected_instead_of_mixing_generations(
+    monkeypatch,
+):
     monkeypatch.delattr(token_tracker, "PRICING_REVISION")
 
-    assert _loaded_pricing_revision() == HER_V2_PRICING_REVISION
+    with pytest.raises(RuntimeError, match="pricing revision is unavailable"):
+        _loaded_pricing_revision()
 
 
 def test_provider_switch_preflight_rejects_known_too_small_context(tmp_path):

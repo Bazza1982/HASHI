@@ -130,7 +130,6 @@ def deliver_hchat_draft(
 
 def _load_send_hchat() -> SendHChatCallable:
     module = importlib.import_module("tools.hchat_send")
-    module = importlib.reload(module)
     return module.send_hchat
 
 

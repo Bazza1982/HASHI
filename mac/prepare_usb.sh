@@ -14,8 +14,8 @@
 set -euo pipefail
 
 SOURCE="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON_VERSION="3.13.2"
-PBS_DATE="20250317"
+PYTHON_VERSION="3.12.13"
+PBS_DATE="20260303"
 
 # ── Detect target ────────────────────────────────────────────
 if [ -n "${1:-}" ]; then
@@ -79,12 +79,14 @@ echo "   Done."
 echo ""
 echo "[2/5] Downloading Python $PYTHON_VERSION (portable build)..."
 
-if [ -f "$PYTHON_DIR/bin/python3" ]; then
-    echo "   Python already present, skipping download."
+if [ -f "$PYTHON_DIR/bin/python3" ] && \
+    "$PYTHON_DIR/bin/python3" -c "import sys; raise SystemExit(0 if sys.version_info[:3] == tuple(map(int, '$PYTHON_VERSION'.split('.'))) else 1)"; then
+    echo "   Approved Python already present, skipping download."
 else
+    rm -rf "$PYTHON_DIR"
     ARCH="$(uname -m)"  # arm64 or x86_64
     PBS_FILE="cpython-${PYTHON_VERSION}+${PBS_DATE}-${ARCH}-apple-darwin-install_only_stripped.tar.gz"
-    PBS_URL="https://github.com/indygreg/python-build-standalone/releases/download/${PBS_DATE}/${PBS_FILE}"
+    PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_DATE}/${PBS_FILE}"
 
     TMP_DIR="$(mktemp -d)"
     echo "   Downloading $PBS_FILE ..."
@@ -109,15 +111,10 @@ echo "   Done."
 echo ""
 echo "[4/5] Installing Python packages (this may take a few minutes)..."
 "$PYTHON_EXE" -m pip install \
-    "python-telegram-bot>=20.0" \
-    "httpx>=0.24.0" \
-    "aiohttp>=3.8.0" \
-    "pillow>=9.0.0" \
-    "rich>=13.0.0" \
-    "textual>=0.50.0" \
-    "edge-tts>=6.0.0" \
-    "psutil>=5.9.0" \
+    -r "$TARGET/constraints/standard-py312.lock" \
     --quiet
+"$PYTHON_EXE" "$TARGET/scripts/check_runtime_contract.py" \
+    --code-root "$TARGET"
 
 echo "   Done."
 

@@ -816,6 +816,7 @@ async def test_tenth_result_forces_replan_without_churning_unchanged_plan(
         "active_plan",
         "available_execution_tools",
         "execution_allow_side_effects",
+        "execution_environment",
         "plan_edit_history",
         "real_goal",
         "relevant_habits",

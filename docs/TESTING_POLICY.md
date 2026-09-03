@@ -98,8 +98,24 @@ python -m pytest -q
 ```
 
 Run it for shared registries, configuration, hot reload, lifecycle, gateway,
-or central runtime boundaries. The target is at most 30 seconds on the HASHI1
-development machine. It is not a full-suite alias.
+or central runtime boundaries. The target is at most 90 seconds on the HASHI3
+development pilot because it includes one real isolated import and
+copy-on-write generation transaction. It is not a full-suite alias.
+
+For Python, ABI, dependency, Core-source, or `/reboot` changes, the owning
+minimum is:
+
+```bash
+python -m pytest -q \
+  tests/test_runtime_contract.py \
+  tests/test_function_generation.py \
+  tests/test_reboot_manager.py
+```
+
+Old tests that assert partial `importlib.reload()` progress or a handoff patch
+between mixed class generations are invalid: that implementation is forbidden.
+The replacement tests assert that rejected candidates do not touch Agents and
+that post-commit failures restore the complete prior generation.
 
 ### 5. Offline product suite
 
@@ -144,6 +160,7 @@ python -m pytest -q tests -m live
 | Leaf module | owning node or module | a public contract changed |
 | Adapter/provider | adapter module plus registry/binding consumer | shared response or delivery contract changed |
 | Shared runtime/registry | focused test plus core gate | ownership spans otherwise unrelated components |
+| Python/Core/function generation | runtime contract, full generation transaction, reboot rollback, then core gate | any fingerprint or lifecycle boundary changed |
 | Deployment asset | native parser, renderer, or dedicated workflow | preparing a deployment release |
 | Test config/fixture | core gate plus offline product suite | always, because collection semantics changed |
 | Live system | focused offline proof first | then only the explicitly authorized canary |

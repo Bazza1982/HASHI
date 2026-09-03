@@ -1,25 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import gc
-import importlib
-import inspect
 import logging
-import sys
 
 from orchestrator.bootstrap_logging import AnimMute
+from orchestrator.function_generation import (
+    FunctionGenerationError,
+    PreparedFunctionGeneration,
+    prepare_function_generation,
+)
 from orchestrator.hot_reload import (
     HotReloadError,
     discover_loaded_project_modules,
-    preflight_module_sources,
+    validate_function_contract,
 )
-
-# ``importlib.reload`` reuses this module dictionary.  Capture the class owned
-# by the live kernel before the new class statement replaces the module name.
-# A hot-restart coroutine already executing on that class keeps its old
-# ``hot_restart`` code object, so the post-reload contract seam must be handed
-# forward explicitly below.
-_PRE_RELOAD_REBOOT_MANAGER_CLASS = globals().get("RebootManager")
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -73,6 +67,35 @@ def _resolve_restart_targets(kernel, restart: dict) -> tuple[str, ...]:
     if mode in TARGETED_REBOOT_MODES and len(targets) != 1:
         raise ValueError(f"targeted reboot resolved to {len(targets)} agents")
     return targets
+
+
+def _validate_generation_cutover_scope(
+    kernel,
+    restart: dict,
+    selected_targets: tuple[str, ...],
+) -> None:
+    """Fail closed until each Agent owns an isolated Function Worker.
+
+    The HASHI3 pilot commits Python module bindings at process scope. Leaving
+    another runtime active across that commit could mix an old object graph
+    with a future lazy import from the new canonical generation. A targeted
+    lifecycle restart is therefore safe only when it is the sole live Agent.
+    Broad modes already quiesce every live runtime.
+    """
+
+    mode = restart.get("mode", "same")
+    if mode not in TARGETED_REBOOT_MODES:
+        return
+    selected = set(selected_targets)
+    unselected = tuple(
+        runtime.name for runtime in kernel.runtimes if runtime.name not in selected
+    )
+    if unselected:
+        raise ValueError(
+            "targeted generation cutover requires per-Agent Function Worker "
+            f"isolation; still-running agents={unselected}. Use /reboot max "
+            "for this process until worker isolation is installed"
+        )
 
 
 class RebootManager:
@@ -141,224 +164,92 @@ class RebootManager:
             )
             await asyncio.gather(*[_restore(name) for name in names])
 
-    def rebuild_hot_managers(self):
-        """Transactionally rebuild hot-reloadable managers after module reload."""
-        registry = importlib.import_module("orchestrator.manager_registry")
-        bundle = registry.build_hot_manager_bundle(self.kernel, self.console_handler)
-        registry.install_hot_manager_bundle(self.kernel, bundle)
-        main_logger.info(
-            "Hot reload: rebuilt skill, config, backend preflight, agent lifecycle, service, reboot, shutdown, startup, and WhatsApp managers."
-        )
-
     def preflight_project_modules(self) -> list[str]:
+        """Return the complete active function surface for candidate staging."""
         code_root = getattr(getattr(self.kernel, "paths", None), "code_root", None)
-        module_names = discover_loaded_project_modules(code_root=code_root)
-        if code_root is not None:
-            checked = preflight_module_sources(module_names, code_root=code_root)
-            main_logger.info("Hot reload preflight: compiled %s source files.", len(checked))
-        return module_names
+        return discover_loaded_project_modules(code_root=code_root)
 
     def reload_project_modules(self, module_names: list[str] | None = None):
-        """Reload project Python modules so hot restart picks up code changes."""
-        to_reload = (
-            module_names
-            if module_names is not None
-            else discover_loaded_project_modules()
+        """Reject the retired in-place module mutation path.
+
+        Keeping an explicit failure here protects older callers and plugins
+        from silently reintroducing ``importlib.reload`` into the Core process.
+        """
+
+        del module_names
+        raise HotReloadError(
+            "In-place module reload is retired; use a verified function generation"
         )
-        reloaded = []
-        for name in to_reload:
-            module = sys.modules.get(name)
-            if module is None:
-                continue
-            try:
-                importlib.reload(module)
-                reloaded.append(name)
-            except Exception as e:
-                raise HotReloadError(
-                    f"Hot reload failed after {len(reloaded)} modules while reloading {name}: "
-                    f"{type(e).__name__}: {e}"
-                ) from e
-        if reloaded:
-            main_logger.info("Hot reload: reloaded %s modules.", len(reloaded))
+
+    def prepare_candidate_generation(self) -> PreparedFunctionGeneration:
+        module_names = self.preflight_project_modules()
+        return prepare_function_generation(
+            self.kernel,
+            self.console_handler,
+            module_names=module_names,
+        )
 
     def validate_agent_runtime_contract(self):
-        """Verify cross-module adapter symbols before rebuilding an agent.
-
-        Compilation alone cannot detect an import-time dependency being
-        satisfied by an older in-memory module.  Keep this check small and
-        focused on the protocol used by every HER acknowledgement/tool event.
-        """
-        stream_events = importlib.import_module("adapters.stream_events")
-        backend_registry = importlib.import_module("adapters.registry")
-        her_v2 = importlib.import_module("adapters.her_v2")
-        runtime_config = importlib.import_module("orchestrator.config")
-        runtime_pipeline = importlib.import_module("orchestrator.runtime_pipeline")
-        runtime_common = importlib.import_module("orchestrator.runtime_common")
-        session_store = importlib.import_module("orchestrator.session_store")
-        runtime_session = importlib.import_module("orchestrator.runtime_session")
-        flexible_runtime = importlib.import_module(
-            "orchestrator.flexible_agent_runtime"
-        )
-        command_registry = importlib.import_module("orchestrator.command_registry")
-        telegram_notifications = importlib.import_module(
-            "orchestrator.telegram_notifications"
-        )
-        tool_registry = importlib.import_module("tools.registry")
-        gateway_context = importlib.import_module("tools.gateway.context")
-
-        acknowledgement_kind = getattr(stream_events, "KIND_ACKNOWLEDGEMENT", None)
-        if acknowledgement_kind != "acknowledgement":
-            raise HotReloadError(
-                "Hot reload contract failed: adapters.stream_events does not expose "
-                "KIND_ACKNOWLEDGEMENT='acknowledgement'"
-            )
-        resolver = getattr(backend_registry, "get_backend_class", None)
-        supported_adapter = getattr(her_v2, "HERv2Adapter", None)
-        if not callable(resolver) or supported_adapter is None:
-            raise HotReloadError(
-                "Hot reload contract failed: HER v2 registry contract unavailable"
-            )
-        if any(
-            resolver(engine) is not supported_adapter
-            for engine in ("her-v2", "her")
-        ):
-            raise HotReloadError(
-                "Hot reload contract failed: a HER ID can reach a stale or retired adapter"
-            )
-        if (
-            getattr(runtime_config, "DEFAULT_AGENT_MODE", None) != "fixed"
-            or getattr(runtime_config, "SUPPORTED_AGENT_MODES", None)
-            != frozenset({"fixed", "flex"})
-            or not callable(
-                getattr(runtime_config, "default_agent_mode_for_backend", None)
-            )
-        ):
-            raise HotReloadError(
-                "Hot reload contract failed: fixed/flex configuration is not current"
-            )
-        if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
-            raise HotReloadError(
-                "Hot reload contract failed: runtime acknowledgement pipeline unavailable"
-            )
-        notification_mode = getattr(
-            telegram_notifications, "notification_mode", None
-        )
-        set_notification_mode = getattr(
-            telegram_notifications, "set_notification_mode", None
-        )
-        disable_notification = getattr(
-            telegram_notifications, "disable_notification", None
-        )
-        disable_parameters = (
-            inspect.signature(disable_notification).parameters
-            if callable(disable_notification)
-            else {}
-        )
-        runtime_commands = command_registry.runtime_command_map()
-        if (
-            not callable(notification_mode)
-            or not callable(set_notification_mode)
-            or "purpose" not in disable_parameters
-            or "notify" not in runtime_commands
-        ):
-            raise HotReloadError(
-                "Hot reload contract failed: Telegram notification mode or "
-                "/notify command is not current"
-            )
-        queued_request = getattr(runtime_common, "QueuedRequest", None)
-        enqueue_request = getattr(
-            getattr(flexible_runtime, "FlexibleAgentRuntime", None),
-            "enqueue_request",
-            None,
-        )
-        queued_fields = getattr(queued_request, "__dataclass_fields__", {})
-        enqueue_parameters = (
-            inspect.signature(enqueue_request).parameters
-            if callable(enqueue_request)
-            else {}
-        )
-        if (
-            "habit_learning_eligible" not in queued_fields
-            or "habit_learning_eligible" not in enqueue_parameters
-        ):
-            raise HotReloadError(
-                "Hot reload contract failed: habit learning request intake is incomplete"
-            )
-        if getattr(flexible_runtime, "QueuedRequest", None) is not queued_request:
-            raise HotReloadError(
-                "Hot reload contract failed: flexible runtime retained a stale "
-                "QueuedRequest class"
-            )
-        session_store_class = getattr(session_store, "SessionStore", None)
-        if (
-            session_store_class is None
-            or getattr(runtime_session, "SessionStore", None) is not session_store_class
-            or not callable(
-                getattr(session_store_class, "recent_agent_exchanges", None)
-            )
-        ):
-            raise HotReloadError(
-                "Hot reload contract failed: runtime session handling retained a "
-                "stale SessionStore class"
-            )
-        if getattr(gateway_context, "ToolRegistry", None) is not getattr(
-            tool_registry, "ToolRegistry", None
-        ):
-            raise HotReloadError(
-                "Hot reload contract failed: tools.gateway.context retained a stale "
-                "ToolRegistry class"
-            )
-        if not callable(
-            getattr(
-                getattr(tool_registry, "ToolRegistry", None),
-                "execute_with_audit_context",
-                None,
-            )
-        ):
-            raise HotReloadError(
-                "Hot reload contract failed: ToolRegistry scoped audit context "
-                "is unavailable"
-            )
+        validate_function_contract()
         contract_message = (
-            "Hot reload contract verified: fixed/flex configuration, HER "
-            "compatibility facade, runtime pipeline, and Telegram notification "
-            "commands are current."
+            "Function generation contract verified: fixed/flex configuration, "
+            "HER compatibility facade, runtime pipeline, and Telegram "
+            "notification commands are current."
         )
         main_logger.info(contract_message)
         bridge_logger.info(contract_message)
 
     async def hot_restart(self, restart: dict):
-        """Stop agents per restart mode, reload Python code and config, then start agents."""
+        """Atomically adopt a verified function generation for selected Agents."""
         mode = restart.get("mode", "same")
         requesting_agent = restart.get("agent_name")
         agent_number = restart.get("agent_number")
 
         try:
             selected_targets = _resolve_restart_targets(self.kernel, restart)
+            _validate_generation_cutover_scope(
+                self.kernel,
+                restart,
+                selected_targets,
+            )
         except ValueError as exc:
             main_logger.error("Hot restart scope rejected: %s", exc)
             bridge_logger.error("Hot restart scope rejected: %s", exc)
             print(
-                "\033[38;5;203m  ✗ reboot rejected — invalid target scope; "
+                "\033[38;5;203m  ✗ reboot rejected — invalid or unsafe target scope; "
                 "no agents were stopped\033[0m\n",
+                flush=True,
+            )
+            return False
+
+        try:
+            candidate = self.prepare_candidate_generation()
+        except (FunctionGenerationError, HotReloadError) as exc:
+            main_logger.error("%s", exc)
+            bridge_logger.error("Function generation rejected before cutover: %s", exc)
+            print(
+                "\033[38;5;203m  ✗ reboot rejected — candidate generation "
+                "failed verification; running agents were not touched\033[0m\n",
                 flush=True,
             )
             return False
 
         boot_state = {name: "pending" for name in selected_targets}
         boot_reason = {}
-
-        try:
-            module_names = self.preflight_project_modules()
-        except HotReloadError as exc:
-            main_logger.error("%s", exc)
-            bridge_logger.error("Hot restart preflight rejected: %s", exc)
-            print(
-                "\033[38;5;203m  ✗ reboot rejected — source preflight failed; "
-                "running agents were not touched\033[0m\n",
-                flush=True,
-            )
-            return False
+        main_logger.info(
+            "Function generation ready: %s (%s modules, probe_pid=%s)",
+            candidate.manifest.generation_id,
+            len(candidate.manifest.entries),
+            candidate.receipt.probe_pid,
+        )
+        bridge_logger.info(
+            "Function generation staged and verified: generation=%s modules=%s "
+            "runtime=%s probe_pid=%s",
+            candidate.manifest.generation_id,
+            len(candidate.manifest.entries),
+            candidate.receipt.runtime.runtime_id,
+            candidate.receipt.probe_pid,
+        )
 
         main_logger.info(
             "Hot restart: stopping %s agent(s): %s",
@@ -395,21 +286,18 @@ class RebootManager:
             )
             return False
 
-        reload_error: HotReloadError | None = None
         try:
-            self.reload_project_modules(module_names)
-            self.validate_agent_runtime_contract()
-            self.rebuild_hot_managers()
-        except HotReloadError as exc:
-            reload_error = exc
-            main_logger.critical("%s", exc)
-            bridge_logger.critical("Hot restart reload failed: %s", exc)
-        except Exception as exc:
-            reload_error = HotReloadError(
-                f"Hot manager rebuild failed: {type(exc).__name__}: {exc}"
+            candidate.activate(self.kernel)
+        except FunctionGenerationError as exc:
+            main_logger.error("Function generation commit rejected: %s", exc)
+            bridge_logger.error("Function generation commit rejected: %s", exc)
+            await self._restore_stopped_agents(stopped_targets)
+            print(
+                "\033[38;5;203m  ✗ reboot rejected — candidate changed during "
+                "cutover; previous generation restored\033[0m\n",
+                flush=True,
             )
-            main_logger.critical("%s", reload_error)
-            bridge_logger.critical("Hot manager rebuild failed: %s", reload_error)
+            return False
 
         main_logger.info("Hot restart: starting agents: %s", selected_targets)
         try:
@@ -438,11 +326,14 @@ class RebootManager:
         workbench_port = getattr(self.kernel.global_cfg, "workbench_port", None) if self.kernel.global_cfg else None
         api_gw = self.kernel.api_gateway is not None
 
+        started_new_targets: list[str] = []
+
         async def _start_agent_with_state(name):
             boot_state[name] = "connecting"
             try:
                 ok, msg = await self.kernel.start_agent(name)
                 if ok:
+                    started_new_targets.append(name)
                     new_state = "local" if "LOCAL MODE" in msg.upper() else "online"
                     boot_state[name] = new_state
                     if new_state == "local":
@@ -478,7 +369,8 @@ class RebootManager:
             )
 
         mute = AnimMute()
-        self.console_handler.addFilter(mute)
+        if self.console_handler is not None:
+            self.console_handler.addFilter(mute)
         try:
             await asyncio.gather(
                 loop.run_in_executor(None, _run_banner),
@@ -486,22 +378,8 @@ class RebootManager:
                 return_exceptions=True,
             )
         finally:
-            self.console_handler.removeFilter(mute)
-
-        if reload_error is None:
-            await self.kernel.service_manager.refresh_hot_services()
-
-        if reload_error is not None:
-            main_logger.error(
-                "Hot restart failed; stopped agents were restored with the last usable managers. "
-                "Repair the reported source/ABI mismatch and retry /reboot."
-            )
-            print(
-                "\033[38;5;203m  ✗ reboot failed — agents restored where possible; "
-                "repair the mismatch and retry /reboot\033[0m\n",
-                flush=True,
-            )
-            return False
+            if self.console_handler is not None:
+                self.console_handler.removeFilter(mute)
 
         failed_targets = [
             name
@@ -521,78 +399,74 @@ class RebootManager:
                 "Hot restart failed for target agent(s): %s",
                 failure_summary,
             )
+            for name in list(started_new_targets):
+                await self.kernel.stop_agent(
+                    name,
+                    reason=f"generation-rollback:{mode}",
+                )
+            candidate.rollback(self.kernel)
+            await self._restore_stopped_agents(stopped_targets)
             print(
                 "\033[38;5;203m  ✗ reboot failed — target agent(s) did not restart: "
-                f"{', '.join(failed_targets)}\033[0m\n",
+                f"{', '.join(failed_targets)}; previous generation restored\033[0m\n",
+                flush=True,
+            )
+            return False
+
+        try:
+            await self.kernel.service_manager.refresh_hot_services(
+                expected_whatsapp=wa_enabled,
+            )
+        except Exception as exc:
+            main_logger.exception("Function service cutover failed: %s", exc)
+            bridge_logger.exception("Function service cutover failed: %s", exc)
+            for name in list(started_new_targets):
+                await self.kernel.stop_agent(
+                    name,
+                    reason=f"generation-rollback:{mode}",
+                )
+            candidate.rollback(self.kernel)
+            await self._restore_stopped_agents(stopped_targets)
+            try:
+                await self.kernel.service_manager.refresh_hot_services(
+                    expected_whatsapp=wa_enabled,
+                )
+            except Exception as restore_exc:
+                main_logger.error(
+                    "Previous-generation service refresh needs operator retry: %s",
+                    restore_exc,
+                )
+                bridge_logger.error(
+                    "Previous-generation service refresh needs operator retry: %s",
+                    restore_exc,
+                )
+            print(
+                "\033[38;5;203m  ✗ reboot failed — warm service cutover was "
+                "rolled back to the previous function generation\033[0m\n",
                 flush=True,
             )
             return False
 
         if self.kernel.runtimes:
-            main_logger.info("Hot restart complete. %s agent(s) running.", len(self.kernel.runtimes))
-            bridge_logger.warning("Hot restart complete (%s agent(s) running)", len(self.kernel.runtimes))
-            print(f"\033[38;5;108m  ✓ reboot complete — {len(self.kernel.runtimes)} agent(s) online\033[0m\n", flush=True)
+            main_logger.info(
+                "Hot restart complete. generation=%s; %s agent(s) running.",
+                candidate.manifest.generation_id,
+                len(self.kernel.runtimes),
+            )
+            bridge_logger.warning(
+                "Hot restart complete (generation=%s, %s agent(s) running)",
+                candidate.manifest.generation_id,
+                len(self.kernel.runtimes),
+            )
+            print(
+                f"\033[38;5;108m  ✓ reboot complete — generation "
+                f"{candidate.manifest.generation_id[7:19]} · "
+                f"{len(self.kernel.runtimes)} agent(s) online\033[0m\n",
+                flush=True,
+            )
             return True
         else:
             main_logger.critical("Hot restart: no agents running after restart.")
             bridge_logger.critical("Hot restart failed: no agents running after restart")
             print("\033[38;5;203m  ✗ reboot failed — no agents running\033[0m\n", flush=True)
             return False
-
-
-def _handoff_reloaded_runtime_contract(
-    previous_manager_class,
-    *,
-    current_manager_class=RebootManager,
-) -> int:
-    """Move the post-reload validator onto an already-running manager class.
-
-    The first reboot across a contract change is still executing
-    ``hot_restart`` from the previous class generation.  Its subsequent
-    ``self.validate_agent_runtime_contract()`` lookup must resolve to the
-    validator from the source that was just reloaded.
-
-    A failed reload can leave the module bound to a newer class generation
-    while the kernel still owns an instance from an older generation.  In
-    that state, handing the validator only to the module's previous class is
-    insufficient.  Discover every live instance with the same class identity
-    and patch that narrow seam on each generation; backend aliases and
-    ordinary runtime resolution remain unchanged.
-    """
-
-    if not inspect.isclass(previous_manager_class):
-        return 0
-
-    expected_module = previous_manager_class.__module__
-    expected_name = previous_manager_class.__name__
-    manager_classes = {previous_manager_class}
-    for candidate in gc.get_objects():
-        candidate_class = type(candidate)
-        if (
-            candidate_class.__module__ == expected_module
-            and candidate_class.__name__ == expected_name
-        ):
-            manager_classes.add(candidate_class)
-
-    patched = 0
-    for manager_class in manager_classes:
-        if manager_class is current_manager_class:
-            continue
-        manager_class.validate_agent_runtime_contract = (
-            current_manager_class.validate_agent_runtime_contract
-        )
-        patched += 1
-    return patched
-
-
-_HANDED_OFF_REBOOT_MANAGER_GENERATIONS = _handoff_reloaded_runtime_contract(
-    _PRE_RELOAD_REBOOT_MANAGER_CLASS
-)
-if _HANDED_OFF_REBOOT_MANAGER_GENERATIONS:
-    handoff_message = (
-        "Hot reload: handed the current runtime contract validator to "
-        f"{_HANDED_OFF_REBOOT_MANAGER_GENERATIONS} live RebootManager "
-        "generation(s)."
-    )
-    main_logger.info(handoff_message)
-    bridge_logger.info(handoff_message)

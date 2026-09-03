@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12.13"
 
       - name: Validate Kubernetes backend packaging contract
         run: python tools/enterprise_k8s_backend_doctor.py --json

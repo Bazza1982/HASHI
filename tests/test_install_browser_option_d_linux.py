@@ -3,12 +3,20 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 
-pytestmark = [pytest.mark.integration, pytest.mark.platform]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.platform,
+    pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="Linux browser installer contract requires a Linux filesystem",
+    ),
+]
 
 
 def test_install_browser_option_d_linux_writes_default_and_isolated_manifests(tmp_path: Path) -> None:

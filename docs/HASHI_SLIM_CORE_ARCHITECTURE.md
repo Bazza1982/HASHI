@@ -187,7 +187,10 @@ services reload.
 
 WhatsApp control logic is outside `main.py` in `WhatsAppManager`, but the live WhatsApp transport object remains on the kernel.
 
-Manager rebuild does not warm-restart the WhatsApp transport implementation. Changes to manager-level WhatsApp control can be adopted by `/reboot`; changes that require replacing the underlying transport still require an explicit transport restart or a cold restart.
+The WhatsApp handle remains on the kernel, but an enabled transport is drained
+and recreated from the verified function generation during `/reboot`. Failure
+to replace it fails the service cutover and restores the prior generation;
+ordinary transport changes do not require a Core cold restart.
 
 ## Validation Record
 
@@ -230,7 +233,8 @@ This warning was followed by successful scheduler recreation and startup, so it 
 ## Residual Notes
 
 - `main.py` is intentionally still above the original aspirational 200-line target. The accepted `v3.2.0` shape is a slim kernel wrapper rather than a pure bootstrap-only file.
-- `StartupManager` is rebuilt during hot reboot but only used during cold start. This is harmless and keeps the manager set complete.
+- `StartupManager`, `ShutdownManager`, and `RebootManager` are protected Core
+  managers. Function-generation rebuilds reuse their loaded Core classes.
 - Transport implementation hot reload for WhatsApp remains explicit-restart-only.
 - Future manager additions must be registered once in
   `orchestrator/manager_registry.py`; cold construction and hot rebuild derive

@@ -1,52 +1,13 @@
 from __future__ import annotations
 
 import ast
-import subprocess
-import sys
-import textwrap
 import types
 from pathlib import Path
 
-import pytest
-
 from orchestrator.hot_reload import (
-    HotReloadError,
     discover_loaded_project_modules,
     module_reload_key,
-    preflight_module_sources,
 )
-
-
-def test_hot_reload_preflight_rejects_syntax_error_before_mutation(tmp_path):
-    source = tmp_path / "broken.py"
-    source.write_text("def broken(:\n    pass\n", encoding="utf-8")
-    module = types.ModuleType("orchestrator.broken")
-    module.__file__ = str(source)
-
-    with pytest.raises(HotReloadError, match="no agents were stopped"):
-        preflight_module_sources(
-            ["orchestrator.broken"],
-            code_root=tmp_path,
-            modules={"orchestrator.broken": module},
-        )
-
-
-def test_hot_reload_preflight_ignores_sources_outside_code_root(tmp_path):
-    code_root = tmp_path / "project"
-    code_root.mkdir()
-    outside = tmp_path / "outside.py"
-    outside.write_text("def broken(:\n", encoding="utf-8")
-    module = types.ModuleType("orchestrator.external")
-    module.__file__ = str(outside)
-
-    assert (
-        preflight_module_sources(
-            ["orchestrator.external"],
-            code_root=code_root,
-            modules={"orchestrator.external": module},
-        )
-        == []
-    )
 
 
 def test_hot_reload_discovery_excludes_live_process_identity_modules(tmp_path):
@@ -61,15 +22,31 @@ def test_hot_reload_discovery_excludes_live_process_identity_modules(tmp_path):
     lock_module = types.ModuleType("orchestrator.instance_lock")
     lock_module.__file__ = str(lock_source)
 
+    resource_source = tmp_path / "orchestrator" / "process_resources.py"
+    resource_source.write_text("LOCKS = {}\n", encoding="utf-8")
+    resource_module = types.ModuleType("orchestrator.process_resources")
+    resource_module.__file__ = str(resource_source)
+
+    transport_source = tmp_path / "transports" / "whatsapp.py"
+    transport_source.parent.mkdir()
+    transport_source.write_text("TRANSPORT = True\n", encoding="utf-8")
+    transport_module = types.ModuleType("transports.whatsapp")
+    transport_module.__file__ = str(transport_source)
+
     discovered = discover_loaded_project_modules(
         {
             runtime_module.__name__: runtime_module,
             lock_module.__name__: lock_module,
+            resource_module.__name__: resource_module,
+            transport_module.__name__: transport_module,
         },
         code_root=tmp_path,
     )
 
-    assert discovered == ["orchestrator.runtime_status"]
+    assert discovered == [
+        "orchestrator.runtime_status",
+        "transports.whatsapp",
+    ]
 
 
 def test_hot_reload_discovery_rejects_prefixed_modules_outside_project(tmp_path):
@@ -85,6 +62,22 @@ def test_hot_reload_discovery_rejects_prefixed_modules_outside_project(tmp_path)
         discover_loaded_project_modules(
             {module.__name__: module},
             code_root=project,
+        )
+        == []
+    )
+
+
+def test_hot_reload_discovery_excludes_external_runtime_sidecars(tmp_path):
+    source = tmp_path / "tools" / "windows_helper" / "server.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("SERVICE = 'sidecar'\n", encoding="utf-8")
+    module = types.ModuleType("tools.windows_helper.server")
+    module.__file__ = str(source)
+
+    assert (
+        discover_loaded_project_modules(
+            {module.__name__: module},
+            code_root=tmp_path,
         )
         == []
     )
@@ -246,38 +239,3 @@ def test_pre_provider_notification_consumers_do_not_bind_helper_symbols():
             and node.module == "orchestrator.telegram_notifications"
         ]
         assert direct_imports == []
-
-
-def test_first_hot_upgrade_from_legacy_notification_module_is_import_safe():
-    script = textwrap.dedent(
-        """
-        import importlib
-
-        provider = importlib.import_module("orchestrator.telegram_notifications")
-        provider.disable_notification = lambda runtime: True
-        del provider.notification_mode
-        del provider.set_notification_mode
-
-        consumers = [
-            importlib.import_module("orchestrator.commands.notify"),
-            importlib.import_module("orchestrator.runtime_delivery"),
-            importlib.import_module("orchestrator.runtime_pipeline"),
-        ]
-        refreshed = importlib.reload(provider)
-        runtime = type("Runtime", (), {"_notify_mode": "quiet"})()
-        assert refreshed.notification_mode(runtime) == "quiet"
-        for consumer in consumers:
-            assert consumer.telegram_notifications is refreshed
-        """
-    )
-
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr

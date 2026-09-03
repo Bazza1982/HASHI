@@ -2,75 +2,95 @@ from __future__ import annotations
 
 import ctypes
 import math
+import os
 import time
 from contextlib import contextmanager
 from ctypes import wintypes
 
-user32 = ctypes.WinDLL("user32", use_last_error=True)
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+AVAILABLE = os.name == "nt" and hasattr(ctypes, "WinDLL")
+
+
+class _UnavailableWindowsLibrary:
+    """Fail at use time while keeping the sidecar module safe to inspect."""
+
+    def __getattr__(self, name: str):
+        raise RuntimeError(
+            f"Windows helper function {name} is unavailable on {os.name!r}"
+        )
+
+
+if AVAILABLE:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+else:
+    user32 = _UnavailableWindowsLibrary()
+    kernel32 = _UnavailableWindowsLibrary()
 ULONG_PTR = getattr(wintypes, "ULONG_PTR", ctypes.c_size_t)
 HGLOBAL = getattr(wintypes, "HGLOBAL", wintypes.HANDLE)
 
-EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+EnumWindowsProc = (
+    ctypes.WINFUNCTYPE if AVAILABLE else ctypes.CFUNCTYPE
+)(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
-user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
-user32.EnumWindows.restype = wintypes.BOOL
-user32.IsWindowVisible.argtypes = [wintypes.HWND]
-user32.IsWindowVisible.restype = wintypes.BOOL
-user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-user32.GetWindowTextLengthW.restype = ctypes.c_int
-user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-user32.GetWindowTextW.restype = ctypes.c_int
-user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-user32.ShowWindow.restype = wintypes.BOOL
-user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-user32.SetForegroundWindow.restype = wintypes.BOOL
-user32.BringWindowToTop.argtypes = [wintypes.HWND]
-user32.BringWindowToTop.restype = wintypes.BOOL
-user32.IsIconic.argtypes = [wintypes.HWND]
-user32.IsIconic.restype = wintypes.BOOL
-user32.IsZoomed.argtypes = [wintypes.HWND]
-user32.IsZoomed.restype = wintypes.BOOL
-user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-user32.PostMessageW.restype = wintypes.BOOL
-user32.GetForegroundWindow.argtypes = []
-user32.GetForegroundWindow.restype = wintypes.HWND
-user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
-user32.GetKeyboardLayout.restype = wintypes.HKL
-user32.GetKeyboardLayoutNameW.argtypes = [wintypes.LPWSTR]
-user32.GetKeyboardLayoutNameW.restype = wintypes.BOOL
-user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, ULONG_PTR]
-user32.keybd_event.restype = None
-user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ULONG_PTR]
-user32.mouse_event.restype = None
-user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
-user32.SetCursorPos.restype = wintypes.BOOL
-user32.GetCursorPos.argtypes = [ctypes.c_void_p]
-user32.GetCursorPos.restype = wintypes.BOOL
-user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
-user32.GetAsyncKeyState.restype = ctypes.c_short
-user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
-user32.MapVirtualKeyW.restype = wintypes.UINT
-user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
-user32.VkKeyScanW.restype = ctypes.c_short
-user32.OpenClipboard.argtypes = [wintypes.HWND]
-user32.OpenClipboard.restype = wintypes.BOOL
-user32.CloseClipboard.argtypes = []
-user32.CloseClipboard.restype = wintypes.BOOL
-user32.EmptyClipboard.argtypes = []
-user32.EmptyClipboard.restype = wintypes.BOOL
-user32.GetClipboardData.argtypes = [wintypes.UINT]
-user32.GetClipboardData.restype = HGLOBAL
-user32.SetClipboardData.argtypes = [wintypes.UINT, HGLOBAL]
-user32.SetClipboardData.restype = HGLOBAL
-kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-kernel32.GlobalAlloc.restype = HGLOBAL
-kernel32.GlobalLock.argtypes = [HGLOBAL]
-kernel32.GlobalLock.restype = ctypes.c_void_p
-kernel32.GlobalUnlock.argtypes = [HGLOBAL]
-kernel32.GlobalUnlock.restype = wintypes.BOOL
+if AVAILABLE:
+    user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    user32.BringWindowToTop.restype = wintypes.BOOL
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    user32.IsIconic.restype = wintypes.BOOL
+    user32.IsZoomed.argtypes = [wintypes.HWND]
+    user32.IsZoomed.restype = wintypes.BOOL
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW.restype = wintypes.BOOL
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+    user32.GetKeyboardLayout.restype = wintypes.HKL
+    user32.GetKeyboardLayoutNameW.argtypes = [wintypes.LPWSTR]
+    user32.GetKeyboardLayoutNameW.restype = wintypes.BOOL
+    user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, ULONG_PTR]
+    user32.keybd_event.restype = None
+    user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ULONG_PTR]
+    user32.mouse_event.restype = None
+    user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+    user32.SetCursorPos.restype = wintypes.BOOL
+    user32.GetCursorPos.argtypes = [ctypes.c_void_p]
+    user32.GetCursorPos.restype = wintypes.BOOL
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+    user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+    user32.MapVirtualKeyW.restype = wintypes.UINT
+    user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
+    user32.VkKeyScanW.restype = ctypes.c_short
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = HGLOBAL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, HGLOBAL]
+    user32.SetClipboardData.restype = HGLOBAL
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = HGLOBAL
+    kernel32.GlobalLock.argtypes = [HGLOBAL]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
 
 SW_RESTORE = 9
 SW_SHOW = 5
@@ -148,8 +168,9 @@ class INPUT(ctypes.Structure):
     ]
 
 
-user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
-user32.SendInput.restype = wintypes.UINT
+if AVAILABLE:
+    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+    user32.SendInput.restype = wintypes.UINT
 
 VK_ALIASES = {
     "shift": 0x10,

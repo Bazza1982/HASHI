@@ -3,27 +3,19 @@
 
 from __future__ import annotations
 
+# ruff: noqa: E402 -- repository root is established before Core import.
+
 import argparse
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY_ROOT))
+from orchestrator.runtime_contract import CORE_SOURCE_PATHS
 
-PROTECTED_CORE_PATHS = (
-    "__main__.py",
-    "main.py",
-    "orchestrator/config.py",
-    "orchestrator/instance_lock.py",
-    "orchestrator/pathing.py",
-    "orchestrator/manager_registry.py",
-    "orchestrator/hot_reload.py",
-    "orchestrator/reboot_manager.py",
-    "orchestrator/startup_manager.py",
-    "orchestrator/shutdown_manager.py",
-    "remote/protocol_manager.py",
-    "remote/peer/base.py",
-)
+PROTECTED_CORE_PATHS = CORE_SOURCE_PATHS
 
 
 def _repo_root() -> Path:
@@ -43,7 +35,24 @@ def _changed_files(args: argparse.Namespace) -> set[str]:
     if args.base:
         cmd.extend([args.base, "--"])
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    return {line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()}
+    changed = {
+        line.strip().replace("\\", "/")
+        for line in result.stdout.splitlines()
+        if line.strip()
+    }
+    if not args.cached and not args.base:
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        changed.update(
+            line.strip().replace("\\", "/")
+            for line in untracked.stdout.splitlines()
+            if line.strip()
+        )
+    return changed
 
 
 def _is_authorized(args: argparse.Namespace) -> bool:

@@ -10,13 +10,11 @@ from typing import Any
 from telegram.error import RetryAfter
 
 from orchestrator import telegram_stream_policy
+from orchestrator.process_resources import async_path_lock
 
 DEFAULT_FAILOVER_AGENT = "lin_yueru"
 DEFAULT_WARNING_REMINDER_SECONDS = 600
 DEFAULT_WATCHER_POLL_SECONDS = 60
-
-_HEALTH_STATE_LOCK = asyncio.Lock()
-
 
 def _now() -> datetime:
     return datetime.now().astimezone()
@@ -328,7 +326,7 @@ async def _prepare_warning(
 ) -> tuple[Any, str] | None:
     if chat_id is None:
         return None
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(source_runtime)):
         path = delivery_state_path(source_runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
@@ -378,7 +376,7 @@ async def _record_warning_result(
     success: bool,
     error: Exception | None = None,
 ) -> None:
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(source_runtime)):
         path = delivery_state_path(source_runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
@@ -486,7 +484,7 @@ async def handle_blocked_send(
 ) -> bool:
     response_path = None
     blocked_record = None
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(runtime)):
         path = delivery_state_path(runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
@@ -532,7 +530,7 @@ async def handle_retry_after(
     incident_id = f"tg-{runtime_name}-{_now().strftime('%Y%m%dT%H%M%S')}"
     response_path = None
     saved_record: dict[str, Any]
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(runtime)):
         path = delivery_state_path(runtime)
         state = _load_health_state_sync(path)
         record = _agent_record(state, runtime)
@@ -581,7 +579,7 @@ async def delivery_health_watcher(kernel: Any) -> None:
 
 async def _tick_recovery(kernel: Any) -> None:
     notices: list[tuple[str, Any, int]] = []
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(kernel)):
         path = delivery_state_path(kernel)
         state = _load_health_state_sync(path)
         changed = False
@@ -620,7 +618,7 @@ async def _tick_recovery(kernel: Any) -> None:
             results.append((agent_name, chat_id, "retry_after", retry_after_s, exc))
         except Exception as exc:
             results.append((agent_name, chat_id, "error", None, exc))
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(kernel)):
         path = delivery_state_path(kernel)
         state = _load_health_state_sync(path)
         changed = False

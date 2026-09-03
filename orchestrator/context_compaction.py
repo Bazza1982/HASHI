@@ -20,7 +20,6 @@ import os
 import re
 import sqlite3
 import tempfile
-import threading
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -36,6 +35,7 @@ from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
 )
+from orchestrator.process_resources import path_lock as process_path_lock
 
 STATE_KEY = "context_compaction"
 MANAGED_HISTORY_TITLE = "HASHI MANAGED CONVERSATION HISTORY"
@@ -65,16 +65,9 @@ DEFAULT_UNKNOWN_TARGET_LOW_TOKENS = DEFAULT_POST_COMPACTION_TARGET_TOKENS
 
 
 def _default_agent_mode() -> str:
-    """Resolve the mode default across the first fixed/flex hot reboot.
+    """Read the mode default from the running Core configuration contract."""
 
-    A live process upgrading from the pre-fixed/flex generation reloads this
-    module before its old reload plan reaches ``orchestrator.config``.  Keep a
-    module reference instead of importing the new constant eagerly so that
-    first mixed-generation reboot can continue; ``importlib.reload`` later
-    updates the same config module object in place.
-    """
-
-    return str(getattr(runtime_config, "DEFAULT_AGENT_MODE", "fixed") or "fixed")
+    return str(runtime_config.DEFAULT_AGENT_MODE)
 
 
 # Live HASHI API evidence showed that a 64k mixed-character estimate serializes
@@ -407,14 +400,8 @@ class _Selection:
     before_tokens: int
 
 
-_LOCKS_GUARD = globals().get("_LOCKS_GUARD") or threading.Lock()
-_PATH_LOCKS: dict[str, threading.RLock] = globals().get("_PATH_LOCKS") or {}
-
-
-def _path_lock(path: Path) -> threading.RLock:
-    key = str(Path(path).resolve())
-    with _LOCKS_GUARD:
-        return _PATH_LOCKS.setdefault(key, threading.RLock())
+def _path_lock(path: Path):
+    return process_path_lock(path)
 
 
 def _atomic_json_write(path: Path, payload: Mapping[str, Any]) -> None:

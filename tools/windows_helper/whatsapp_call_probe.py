@@ -50,7 +50,7 @@ def _matches_any(value: str, needles: tuple[str, ...]) -> bool:
 
 
 def _whatsapp_windows() -> list[dict[str, Any]]:
-    if win32 is None:
+    if win32 is None or not win32.AVAILABLE:
         return []
     return [
         item

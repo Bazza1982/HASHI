@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator import config as config_module
 from orchestrator.config import (
     LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
     SESSION_MODE_BACKENDS,
@@ -23,7 +22,7 @@ CORE_HER_V2_PROVIDERS = {"hashi-api", "deepseek-api", "openrouter-api"}
 
 @pytest.mark.skipif(os.name == "nt", reason="WSL mount-scope contract")
 def test_wsl_drive_scope_resolves_only_the_mounted_windows_drive(monkeypatch):
-    monkeypatch.setattr(config_module, "is_wsl", lambda: True)
+    monkeypatch.setattr("orchestrator.process_execution.is_wsl", lambda: True)
 
     project_drive = resolve_access_root(
         "drive",

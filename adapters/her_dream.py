@@ -12,7 +12,6 @@ import json
 import os
 import re
 import tempfile
-import threading
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -21,6 +20,7 @@ from typing import Any
 
 from adapters import her_habits
 from orchestrator.her_json_repair import render_json_repair_input
+from orchestrator.process_resources import path_lock as process_path_lock
 
 DREAM_RUN_FORMAT = "her-habit-dream-run-v1"
 DREAM_SNAPSHOT_FORMAT = "her-habit-dream-snapshot-v1"
@@ -35,7 +35,6 @@ MAX_SYS_GUIDANCE_CHARS = 24_000
 MAX_RECENT_REQUEST_CHARS = 32_000
 
 _RUN_ID_RE = re.compile(r"^D-[0-9]{8}-[0-9]{6}-[A-F0-9]{6}$")
-_AUDIT_LOCK = threading.Lock()
 
 
 class DreamValidationError(ValueError):
@@ -592,7 +591,7 @@ class HERDreamJournal:
         for path in sorted(self.runs_root.glob("D-*.json"), reverse=True):
             try:
                 runs.append(self._read_run(path.stem))
-            except Exception as exc:  # noqa: BLE001 - one corrupt run stays isolated
+            except Exception as exc:
                 if self.logger is not None:
                     self.logger.warning(
                         "Ignoring invalid HER Dream run %s: %s", path, exc
@@ -734,7 +733,9 @@ class HERDreamJournal:
             },
         }
         line = json.dumps(record, ensure_ascii=False, sort_keys=True)
-        with _AUDIT_LOCK, self.audit_path.open("a", encoding="utf-8") as handle:
+        with process_path_lock(self.audit_path), self.audit_path.open(
+            "a", encoding="utf-8"
+        ) as handle:
             handle.write(line + "\n")
 
     def _snapshot_path(self, run_id: str) -> Path:
@@ -1184,7 +1185,7 @@ def recover_interrupted_runs(
             _atomic_write_json(journal._run_path(run_id), manifest)
             journal.append_audit("dream_recovered_rollback", run_id=run_id)
             recovered += 1
-        except Exception as exc:  # noqa: BLE001 - retain evidence for manual recovery
+        except Exception as exc:
             journal.mark_failed(
                 run_id,
                 status="recovery_failed",
@@ -1239,7 +1240,7 @@ def recover_interrupted_runs(
                     undo_id=undo_id,
                 )
                 recovered += 1
-            except Exception as exc:  # noqa: BLE001 - preserve recovery evidence
+            except Exception as exc:
                 undo["status"] = "recovery_failed"
                 undo["error"] = her_habits.redact_bounded_text(
                     f"{type(exc).__name__}: {exc}",

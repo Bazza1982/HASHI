@@ -11,11 +11,11 @@ rem ============================================================
 
 set TARGET=D:\HASHI9
 for %%d in ("%~dp0..") do set SOURCE=%%~fd
-set PYTHON_VERSION=3.13.3
-set PYTHON_ZIP=python-%PYTHON_VERSION%-embed-amd64.zip
-set PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/%PYTHON_ZIP%
+set PYTHON_VERSION=3.12.13
+set PBS_DATE=20260303
+set PYTHON_ARCHIVE=cpython-%PYTHON_VERSION%+%PBS_DATE%-x86_64-pc-windows-msvc-install_only_stripped.tar.gz
+set PYTHON_URL=https://github.com/astral-sh/python-build-standalone/releases/download/%PBS_DATE%/%PYTHON_ARCHIVE%
 set PYTHON_DIR=%TARGET%\python
-set GET_PIP_URL=https://bootstrap.pypa.io/get-pip.py
 
 echo.
 echo ============================================================
@@ -41,7 +41,7 @@ if /i not "%CONFIRM%"=="YES" (
 )
 
 echo.
-echo [1/5] Copying project files...
+echo [1/6] Copying project files...
 
 if exist "%TARGET%\python" (
     echo    Keeping existing Python installation...
@@ -60,14 +60,19 @@ if errorlevel 16 (
 echo    Done.
 
 echo.
-echo [2/5] Downloading Python %PYTHON_VERSION% embeddable...
+echo [2/6] Preparing portable CPython %PYTHON_VERSION%...
 if exist "%PYTHON_DIR%\python.exe" (
-    echo    Python already present, skipping download.
-    goto :install_pip
+    "%PYTHON_DIR%\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info[:3] == tuple(map(int, '%PYTHON_VERSION%'.split('.'))) else 1)" >nul 2>&1
+    if not errorlevel 1 (
+        echo    Approved Python already present, skipping download.
+        goto :install_pip
+    )
+    echo    Existing Python does not match %PYTHON_VERSION%; replacing it.
+    rmdir /s /q "%PYTHON_DIR%"
 )
 
 if not exist "%TARGET%\tmp" mkdir "%TARGET%\tmp"
-powershell -NoProfile -Command "Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%TARGET%\tmp\%PYTHON_ZIP%' -UseBasicParsing"
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%TARGET%\tmp\%PYTHON_ARCHIVE%' -UseBasicParsing"
 if errorlevel 1 (
     echo ERROR: Failed to download Python. Check internet connection.
     pause
@@ -76,54 +81,45 @@ if errorlevel 1 (
 
 echo    Extracting...
 if not exist "%PYTHON_DIR%" mkdir "%PYTHON_DIR%"
-powershell -NoProfile -Command "Expand-Archive -Path '%TARGET%\tmp\%PYTHON_ZIP%' -DestinationPath '%PYTHON_DIR%' -Force"
+tar -xzf "%TARGET%\tmp\%PYTHON_ARCHIVE%" -C "%PYTHON_DIR%" --strip-components=1
+if errorlevel 1 (
+    echo ERROR: Failed to extract portable Python. Windows tar is required.
+    pause
+    exit /b 1
+)
 rmdir /s /q "%TARGET%\tmp"
 echo    Done.
 
 :install_pip
 echo.
-echo [3/5] Enabling pip in embedded Python...
-
-set PTH_FILE=
-for %%f in ("%PYTHON_DIR%\python*._pth") do set PTH_FILE=%%f
-
-if "%PTH_FILE%"=="" (
-    echo ERROR: Could not find Python ._pth file in %PYTHON_DIR%
-    pause
-    exit /b 1
-)
-
-(
-    echo python313.zip
-    echo .
-    echo ..
-    echo import site
-) > "%PTH_FILE%"
-
-powershell -NoProfile -Command "Invoke-WebRequest -Uri '%GET_PIP_URL%' -OutFile '%PYTHON_DIR%\get-pip.py' -UseBasicParsing"
+echo [3/6] Enabling pip in portable Python...
+"%PYTHON_DIR%\python.exe" -m ensurepip --upgrade --default-pip >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Failed to download get-pip.py
+    echo ERROR: Python ensurepip failed.
     pause
     exit /b 1
 )
-
-"%PYTHON_DIR%\python.exe" "%PYTHON_DIR%\get-pip.py" --no-warn-script-location >nul 2>&1
-del "%PYTHON_DIR%\get-pip.py"
 echo    Done.
 
 echo.
-echo [4/5] Installing Python packages (this may take a few minutes)...
-"%PYTHON_DIR%\python.exe" -m pip install "python-telegram-bot>=20.0" "httpx>=0.24.0" "aiohttp>=3.8.0" "pillow>=9.0.0" "rich>=13.0.0" "textual>=0.50.0" "edge-tts>=6.0.0" "psutil>=5.9.0" --no-warn-script-location --quiet
+echo [4/6] Installing the approved dependency generation...
+"%PYTHON_DIR%\python.exe" -m pip install -r "%TARGET%\constraints\standard-py312.lock" --no-warn-script-location --quiet
 
 if errorlevel 1 (
     echo ERROR: Package installation failed.
     pause
     exit /b 1
 )
+"%PYTHON_DIR%\python.exe" "%TARGET%\scripts\check_runtime_contract.py"
+if errorlevel 1 (
+    echo ERROR: Installed runtime does not satisfy the HASHI Core contract.
+    pause
+    exit /b 1
+)
 echo    Done.
 
 echo.
-echo [5/5] Stripping runtime data...
+echo [5/6] Stripping runtime data...
 
 if exist "%TARGET%\logs" rmdir /s /q "%TARGET%\logs"
 mkdir "%TARGET%\logs" >nul 2>&1

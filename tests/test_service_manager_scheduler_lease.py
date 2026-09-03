@@ -1,13 +1,18 @@
 import asyncio
 import json
+import logging
 import sys
 from types import SimpleNamespace
 
 import pytest
 
 from adapters.base import BaseBackend
-from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService, KubernetesApiLeaseClient
-from orchestrator.service_manager import ServiceManager
+from orchestrator.enterprise import (
+    EnterpriseLeaseStore,
+    IdentityService,
+    KubernetesApiLeaseClient,
+)
+from orchestrator.service_manager import HotServiceCutoverError, ServiceManager
 
 
 def _manager(tmp_path):
@@ -100,6 +105,7 @@ async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, 
     manager.kernel.runtimes = []
     manager.kernel.skill_manager = object()
     manager.kernel.workbench_api = object()
+    manager.kernel.whatsapp = None
     manager.kernel.delivery_health_task = None
     manager.kernel.background_job_manager = None
 
@@ -108,6 +114,9 @@ async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, 
 
     async def fake_restart_api_gateway():
         events.append("api_gateway")
+
+    async def fake_restart_whatsapp_transport(*, expected_running):
+        events.append(f"whatsapp:{expected_running}")
 
     async def fake_stop_scheduler():
         events.append("stop_scheduler")
@@ -120,6 +129,9 @@ async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, 
     async def fake_restart_background_jobs():
         events.append("background")
 
+    async def fake_assert_hot_services_healthy(*, expected_whatsapp):
+        events.append(f"health:{expected_whatsapp}")
+
     class _Scheduler:
         def __init__(self, *args, **kwargs):
             events.append("scheduler_init")
@@ -129,9 +141,19 @@ async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, 
 
     monkeypatch.setattr(manager, "restart_workbench_api", fake_restart_workbench_api)
     monkeypatch.setattr(manager, "restart_api_gateway", fake_restart_api_gateway)
+    monkeypatch.setattr(
+        manager,
+        "restart_whatsapp_transport",
+        fake_restart_whatsapp_transport,
+    )
     monkeypatch.setattr(manager, "stop_scheduler", fake_stop_scheduler)
     monkeypatch.setattr(manager, "restart_delivery_health_watcher", fake_restart_delivery_health_watcher)
     monkeypatch.setattr(manager, "restart_background_jobs", fake_restart_background_jobs)
+    monkeypatch.setattr(
+        manager,
+        "assert_hot_services_healthy",
+        fake_assert_hot_services_healthy,
+    )
     monkeypatch.setitem(sys.modules, "orchestrator.scheduler", SimpleNamespace(TaskScheduler=_Scheduler))
 
     await manager.restart_scheduler()
@@ -139,10 +161,12 @@ async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, 
     assert events == [
         "workbench",
         "api_gateway",
+        "whatsapp:False",
         "stop_scheduler",
         "scheduler_init",
         "delivery",
         "background",
+        "health:False",
     ]
     manager.kernel.scheduler_task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -238,10 +262,113 @@ async def test_restart_api_gateway_aborts_replacement_when_old_gateway_cannot_st
 
     monkeypatch.setattr(manager, "start_api_gateway", unexpected_start)
 
-    await manager.restart_api_gateway()
+    with pytest.raises(HotServiceCutoverError, match="did not stop safely"):
+        await manager.restart_api_gateway()
 
     assert kernel.api_gateway is old_gateway
     assert events == ["old_stop_failed"]
+
+
+@pytest.mark.asyncio
+async def test_restart_workbench_failure_rejects_service_generation(
+    tmp_path,
+    monkeypatch,
+):
+    kernel = SimpleNamespace(
+        global_cfg=SimpleNamespace(workbench_port=18800),
+        secrets={},
+        workbench_api=object(),
+    )
+    manager = ServiceManager(kernel)
+
+    async def fake_stop(*_args, **_kwargs):
+        kernel.workbench_api = None
+
+    async def failed_start(*_args, **_kwargs):
+        kernel.workbench_api = None
+
+    monkeypatch.setattr(manager, "stop_workbench_api", fake_stop)
+    monkeypatch.setattr(manager, "start_workbench_api", failed_start)
+
+    with pytest.raises(HotServiceCutoverError, match="did not start"):
+        await manager.restart_workbench_api()
+
+
+@pytest.mark.asyncio
+async def test_hot_service_health_covers_every_warm_runtime(tmp_path, monkeypatch):
+    stop = asyncio.Event()
+
+    async def stay_alive():
+        await stop.wait()
+
+    scheduler_task = asyncio.create_task(stay_alive())
+    delivery_task = asyncio.create_task(stay_alive())
+    kernel = SimpleNamespace(
+        global_cfg=SimpleNamespace(workbench_port=18800, api_gateway_port=18801),
+        workbench_api=SimpleNamespace(bind_host="127.0.0.1"),
+        api_gateway=SimpleNamespace(bind_host="127.0.0.1"),
+        enable_api_gateway=True,
+        whatsapp=SimpleNamespace(_connect_task=None),
+        scheduler_task=scheduler_task,
+        delivery_health_task=delivery_task,
+        background_job_manager=object(),
+    )
+    manager = ServiceManager(kernel)
+    probes = []
+
+    async def healthy(host, port, path):
+        probes.append((host, port, path))
+        return True
+
+    monkeypatch.setattr(manager, "_wait_for_http_health", healthy)
+    monkeypatch.setattr(
+        manager,
+        "_load_api_gateway_state",
+        lambda: {"enabled": True},
+    )
+
+    try:
+        await manager.assert_hot_services_healthy(expected_whatsapp=True)
+    finally:
+        stop.set()
+        await asyncio.gather(scheduler_task, delivery_task)
+
+    assert probes == [
+        ("127.0.0.1", 18800, "/api/health"),
+        ("127.0.0.1", 18801, "/health"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_transport_is_replaced_without_changing_enabled_policy(
+    tmp_path,
+):
+    events = []
+    old_transport = object()
+    new_transport = object()
+    kernel = SimpleNamespace(whatsapp=old_transport)
+
+    class _WhatsAppManager:
+        async def stop_transport(self, *, persist_enabled):
+            events.append(("stop", persist_enabled, kernel.whatsapp))
+            kernel.whatsapp = None
+            return True, "stopped"
+
+        async def start_transport(self, *, persist_enabled):
+            events.append(("start", persist_enabled))
+            kernel.whatsapp = new_transport
+            return True, "started"
+
+    kernel.whatsapp_manager = _WhatsAppManager()
+    manager = ServiceManager(kernel)
+
+    await manager.restart_whatsapp_transport(expected_running=True)
+
+    assert kernel.whatsapp is new_transport
+    assert events == [
+        ("stop", False, old_transport),
+        ("start", False),
+    ]
 
 
 @pytest.mark.asyncio
@@ -519,9 +646,13 @@ def test_scheduler_enterprise_lease_kwargs_rejects_unknown_backend(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_stop_scheduler_closes_enterprise_lease_store(tmp_path):
+async def test_stop_scheduler_closes_enterprise_lease_store_without_false_timeout_warning(
+    tmp_path,
+    caplog,
+):
     manager = _manager(tmp_path)
     closed = {"value": False}
+    caplog.set_level(logging.INFO, logger="BridgeU.Bridge")
 
     class _Store:
         def close(self):
@@ -538,3 +669,5 @@ async def test_stop_scheduler_closes_enterprise_lease_store(tmp_path):
     assert closed["value"] is True
     assert manager.kernel.scheduler is None
     assert manager.kernel.scheduler_task is None
+    assert "Scheduler task stopped after cancellation" in caplog.text
+    assert "did not stop within" not in caplog.text

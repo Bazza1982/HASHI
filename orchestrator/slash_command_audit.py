@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from orchestrator.command_specs import SENSITIVE_COMMAND_NAMES
-
-_WRITE_LOCK = threading.Lock()
+from orchestrator.process_resources import path_lock as process_path_lock
 
 # `pswd` is provided by an optional private command package rather than the
 # built-in registry, so it remains an explicit external sensitivity rule.
@@ -79,7 +77,7 @@ def append_audit_record(path: Path, record: dict[str, Any]) -> Path:
     audit_path = Path(path)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, ensure_ascii=False)
-    with _WRITE_LOCK:
+    with process_path_lock(audit_path):
         with audit_path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     return audit_path

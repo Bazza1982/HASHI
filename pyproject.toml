@@ -20,11 +20,9 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "python-telegram-bot>=20.0",
     "httpx>=0.24.0",
@@ -62,7 +60,6 @@ tui = [
 test = [
     "pytest>=9.0.3,<10.0.0",
     "pytest-asyncio>=0.23.0",
-    "tomli>=2.0.0; python_version < '3.11'",
 ]
 whatsapp = [
     "neonize>=0.4.3.post0,<0.5.0",
@@ -123,6 +120,17 @@ Issues = "https://github.com/Bazza1982/hashi/issues"
 [project.scripts]
 nagare = "nagare.cli:main"
 
+[tool.hashi.runtime]
+# This is the sole machine-readable owner of the HASHI Core runtime contract.
+# Packaging metadata, launchers, containers, CI, and release documentation are
+# checked against it; ordinary function generations cannot override it.
+implementation = "cpython"
+python = "3.12.13"
+standard-lock = "constraints/standard-py312.lock"
+portable-build-date = "20260303"
+core-api = 1
+function-api = 1
+
 [tool.setuptools.packages.find]
 include = ["flow*", "nagare*"]
 
@@ -136,17 +144,24 @@ testpaths = [
     "tests/test_architecture_boundaries.py",
     "tests/test_codex_api_tool_bridge.py",
     "tests/test_command_registry.py",
+    "tests/test_dependency_profiles.py",
     "tests/test_her_v2_adapter.py",
     "tests/test_her_v2_core.py",
     "tests/test_hot_reload.py",
+    "tests/test_function_generation.py",
     "tests/test_manager_registry.py",
     "tests/test_model_catalog.py",
     "tests/test_protocol_ack.py",
     "tests/test_request_activity.py",
+    "tests/test_reboot_manager.py",
     "tests/test_runtime_command_binding.py",
     "tests/test_runtime_working_modes.py",
     "tests/test_runtime_lifecycle.py",
+    "tests/test_runtime_contract.py",
+    "tests/test_service_manager_scheduler_lease.py",
     "tests/test_smart_tool_registry.py",
+    "tests/test_workbench_enterprise_health.py",
+    "tests/test_workspace_state.py",
 ]
 python_files = ["test_*.py"]
 norecursedirs = [

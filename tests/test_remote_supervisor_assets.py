@@ -3,13 +3,20 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.platform
+pytestmark = [
+    pytest.mark.platform,
+    pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="systemd supervisor asset contract is Linux-only",
+    ),
+]
 
 
 def test_linux_remote_supervisor_script_is_valid_bash():

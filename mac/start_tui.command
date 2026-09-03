@@ -24,6 +24,10 @@ else
     osascript -e 'display alert "HASHI Error" message "Python 3 not found.\nPlease run mac/prepare_usb.sh first." as critical'
     exit 1
 fi
+if ! "$PYTHON_EXE" "$ROOT/scripts/check_runtime_contract.py" --code-root "$ROOT"; then
+    osascript -e 'display alert "HASHI Error" message "Python or the dependency generation does not satisfy the HASHI Core runtime contract. Rebuild this installation." as critical'
+    exit 78
+fi
 PID_FILE="$("$PYTHON_EXE" "$ROOT/scripts/resolve_instance_runtime.py" \
     --code-root "$ROOT" --bridge-home "$ROOT" --field pid-path)"
 INSTANCE_ID="$("$PYTHON_EXE" "$ROOT/scripts/resolve_instance_runtime.py" \

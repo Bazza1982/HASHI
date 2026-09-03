@@ -7,9 +7,10 @@ import logging
 import mimetypes
 import socket
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from uuid import uuid4
 
 from aiohttp import web
@@ -68,8 +69,8 @@ from orchestrator.enterprise.scim import (
     scim_user_resource,
 )
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
-from orchestrator.pathing import resolve_path_value
 from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.pathing import resolve_path_value
 from orchestrator.session_store import (
     TERMINAL_RUN_STATES,
     IdempotencyConflict,
@@ -6178,6 +6179,20 @@ class WorkbenchApiServer:
             ),
             "agents": running_agents,
         }
+        runtime = getattr(orchestrator, "runtime_fingerprint", None)
+        if runtime is not None:
+            payload["runtime"] = {
+                "id": runtime.runtime_id,
+                "python": runtime.python,
+                "platform_abi": runtime.platform_abi,
+                "core_api": runtime.core_api,
+                "function_api": runtime.function_api,
+                "dependency_digest": runtime.dependency_digest,
+                "core_source_digest": runtime.core_source_digest,
+            }
+        generation = getattr(orchestrator, "function_generation", None)
+        if isinstance(generation, dict):
+            payload["function_generation"] = dict(generation)
         if self._is_governed_profile():
             payload["enterprise"] = self._enterprise_health_payload()
         return web.json_response(payload)

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 
-from orchestrator import remote_lifecycle
 from orchestrator.bootstrap_logging import AnimMute
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
@@ -89,6 +89,9 @@ class StartupManager:
     async def _ensure_remote_lifecycle(self) -> None:
         root = getattr(getattr(self.kernel, "global_config", None), "project_root", None)
         try:
+            remote_lifecycle = importlib.import_module(
+                "orchestrator.remote_lifecycle"
+            )
             result = await remote_lifecycle.ensure_remote_started(root)
         except Exception as exc:
             bridge_logger.warning("Hashi Remote lifecycle check failed: %s: %s", type(exc).__name__, exc)

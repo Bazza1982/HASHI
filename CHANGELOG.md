@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Core runtime and transactional function generations (HASHI3 pilot)** —
+  made CPython 3.12.x the enforced Core runtime, added executable/platform-ABI/
+  architecture/dependency/Core-source/API fingerprinting, aligned launchers,
+  CI, containers and portable builders, and established a locked standard
+  dependency generation. `/reboot` no longer mutates live module objects with
+  `importlib.reload()`: an isolated process imports the complete active
+  function closure and every registered backend, fresh module objects and the
+  full Manager bundle are prepared off-line, and cutover is committed only
+  after validation. Candidate, target-start and warm-service failures restore
+  the prior code/Manager/Agent generation without a Core restart.
 - **HER v2 Fast/Low Strategy experiment (HASHI3)** — upgraded the compatible
   Triage wire stage to a tool-capable Strategist backed by a versioned external
   38-card Playbook and schema v3. Low effort now passes only the selected Card

@@ -11,9 +11,11 @@ local_doc/
 __pycache__/
 *.pyc
 .venv/
+.venv-wsl/
 
 # Runtime state
 *.lock
+!constraints/standard-py312.lock
 *.pid
 .claw/
 .bridge_u_f.lock

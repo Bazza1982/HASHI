@@ -68,9 +68,8 @@ logger = logging.getLogger("BridgeU.APIGateway")
 SESSION_TTL_SEC = 1800  # 30 minutes
 MAX_EXTERNAL_TOOLS = 128
 MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
-# Keep the server boundary bootstrappable from a live generation that predates
-# the shared multimodal constants. Contract tests pin these values together;
-# once that first hot reload succeeds, the dependency ordering is also current.
+# Request limits are part of the Gateway's public boundary and are verified as
+# one complete function generation before the service is replaced.
 MAX_INLINE_MEDIA_BYTES = 50 * 1024 * 1024
 API_GATEWAY_MAX_REQUEST_BYTES = 256 * 1024 * 1024
 API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0

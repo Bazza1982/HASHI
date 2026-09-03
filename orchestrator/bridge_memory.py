@@ -15,20 +15,15 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from orchestrator.pcm import PCMDocument, load_pcm_document
+from orchestrator.process_resources import path_lock as process_path_lock
 from tools.token_tracker import estimate_tokens as _estimate_tokens
 
 CURRENT_REQUEST_SEPARATOR = "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
 
 sys_prompt_logger = logging.getLogger("BridgeU.SysPrompt")
 memory_logger = logging.getLogger("BridgeU.Memory")
-_SYS_PROMPT_LOCKS_GUARD = globals().get("_SYS_PROMPT_LOCKS_GUARD", threading.Lock())
-_SYS_PROMPT_LOCKS: dict[str, threading.RLock] = globals().get("_SYS_PROMPT_LOCKS", {})
-
-
 def _sys_prompt_path_lock(path: Path) -> threading.RLock:
-    key = str(Path(path).resolve())
-    with _SYS_PROMPT_LOCKS_GUARD:
-        return _SYS_PROMPT_LOCKS.setdefault(key, threading.RLock())
+    return process_path_lock(path)
 
 
 def global_sys_prompt_state_path(global_config: Any) -> Path:
@@ -1177,7 +1172,7 @@ class SysPromptManager:
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
             return self._normalize(payload)
-        except Exception as exc:  # noqa: BLE001 - malformed state must not stop an Agent
+        except Exception as exc:
             sys_prompt_logger.error(
                 "Could not load %s system prompt state from %s: %s",
                 self.scope,

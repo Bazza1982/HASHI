@@ -60,6 +60,7 @@ deployment validation continues.
 ## Active (keep these current)
 
 ### Core references
+- [HASHI_PYTHON_RUNTIME_COMPATIBILITY.md](HASHI_PYTHON_RUNTIME_COMPATIBILITY.md) — normative CPython 3.12.13 Core, ABI/dependency/source fingerprint, transactional function generations, rollback, test and migration contract
 - [HASHI_NATIVE_AUDIO_CHAT_DESIGN.md](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md) — implemented and qualified provider- and terminal-neutral native audio input/output, HER routing, Safe Voice, fallback, retention, and generic frontend Events
 - [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative target design for backend-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval and migration
 - [HER_V2_WIP_JOURNAL.md](HER_V2_WIP_JOURNAL.md) — crash-safe transient unfinished-work context, clear/preserve rules, and lifecycle audit evidence

@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -12,7 +12,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY constraints/standard-py312.lock ./constraints/standard-py312.lock
+RUN pip install --no-cache-dir -r constraints/standard-py312.lock
 
 COPY . .
 RUN if [ -n "$HASHI_ENTERPRISE_EXTRAS" ]; then \

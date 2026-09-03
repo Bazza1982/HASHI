@@ -21,7 +21,7 @@
 
 ### Prerequisites
 - Windows 10/11
-- Python (project-supported version)
+- CPython 3.12.13 (approved Core; source compatibility is 3.12)
 - Node.js + npm
 
 ### Install
@@ -47,7 +47,7 @@
 
 ### Install
 1) Install Homebrew
-2) Install Python + Node
+2) Install approved CPython 3.12.13 + Node
 3) Clone repo
 4) Install dependencies
 
@@ -57,7 +57,7 @@
 
 ### Prerequisites
 - Ubuntu 22.04+ recommended
-- Python3 + venv
+- CPython 3.12.13 + venv
 - Node.js + npm
 
 ### Run
@@ -70,15 +70,23 @@
 For a normal local HASHI installation, use the standard source profile:
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r constraints/standard-py312.lock
 ```
 
-The standard profile includes the core plus media handling, Hashi Remote, and
-the terminal UI. Test packages are deliberately separate:
+`requirements.txt` is the human-maintained dependency input; launch and
+deployment use the generated lock above. The standard profile includes the
+core plus media handling, Hashi Remote, and the terminal UI. Test packages are
+deliberately separate:
 
 ```bash
 python -m pip install -r requirements-dev.txt
 ```
+
+Every launcher checks the interpreter against `[tool.hashi.runtime]` before
+importing HASHI. Linux/WSL uses a separate `.venv-wsl` when the checkout also
+contains a native Windows `.venv`. Do not install or upgrade packages in a
+running Core environment; rebuild the environment and perform a planned Core
+migration instead.
 
 Minimal or specialised environments can install from `pyproject.toml` instead:
 
