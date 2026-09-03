@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.process_execution import is_wsl
+
 
 STATE_FILENAME = "workzone.json"
 WORKZONE_SLOT_IDS = ("main",) + tuple(str(number) for number in range(1, 10))
@@ -42,14 +44,19 @@ def load_workzone(workspace_dir: Path) -> Path | None:
 
 def _normalize_workzone_input(raw_path: str) -> Path:
     raw = str(raw_path or "").strip()
-    drive_match = _WINDOWS_DRIVE_RE.match(raw)
-    if drive_match:
-        drive = drive_match.group(1).lower()
-        rest = drive_match.group(2).replace("\\", "/")
-        return Path("/mnt") / drive / rest
-    unc_match = _WSL_UNC_RE.match(raw)
-    if unc_match:
-        return Path("/") / unc_match.group(1).replace("\\", "/")
+    if os.name == "nt":
+        # Native Windows must retain drive and UNC semantics.  /mnt/<drive>
+        # translation belongs only to an actual WSL process.
+        return Path(raw).expanduser()
+    if is_wsl():
+        drive_match = _WINDOWS_DRIVE_RE.match(raw)
+        if drive_match:
+            drive = drive_match.group(1).lower()
+            rest = drive_match.group(2).replace("\\", "/")
+            return Path("/mnt") / drive / rest
+        unc_match = _WSL_UNC_RE.match(raw)
+        if unc_match:
+            return Path("/") / unc_match.group(1).replace("\\", "/")
     return Path(raw.replace("\\", "/")).expanduser()
 
 

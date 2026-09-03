@@ -102,10 +102,13 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "orchestrator.api_gateway",
         "orchestrator.flexible_backend_manager",
         "orchestrator.multimodal_contract",
+        "orchestrator.her_v2.cognitive_control",
         "orchestrator.her_v2.config",
         "orchestrator.her_v2.prompt_catalog",
         "orchestrator.her_v2.prompts",
         "orchestrator.her_v2.models",
+        "orchestrator.her_v2.session_store",
+        "orchestrator.her_v2.backend_session",
         "orchestrator.her_v2.retry",
         "orchestrator.her_v2.runtime_configuration",
         "orchestrator.her_v2.interfaces",
@@ -136,6 +139,15 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
     assert ordered.index("orchestrator.her_v2.models") < ordered.index(
         "orchestrator.her_v2.interfaces"
     )
+    assert ordered.index("orchestrator.her_v2.cognitive_control") < ordered.index(
+        "adapters.her_v2_provider"
+    )
+    assert ordered.index("orchestrator.her_v2.session_store") < ordered.index(
+        "orchestrator.her_v2.backend_session"
+    )
+    assert ordered.index("orchestrator.her_v2.backend_session") < ordered.index(
+        "adapters.her_v2"
+    )
     assert ordered.index("orchestrator.her_v2.interfaces") < ordered.index(
         "orchestrator.her_v2.runtime"
     )
@@ -163,9 +175,7 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
     assert ordered.index("orchestrator.her_v2.runtime") < ordered.index(
         "adapters.her_v2_provider"
     )
-    assert ordered.index("adapters.her_v2_provider") < ordered.index(
-        "adapters.her_v2"
-    )
+    assert ordered.index("adapters.her_v2_provider") < ordered.index("adapters.her_v2")
     assert ordered.index("adapters.openrouter_api") < ordered.index(
         "adapters.deepseek_api"
     )

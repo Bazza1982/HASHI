@@ -209,6 +209,25 @@ def _global_config(tmp_path):
     )
 
 
+def _strategy_payload(classification: str, goal: str) -> dict[str, object]:
+    work = classification in {"SIMPLE_TASK", "COMPLEX_TASK", "HIGH_VOLUME_TASK"}
+    return {
+        "classification": classification,
+        "real_goal": goal,
+        "selected_strategy_cards": ["SIMPLE_QA"] if work else [],
+        "relevant_habits": [],
+        "execution_brief": {
+            "strategy": "Execute and verify." if work else "",
+            "stages": ["Execute", "Verify"] if work else [],
+            "dependencies": [],
+            "verification": ["Verify the requested outcome"] if work else [],
+            "success_criteria": ["The requested outcome is complete"] if work else [],
+            "replan_conditions": ["Evidence invalidates the approach"] if work else [],
+        },
+        "clarification": None,
+    }
+
+
 class _DirectProvider:
     def __init__(self):
         self.requests = []
@@ -218,12 +237,7 @@ class _DirectProvider:
         if request.stage is Stage.IMMEDIATE_RESPONSE:
             data = {"message": "Hello from HER v2."}
         elif request.stage is Stage.TRIAGE:
-            data = {
-                "classification": "DIRECT_RESPONSE",
-                "real_goal": request.goal,
-                "relevant_habits": [],
-                "clarification": None,
-            }
+            data = _strategy_payload("DIRECT_RESPONSE", request.goal)
         else:
             raise AssertionError(f"unexpected stage: {request.stage}")
         return StageResponse(
@@ -249,6 +263,279 @@ class _ZeroProvider:
             model=profile.model,
             reasoning_trace="direct trace",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_mode", ["fixed", "flex"])
+async def test_adapter_prepares_pre_turn_compaction_accounting_in_both_modes(
+    tmp_path,
+    agent_mode,
+):
+    config = _agent_config(tmp_path)
+    config._her_v2_stage_provider = _DirectProvider()
+    global_config = _global_config(tmp_path)
+    from orchestrator import runtime_session
+
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(
+            agent_mode=agent_mode,
+            current_backend=None,
+        ),
+        _request_meta_by_id={},
+        current_request_meta={},
+        global_config=global_config,
+        config=SimpleNamespace(active_backend="her-v2"),
+        workspace_dir=config.workspace_dir,
+        name=config.name,
+    )
+    outer_session = runtime_session.initialize_runtime_sessions(runtime)
+    request_meta = {
+        "request_id": "request-accounting",
+        "hashi_session_id": outer_session["session_id"],
+        "hashi_message_id": "message-accounting",
+        "context_generation": outer_session["context_generation"],
+        "owner_id": outer_session["owner_id"],
+        "session_workspace": str(
+            runtime_session.ensure_store(runtime).session_workspace(
+                outer_session["session_id"],
+                outer_session["context_generation"],
+            )
+        ),
+    }
+    runtime._request_meta_by_id["request-accounting"] = request_meta
+    runtime.current_request_meta = request_meta
+    config._hashi_runtime = runtime
+    adapter = HERv2Adapter(config, global_config)
+    assert await adapter.initialize() is True
+    runtime.backend_manager.current_backend = adapter
+
+    assert adapter.can_record_maintenance_provider_requests() is False
+    assert adapter.ensure_maintenance_provider_accounting(
+        "request-accounting"
+    ) is True
+    session_id = adapter._session_id
+    assert session_id
+    shell = adapter._session_coordinator.store.session(session_id)
+    assert shell["status"] == "accounting"
+    assert shell["hashi_conversation_id"] == outer_session["session_id"]
+    assert runtime_session.ensure_store(runtime).backend_binding(
+        agent_id=config.name,
+        session_id=outer_session["session_id"],
+        context_generation=outer_session["context_generation"],
+        backend_id="her-v2",
+    ) == session_id
+    assert adapter.can_resume_fixed_session() is False
+    assert adapter._session_id == session_id
+
+    # The preflight is idempotent and retains one shell/session ID.
+    assert adapter.ensure_maintenance_provider_accounting(
+        "request-accounting"
+    ) is True
+    assert adapter._session_id == session_id
+
+    # A later request may replace the adapter's current Session while detached
+    # Compact is settling. The request-bound ledger target must not move.
+    adapter._session_id = "unrelated-later-session"
+    assert adapter.record_maintenance_provider_requests(
+        [
+            {
+                "provider_request_id": f"compact-{agent_mode}",
+                "parent_request_id": "request-accounting",
+                "phase": "compact",
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "input": 10,
+                "output": 2,
+                "compact": True,
+            }
+        ]
+    ) == 1
+    assert adapter._session_coordinator.store.usage_summary(session_id)["total"][
+        "provider_requests"
+    ] == 1
+    adapter._session_id = session_id
+
+
+@pytest.mark.asyncio
+async def test_adapter_fixed_backend_keeps_one_session_and_accepts_incremental_turns(
+    tmp_path,
+):
+    config = _agent_config(tmp_path)
+    provider = _DirectProvider()
+    setattr(config, "_her_v2_stage_provider", provider)
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(agent_mode="fixed"),
+        _request_meta_by_id={},
+        current_request_meta={},
+    )
+    setattr(config, "_hashi_runtime", runtime)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert adapter.capabilities.supports_sessions is True
+    assert await adapter.initialize() is True
+
+    sections = [
+        {
+            "key": "permanent_system",
+            "title": "PERMANENT SYSTEM INSTRUCTIONS",
+            "text": "Follow the permanent policy.",
+            "authority": "permanent_system",
+            "rank": 0,
+            "protected": True,
+            "metadata": {},
+            "order": 0,
+        },
+        {
+            "key": "current_user_request",
+            "title": "CURRENT USER REQUEST",
+            "text": "placeholder",
+            "authority": "current_user",
+            "rank": 3,
+            "protected": True,
+            "metadata": {},
+            "order": 1,
+        },
+    ]
+    prompt_payload = {
+        "transport_snapshot": {"version": 1, "sections": sections}
+    }
+
+    def metadata(request_id):
+        return {
+            "request_id": request_id,
+            "hashi_session_id": "hashi-session-a",
+            "hashi_message_id": f"message-{request_id}",
+            "context_generation": 1,
+            "session_workspace": str(tmp_path / "session-a"),
+        }
+
+    first_meta = metadata("request-1")
+    runtime._request_meta_by_id["request-1"] = first_meta
+    runtime.current_request_meta = first_meta
+    first_transport, first_audit = adapter.prepare_fixed_turn_input(
+        prompt_payload=prompt_payload,
+        user_message="Remember that the colour is blue.",
+        request_id="request-1",
+        request_meta=first_meta,
+    )
+    first_response = await adapter.generate_response(
+        first_transport, "request-1"
+    )
+    session_id = adapter._session_id
+
+    assert first_response.is_success is True
+    assert first_audit["operation"] == "open_session"
+    assert session_id
+    assert first_response.stream_metadata["her_v2"]["fixed_backend"][
+        "session_id"
+    ] == session_id
+
+    second_meta = metadata("request-2")
+    runtime._request_meta_by_id["request-2"] = second_meta
+    runtime.current_request_meta = second_meta
+    second_transport, second_audit = adapter.prepare_fixed_turn_input(
+        prompt_payload=prompt_payload,
+        user_message="What colour did I give you?",
+        request_id="request-2",
+        request_meta=second_meta,
+    )
+
+    assert second_audit["operation"] == "append_turn"
+    assert "Follow the permanent policy." not in second_transport
+    assert "Remember that the colour is blue." not in second_transport
+
+    before = len(provider.requests)
+    second_response = await adapter.generate_response(
+        second_transport, "request-2"
+    )
+    second_goals = [request.goal for _profile, request in provider.requests[before:]]
+
+    assert second_response.is_success is True
+    assert adapter._session_id == session_id
+    assert any("Remember that the colour is blue." in goal for goal in second_goals)
+    assert any(first_response.text in goal for goal in second_goals)
+    assert second_response.stream_metadata["her_v2"]["fixed_backend"][
+        "transport"
+    ]["incremental"] is True
+
+    assert await adapter.handle_new_session() is True
+    assert adapter._session_id is None
+    assert adapter._session_coordinator.store.session(session_id)["status"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_fixed_route_freeze_failure_closes_turn_before_provider_work(
+    tmp_path,
+    monkeypatch,
+):
+    config = _agent_config(tmp_path)
+    provider = _DirectProvider()
+    setattr(config, "_her_v2_stage_provider", provider)
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(agent_mode="fixed"),
+        _request_meta_by_id={},
+        current_request_meta={},
+    )
+    setattr(config, "_hashi_runtime", runtime)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+    sections = [
+        {
+            "key": "permanent_system",
+            "title": "PERMANENT SYSTEM INSTRUCTIONS",
+            "text": "Follow policy.",
+            "authority": "permanent_system",
+            "rank": 0,
+            "protected": True,
+            "metadata": {},
+            "order": 0,
+        },
+        {
+            "key": "current_user_request",
+            "title": "CURRENT USER REQUEST",
+            "text": "placeholder",
+            "authority": "current_user",
+            "rank": 3,
+            "protected": True,
+            "metadata": {},
+            "order": 1,
+        },
+    ]
+    request_meta = {
+        "request_id": "request-route-failure",
+        "hashi_session_id": "hashi-session-route-failure",
+        "hashi_message_id": "message-route-failure",
+        "context_generation": 1,
+        "session_workspace": str(tmp_path / "session-route-failure"),
+    }
+    runtime._request_meta_by_id[request_meta["request_id"]] = request_meta
+    runtime.current_request_meta = request_meta
+    transport, _audit = adapter.prepare_fixed_turn_input(
+        prompt_payload={"transport_snapshot": {"version": 1, "sections": sections}},
+        user_message="Do not reach the Provider.",
+        request_id=request_meta["request_id"],
+        request_meta=request_meta,
+    )
+    payload = json.loads(transport.split("\n", 1)[1])
+
+    def fail_route_freeze(**_kwargs):
+        raise OSError("simulated canonical store failure")
+
+    monkeypatch.setattr(
+        adapter._session_coordinator.store,
+        "freeze_turn_routing",
+        fail_route_freeze,
+    )
+
+    response = await adapter.generate_response(transport, request_meta["request_id"])
+
+    assert response.is_success is False
+    assert response.error_code == ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE.value
+    assert provider.requests == []
+    turn = adapter._session_coordinator.store.turn_by_idempotency(
+        adapter._session_id,
+        payload["initial_turn"]["idempotency_key"],
+    )
+    assert turn["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -423,16 +710,18 @@ class _RetryingMaintenanceProvider:
 
 
 class _WorkAndMeditationProvider(_DirectProvider):
+    def __init__(self, *, strategy_commentary: str = ""):
+        super().__init__()
+        self.strategy_commentary = strategy_commentary
+
     async def invoke(self, profile, request):
         self.requests.append((profile, request))
+        strategy_payload = _strategy_payload("SIMPLE_TASK", request.goal)
+        if self.strategy_commentary:
+            strategy_payload["commentary"] = self.strategy_commentary
         payload = {
             Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
-            Stage.TRIAGE: {
-                "classification": "SIMPLE_TASK",
-                "real_goal": request.goal,
-                "relevant_habits": [],
-                "clarification": None,
-            },
+            Stage.TRIAGE: strategy_payload,
             Stage.EXECUTION: {
                 "disposition": "COMPLETED",
                 "summary": "Verified and completed the requested work.",
@@ -483,12 +772,7 @@ class _SideEffectFailureProvider(_DirectProvider):
         if request.stage is Stage.IMMEDIATE_RESPONSE:
             payload = {"message": "I have it."}
         elif request.stage is Stage.TRIAGE:
-            payload = {
-                "classification": "SIMPLE_TASK",
-                "real_goal": request.goal,
-                "relevant_habits": [],
-                "clarification": None,
-            }
+            payload = _strategy_payload("SIMPLE_TASK", request.goal)
         elif request.stage is Stage.EXECUTION:
             request.provider_activity_callback(
                 {
@@ -519,6 +803,21 @@ class _SideEffectFailureProvider(_DirectProvider):
                 "provider stream ended before completion",
                 code=ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT,
                 human_description=("The provider response began but did not complete."),
+                http_status=400,
+                provider_request_id="gateway-reject-side-effect-1",
+                details={
+                    "tool_call_count": 3,
+                    "tool_loop_count": 3,
+                    "provider_http_failure": {
+                        "response": {
+                            "status": 400,
+                            "body": '{"error":{"code":"invalid_tool_result"}}',
+                        },
+                        "transport_audit_refs": [
+                            "hashi-transport:test:client_response_rejected"
+                        ],
+                    },
+                },
             )
         elif request.stage is Stage.FINALISATION:
             payload = {
@@ -567,12 +866,7 @@ class _EffortPolicyProvider:
             )
         payload = {
             Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
-            Stage.TRIAGE: {
-                "classification": "SIMPLE_TASK",
-                "real_goal": request.goal,
-                "relevant_habits": [],
-                "clarification": None,
-            },
+            Stage.TRIAGE: _strategy_payload("SIMPLE_TASK", request.goal),
             Stage.PLANNING: {
                 "plan": ["Execute the scheduled specification"],
                 "success_criteria": ["The scheduled specification is completed"],
@@ -686,9 +980,6 @@ def test_public_her_alias_resolves_forward_and_claw_id_is_removed():
         "zero",
         "low",
         "medium",
-        "high",
-        "xhigh",
-        "max",
     ]
     assert BACKEND_REGISTRY["her-v2"]["secret_keys"] == []
 
@@ -959,12 +1250,7 @@ async def test_adapter_accepts_primary_execution_natural_language_without_finali
             if request.stage is Stage.IMMEDIATE_RESPONSE:
                 payload = {"message": "I have it."}
             elif request.stage is Stage.TRIAGE:
-                payload = {
-                    "classification": "SIMPLE_TASK",
-                    "real_goal": request.goal,
-                    "relevant_habits": [],
-                    "clarification": None,
-                }
+                payload = _strategy_payload("SIMPLE_TASK", request.goal)
             elif request.stage is Stage.EXECUTION:
                 return StageResponse(
                     text="execution reply without valid JSON",
@@ -1032,12 +1318,24 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
     recovery_code = ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
     assert response.is_success is False
     assert response.error_code == primary_code
+    assert response.http_status == 400
+    assert response.provider_request_id == "gateway-reject-side-effect-1"
+    assert response.side_effects_possible is True
+    assert response.tool_call_count == 3
+    assert response.tool_loop_count == 3
     assert primary_code in response.error
     assert primary_code in response.text
     assert recovery_code in response.text
     assert "Foreground cleanup:" in response.text
     chain = response.stream_metadata["her_v2"]["failure_chain"]
     assert chain["primary_failure"]["code"] == primary_code
+    assert chain["primary_failure"]["http_status"] == 400
+    assert chain["primary_failure"]["provider_request_id"] == (
+        "gateway-reject-side-effect-1"
+    )
+    assert chain["primary_failure"]["details"]["provider_http_failure"][
+        "response"
+    ]["body"] == '{"error":{"code":"invalid_tool_result"}}'
     assert chain["recovery_decision"]["code"] == recovery_code
     assert chain["recovery_decision"]["automatic_replay_attempted"] is False
     assert chain["foreground_cleanup"]["status"] == "terminated"
@@ -1061,10 +1359,15 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
 
 
 @pytest.mark.asyncio
-async def test_adapter_packages_only_structured_stage_commentary_before_delivery(
+async def test_adapter_delivers_stage_authored_strategy_commentary_without_repackaging(
     tmp_path,
 ):
-    provider = _WorkAndMeditationProvider()
+    strategy_commentary = (
+        "Captain, the verified strategy is ready; execution comes next."
+    )
+    provider = _WorkAndMeditationProvider(
+        strategy_commentary=strategy_commentary
+    )
     packager = _StaticPersonaPackager()
     config = _agent_config(tmp_path, effort="low")
     setattr(config, "_her_v2_stage_provider", provider)
@@ -1083,12 +1386,11 @@ async def test_adapter_packages_only_structured_stage_commentary_before_delivery
     assert response.is_success is True
     commentary = [event for event in events if event.kind == KIND_COMMENTARY]
     assert [(event.phase, event.provenance) for event in commentary] == [
-        ("execution", "persona_packager"),
+        ("triage", "stage_authored_persona"),
     ]
     assert commentary[0].detail == "persona_packaging_fallback=false"
-    assert [(item.stage, item.text) for item in packager.commentaries] == [
-        (Stage.EXECUTION, "The requested work is verified and complete."),
-    ]
+    assert commentary[0].summary == strategy_commentary
+    assert packager.commentaries == []
 
 
 @pytest.mark.asyncio
@@ -1723,6 +2025,50 @@ class _FakeManager:
         return backend
 
 
+class _ControlledForegroundToolBackend(_FakeBackend):
+    def __init__(self, system_md=None):
+        super().__init__(system_md)
+        self.tool_started = asyncio.Event()
+        self.release_tool = asyncio.Event()
+
+    async def generate_response(
+        self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+    ):
+        del request_id, is_retry, silent
+        self.prompt = prompt
+        await on_stream_event(
+            StreamEvent(
+                kind=KIND_THINKING,
+                raw_delta="preparing foreground work",
+                summary="preparing foreground work",
+            )
+        )
+        await on_stream_event(
+            StreamEvent(
+                kind=KIND_TOOL_START,
+                summary="foreground tool is running",
+                tool_name="bash",
+            )
+        )
+        self.tool_started.set()
+        await self.release_tool.wait()
+        return BackendResponse(
+            text='{"disposition":"COMPLETED","summary":"done"}',
+            duration_ms=1,
+            tool_call_count=1,
+            tool_loop_count=1,
+        )
+
+
+class _ControlledForegroundToolManager(_FakeManager):
+    def create_ephemeral_backend(self, engine, target_model=None):
+        assert engine == "openrouter-api"
+        assert target_model == "configured/model"
+        backend = _ControlledForegroundToolBackend(self.system_md)
+        self.backends.append(backend)
+        return backend
+
+
 class _CommentaryFakeBackend(_FakeBackend):
     async def generate_response(
         self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
@@ -1885,6 +2231,98 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
     )
 
 
+@pytest.mark.asyncio
+async def test_stage_provider_does_not_wrap_foreground_tool_in_absolute_timeout(
+    monkeypatch,
+):
+    manager = _ControlledForegroundToolManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    profile = ProviderProfile(
+        "execution",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-high",
+    )
+    installed_deadlines = []
+    original_timeout = getattr(asyncio, "timeout", None)
+
+    def observe_absolute_timeout(delay):
+        installed_deadlines.append(delay)
+        if original_timeout is None:
+            raise AssertionError("asyncio.timeout is unavailable on Python 3.10")
+        return original_timeout(delay)
+
+    monkeypatch.setattr(
+        asyncio,
+        "timeout",
+        observe_absolute_timeout,
+        raising=False,
+    )
+    invocation = asyncio.create_task(
+        provider.invoke(
+            profile,
+            _stage_request(
+                Stage.EXECUTION,
+                allow_tools=True,
+                allow_side_effects=True,
+            ),
+        )
+    )
+
+    await asyncio.sleep(0)
+    backend = manager.backends[0]
+    await asyncio.wait_for(backend.tool_started.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+
+    assert invocation.done() is False
+    assert installed_deadlines == []
+
+    backend.release_tool.set()
+    response = await asyncio.wait_for(invocation, timeout=1)
+
+    assert json.loads(response.text)["disposition"] == "COMPLETED"
+    assert response.reasoning_trace == "preparing foreground work"
+    assert backend.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_still_cleans_up_active_foreground_tool():
+    manager = _ControlledForegroundToolManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    invocation = asyncio.create_task(
+        provider.invoke(
+            ProviderProfile(
+                "execution",
+                "openrouter-api",
+                "configured/model",
+            ),
+            _stage_request(
+                Stage.EXECUTION,
+                allow_tools=True,
+                allow_side_effects=True,
+            ),
+        )
+    )
+
+    await asyncio.sleep(0)
+    backend = manager.backends[0]
+    await asyncio.wait_for(backend.tool_started.wait(), timeout=1)
+    invocation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert backend.release_tool.is_set() is False
+    assert backend.shutdown_called is True
+    assert provider.interrupt_nowait("after-cancel") == 0
+
+
 def _adapter_replan_outcome(*, completion_percent: int = 50) -> ReplanningOutcome:
     return ReplanningOutcome(
         plan={
@@ -1994,7 +2432,7 @@ async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
+async def test_strategy_receives_complete_policy_and_minimal_turn_prompt():
     manager = _FakeManager()
     provider = HashiStageProvider(backend_manager=manager)
     profile = ProviderProfile(
@@ -2018,7 +2456,7 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
     await provider.invoke(profile, request)
 
     backend = manager.backends[-1]
-    assert "triage classifier and context preparation agent" in backend.sys_prompt
+    assert "You are the task strategist" in backend.sys_prompt
     assert "configured agent persona" not in backend.sys_prompt
     assert "Original user request and context" in backend.sys_prompt
     assert "Earlier context already contains the result. Please check it." in (
@@ -2043,6 +2481,8 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
         assert decision_boundary in backend.sys_prompt
     assert "Return exactly one valid JSON object" in backend.sys_prompt
     assert '"real_goal"' in backend.sys_prompt
+    assert '"selected_strategy_cards"' in backend.sys_prompt
+    assert '"execution_brief"' in backend.sys_prompt
     assert '"relevant_habits"' in backend.sys_prompt
     assert "checkpoint_policy" not in backend.sys_prompt
     assert "checkpoint_reason" not in backend.sys_prompt
@@ -2520,6 +2960,11 @@ async def test_hashi_stage_provider_installs_full_direct_contract_and_tools():
             "plan_id": None,
             "context": {
                 "habit_catalogue": ["Verify before reporting success."],
+                "strategy_playbook": {
+                    "playbook_version": "test-v1",
+                    "sha256": "sha256:test",
+                    "cards": [{"id": "TEST_QA"}],
+                },
                 "skills_catalogue": [
                     {
                         "id": "reports",
@@ -2549,6 +2994,8 @@ async def test_hashi_stage_provider_installs_full_direct_contract_and_tools():
     assert '"name": "file_write"' in backend.sys_prompt
     assert '"id": "reports"' in backend.sys_prompt
     assert "Verify before reporting success." in backend.sys_prompt
+    assert "Direct Strategy Playbook self-selection" in backend.sys_prompt
+    assert '"id": "TEST_QA"' in backend.sys_prompt
     assert backend.tool_registry.is_allowed("file_write") is True
     assert backend.tool_registry.max_loops is None
     assert backend.config.extra["reasoning_effort"] == "high"
@@ -3364,7 +3811,7 @@ async def test_hashi_stage_provider_rejects_tool_backend_without_isolation_capab
 
     manager = CapabilityManager()
     provider = HashiStageProvider(backend_manager=manager)
-    profile = ProviderProfile("premium", "codex-cli", "gpt-configured")
+    profile = ProviderProfile("premium", "openrouter-api", "model-configured")
 
     with pytest.raises(StageInvocationError, match="cannot prove HASHI tool isolation"):
         await provider.invoke(
@@ -3372,6 +3819,24 @@ async def test_hashi_stage_provider_rejects_tool_backend_without_isolation_capab
             _stage_request(Stage.EXECUTION, allow_tools=True),
         )
     assert manager.backends[0].shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_never_selects_codex_as_internal_provider():
+    class Manager:
+        def create_ephemeral_backend(self, *_args, **_kwargs):
+            raise AssertionError("Codex backend construction must not be reached")
+
+    provider = HashiStageProvider(backend_manager=Manager())
+    profile = ProviderProfile("premium", "codex-cli", "gpt-configured")
+
+    with pytest.raises(StageInvocationError, match="separate HASHI backend") as caught:
+        await provider.invoke(
+            profile,
+            _stage_request(Stage.EXECUTION, allow_tools=True),
+        )
+
+    assert caught.value.code is ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
 
 
 @pytest.mark.asyncio

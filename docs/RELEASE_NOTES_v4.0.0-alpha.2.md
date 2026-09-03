@@ -7,21 +7,41 @@ into a clean-room, provider-neutral Python orchestration runtime. The retired
 HER v1 Rust executable, packaged binaries, and rebuild workflow are no longer
 reachable; `her` resolves forward to `her-v2`.
 
-The independent Enterprise AAI package line remains
-`v0.1.0-alpha.1` / `0.1.0a1`; this document describes the broader HASHI v4
-platform line.
+This release candidate is the single current repository and package line.
+Enterprise AAI `v0.1.0-alpha.1` remains a historical tagged milestone whose
+governance scope and known limits are carried forward here, not a parallel
+active version.
+
+> **Architecture note (2026-09-01):** this is a historical release-candidate
+> record, subordinate to the current
+> [HASHI System Architecture](../ARCHITECTURE.md). HER v2 is an Engine
+> (Harness) Provider selected by PAO; an unqualified Provider inside HER means a
+> Model Provider. The implemented fixed HER Engine Session control plane is now
+> canonical recovery authority, while the WIP Journal is shadow compatibility
+> evidence.
+
+> **Product-surface update (2026-08-31):** HER v2 now exposes only Direct
+> (`zero`), Strategic (`low`), and Planned (`medium`). The higher-mode sections
+> in these notes describe retained dormant implementation and regression
+> evidence, not selectable production modes. See
+> [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md).
+
+> **Agent working-mode update (2026-09-01):** Fixed is now the default for
+> session-capable backends, and Flex remains the explicit backend-switching
+> mode. Wrapper, Audit, and Dual-brain are no longer selectable. Persisted
+> legacy values migrate safely to Fixed or Flex while their historical
+> configuration blocks remain intact. See
+> [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
 
 ## Why This Is a Significant HER Update
 
 HER v2 is HASHI-owned orchestration over provider, tool, delivery, and audit
 interfaces. Its release contract includes:
 
-- six task-matched execution modes using stable `zero` through `max` wire
-  values;
-- compulsory Adaptive-or-above Replanning at each 10-result or 300-second safe
-  boundary, independent of immutable Triage risk metadata;
-- adaptive Planning and Replanning, tool-backed independent Review, and
-  comprehensive latest-state Verification;
+- three task-matched production execution modes using stable `zero`, `low`, and
+  `medium` wire values;
+- retained but non-public Replanning, Review, and Verification internals whose
+  future product design is postponed;
 - hard evidence receipts that reject paper-only, fabricated, stale,
   cross-stage, incomplete, and failed passing claims;
 - configured recipes or direct argv checks in the authoritative workspace with
@@ -53,16 +73,19 @@ compatible.
 | Display name | Wire value | Execution contract |
 | --- | --- | --- |
 | Direct | `zero` | One fully capable Quick-model agent at default provider reasoning `high`; no other HER stage and no automatic effort upgrade |
-| Fast path | `low` | Direct Execution without formal Planning |
-| Planned | `medium` | Planning followed by Execution |
-| Adaptive | `high` | Planning and Execution with compulsory Replanning every 10 completed results or 300 seconds at a safe boundary |
-| Reviewed | `xhigh` | Adaptive path plus one independent read-only Review; a failed Review permits one Primary-Agent remediation and one closure Review |
-| Assured | `max` | Reviewed path plus comprehensive Verification of the latest state, with at most three Verification attempts and remediation between failed checks |
+| Strategic | `low` | Strategy and selected Cards followed by fully capable Execution, without formal Planning |
+| Planned | `medium` | No-tool Strategy, read-only Planning, then fully capable Execution |
 
-`/effort direct`, `/effort reviewed`, and `/effort assured` are accepted aliases
-and persist as `zero`, `xhigh`, and `max`. Fast path, Planned, and Adaptive
-aliases normalize in the same way. Non-HER backends retain their established
+`/effort direct`, `/effort strategic`, and `/effort planned` persist as `zero`,
+`low`, and `medium`. Legacy aliases `fast` and `fast_path` select Strategic.
+Saved `high`, `xhigh`, or `max` values migrate to Planned; Adaptive, Reviewed,
+and Assured cannot be newly selected. Non-HER Engines retain their established
 reasoning-effort UI.
+
+### Dormant higher-mode implementation record
+
+The following Review and Verification material records retained dormant code
+and regression evidence. It is not part of the selectable release surface.
 
 Review is read-only; Verification has validation-only workspace authority.
 Passing or failing findings require completed receipts from the exact current

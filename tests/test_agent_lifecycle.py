@@ -1,9 +1,12 @@
 import asyncio
+from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
 
 from orchestrator.agent_lifecycle import AgentLifecycleManager
+from orchestrator.request_activity import RequestActivityStore
+from orchestrator.session_store import SessionStore
 
 
 class DummyRuntime:
@@ -82,6 +85,114 @@ async def test_stop_agent_times_out_without_removing_still_running_runtime(monke
     assert kernel.runtimes == [runtime]
     release_shutdown.set()
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_stop_agent_terminalizes_durable_run_and_live_activity(tmp_path):
+    runtime = DummyRuntime("alpha")
+    runtime.session_store = SessionStore(
+        tmp_path / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    runtime.request_activity = RequestActivityStore()
+    session = runtime.session_store.ensure_default_session(
+        owner_id="user:7",
+        agent_id=runtime.name,
+    )
+    accepted = runtime.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id=runtime.name,
+        request_id="req-active-at-stop",
+        text="active work",
+        source="api",
+        idempotency_key="active-at-stop",
+    )
+    runtime.session_store.mark_request_running(
+        accepted.request_id,
+        worker_id="runtime-before-stop",
+    )
+    runtime.request_activity.start(accepted.request_id, source="api")
+    runtime.request_activity.mark_running(accepted.request_id)
+    kernel = DummyKernel([runtime])
+    manager = AgentLifecycleManager(kernel)
+
+    ok, _message = await manager.stop_agent(runtime.name, reason="hot-restart:min")
+
+    assert ok is True
+    run = runtime.session_store.get_run(accepted.run_id, owner_id="user:7")
+    assert run["state"] == "interrupted"
+    assert run["error_code"] == "runtime_restart_interrupted"
+    activity = runtime.request_activity.poll(accepted.request_id)
+    assert activity["terminal"] is True
+    assert activity["success"] is False
+    assert kernel.runtimes == []
+
+
+@pytest.mark.asyncio
+async def test_start_agent_reconciles_stale_run_before_replacement_accepts_work(
+    tmp_path,
+    monkeypatch,
+):
+    class StartKernel(DummyKernel):
+        def __init__(self):
+            super().__init__([])
+            self._agent_locks = {}
+            self.whatsapp = None
+
+        def _agent_lock(self, name):
+            return self._agent_locks.setdefault(name, asyncio.Lock())
+
+        def _load_config_bundle(self):
+            return (
+                SimpleNamespace(),
+                [SimpleNamespace(name="alpha")],
+                {},
+            )
+
+    class ReplacementRuntime(DummyRuntime):
+        def __init__(self, store):
+            super().__init__("alpha")
+            self.session_store = store
+            self.request_activity = RequestActivityStore()
+            self.telegram_connected = False
+
+        async def process_queue(self):
+            await asyncio.Event().wait()
+
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="alpha")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="alpha",
+        request_id="req-stale-before-start",
+        text="lost with old runtime",
+        source="api",
+        idempotency_key="stale-before-start",
+    )
+    store.mark_request_running(
+        accepted.request_id,
+        worker_id="old-runtime",
+    )
+    runtime = ReplacementRuntime(store)
+    kernel = StartKernel()
+    manager = AgentLifecycleManager(kernel)
+    monkeypatch.setattr(manager, "build_runtime", lambda *_args: runtime)
+
+    async def start_runtime(_runtime):
+        return True, "Started agent 'alpha'."
+
+    monkeypatch.setattr(manager, "start_runtime", start_runtime)
+
+    ok, _message = await manager.start_agent("alpha")
+
+    assert ok is True
+    assert store.get_run(accepted.run_id, owner_id="user:7")["state"] == "interrupted"
+    assert kernel.runtimes == [runtime]
+    runtime.process_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await runtime.process_task
 
 
 @pytest.mark.asyncio

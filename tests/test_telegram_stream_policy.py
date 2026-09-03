@@ -249,6 +249,121 @@ async def test_typing_command_does_not_change_verbose_or_think_preferences(tmp_p
     assert runtime._think is False
 
 
+def _display_command_runtime(tmp_path):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.workspace_dir = tmp_path / "workspaces" / "zelda"
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    runtime.config = SimpleNamespace(active_backend="her-v2", extra={})
+    runtime.backend_manager = SimpleNamespace(
+        current_backend=SimpleNamespace(
+            effort="medium",
+            capabilities=SimpleNamespace(
+                supports_progress_stream=True,
+                supports_tool_stream=True,
+                supports_thinking_stream=True,
+                supports_commentary_stream=True,
+            ),
+        )
+    )
+    runtime._verbose = True
+    runtime._think = False
+    runtime._commentary = True
+    runtime._think_buffer = []
+    runtime._openrouter_think_chunk = ""
+    runtime._last_openrouter_think_snippet = None
+    runtime._is_authorized_user = lambda _user_id: True
+    runtime._display_preference_events = set()
+    return runtime
+
+
+@pytest.mark.asyncio
+async def test_bare_display_commands_only_open_their_menus(tmp_path):
+    runtime = _display_command_runtime(tmp_path)
+    (runtime.workspace_dir / ".think_off").touch()
+    preference_event = asyncio.Event()
+    runtime._display_preference_events.add(preference_event)
+    replies = []
+
+    async def _reply_text(_update, text, **kwargs):
+        replies.append((text, kwargs))
+
+    runtime._reply_text = _reply_text
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
+
+    await FlexibleAgentRuntime.cmd_verbose(
+        runtime,
+        update,
+        SimpleNamespace(args=[]),
+    )
+    await FlexibleAgentRuntime.cmd_think(
+        runtime,
+        update,
+        SimpleNamespace(args=[]),
+    )
+    await FlexibleAgentRuntime.cmd_commentary(
+        runtime,
+        update,
+        SimpleNamespace(args=[]),
+    )
+
+    assert (runtime._verbose, runtime._think, runtime._commentary) == (
+        True,
+        False,
+        True,
+    )
+    assert not (runtime.workspace_dir / ".verbose_off").exists()
+    assert (runtime.workspace_dir / ".think_off").exists()
+    assert not (runtime.workspace_dir / ".commentary_off").exists()
+    assert not preference_event.is_set()
+    assert len(replies) == 3
+    assert all(reply_markup["reply_markup"] is not None for _, reply_markup in replies)
+
+
+@pytest.mark.asyncio
+async def test_display_menu_selections_update_live_state_and_wake_current_turn(tmp_path):
+    runtime = _display_command_runtime(tmp_path)
+    preference_event = asyncio.Event()
+    runtime._display_preference_events.add(preference_event)
+    edits = []
+    answers = []
+
+    async def edit_message_text(text, **kwargs):
+        edits.append((text, kwargs))
+
+    async def answer(text=None, **kwargs):
+        answers.append((text, kwargs))
+
+    async def select(data):
+        preference_event.clear()
+        query = SimpleNamespace(
+            data=data,
+            from_user=SimpleNamespace(id=1),
+            edit_message_text=edit_message_text,
+            answer=answer,
+        )
+        await FlexibleAgentRuntime.callback_toggle(
+            runtime,
+            SimpleNamespace(callback_query=query),
+            SimpleNamespace(),
+        )
+        assert preference_event.is_set()
+
+    await select("tgl:verbose:off")
+    await select("tgl:think:on")
+    await select("tgl:commentary:off")
+
+    assert (runtime._verbose, runtime._think, runtime._commentary) == (
+        False,
+        True,
+        False,
+    )
+    assert (runtime.workspace_dir / ".verbose_off").exists()
+    assert not (runtime.workspace_dir / ".think_off").exists()
+    assert (runtime.workspace_dir / ".commentary_off").exists()
+    assert len(edits) == 3
+    assert len(answers) == 3
+
+
 @pytest.mark.asyncio
 async def test_her_commentary_command_persists_without_changing_think_or_verbose(tmp_path):
     runtime = object.__new__(FlexibleAgentRuntime)
@@ -474,6 +589,50 @@ async def test_verbose_stream_display_drains_review_event_during_stop(tmp_path):
     assert edits
     assert "Review passed" in edits[-1]["text"]
     assert "Completed" in edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_verbose_off_drops_pending_events_instead_of_rendering_on_stop(tmp_path):
+    edits = []
+
+    class Bot:
+        async def edit_message_text(self, **kwargs):
+            edits.append(kwargs)
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        workspace_dir=tmp_path / "workspaces" / "zelda",
+        config=SimpleNamespace(
+            active_backend="her-v2",
+            extra={"answer_stream_edit_interval_s": 0.01},
+        ),
+        telegram_connected=True,
+        app=SimpleNamespace(bot=Bot()),
+        telegram_logger=SimpleNamespace(
+            info=lambda _message: None,
+            warning=lambda _message: None,
+        ),
+        _verbose=False,
+    )
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    event_queue = asyncio.Queue()
+    await event_queue.put(
+        StreamEvent(kind=KIND_PROGRESS, summary="must stay hidden after Off")
+    )
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    await FlexibleAgentRuntime._streaming_display_loop(
+        runtime,
+        123,
+        SimpleNamespace(message_id=77),
+        "req-off-boundary",
+        stop_event,
+        event_queue,
+    )
+
+    assert edits == []
+    assert event_queue.empty()
 
 
 @pytest.mark.asyncio

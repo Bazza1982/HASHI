@@ -1,12 +1,16 @@
 import json
 import logging
+import os
 from pathlib import Path
 
 import pytest
 
+from orchestrator import config as config_module
 from orchestrator.config import (
     LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
+    SESSION_MODE_BACKENDS,
     ConfigManager,
+    resolve_access_root,
 )
 from orchestrator.flexible_backend_registry import normalize_allowed_backends
 from orchestrator.her_v2.config import HERv2Config
@@ -15,6 +19,27 @@ from orchestrator.pcm import load_pcm_document
 
 ROOT = Path(__file__).resolve().parent.parent
 CORE_HER_V2_PROVIDERS = {"hashi-api", "deepseek-api", "openrouter-api"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="WSL mount-scope contract")
+def test_wsl_drive_scope_resolves_only_the_mounted_windows_drive(monkeypatch):
+    monkeypatch.setattr(config_module, "is_wsl", lambda: True)
+
+    project_drive = resolve_access_root(
+        "drive",
+        Path("/home/operator/.hashi/workspaces/agent"),
+        Path("/mnt/c/Users/operator/project"),
+    )
+    workspace_drive = resolve_access_root(
+        "drive",
+        Path("/mnt/d/HASHI/workspaces/agent"),
+        Path("/home/operator/HASHI"),
+    )
+
+    assert project_drive == Path("/mnt/c")
+    assert workspace_drive == Path("/mnt/d")
+    assert project_drive != Path("/")
+    assert workspace_drive != Path("/")
 
 
 def _materialize_legacy_pcm(config_path, root):
@@ -131,6 +156,29 @@ def test_explicit_fixed_session_agent_keeps_fixed_working_mode(tmp_path, caplog)
     assert "default_mode=fixed" in caplog.text
 
 
+def test_her_v2_defaults_to_fixed_as_a_session_backend(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "strategic",
+            "type": "flex",
+            "workspace_dir": "workspaces/strategic",
+            "system_md": "workspaces/strategic/agent.md",
+            "allowed_backends": [
+                {"engine": "her-v2", "model": "role-configured"}
+            ],
+            "active_backend": "her-v2",
+        },
+    )
+
+    _, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+
+    assert agents[0].active_backend == "her-v2"
+    assert agents[0].default_mode == "fixed"
+
+
 def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
     config_path, secrets_path = _write_base_files(
         tmp_path,
@@ -148,7 +196,45 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
         _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
     assert agents[0].type == "flex"
+    assert agents[0].default_mode == "flex"
     assert "has no explicit type" not in caplog.text
+
+
+@pytest.mark.parametrize("default_mode", ["wrapper", "audit", "dual-brain"])
+def test_retired_default_mode_is_rejected(tmp_path, default_mode):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "retired-mode",
+            "type": "flex",
+            "workspace_dir": "workspaces/retired-mode",
+            "allowed_backends": [{"engine": "codex-cli", "model": "gpt-5.4"}],
+            "active_backend": "codex-cli",
+            "default_mode": default_mode,
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported default_mode"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+
+def test_fixed_default_mode_is_rejected_for_stateless_backend(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "stateless-fixed",
+            "type": "flex",
+            "workspace_dir": "workspaces/stateless-fixed",
+            "allowed_backends": [
+                {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"}
+            ],
+            "active_backend": "gemini-cli",
+            "default_mode": "fixed",
+        },
+    )
+
+    with pytest.raises(ValueError, match="stateless backend 'gemini-cli'"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
 
 def test_public_her_configuration_id_resolves_forward_to_v2(tmp_path):
@@ -242,6 +328,13 @@ def test_agents_sample_has_valid_her_v2_core_providers():
     her_entries = []
 
     for agent in sample["agents"]:
+        if agent.get("type") == "flex":
+            expected_mode = (
+                "fixed"
+                if agent.get("active_backend") in SESSION_MODE_BACKENDS
+                else "flex"
+            )
+            assert agent.get("default_mode") == expected_mode
         assert all(
             backend.get("engine") != "her"
             for backend in agent.get("allowed_backends", [])

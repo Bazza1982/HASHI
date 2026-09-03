@@ -17,7 +17,7 @@ The design goal is concise continuity:
 
 Execution mode and continuity are separate:
 
-- `/mode` selects `flex`, `fixed`, `wrapper`, `audit`, or `dual-brain`;
+- `/mode` selects `fixed` or `flex`;
 - `/memory plus on|off` enables or pauses Memory+ continuity;
 - `/mode memory+` remains a compatibility alias that enables Memory+ without
   changing the current execution mode.

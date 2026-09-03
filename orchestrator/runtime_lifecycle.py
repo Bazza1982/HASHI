@@ -224,6 +224,16 @@ async def shutdown(runtime: Any) -> None:
         )
         and clean
     )
+    control_lane = getattr(runtime, "control_lane", None)
+    if control_lane is not None:
+        clean = (
+            await _run_shutdown_step(
+                runtime,
+                asyncio.to_thread(control_lane.close),
+                label="agent-control-lane",
+            )
+            and clean
+        )
 
     if runtime.startup_success:
         for label, action, timeout_s in (
@@ -256,6 +266,17 @@ async def shutdown(runtime: Any) -> None:
         if clean:
             runtime.logger.info("Telegram app shut down cleanly.")
 
+    canonical_audit_buffer = getattr(runtime, "canonical_audit_buffer", None)
+    if canonical_audit_buffer is not None:
+        clean = (
+            await _run_shutdown_step(
+                runtime,
+                asyncio.to_thread(canonical_audit_buffer.close),
+                label="canonical-audit-buffer",
+            )
+            and clean
+        )
+
     runtime._mark_runtime_shutdown(clean=clean)
     if not clean:
         raise RuntimeError(
@@ -268,6 +289,8 @@ async def process_queue(runtime: Any) -> None:
     runtime.logger.info("Flex queue processor started.")
     while True:
         item = None
+        feedback = None
+        feedback_cleaned = False
         try:
             item = await runtime.queue.get()
             if not item.prompt or not item.prompt.strip():
@@ -353,11 +376,24 @@ async def process_queue(runtime: Any) -> None:
                     feedback.answer_preview_task,
                     label="answer-preview-detach",
                 )
+                await runtime_pipeline.settle_interactive_feedback_task(
+                    runtime,
+                    feedback.think_flush_task,
+                    label="thinking-flush-detach",
+                    cancel_first=True,
+                )
+                runtime_pipeline.release_display_preference_event(
+                    runtime,
+                    feedback.preference_event,
+                )
                 setattr(item, "_audit_collector", audit_collector)
                 setattr(item, "_her_message_router", feedback.her_message_router)
                 status_placeholder = feedback.placeholder
                 if feedback.verbose_display_state is not None:
-                    status_placeholder = feedback.verbose_display_state.current_message
+                    if feedback.verbose_display_state.current_message is not None:
+                        status_placeholder = feedback.verbose_display_state.current_message
+                    elif feedback.verbose_display_state.ever_activated:
+                        status_placeholder = None
                 if (
                     feedback.answer_stream_state is not None
                     and feedback.answer_stream_state.has_text
@@ -376,6 +412,8 @@ async def process_queue(runtime: Any) -> None:
                     f"(threshold={generation.detach_after_s}s, backend={runtime.config.active_backend})"
                 )
                 runtime._log_maintenance(item, "bg_detached", detach_after_s=generation.detach_after_s)
+                feedback_cleaned = True
+                feedback = None
                 continue
 
             recovered = await runtime_pipeline.recover_typed_context_capacity_rejection(
@@ -408,12 +446,14 @@ async def process_queue(runtime: Any) -> None:
                 think_flush_task=feedback.think_flush_task,
                 placeholder=feedback.placeholder,
                 verbose_display_state=feedback.verbose_display_state,
+                preference_event=feedback.preference_event,
                 delete_placeholder=not (
                     response.is_success
                     and bool(response.text)
                     and feedback.answer_stream_state is not None
                 ),
             )
+            feedback_cleaned = True
 
             has_deliverable_content = runtime_pipeline.response_has_deliverable_content(
                 response
@@ -538,6 +578,29 @@ async def process_queue(runtime: Any) -> None:
             runtime.error_logger.exception(f"Error in flex queue processing: {exc}")
             runtime.is_generating = False
         finally:
+            if (
+                feedback is not None
+                and not feedback_cleaned
+                and item is not None
+            ):
+                try:
+                    await runtime_pipeline.cleanup_interactive_feedback(
+                        runtime,
+                        item,
+                        stop_typing=feedback.stop_typing,
+                        typing_task=feedback.typing_task,
+                        escalation_task=feedback.escalation_task,
+                        answer_preview_task=feedback.answer_preview_task,
+                        think_flush_task=feedback.think_flush_task,
+                        placeholder=feedback.placeholder,
+                        verbose_display_state=feedback.verbose_display_state,
+                        preference_event=feedback.preference_event,
+                    )
+                except Exception as cleanup_exc:
+                    runtime.error_logger.warning(
+                        "Interactive feedback emergency cleanup failed: "
+                        f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                    )
             if item is not None:
                 background_ids = getattr(runtime, "_background_request_ids", set())
                 if item.request_id not in background_ids:

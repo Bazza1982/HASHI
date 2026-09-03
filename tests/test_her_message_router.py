@@ -110,6 +110,61 @@ async def test_all_toggle_combinations_present_each_event_id_once(
 
 
 @pytest.mark.asyncio
+async def test_live_commentary_toggle_applies_only_to_events_after_selection():
+    enabled = False
+    presented = []
+    persisted = []
+
+    async def present(event):
+        presented.append(event.event_id)
+
+    async def persist(event):
+        persisted.append(event.event_id)
+
+    router = HERMessageRouter(
+        request_id="req-live-commentary",
+        logger=SimpleNamespace(
+            info=lambda _message: None,
+            warning=lambda _message: None,
+        ),
+        commentary_presenter=present,
+        commentary_enabled=lambda: enabled,
+        persist_event=persist,
+    )
+
+    await router.route(
+        _event(
+            DELIVERY_USER_COMMENTARY,
+            "req-live-commentary:before-on",
+            kind=KIND_COMMENTARY,
+        )
+    )
+    enabled = True
+    await router.route(
+        _event(
+            DELIVERY_USER_COMMENTARY,
+            "req-live-commentary:after-on",
+            kind=KIND_COMMENTARY,
+        )
+    )
+    enabled = False
+    await router.route(
+        _event(
+            DELIVERY_USER_COMMENTARY,
+            "req-live-commentary:after-off",
+            kind=KIND_COMMENTARY,
+        )
+    )
+
+    assert presented == ["req-live-commentary:after-on"]
+    assert persisted == [
+        "req-live-commentary:before-on",
+        "req-live-commentary:after-on",
+        "req-live-commentary:after-off",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_required_control_bypasses_all_optional_toggles():
     presented = []
     router = HERMessageRouter(

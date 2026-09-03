@@ -11,7 +11,7 @@ import wave
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 from uuid import uuid4
 
 import httpx
@@ -88,6 +88,17 @@ _REASONING_EFFORT_VALUES = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
 _MEDIA_FALLBACK_TOOL_NAMES = frozenset({"media_read", "vision_inspect"})
+
+
+class ProviderCallObserverError(RuntimeError):
+    """A durable per-request observer failed after a real Provider call.
+
+    Adapters must let this escape unchanged instead of converting it into a
+    Provider failure response or retrying the already completed request.
+    """
+
+
+ProviderCallObserver = Callable[[Mapping[str, Any]], None]
 
 
 def _argument_string_values(value: Any) -> set[str]:
@@ -219,6 +230,10 @@ class _APIResult:
     structured_data: dict[str, Any] | None = None
     audio_bytes: bytes = b""
     audio_transcript: str = ""
+    # Provider-reported prompt-cache accounting.  ``None`` means the
+    # provider did not report the field; zero remains a real observation.
+    prompt_cache_hit_tokens: int | None = None
+    prompt_cache_miss_tokens: int | None = None
 
 
 def _usage_thinking_tokens(usage: Mapping[str, Any]) -> int:
@@ -240,6 +255,17 @@ def _usage_cost_usd(usage: Mapping[str, Any]) -> float | None:
         return None
 
 
+def _optional_usage_token_count(value: Any) -> int | None:
+    """Normalize an optional provider token counter without inventing zero."""
+
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _retry_after_seconds(response: httpx.Response | None) -> float | None:
     if response is None:
         return None
@@ -255,11 +281,105 @@ def _retry_after_seconds(response: httpx.Response | None) -> float | None:
 def _provider_request_id(response: httpx.Response | None) -> str:
     if response is None:
         return ""
-    for name in ("x-request-id", "request-id", "cf-ray", "x-amzn-requestid"):
+    for name in (
+        "x-hashi-gateway-request-id",
+        "x-request-id",
+        "request-id",
+        "cf-ray",
+        "x-amzn-requestid",
+    ):
         value = str(response.headers.get(name) or "").strip()
         if value:
             return value
     return ""
+
+
+_SENSITIVE_HTTP_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "set-cookie",
+        "x-api-key",
+    }
+)
+
+
+def _diagnostic_headers(headers: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        str(name): (
+            "[REDACTED]"
+            if str(name).strip().casefold() in _SENSITIVE_HTTP_HEADER_NAMES
+            else str(value)
+        )
+        for name, value in headers.items()
+    }
+
+
+def _diagnostic_body(payload: bytes) -> dict[str, Any]:
+    raw = bytes(payload)
+    try:
+        body = raw.decode("utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        body = base64.b64encode(raw).decode("ascii")
+        encoding = "base64"
+    return {
+        "body": body,
+        "body_encoding": encoding,
+        "body_bytes": len(raw),
+        "body_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _provider_http_failure_diagnostics(error: Exception) -> dict[str, Any]:
+    """Preserve the complete HTTP request/response evidence for local audit."""
+
+    diagnostics: dict[str, Any] = {}
+    response = getattr(error, "response", None)
+    try:
+        request = getattr(error, "request", None)
+    except RuntimeError:
+        # httpx exposes ``RequestError.request`` as a property that raises
+        # until a request has been attached (for example on a synthetic
+        # RemoteProtocolError).  Missing diagnostics must not replace the
+        # original provider failure with this accessor error.
+        request = None
+    if not isinstance(request, httpx.Request) and isinstance(response, httpx.Response):
+        try:
+            request = response.request
+        except RuntimeError:
+            request = None
+
+    if isinstance(request, httpx.Request):
+        try:
+            request_body = bytes(request.content)
+        except (httpx.RequestNotRead, TypeError, ValueError):
+            request_body = b""
+        diagnostics["request"] = {
+            "method": str(request.method),
+            "url": str(request.url),
+            "headers": _diagnostic_headers(request.headers),
+            **_diagnostic_body(request_body),
+        }
+
+    if isinstance(response, httpx.Response):
+        try:
+            response_body = bytes(response.content)
+        except (httpx.ResponseNotRead, TypeError, ValueError):
+            response_body = b""
+        diagnostics["response"] = {
+            "status": int(response.status_code),
+            "headers": _diagnostic_headers(response.headers),
+            **_diagnostic_body(response_body),
+        }
+
+    audit_refs = getattr(error, "hashi_transport_audit_refs", ())
+    if isinstance(audit_refs, (list, tuple)):
+        diagnostics["transport_audit_refs"] = [
+            str(item) for item in audit_refs if str(item).strip()
+        ]
+    return diagnostics
 
 
 def _backend_failure_response(
@@ -373,8 +493,51 @@ def _backend_failure_response(
             "provider_activity_observed": bool(
                 getattr(error, "provider_activity_observed", False)
             ),
+            "provider_http_failure": _provider_http_failure_diagnostics(error),
         },
     )
+
+
+def _transient_provider_call_error(error: Exception) -> bool:
+    """Return whether one unfinished provider HTTP call may be retried in place."""
+
+    response = getattr(error, "response", None)
+    status = (
+        int(response.status_code)
+        if isinstance(response, httpx.Response)
+        else None
+    )
+    if status in {408, 429} or (status is not None and 500 <= status <= 599):
+        return True
+    if isinstance(error, httpx.ConnectError) and any(
+        token in str(error).casefold() for token in ("certificate", "ssl", "tls")
+    ):
+        return False
+    return isinstance(
+        error,
+        (
+            httpx.TimeoutException,
+            httpx.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.NetworkError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+        ),
+    )
+
+
+def _provider_call_retry_delay(
+    error: Exception,
+    *,
+    default_s: float,
+    maximum_s: float,
+) -> float:
+    response = getattr(error, "response", None)
+    retry_after = _retry_after_seconds(
+        response if isinstance(response, httpx.Response) else None
+    )
+    delay = default_s if retry_after is None else retry_after
+    return max(0.0, min(float(maximum_s), float(delay)))
 
 
 def _assistant_content_text(content: Any) -> str:
@@ -477,6 +640,13 @@ def _file_resource(arguments: dict) -> str:
 
 
 class OpenRouterAdapter(BaseBackend):
+    # OpenRouter aggregates providers with different replay guarantees.  A
+    # concrete compatible adapter may opt into narrowly scoped HTTP-call
+    # recovery without replaying completed tool loops.
+    TRANSIENT_PROVIDER_CALL_RETRIES = 0
+    TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.0
+    TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 5.0
+
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
             supports_sessions=False,
@@ -487,6 +657,10 @@ class OpenRouterAdapter(BaseBackend):
             supports_progress_stream=True,
             supports_tool_stream=True,
             supports_answer_stream=True,
+            continuation_mode="reconstructed",
+            tool_request_mode="native",
+            recovery_mode="reconstruct_safe",
+            reasoning_transport="visible_optional",
         )
 
     def __init__(self, agent_config, global_config, api_key: str = None):
@@ -499,6 +673,51 @@ class OpenRouterAdapter(BaseBackend):
         self.reasoning_enabled: bool | None = None
         self.tool_registry = None   # Injected by FlexibleBackendManager if tools configured
         self._audio_asset_store: AudioAssetStore | None = None
+        self._provider_call_observer: ProviderCallObserver | None = None
+
+    def set_provider_call_observer(
+        self,
+        observer: ProviderCallObserver | None,
+    ) -> None:
+        """Install a synchronous durable observer for physical HTTP calls."""
+
+        self._provider_call_observer = observer
+
+    def _provider_call_record(
+        self,
+        *,
+        request_id: str,
+        serial: int,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Create and immediately publish one immutable physical-call fact."""
+
+        record = dict(payload)
+        record.setdefault(
+            "provider_request_id",
+            "hashi-provider:"
+            + hashlib.sha256(
+                "|".join(
+                    (
+                        type(self).__name__,
+                        str(getattr(self.config, "model", "") or ""),
+                        str(request_id or ""),
+                        str(max(1, int(serial))),
+                    )
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+        observer = getattr(self, "_provider_call_observer", None)
+        if observer is not None:
+            try:
+                observer(record)
+            except ProviderCallObserverError:
+                raise
+            except Exception as exc:
+                raise ProviderCallObserverError(
+                    "physical Provider request could not be durably observed"
+                ) from exc
+        return record
 
     def set_reasoning_enabled(self, enabled: bool | None) -> None:
         self.reasoning_enabled = None if enabled is None else bool(enabled)
@@ -1105,7 +1324,7 @@ class OpenRouterAdapter(BaseBackend):
             raw_args = fn.get("arguments", "{}")
 
             # Determine stream event kind
-            if tool_name == "bash":
+            if tool_name in {"bash", "shell"}:
                 evt_kind = KIND_SHELL_EXEC
             elif tool_name == "file_read":
                 evt_kind = KIND_FILE_READ
@@ -1138,7 +1357,7 @@ class OpenRouterAdapter(BaseBackend):
             event_metadata: dict[str, Any] = {}
             event_path = ""
             if isinstance(arguments, Mapping):
-                if tool_name == "bash":
+                if tool_name in {"bash", "shell"}:
                     command = arguments.get("command") or arguments.get("cmd")
                     if command:
                         event_metadata["command"] = str(command)
@@ -1267,8 +1486,16 @@ class OpenRouterAdapter(BaseBackend):
 
     def _tool_policy_action_resource(self, tool_name: str, arguments: dict) -> tuple[str, str]:
         normalized = (tool_name or "").strip().lower()
-        if normalized == "bash":
-            return "shell.execute", "shell:bash"
+        if normalized in {"bash", "shell"}:
+            if normalized == "bash":
+                selected_shell = "bash"
+            else:
+                from orchestrator.process_execution import default_shell_name
+
+                selected_shell = str(
+                    arguments.get("shell") or default_shell_name()
+                ).strip().casefold()
+            return "shell.execute", f"shell:{selected_shell}"
         if normalized == "file_write":
             return "file.write", _file_resource(arguments)
         if normalized == "file_read":
@@ -1592,6 +1819,8 @@ class OpenRouterAdapter(BaseBackend):
         provider_call_count = 0
         provider_cost_complete = True
         provider_calls: list[dict[str, Any]] = []
+        provider_transport_retry_count = 0
+        provider_attempt_serial = 0
         total_tool_calls = 0
         tool_loop_count = 0
         media_routing: tuple[dict[str, Any], ...] = ()
@@ -1632,6 +1861,8 @@ class OpenRouterAdapter(BaseBackend):
             )
 
             for loop_idx in count():
+                provider_call_retry_count = 0
+                next_provider_recovery_kind = "none"
                 while True:
                     payload = self._build_payload(
                         messages,
@@ -1646,45 +1877,147 @@ class OpenRouterAdapter(BaseBackend):
                             audio_output is None or audio_output.get("tools")
                         ),
                     )
+                    provider_call_emitted_text = False
 
+                    async def _capture_provider_call(event: StreamEvent) -> None:
+                        nonlocal provider_call_emitted_text
+                        if event.kind == KIND_TEXT_DELTA and (
+                            event.raw_delta or event.summary
+                        ):
+                            provider_call_emitted_text = True
+                        if on_stream_event is not None:
+                            await on_stream_event(event)
+
+                    call_stream_callback = (
+                        _capture_provider_call
+                        if on_stream_event is not None
+                        else None
+                    )
+                    provider_attempt_serial += 1
+                    provider_call_started = time.perf_counter()
+                    provider_attempt = provider_call_retry_count + 1
+                    provider_recovery_kind = next_provider_recovery_kind
                     try:
                         if use_streaming:
                             result = await self._stream_api_once(
                                 payload,
                                 headers,
-                                on_stream_event,
+                                call_stream_callback,
                             )
                         else:
                             result = await self._call_api_once(
                                 payload,
                                 headers,
-                                on_stream_event,
+                                call_stream_callback,
                             )
+                    except asyncio.CancelledError:
+                        provider_calls.append(
+                            self._provider_call_record(
+                                request_id=request_id,
+                                serial=provider_attempt_serial,
+                                payload={
+                                    "input": 0,
+                                    "output": 0,
+                                    "thinking": 0,
+                                    "token_source": "unknown",
+                                    "thinking_in_output": False,
+                                    "cost_usd": None,
+                                    "prompt_cache_hit_tokens": None,
+                                    "prompt_cache_miss_tokens": None,
+                                    "provider_call_latency_ms": round(
+                                        (time.perf_counter() - provider_call_started)
+                                        * 1000,
+                                        3,
+                                    ),
+                                    "attempt": provider_attempt,
+                                    "retry_count": provider_call_retry_count,
+                                    "recovery_kind": provider_recovery_kind,
+                                    "status": "cancelled",
+                                },
+                            )
+                        )
+                        raise
                     except Exception as exc:
-                        if not self._can_replay_typed_media_fallback(
+                        provider_calls.append(
+                            self._provider_call_record(
+                                request_id=request_id,
+                                serial=provider_attempt_serial,
+                                payload={
+                                    "input": 0,
+                                    "output": 0,
+                                    "thinking": 0,
+                                    "token_source": "unknown",
+                                    "thinking_in_output": False,
+                                    "cost_usd": None,
+                                    "prompt_cache_hit_tokens": None,
+                                    "prompt_cache_miss_tokens": None,
+                                    "provider_call_latency_ms": round(
+                                        (time.perf_counter() - provider_call_started)
+                                        * 1000,
+                                        3,
+                                    ),
+                                    "attempt": provider_attempt,
+                                    "retry_count": provider_call_retry_count,
+                                    "recovery_kind": provider_recovery_kind,
+                                    "status": "failed_without_receipt",
+                                },
+                            )
+                        )
+                        if self._can_replay_typed_media_fallback(
                             exc,
                             media_routing=media_routing,
                             fallback_attempted=media_fallback_attempted,
                             provider_call_count=provider_call_count,
                             tool_call_count=total_tool_calls,
                         ):
-                            raise
-                        media_fallback_attempted = True
-                        self._enable_request_local_media_fallback(
-                            native_attachment_ids
+                            media_fallback_attempted = True
+                            self._enable_request_local_media_fallback(
+                                native_attachment_ids
+                            )
+                            messages = self._typed_media_fallback_messages(
+                                prompt,
+                                provider_request_content,
+                            )
+                            media_routing = self._typed_media_fallback_routing(
+                                media_routing
+                            )
+                            self._last_media_routing = media_routing
+                            native_attachment_ids = set()
+                            native_local_refs = set()
+                            all_media_native = False
+                            next_provider_recovery_kind = "typed_media_fallback"
+                            continue
+                        retry_limit = max(
+                            0,
+                            int(self.TRANSIENT_PROVIDER_CALL_RETRIES),
                         )
-                        messages = self._typed_media_fallback_messages(
-                            prompt,
-                            provider_request_content,
-                        )
-                        media_routing = self._typed_media_fallback_routing(
-                            media_routing
-                        )
-                        self._last_media_routing = media_routing
-                        native_attachment_ids = set()
-                        native_local_refs = set()
-                        all_media_native = False
-                        continue
+                        if (
+                            provider_call_retry_count < retry_limit
+                            and not provider_call_emitted_text
+                            and _transient_provider_call_error(exc)
+                        ):
+                            provider_call_retry_count += 1
+                            provider_transport_retry_count += 1
+                            next_provider_recovery_kind = (
+                                "provider_transport_retry"
+                            )
+                            await asyncio.sleep(
+                                _provider_call_retry_delay(
+                                    exc,
+                                    default_s=(
+                                        self.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S
+                                    ),
+                                    maximum_s=(
+                                        self.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S
+                                    ),
+                                )
+                            )
+                            continue
+                        raise
+                    provider_call_latency_ms = round(
+                        (time.perf_counter() - provider_call_started) * 1000,
+                        3,
+                    )
                     break
 
                 # Accumulate usage from each API call
@@ -1693,16 +2026,32 @@ class OpenRouterAdapter(BaseBackend):
                 total_thinking += result.thinking_tokens
                 provider_call_count += 1
                 provider_calls.append(
-                    {
-                        "input": int(result.prompt_tokens or 0),
-                        "output": int(result.completion_tokens or 0),
-                        "thinking": int(result.thinking_tokens or 0),
-                        "token_source": "provider",
-                        # OpenRouter reasoning_tokens is a detail within
-                        # completion_tokens, not an additional token bucket.
-                        "thinking_in_output": True,
-                        "cost_usd": result.cost_usd,
-                    }
+                    self._provider_call_record(
+                        request_id=request_id,
+                        serial=provider_attempt_serial,
+                        payload={
+                            "input": int(result.prompt_tokens or 0),
+                            "output": int(result.completion_tokens or 0),
+                            "thinking": int(result.thinking_tokens or 0),
+                            "token_source": "provider",
+                            # OpenRouter reasoning_tokens is a detail within
+                            # completion_tokens, not an additional token bucket.
+                            "thinking_in_output": True,
+                            "cost_usd": result.cost_usd,
+                            "prompt_cache_hit_tokens": _optional_usage_token_count(
+                                getattr(result, "prompt_cache_hit_tokens", None)
+                            ),
+                            "prompt_cache_miss_tokens": _optional_usage_token_count(
+                                getattr(result, "prompt_cache_miss_tokens", None)
+                            ),
+                            # One physical call only; retries have their own row.
+                            "provider_call_latency_ms": provider_call_latency_ms,
+                            "attempt": provider_attempt,
+                            "retry_count": provider_call_retry_count,
+                            "recovery_kind": provider_recovery_kind,
+                            "status": "completed",
+                        },
+                    )
                 )
                 if result.cost_usd is None:
                     provider_cost_complete = False
@@ -1857,6 +2206,9 @@ class OpenRouterAdapter(BaseBackend):
                 ),
                 stream_metadata={
                     "meter": {"provider_calls": provider_calls},
+                    "provider_transport_retry_count": (
+                        provider_transport_retry_count
+                    ),
                     "multimodal_routing": list(media_routing),
                     "multimodal_fallback_attempted": media_fallback_attempted,
                     "native_audio": native_audio_metadata,
@@ -1870,6 +2222,8 @@ class OpenRouterAdapter(BaseBackend):
         except asyncio.CancelledError:
             self.logger.warning(f"Request cancelled for {request_id}")
             raise
+        except ProviderCallObserverError:
+            raise
         except Exception as e:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             failure = _backend_failure_response(
@@ -1879,6 +2233,10 @@ class OpenRouterAdapter(BaseBackend):
                 tool_loop_count=tool_loop_count,
             )
             metadata = dict(failure.stream_metadata or {})
+            metadata["provider_transport_retry_count"] = (
+                provider_transport_retry_count
+            )
+            metadata["meter"] = {"provider_calls": provider_calls}
             metadata["multimodal_routing"] = list(media_routing)
             metadata["multimodal_fallback_attempted"] = media_fallback_attempted
             if isinstance(e, MultimodalContractError) and e.attachment_id:

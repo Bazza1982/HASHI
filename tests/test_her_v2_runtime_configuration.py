@@ -8,6 +8,13 @@ import pytest
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.her_v2.models import Route, Stage, TriageClassification
+from orchestrator.her_v2.runtime_configuration import (
+    HER_V2_CAPABILITY_REVISION,
+    HER_V2_PRICING_REVISION,
+    _loaded_pricing_revision,
+    resolve_her_v2_configuration,
+)
+from tools import token_tracker
 
 
 def _her_v2_config() -> dict:
@@ -90,6 +97,32 @@ def _manager(tmp_path, *, state: dict | None = None) -> FlexibleBackendManager:
         },
     )
     return FlexibleBackendManager(config, global_config, secrets={})
+
+
+def test_retired_configured_her_mode_normalizes_to_planned(tmp_path):
+    manager = _manager(tmp_path)
+    her_backend = next(
+        item for item in manager.config.allowed_backends if item["engine"] == "her-v2"
+    )
+
+    assert her_backend["effort"] == "medium"
+
+
+def test_retired_persisted_her_mode_migrates_to_planned(tmp_path):
+    manager = _manager(
+        tmp_path,
+        state={
+            "active_backend": "her-v2",
+            "backend_efforts": {"her-v2": "max"},
+        },
+    )
+    her_backend = next(
+        item for item in manager.config.allowed_backends if item["engine"] == "her-v2"
+    )
+    state = json.loads(manager.state_file.read_text(encoding="utf-8"))
+
+    assert her_backend["effort"] == "medium"
+    assert state["backend_efforts"] == {"her-v2": "medium"}
 
 
 def test_her_v2_provider_options_are_concrete_call_providers(tmp_path):
@@ -210,7 +243,7 @@ def test_hybrid_draft_applies_full_targets_and_custom_route_atomically(tmp_path)
             extra={"her_v2": _her_v2_config()},
         ),
         _v2_config=None,
-        effort="high",
+        effort="medium",
     )
     active_before = manager.get_her_v2_configuration()
     draft = manager.begin_her_v2_hybrid_draft()
@@ -282,7 +315,7 @@ def test_apply_replaces_live_config_without_mutating_turn_snapshot(tmp_path):
             extra={"her_v2": _her_v2_config()},
         ),
         _v2_config=None,
-        effort="high",
+        effort="medium",
     )
     manager.apply_her_v2_configuration(
         manager.prepare_her_v2_provider("openrouter-api")
@@ -298,6 +331,84 @@ def test_apply_replaces_live_config_without_mutating_turn_snapshot(tmp_path):
     assert manager.current_backend._v2_config.profile_for(Stage.PLANNING).engine == (
         "deepseek-api"
     )
+
+
+def test_routing_revision_advances_only_when_default_route_changes(tmp_path):
+    manager = _manager(tmp_path)
+    assert manager.get_her_v2_configuration().routing_revision == 1
+
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_provider("openrouter-api")
+    )
+    changed = manager.get_her_v2_configuration()
+    assert changed.routing_revision == 2
+
+    manager.apply_her_v2_configuration(changed)
+    unchanged = manager.get_her_v2_configuration()
+    assert unchanged.routing_revision == 2
+    persisted = json.loads(manager.state_file.read_text(encoding="utf-8"))
+    assert persisted["her_v2_configuration"]["routing_revision"] == 2
+
+
+def test_saved_route_cannot_pin_stale_capability_or_pricing_revisions():
+    selected = resolve_her_v2_configuration(
+        _her_v2_config(),
+        {
+            "routing_revision": 9,
+            "capability_revision": 999,
+            "pricing_revision": "stale-prices",
+        },
+    )
+
+    assert selected.routing_revision == 9
+    assert selected.capability_revision == HER_V2_CAPABILITY_REVISION
+    assert selected.pricing_revision == HER_V2_PRICING_REVISION
+
+
+def test_pricing_revision_survives_first_mixed_generation_reboot(monkeypatch):
+    monkeypatch.delattr(token_tracker, "PRICING_REVISION")
+
+    assert _loaded_pricing_revision() == HER_V2_PRICING_REVISION
+
+
+def test_provider_switch_preflight_rejects_known_too_small_context(tmp_path):
+    manager = _manager(tmp_path)
+    for grant in manager.config.allowed_backends:
+        if grant.get("engine") == "openrouter-api":
+            grant["context_window_tokens"] = 32_000
+            grant["response_headroom_tokens"] = 4_000
+    runtime = SimpleNamespace(
+        backend_manager=manager,
+        global_config=manager.global_config,
+        workspace_dir=manager.config.workspace_dir,
+        _last_full_prompt_tokens=999_000,
+    )
+    manager.runtime = runtime
+    candidate = manager.prepare_her_v2_provider("openrouter-api")
+
+    with pytest.raises(ValueError, match="context is too small"):
+        manager.apply_her_v2_configuration(candidate)
+
+    assert manager.get_her_v2_configuration().routing_revision == 1
+
+
+def test_reasoning_only_switch_does_not_run_target_context_preflight(tmp_path):
+    manager = _manager(tmp_path)
+    runtime = SimpleNamespace(
+        backend_manager=manager,
+        global_config=manager.global_config,
+        workspace_dir=manager.config.workspace_dir,
+        _last_full_prompt_tokens=999_000,
+    )
+    manager.runtime = runtime
+
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_route_reasoning("planning", "medium")
+    )
+
+    assert manager.get_her_v2_configuration().routing_revision == 2
+    persisted = json.loads(manager.state_file.read_text(encoding="utf-8"))
+    assert persisted["her_v2_last_route_preflight"]["status"] == "not_required"
 
 
 def test_reselecting_active_provider_preserves_valid_slot_choices(tmp_path):
@@ -391,7 +502,7 @@ def test_apply_configuration_persists_and_refreshes_live_adapter_atomically(tmp_
             extra={"her_v2": _her_v2_config()},
         ),
         _v2_config=None,
-        effort="high",
+        effort="medium",
     )
     candidate = manager.prepare_her_v2_route_model_slot("planning", "fast")
     candidate = manager.prepare_her_v2_route_reasoning(
@@ -407,9 +518,9 @@ def test_apply_configuration_persists_and_refreshes_live_adapter_atomically(tmp_
     assert state["her_v2_configuration"]["route_reasoning"] == {
         "planning": "medium"
     }
-    assert state["backend_efforts"] == {"her-v2": "high"}
+    assert state["backend_efforts"] == {"her-v2": "medium"}
     assert "provider_reasoning" not in state
-    assert manager.current_backend.effort == "high"
+    assert manager.current_backend.effort == "medium"
     planning = manager.current_backend._v2_config.profile_for(Stage.PLANNING)
     assert planning.model == "deepseek-v4-flash"
     assert planning.reasoning == "medium"
@@ -478,7 +589,7 @@ def test_direct_provider_state_migrates_to_her_v2(
 
 
 @pytest.mark.parametrize("persisted_backend", ["her", "her-v2"])
-def test_stale_her_v2_fixed_mode_is_repaired_to_flex(
+def test_her_v2_fixed_mode_is_preserved(
     tmp_path,
     persisted_backend,
 ):
@@ -494,9 +605,9 @@ def test_stale_her_v2_fixed_mode_is_repaired_to_flex(
     state = json.loads(manager.state_file.read_text(encoding="utf-8"))
 
     assert manager.config.active_backend == "her-v2"
-    assert manager.agent_mode == "flex"
+    assert manager.agent_mode == "fixed"
     assert state["active_backend"] == "her-v2"
-    assert state["agent_mode"] == "flex"
+    assert state["agent_mode"] == "fixed"
     assert state["unrelated"] == {"keep": True}
 
 
@@ -576,7 +687,7 @@ def test_persistence_failure_keeps_previous_live_configuration(tmp_path, monkeyp
             extra={"her_v2": _her_v2_config()},
         ),
         _v2_config=None,
-        effort="high",
+        effort="medium",
     )
     before = manager.get_her_v2_configuration()
     candidate = manager.prepare_her_v2_provider("openrouter")

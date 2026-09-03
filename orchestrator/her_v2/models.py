@@ -48,7 +48,7 @@ class Effort(StrEnum):
 
 EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
     Effort.ZERO: "Direct",
-    Effort.LOW: "Fast path",
+    Effort.LOW: "Strategic",
     Effort.MEDIUM: "Planned",
     Effort.HIGH: "Adaptive",
     Effort.XHIGH: "Reviewed",
@@ -58,6 +58,7 @@ EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
 _EFFORT_ALIASES: Mapping[str, Effort] = {
     "direct": Effort.ZERO,
     "zero_orchestration": Effort.ZERO,
+    "strategic": Effort.LOW,
     "fast": Effort.LOW,
     "fast_path": Effort.LOW,
     "planned": Effort.MEDIUM,
@@ -234,6 +235,9 @@ class StageRequest:
     provider_activity_callback: Callable[[Mapping[str, Any]], None] | None = field(
         default=None, compare=False, repr=False
     )
+    # Turn-scoped, provider-neutral projection of task conclusions and evidence.
+    # ``Any`` avoids coupling the wire envelope to one persistence implementation.
+    task_state: Any | None = field(default=None, compare=False, repr=False)
     # Compatibility field name retained for provider adapters shipped with the
     # earlier checkpoint package; its active value is now a compulsory Replan
     # coordinator and is never risk-gated.
@@ -256,6 +260,9 @@ class StageResponse:
     media_routing: tuple[Mapping[str, Any], ...] = ()
     validation_source: str = ""
     content: tuple[Mapping[str, Any], ...] = ()
+    # Observable decision state only.  This must never contain hidden model
+    # reasoning or reconstructed chain-of-thought.
+    cognitive_control: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -263,6 +270,18 @@ class TriageDecision:
     classification: TriageClassification
     real_goal: str
     relevant_habits: tuple[str, ...] = ()
+    clarification: str = ""
+
+
+@dataclass(frozen=True)
+class StrategyDecision:
+    """Validated Strategy schema-v3 handoff at the legacy Triage wire stage."""
+
+    classification: TriageClassification
+    real_goal: str
+    selected_strategy_cards: tuple[str, ...] = ()
+    relevant_habits: tuple[str, ...] = ()
+    execution_brief: Mapping[str, Any] = field(default_factory=dict)
     clarification: str = ""
 
 
@@ -382,6 +401,7 @@ class TurnResult:
     replan_count: int = 0
     checkpoint_count: int = 0
     assurance_status: str = ""
+    task_state: Mapping[str, Any] = field(default_factory=dict)
     content: tuple[Mapping[str, Any], ...] = ()
 
 

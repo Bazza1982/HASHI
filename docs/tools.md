@@ -1,22 +1,36 @@
 # Tools
 
-## Universal Multi-Agent Telegram Orchestrator (`bridge-u-f`)
-The `bridge-u-f` project located at `<project_root>` is a local multi-agent bridge that connects Telegram bots (and optionally WhatsApp) to multiple AI backends, with TUI and authenticated Backend API surfaces.
+Canonical ownership and terminology are defined in
+[HASHI System Architecture](../ARCHITECTURE.md). This operational reference
+keeps exact command and configuration keys such as `/backend`,
+`allowed_backends`, and profile `engine` where the implementation requires
+them; those compatibility names do not collapse Engine Providers and Model
+Providers into one concept.
 
-Five runtime execution modes are available to a Flex Agent:
-- **Fixed mode:** keep one selected session-capable backend and its native session.
-- **Flex mode:** one bot, one workspace, one shared identity, and a switchable backend via `/backend`.
-- **Wrapper mode:** one shared identity with a functional core backend/model plus a stateless wrapper backend/model that rewrites only the final user-facing response.
-- **Audit mode:** a functional core response plus a separate auditor pass and findings.
-- **Dual Brain mode:** a left-brain continuity/planning pass plus right-brain execution.
+## Universal Multi-Agent Telegram Orchestrator (`bridge-u-f`)
+The `bridge-u-f` project located at `<project_root>` is a local multi-agent bridge that connects Telegram bots (and optionally WhatsApp) to multiple AI Engine Providers, with TUI and authenticated Backend API surfaces.
+
+Two working modes are available to a Flex Agent:
+- **Fixed mode (default):** keep one selected session-capable Engine and its
+  native Engine Session.
+- **Flex mode:** one bot, one workspace, one shared identity, and a switchable
+  Engine Provider via `/backend`.
+
+Wrapper, Audit, and Dual Brain are retired and cannot be selected. Persisted
+legacy mode values migrate to the configured default without deleting their
+historical configuration blocks.
+
+See [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md) for the
+configuration, transition, migration, and regression contract.
 
 - **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
-- **Selectable backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
+- **Selectable Engine Providers:** `gemini-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
   `her-v2` (with `her` as a migration alias), `ollama-api`, and `xai-api`.
-  `openrouter-api` and `deepseek-api` remain provider-only engines for HER v2
+  `openrouter-api` and `deepseek-api` remain Model Provider adapters for HER v2
   and internal rendering; they are hidden from `/backend`.
 - **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set `type` explicitly. New agents should normally use `type: "flex"`; omitted `type` is rejected so HASHI cannot accidentally fall back to the retired legacy fixed runtime.
   - Flex required fields: `name`, `type: "flex"`, `workspace_dir`, `allowed_backends`, `active_backend`, `is_active`; the workspace must contain a strict lower-case `agent.md`
+  - `default_mode` may be `fixed` or `flex`. If omitted, session-capable backends default to `fixed`; stateless backends use `flex`.
   - Legacy `type: "fixed"` and `system_md` values are one-time migration inputs only; successful startup converts the row to Flex shape, validates/writes `agent.md`, and removes `system_md`
   - Optional: `display_name`, `emoji`, `typing_message`, `typing_parse_mode`, `effort`, `resume_policy`
   - `access_scope` — filesystem boundary: `"workspace"` (agent dir only), `"project"` (repo root), `"drive"` (full `C:\`)
@@ -35,19 +49,23 @@ Five runtime execution modes are available to a Flex Agent:
   backend and inherit that Agent runtime's authority; a Cron does not create a
   separate low-privilege Agent.
 - **Tokens and secrets:** Telegram bot tokens and API keys are stored in `<project_root>\secrets.json`, keyed by agent name. Never put them in `agents.json`.
-- **Memory isolation:** Each agent runs inside its own `workspace_dir`. Fixed mode enables persistent sessions only for session-capable Codex, Claude, and Grok CLI backends. Other modes use one-shot backend turns with bridge-managed context.
+- **Session isolation:** Each Agent runs inside its own `workspace_dir`. Fixed
+  mode preserves native Engine Sessions for session-capable Codex, Claude, and
+  Grok CLI Engines. HER v2 separately owns a durable HER Engine Session behind
+  its stable PAO Conversation-to-Engine binding and receives incremental PCM.
+  Stateless/per-turn Engine invocations use PAO/PCM-managed Context.
 - **Per-agent logs and files:** Logs under `<project_root>\logs\<agent>\<session>`. Media under `<project_root>\media\<agent>`.
 
 ## Telegram Commands
 
 **Common (all agents):**
 - `/help` — list available commands
-- `/new` — create and select a new HASHI Session for the originating channel; session-capable fixed backends also clear their native session so the next request starts fresh
-- `/fresh` — clean API context for non-CLI backends; HER v2 persists a boundary across every prior turn source while preserving logs, searchable memory, and archives
+- `/new` — create and select a new HASHI Conversation Session for the originating channel; session-capable fixed Engines also clear their native Engine Session so the next request starts fresh
+- `/fresh` — advance the PAO Context generation for the selected Engine; HER v2 persists the boundary across every prior Turn source while preserving logs, searchable Memory, and archives
 - `/memory [status|on|pause|saved on|saved off|plus on|plus off]` — inspect or change normal memory injection and independent Memory+ continuity
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]` — inspect or maintain the compact Memory+ work card and archive index
 - `/clear` — clear workspace context files
-- `/handoff` — restore the latest 10 completed Bridge exchanges across retained HASHI Sessions into a fresh backend session
+- `/handoff` — restore the latest 10 completed exchanges across retained HASHI Conversation Sessions into a fresh Engine Session
 - `/fyi [prompt]` — refresh bridge environment awareness; optionally append a follow-up prompt
 - `/usecomputer [on|off|status|examples|task]` — load managed GUI-aware computer-use guidance; unified shortcut for desktop/browser/Windows interaction when needed
 - `/browser [status|examples|1-4 task]` — route an internet task through HASHI headless browser, CLI-native browsing, Brave search, or the logged-in browser extension
@@ -65,12 +83,13 @@ Five runtime execution modes are available to a Flex Agent:
 - `/resend` — replay the previous model or Bridge output without model work
 - `/retry` — stop stale execution, reset context, restore recent handoff continuity, and rerun the last request; see [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md)
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
-- `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
+- `/mode [fixed|flex]` — switch working mode; `/mode memory+` only enables Memory+ and keeps the current mode
 - `/language [en|zh|default]` — choose the HASHI interface language for this user across all agents. The setting applies to Telegram command menus, buttons, common cards, and system notices, without translating agent replies, terminal output, transcripts, or logs.
 - `/terminal [quiet|activity|debug|raw]` — control instance-wide terminal stdout. `quiet` is the default and shows lifecycle/failures/operator attention; `activity` adds content-free phases, timing, tool counts, and token counts; `debug` adds sanitised technical events and failure clues without chat or reasoning text; `raw` restores the historical plaintext console. This never filters external clients, TUI chat, Telegram, transcripts, or file logs.
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
 - `/commentary [on|off]` — HER only: show explicitly model-authored Persona acknowledgements and interim reports once each; independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show one temporary deterministic activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status. The same Telegram card is edited as work advances; raw technical events remain in logs, while Persona speech, reasoning, and answer drafts stay excluded.
+- Bare `/think`, `/commentary`, and `/verbose` commands only open their menus. Choosing On or Off applies to the active turn immediately; display events produced while Off are not replayed later.
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/notify [on|quiet|off]` — `on` notifies for every message; `quiet` silences interim activity but not final results, errors, warnings, recovery, or important alerts; `off` delivers every message silently
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
@@ -86,7 +105,7 @@ Five runtime execution modes are available to a Flex Agent:
 - `/rebuild` — one-version compatibility notice for the retired native HER build workflow; performs no build, reload, or restart
 - Alias: `/usercomputer`
 
-The `/verbose` digest uses one stable, backend-neutral vocabulary. Lifecycle
+The `/verbose` digest uses one stable, Engine-neutral vocabulary. Lifecycle
 headers are `🧭 Planning`, `🛠️ Execution`, `🔄 Replanning`, `🧐 Review`,
 `🔬 Verification`, `✍️ Finalisation`, and `✅ Completed`, with `⏳ Preparing`,
 `⛔ Blocked`, and `❌ Error` for control states. Body rows are grouped as
@@ -95,22 +114,24 @@ headers are `🧭 Planning`, `🛠️ Execution`, `🔄 Replanning`, `🧐 Revie
 `❌` failure, and `⛔` blocked. Classification is programmatic from canonical
 events and known command/tool shapes; no model generates or paraphrases it.
 
-**Backend configuration:**
-- `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker. Selecting `her-v2` switches only the backend; it never asks the user to select the internal `role-configured` sentinel.
-- `/provider [name|hybrid]` — HER v2-only routing-mode picker. A named provider keeps the immediate Single-provider flow; `hybrid` opens a draft with independent Quick and Pro provider/model targets.
-- `/model` — for HER v2, edit complete Quick/Pro targets and let each effective task route follow Quick, follow Pro, or use a Custom provider/model target. The Direct route is fixed to Quick and defaults to provider reasoning `high`; `/model reasoning direct <value|inherit>` may override or restore that reasoning default. Use `/model quick|pro [provider] <model>`, `/model route <route> <quick|pro>`, `/model route <route> custom <provider> <model>`, `/model reasoning <route> <value|inherit>`, and `/model apply|discard`. Other backends retain their existing single-model `/model [name]` behaviour.
-- `/compact [status|cancel]` — HER v2-only context maintenance with two independent phases. Any active WIP Journal is first converted without a model into bounded quoted Session context and cleared only after a verified durable write; this phase runs even below 64,000 tokens and failure preserves the Journal. Ordinary conversation compaction still uses the active Quick/Light provider and model at fixed high HER effort: below 64,000 effective tokens it reports the exact not-needed reason, from 64,000 tokens upward it executes, and above 128,000 tokens main Execution schedules the non-blocking automatic path. Active WIP and automatic compaction failures both produce mandatory warnings independently of `/verbose`.
+**Engine and Model Provider configuration:**
+- `/backend` — switch the active Engine Provider in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the Engine picker. Selecting `her-v2` switches only the Engine; it never asks the user to select the internal `role-configured` sentinel.
+- `/provider [name|hybrid]` — HER v2-only Model Provider routing picker. A named Model Provider keeps the immediate Single-provider flow; `hybrid` opens a draft with independent Quick and Pro Model Provider/model targets.
+- `/model` — for HER v2, edit complete Quick/Pro targets and configure the public Direct, Strategy, Planning, and Execution stages. Direct is fixed to Quick. Execution `Auto` uses Quick for simple tasks and Pro for complex or high-volume tasks; Quick and Pro apply one choice to every execution class. Provider-reasoning choices are limited to values declared by the active provider/model. Per-task Custom targets and Compact are under Advanced settings; internal/background routes retain their saved defaults without appearing in the normal menu. Typed compatibility controls remain `/model quick|pro [provider] <model>`, `/model route <route> <quick|pro>`, `/model route <route> custom <provider> <model>`, `/model reasoning <route> <value|inherit>`, and `/model apply|discard`. Other Engines retain their existing single-model `/model [name]` behaviour.
+- `/compact [status|cancel]` — HER v2-only maintenance over settled HER Engine Session history. Manual Compact is blocked while a Turn is active and follows the active Quick/Light Model Provider/model route. Canonical typed recovery state is never compacted away. The WIP Journal is only a shadow/legacy compatibility projection and is not re-ingested when canonical recovery is available.
 - `/model compact inherit_quick [auto|tier_2|tier_3]` or `/model compact off` — enable the approved inherited Quick/Light Compact policy, choose its isolated watchdog tier, or turn it off. Legacy inherited-Pro and explicit Compact records migrate to `inherit_quick`.
-- Non-HER backend/model selection continues to the existing optional effort step when supported. HER v2 keeps backend, provider, models/reasoning, and effort as independent controls.
-- `/effort [level]` — HER v2 opens the **HER execution mode** control: Direct (`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Direct invokes one fully capable Quick agent at default provider reasoning `high`, never upgrades itself, skips Immediate Response, Triage, Planning, Replanning, delegation, Review, and Finalisation, and treats any successful natural-language return—including a request for missing information—as completed. It still exposes normal `/verbose` provider/tool progress and uses the existing local attachment fallback. Descriptive aliases are accepted and persisted as their canonical wire values. Reviewed adds one independent Review and closure; Assured repeats Review-driven remediation against the latest execution state until Review passes or reports a conditional pass. HER effort never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
+- Non-HER Engine/model selection continues to the existing optional effort step when supported. HER v2 keeps Engine, Model Provider, models/reasoning, and effort as independent controls.
+- `/effort [level]` — HER v2 opens the **HER execution mode** control: Direct (`zero`), Strategic (`low`), and Planned (`medium`). Direct invokes one fully capable Quick agent and skips HER orchestration. Strategic selects task-matched Strategy Cards before fully capable Execution. Planned uses no-tool Strategy, mechanically read-only Planning, then fully capable Execution; Planning may investigate but cannot mutate artifacts or perform the downstream implementation. Descriptive aliases persist as canonical wire values, while legacy `fast` and `fast_path` still select Strategic. Retired saved HER values `high`, `xhigh`, and `max` migrate to Planned; their Replanning/Review designs remain internal and are not selectable. HER effort never reads or writes Model Provider reasoning. Other Engines retain their model-aware effort behaviour.
 
-### HER v2 provider and model configuration
+### HER v2 Model Provider and model configuration
 
-HER v2 is provider-neutral. Provider connection metadata lives under
+HER v2 is Model-Provider-neutral. Model Provider connection metadata lives under
 `global.her_providers.providers`; an enabled instance provider is sufficient for
 HER routing and does not need to be repeated in each Agent's
-`allowed_backends`. Concrete non-HER rows still control ordinary direct backend
-selection. API-key values stay in `secrets.json`.
+`allowed_backends`. Concrete non-HER Engine rows still control ordinary direct
+Engine selection. API-key values stay in `secrets.json`. In the JSON schema,
+the compatibility key `engine` inside a HER profile identifies a Model Provider
+adapter; it does not make that adapter a top-level Engine Provider.
 
 ```json
 {
@@ -139,28 +160,13 @@ selection. API-key values stay in `secrets.json`.
       "type": "flex",
       "allowed_backends": [
         {
-          "engine": "openrouter-api",
-          "models": [
-            "deepseek/deepseek-v4-flash",
-            "deepseek/deepseek-v4-pro",
-            "openai/gpt-4.1-mini"
-          ],
-          "default_model": "deepseek/deepseek-v4-flash"
-        },
-        {
-          "engine": "deepseek-api",
-          "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
-          "default_model": "deepseek-v4-flash"
-        },
-        {
           "engine": "her-v2",
           "access_scope": "drive",
           "model": "role-configured",
-          "effort": "high",
+          "effort": "medium",
           "permission_mode": "danger-full-access",
           "tools": {"allowed": ["*"]},
           "her_v2": {
-            "review_limits": {"xhigh": 1, "max": 1},
             "profiles": {
               "lightweight": {
                 "engine": "deepseek-api",
@@ -176,11 +182,6 @@ selection. API-key values stay in `secrets.json`.
                 "engine": "deepseek-api",
                 "model": "deepseek-v4-pro",
                 "reasoning": "high"
-              },
-              "reviewer": {
-                "engine": "deepseek-api",
-                "model": "deepseek-v4-pro",
-                "reasoning": "max"
               }
             }
           }
@@ -191,18 +192,24 @@ selection. API-key values stay in `secrets.json`.
 }
 ```
 
-Provider choices are built from enabled instance provider profiles and the
-installed adapter model catalogue, with Agent backend rows retained as optional
-model/default hints. A one-model provider uses that model for both slots.
-Disabled providers remain visible but locked.
+Model Provider choices are built from enabled instance profiles and the
+installed adapter model catalogue, with legacy Agent backend rows retained only
+as compatibility hints. A one-model Model Provider uses that model for both
+slots. Disabled Model Providers remain visible but locked.
 
-Single mode keeps one provider for Quick and Pro. Hybrid mode stores full
-`provider + model` targets for Quick and Pro. Immediate response, Triage,
-Meditation, Dream, and Simple execution follow Quick by default; Planning,
-Complex execution, High-volume execution (including its sub-agents),
-Replanning, Review, and Finalisation follow Pro. Any task route may instead use
-a Custom target. This phase adds no
-automatic cross-provider failover and no picture/media-specific routing.
+Single mode keeps one Model Provider for Quick and Pro. Hybrid mode stores full
+`Model Provider + model` targets for Quick and Pro. Current Direct, Strategic,
+and Planned stages follow their configured role routes. Dormant reviewer and
+Replanning profiles may remain for isolated regression coverage, but their
+presence does not expose a higher mode. This phase adds no automatic
+cross-Model-Provider failover.
+
+### Dormant higher-mode internals
+
+The following Replanning and Review behaviour remains implemented for internal
+regression coverage, but Adaptive, Reviewed, and Assured are not exposed by the
+current three-mode production selector. It must not be treated as an available
+day-to-day `/effort` choice.
 
 Triage independently records each work turn as `STANDARD` or `HIGH_RISK` risk
 metadata. Adaptive (`high`) and above Execution, regardless of that label,
@@ -241,17 +248,9 @@ Legacy provider/model and profile/stage reasoning fields remain readable as a
 migration fallback. The internal `role-configured` model remains an adapter
 sentinel only and is never presented as a user choice.
 
-**Wrapper-mode:**
-- `/mode wrapper` — switch a flex-capable agent into wrapper mode.
-- `/core [backend=<engine> model=<model>]` — show or change the functional core backend/model. Default: `codex-cli / gpt-5.5`.
-- `/wrap [backend=<engine> model=<model> context=<n>]` — show or change the stateless wrapper backend/model and recent visible context window. Default: `claude-cli / claude-haiku-4-5 / context=3`.
-- `/wrapper` — show wrapper configuration, persona/style slots, and navigation buttons.
-- `/wrapper set <slot> <text>` — set a wrapper persona/style slot.
-- `/wrapper clear <slot>` or `/wrapper clear all` — clear wrapper persona/style slots.
-- `/model` guides wrapper agents to `/core` or `/wrap`; `/backend` offers the explicit switch-to-Flex confirmation instead of silently changing modes.
-- `/reset CONFIRM` preserves wrapper mode config and wrapper slots; `/wipe CONFIRM` remains a hard workspace clear.
-
-Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Pro, and OpenRouter DeepSeek Flash/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
+**Retired working modes:** `/mode wrapper`, `/mode audit`, and
+`/mode dual-brain` return a compatibility notice. Their former configuration commands
+and old inline buttons do the same; none can reactivate a retired mode.
 
 **Backend-specific (fixed):**
 - `/effort` — Claude, Codex, and Grok CLI

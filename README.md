@@ -1,14 +1,14 @@
 # HASHI
 
-> **Status:** HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise
-> alpha artifact-freeze line. HASHI `v4.0.0-alpha.2` is the current broader
-> platform release candidate, centred on the provider-neutral, HASHI-native
-> Python Engine Runtime (HER v2), evidence-backed assurance, and multimodal
-> provider routing.
-> Enterprise `0.1.0a1` resets the enterprise-grade package version line for
-> alpha testing; it is not a production-certified deployment claim.
+> **Status:** HASHI `v4.0.0-alpha.2` is the single current repository and
+> package release candidate (`4.0.0a2` in Python metadata). It centres on the
+> provider-neutral, HASHI-native Python Engine Runtime (HER v2),
+> evidence-backed assurance, multimodal provider routing, and the governed AAI
+> control plane.
+> Enterprise AAI `v0.1.0-alpha.1` remains a historical tagged milestone; it is
+> not a second active version line or a production-certification claim.
 >
-> **Current integration checkpoint:** see [`docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
+> **Current architecture:** see [`ARCHITECTURE.md`](ARCHITECTURE.md) · **Latest dated integration record:** see the historical [`2026-08-27 checkpoint`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
 
@@ -84,10 +84,19 @@ Throughout the codebase, you'll see references to **`bridge-u-f`** — this was 
 
 HASHI is a **universal multi-agent orchestration platform** that runs entirely locally by default. It routes user requests to AI backends through a flexible adapter system, eliminating the need to store sensitive OAuth tokens. HASHI AAI extends that foundation into a governed enterprise control plane while preserving the same personal/local default path.
 
-**Core Components:**
+**Top-level functional modules:**
+- **PCM** — authoritative Persona, Context, and Memory assembly and projection
+- **PAO** — Provider-Agnostic Orchestration for Agents, Conversation Sessions,
+  Engine binding, Tools, workflows, Jobs, and cross-agent control
+- **HER v2** — HASHI's native Engine (Harness), with a durable Engine Session
+  and internal Model Provider routing
+- **Frontend Connectors** — the built-in TUI, Telegram, WhatsApp, Backend API,
+  Persistent Session API, and compatible-client protocols
+
+**Major capabilities:**
 - **Onboarding** — Multi-language guided setup to create your first agent
 - **Backend API** — Local runtime API for authenticated clients and HASHI integrations
-- **Orchestrator** — Central runtime managing agents, memory, skills, and scheduling
+- **Orchestrator** — Current physical implementation of much of PAO, PCM integration, and connector coordination
 - **Nagare Flow System** — Multi-agent workflow orchestration engine
 - **Transports** — Connect via Telegram, WhatsApp, TUI, or the Backend API
 - **Skills** — Modular capabilities (prompts, toggles, actions) that extend agents
@@ -104,21 +113,27 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 **What makes HASHI different:**
 1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
-2. **Provider-Neutral Runtime** — HER v2 orchestrates OpenRouter and DeepSeek as providers while their adapters remain available internally
+2. **Provider-Neutral Runtime** — PAO is agnostic to Engine/Harness Providers;
+   HER v2 is agnostic to internal Model Providers such as OpenRouter and DeepSeek
 3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
 4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
 5. **Self-Improving HER Agents** — Optional `Planning → Execution → Meditation → Write` learning with agent-local files
 6. **SafeVoice** — Voice messages are transcribed and shown for confirmation before execution, preventing accidental commands
 7. **Context Recovery** — `/handoff` command instantly restores project context after compression
 8. **Tool Execution Layer** — HER v2 and tool-capable backends can take real local actions: run commands, read/write files, browse the web, call external APIs, and more
-9. **Flex/Fixed Mode Switching** — Agents can switch among selectable runtimes via `/backend`; OpenRouter and DeepSeek are selected inside HER v2 as providers
-10. **Wrapper Agent Mode** — Pair a strong core model with a stateless persona wrapper so GPT/Codex can do the work while another model controls the final visible voice
+9. **Fixed/Flex Working Modes** — `/mode` exposes only Fixed and Flex;
+   session-capable Engines default to Fixed with native Engine Session
+   continuity, while stateless Engines use Flex and `/backend` remains the
+   explicit Flex-only Engine switch
+10. **Stable HER Session Binding** — PAO selects Engines via `/backend`; HER v2
+    stays fixed at the PAO-to-Engine Session boundary while Model Providers such
+    as OpenRouter and DeepSeek remain selectable inside HER
 11. **Anatta Live Self-Assembly** — Optional per-agent mode (`off`, `shadow`, `on`) that can observe or inject transient self-state guidance while keeping `agent.md` as the stable identity
 12. **Cross-Instance Messaging** — Agents across different HASHI instances can communicate via HChat and Hashi Remote
 13. **EXP Guidebooks** — `/exp` lets agents consult context-specific operational playbooks, failure memory, validators, and training evidence before acting
 14. **Browser Route Dashboard** — `/browser` selects the right internet path: HASHI headless browser, CLI-native browsing, Brave Search, or the logged-in Chrome extension bridge
 15. **Hashi Remote File Transfer** — move release artifacts, EXP packs, and other files directly between HASHI instances
-16. **Audit Agent Mode** — run a core model plus a separate auditor that emits follow-up findings without rewriting the core answer
+16. **Evidence-Aware Lifecycle Control** — durable task state and receipts help long-running work recover direction and prove completion
 17. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
 18. **Managed Background Jobs** — `/bg` starts long OS/process tasks without
    blocking chat, records status and logs, notifies on terminal outcomes, and
@@ -135,18 +150,17 @@ and binary packages are no longer part of the active program.
 
 ## Project Status
 
-- **Enterprise AAI v0.1.0-alpha.1** *(current enterprise alpha line)* — governed
-  AAI control plane, identity/SSO/SCIM primitives, policy/approval/audit,
-  connector MVPs, authenticated client surfaces, and deployment artifacts for
-  alpha operator review. Production enterprise-server validation remains
-  pending.
-- **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration,
-  evidence-backed Reviewed/Assured modes, compulsory Adaptive-or-above
-  safe-boundary Replanning,
+- **v4.0.0-alpha.2** *(current unified release candidate)* — HER v2 orchestration
+  converged on Direct, Strategic, and Planned production modes,
   provider-aware multimodal input, Hybrid routing, automatic context
-  maintenance, stronger session and delivery continuity, and a Flex-only
-  runtime architecture. This is the broader platform line, not the enterprise
-  package version line.
+  maintenance, stronger session and delivery continuity, and two Agent working
+  modes: Fixed by default plus explicit Flex. Wrapper, Audit, and Dual-brain
+  modes are retired. This is also the active root package and Enterprise AAI
+  integration line.
+- **Enterprise AAI v0.1.0-alpha.1** *(historical tagged milestone)* — froze the
+  first governed AAI control-plane and deployment-artifact alpha for operator
+  review. Its production enterprise-server validation limits remain recorded
+  in the historical release notes.
 - **v3.2.1** — Backend API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
@@ -159,54 +173,43 @@ and binary packages are no longer part of the active program.
 
 ## What's New Since v2
 
-### Version Lines At A Glance
+### Current Version At A Glance
 
-HASHI currently has two active alpha narratives:
+HASHI has one active repository release line:
 
-- **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** — the reset
-  enterprise-grade update line for governed AAI deployment artifacts and alpha
-  operator review.
-- **HASHI `v4.0.0-alpha.2`** — the broader platform release candidate for the
-  upgraded HER backend, Superloop operations, and local orchestration evolution.
+- **HASHI `v4.0.0-alpha.2` / Python package `4.0.0a2`** — the unified release
+  candidate for HER v2, Superloop operations, local orchestration, governed AAI
+  controls, and deployment artifacts.
 
-Both lines share one repository and one codebase. Personal/local mode remains
-the default smooth path; enterprise features are activated through explicit
-profiles and bootstrap state.
+Personal/local mode remains the default smooth path; enterprise features are
+activated through explicit profiles and bootstrap state. The older Enterprise
+AAI `v0.1.0-alpha.1` tag remains immutable release history.
 
 ### HER v2 Runtime in v4.0.0-alpha.2
 
 HER v2 is the sole supported HER execution backend:
 
-- **Provider-neutral orchestration** — Triage, Planning, Execution, Review,
-  Verification, and Finalisation are explicit, independently testable stages.
-- **HER execution modes** — Direct (`zero`), Fast path (`low`), Planned
-  (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`)
-  control orchestration depth without changing provider reasoning settings or
-  limiting ordinary tool-call count. Direct is one fully capable Quick-model
-  agent at default provider reasoning `high`; it never upgrades and invokes no
-  other HER stage. Scheduled cron and heartbeat prompt/skill work always uses
-  Direct so the authoritative job instruction reaches that agent without
-  Triage pre-processing.
-- **Evidence-backed assurance** — Reviewed performs an independent read-only
-  Review and one closure check after remediation. Assured adds latest-state
-  Verification with exact tool receipts and up to three attempts. Configured
-  recipes or direct argv checks run in the authoritative workspace with the
-  HASHI process's existing authority and an execution-derived timeout floor.
-- **Compulsory safe-boundary Replanning** — Adaptive (`high`), Reviewed
-  (`xhigh`), and Assured (`max`) Execution unconditionally Replan after 10
-  completed tool results or 300 seconds at the next safe boundary. Each cycle
-  reassesses completion and plan suitability, activates a plan version, and
-  sends one Persona-rendered progress update without interrupting active tools,
-  replaying side effects, or imposing a workflow ceiling.
+- **Provider-neutral orchestration** — Strategy, Planning, and Execution are
+  explicit, independently testable stages with mechanically enforced tool
+  boundaries.
+- **Three production execution modes** — Direct (`zero`), Strategic (`low`),
+  and Planned (`medium`) control orchestration depth without changing provider
+  reasoning settings or limiting ordinary tool-call count. Direct is one fully
+  capable Quick-model agent; Strategic adds task-matched Strategy before full
+  Execution; Planned adds no-tool Strategy and read-only Planning before full
+  Execution. Scheduled cron and heartbeat prompt/skill work always uses Direct.
+- **Deferred higher-mode redesign** — the existing Adaptive, Reviewed, and
+  Assured implementation remains in the codebase for future work and regression
+  evidence, but is not selectable. Persisted `high`, `xhigh`, or `max` HER
+  values safely migrate to Planned (`medium`).
 - **Provider-aware multimodal routing** — images and other supported media keep
   stable identity and order, travel natively to capable provider/models, and
   fall back only through authorised local media inspection when needed.
-- **Crash-safe WIP continuity** — HER v2 records observable work from an
-  unfinished turn in a bounded Session-scoped transient journal, exposes its
-  lifecycle in the durable audit log, and never recursively copies assembled
-  provider requests. Active WIP produces a mandatory visible warning;
-  `/compact` can commit a deterministic quoted recovery capsule without a
-  model and clears the exact Journal snapshot only after that write is durable.
+- **Canonical Session recovery** — HER v2 records typed Turn, Tool,
+  side-effect, checkpoint, and physical Model Provider request evidence in its
+  durable Engine Session control plane. Provider-native Context remains
+  rebuildable. The former WIP Journal is shadow compatibility evidence rather
+  than recovery authority.
 - **Quiet Telegram notifications** — `/notify quiet` keeps acknowledgements,
   commentary, reasoning, verbose activity, and other interim updates silent
   while final results, errors, warnings, recovery notices, and important alerts
@@ -223,16 +226,18 @@ HER v2 is the sole supported HER execution backend:
 - **Migration compatibility** — public engine ID `her` resolves forward to
   `her-v2`. The unrelated historical ID `claw-cli` is rejected.
 
-See [the HER v2 design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
-and [HER v2 testing plan](docs/HER_V2_TESTING_PLAN.md). The exact integrated
-baseline and GitHub publication boundary are recorded in the
-[2026-08-27 checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md).
+See [the Level 0 architecture](ARCHITECTURE.md),
+[the HER v2 design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md),
+and [HER v2 testing plan](docs/HER_V2_TESTING_PLAN.md). The
+[2026-08-27 checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) is a
+historical implementation and publication record, not current architecture
+authority.
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 
 - **From tools to agentic operations:** the v2 tool layer is now surrounded by optional HER Habit–Meditation, separate nightly Dream reflection, SafeVoice confirmation, token/cost audit, and behavior audit trails.
 - **From one machine to a HASHI network:** HChat and Hashi Remote let agents address peers across instances, with peer health, protocol handshakes, and direct file transfer for moving artifacts and EXP packs.
-- **From backend switching to runtime composition:** agents can run fixed, flex, wrapper, or audit modes, including a strong core model paired with a separate persona wrapper or auditor.
+- **From implicit runtime behavior to two clear working modes:** Fixed is the default for session-capable backends; Flex enables explicit backend switching and full context injection.
 - **From generic skills to learned expertise:** `/exp` adds context-specific guidebooks with playbooks, validators, failure memory, templates, evidence, and training runs for repeatable high-skill work.
 - **From browser automation to browser routing:** `/browser` exposes a route dashboard that chooses between headless browser tools, CLI-native browsing, Brave Search, and the real logged-in Chrome extension bridge.
 - **From a monolith to a hot-reloadable core:** v3.2's slim core moves frequently changed behavior into managers and runtime modules so `/reboot min` can adopt most code changes without a full process restart.
@@ -448,67 +453,35 @@ and `kubernetes` add only the selected feature. See
 
 ### Architecture
 
-The canonical layer boundaries, single-source owners, localized-change rule,
-and `/reboot` contract are documented in
+The Level 0 module ownership, Session authority, terminology, engineering
+layers, single-source rules, and `/reboot` boundary are documented in
 [`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor checks are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-HASHI uses a **Universal Orchestrator** pattern where a single Python process manages multiple concurrent agent runtimes:
+HASHI has two orthogonal architecture dimensions:
 
+```text
+Functional ownership                          Engineering placement
+
+Frontend Connectors                           Core
+  -> PAO Conversation Session and Run            -> Functions
+      -> PCM full/delta projection                    -> Platform Configuration
+      -> selected Engine Provider                         -> Instance Configuration
+           -> HER v2 Engine Session, or another Engine
+                -> Model Provider(s), where applicable
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    Universal Orchestrator                         │
-│                                                                  │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐     │
-│  │ Agent Runtime  │  │ Agent Runtime  │  │ Agent Runtime  │ ... │
-│  │   (Agent A)    │  │   (Agent B)    │  │   (Agent C)    │     │
-│  └────────────────┘  └────────────────┘  └────────────────┘     │
-│          ▲                  ▲                  ▲                  │
-│          └──────────────────┴──────────────────┘                  │
-│                          │                                        │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │              Flexible Backend Manager                      │  │
-│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────┐           │  │
-│  │  │Gemini  │ │Claude  │ │ Codex  │ │OpenRouter│           │  │
-│  │  │Adapter │ │Adapter │ │Adapter │ │ Adapter  │           │  │
-│  │  └────────┘ └────────┘ └────────┘ └──────────┘           │  │
-│  │  ┌──────────┐ ┌────────┐                                  │  │
-│  │  │DeepSeek  │ │ Ollama │                                  │  │
-│  │  │ Adapter  │ │Adapter │                                  │  │
-│  │  └──────────┘ └────────┘                                  │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                          ▲                                        │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │                Transport Layer                              │  │
-│  │    [Telegram] [WhatsApp] [Backend API] [HChat]             │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                                                                  │
-│  ┌────────────┐  ┌────────────┐  ┌────────────────────┐        │
-│  │   Skill    │  │  Scheduler │  │   Memory System    │        │
-│  │  Manager   │  │ (Jobs/Cron)│  │ (Vector + Recall)  │        │
-│  └────────────┘  └────────────┘  └────────────────────┘        │
-│                                                                  │
-│  ┌────────────────────────────┐  ┌────────────────────────┐    │
-│  │ HER Habit–Meditation       │  │   Token Audit          │    │
-│  │ (Backend-local, optional) │  │  (Usage + Cost Track)  │    │
-│  └────────────────────────────┘  └────────────────────────┘    │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │              Nagare Flow System                              │  │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐         │  │
-│  │  │FlowRunner│→ │ Workers  │→ │ Evaluation KB    │         │  │
-│  │  │(DAG Orch)│  │(Multi-AI)│  │(Self-Improving)  │         │  │
-│  │  └──────────┘  └──────────┘  └──────────────────┘         │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
-```
+
+Most functional-module behaviour lives in hot-reloadable Functions. The small
+Core stays continuously running so normal functions can be adopted without a
+cold restart. Platform and Instance Configuration adapt the same program
+without forking product policy.
 
 **Key Design Principles:**
-- **Backend Agnostic** — Agents work with any supported backend; you can switch mid-conversation
-- **Shared Sessions** — Telegram, TUI, and authenticated external clients share the same agent queues and memory
+- **Provider Agnostic** — PAO supports conforming Engine/Harness Providers, and Engines such as HER v2 can support multiple Model Providers
+- **Authoritative Sessions** — PAO owns HASHI Conversation Sessions; each selected Engine owns only its internal Engine Session
 - **Explicit over Automatic** — Skills, jobs, and features are user-activated, never magic
 - **Single Instance** — File-based locking prevents multiple HASHI processes from conflicting
-- **Remote Provider Policy** — Remote provider calls are permission-gated for automated flows to prevent runaway costs
+- **Qualified Provider Policy** — Remote Model Provider calls are permission-gated for automated flows to prevent runaway costs
 - **Slim Core** — process bootstrap stays small while hot-reloadable managers own feature behavior
 
 ### File Structure
@@ -620,6 +593,8 @@ HASHI supports multiple communication channels:
 - Workbench has retired and is no longer shipped or supported by HASHI.
 - The frontend, Node server, launchers, build assets, data, and UI tests have
   been removed from this repository.
+- Any successor graphical frontend is a separate product/repository. It may use
+  HASHI's generic Connector and API contracts but is not a HASHI module.
 - Legacy identifiers such as `workbench_port`, `workbench_api.py`, and
   `/workbench/v1/*` remain only for Backend API compatibility.
 
@@ -715,13 +690,10 @@ examples, timing semantics, persistence, and cancellation, see
 
 | Command | Description |
 |---------|-------------|
-| `/mode [fixed\|flex\|wrapper\|audit\|dual-brain]` | Switch execution mode; `/mode memory+` is a compatibility alias that only enables continuity |
-| `/backend [engine]` | Switch backend in Flex; other modes first offer an explicit switch-to-Flex confirmation |
+| `/mode [fixed\|flex]` | Switch working mode; Fixed is the session-capable default, while `/mode memory+` only enables independent continuity |
+| `/backend [engine]` | Switch backend in Flex; Fixed first offers an explicit switch-to-Flex confirmation |
 | `/provider [name\|hybrid]` | Choose a Single provider or open a HER v2 Hybrid routing draft |
 | `/model [name]` | Configure HER v2 Quick/Pro and task-route targets, or change the active model on other backends |
-| `/core` | View/change the functional core backend/model used by wrapper or audit mode |
-| `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
-| `/wrapper` | View/edit wrapper-mode persona/style slots |
 | `/anatta [status\|off\|shadow\|on]` | Inspect or switch Anatta live self-assembly mode for the current agent |
 | `/effort` | Change HER execution mode, or model reasoning effort on supported non-HER backends |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
@@ -733,6 +705,9 @@ examples, timing semantics, persistence, and cancellation, see
 | `/retry` | Stop stale execution, create a clean context, restore recent handoff continuity, and rerun the last prompt |
 | `/long` ... `/end` | Buffer text and Telegram media, submit everything as one request |
 | `/loop <interval> <task>` | Create recurring automated tasks via skill injection |
+
+The configuration, transition, and legacy-mode migration contract is documented
+in [Fixed and Flex Working Modes](docs/FIXED_FLEX_WORKING_MODES.md).
 
 `/retry` uses `/new`-equivalent cleanup for CLI backends and `/fresh`-equivalent
 cleanup for API backends. The last retryable prompt and resendable output are
@@ -762,22 +737,30 @@ Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
 
 For HER v2, `/effort` opens the **HER execution mode** menu. It displays Direct
-(`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed
-(`xhigh`), and Assured (`max`). Direct makes one fully capable Quick-model call
+(`zero`), Strategic (`low`), and Planned (`medium`). Direct makes one fully capable Quick-model call
 at default provider reasoning `high`, with no Immediate Response, Triage,
 Planning, Replanning, delegation, Review, Verification, or Finalisation. It
 never auto-upgrades, and any successful natural-language return is completed,
 including a request for missing information. The descriptive names are
 accepted as command aliases; saved configuration and wire values remain
-canonical, so `/effort direct` stores `zero`, `/effort reviewed` stores `xhigh`,
-and `/effort assured` stores `max`. Other backends keep their existing
-reasoning-effort menus and labels.
+canonical, so `/effort direct` stores `zero`, `/effort strategic` stores `low`,
+and `/effort planned` stores `medium`. Legacy `fast` and `fast_path` aliases
+still select Strategic. Planned uses a no-tool Strategy stage, a mechanically
+read-only Planning stage, and then fully capable Execution; Planning cannot
+mutate artifacts or complete the downstream work. Old saved `high`, `xhigh`,
+and `max` values migrate to Planned while those higher designs are postponed.
+Other backends keep their existing reasoning-effort menus and labels.
 
 The `/backend` and `/model` menus finish as one configuration flow. For HER v2,
 `/provider` selects either a Single provider or Hybrid routing. Hybrid Quick,
-Pro, and Custom task routes each carry a full provider/model target and remain
+Pro, and Custom task targets each carry a full provider/model target and remain
 drafted until one Apply; Single-provider selection retains its immediate atomic
-flow. Models with selectable effort levels show an
+flow. The normal `/model` menu follows the public execution design: Direct,
+Strategy, Planning, and Execution. Execution `Auto` assigns simple tasks to
+Quick and complex or high-volume tasks to Pro. Per-task Custom targets and
+Compact live under Advanced settings; internal and background routes keep their
+saved defaults without appearing as ordinary task choices. Provider reasoning
+choices follow the current provider/model's declared capabilities. Models with selectable effort levels show an
 optional effort step; keeping the current value leaves it unchanged. Models
 without selectable effort skip that step and show `n/a` in the saved
 configuration summary.
@@ -798,6 +781,10 @@ configuration summary.
 | `/voice [on\|off\|menu\|use <alias>]` | Control bridge voice replies |
 | `/say` | Read the last assistant reply as voice; forces one TTS attempt even when `/voice off` if a voice is configured |
 | `/api [status\|on\|off\|model <name>]` | Show API Gateway address, switch it on/off, or set its default model |
+
+For `/verbose`, `/think`, and `/commentary`, the bare command only opens the
+menu. Choosing On or Off (or passing it explicitly) changes the active turn
+immediately. Events emitted while a display is Off are not replayed later.
 
 #### Lifecycle Commands
 
@@ -909,31 +896,32 @@ Jobs can be transferred between agents (same instance or cross-instance):
 
 ---
 
-### Backend Adapters
+### Engine and Model Provider Adapters
 
-HASHI's **adapter system** provides a unified interface to multiple AI backends:
+HASHI's adapter system separates Engine (Harness) Providers from Model
+Providers. Existing `backend` identifiers remain compatibility surfaces.
 
-#### Supported Backends
+#### Selectable Engine Providers
 
-| Backend | Engine ID | Requirements | Notes |
+| Engine Provider | Engine ID | Requirements | Notes |
 |---------|-----------|--------------|-------|
 | Gemini CLI | `gemini-cli` | `gemini` CLI installed | Local auth |
 | Claude Code | `claude-cli` | `claude` CLI installed | Local auth |
 | Codex CLI | `codex-cli` | `codex` CLI installed | Local auth |
 | Grok CLI | `grok-cli` | `grok` CLI installed and logged in | Local auth, streaming JSON |
 | xAI API | `xai-api` | Hermes xAI OAuth profile or `xai_api_key` | Grok chat, responses, Imagine image/video |
-| HER v2 | `her-v2` (`her` migration alias) | At least one configured HER v2 provider profile | Provider-neutral staged orchestration; `claw-cli` is retired |
+| HER v2 | `her-v2` (`her` migration alias) | At least one configured HER v2 Model Provider profile | Model-Provider-neutral staged orchestration with a durable Engine Session; `claw-cli` is retired |
 | Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |
 
-OpenRouter (`openrouter-api`) and DeepSeek (`deepseek-api`) are provider-only
-engines. Their adapters remain available to HER v2 and internal rendering, but
-they are not selectable as top-level backends in `/backend`.
+OpenRouter (`openrouter-api`) and DeepSeek (`deepseek-api`) are Model Provider
+adapters, not Engine Providers. They remain available to HER v2 and internal
+rendering, but are not selectable as top-level Engines in `/backend`.
 
 #### Remote Backend Policy
 
-Remote provider calls (including OpenRouter, DeepSeek, and xAI API) are protected by an automatic cost-control policy:
-- **User-initiated requests** → allowed on any backend
-- **Automated requests** (scheduler, HChat, transfers) → blocked on remote API backends, must use CLI or local backends
+Remote Model Provider calls (including OpenRouter, DeepSeek, and xAI API) are protected by an automatic cost-control policy:
+- **User-initiated requests** → allowed on any permitted Engine route
+- **Automated requests** (scheduler, HChat, transfers) → blocked on remote API routes, must use permitted CLI or local Engines
 
 This prevents runaway API costs from automated workflows.
 
@@ -944,8 +932,8 @@ This prevents runaway API costs from automated workflows.
 - Conversation memory managed by CLI
 - Grok CLI uses `--output-format streaming-json`; HASHI treats zero-exit empty answers as failures, retries once only for side-effect-free `thought`/`end` empty output, and refuses retry after side-effect events.
 
-#### API Providers and Backends
-- OpenRouter and DeepSeek run through HER v2 provider profiles; xAI remains a selectable API backend
+#### API Model Providers and Engine Surfaces
+- OpenRouter and DeepSeek run through HER v2 Model Provider profiles; xAI remains a selectable compatibility Engine surface
 - HTTP API with streaming support
 - Supports tool calls (function calling)
 - Stateless (HASHI manages conversation history)
@@ -961,16 +949,16 @@ This prevents runaway API costs from automated workflows.
 
 #### Tool Execution Layer
 
-HER v2 and other tool-capable runtimes can execute local actions through the
-HASHI Tool Registry. OpenRouter and DeepSeek remain provider adapters inside
-HER v2 rather than selectable top-level backends:
+HER v2 and other tool-capable Engines can execute local actions through the
+PAO-owned HASHI Tool Registry. OpenRouter and DeepSeek remain Model Provider
+adapters inside HER v2 rather than selectable top-level Engines:
 
 ```json
 {
   "engine": "her-v2",
   "model": "role-configured",
   "tools": {
-    "allowed": ["bash", "file_read", "file_write", "file_list", "apply_patch",
+    "allowed": ["shell", "file_read", "file_write", "file_list", "apply_patch",
                 "web_search", "web_fetch", "http_request",
                 "process_list", "process_kill", "telegram_send"]
   }
@@ -981,7 +969,8 @@ HER v2 rather than selectable top-level backends:
 
 | Tool | Description |
 |------|-------------|
-| `bash` | Run shell commands (sandboxed, timeout + blocklist controls) |
+| `shell` | Run through an explicit shell contract: PowerShell on native Windows, Bash on Linux/WSL/macOS; select `cmd` only for CMD syntax |
+| `bash` | Deprecated compatibility alias that always means real Bash, never CMD |
 | `file_read` | Read files with offset/limit pagination |
 | `file_write` | Write/create files |
 | `file_list` | List directories with glob filter |
@@ -1189,7 +1178,7 @@ stateless API backends receive the compact card plus at most two recent
 exchanges on each request.
 
 `/mode memory+` remains a compatibility alias that turns continuity on without
-changing the current `flex`, `fixed`, `wrapper`, `audit`, or `dual-brain` mode.
+changing the current `fixed` or `flex` mode.
 See [Memory+ v2 — Compact Work Continuity](docs/MEMORY_PLUS_V2.md) for storage,
 rollover, migration, and mode ownership details.
 
@@ -1423,7 +1412,7 @@ duplicate alias `/paswd` has been removed.
     "authorized_id": 123456789,
     "ui_language": "en",
     "default_tools": {
-      "allowed": ["bash", "file_read", "file_write", "file_list"]
+      "allowed": ["shell", "file_read", "file_write", "file_list"]
     },
     "her_providers": {
       "max_permission_mode": "danger-full-access",
@@ -1553,6 +1542,8 @@ field remains a one-model hint.
 |-----|----------|----------|
 | Bridge log | `logs/bridge.log` | Orchestrator events, backend checks, agent state |
 | Session errors | `logs/<session>/errors.log` | Per-session error details |
+| HASHI API transport | `logs/hashi_api_transport.jsonl` | Complete local Gateway request, response, and SSE evidence |
+| API Gateway observability | `logs/api_gateway_observability.jsonl` | Gateway ingress, validation stage, rejection, and response evidence |
 | Launch log | `logs/bridge_launch.log` | Startup sequence |
 | Token audit | `logs/token_usage.jsonl` | Token consumption records |
 
@@ -1577,7 +1568,8 @@ field remains a one-model hint.
 
 ### TUI Interface
 
-`tui.py` provides a terminal-first interface built with [Textual](https://github.com/Textualize/textual):
+`tui.py` is HASHI's permanent built-in reference terminal Connector, built with
+[Textual](https://github.com/Textualize/textual):
 
 ```bash
 python tui.py
@@ -1586,7 +1578,7 @@ python tui.py
 **Panels:**
 - **Log panel** (upper) — real-time stdout/stderr from the bridge process
 - **Chat input bar** (lower) — send messages to any active agent
-- **Status bar** — current agent, backend, bridge uptime
+- **Status bar** — current Agent, Engine (legacy backend label), bridge uptime
 - **Agent selector** — hotkey to switch which agent receives input
 
 **Local TUI commands:**
@@ -1611,18 +1603,20 @@ unchanged. The upper panel remains explicitly labeled as the launch instance's
 local log after switching. See
 [`docs/TUI_INSTANCE_SWITCHING.md`](docs/TUI_INSTANCE_SWITCHING.md).
 
+The current TUI uses the basic Backend API chat/transcript surface. It is not
+yet a complete Persistent Session API v1 multi-Session client.
+
 ---
 
 ## Warnings
 
-### Current Enterprise Alpha
+### Current Alpha
 
-HASHI AAI Enterprise v0.1.0-alpha.1 is the current **enterprise alpha** line.
-It packages the governed control-plane work for alpha operator review while
-keeping production enterprise-server validation pending.
-
-HASHI v4.0.0-alpha.2 is the current **v4 platform release candidate**. The
-enterprise package version remains independently frozen at `0.1.0a1`.
+HASHI v4.0.0-alpha.2 is the single current **repository and package release
+candidate**. It includes the governed Enterprise AAI control-plane work while
+keeping production enterprise-server validation pending. Enterprise AAI
+v0.1.0-alpha.1 remains a historical tagged milestone, not an independent
+current package line.
 
 **Known Limitations:**
 - **Stability** — Expect edge cases and unexpected behavior
@@ -1654,18 +1648,10 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Provider-neutral orchestration** — HER v2 owns explicit Triage, Planning,
   Execution, Review, Verification, and Finalisation stages without a native
   Claw runtime
-- **Task-matched execution modes** — Direct, Fast path, Planned, Adaptive,
-  Reviewed, and Assured remain independent from provider reasoning and
-  ordinary tool-call count; Direct is a single fully capable Quick-model agent
-  with zero HER orchestration and no automatic upgrade
-- **Hard-evidence assurance** — read-only Review and validation-only
-  Verification accept only exact completed current-invocation receipts;
-  Assured runs configured recipes or direct argv checks in the authoritative
-  workspace and re-verifies remediated state up to three times
-- **Compulsory execution Replanning** — every Adaptive-or-above cycle performs
-  a tool-free Replan at the safe boundary after 10 completed tool results or
-  300 seconds, with mandatory progress commentary and no Replan, tool, time,
-  token, turn, or completion ceiling
+- **Task-matched execution modes** — Direct, Strategic, and Planned remain
+  independent from provider reasoning and ordinary tool-call count; higher
+  Replanning/Review modes are retained internally but deferred and hidden from
+  the production selector
 - **Reliable conversation delivery** — direct-message continuity, scheduler
   isolation, explicit stream ownership, stable event IDs, and request-scoped
   idempotency
@@ -1679,7 +1665,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - Full scope and alpha limits are recorded in
   [the release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md).
 
-### Enterprise AAI v0.1.0-alpha.1 *(current enterprise alpha)* — Governed AAI Control Plane (June 2026)
+### Enterprise AAI v0.1.0-alpha.1 *(historical alpha milestone)* — Governed AAI Control Plane (June 2026)
 
 - **Enterprise control plane** — governed `personal`/`team`/`enterprise`
   profile model with identity, SSO/SCIM primitives, projects, roles, API tokens,
@@ -1716,15 +1702,15 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 ### v3.2.0 — Slim Core, EXP, Browser Routing & Runtime Hardening (May 2026)
 
 - **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
-- **Wrapper Agent Mode implemented** — agents can run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
-  - `/core`, `/wrap`, and `/wrapper` configure core model, wrapper model/context, and persona/style slots with Telegram inline controls
-  - `/verbose on` shows a compact wrapper status, latency, and fallback summary without echoing raw answer drafts
-  - Foreground and background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries use wrapper-visible text where appropriate; active `bridge:hchat` sends remain wrapper-bypassed until the delivery-boundary HChat pipeline is implemented
-  - Core prompt memory stores core raw assistant output, while visible transcript, project chat, core transcript, and audit metadata remain separated for debugging and user-facing continuity
-  - `/reset CONFIRM` preserves wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remains a hard workspace clear
+- **Wrapper Agent Mode implemented (historical; retired in v4)** — agents could run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
+  - `/core`, `/wrap`, and `/wrapper` configured the core model, wrapper model/context, and persona/style slots with Telegram inline controls
+  - `/verbose on` showed a compact wrapper status, latency, and fallback summary without echoing raw answer drafts
+  - Foreground and background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries used wrapper-visible text where appropriate; active `bridge:hchat` sends remained wrapper-bypassed pending a delivery-boundary HChat pipeline
+  - Core prompt memory stored core raw assistant output, while visible transcript, project chat, core transcript, and audit metadata remained separated for debugging and user-facing continuity
+  - `/reset CONFIRM` preserved wrapper mode configuration and prompt slots, matching `/sys` preservation behavior; `/wipe CONFIRM` remained a hard workspace clear
   - Final hardening commit `677212b` prevents wrapper persona from drifting back into the core model through prompt memory
 - **Anatta controls added** — `/anatta off`, `/anatta shadow`, and `/anatta on` switch per-agent live self-assembly mode by updating workspace config and reloading post-turn observers
-- **Audit Agent Mode implemented** — `/mode audit` and `/audit` configure a core model plus a separate audit model that emits follow-up findings while leaving the core answer unchanged
+- **Audit Agent Mode implemented (historical; retired in v4)** — `/mode audit` and `/audit` configured a core model plus a separate audit model that emitted follow-up findings while leaving the core answer unchanged
 - **EXP guidebook corpus imported** — `/exp <task>` consults context-specific guidebooks under `exp/`, including playbooks, validators, failure memory, templates, evidence, and training records
 - **Runtime slimming continued** — runtime session, workspace, control, remote command, lifecycle, queue processor, and pipeline responsibilities moved out of the main flex runtime file into focused modules
 - **Per-instance API Gateway ports** — API Gateway defaults to `workbench_port + 1`, launcher status uses configured ports, and HASHI API health reports gateway ownership/status

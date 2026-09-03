@@ -1408,6 +1408,162 @@ class SessionStore:
             ).fetchone()
             return self._run_dict(result)
 
+    def record_assistant_delivery(
+        self,
+        request_id: str,
+        *,
+        delivered: bool,
+        assistant_text: str | None = None,
+        surface: str,
+        channel_key: str,
+        transport: str,
+        completion_path: str,
+        disposition: str = "",
+    ) -> dict[str, Any] | None:
+        """Persist one final-response delivery outcome for a Session Run.
+
+        Run completion only proves that the backend produced an assistant
+        message.  Commands such as ``/say`` need the stricter fact that the
+        visible final response reached its intended channel.  The route is
+        part of the receipt because one Session may be bound to multiple
+        surfaces or chats.
+        """
+
+        normalized_surface = str(surface or "").strip().lower()
+        normalized_channel = str(channel_key or "").strip()
+        if not normalized_surface or not normalized_channel:
+            return None
+        route_phase = f"transport:{normalized_surface}:{normalized_channel}"
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                """
+                SELECT r.*, m.text AS canonical_assistant_text
+                FROM runs AS r
+                JOIN messages AS m ON m.message_id = r.final_message_id
+                WHERE r.request_id = ? AND r.state = 'completed'
+                """,
+                (str(request_id),),
+            ).fetchone()
+            if run is None:
+                return None
+
+            outcome_status = "delivered" if delivered else "failed"
+            existing = connection.execute(
+                """
+                SELECT * FROM run_events
+                WHERE run_id = ? AND kind = 'assistant.delivery.outcome'
+                  AND status = ? AND phase = ?
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (str(run["run_id"]), outcome_status, route_phase),
+            ).fetchone()
+            if existing is not None:
+                detail = _json_object(existing["detail_json"])
+                event = dict(existing)
+                event["detail"] = detail
+                event.pop("detail_json", None)
+                return event
+
+            delivered_text = str(assistant_text or "").strip()
+            canonical_text = str(run["canonical_assistant_text"] or "").strip()
+            detail = {
+                "request_id": str(request_id),
+                "message_id": str(run["final_message_id"]),
+                "surface": normalized_surface,
+                "channel_key": normalized_channel,
+                "transport": str(transport or "").strip().lower(),
+                "completion_path": str(completion_path or "").strip().lower(),
+                "disposition": str(disposition or "").strip(),
+            }
+            if delivered_text and delivered_text != canonical_text:
+                # CoS and other presentation paths can replace the persisted
+                # backend text at delivery time.  Store only that exceptional
+                # override; ordinary receipts continue referencing the
+                # canonical assistant Message without duplicating its text.
+                detail["text_override"] = delivered_text
+            return self._append_event(
+                connection,
+                session_id=str(run["session_id"]),
+                run_id=str(run["run_id"]),
+                kind="assistant.delivery.outcome",
+                status=outcome_status,
+                phase=route_phase,
+                summary=(
+                    "Assistant final response delivered"
+                    if delivered
+                    else "Assistant final response delivery failed"
+                ),
+                detail=detail,
+            )
+
+    def latest_delivered_assistant_text(
+        self,
+        session_id: str,
+        *,
+        surface: str,
+        channel_key: str,
+    ) -> str | None:
+        """Return the newest visible assistant text confirmed on one route."""
+
+        self.get_session(session_id)
+        normalized_surface = str(surface or "").strip().lower()
+        normalized_channel = str(channel_key or "").strip()
+        if not normalized_surface or not normalized_channel:
+            return None
+        route_phase = f"transport:{normalized_surface}:{normalized_channel}"
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT e.detail_json, m.text
+                FROM run_events AS e
+                JOIN runs AS r ON r.run_id = e.run_id
+                JOIN messages AS m ON m.message_id = r.final_message_id
+                WHERE e.session_id = ?
+                  AND e.kind = 'assistant.delivery.outcome'
+                  AND e.status = 'delivered'
+                  AND e.phase = ?
+                  AND r.state = 'completed'
+                  AND m.role = 'assistant'
+                  AND m.visibility = 'visible'
+                ORDER BY e.sequence DESC
+                """,
+                (str(session_id), route_phase),
+            ).fetchall()
+        for row in rows:
+            detail = _json_object(row["detail_json"])
+            text = str(detail.get("text_override") or row["text"] or "").strip()
+            if text:
+                return text
+        return None
+
+    def has_assistant_delivery_outcome(
+        self,
+        session_id: str,
+        *,
+        surface: str,
+        channel_key: str,
+    ) -> bool:
+        """Return whether delivery-aware tracking has begun on this route."""
+
+        self.get_session(session_id)
+        normalized_surface = str(surface or "").strip().lower()
+        normalized_channel = str(channel_key or "").strip()
+        if not normalized_surface or not normalized_channel:
+            return False
+        route_phase = f"transport:{normalized_surface}:{normalized_channel}"
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM run_events
+                WHERE session_id = ? AND kind = 'assistant.delivery.outcome'
+                  AND phase = ?
+                LIMIT 1
+                """,
+                (str(session_id), route_phase),
+            ).fetchone()
+        return row is not None
+
     def cancel_run(
         self, run_id: str, *, owner_id: str, reason: str = "cancelled_by_user"
     ) -> dict[str, Any]:
@@ -2608,7 +2764,11 @@ class SessionStore:
         result["scope"] = _json_object(result.pop("scope_json"))
         return result
 
-    def reconcile_incomplete_runs(self) -> list[dict[str, Any]]:
+    def reconcile_incomplete_runs(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Terminalize Runs whose in-memory executor was lost on restart.
 
         The current runtime has no durable queue or safe execution-stack replay.
@@ -2617,30 +2777,49 @@ class SessionStore:
         fences every pre-existing non-terminal Run as ``interrupted``, preserves
         its user Message and evidence, and appends one durable terminal Event.
         A later user continuation is a new child Run with a new idempotency key.
+
+        Process startup reconciles the whole instance.  Agent lifecycle restart
+        passes ``agent_id`` so one restarted executor cannot interrupt Runs that
+        still belong to another live Agent in the same HASHI process.
         """
 
         now = _utc_now()
+        target_agent_id = str(agent_id or "").strip() or None
         reconciled_ids: list[str] = []
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            agent_clause = " AND r.agent_id = ?" if target_agent_id else ""
+            params: tuple[str, ...] = (
+                (self.instance_id, target_agent_id)
+                if target_agent_id
+                else (self.instance_id,)
+            )
             rows = connection.execute(
-                """
+                f"""
                 SELECT r.* FROM runs AS r
                 JOIN sessions AS s ON s.session_id = r.session_id
                 WHERE s.instance_id = ? AND r.state IN ('queued', 'running')
+                {agent_clause}
                 ORDER BY r.created_at, r.run_id
                 """,
-                (self.instance_id,),
+                params,
             ).fetchall()
             for run in rows:
                 prior_state = str(run["state"])
                 run_id = str(run["run_id"])
                 session_id = str(run["session_id"])
-                reason = (
-                    "HASHI restarted before the accepted Run began"
-                    if prior_state == "queued"
-                    else "HASHI restarted while the Run was executing"
-                )
+                if target_agent_id:
+                    reason = (
+                        f"Agent '{target_agent_id}' restarted before the accepted Run began"
+                        if prior_state == "queued"
+                        else f"Agent '{target_agent_id}' restarted while the Run was executing"
+                    )
+                else:
+                    reason = (
+                        "HASHI restarted before the accepted Run began"
+                        if prior_state == "queued"
+                        else "HASHI restarted while the Run was executing"
+                    )
                 updated = connection.execute(
                     """
                     UPDATE runs
@@ -2673,8 +2852,10 @@ class SessionStore:
                     phase="recovery",
                     summary=reason,
                     detail={
+                        "agent_id": str(run["agent_id"]),
                         "error_code": "runtime_restart_interrupted",
                         "prior_state": prior_state,
+                        "recovery_scope": "agent" if target_agent_id else "instance",
                     },
                     outbox=True,
                 )

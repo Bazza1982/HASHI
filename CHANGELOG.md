@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HER v2 Fast/Low Strategy experiment (HASHI3)** — upgraded the compatible
+  Triage wire stage to a tool-capable Strategist backed by a versioned external
+  38-card Playbook and schema v3. Low effort now passes only the selected Card
+  snapshots and strategic execution brief to primary Execution while retaining
+  `active_plan=None`; Medium and higher Planning paths remain unchanged in this
+  first slice.
 - **Telegram Quiet notification mode** — expanded `/notify` to
   `on|quiet|off`. Quiet delivers every message, silences acknowledgements,
   commentary, reasoning, technical activity, placeholders, and previews, then
@@ -108,7 +114,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **OpenRouter and DeepSeek are provider-only engines** — removed both from
+- **Unified release identity** — made HASHI `v4.0.0-alpha.2` the single current
+  repository, Python package (`4.0.0a2`), root Node package, and Helm
+  application line. Enterprise AAI `v0.1.0-alpha.1` remains an immutable
+  historical milestone rather than a parallel active version.
+- **npm package hygiene** — excluded ignored Python bytecode and machine-local
+  skill state from the root package allow-list so a lived-in checkout packs
+  only Git-tracked release inputs.
+- **Fixed/Flex Agent working-mode convergence** — the normal Flex Agent runtime
+  now exposes only Fixed and Flex. Session-capable Engines default to Fixed for
+  native Engine Session continuation; stateless Engines default to Flex for
+  PCM-managed Context and explicit Engine switching. `default_mode`, `/mode`,
+  `/backend`, status/help metadata, locale text, sample configuration, and
+  migration behavior now share that contract.
+- **OpenRouter and DeepSeek are Model Provider adapters** — an earlier label
+  incorrectly treated them as Engines; removed both from
   top-level `/backend` selection while retaining their adapters for HER v2 and
   internal rendering. Legacy direct active selections migrate to `her-v2` only
   when the Agent already grants an explicit HER v2 row; otherwise startup fails
@@ -129,6 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Wrapper, Audit, and Dual-brain selectable working modes** — removed their
+  buttons and command-picker entries. Old slash commands and inline callbacks
+  return a non-mutating compatibility notice, while persisted legacy mode
+  values migrate to Fixed or Flex and retain their historical configuration
+  blocks.
 - **HER v1 and legacy fixed runtime** — retired the Claw-derived native HER
   adapter, binaries/source integration, debug/certification tooling, old fixed
   runtime, and the standalone OpenClaw importer. `her` now resolves only to the
@@ -142,6 +167,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agent-restart Session convergence** — Agent stop/start lifecycle boundaries
+  now terminalize only that Agent's orphaned queued/running Runs as
+  `interrupted`, including the first hot reload that adopts the fix. The
+  warm Backend API replacement no longer repeats the process-start instance
+  sweep and interrupt Runs owned by other live Agents. The Activity API
+  recovers the terminal durable projection after the replacement Runtime loses
+  its in-memory stream, so Session clients no longer wait forever on work whose
+  executor was destroyed.
+- **Reasoning-stream canonical audit hot path** — lossless provider stream
+  evidence now commits in bounded 200 ms / 8 KiB groups with one lock, chain-tail
+  read, append, flush, and `fsync`. Each raw delta retains its own sequence,
+  timestamp, event, and digest-chain link; one semantic reasoning record
+  references the batch instead of copying every delta a second time. Canonical
+  audit startup is fail-closed and uses native `fcntl` or `msvcrt` locking.
+- **Platform-truthful execution contracts** — replaced the misleading implicit
+  `bash` execution path with an explicit `shell` tool: PowerShell on native
+  Windows and Bash on Linux, WSL, and macOS, with selectable CMD and a real-Bash
+  compatibility alias. HER stages now receive authoritative OS, Shell, cwd,
+  path, encoding, Python, and argv facts. Windows process trees, `.cmd`/`.bat`
+  and `.ps1` entry points, UTF-8 output, native paths, WSL drive scopes,
+  background jobs, verification commands, CLI adapters, and CI are covered by
+  native Windows regression tests.
+- **Workbench smoke-result correlation** — live Agent smoke checks now wait on
+  the current request ID in the canonical core transcript instead of watching
+  the legacy presentation transcript for an adjacent user/assistant pair. This
+  prevents successful HER v2 requests from being reported as 180-second false
+  timeouts and avoids cross-request response matches under concurrency.
+- **Fixed/Flex first hot-reload adoption** — configuration now reloads before
+  working-mode consumers, Context Compact tolerates the one mixed-generation
+  reboot that installs this ordering, and the post-reload contract rejects a
+  runtime whose Fixed/Flex symbols are still stale.
 - **Notification-policy delivery and hot-reload safety** — notification helper
   signature mismatches or policy exceptions can no longer suppress a final
   message. Delivery uses a compatibility fallback or safe audible default, and
@@ -153,9 +209,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response request metadata. Codex document/media fallback prompts continue
   through stdin rather than reverting to an oversized command-line argument.
 - **HER read-only search portability** — `workspace_inspect search` now uses
-  the system `grep` binary when `rg` is absent from the service process PATH,
-  preserving bounded, workzone-scoped Review and Verification evidence instead
-  of returning an unexpected tool failure.
+  the system `grep` binary when `rg` is absent, then a bounded built-in Python
+  search when neither binary exists. Pure native-Windows Review and
+  Verification therefore keep workzone-scoped evidence instead of returning an
+  unexpected tool failure.
 - **API Gateway hot-reload process-group crash** — isolated Codex MCP inventory
   subprocesses from HASHI's POSIX process group and made process-tree cleanup
   refuse any group kill that could target HASHI itself. Gateway shutdown now

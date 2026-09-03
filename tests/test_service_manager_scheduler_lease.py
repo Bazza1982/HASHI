@@ -48,7 +48,16 @@ async def test_start_workbench_api_uses_reloaded_module_class(tmp_path, monkeypa
     created = []
 
     class _ReloadedWorkbenchApiServer:
-        def __init__(self, config_path, global_cfg, runtimes, *, secrets=None, orchestrator=None):
+        def __init__(
+            self,
+            config_path,
+            global_cfg,
+            runtimes,
+            *,
+            secrets=None,
+            orchestrator=None,
+            reconcile_session_runs=True,
+        ):
             created.append(
                 {
                     "config_path": config_path,
@@ -56,6 +65,7 @@ async def test_start_workbench_api_uses_reloaded_module_class(tmp_path, monkeypa
                     "runtimes": runtimes,
                     "secrets": secrets,
                     "orchestrator": orchestrator,
+                    "reconcile_session_runs": reconcile_session_runs,
                 }
             )
             self.bind_host = "127.0.0.1"
@@ -83,6 +93,69 @@ async def test_start_workbench_api_uses_reloaded_module_class(tmp_path, monkeypa
             "runtimes": kernel.runtimes,
             "secrets": {"token": "secret"},
             "orchestrator": kernel,
+            "reconcile_session_runs": True,
+            "started": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restart_workbench_api_skips_process_start_run_reconciliation(
+    tmp_path,
+    monkeypatch,
+):
+    created = []
+
+    class _ReloadedWorkbenchApiServer:
+        def __init__(
+            self,
+            _config_path,
+            _global_cfg,
+            _runtimes,
+            *,
+            secrets=None,
+            orchestrator=None,
+            reconcile_session_runs=True,
+        ):
+            created.append(
+                {
+                    "secrets": secrets,
+                    "orchestrator": orchestrator,
+                    "reconcile_session_runs": reconcile_session_runs,
+                }
+            )
+            self.bind_host = "127.0.0.1"
+
+        async def start(self):
+            created[-1]["started"] = True
+
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(config_path=tmp_path / "agents.json"),
+        runtimes=[SimpleNamespace(name="zhaojun")],
+        global_cfg=SimpleNamespace(workbench_port=18800),
+        secrets={"token": "secret"},
+        workbench_api=object(),
+    )
+    manager = ServiceManager(kernel)
+    monkeypatch.setitem(
+        sys.modules,
+        "orchestrator.workbench_api",
+        SimpleNamespace(WorkbenchApiServer=_ReloadedWorkbenchApiServer),
+    )
+
+    async def stop_workbench_api(*, timeout):
+        assert timeout == 2.0
+        kernel.workbench_api = None
+
+    monkeypatch.setattr(manager, "stop_workbench_api", stop_workbench_api)
+
+    await manager.restart_workbench_api()
+
+    assert created == [
+        {
+            "secrets": {"token": "secret"},
+            "orchestrator": kernel,
+            "reconcile_session_runs": False,
             "started": True,
         }
     ]

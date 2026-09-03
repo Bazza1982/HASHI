@@ -21,6 +21,7 @@ from orchestrator.pcm import (
     parse_pcm_text,
 )
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
+from orchestrator.process_execution import is_wsl
 from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
     normalize_allowed_backends,
@@ -32,10 +33,26 @@ from orchestrator.flexible_backend_registry import (
 #   "project"   - the project root / repo root (sensible default)
 #   "drive"     - full drive root e.g. C:\ (least restrictive)
 VALID_ACCESS_SCOPES = {"workspace", "project", "drive"}
-SESSION_MODE_BACKENDS = frozenset({"claude-cli", "codex-cli", "grok-cli"})
+SESSION_MODE_BACKENDS = frozenset(
+    {"claude-cli", "codex-cli", "grok-cli", "her-v2"}
+)
+DEFAULT_AGENT_MODE = "fixed"
+SUPPORTED_AGENT_MODES = frozenset({"fixed", "flex"})
+RETIRED_AGENT_MODES = frozenset({"wrapper", "audit", "dual-brain"})
 LEGACY_FIXED_CONFIG_BACKUP_SUFFIX = ".pre-flex-migration.bak"
 LEGACY_PCM_CONFIG_BACKUP_SUFFIX = ".pre-pcm-migration.bak"
 config_logger = logging.getLogger("BridgeU.Config")
+
+
+def default_agent_mode_for_backend(engine: str | None) -> str:
+    """Return the product default while respecting backend capabilities."""
+
+    canonical = canonical_backend_engine(engine)
+    return (
+        DEFAULT_AGENT_MODE
+        if canonical in SESSION_MODE_BACKENDS
+        else "flex"
+    )
 
 
 def _truthy(value: Any) -> bool:
@@ -51,6 +68,28 @@ def resolve_access_root(scope: str, workspace_dir: Path, project_root: Path) -> 
     elif scope == "project":
         return project_root if project_root is not None else workspace_dir
     elif scope == "drive":
+        if is_wsl():
+            # WSL's filesystem anchor is '/', not the mounted Windows drive.
+            # Prefer the drive containing the task/project and never turn a
+            # Windows "drive" grant into the whole Linux root filesystem.
+            for candidate in (workspace_dir, project_root):
+                if candidate is None:
+                    continue
+                resolved = Path(candidate).expanduser().resolve()
+                parts = resolved.parts
+                if (
+                    len(parts) >= 3
+                    and parts[0] == "/"
+                    and parts[1] == "mnt"
+                    and len(parts[2]) == 1
+                    and parts[2].isalpha()
+                ):
+                    return Path("/mnt") / parts[2].lower()
+            return (
+                Path(project_root).expanduser().resolve()
+                if project_root is not None
+                else Path(workspace_dir).expanduser().resolve()
+            )
         return Path(workspace_dir.anchor)
     # Safe fallback
     return workspace_dir
@@ -140,7 +179,7 @@ class FlexibleAgentConfig:
     active_backend: str
     is_active: bool = True
     type: str = "flex"
-    default_mode: str = "flex"
+    default_mode: str = DEFAULT_AGENT_MODE
     access_scope: str = "project"
     extra: Dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
@@ -301,8 +340,13 @@ class ConfigManager:
                 raise ValueError(
                     f"Agent '{name}' active_backend '{active}' is not allowed."
                 )
-            default_mode = str(row.get("default_mode", "flex") or "flex").lower()
-            if default_mode not in {"flex", "fixed"}:
+            configured_default = row.get("default_mode")
+            default_mode = (
+                str(configured_default).strip().lower()
+                if configured_default
+                else default_agent_mode_for_backend(active)
+            )
+            if default_mode not in SUPPORTED_AGENT_MODES:
                 raise ValueError(
                     f"Agent '{name}' has unsupported default_mode '{default_mode}'."
                 )
@@ -720,8 +764,13 @@ class ConfigManager:
                     "configure 'her-v2' instead."
                 )
             is_active = a_raw.pop("is_active", True)
-            default_mode = str(a_raw.pop("default_mode", "flex") or "flex").strip().lower()
-            if default_mode not in {"flex", "fixed"}:
+            configured_default = a_raw.pop("default_mode", None)
+            default_mode = (
+                str(configured_default).strip().lower()
+                if configured_default
+                else default_agent_mode_for_backend(active_backend)
+            )
+            if default_mode not in SUPPORTED_AGENT_MODES:
                 raise ValueError(
                     f"Agent '{name}' has unsupported default_mode '{default_mode}'. "
                     "Expected 'flex' or 'fixed'."

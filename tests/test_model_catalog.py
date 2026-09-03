@@ -2,6 +2,7 @@ from orchestrator.flexible_backend_registry import (
     get_all_gateway_models,
     get_available_efforts,
     get_available_models,
+    get_provider_reasoning_efforts,
     is_cli_backend,
     normalize_effort,
 )
@@ -41,7 +42,12 @@ def test_codex_gateway_models_expose_live_probed_reasoning_efforts():
     expected = ["none", "low", "medium", "high", "xhigh", "max"]
     assert get_available_efforts("codex-cli", "gpt-5.6-sol") == expected
     assert get_available_efforts("codex-cli", "gpt-5.6-luna") == expected
-    assert get_available_efforts("codex-cli", "gpt-5.6-terra") == ["low", "medium", "high", "xhigh"]
+    assert get_available_efforts("codex-cli", "gpt-5.6-terra") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
     assert normalize_effort("codex-cli", "none", "gpt-5.6-luna") == "none"
     assert normalize_effort("codex-cli", "max", "gpt-5.6-luna") == "max"
     assert normalize_effort("codex-cli", "max", "gpt-5.6-sol") == "max"
@@ -52,6 +58,7 @@ def test_hashi_api_declares_reasoning_efforts_for_both_gateway_models():
     expected = ["none", "low", "medium", "high", "xhigh", "max"]
     for model in ("gpt-5.6-luna", "gpt-5.6-sol"):
         assert get_available_efforts("hashi-api", model) == expected
+        assert get_provider_reasoning_efforts("hashi-api", model) == expected
         assert normalize_effort("hashi-api", None, model) == "medium"
         assert normalize_effort("hashi-api", "high", model) == "high"
         assert normalize_effort("hashi-api", "max", model) == "max"
@@ -77,12 +84,16 @@ def test_grok_cli_exposes_reasoning_effort_with_medium_default():
     assert normalize_effort("grok-cli", "xhigh", "grok-4.5") == "medium"
 
 
-def test_retired_her_id_exposes_only_v2_orchestration_efforts():
-    expected = ["zero", "low", "medium", "high", "xhigh", "max"]
+def test_retired_her_id_exposes_only_three_public_v2_execution_modes():
+    expected = ["zero", "low", "medium"]
     assert get_available_efforts("her", "deepseek/deepseek-v4-pro") == expected
     assert normalize_effort("her", None, "deepseek/deepseek-v4-pro") == "medium"
     assert normalize_effort("her", "zero", "deepseek/deepseek-v4-pro") == "zero"
-    assert normalize_effort("her", "max", "deepseek/deepseek-v4-pro") == "max"
+    assert normalize_effort("her", "direct", "deepseek/deepseek-v4-pro") == "zero"
+    assert normalize_effort("her", "strategic", "deepseek/deepseek-v4-pro") == "low"
+    assert normalize_effort("her", "fast", "deepseek/deepseek-v4-pro") == "low"
+    assert normalize_effort("her", "planned", "deepseek/deepseek-v4-pro") == "medium"
+    assert normalize_effort("her", "max", "deepseek/deepseek-v4-pro") == "medium"
     assert normalize_effort("her", "max+", "deepseek/deepseek-v4-pro") == "medium"
     assert normalize_effort("her", "ultra", "deepseek/deepseek-v4-pro") == "medium"
 
@@ -106,6 +117,21 @@ def test_current_deepseek_models_replace_retired_and_experimental_ids():
     assert "deepseek/deepseek-v4-pro" in openrouter_models
     assert "deepseek/deepseek-v4-flash" in openrouter_models
     assert "deepseek/deepseek-v3.2-exp" not in openrouter_models
+
+
+def test_deepseek_exposes_only_distinct_provider_reasoning_states():
+    for model in (
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    ):
+        assert get_available_efforts("deepseek-api", model) == []
+        assert get_provider_reasoning_efforts("deepseek-api", model) == [
+            "off",
+            "high",
+            "max",
+        ]
+        assert normalize_effort("deepseek-api", None, model) is None
 
 
 def test_compatibility_catalog_is_derived_from_backend_registry():

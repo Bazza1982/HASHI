@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from adapters.hashi_api import HashiApiAdapter
-from adapters.openrouter_api import _APIResult
+from adapters.openrouter_api import ProviderCallObserverError, _APIResult
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_INTERNAL,
@@ -133,6 +133,52 @@ async def test_hashi_api_initializes_without_a_provider_secret(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hashi_api_observes_each_physical_provider_call(tmp_path):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult(
+            "done",
+            None,
+            "stop",
+            prompt_tokens=11,
+            completion_tokens=3,
+            thinking_tokens=2,
+            prompt_cache_hit_tokens=7,
+            prompt_cache_miss_tokens=4,
+        )
+    )
+
+    response = await adapter.generate_response("hello", "request-meter")
+
+    calls = response.stream_metadata["meter"]["provider_calls"]
+    assert calls == observed
+    assert len(calls) == 1
+    assert calls[0]["status"] == "completed"
+    assert calls[0]["prompt_cache_hit_tokens"] == 7
+    assert calls[0]["prompt_cache_miss_tokens"] == 4
+    assert calls[0]["provider_request_id"].startswith("hashi-provider:")
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_does_not_swallow_or_retry_accounting_failure(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("done", None, "stop", 4, 1)
+    )
+
+    def fail_accounting(_call):
+        raise RuntimeError("ledger unavailable")
+
+    adapter.set_provider_call_observer(fail_accounting)
+
+    with pytest.raises(ProviderCallObserverError):
+        await adapter.generate_response("hello", "request-accounting-failure")
+    assert adapter._call_api_once.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_translates_private_gateway_activity_to_internal_event(
     tmp_path,
 ):
@@ -198,6 +244,24 @@ async def test_hashi_api_translates_private_gateway_activity_to_internal_event(
     assert activity_event.origin == "codex-app-server"
     assert activity_event.metadata == {"activity": "protocol_progress"}
     assert "must not be forwarded" not in repr(activity_event)
+    transport_records = [
+        json.loads(line)
+        for line in adapter.transport_audit_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert [record["event"] for record in transport_records] == [
+        "client_request_prepared",
+        "client_stream_received",
+    ]
+    assert transport_records[1]["stream_complete"] is True
+    assert transport_records[1]["stream_lines"][-1] == "data: [DONE]"
+    assert sum(
+        line.startswith("data: ")
+        for line in transport_records[1]["stream_lines"]
+    ) == len(chunks) + 1
+    assert transport_records[1]["http_response"]["body_bytes"] > 0
+    assert transport_records[1]["http_response"]["body_sha256"]
     await adapter.shutdown()
 
 
@@ -251,6 +315,151 @@ async def test_hashi_private_activity_marks_later_stream_error_as_observed(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_hashi_api_persists_complete_streaming_400_transport_evidence(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "local_read",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+    )
+    rejected_payload = {
+        "error": {
+            "message": "tool_call_id call-missing has no matching assistant call",
+            "type": "invalid_request_error",
+            "code": "invalid_tool_result",
+            "param": "messages[0].tool_call_id",
+        }
+    }
+
+    async def handler(request):
+        assert request.headers["X-Hashi-Correlation-ID"] == "request-log-gap"
+        return httpx.Response(
+            400,
+            json=rejected_payload,
+            headers={
+                "X-Hashi-Gateway-Request-ID": "gateway-reject-1",
+                "X-Hashi-Rejection-Stage": "continuation_contract",
+            },
+        )
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def on_event(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "Inspect the local notes.",
+        "request-log-gap",
+        on_stream_event=on_event,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_BAD_REQUEST"
+    assert response.http_status == 400
+    assert response.provider_request_id == "gateway-reject-1"
+    diagnostics = response.stream_metadata["provider_http_failure"]
+    assert json.loads(diagnostics["response"]["body"]) == rejected_payload
+    assert diagnostics["response"]["body_bytes"] > 0
+    assert diagnostics["response"]["body_sha256"]
+    diagnostic_headers = {
+        key.casefold(): value
+        for key, value in diagnostics["request"]["headers"].items()
+    }
+    assert diagnostic_headers["x-hashi-provider-call"] == "1"
+    response_headers = {
+        key.casefold(): value
+        for key, value in diagnostics["response"]["headers"].items()
+    }
+    assert response_headers["x-hashi-gateway-request-id"] == "gateway-reject-1"
+    assert response_headers["x-hashi-rejection-stage"] == "continuation_contract"
+    assert len(diagnostics["transport_audit_refs"]) == 2
+
+    rows = [
+        json.loads(line)
+        for line in adapter.transport_audit_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert [row["event"] for row in rows] == [
+        "client_request_prepared",
+        "client_response_rejected",
+    ]
+    sent_body = json.loads(rows[0]["http_request"]["body"])
+    assert sent_body["session_id"].startswith("hashi-tool-")
+    assert sent_body["hashi_tool_workspace"] == str(tmp_path.resolve())
+    assert sent_body["messages"][1]["content"] == "Inspect the local notes."
+    assert json.loads(rows[1]["http_response"]["body"]) == rejected_payload
+    assert rows[1]["http_response"]["body_sha256"]
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_stops_before_http_when_transport_audit_cannot_persist(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    blocked_path = tmp_path / "blocked-transport-log"
+    blocked_path.mkdir()
+    adapter.transport_audit_path = blocked_path
+    network_calls = 0
+
+    async def handler(_request):
+        nonlocal network_calls
+        network_calls += 1
+        return httpx.Response(200, json={"choices": []})
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await adapter.generate_response("Do the work", "request-audit-blocked")
+
+    assert network_calls == 0
+    assert response.is_success is False
+    assert response.error_code == "AUDIT_PERSISTENCE_FAILURE"
+    assert response.error_retryable is False
+    assert response.side_effects_possible is False
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_persists_network_transport_failure(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    async def handler(_request):
+        raise httpx.ConnectError("gateway connection reset")
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    response = await adapter.generate_response(
+        "Do the work",
+        "request-network-failure",
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_CONNECTION_FAILED"
+    diagnostics = response.stream_metadata["provider_http_failure"]
+    assert len(diagnostics["transport_audit_refs"]) == 2
+    records = [
+        json.loads(line)
+        for line in adapter.transport_audit_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert [record["event"] for record in records] == [
+        "client_request_prepared",
+        "client_transport_failed",
+    ]
+    assert records[1]["error"]["type"] == "ConnectError"
+    assert records[1]["error"]["message"] == "gateway connection reset"
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_reports_usage_and_never_adds_openrouter_headers(tmp_path):
     adapter = _adapter(tmp_path)
     adapter._call_api_once = AsyncMock(
@@ -275,6 +484,70 @@ async def test_hashi_api_reports_usage_and_never_adds_openrouter_headers(tmp_pat
     assert response.usage.output_tokens == 30
     assert response.usage.thinking_tokens == 10
     assert response.cost_usd == pytest.approx(0.0025)
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: []
+    )
+    tool_call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "file_read", "arguments": '{"path":"a.txt"}'},
+    }
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            _APIResult("", [tool_call], "tool_calls", 100, 10),
+            _APIResult("finished", None, "stop", 20, 5),
+        ]
+    )
+
+    async def run_tool_calls(_calls, messages, _callback, **_kwargs):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "file contents",
+            }
+        )
+
+    adapter._run_tool_calls = run_tool_calls
+
+    response = await adapter.generate_response("Inspect the file", "request-tool")
+
+    assert response.is_success is True
+    assert response.text == "finished"
+    assert adapter._call_api_once.call_count == 2
+    first_payload = adapter._call_api_once.call_args_list[0].args[0]
+    second_payload = adapter._call_api_once.call_args_list[1].args[0]
+    assert [message["role"] for message in first_payload["messages"]] == [
+        "system",
+        "user",
+    ]
+    assert second_payload["messages"] == [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "file contents",
+        }
+    ]
+    assert first_payload["session_id"] == second_payload["session_id"]
+    assert first_payload["hashi_tool_workspace"] == str(tmp_path.resolve())
+    assert second_payload["hashi_tool_workspace"] == str(tmp_path.resolve())
+    second_headers = adapter._call_api_once.call_args_list[1].args[1]
+    assert second_headers["X-Hashi-After-Tool-End"] == "true"
+    assert second_headers["X-Hashi-External-Tool-Session"] == "v1"
+    continuation = response.stream_metadata["gateway_continuation"]
+    assert continuation["enabled"] is True
+    assert continuation["full_prompt_send_count"] == 1
+    assert [call["message_count"] for call in continuation["transport_calls"]] == [
+        2,
+        1,
+    ]
 
 
 @pytest.mark.asyncio

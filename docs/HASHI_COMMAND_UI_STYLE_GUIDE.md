@@ -89,7 +89,7 @@ background, never as automatically queued work.
 
 The main `/status` card always shows the active backend and model. For HER v2 it
 shows **HER execution mode** with the descriptive name and canonical value,
-such as `Assured (max)`. Other backends continue to show **Effort**. Use `n/a`
+such as `Planned (medium)`. Other backends continue to show **Effort**. Use `n/a`
 when the active non-HER model does not support a selectable effort level.
 
 Every dangerous operation shows:
@@ -143,8 +143,9 @@ The shared contract applies to every command surface that opens a status card,
 settings panel, picker, multi-step flow, or dangerous-operation confirmation.
 Current coverage includes:
 
-- help, status, backend, model, effort, mode, privacy, API, wrapper, audit, and
-  dual-brain configuration;
+- help, status, backend, model, effort, Fixed/Flex mode, privacy, and API
+  configuration, plus non-mutating retirement notices for historical Wrapper,
+  Audit, and Dual-brain controls;
 - stream, verbose, think, preview, voice, safe voice, Whisper, active
   continuation, memory, notepad, and computer-use controls;
 - agents, start, groups, skills, jobs, cron, heartbeat, nudge, loop,
@@ -152,10 +153,10 @@ Current coverage includes:
 - reboot, hard restart, retry, move, workspace reset, workspace wipe, and other
   destructive confirmation cards.
 
-All supported Flex Agent execution modes use the same shared headings,
-selection marker, navigation labels, and information order wherever they expose
-the same menu. Callback data and command behavior remain stable during
-presentation-only migrations.
+Both supported working modes use the same shared headings, selection marker,
+navigation labels, and information order wherever they expose the same menu.
+Stale callbacks from retired modes must resolve to a compatibility notice rather
+than reopening their former configuration surfaces.
 
 Private commands are outside this migration inventory because they are installed
 per machine. HASHI2's local `/oll` command follows the same card structure but

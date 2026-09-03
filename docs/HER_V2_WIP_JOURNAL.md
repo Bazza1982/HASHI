@@ -1,10 +1,23 @@
 # HER v2 WIP Journal
 
-Status: **active operational contract**
+Status: **shadow/legacy compatibility contract; not current recovery authority**
 
-The HER v2 WIP Journal is crash-safe, model-independent transient Context for
-unfinished work. It is not Agent Memory, Memory+, a continuation command, or a
-provider transcript. The current user request always remains authoritative.
+Current authority:
+[HER v2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md).
+
+The HER v2 WIP Journal is a bounded model-independent transient Context
+projection retained while canonical HER Engine Session recovery completes
+shadow validation and for legacy Sessions without canonical state. It is not
+Agent Memory, Memory+, a continuation command, a Model Provider transcript, or
+a second recovery authority. The current user request always remains
+authoritative.
+
+For current fixed HER Engine Sessions, canonical typed Session events,
+active-Turn recovery state, settled checkpoints, Tool evidence, and physical
+Model Provider request records are authoritative. The Journal receives only a
+shadow projection and is not re-ingested by `/compact` when canonical recovery
+is available. The remaining sections document the compatibility implementation
+and apply only within that boundary.
 
 ## Lifecycle
 
@@ -83,10 +96,11 @@ If that primary audit path is unavailable, the durable fallback remains:
 <agent-workspace>/backend_state/her_v2/audit_fallback.jsonl
 ```
 
-## `/compact` recovery phase
+## Legacy `/compact` recovery phase
 
-WIP recovery and ordinary conversation compaction are independent phases of
-the same command:
+For legacy Sessions without canonical recovery state, WIP recovery and ordinary
+conversation compaction are independent phases of the same command. Current
+canonical Sessions skip Journal re-ingestion:
 
 1. **WIP recovery phase — always eligible.** It snapshots each active current
    Session or legacy Journal, generates a deterministic capsule without a

@@ -7,7 +7,8 @@
 | Status | Accepted and implemented test contract |
 | Accepted | 26 August 2026 |
 | Governing design | [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) |
-| Scope | Backend-neutral HASHI Persona-Context-Memory infrastructure; HER-V2 is one consumer, not the owner of this contract |
+| Scope | Engine-neutral HASHI Persona-Context-Memory infrastructure; HER v2 is one consumer, not the owner of this contract |
+| Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
 ## 1. Purpose
 

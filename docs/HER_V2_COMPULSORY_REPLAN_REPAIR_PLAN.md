@@ -2,12 +2,16 @@
 
 | Field | Value |
 |---|---|
-| Status | Implemented, merged to local `main`, and loaded by an authorised Arale `/reboot min` |
+| Status | Implemented historically; dormant while higher-mode redesign is postponed |
 | Date | 2026-08-24 |
-| Authority | Current user-approved HER v2 Replanning contract |
+| Authority | Historical internal contract; superseded for the public surface by `HER_V2_THREE_MODE_DECISION.md` |
 | Scope | HER v2 work turns at Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) execution modes |
 | Fixed cadence | 300 monotonic seconds or 10 newly completed Execution tool results, whichever is observed first |
 | Runtime activation | Targeted Arale hot reload passed on 2026-08-24; capability-level threshold canaries remain separate |
+
+Adaptive, Reviewed, and Assured are no longer exposed by `/effort`. This file
+continues to document and regression-test retained internal code only; it does
+not define a current production choice.
 
 ## 1. Repair objective
 

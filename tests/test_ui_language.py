@@ -80,6 +80,19 @@ def test_user_language_preference_is_shared_across_agent_runtimes(tmp_path) -> N
     assert ui_language.preferred_locale(first, update) == "en"
 
 
+def test_session_owner_id_uses_same_user_language_preference(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    ui_language.set_preferred_locale(runtime, "zh-CN", actor_id=42)
+
+    assert ui_language.preferred_locale(runtime, actor_id="user:42") == "zh-CN"
+    assert (
+        ui_language.actor_id_from_update(
+            SimpleNamespace(_hashi_session_owner_id="user:42")
+        )
+        == "42"
+    )
+
+
 def test_instance_default_is_used_when_user_has_no_saved_preference(tmp_path) -> None:
     runtime = _runtime(tmp_path)
     runtime.global_config.ui_language = "zh-CN"
@@ -239,7 +252,7 @@ def test_backend_wrapper_is_localized_but_exact_provider_error_is_unchanged() ->
 
     text = format_backend_error_for_user("her-v2", raw, locale="zh-CN")
 
-    assert text.startswith("后端返回的准确错误：")
+    assert text.startswith("错误详情：")
     assert raw in text
 
 

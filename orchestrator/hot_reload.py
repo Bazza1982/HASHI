@@ -29,6 +29,11 @@ FOUNDATION_PHASES = {
     # schemas, then the registry, then the context so a hot restart cannot
     # retain the pre-change ToolRegistry class after its constructor evolves.
     "tools.schemas": 0,
+    # Pricing revision is imported by HER runtime configuration. Reload it
+    # before that consumer so future price-table changes take effect in one
+    # reboot; runtime_configuration also carries a one-generation fallback for
+    # the first reboot that adopts this ordering rule.
+    "tools.token_tracker": 0,
     "tools.registry": 1,
     "tools.gateway.context": 2,
     "tools.gateway.mcp_stdio": 3,
@@ -50,6 +55,13 @@ FOUNDATION_PHASES = {
     # a new enqueue method to the previous dataclass constructor.
     "orchestrator.runtime_common": 0,
     "orchestrator.runtime_defaults": 0,
+    # Config exports defaults and capability sets that are imported directly
+    # by compaction, status, backend-manager, and runtime consumers.  Reload it
+    # after its registry/default providers but before those consumers.  The
+    # first reboot that adopts this ordering is still computed by the previous
+    # RebootManager generation, so early consumers also carry a one-generation
+    # fallback for newly introduced config symbols.
+    "orchestrator.config": 2,
     "orchestrator.workspace_state": 0,
     # Workzone helpers are imported directly by overview, backend-manager and
     # runtime consumers. Refresh the provider before the first consumer so a
@@ -76,6 +88,13 @@ FOUNDATION_PHASES = {
     "orchestrator.her_v2.models": 0,
     "orchestrator.her_v2.audit": 0,
     "orchestrator.her_v2.progress": 0,
+    "orchestrator.her_v2.task_state": 0,
+    "orchestrator.her_v2.cognitive_control": 1,
+    # Fixed-backend state types must refresh before the protocol coordinator
+    # imports them. This keeps repeated /reboot cycles from binding the newly
+    # reloaded coordinator to the previous SessionStore class object.
+    "orchestrator.her_v2.session_store": 0,
+    "orchestrator.her_v2.backend_session": 1,
     "orchestrator.her_v2.config": 1,
     "orchestrator.her_v2.retry": 1,
     "orchestrator.her_v2.runtime_configuration": 2,

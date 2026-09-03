@@ -633,7 +633,16 @@ class ReplanJourneyProvider:
                 data={
                     "classification": "COMPLEX_TASK",
                     "real_goal": request.goal,
+                    "selected_strategy_cards": ["SIMPLE_QA"],
                     "relevant_habits": [],
+                    "execution_brief": {
+                        "strategy": "Execute and verify the authorised task.",
+                        "stages": ["Execute", "Verify"],
+                        "dependencies": [],
+                        "verification": ["Verify the final state"],
+                        "success_criteria": ["The authorised goal is complete"],
+                        "replan_conditions": ["Evidence invalidates the approach"],
+                    },
                     "clarification": None,
                 }
             )
@@ -807,6 +816,7 @@ async def test_tenth_result_forces_replan_without_churning_unchanged_plan(
         "active_plan",
         "available_execution_tools",
         "execution_allow_side_effects",
+        "execution_environment",
         "plan_edit_history",
         "real_goal",
         "relevant_habits",

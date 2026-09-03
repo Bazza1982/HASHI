@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
+    active_slash_command_audit_session,
     append_audit_record,
     build_audit_record,
     default_audit_path,
@@ -167,6 +169,44 @@ async def test_execute_local_command_writes_success_audit(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("voice_outcome", "expected_effect"),
+    [
+        (True, "voice_reply_sent"),
+        (None, "voice_reply_delivery_unknown"),
+    ],
+)
+async def test_execute_local_say_audits_voice_side_effect(
+    tmp_path, voice_outcome, expected_effect
+):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    class _SayRuntime(_Runtime):
+        cmd_say = FlexibleAgentRuntime.cmd_say
+
+        def _is_authorized_user(self, user_id):
+            return user_id == self.global_config.authorized_id
+
+        def _load_last_visible_assistant_text(self, update):
+            return "last delivered reply"
+
+        async def _send_voice_reply(self, *args, **kwargs):
+            return voice_outcome
+
+        async def _reply_text(self, update, text):
+            await update.message.reply_text(text)
+
+    runtime = _SayRuntime(tmp_path)
+    result = await execute_local_command(runtime, "/say", chat_id=99)
+
+    assert result["ok"] is True
+    rows = _read_jsonl(default_audit_path(tmp_path))
+    assert rows[0]["side_effects"] == [expected_effect]
+    if voice_outcome is None:
+        assert result["messages"]
+
+
+@pytest.mark.asyncio
 async def test_execute_local_command_writes_blocked_restart_audit(tmp_path):
     runtime = _Runtime(tmp_path)
     result = await execute_local_command(runtime, "/restart", chat_id=99)
@@ -265,6 +305,73 @@ async def test_wrap_callback_audits_telegram_callback(tmp_path, monkeypatch):
     assert rows[0]["command_name"] == "tgl:verbose"
     assert rows[0]["args_redacted"] == ["on"]
 
+
+@pytest.mark.asyncio
+async def test_concurrent_telegram_commands_keep_audit_side_effects_isolated(
+    tmp_path, monkeypatch
+):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    class _ConcurrentRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42)
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, update):
+            return None
+
+        def _is_command_allowed(self, command):
+            return True
+
+    async def allow_channel(self, update, *, source_channel):
+        return True
+
+    monkeypatch.setattr(
+        FlexibleAgentRuntime,
+        "_telegram_channel_allowed",
+        allow_channel,
+    )
+    runtime = _ConcurrentRuntime()
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_handler(update, context):
+        first_entered.set()
+        await second_entered.wait()
+        active_slash_command_audit_session().add_side_effect("first_effect")
+
+    async def second_handler(update, context):
+        await first_entered.wait()
+        second_entered.set()
+        await asyncio.sleep(0)
+        active_slash_command_audit_session().add_side_effect("second_effect")
+
+    def update(chat_id):
+        return SimpleNamespace(
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=chat_id),
+            callback_query=None,
+        )
+
+    wrapped_first = FlexibleAgentRuntime._wrap_cmd(runtime, "first", first_handler)
+    wrapped_second = FlexibleAgentRuntime._wrap_cmd(runtime, "second", second_handler)
+    await asyncio.gather(
+        wrapped_first(update(1), SimpleNamespace(args=[])),
+        wrapped_second(update(2), SimpleNamespace(args=[])),
+    )
+
+    rows = {
+        row["command_name"]: row
+        for row in _read_jsonl(default_audit_path(tmp_path))
+    }
+    assert rows["first"]["side_effects"] == ["first_effect"]
+    assert rows["second"]["side_effects"] == ["second_effect"]
+    assert active_slash_command_audit_session() is None
+
+
 class _PolicyRuntime(_Runtime):
     def __init__(self, tmp_path):
         super().__init__(tmp_path)
@@ -332,4 +439,3 @@ async def test_try_execute_slash_command_text_normalizes_bot_suffix(tmp_path):
     assert result["command"] == "help"
     rows = _read_jsonl(default_audit_path(tmp_path))
     assert rows[0]["command_name"] == "help"
-

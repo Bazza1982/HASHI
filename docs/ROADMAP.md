@@ -27,20 +27,21 @@ needed for professional enterprise adoption.
 
 Current version-line interpretation:
 
-- **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** is the current
-  enterprise alpha artifact-freeze line.
-- **HASHI `v4.0.0-alpha.2`** is the current broader platform release candidate,
-  led by the provider-neutral HASHI-native Python HER v2 runtime and its
-  evidence-backed execution contracts.
+- **HASHI `v4.0.0-alpha.2` / Python package `4.0.0a2`** is the single current
+  repository release candidate, led by the provider-neutral HASHI-native
+  Python HER v2 runtime, evidence-backed execution contracts, and governed AAI
+  control plane.
+- **Enterprise AAI `v0.1.0-alpha.1`** is a historical tagged milestone and no
+  longer a parallel active package line.
 
 ---
 
-## Enterprise AAI v0.1.0-alpha.1 (Current Enterprise Alpha)
+## Enterprise AAI v0.1.0-alpha.1 (Historical Alpha Milestone)
 
-HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise artifact-freeze
-line. It resets the enterprise-grade package version to `0.1.0a1` while the
-broader HASHI 4 line advances independently through the advanced HER
-`v4.0.0-alpha.2` release candidate.
+HASHI AAI Enterprise `v0.1.0-alpha.1` froze the first enterprise
+artifact-review line and reset its package metadata to `0.1.0a1`. That tag and
+its release notes remain historical provenance; current development and
+package metadata continue only under `v4.0.0-alpha.2`.
 
 This enterprise alpha includes governed profiles, identity/SSO/SCIM primitives,
 policy/approval/audit, connector MVPs, authenticated Backend API surfaces, and
@@ -54,16 +55,14 @@ The development accumulated after the first v4 foundation alpha is now
 consolidated as the `v4.0.0-alpha.2` release candidate:
 
 - provider-neutral HER v2 as the sole HER execution backend;
-- `zero`, `low`, `medium`, `high`, `xhigh`, and `max` execution-effort
-  policies, independent from provider reasoning and tool-call count; `zero`
-  is a single fully capable Direct agent with no other HER stage or automatic
-  upgrade;
+- Direct (`zero`), Strategic (`low`), and Planned (`medium`) production
+  execution modes, independent from provider reasoning and tool-call count;
 - persistent direct-conversation ordering, isolated scheduler execution,
   reply-target snapshots, explicit stream ownership, and idempotent delivery;
 - explicit staged orchestration, Tool Gateway/MCP, secure multimedia, and
   optional agent-local Habit/Meditation;
-- evidence-backed Reviewed and Assured modes, plus compulsory
-  Adaptive-or-above safe-boundary Replanning every 10 results or 300 seconds;
+- deferred redesign of the retained but non-public Adaptive, Reviewed, and
+  Assured implementation;
 - provider-aware native/fallback multimodal routing, configurable Single/Hybrid
   Quick and Pro routes, and the HASHI API provider;
 - automatic context maintenance that continues selected-model execution when
@@ -74,7 +73,8 @@ consolidated as the `v4.0.0-alpha.2` release candidate:
 - canonical Backend API Agent Overview and shared-token-authenticated remote
   terminal execution;
 - crash-safe HER v2 WIP context with explicit preserve/inject/clear audit
-  events, provider-only OpenRouter/DeepSeek selection, and exact DeepSeek native
+  events, HER-internal OpenRouter/DeepSeek Model Provider selection, and exact
+  DeepSeek native
   vision capability;
 - client-neutral persistent Session/Message/Run/Event services behind a
   fail-closed qualification boundary, plus restart reconciliation for orphaned
@@ -90,8 +90,8 @@ of a source push.
 
 See [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md) for the delivered scope
 and alpha boundaries. The
-[2026-08-27 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) records the
-current integrated implementation and publication boundary. The
+[2026-08-27 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) records an
+earlier integrated implementation and publication boundary. The
 [2026-08-24 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) and
 [2026-08-13 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) remain
 historical records of earlier integration states.
@@ -209,14 +209,18 @@ unreleased checkpoint above):
 
 ### Wrapper Agent Mode
 
-Status: **implemented in v3.2.0**.
+Status: **implemented in v3.2.0; retired from the product surface in v4.0.0-alpha.2**.
 
-Wrapper Agent Mode is a third runtime mode beside fixed and flex. It lets a strong core model do the actual work while a separate stateless wrapper model rewrites only the final user-facing tone/persona.
+Wrapper Agent Mode historically let a strong core model do the actual work
+while a separate stateless wrapper model rewrote the final user-facing
+tone/persona. HASHI now exposes only Fixed and Flex. Old mode state migrates to
+the configured default, and the saved wrapper blocks remain only as historical
+compatibility data.
 
-Implemented scope:
+Historical implemented scope:
 
 - Merge-safe `state.json` writes preserve `core`, `wrapper`, and `wrapper_slots`.
-- `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` configure wrapper agents.
+- The former `/mode wrapper`, `/core`, `/wrap`, and `/wrapper` product controls now return a retirement notice.
 - Foreground/background responses, listeners, transfer suppression, handoff, project chat, voice replies, and HChat reply summaries use wrapper-visible output where appropriate; active `bridge:hchat` sends remain bypassed until the delivery-boundary HChat pipeline is implemented.
 - `/verbose on` shows compact wrapper status, latency, and fallback details without exposing raw answer drafts.
 - `/reset CONFIRM` preserves wrapper configuration and prompt slots, matching `/sys` preservation behavior.

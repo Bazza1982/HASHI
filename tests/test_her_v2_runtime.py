@@ -382,11 +382,30 @@ def _triage(
     real_goal: str | None,
     clarification: str | None = None,
     relevant_habits: tuple[str, ...] = (),
+    selected_strategy_cards: tuple[str, ...] | None = None,
+    execution_strategy: str | None = None,
 ):
+    work = classification in {"SIMPLE_TASK", "COMPLEX_TASK", "HIGH_VOLUME_TASK"}
+    selected = (
+        selected_strategy_cards
+        if selected_strategy_cards is not None
+        else (("SIMPLE_QA",) if work else ())
+    )
     return {
         "classification": classification,
         "real_goal": real_goal,
+        "selected_strategy_cards": list(selected),
         "relevant_habits": list(relevant_habits),
+        "execution_brief": {
+            "strategy": execution_strategy or ("Execute and verify." if work else ""),
+            "stages": ["Execute", "Verify"] if work else [],
+            "dependencies": [],
+            "verification": ["Verify the requested outcome"] if work else [],
+            "success_criteria": ["The requested outcome is complete"] if work else [],
+            "replan_conditions": ["Current evidence invalidates the approach"]
+            if work
+            else [],
+        },
         "clarification": clarification,
     }
 
@@ -541,9 +560,7 @@ async def test_low_text_input_uses_complete_modality_matrix(
     provider = ModalityScriptedProvider(
         {
             Stage.IMMEDIATE_RESPONSE: [{"message": "Immediate answer."}],
-            Stage.TRIAGE: [
-                _triage("DIRECT_RESPONSE", real_goal="Answer directly.")
-            ],
+            Stage.TRIAGE: [_triage("DIRECT_RESPONSE", real_goal="Answer directly.")],
             Stage.DIRECT: [{"message": "Direct answer after Triage."}],
         },
         tmp_path=tmp_path,
@@ -708,6 +725,8 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
     assert request.checkpoint_coordinator is None
     assert request.context["automatic_effort_upgrade_allowed"] is False
     assert request.context["sub_agent_delegation_allowed"] is False
+    assert request.context["direct_strategy_self_selection"] is False
+    assert request.context["strategy_playbook"] is None
     assert request.context["habit_catalogue"] == ["advisory habit"]
     assert request.context["skills_catalogue"][0]["id"] == "reports"
     assert profile.model == "quick-model"
@@ -724,6 +743,65 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
         Stage.REVIEW,
         Stage.FINALISATION,
     }.isdisjoint(request.stage for _profile, request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_zero_can_self_select_from_playbook_without_adding_a_stage(tmp_path):
+    provider = ScriptedProvider(
+        {
+            Stage.DIRECT: [
+                StageResponse(
+                    data={
+                        "message": (
+                            "Work complete.\nStrategy Cards used: "
+                            "OPTIMIZATION_SCHEDULING, TEST_QA"
+                        )
+                    },
+                    provider="fake-api",
+                    model="quick-model",
+                )
+            ]
+        }
+    )
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        config=_config(direct_strategy_self_selection=True),
+    )
+
+    result = await runtime.run_turn(
+        "Schedule the meetings directly.",
+        "request-zero-direct-playbook",
+        effort=Effort.ZERO,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert len(provider.requests) == 1
+    _profile, request = provider.requests[0]
+    assert request.stage is Stage.DIRECT
+    assert request.context["direct_strategy_self_selection"] is True
+    playbook = request.context["strategy_playbook"]
+    assert playbook["playbook_version"] == "2026-08-29.1"
+    assert playbook["sha256"].startswith("sha256:")
+    assert len(playbook["cards"]) == 38
+    assert {
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.TRIAGE,
+        Stage.PLANNING,
+        Stage.EXECUTION,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+        Stage.FINALISATION,
+    }.isdisjoint(item.stage for _profile, item in provider.requests)
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    attached = next(
+        row for row in audit_rows if row["event"] == "direct_strategy_playbook_attached"
+    )
+    assert attached["payload"]["card_count"] == 38
+    assert attached["payload"]["selection_mode"] == "direct_self_selection"
 
 
 @pytest.mark.asyncio
@@ -780,7 +858,7 @@ async def test_native_audio_direct_disables_tools_in_request_and_audit(tmp_path)
     assert request.allow_side_effects is False
     audit_rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     started = next(
         row
@@ -1173,9 +1251,7 @@ async def test_direct_response_preserves_visible_immediate_content_without_fallb
                 model="model-lightweight",
             )
         ],
-        Stage.TRIAGE: [
-            _triage("DIRECT_RESPONSE", real_goal="Answer directly.")
-        ],
+        Stage.TRIAGE: [_triage("DIRECT_RESPONSE", real_goal="Answer directly.")],
     }
     provider = ScriptedProvider(
         scripts,
@@ -1197,7 +1273,7 @@ async def test_direct_response_preserves_visible_immediate_content_without_fallb
     ]
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     compatibility = next(
         row
@@ -1471,7 +1547,7 @@ async def test_triage_first_work_starts_without_waiting_and_preserves_late_immed
     assert provider.cancelled[Stage.IMMEDIATE_RESPONSE] == 0
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     continued = next(row for row in rows if row["event"] == "optional_stage_continues")
     assert continued["payload"] == {
@@ -1521,7 +1597,7 @@ async def test_unrepairable_immediate_text_remains_visible_for_work(tmp_path):
     ]
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     compatibility = next(
         row
@@ -1564,7 +1640,7 @@ async def test_final_completion_supersedes_a_still_pending_immediate_response(tm
     assert provider.cancelled[Stage.IMMEDIATE_RESPONSE] == 1
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     superseded = next(
         row
@@ -1625,7 +1701,7 @@ async def test_triage_clarification_is_persona_rendered_without_changing_authori
     assert clarification.text == result.text
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     rendered = next(
         row for row in rows if row["event"] == "required_persona_render_completed"
@@ -1687,7 +1763,7 @@ async def test_optional_immediate_failure_does_not_block_authoritative_triage(
     assert result.terminal_state is expected
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     degraded = next(row for row in rows if row["event"] == "optional_stage_degraded")
     assert degraded["payload"]["authoritative_path_continued"] is True
@@ -1732,7 +1808,7 @@ async def test_invalid_presentation_data_keeps_structured_output_error_code(tmp_
     assert ProviderFailureCode.STRUCTURED_OUTPUT_INVALID.value in result.error
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     failures = [
         row
@@ -1823,7 +1899,7 @@ async def test_deferred_clarification_resolution_is_deduplicated_by_delivery_sta
 
 
 @pytest.mark.asyncio
-async def test_medium_turn_uses_triage_real_goal_and_routes_tools_only_to_execution(
+async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_planning_and_execution(
     tmp_path,
 ):
     real_goal = "Implement and test the requested feature."
@@ -1864,6 +1940,19 @@ async def test_medium_turn_uses_triage_real_goal_and_routes_tools_only_to_execut
     ]
     assert all(call.goal == request for call in initial_calls)
     assert all(call.goal == real_goal for call in downstream_calls)
+    assert all(
+        "execution_environment" in call.context
+        for _profile, call in provider.requests
+    )
+    assert all(
+        call.context["execution_environment"]["shell_tool"]["name"] == "shell"
+        for _profile, call in provider.requests
+    )
+    assert all(
+        call.context["execution_environment"]["shell_tool"]["implicit_shell"]
+        is False
+        for _profile, call in provider.requests
+    )
     assert all(call.context["real_goal"] == real_goal for call in downstream_calls)
     assert all(call.context["relevant_habits"] == [] for call in downstream_calls)
     execution_calls = [
@@ -1872,10 +1961,183 @@ async def test_medium_turn_uses_triage_real_goal_and_routes_tools_only_to_execut
     assert len(execution_calls) == 1
     assert execution_calls[0].allow_tools is True
     assert execution_calls[0].allow_side_effects is True
+    planning_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.PLANNING
+    )
+    assert planning_call.allow_tools is True
+    assert planning_call.allow_side_effects is False
+    assert planning_call.context["strategy_handoff"]["execution_brief"]["strategy"]
+    assert (
+        execution_calls[0].context["strategy_handoff"]
+        == planning_call.context["strategy_handoff"]
+    )
     assert all(
         not call.allow_tools
         for _profile, call in provider.requests
-        if call.stage is not Stage.EXECUTION
+        if call.stage not in {Stage.PLANNING, Stage.EXECUTION}
+    )
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    assert strategy_call.allow_tools is False
+    assert strategy_call.allow_side_effects is False
+    assert strategy_call.role == "strategist"
+
+
+@pytest.mark.asyncio
+async def test_enabled_task_state_is_shared_and_projected_across_lifecycle_stages(
+    tmp_path,
+):
+    real_goal = "Implement and verify the evidence-aware feature."
+    scripts = _initial("COMPLEX_TASK", real_goal=real_goal)
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["inspect", "implement", "verify"],
+                    "success_criteria": ["The evidence-aware feature is verified"],
+                }
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Implemented and verified.",
+                }
+            ],
+            Stage.FINALISATION: [{"report": "Implemented and verified."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(cognitive_control_enabled=True),
+    ).run_turn("Implement the feature", "request-shared-task-state", effort="medium")
+
+    lifecycle_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage
+        in {Stage.TRIAGE, Stage.PLANNING, Stage.EXECUTION, Stage.FINALISATION}
+    ]
+    assert lifecycle_requests
+    assert lifecycle_requests[0].task_state is not None
+    assert all(
+        request.task_state is lifecycle_requests[0].task_state
+        for request in lifecycle_requests
+    )
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.task_state["goal"] == real_goal
+    assert any(
+        item["criterion"] == "The evidence-aware feature is verified"
+        and item["status"] == "open"
+        for item in result.task_state["criteria"]
+    )
+    assert result.task_state["last_stage"] == Stage.EXECUTION.value
+
+
+@pytest.mark.parametrize("planning_tools_enabled", [False, True])
+@pytest.mark.asyncio
+async def test_medium_stage_tool_access_uses_frozen_policy_and_capability_gate(
+    tmp_path,
+    planning_tools_enabled,
+):
+    scripts = _initial(
+        "COMPLEX_TASK",
+        real_goal="Diagnose, repair, and verify the supplied implementation.",
+    )
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["inspect", "repair", "verify"]}],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Repaired and verified.",
+                }
+            ],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(
+            strategy_tools_enabled=True,
+            planning_tools_enabled=planning_tools_enabled,
+        ),
+    ).run_turn("Repair it", "request-stage-tool-access", effort=Effort.MEDIUM)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    planning_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.PLANNING
+    )
+    execution_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.EXECUTION
+    )
+    assert strategy_call.allow_tools is False
+    assert strategy_call.allow_side_effects is False
+    assert planning_call.allow_tools is planning_tools_enabled
+    assert planning_call.allow_side_effects is False
+    assert execution_call.allow_tools is True
+    assert execution_call.allow_side_effects is True
+
+
+@pytest.mark.asyncio
+async def test_low_strategy_handoff_contains_only_selected_cards_and_skips_planning(
+    tmp_path,
+):
+    scripts = _initial("SIMPLE_TASK", real_goal="Modify and verify the target.")
+    scripts[Stage.TRIAGE] = [
+        _triage(
+            "SIMPLE_TASK",
+            real_goal="Modify and verify the target.",
+            selected_strategy_cards=("CODE_MODIFY", "TEST_QA"),
+            execution_strategy="Inspect the implementation, change it, and verify it.",
+        )
+    ]
+    scripts[Stage.EXECUTION] = [
+        {"disposition": "COMPLETED", "summary": "Modified and verified."}
+    ]
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        skills_catalogue=({"name": "debug", "description": "Debug work"},),
+    ).run_turn("Modify it", "request-low-strategy-handoff", effort=Effort.LOW)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert not any(call.stage is Stage.PLANNING for _profile, call in provider.requests)
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    assert strategy_call.role == "strategist"
+    assert strategy_call.allow_tools is True
+    assert strategy_call.allow_side_effects is True
+    assert len(strategy_call.context["strategy_cards"]["cards"]) == 38
+    assert strategy_call.context["execution_capabilities"]["skills"] == [
+        {"name": "debug", "description": "Debug work"}
+    ]
+
+    execution_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.EXECUTION
+    )
+    assert execution_call.context["active_plan"] is None
+    handoff = execution_call.context["strategy_handoff"]
+    assert [card["id"] for card in handoff["selected_strategy_cards"]] == [
+        "CODE_MODIFY",
+        "TEST_QA",
+    ]
+    assert "SIMPLE_QA" not in {
+        card["id"] for card in handoff["selected_strategy_cards"]
+    }
+    assert handoff["execution_brief"]["strategy"] == (
+        "Inspect the implementation, change it, and verify it."
     )
 
 
@@ -1925,7 +2187,7 @@ async def test_primary_execution_delivers_persona_message_without_second_rendere
     assert result.ledger["status"] == "COMPLETED"
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     delivery = next(
         row
@@ -1960,7 +2222,7 @@ async def test_removed_final_persona_renderer_cannot_change_execution_result(
     assert renderer.messages == []
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert not any(row["event"].startswith("required_persona_render") for row in rows)
 
@@ -2085,6 +2347,10 @@ async def test_execution_receives_the_same_complete_request_context_as_planning(
         "change",
         "verify",
     ]
+    assert (
+        execution_request.context["strategy_handoff"]
+        == planning_request.context["strategy_handoff"]
+    )
     assert result.terminal_state is TerminalState.COMPLETED
 
 
@@ -2110,10 +2376,13 @@ async def test_normal_mode_enables_external_side_effect_authority(tmp_path):
     )
     assert set(execution.context) == {
         "active_plan",
+        "execution_environment",
         "real_goal",
         "relevant_habits",
+        "strategy_handoff",
         "sub_agent_results",
     }
+    assert execution.context["strategy_handoff"]["execution_brief"]["strategy"]
     assert execution.context["real_goal"] == "resolved goal"
     assert execution.context["relevant_habits"] == []
     assert execution.allow_tools is True
@@ -2187,6 +2456,7 @@ async def test_review_imposed_replanning_reuses_triage_selected_habits(tmp_path)
     assert set(replan_request.context) == {
         "active_plan",
         "available_execution_tools",
+        "execution_environment",
         "execution_allow_side_effects",
         "plan_edit_history",
         "real_goal",
@@ -2243,29 +2513,24 @@ async def test_xhigh_publishes_replaceable_draft_then_replaces_it_with_final(
     assert delivery.records[-1].event_id.endswith(":execution:draft")
     activity = delivery.activity_records
     assert any(
-        item["phase"] == "planning"
-        and item["metadata"]["activity_type"] == "stage"
+        item["phase"] == "planning" and item["metadata"]["activity_type"] == "stage"
         for item in activity
     )
     assert any(
-        item["phase"] == "review"
-        and item["metadata"].get("outcome") == "PASS"
+        item["phase"] == "review" and item["metadata"].get("outcome") == "PASS"
         for item in activity
     )
     assert any(
-        item["phase"] == "finalisation"
-        and item["metadata"]["activity_type"] == "stage"
+        item["phase"] == "finalisation" and item["metadata"]["activity_type"] == "stage"
         for item in activity
     )
     assert activity[-1]["metadata"]["lifecycle_state"] == "COMPLETED"
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     draft = next(
-        row
-        for row in rows
-        if row["event"] == "draft_commentary_publish_result"
+        row for row in rows if row["event"] == "draft_commentary_publish_result"
     )
     assert draft["payload"]["accepted"] is True
     assert draft["payload"]["exact_primary_execution_text"] is True
@@ -2335,17 +2600,13 @@ async def test_max_solidifies_old_draft_and_publishes_each_remediation_draft(
     assert delivery.records[2].event_id.endswith(":execution:draft:2")
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     published = [
-        row
-        for row in rows
-        if row["event"] == "draft_commentary_publish_result"
+        row for row in rows if row["event"] == "draft_commentary_publish_result"
     ]
     assert [row["payload"]["accepted"] for row in published] == [True, True]
-    resolutions = [
-        row for row in rows if row["event"] == "initial_resolution_result"
-    ]
+    resolutions = [row for row in rows if row["event"] == "initial_resolution_result"]
     assert [row["payload"]["resolution"] for row in resolutions] == [
         "commentary",
         "final",
@@ -2500,9 +2761,7 @@ async def test_xhigh_finalisation_accepts_natural_language_and_replaces_draft(
         provider,
         delivery=delivery,
         commentary=commentary,
-    ).run_turn(
-        "Build and review", "request-xhigh-natural-final", effort=Effort.XHIGH
-    )
+    ).run_turn("Build and review", "request-xhigh-natural-final", effort=Effort.XHIGH)
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.text == "Persona-rendered final response."
@@ -2952,8 +3211,7 @@ async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(
     assert all(request.context["may_replan"] is False for request in sub_requests)
     assert all(request.context["may_finalise"] is False for request in sub_requests)
     assert all(
-        request.context["real_goal"] == "Process the batch"
-        for request in sub_requests
+        request.context["real_goal"] == "Process the batch" for request in sub_requests
     )
     assert all(request.context["relevant_habits"] == [] for request in sub_requests)
     assert all(
@@ -3600,6 +3858,55 @@ async def test_missing_optional_commentary_does_not_fail_work(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_public_planned_mode_publishes_strategy_and_planning_persona_progress_only(
+    tmp_path,
+):
+    scripts = _initial("COMPLEX_TASK")
+    scripts[Stage.TRIAGE][0]["commentary"] = (
+        "Captain, the safe implementation strategy is selected; planning comes next."
+    )
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["inspect", "change", "verify"],
+                    "commentary": (
+                        "Captain, the execution plan is ready; implementation comes next."
+                    ),
+                }
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Done.",
+                    "commentary": "This duplicate Execution update must stay internal.",
+                }
+            ],
+            Stage.FINALISATION: [{"report": "Done."}],
+        }
+    )
+    commentary = RecordingCommentaryPort()
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        commentary=commentary,
+    ).run_turn("Do it", "request-persona-progress", effort="medium")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [(item.stage, item.text) for item in commentary.records] == [
+        (
+            Stage.TRIAGE,
+            "Captain, the safe implementation strategy is selected; planning comes next.",
+        ),
+        (
+            Stage.PLANNING,
+            "Captain, the execution plan is ready; implementation comes next.",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_only_successful_stage_results_publish_neutral_commentary(
     tmp_path,
 ):
@@ -3952,7 +4259,7 @@ async def test_provider_operations_have_no_elapsed_attempt_deadline(
     assert clock.now == 601
     assert observed_wait_timeouts
     assert all(timeout is None for timeout in observed_wait_timeouts)
-    audit_text = (tmp_path / "her-v2" / "audit.jsonl").read_text()
+    audit_text = (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8")
     assert "attempt_timeout_s" not in audit_text
     assert "retry_tier" not in audit_text
 
@@ -4039,9 +4346,7 @@ async def test_nonretryable_auth_failure_keeps_typed_code_and_single_attempt(tmp
                 http_status=401,
             )
         ],
-        Stage.TRIAGE: [
-            _triage("DIRECT_RESPONSE", real_goal="Reply directly")
-        ],
+        Stage.TRIAGE: [_triage("DIRECT_RESPONSE", real_goal="Reply directly")],
     }
     provider = ScriptedProvider(scripts)
 
@@ -4061,7 +4366,7 @@ async def test_nonretryable_auth_failure_keeps_typed_code_and_single_attempt(tmp
     )
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     failure = next(
         row
@@ -4099,7 +4404,7 @@ async def test_rate_limit_retry_honours_retry_after_and_preserves_route(tmp_path
     assert result.terminal_state is TerminalState.COMPLETED
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     failure = next(
         row
@@ -4276,7 +4581,7 @@ async def test_execution_never_replays_after_side_effect_tool_starts(tmp_path):
     )
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     failure = next(
         row
@@ -4452,10 +4757,13 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
         Stage.TRIAGE: [
             StageResponse(
                 text="",
-                reasoning_trace=(
-                    '{"classification":"COMPLEX_TASK",'
-                    '"real_goal":"Diagnose the fault",'
-                    '"relevant_habits":[],"clarification":null}'
+                reasoning_trace=json.dumps(
+                    _triage(
+                        "COMPLEX_TASK",
+                        real_goal="Diagnose the fault",
+                        selected_strategy_cards=("BUG_DIAGNOSIS",),
+                        execution_strategy="Inspect evidence and diagnose the fault.",
+                    )
                 ),
                 provider="fake-api",
                 model="model-triage",
@@ -4474,7 +4782,7 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
     assert result.classification is TriageClassification.COMPLEX_TASK
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     compatibility = next(
         row
@@ -4629,9 +4937,11 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
     assert set(second_execution.context) == {
         "active_plan",
         "continuation_rules",
+        "execution_environment",
         "real_goal",
         "relevant_habits",
         "replan_continuation",
+        "strategy_handoff",
         "sub_agent_results",
     }
     assert (
@@ -4698,7 +5008,7 @@ async def test_primary_execution_natural_language_needs_no_json_or_finalisation(
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     original_response = next(
         row
@@ -4780,7 +5090,7 @@ async def test_nonempty_execution_natural_language_is_a_usable_result(
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert not any(
         row["event"] == "execution_structure_deferred_to_finalisation" for row in rows
@@ -4833,10 +5143,7 @@ async def test_specialist_json_repair_has_no_attempt_cap_and_preserves_classific
         StageResponse(text="not json on the third attempt"),
         StageResponse(text="not json on the fourth attempt"),
         StageResponse(
-            text=(
-                '{"classification":"SIMPLE_TASK","real_goal":"Do it",'
-                '"relevant_habits":[],"clarification":null}'
-            ),
+            text=json.dumps(_triage("SIMPLE_TASK", real_goal="Do it")),
             reasoning_trace=None,
             provider="fake-api",
             model="model-triage",
@@ -4873,6 +5180,55 @@ async def test_specialist_json_repair_has_no_attempt_cap_and_preserves_classific
     assert repair_requests[0].allow_tools is False
     assert repair_requests[0].allow_side_effects is False
     assert repair_requests[0].request_content is None
+
+
+@pytest.mark.asyncio
+async def test_strategy_json_repair_retains_source_and_lifecycle_invariant(tmp_path):
+    source_strategy = _triage("COMPLEX_TASK", real_goal="Complete the work")
+    source_text = "Strategy follows.\n\n" + json.dumps(source_strategy)
+    scripts = _initial("COMPLEX_TASK", real_goal="Complete the work")
+    scripts[Stage.TRIAGE] = [StageResponse(text=source_text)]
+    scripts[Stage.JSON_REPAIR] = [
+        StageResponse(text=""),
+        StageResponse(
+            text=json.dumps(
+                _triage(
+                    "CONFIRMATION_REQUIRED",
+                    real_goal=None,
+                    clarification="What should I do?",
+                )
+            )
+        ),
+        StageResponse(text=json.dumps(source_strategy)),
+    ]
+    scripts.update(
+        {
+            Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
+            Stage.FINALISATION: [{"report": "Done."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+    runtime = _runtime(tmp_path, provider)
+
+    async def _no_delay(*_args, **_kwargs):
+        await asyncio.sleep(0)
+
+    runtime._wait_for_stage_retry = _no_delay
+    result = await runtime.run_turn(
+        "Complete the work",
+        "request-repair-invariant",
+        effort=Effort.LOW,
+    )
+
+    assert result.classification is TriageClassification.COMPLEX_TASK
+    repair_requests = [
+        call for _profile, call in provider.requests if call.stage is Stage.JSON_REPAIR
+    ]
+    assert len(repair_requests) == 3
+    repair_inputs = [json.loads(call.goal) for call in repair_requests]
+    assert repair_inputs[0]["rejected_output"] == source_text
+    assert repair_inputs[1]["rejected_output"] == source_text
+    assert repair_inputs[2]["semantic_invariants"] == {"classification": "COMPLEX_TASK"}
 
 
 @pytest.mark.asyncio
@@ -5419,7 +5775,7 @@ async def test_audit_records_trace_or_explicit_unavailability_with_correlation(
 
     rows = [
         json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     reasoning = [row for row in rows if row["event"] == "reasoning_trace"]
     assert {row["stage"] for row in reasoning} == {

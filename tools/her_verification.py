@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -16,6 +17,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from orchestrator.process_execution import (
+    decode_process_output,
+    process_group_kwargs,
+    resolve_argv_invocation,
+    terminate_windows_process_tree,
+)
 from tools.builtins import BuiltinExecutionResult
 
 _IGNORED_COPY_DIRS = frozenset(
@@ -43,6 +50,7 @@ _IGNORED_COPY_DIRS = frozenset(
 )
 _MAX_OUTPUT_CHARS = 80_000
 _MAX_ARTIFACT_HASH_BYTES = 512 * 1024 * 1024
+_MAX_PYTHON_SEARCH_FILE_BYTES = 32 * 1024 * 1024
 _HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
 _DEFAULT_DIRECT_TIMEOUT_S = 1800.0
 _DEFAULT_MINIMUM_TIMEOUT_S = 300.0
@@ -59,7 +67,11 @@ def _result(output: str, **details: Any) -> BuiltinExecutionResult:
 def _workspace_path(workspace_dir: Path, raw_path: Any = ".") -> Path:
     root = Path(workspace_dir).resolve()
     candidate = Path(str(raw_path or "."))
-    candidate = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    candidate = (
+        (root / candidate).resolve()
+        if not candidate.is_absolute()
+        else candidate.resolve()
+    )
     try:
         candidate.relative_to(root)
     except ValueError as exc:
@@ -69,7 +81,9 @@ def _workspace_path(workspace_dir: Path, raw_path: Any = ".") -> Path:
     return candidate
 
 
-def _run_read_only(argv: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[bytes]:
+def _run_read_only(
+    argv: Sequence[str], *, cwd: Path
+) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         [str(item) for item in argv],
         cwd=str(cwd),
@@ -185,10 +199,66 @@ def _workspace_snapshot(root: Path) -> tuple[str, dict[str, Any]]:
 
 
 def _bounded_text(raw: bytes) -> str:
-    text = raw.decode("utf-8", errors="replace")
+    text = decode_process_output(raw).replace("\r\n", "\n").replace("\r", "\n")
     if len(text) > _MAX_OUTPUT_CHARS:
         return text[:_MAX_OUTPUT_CHARS] + "\n...[truncated]"
     return text
+
+
+def _python_workspace_search(
+    target: Path,
+    *,
+    query: str,
+    regex: bool,
+) -> tuple[str, int]:
+    """Portable bounded search used when rg/grep are unavailable."""
+
+    matcher = re.compile(query).search if regex else lambda line: query in line
+    if target.is_file():
+        paths = [target]
+        include_path = False
+        root = target.parent
+    elif target.is_dir():
+        paths = []
+        root = target
+        for current, dirs, files in os.walk(target, followlinks=False):
+            dirs[:] = sorted(name for name in dirs if name not in _IGNORED_COPY_DIRS)
+            current_path = Path(current)
+            paths.extend(current_path / name for name in sorted(files))
+        include_path = True
+    else:
+        return "", 0
+
+    rows: list[str] = []
+    output_chars = 0
+    searched_bytes = 0
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            file_size = path.stat().st_size
+            if file_size > _MAX_PYTHON_SEARCH_FILE_BYTES:
+                continue
+            searched_bytes += file_size
+            if searched_bytes > _MAX_ARTIFACT_HASH_BYTES:
+                break
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in raw[:8192]:
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not matcher(line):
+                continue
+            prefix = f"{path.relative_to(root).as_posix()}:" if include_path else ""
+            row = f"{prefix}{line_number}:{line}"
+            if output_chars + len(row) + 1 > _MAX_OUTPUT_CHARS:
+                rows.append("...[truncated]")
+                return "\n".join(rows) + "\n", len(rows) - 1
+            rows.append(row)
+            output_chars += len(row) + 1
+    return ("\n".join(rows) + "\n" if rows else ""), len(rows)
 
 
 async def execute_workspace_inspect(
@@ -230,7 +300,8 @@ async def execute_workspace_inspect(
         )
         if completed.returncode != 0:
             return _result(
-                "Error: workspace status is unavailable: " + _bounded_text(completed.stderr),
+                "Error: workspace status is unavailable: "
+                + _bounded_text(completed.stderr),
                 operation=operation,
                 exit_code=completed.returncode,
             )
@@ -251,7 +322,8 @@ async def execute_workspace_inspect(
         completed = await asyncio.to_thread(_run_read_only, argv, cwd=root)
         if completed.returncode != 0:
             return _result(
-                "Error: workspace diff is unavailable: " + _bounded_text(completed.stderr),
+                "Error: workspace diff is unavailable: "
+                + _bounded_text(completed.stderr),
                 operation=operation,
                 exit_code=completed.returncode,
             )
@@ -285,11 +357,26 @@ async def execute_workspace_inspect(
             search_backend = "grep"
             executable = shutil.which("grep")
             if not executable:
+                try:
+                    output, matches = await asyncio.to_thread(
+                        _python_workspace_search,
+                        target,
+                        query=query,
+                        regex=regex,
+                    )
+                except re.error as exc:
+                    return _result(
+                        f"Error: workspace search failed: invalid regex: {exc}",
+                        operation=operation,
+                        exit_code=2,
+                        search_backend="python",
+                    )
                 return _result(
-                    "Error: workspace search is unavailable: neither rg nor grep "
-                    "is installed",
+                    output or "No matches.",
                     operation=operation,
-                    unavailable=True,
+                    exit_code=0 if matches else 1,
+                    matches=matches,
+                    search_backend="python",
                 )
             argv = [
                 executable,
@@ -336,7 +423,9 @@ async def execute_workspace_inspect(
                 **metadata,
             }
         else:
-            return _result(f"Error: unsupported artifact type: {target}", operation=operation)
+            return _result(
+                f"Error: unsupported artifact type: {target}", operation=operation
+            )
         return _result(
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
             operation=operation,
@@ -400,7 +489,9 @@ def _recipe_catalog(options: Mapping[str, Any] | None) -> dict[str, dict[str, An
         if timeout_s <= 0:
             continue
         recipes[name] = {
-            "description": str(raw.get("description") or "Configured verification recipe."),
+            "description": str(
+                raw.get("description") or "Configured verification recipe."
+            ),
             "argv": [python if item == "{python}" else item for item in argv],
             "timeout_s": timeout_s,
         }
@@ -486,8 +577,7 @@ def _timeout_policy(
         "execution_floor_s": execution_floor_s,
         "effective_timeout_s": effective_timeout_s,
         "formula": (
-            "max(configured, requested, minimum, "
-            "execution_elapsed*multiplier+grace)"
+            "max(configured, requested, minimum, execution_elapsed*multiplier+grace)"
         ),
     }
 
@@ -522,13 +612,18 @@ def _workspace_authority(root: Path) -> dict[str, Any]:
 async def _run_workspace_command(
     command: Sequence[str], *, cwd: Path, timeout_s: float
 ) -> tuple[int, bytes, bytes, bool, dict[str, Any]]:
+    invocation = resolve_argv_invocation(command)
+    child_env = dict(os.environ)
+    child_env.setdefault("PYTHONIOENCODING", "utf-8")
+    child_env.setdefault("PYTHONUTF8", "1")
     proc = await asyncio.create_subprocess_exec(
-        *command,
+        *invocation.argv,
         cwd=str(cwd),
+        env=child_env,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        start_new_session=os.name == "posix",
+        **process_group_kwargs(),
     )
     communicate_task = asyncio.create_task(proc.communicate())
     try:
@@ -542,17 +637,40 @@ async def _run_workspace_command(
                 False,
                 {
                     "status": "normal_completion",
-                    "scope": "process_group" if os.name == "posix" else "process",
+                    "scope": "process_group" if os.name == "posix" else "process_tree",
                     "forced": False,
                     "process_reaped": proc.returncode is not None,
+                    "requested_executable": invocation.requested_executable,
+                    "resolved_executable": invocation.resolved_executable,
+                    "launcher": invocation.launcher,
+                    "launcher_executable": invocation.launcher_executable,
+                    "encoding": invocation.encoding,
                 },
             )
 
         cleanup = await _stop_workspace_process(proc, communicate_task)
+        cleanup.update(
+            {
+                "requested_executable": invocation.requested_executable,
+                "resolved_executable": invocation.resolved_executable,
+                "launcher": invocation.launcher,
+                "launcher_executable": invocation.launcher_executable,
+                "encoding": invocation.encoding,
+            }
+        )
         stdout, stderr = cleanup.pop("stdout"), cleanup.pop("stderr")
         return int(proc.returncode or 0), stdout, stderr, True, cleanup
     except asyncio.CancelledError as exc:
         cleanup = await _stop_workspace_process(proc, communicate_task)
+        cleanup.update(
+            {
+                "requested_executable": invocation.requested_executable,
+                "resolved_executable": invocation.resolved_executable,
+                "launcher": invocation.launcher,
+                "launcher_executable": invocation.launcher_executable,
+                "encoding": invocation.encoding,
+            }
+        )
         cleanup.pop("stdout", None)
         cleanup.pop("stderr", None)
         setattr(exc, "hashi_tool_details", {"foreground_cleanup": cleanup})
@@ -567,10 +685,13 @@ async def _stop_workspace_process(
 
     errors: list[str] = []
     forced = False
-    scope = "process_group" if os.name == "posix" else "process"
+    scope = "process_group" if os.name == "posix" else "process_tree"
     if proc.returncode is None:
         try:
-            if os.name == "posix" and proc.pid:
+            if os.name == "nt" and proc.pid:
+                await terminate_windows_process_tree(proc.pid, force=True)
+                forced = True
+            elif os.name == "posix" and proc.pid:
                 os.killpg(proc.pid, signal.SIGTERM)
             else:
                 proc.terminate()
@@ -582,7 +703,9 @@ async def _stop_workspace_process(
     if communicate_task not in done:
         forced = True
         try:
-            if os.name == "posix" and proc.pid:
+            if os.name == "nt" and proc.pid:
+                await terminate_windows_process_tree(proc.pid, force=True)
+            elif os.name == "posix" and proc.pid:
                 os.killpg(proc.pid, signal.SIGKILL)
             else:
                 proc.kill()
@@ -752,7 +875,9 @@ async def execute_verification_run(
         )
 
     combined = _bounded_text(stdout + (b"\n" if stdout and stderr else b"") + stderr)
-    final_output = combined or f"Verification {command_ref} exited with code {exit_code}."
+    final_output = (
+        combined or f"Verification {command_ref} exited with code {exit_code}."
+    )
     if timed_out:
         final_output = (
             f"Error: verification {command_ref} timed out after "

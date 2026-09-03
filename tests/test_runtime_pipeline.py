@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import types
@@ -23,6 +24,7 @@ from adapters.stream_events import (
     KIND_PROGRESS,
     KIND_REVIEW,
     KIND_TEXT_DELTA,
+    KIND_THINKING,
     StreamEvent,
 )
 from orchestrator import (
@@ -31,9 +33,14 @@ from orchestrator import (
     runtime_retry,
     runtime_session,
     telegram_stream_policy,
+    ui_language,
 )
 from orchestrator import telegram_delivery_failover as failover
-from orchestrator.canonical_audit import CanonicalAuditStore
+from orchestrator.canonical_audit import (
+    CanonicalAuditConfigurationError,
+    CanonicalAuditStore,
+)
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.session_store import SessionStore
 
 
@@ -48,6 +55,9 @@ class _Logger:
         self.messages.append(message % args if args else message)
 
     def error(self, message, *args):
+        self.messages.append(message % args if args else message)
+
+    def debug(self, message, *args):
         self.messages.append(message % args if args else message)
 
 
@@ -406,6 +416,16 @@ def test_begin_queue_item_records_processing_metadata():
     assert runtime.maintenance_events[0][0] == "processing"
 
 
+def test_begin_queue_item_resolves_locale_from_prefixed_session_owner():
+    runtime = _runtime()
+    ui_language.set_preferred_locale(runtime, "zh-CN", actor_id=123)
+    item = _item(owner_id="user:123")
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert runtime.current_request_meta["ui_locale_at_start"] == "zh-CN"
+
+
 @pytest.mark.asyncio
 async def test_canonical_audit_correlates_complete_foreground_request_chain(tmp_path):
     runtime = _runtime()
@@ -462,6 +482,133 @@ async def test_canonical_audit_correlates_complete_foreground_request_chain(tmp_
     assert {event["request_id"] for event in events} == {"req-audit"}
     assert events[-1]["payload"]["assistant_provider_text"] == "provider raw answer"
     assert events[-1]["payload"]["assistant_delivered_text"] == "delivered answer"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_stream_audit_batches_without_copying_raw_delta(
+    monkeypatch,
+):
+    monkeypatch.setattr(runtime_pipeline, "CANONICAL_STREAM_BATCH_MAX_AGE_S", 0.01)
+
+    class BatchStore:
+        def __init__(self):
+            self.commits: list[list[dict]] = []
+
+        def record_many(self, records):
+            self.commits.append([dict(record) for record in records])
+
+    store = BatchStore()
+    runtime = SimpleNamespace(canonical_audit=store, error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-reasoning")
+
+    for index in range(100):
+        batch.capture(
+            StreamEvent(
+                kind=KIND_THINKING,
+                summary="",
+                raw_delta=f"delta-{index}",
+                event_id=f"provider-{index}",
+                origin="deepseek",
+                provenance="provider_returned",
+            )
+        )
+
+    assert store.commits == []
+    await asyncio.sleep(0.03)
+
+    assert len(store.commits) == 1
+    records = store.commits[0]
+    assert len(records) == 101
+    stream_records = [
+        record for record in records if record["event_type"] == "provider_stream_event"
+    ]
+    reasoning_records = [
+        record for record in records if record["event_type"] == "provider_reasoning"
+    ]
+    assert [record["payload"]["raw_delta"] for record in stream_records] == [
+        f"delta-{index}" for index in range(100)
+    ]
+    assert len(reasoning_records) == 1
+    reasoning_payload = reasoning_records[0]["payload"]
+    assert "raw_delta" not in reasoning_payload
+    assert reasoning_payload["chunk_count"] == 100
+    assert reasoning_payload["raw_delta_char_count"] == sum(
+        len(f"delta-{index}") for index in range(100)
+    )
+    assert reasoning_payload["stream_batch_ref"] == {
+        "audit_batch_id": "req-reasoning:stream-batch:1",
+        "request_id": "req-reasoning",
+        "first_stream_sequence": 1,
+        "last_stream_sequence": 100,
+        "event_kind": "thinking",
+    }
+    assert {record["provenance"]["audit_batch_id"] for record in records} == {
+        "req-reasoning:stream-batch:1"
+    }
+    assert runtime._canonical_reasoning_seen == {"req-reasoning"}
+
+
+def test_canonical_stream_audit_failure_is_not_silently_ignored():
+    class FailingStore:
+        def record_many(self, _records):
+            raise OSError("audit volume full")
+
+    runtime = SimpleNamespace(canonical_audit=FailingStore(), error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-audit-fail")
+    event = StreamEvent(
+        kind=KIND_THINKING,
+        summary="",
+        raw_delta="evidence",
+        origin="provider",
+    )
+    batch.capture(event)
+
+    with pytest.raises(OSError, match="audit volume full"):
+        batch.flush(reason="provider_end")
+    with pytest.raises(CanonicalAuditConfigurationError, match="audit volume full"):
+        batch.capture(event)
+    assert any("Canonical stream audit batch failed" in message for message in runtime.error_logger.messages)
+
+
+def test_canonical_stream_audit_prefers_buffer_and_barriers_at_provider_end():
+    class BufferedStore:
+        def __init__(self):
+            self.commits: list[list[dict]] = []
+            self.flushes = 0
+
+        def record_many(self, records):
+            self.commits.append([dict(record) for record in records])
+
+        def flush(self):
+            self.flushes += 1
+
+    class ForbiddenDirectStore:
+        def record_many(self, _records):
+            raise AssertionError("stream evidence bypassed the async buffer")
+
+    buffered = BufferedStore()
+    runtime = SimpleNamespace(
+        canonical_audit=ForbiddenDirectStore(),
+        canonical_audit_buffer=buffered,
+        error_logger=_Logger(),
+    )
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-buffered")
+    batch.capture(
+        StreamEvent(
+            kind=KIND_THINKING,
+            summary="",
+            raw_delta="evidence",
+            origin="provider",
+        )
+    )
+
+    assert batch.flush(reason="provider_request_end") == 2
+    assert len(buffered.commits) == 1
+    assert [record["event_type"] for record in buffered.commits[0]] == [
+        "provider_stream_event",
+        "provider_reasoning",
+    ]
+    assert buffered.flushes == 1
 
 
 def test_begin_queue_item_preserves_explicit_habit_ineligibility():
@@ -690,6 +837,89 @@ async def test_fixed_session_backend_uses_incremental_prompt():
 
     assert runtime.current_request_meta["session_scope"] == "persistent"
     assert prompt.incremental is True
+
+
+@pytest.mark.asyncio
+async def test_her_fixed_backend_replaces_assembled_pcm_with_typed_transport(
+    monkeypatch,
+):
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.agent_mode = "fixed"
+    observed = {}
+    captured_bindings = []
+    monkeypatch.setattr(
+        runtime_session,
+        "capture_backend_binding",
+        lambda _runtime, *, request_id: captured_bindings.append(request_id),
+    )
+
+    class _HERAssembler:
+        turns_injection_enabled = True
+        saved_memory_injection_enabled = True
+        MAX_RECENT_EXCHANGES = 8
+
+        def build_prompt_payload(self, prompt, backend, **_kwargs):
+            assert backend == "her-v2"
+            return {
+                "final_prompt": "FULL PCM MUST NOT CROSS THE BACKEND BOUNDARY",
+                "transport_snapshot": {
+                    "version": 1,
+                    "sections": [
+                        {
+                            "key": "permanent_system",
+                            "title": "SYSTEM",
+                            "text": "policy",
+                            "authority": "permanent_system",
+                            "rank": 0,
+                            "protected": True,
+                            "metadata": {},
+                            "order": 0,
+                        }
+                    ],
+                },
+                "audit": {"incremental": True, "sections": []},
+                "envelope": {"version": 1, "sections": []},
+            }
+
+    class _HERBackend:
+        _session_id = "her-session-existing"
+        persistent_session_busy = False
+        capabilities = SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        )
+
+        def prepare_fixed_turn_input(self, **kwargs):
+            observed.update(kwargs)
+            return (
+                "HASHI_HER_FIXED_ENVELOPE_V1\n{\"operation\":\"append_turn\"}",
+                {
+                    "operation": "append_turn",
+                    "incremental": True,
+                    "transport_chars": 70,
+                },
+            )
+
+    runtime.context_assembler = _HERAssembler()
+    runtime.backend_manager.current_backend = _HERBackend()
+    item = _item()
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert prompt.final_prompt.startswith("HASHI_HER_FIXED_ENVELOPE_V1")
+    assert "FULL PCM" not in prompt.final_prompt
+    assert prompt.incremental is True
+    assert observed["user_message"].endswith("Hello")
+    assert "primer" in observed["user_message"]
+    assert observed["request_id"] == "req-1"
+    assert prompt.prompt_audit["her_fixed_backend"]["operation"] == "append_turn"
+    assert captured_bindings == ["req-1"]
 
 
 @pytest.mark.asyncio
@@ -1237,6 +1467,54 @@ async def test_cleanup_verbose_rollover_deletes_only_active_message():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_does_not_delete_live_verbose_placeholder_twice():
+    runtime = _runtime()
+    placeholder = SimpleNamespace(message_id=77)
+    display_state = runtime_pipeline.VerboseDisplayState(
+        current_message=None,
+        message_ids=[77],
+        deleted_message_ids={77},
+    )
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=None,
+        typing_task=None,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+        verbose_display_state=display_state,
+    )
+
+    assert runtime.app.bot.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_older_verbose_card_after_live_display_stopped():
+    runtime = _runtime()
+    placeholder = SimpleNamespace(message_id=77)
+    display_state = runtime_pipeline.VerboseDisplayState(
+        current_message=None,
+        message_ids=[77, 78],
+        ever_activated=True,
+    )
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=None,
+        typing_task=None,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+        verbose_display_state=display_state,
+    )
+
+    assert runtime.app.bot.deleted == []
+
+
+@pytest.mark.asyncio
 async def test_cleanup_interactive_feedback_propagates_queue_worker_cancellation():
     runtime = _runtime()
     child_started = asyncio.Event()
@@ -1336,13 +1614,21 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     ]
     assert feedback.placeholder.message_id == 77
     assert feedback.typing_task is not None
-    assert feedback.escalation_task is None
+    assert feedback.escalation_task is not None
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
+    assert feedback.think_flush_task is not None
+    assert feedback.preference_event is not None
     assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
 
 @pytest.mark.asyncio
@@ -1431,7 +1717,8 @@ async def test_her_message_audit_preserves_exact_commentary_and_transport_status
     assert records[0]["text_sha256"] == records[1]["text_sha256"]
     assert records[0]["provenance"] == "persona_renderer"
     assert records[0]["detail"] == "persona_renderer_fallback=false"
-    assert audit_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert audit_path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio
@@ -1970,7 +2257,7 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
         audit_collector=None,
     )
 
-    feedback.stop_typing.set()
+    assert feedback.stop_typing is None
     assert feedback.typing_task is None
 
     saved = failover.load_health_state(runtime)
@@ -2069,15 +2356,25 @@ async def test_typing_off_skips_typing_ui_and_uses_final_delivery_once():
         audit_collector=None,
     )
 
-    assert feedback.stop_typing is None
+    assert feedback.stop_typing is not None
     assert feedback.typing_task is None
-    assert feedback.escalation_task is None
+    assert feedback.escalation_task is not None
     assert feedback.answer_preview_task is None
     assert feedback.placeholder is None
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
+    assert feedback.think_flush_task is not None
+    assert feedback.preference_event is not None
     assert callable(feedback.on_stream_event)
     assert runtime.app.bot.sent == []
     assert runtime.app.bot.edits == []
+
+    feedback.stop_typing.set()
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
     await runtime_pipeline.handle_success_delivery(
         runtime,
@@ -2175,12 +2472,18 @@ async def test_typing_only_does_not_route_answer_deltas_or_edit_placeholder():
         audit_collector=None,
     )
 
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
     assert callable(feedback.on_stream_event)
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
     assert runtime.app.bot.edits == []
 
 
@@ -2488,11 +2791,17 @@ async def test_legacy_preview_flag_stays_inactive_without_verbose():
 
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
-    assert feedback.escalation_task is None
-    assert feedback.stream_callback is None
+    assert feedback.escalation_task is not None
+    assert feedback.stream_callback is not None
     assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
 
 @pytest.mark.asyncio
@@ -2594,6 +2903,96 @@ async def test_verbose_alone_forces_placeholder_and_progress_stream():
     await feedback.typing_task
     await feedback.escalation_task
     assert runtime.streaming_loops == [("req-1", True, True)]
+
+
+@pytest.mark.asyncio
+async def test_live_verbose_and_think_changes_apply_without_replaying_hidden_events():
+    runtime = _runtime()
+    runtime.telegram_connected = True
+    make_stream_callback = FlexibleAgentRuntime._make_stream_callback.__get__(
+        runtime,
+        FlexibleAgentRuntime,
+    )
+
+    def _capturing_stream_callback(**kwargs):
+        runtime.stream_callbacks.append(kwargs)
+        return make_stream_callback(**kwargs)
+
+    runtime._make_stream_callback = _capturing_stream_callback
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    stream_queue = runtime.stream_callbacks[0]["event_queue"]
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="hidden before On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="hidden reasoning before On")
+    )
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, True)
+    FlexibleAgentRuntime._set_think_enabled(runtime, True)
+    for _ in range(50):
+        if runtime.streaming_loops:
+            break
+        await asyncio.sleep(0.01)
+    assert len(runtime.streaming_loops) == 1
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="visible after On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="R" * 160)
+    )
+    assert stream_queue.qsize() == 1
+    assert runtime._think_buffer == ["R" * 160]
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, False)
+    FlexibleAgentRuntime._set_think_enabled(runtime, False)
+    for _ in range(50):
+        if runtime.app.bot.deleted:
+            break
+        await asyncio.sleep(0.01)
+    assert runtime.app.bot.deleted
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, True)
+    FlexibleAgentRuntime._set_think_enabled(runtime, True)
+    for _ in range(50):
+        if len(runtime.streaming_loops) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert len(runtime.streaming_loops) == 2
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="visible after second On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="N" * 160)
+    )
+    assert stream_queue.qsize() == 1
+    assert runtime._think_buffer == ["N" * 160]
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, False)
+    FlexibleAgentRuntime._set_think_enabled(runtime, False)
+    feedback.stop_typing.set()
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
 
 @pytest.mark.asyncio
@@ -2743,7 +3142,28 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
                 "thinking_event_count": 2,
                 "thinking_redacted_count": 1,
                 "thinking_sources": ["reasoning", "reasoning_details.encrypted"],
-            }
+            },
+            "meter": {
+                "line_items": [
+                    {
+                        "request_id": "req-1:provider-call:1",
+                        "parent_request_id": "req-1",
+                        "phase": "execution",
+                        "engine": "deepseek-api",
+                        "model": "deepseek-v4-flash",
+                        "input": 100,
+                        "output": 10,
+                        "thinking": 2,
+                        "token_source": "provider",
+                        "thinking_in_output": True,
+                        "cost_usd": 0.0001,
+                        "cost_source": "provider",
+                        "prompt_cache_hit_tokens": 80,
+                        "prompt_cache_miss_tokens": 20,
+                        "provider_call_latency_ms": 123.456,
+                    }
+                ]
+            },
         },
     )
 
@@ -2769,6 +3189,18 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     assert event["thinking_event_count"] == 2
     assert event["thinking_redacted_count"] == 1
     assert event["thinking_sources"] == ["reasoning", "reasoning_details.encrypted"]
+    assert event["provider_call_metrics"] == [
+        {
+            "request_id": "req-1:provider-call:1",
+            "parent_request_id": "req-1",
+            "phase": "execution",
+            "engine": "deepseek-api",
+            "model": "deepseek-v4-flash",
+            "prompt_cache_hit_tokens": 80,
+            "prompt_cache_miss_tokens": 20,
+            "provider_call_latency_ms": 123.456,
+        }
+    ]
     assert event["section_chars"] == {"Workzone": 8}
     assert event["wrapper_applied"] is True
 
@@ -2866,6 +3298,81 @@ async def test_handle_backend_error_notifies_and_delivers_error():
 
 
 @pytest.mark.asyncio
+async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners():
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(
+        error="Selected model is at capacity.",
+        error_code="PROVIDER_CAPACITY_UNAVAILABLE",
+        error_retryable=True,
+        http_status=503,
+        provider_request_id="req_provider_1",
+        retry_after_s=2.5,
+        tool_call_count=3,
+        side_effects_possible=True,
+        stream_metadata={
+            "her_v2": {
+                "failure_chain": {
+                    "primary_failure": {
+                        "code": "PROVIDER_CAPACITY_UNAVAILABLE",
+                        "description": "Selected model is at capacity.",
+                        "side_effects_possible": True,
+                        "details": {
+                            "provider_http_failure": {
+                                "response": {
+                                    "status": 503,
+                                    "body": '{"error":{"code":"capacity"}}',
+                                },
+                                "transport_audit_refs": [
+                                    "hashi-transport:test:response"
+                                ],
+                            }
+                        },
+                    },
+                    "recovery_decision": {},
+                    "foreground_cleanup": {},
+                }
+            }
+        },
+    )
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        response,
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+    )
+
+    payload = runtime.listener_payloads[0]
+    assert payload["error_code"] == "PROVIDER_CAPACITY_UNAVAILABLE"
+    assert payload["error_retryable"] is True
+    assert payload["http_status"] == 503
+    assert payload["provider_request_id"] == "req_provider_1"
+    assert payload["retry_after_s"] == 2.5
+    assert payload["tool_call_count"] == 3
+    assert payload["side_effects_possible"] is True
+    assert runtime.sent_message["text"] == response.error
+    assert runtime.sent_message["error_context"] == {
+        "error_code": "PROVIDER_CAPACITY_UNAVAILABLE",
+        "error_retryable": True,
+        "http_status": 503,
+        "provider_request_id": "req_provider_1",
+        "retry_after_s": 2.5,
+        "tool_call_count": 3,
+        "side_effects_possible": True,
+    }
+    diagnostic_log = next(
+        message
+        for message in runtime.error_logger.messages
+        if message.startswith("Backend failure diagnostics")
+    )
+    assert '{\\"error\\":{\\"code\\":\\"capacity\\"}}' in diagnostic_log
+    assert "hashi-transport:test:response" in diagnostic_log
+
+
+@pytest.mark.asyncio
 async def test_handle_backend_error_passes_raw_failure_to_delivery_boundary():
     runtime = _runtime()
     item = _item()
@@ -2925,6 +3432,10 @@ async def test_handle_backend_error_keeps_non_deliverable_silent_request_interna
     )
 
     assert not hasattr(runtime, "sent_message")
+    assert any(
+        "internal scheduled failure" in message
+        for message in runtime.error_logger.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -2944,13 +3455,22 @@ async def test_handle_backend_error_buffers_transfer_without_delivery():
 
     assert runtime.suppressed == {"success": False, "error": "buffer me"}
     assert not hasattr(runtime, "sent_message")
+    assert any("buffer me" in message for message in runtime.error_logger.messages)
 
 
 @pytest.mark.asyncio
-async def test_handle_success_delivery_sends_response_and_routes_hchat():
+async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypatch):
     runtime = _runtime()
     item = _item(prompt="user text")
     response = SimpleNamespace(text="core text")
+    delivery_outcomes = []
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda current_runtime, current_item, **fields: delivery_outcomes.append(
+            (current_runtime, current_item, fields)
+        ),
+    )
 
     await runtime_pipeline.handle_success_delivery(
         runtime,
@@ -2972,6 +3492,60 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat():
     assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"
+    assert delivery_outcomes == [
+        (
+            runtime,
+            item,
+            {
+                "delivered": True,
+                "assistant_text": "visible text",
+                "transport": "telegram",
+                "completion_path": "foreground",
+                "disposition": "transport_delivered",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_records_failed_transport_outcome(monkeypatch):
+    runtime = _runtime()
+    item = _item(prompt="user text")
+    outcomes = []
+
+    async def no_transport_receipt(**kwargs):
+        return 0.0, 0
+
+    runtime.send_long_message = no_transport_receipt
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda current_runtime, current_item, **fields: outcomes.append(fields),
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="backend output"),
+        visible_text="visible output",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert outcomes == [
+        {
+            "delivered": False,
+            "assistant_text": "visible output",
+            "transport": "telegram",
+            "completion_path": "foreground",
+            "disposition": "transport_returned_no_receipt",
+        }
+    ]
 
 
 @pytest.mark.asyncio

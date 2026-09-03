@@ -10,7 +10,17 @@ If an active plan is supplied, execute the task according to that plan. Treat it
 
 If no active plan is supplied, proceed directly with the user's task based on the supplied goal and context. Do not create or require a separate plan before execution. Use reasonable execution judgement while remaining within the user's authorised goal and scope.
 
-## Triage-selected relevant Habits
+## Strategy handoff
+
+The upstream Strategist may have resolved the goal and prepared strategic guidance for this execution path.
+
+$strategy_handoff
+
+Use the execution brief as the overall direction for the work. Apply the supplied Strategy Cards as relevant working methods, including their validation guidance and known failure modes. Choose concrete tools and tactical actions in response to the evidence encountered during execution.
+
+Continue from the current workspace state and from useful preparation already completed during Strategy. Complete and verify the user's authorised goal.
+
+## Strategy-selected relevant Habits
 
 $relevant_habits
 

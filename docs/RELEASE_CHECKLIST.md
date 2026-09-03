@@ -40,28 +40,35 @@
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
 - HER v2 mode gates:
-  - release scope names HASHI `v4.0.0-alpha.2` separately from Enterprise AAI
-    `v0.1.0-alpha.1` / package `0.1.0a1`
+  - release scope uses HASHI `v4.0.0-alpha.2` as the single current repository,
+    Python package (`4.0.0a2`), root Node package, and Helm application line;
+    Enterprise AAI `v0.1.0-alpha.1` is labelled only as historical provenance
   - HER v2 changes run the touched v2 module plus its direct adapter/runtime
     consumers; no active path imports the retired HER v1 implementation
   - `her` resolves forward to `her-v2`, while `claw-cli` is rejected
   - the release candidate passes the explicit offline product suite once;
     repeated overlapping HER bundles are not separate gates
   - `python -m py_compile adapters/her_v2.py adapters/her_v2_provider.py orchestrator/her_v2/prompt_catalog.py orchestrator/her_v2/prompts.py orchestrator/her_v2/runtime.py orchestrator/her_v2/runtime_invocation.py orchestrator/her_v2/runtime_support.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
-  - Fixed mode proves incremental resume for session-based CLI backends; Flex,
-    Wrapper, Audit, and Dual Brain preserve their full-context contracts
+  - `python -m pytest -q tests/test_runtime_working_modes.py tests/test_config.py tests/test_flexible_backend_state.py tests/test_runtime_command_binding.py`
+  - the working-mode surface exposes only Fixed and Flex; session-capable
+    backends default to Fixed, stateless backends default to Flex, and invalid
+    Fixed/stateless configuration fails closed
+  - Fixed proves incremental native-session resume; Flex proves bridge-managed
+    context and explicit backend switching
+  - retired Wrapper, Audit, and Dual Brain state migrates to the valid
+    configured default without deleting historical configuration blocks;
+    former commands and callbacks are hidden compatibility notices
   - HER v2 remains the active Habit/Meditation owner and request-scoped
     eligibility prevents internal or ephemeral work from entering `/habit`
-  - HER UI and status show Direct, Fast path, Planned, Adaptive, Reviewed, and Assured
-    while persisted/API values remain `zero`, `low`, `medium`, `high`, `xhigh`, and
-    `max`; `/effort reviewed` and `/effort assured` normalize correctly
+  - HER UI and status show only Direct, Strategic, and Planned while persisted/API
+    values remain `zero`, `low`, and `medium`; legacy `fast` aliases select
+    Strategic and saved `high`, `xhigh`, or `max` values migrate to Planned
   - Direct (`zero`) proves exactly one Quick-model call at default provider
     reasoning `high`, complete tool/side-effect capability, no orchestration
     upgrade or other HER stage, normal verbose tool progress, attachment fallback,
     and `COMPLETED` for every successful natural-language return
-  - Reviewed and Assured regressions prove read-only tool delegation, exact
-    current-invocation receipts, stable before/after snapshots, one Reviewed
-    closure check, and the three-attempt Assured Verification ceiling
+  - retained higher-mode regressions remain internal coverage and do not expose
+    Adaptive, Reviewed, or Assured through the production selector
   - `verification_run` runs configured recipes or direct argv in the
     authoritative workspace without copying, inherits the execution process's
     filesystem/environment/`HOME`/network authority, and enforces a timeout
@@ -126,15 +133,17 @@
   - push only after the destination and publication scope are approved; never
     overwrite remote history implicitly
 
-## HASHI AAI Enterprise 0.1 Alpha
+## Historical HASHI AAI Enterprise 0.1 Alpha Revalidation
 
-This gate is for `HASHI AAI Enterprise v0.1.0-alpha.1`. It confirms that the
-enterprise control plane and deployment artifacts are coherent for alpha
-testing. It does not certify a production enterprise-server rollout.
+This optional historical gate revalidates the scope frozen at `HASHI AAI
+Enterprise v0.1.0-alpha.1`. It confirms that the inherited enterprise control
+plane and deployment artifacts remain coherent for alpha testing. It neither
+defines current package metadata nor certifies a production enterprise-server
+rollout.
 
-- Version metadata:
-  - `pyproject.toml` uses `0.1.0a1`
-  - `setup.py` uses `0.1.0a1`
+- Version provenance:
+  - annotated tag `v0.1.0-alpha.1` remains immutable
+  - current root package metadata uses the unified v4 release line
 - Scope docs:
   - `docs/HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md` includes the
     `HASHI AAI Enterprise 0.1 Alpha` cut line

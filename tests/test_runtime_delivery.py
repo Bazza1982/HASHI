@@ -291,7 +291,9 @@ async def test_send_long_message_error_uses_plain_summary(tmp_path):
     assert message["disable_notification"] is True
     assert "parse_mode" not in message
     assert "Backend error (codex-cli) | req-err" in message["text"]
-    assert "Full log (local):" in message["text"]
+    assert "Diagnostic log (local):" in message["text"]
+    assert "search the log for HASHI request ID req-err" in message["text"]
+    assert "/verbose off" not in message["text"]
     assert "... (truncated) ..." in message["text"]
 
 
@@ -304,7 +306,7 @@ def test_format_backend_error_for_user_adds_upgrade_action_for_version_gated_mod
 
     text = runtime_delivery.format_backend_error_for_user("codex-cli", raw)
 
-    assert "Exact backend failure: The 'gpt-5.6-sol' model requires a newer version of Codex." in text
+    assert "Error details: The 'gpt-5.6-sol' model requires a newer version of Codex." in text
     assert "Action: this model is not supported by the installed Codex." in text
     assert "Raw error:" in text
 
@@ -328,9 +330,42 @@ async def test_send_long_message_formats_backend_failure_once(tmp_path):
 
     assert chunks == 1
     message = runtime.app.bot.messages[0]["text"]
-    assert message.count("Exact backend failure:") == 1
+    assert message.count("Error details:") == 1
     assert "Action: this model is not supported by the installed Codex." in message
     assert "Raw error:" in message
+
+
+@pytest.mark.asyncio
+async def test_backend_error_exposes_actionable_typed_context_in_chinese(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.ui_language = "zh-CN"
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="[PROVIDER_BAD_REQUEST] The provider rejected the request as invalid.",
+        request_id="req-sunny-0003",
+        purpose="error",
+        error_context={
+            "error_code": "PROVIDER_BAD_REQUEST",
+            "error_retryable": False,
+            "http_status": 400,
+            "provider_request_id": "provider-abc",
+            "side_effects_possible": True,
+        },
+    )
+
+    assert chunks == 1
+    message = runtime.app.bot.messages[0]["text"]
+    assert "错误详情：[PROVIDER_BAD_REQUEST]" in message
+    assert "HTTP 状态：400" in message
+    assert "服务提供方请求编号：provider-abc" in message
+    assert "任务可能已部分执行" in message
+    assert "原样重试通常无法解决问题" in message
+    assert "诊断日志：" in message
+    assert "HASHI 请求编号 req-sunny-0003" in message
+    assert "准确错误" not in message
+    assert "/verbose off" not in message
 
 
 @pytest.mark.asyncio

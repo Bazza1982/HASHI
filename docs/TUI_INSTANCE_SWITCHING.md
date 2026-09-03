@@ -1,5 +1,7 @@
 # TUI Instance Switching
 
+Architecture: [HASHI Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)
+
 ## Purpose and boundary
 
 `/instance` lets one running TUI move between HASHI instances without depending
@@ -15,7 +17,7 @@ Supported targets are:
 Every cross-instance target must be discovered by the launch instance's local
 Hashi Remote, must have `handshake_accepted` state on both sides, and must
 advertise `tui_proxy_v1`. There is no manual URL escape hatch and no public
-internet Workbench routing.
+internet Backend API routing.
 
 ## Transport and trust contract
 
@@ -23,16 +25,16 @@ internet Workbench routing.
 TUI
   -> launch Remote POST /tui/proxy (local-host callers only)
   -> peer Remote POST /protocol/tui (hashi-shared-hmac-v1)
-  -> peer's local Workbench API
+  -> peer's local Backend API
 ```
 
 This shape is deliberate. A successful handshake proves Remote-to-Remote trust;
-it does not make a LAN-bound Workbench API authenticated. The TUI therefore
-never uses a peer's Workbench host or port directly.
+it does not make a LAN-bound Backend API authenticated. The TUI therefore never
+uses a peer's Backend API host or port directly.
 
 The proxy accepts only these named operations:
 
-| Operation | Local Workbench request |
+| Operation | Local Backend API request |
 | --- | --- |
 | `health` | `GET /api/health` |
 | `agents` | `GET /api/agents` |
@@ -42,6 +44,10 @@ The proxy accepts only these named operations:
 
 Arbitrary paths are not represented in the protocol. Text, agent, offset,
 limit, and response sizes are bounded before forwarding.
+
+The TUI is HASHI's permanent built-in reference terminal Connector. This
+switching contract currently proxies the basic Backend API chat/transcript
+surface; it does not claim complete Persistent Session API v1 support.
 
 ## Switch transaction
 

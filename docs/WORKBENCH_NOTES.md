@@ -1,11 +1,17 @@
 # Workbench Retirement Notice
 
+Architecture: [HASHI Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)
+
 Workbench has retired and is no longer shipped or supported by HASHI.
 
 The retired component's frontend, Node server, build assets, launchers, local
 data, dependencies, and UI-specific tests have been removed from this
 repository. HASHI startup, onboarding, packaging, and release checks no longer
 start or build Workbench.
+
+Any successor graphical frontend is developed in a separate repository. It may
+consume HASHI's generic Connector and API contracts, but it is not part of the
+HASHI program or this architecture.
 
 ## Compatibility Names
 

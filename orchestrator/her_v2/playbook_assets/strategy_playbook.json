@@ -1,0 +1,1450 @@
+{
+  "playbook_version": "2026-08-29.1",
+  "source": "面向 AI Agent 的任务分诊与规划 Playbook",
+  "cards": [
+    {
+      "id": "SIMPLE_QA",
+      "version": "1.0.0",
+      "title": "简单知识问答",
+      "content": "**使用：**稳定、低风险、无需外部状态的短事实或定义。**拓扑：**`DIRECT_INFERENCE`。**工具：**通常无。**输入：**问题、期望深度。**输出：**直接答案。**验证：**检查是否答全、概念是否自洽；事实若可能过时则升级为检索。**变体：**定义、术语、基础事实。**例：**“什么是 EBITDA？”；**计划：**识别概念→简洁定义→必要背景→一致性检查。OpenAI 也明确指出简单 retrieval/intent 等任务不必使用最高复杂度模型。 citeturn9view1",
+      "use_when": [
+        "稳定、低风险、无需外部状态的短事实或定义。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "识别概念",
+        "简洁定义",
+        "必要背景",
+        "一致性检查。OpenAI 也明确指出简单 retrieval/intent 等任务不必使用最高复杂度模型。 citeturn9view1"
+      ],
+      "topology": {
+        "pattern": "`DIRECT_INFERENCE`。"
+      },
+      "validation": [
+        "检查是否答全、概念是否自洽；事实若可能过时则升级为检索。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "通常无。"
+      ],
+      "inputs": [
+        "问题、期望深度。"
+      ],
+      "outputs": [
+        "直接答案。"
+      ],
+      "variants": [
+        "定义、术语、基础事实。"
+      ],
+      "example": "“什么是 EBITDA？”；"
+    },
+    {
+      "id": "EXPLAIN_TEACH",
+      "version": "1.0.0",
+      "title": "解释与教学",
+      "content": "**使用：**用户目标是理解概念、机制、因果关系而非单个事实。**拓扑：**`DIRECT_INFERENCE`，复杂时加 `DRAFT_CRITIQUE_REVISE`。**工具：**通常无；技术细节不确定时检索。**输入：**主题、受众水平、深度。**输出：**解释、示例、类比。**验证：**术语一致、因果链完整、示例不与定义冲突。**变体：**初学者解释、专家解释、教程。**例：**“给产品经理解释向量数据库”；**计划：**定义→用途→机制→示例→限制。",
+      "use_when": [
+        "用户目标是理解概念、机制、因果关系而非单个事实。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "定义",
+        "用途",
+        "机制",
+        "示例",
+        "限制。"
+      ],
+      "topology": {
+        "pattern": "`DIRECT_INFERENCE`，复杂时加 `DRAFT_CRITIQUE_REVISE`。"
+      },
+      "validation": [
+        "术语一致、因果链完整、示例不与定义冲突。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "通常无；技术细节不确定时检索。"
+      ],
+      "inputs": [
+        "主题、受众水平、深度。"
+      ],
+      "outputs": [
+        "解释、示例、类比。"
+      ],
+      "variants": [
+        "初学者解释、专家解释、教程。"
+      ],
+      "example": "“给产品经理解释向量数据库”；"
+    },
+    {
+      "id": "COMPARE_EVALUATE",
+      "version": "1.0.0",
+      "title": "比较与评估",
+      "content": "**使用：**比较技术、方案、模型或观点，但不存在单一机械最优解。**拓扑：**`ENUMERATE_SCORE_SELECT`。**工具：**知识稳定可直接推理；时效性强则 Web/Search。**输入：**候选、评价目标、约束。**输出：**标准化比较矩阵与结论。**验证：**先统一 criteria，再比较；避免不同候选使用不同尺度。**变体：**A/B、架构权衡、供应商比较。**例：**“Postgres 和 MongoDB 怎么选？”；**计划：**抽取场景→设 criteria→比较→指出 trade-off→推荐。",
+      "use_when": [
+        "比较技术、方案、模型或观点，但不存在单一机械最优解。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "抽取场景",
+        "设 criteria",
+        "比较",
+        "指出 trade-off",
+        "推荐。"
+      ],
+      "topology": {
+        "pattern": "`ENUMERATE_SCORE_SELECT`。"
+      },
+      "validation": [
+        "先统一 criteria，再比较；避免不同候选使用不同尺度。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "知识稳定可直接推理；时效性强则 Web/Search。"
+      ],
+      "inputs": [
+        "候选、评价目标、约束。"
+      ],
+      "outputs": [
+        "标准化比较矩阵与结论。"
+      ],
+      "variants": [
+        "A/B、架构权衡、供应商比较。"
+      ],
+      "example": "“Postgres 和 MongoDB 怎么选？”；"
+    },
+    {
+      "id": "RECOMMEND_DECIDE",
+      "version": "1.0.0",
+      "title": "推荐与决策支持",
+      "content": "**使用：**用户需要在多个候选中做实际选择。**拓扑：**`ENUMERATE_SCORE_SELECT`。**工具：**Search、数据库、Python scoring。**输入：**硬约束、偏好、预算、候选。**输出：**过滤后的 shortlist、排序、理由。**验证：**先 hard-filter，再 score；做 sensitivity check，避免精确权重制造伪精确。**变体：**采购、技术选型、路线选择。**例：**“选一个最适合 10 人团队的 CI 平台”；**计划：**约束→候选→筛除→评分→敏感性→推荐。",
+      "use_when": [
+        "用户需要在多个候选中做实际选择。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "约束",
+        "候选",
+        "筛除",
+        "评分",
+        "敏感性",
+        "推荐。"
+      ],
+      "topology": {
+        "pattern": "`ENUMERATE_SCORE_SELECT`。"
+      },
+      "validation": [
+        "先 hard-filter，再 score；做 sensitivity check，避免精确权重制造伪精确。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Search、数据库、Python scoring。"
+      ],
+      "inputs": [
+        "硬约束、偏好、预算、候选。"
+      ],
+      "outputs": [
+        "过滤后的 shortlist、排序、理由。"
+      ],
+      "variants": [
+        "采购、技术选型、路线选择。"
+      ],
+      "example": "“选一个最适合 10 人团队的 CI 平台”；"
+    },
+    {
+      "id": "CURRENT_FACT_RESEARCH",
+      "version": "1.0.0",
+      "title": "最新事实查询",
+      "content": "**使用：**新闻、价格、法规、API 版本、职位、产品状态等可能变化的信息。**拓扑：**`RETRIEVE_THEN_REASON`。**工具：**Web/Search，优先官方/primary sources。**输入：**实体、时间范围、所需精度。**输出：**带日期和来源的结论。**验证：**核对发布日期与事件日期；关键事实至少交叉验证。**变体：**latest status、政策、市场数据。**例：**“现在 AWS 推荐哪个 Agent 服务？”；**计划：**官方检索→核对发布日期→确认当前状态→回答。Bedrock Agents Classic 的 2026 状态就是典型需要动态检索的事实。 citeturn2search4",
+      "use_when": [
+        "新闻、价格、法规、API 版本、职位、产品状态等可能变化的信息。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "官方检索",
+        "核对发布日期",
+        "确认当前状态",
+        "回答。Bedrock Agents Classic 的 2026 状态就是典型需要动态检索的事实。 citeturn2search4"
+      ],
+      "topology": {
+        "pattern": "`RETRIEVE_THEN_REASON`。"
+      },
+      "validation": [
+        "核对发布日期与事件日期；关键事实至少交叉验证。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Web/Search，优先官方/primary sources。"
+      ],
+      "inputs": [
+        "实体、时间范围、所需精度。"
+      ],
+      "outputs": [
+        "带日期和来源的结论。"
+      ],
+      "variants": [
+        "latest status、政策、市场数据。"
+      ],
+      "example": "“现在 AWS 推荐哪个 Agent 服务？”；"
+    },
+    {
+      "id": "DEEP_RESEARCH",
+      "version": "1.0.0",
+      "title": "深度研究与综合",
+      "content": "**使用：**答案分散在多来源中，需要搜索、比较、综合和引用。**拓扑：**`RETRIEVE_THEN_REASON` + `DECOMPOSE_PARALLEL_SYNTH`。**工具：**Search、browser、PDF/document parser、Python。**输入：**研究问题、范围、source policy。**输出：**evidence notes、综合报告、bibliography。**验证：**claim→source 对齐；主动寻找冲突来源和缺口。**变体：**市场研究、技术 landscape、政策研究。**例：**本报告；**计划：**分主题→并行检索→primary-source 筛选→证据表→缺口搜索→综合。Anthropic 的 multi-agent research 系统也采用动态分解和并行搜索。 citeturn6search7turn8search2",
+      "use_when": [
+        "答案分散在多来源中，需要搜索、比较、综合和引用。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "分主题",
+        "并行检索",
+        "primary-source 筛选",
+        "证据表",
+        "缺口搜索",
+        "综合。Anthropic 的 multi-agent research 系统也采用动态分解和并行搜索。 citeturn6search7turn8search2"
+      ],
+      "topology": {
+        "pattern": "`RETRIEVE_THEN_REASON` + `DECOMPOSE_PARALLEL_SYNTH`。"
+      },
+      "validation": [
+        "claim→source 对齐；主动寻找冲突来源和缺口。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Search、browser、PDF/document parser、Python。"
+      ],
+      "inputs": [
+        "研究问题、范围、source policy。"
+      ],
+      "outputs": [
+        "evidence notes、综合报告、bibliography。"
+      ],
+      "variants": [
+        "市场研究、技术 landscape、政策研究。"
+      ],
+      "example": "本报告；"
+    },
+    {
+      "id": "EVIDENCE_EXTRACTION",
+      "version": "1.0.0",
+      "title": "证据与条款抽取",
+      "content": "**使用：**答案已经位于给定文件、邮件、合同、网页或知识库中。**拓扑：**`RETRIEVE_THEN_REASON`。**工具：**全文搜索、RAG、parser。**输入：**文档集合、目标字段/问题。**输出：**精确片段、结构化字段、引用位置。**验证：**答案必须能回指原文；避免把推断写成文档事实。**变体：**合同条款、政策、会议记录。**例：**“这份租约允许养宠物吗？”；**计划：**检索 pet/animal→读取上下文→抽取规则→引用→区分明文与解释。",
+      "use_when": [
+        "答案已经位于给定文件、邮件、合同、网页或知识库中。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "检索 pet/animal",
+        "读取上下文",
+        "抽取规则",
+        "引用",
+        "区分明文与解释。"
+      ],
+      "topology": {
+        "pattern": "`RETRIEVE_THEN_REASON`。"
+      },
+      "validation": [
+        "答案必须能回指原文；避免把推断写成文档事实。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "全文搜索、RAG、parser。"
+      ],
+      "inputs": [
+        "文档集合、目标字段/问题。"
+      ],
+      "outputs": [
+        "精确片段、结构化字段、引用位置。"
+      ],
+      "variants": [
+        "合同条款、政策、会议记录。"
+      ],
+      "example": "“这份租约允许养宠物吗？”；"
+    },
+    {
+      "id": "FACT_VERIFY",
+      "version": "1.0.0",
+      "title": "事实核验",
+      "content": "**使用：**用户要求验证一项声明是否真实或来源是否支持它。**拓扑：**`RETRIEVE_THEN_REASON`。**工具：**Search、原始数据库、官方材料。**输入：**claim、时间点。**输出：**supported / contradicted / unresolved + evidence。**验证：**寻找支持和反证；区分来源是否只是互相转载。**变体：**新闻核查、引用核查、技术声明。**例：**“某公司是否真的发布了 X？”；**计划：**拆 claim→找原始公告→独立来源→检查日期→判定。ReAct 在 fact verification 中利用外部检索减轻纯语言推理的 hallucination/error propagation。 citeturn3search0",
+      "use_when": [
+        "用户要求验证一项声明是否真实或来源是否支持它。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "拆 claim",
+        "找原始公告",
+        "独立来源",
+        "检查日期",
+        "判定。ReAct 在 fact verification 中利用外部检索减轻纯语言推理的 hallucination/error propagation。 citeturn3search0"
+      ],
+      "topology": {
+        "pattern": "`RETRIEVE_THEN_REASON`。"
+      },
+      "validation": [
+        "寻找支持和反证；区分来源是否只是互相转载。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Search、原始数据库、官方材料。"
+      ],
+      "inputs": [
+        "claim、时间点。"
+      ],
+      "outputs": [
+        "supported / contradicted / unresolved + evidence。"
+      ],
+      "variants": [
+        "新闻核查、引用核查、技术声明。"
+      ],
+      "example": "“某公司是否真的发布了 X？”；"
+    },
+    {
+      "id": "DETERMINISTIC_CALC",
+      "version": "1.0.0",
+      "title": "确定性计算",
+      "content": "**使用：**算术、统计公式、日期、单位转换、财务计算等存在明确算法。**拓扑：**`COMPUTE_THEN_EXPLAIN`。**工具：**Calculator、Python、symbolic math。**输入：**数值、单位、公式/规则。**输出：**计算结果和必要解释。**验证：**独立重算、assert、边界测试。**变体：**统计、财务、概率。**例：**“计算这组交易的 CAGR”；**计划：**解析变量→Python 计算→独立公式核验→解释。Toolformer 特别把 arithmetic/factual lookup 作为外部工具优于纯 LM 的例子。 citeturn4search1",
+      "use_when": [
+        "算术、统计公式、日期、单位转换、财务计算等存在明确算法。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "解析变量",
+        "Python 计算",
+        "独立公式核验",
+        "解释。Toolformer 特别把 arithmetic/factual lookup 作为外部工具优于纯 LM 的例子。 citeturn4search1"
+      ],
+      "topology": {
+        "pattern": "`COMPUTE_THEN_EXPLAIN`。"
+      },
+      "validation": [
+        "独立重算、assert、边界测试。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Calculator、Python、symbolic math。"
+      ],
+      "inputs": [
+        "数值、单位、公式/规则。"
+      ],
+      "outputs": [
+        "计算结果和必要解释。"
+      ],
+      "variants": [
+        "统计、财务、概率。"
+      ],
+      "example": "“计算这组交易的 CAGR”；"
+    },
+    {
+      "id": "DATA_ANALYSIS",
+      "version": "1.0.0",
+      "title": "结构化数据分析",
+      "content": "**使用：**CSV、Excel、数据库或表格上的统计、聚合、关联、异常分析。**拓扑：**`COMPUTE_THEN_EXPLAIN`。**工具：**Python/pandas/SQL。**输入：**数据、问题、字段定义。**输出：**分析表、指标、图或结论。**验证：**schema、row counts、missing values、汇总 totals、spot checks。**变体：**EDA、KPI、cohort、异常检测。**例：**“为什么上月退款率升高？”；**计划：**inspect schema→清洗→分层计算→异常 slice→复算→解释。",
+      "use_when": [
+        "CSV、Excel、数据库或表格上的统计、聚合、关联、异常分析。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "inspect schema",
+        "清洗",
+        "分层计算",
+        "异常 slice",
+        "复算",
+        "解释。"
+      ],
+      "topology": {
+        "pattern": "`COMPUTE_THEN_EXPLAIN`。"
+      },
+      "validation": [
+        "schema、row counts、missing values、汇总 totals、spot checks。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Python/pandas/SQL。"
+      ],
+      "inputs": [
+        "数据、问题、字段定义。"
+      ],
+      "outputs": [
+        "分析表、指标、图或结论。"
+      ],
+      "variants": [
+        "EDA、KPI、cohort、异常检测。"
+      ],
+      "example": "“为什么上月退款率升高？”；"
+    },
+    {
+      "id": "DATA_TRANSFORM",
+      "version": "1.0.0",
+      "title": "数据清洗与转换",
+      "content": "**使用：**merge、reshape、normalize、去重、格式转换。**拓扑：**`COMPUTE_THEN_EXPLAIN`。**工具：**Python、SQL、CLI。**输入：**源数据、目标 schema、映射规则。**输出：**转换文件和 transformation log。**验证：**输入/输出行数、schema、null、unique keys、hash/抽样。**变体：**ETL、CSV↔JSON、字段标准化。**例：**“把 50 个 CSV 合并成统一 schema”；**计划：**采样→推断 schema→定义映射→批处理→异常表→完整性检查。",
+      "use_when": [
+        "merge、reshape、normalize、去重、格式转换。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "采样",
+        "推断 schema",
+        "定义映射",
+        "批处理",
+        "异常表",
+        "完整性检查。"
+      ],
+      "topology": {
+        "pattern": "`COMPUTE_THEN_EXPLAIN`。"
+      },
+      "validation": [
+        "输入/输出行数、schema、null、unique keys、hash/抽样。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Python、SQL、CLI。"
+      ],
+      "inputs": [
+        "源数据、目标 schema、映射规则。"
+      ],
+      "outputs": [
+        "转换文件和 transformation log。"
+      ],
+      "variants": [
+        "ETL、CSV↔JSON、字段标准化。"
+      ],
+      "example": "“把 50 个 CSV 合并成统一 schema”；"
+    },
+    {
+      "id": "BATCH_CLASSIFY",
+      "version": "1.0.0",
+      "title": "大批量分类/标注",
+      "content": "**使用：**数百至数百万同构项目需要分类、标签或评分。**拓扑：**`SAMPLE_INFER_BATCH_QA`。**工具：**Python、batch LLM/API。**输入：**数据、label schema、判定规则。**输出：**标签集、confidence、exception queue。**验证：**先人工/高质量 sample 建 rubric；分层抽检、低置信度全审。**变体：**评论分类、文档 routing、实体编码。**例：**“分类 20,000 个客服工单”；**计划：**采样→定义 taxonomy→批量分类→异常/低置信度 review→统计 QA。",
+      "use_when": [
+        "数百至数百万同构项目需要分类、标签或评分。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "采样",
+        "定义 taxonomy",
+        "批量分类",
+        "异常/低置信度 review",
+        "统计 QA。"
+      ],
+      "topology": {
+        "pattern": "`SAMPLE_INFER_BATCH_QA`。"
+      },
+      "validation": [
+        "先人工/高质量 sample 建 rubric；分层抽检、低置信度全审。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Python、batch LLM/API。"
+      ],
+      "inputs": [
+        "数据、label schema、判定规则。"
+      ],
+      "outputs": [
+        "标签集、confidence、exception queue。"
+      ],
+      "variants": [
+        "评论分类、文档 routing、实体编码。"
+      ],
+      "example": "“分类 20,000 个客服工单”；"
+    },
+    {
+      "id": "FORECAST_SCENARIO",
+      "version": "1.0.0",
+      "title": "预测与情景估计",
+      "content": "**使用：**未来结果无法确定，但可基于假设、历史数据或模型估算。**拓扑：**`COMPUTE_THEN_EXPLAIN` + `ENUMERATE_SCORE_SELECT`。**工具：**Python、统计模型、Search。**输入：**历史数据、假设、时间范围。**输出：**baseline/bull/bear scenarios、区间。**验证：**backtest、sensitivity、assumption audit。**变体：**需求、预算、项目时间、市场规模。**例：**“估计明年 API 成本”；**计划：**列 driver→计算情景→敏感性→给范围而非伪精确单值。",
+      "use_when": [
+        "未来结果无法确定，但可基于假设、历史数据或模型估算。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "列 driver",
+        "计算情景",
+        "敏感性",
+        "给范围而非伪精确单值。"
+      ],
+      "topology": {
+        "pattern": "`COMPUTE_THEN_EXPLAIN` + `ENUMERATE_SCORE_SELECT`。"
+      },
+      "validation": [
+        "backtest、sensitivity、assumption audit。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Python、统计模型、Search。"
+      ],
+      "inputs": [
+        "历史数据、假设、时间范围。"
+      ],
+      "outputs": [
+        "baseline/bull/bear scenarios、区间。"
+      ],
+      "variants": [
+        "需求、预算、项目时间、市场规模。"
+      ],
+      "example": "“估计明年 API 成本”；"
+    },
+    {
+      "id": "OPTIMIZATION_SCHEDULING",
+      "version": "1.0.0",
+      "title": "组合优化与排程",
+      "content": "**使用：**满足约束的同时最小化成本、时间或冲突。**拓扑：**`COMPUTE_THEN_EXPLAIN`，必要时 custom solver/search。**工具：**Python、OR-Tools、MILP、CP-SAT。**输入：**变量、hard constraints、objective。**输出：**可行/最优方案。**验证：**独立 validator 检查所有约束；能证明时检查 optimality bound。**变体：**排班、资源分配、routing。**例：**“给 30 人排 7 天班”；**计划：**形式化→solver→验证 constraints→解释 trade-offs。Tree-of-Thoughts 也说明探索/search 对非平凡规划问题可以优于单一路径生成。 citeturn3search3",
+      "use_when": [
+        "满足约束的同时最小化成本、时间或冲突。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "形式化",
+        "solver",
+        "验证 constraints",
+        "解释 trade-offs。Tree-of-Thoughts 也说明探索/search 对非平凡规划问题可以优于单一路径生成。 citeturn3search3"
+      ],
+      "topology": {
+        "pattern": "`COMPUTE_THEN_EXPLAIN`，必要时 custom solver/search。"
+      },
+      "validation": [
+        "独立 validator 检查所有约束；能证明时检查 optimality bound。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Python、OR-Tools、MILP、CP-SAT。"
+      ],
+      "inputs": [
+        "变量、hard constraints、objective。"
+      ],
+      "outputs": [
+        "可行/最优方案。"
+      ],
+      "variants": [
+        "排班、资源分配、routing。"
+      ],
+      "example": "“给 30 人排 7 天班”；"
+    },
+    {
+      "id": "LOGIC_CONSTRAINT",
+      "version": "1.0.0",
+      "title": "逻辑与约束推理",
+      "content": "**使用：**谜题、布尔条件、离散约束、有限状态问题。**拓扑：**`COMPUTE_THEN_EXPLAIN` 或 `ENUMERATE_SCORE_SELECT`。**工具：**Python enumeration、SAT/SMT。**输入：**前提、约束、目标。**输出：**解、反例或不满足证明。**验证：**枚举所有候选或 solver validator。**变体：**logic puzzle、configuration validation。**例：**“谁住在哪栋房？”；**计划：**形式化 predicates→枚举/SAT→验证→把结果翻译成简洁推理。",
+      "use_when": [
+        "谜题、布尔条件、离散约束、有限状态问题。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "形式化 predicates",
+        "枚举/SAT",
+        "验证",
+        "把结果翻译成简洁推理。"
+      ],
+      "topology": {
+        "pattern": "`COMPUTE_THEN_EXPLAIN` 或 `ENUMERATE_SCORE_SELECT`。"
+      },
+      "validation": [
+        "枚举所有候选或 solver validator。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Python enumeration、SAT/SMT。"
+      ],
+      "inputs": [
+        "前提、约束、目标。"
+      ],
+      "outputs": [
+        "解、反例或不满足证明。"
+      ],
+      "variants": [
+        "logic puzzle、configuration validation。"
+      ],
+      "example": "“谁住在哪栋房？”；"
+    },
+    {
+      "id": "MATH_PROOF",
+      "version": "1.0.0",
+      "title": "数学证明",
+      "content": "**使用：**需要证明命题而非只给数值答案。**拓扑：**`DIRECT_INFERENCE` + custom `FORMALIZE_VERIFY`。**工具：**symbolic math、Lean/Coq/SMT 可用时优先。**输入：**命题、定义、允许定理。**输出：**证明或 counterexample。**验证：**独立推导、symbolic/formal checker、边界反例搜索。**变体：**代数证明、组合证明。**例：**“证明某递推式”；**计划：**明确 assumptions→选择证明法→推导→检查每个 implication→搜索反例。",
+      "use_when": [
+        "需要证明命题而非只给数值答案。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "明确 assumptions",
+        "选择证明法",
+        "推导",
+        "检查每个 implication",
+        "搜索反例。"
+      ],
+      "topology": {
+        "pattern": "`DIRECT_INFERENCE` + custom `FORMALIZE_VERIFY`。"
+      },
+      "validation": [
+        "独立推导、symbolic/formal checker、边界反例搜索。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "symbolic math、Lean/Coq/SMT 可用时优先。"
+      ],
+      "inputs": [
+        "命题、定义、允许定理。"
+      ],
+      "outputs": [
+        "证明或 counterexample。"
+      ],
+      "variants": [
+        "代数证明、组合证明。"
+      ],
+      "example": "“证明某递推式”；"
+    },
+    {
+      "id": "CODE_IMPLEMENT",
+      "version": "1.0.0",
+      "title": "新代码实现",
+      "content": "**使用：**新增函数、CLI、服务、应用或算法。**拓扑：**`GENERATE_EXECUTE_TEST`。**工具：**repo search、editor、shell、compiler、test runner。**输入：**需求、repo、接口、约束。**输出：**代码、tests、diff。**验证：**build、unit/integration tests、type/lint。**变体：**greenfield、isolated feature。**例：**“增加 CSV 导出 endpoint”；**计划：**inspect architecture→找现有 pattern→实现最小改动→测试→回归。Codex 和 SWE-agent 都把真实执行/测试 loop 作为 coding harness 的核心。 citeturn8search1turn4search2",
+      "use_when": [
+        "新增函数、CLI、服务、应用或算法。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "inspect architecture",
+        "找现有 pattern",
+        "实现最小改动",
+        "测试",
+        "回归。Codex 和 SWE-agent 都把真实执行/测试 loop 作为 coding harness 的核心。 citeturn8search1turn4search2"
+      ],
+      "topology": {
+        "pattern": "`GENERATE_EXECUTE_TEST`。"
+      },
+      "validation": [
+        "build、unit/integration tests、type/lint。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "repo search、editor、shell、compiler、test runner。"
+      ],
+      "inputs": [
+        "需求、repo、接口、约束。"
+      ],
+      "outputs": [
+        "代码、tests、diff。"
+      ],
+      "variants": [
+        "greenfield、isolated feature。"
+      ],
+      "example": "“增加 CSV 导出 endpoint”；"
+    },
+    {
+      "id": "CODE_MODIFY",
+      "version": "1.0.0",
+      "title": "功能修改与扩展",
+      "content": "**使用：**在现有代码中添加能力且必须保持已有行为。**拓扑：**`GENERATE_EXECUTE_TEST`。**工具：**code search、git、tests。**输入：**repo、feature request、acceptance criteria。**输出：**最小 diff、测试。**验证：**先理解 invariant，再新增 test；运行相关及回归测试。**变体：**API change、UI feature、integration。**例：**“给登录增加 WebAuthn”；**计划：**追踪 auth flow→识别接口→先测试/契约→修改→运行完整 auth tests。",
+      "use_when": [
+        "在现有代码中添加能力且必须保持已有行为。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "追踪 auth flow",
+        "识别接口",
+        "先测试/契约",
+        "修改",
+        "运行完整 auth tests。"
+      ],
+      "topology": {
+        "pattern": "`GENERATE_EXECUTE_TEST`。"
+      },
+      "validation": [
+        "先理解 invariant，再新增 test；运行相关及回归测试。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "code search、git、tests。"
+      ],
+      "inputs": [
+        "repo、feature request、acceptance criteria。"
+      ],
+      "outputs": [
+        "最小 diff、测试。"
+      ],
+      "variants": [
+        "API change、UI feature、integration。"
+      ],
+      "example": "“给登录增加 WebAuthn”；"
+    },
+    {
+      "id": "BUG_DIAGNOSIS",
+      "version": "1.0.0",
+      "title": "Bug 诊断",
+      "content": "**使用：**系统有错误，但原因未知。**拓扑：**`HYPOTHESIZE_TEST_NARROW`。**工具：**logs、debugger、tests、shell、metrics。**输入：**症状、环境、日志、复现信息。**输出：**root-cause evidence、修复建议；未授权不修改。**验证：**能稳定复现且 discriminating test 支持原因。**变体：**runtime error、wrong output、performance regression。**例：**“生产偶发 500”；**计划：**复现/观测→列 competing hypotheses→最便宜 discriminating test→淘汰→确认 root cause。",
+      "use_when": [
+        "系统有错误，但原因未知。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "复现/观测",
+        "列 competing hypotheses",
+        "最便宜 discriminating test",
+        "淘汰",
+        "确认 root cause。"
+      ],
+      "topology": {
+        "pattern": "`HYPOTHESIZE_TEST_NARROW`。"
+      },
+      "validation": [
+        "能稳定复现且 discriminating test 支持原因。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "logs、debugger、tests、shell、metrics。"
+      ],
+      "inputs": [
+        "症状、环境、日志、复现信息。"
+      ],
+      "outputs": [
+        "root-cause evidence、修复建议；未授权不修改。"
+      ],
+      "variants": [
+        "runtime error、wrong output、performance regression。"
+      ],
+      "example": "“生产偶发 500”；"
+    },
+    {
+      "id": "REFACTOR_MIGRATE",
+      "version": "1.0.0",
+      "title": "重构与迁移",
+      "content": "**使用：**结构或依赖变化，但外部行为原则上应保持。**拓扑：**`GENERATE_EXECUTE_TEST`，大规模时加 `DECOMPOSE_PARALLEL_SYNTH`。**工具：**AST/code search、tests、git。**输入：**旧架构、目标架构、compatibility constraints。**输出：**incremental diffs、migration notes。**验证：**behavioral regression suite、build、benchmark。**变体：**framework upgrade、API migration。**例：**“从旧 SDK 迁移到新 API”；**计划：**inventory→定义 invariants→分批迁移→每批测试→最终清理。",
+      "use_when": [
+        "结构或依赖变化，但外部行为原则上应保持。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "inventory",
+        "定义 invariants",
+        "分批迁移",
+        "每批测试",
+        "最终清理。"
+      ],
+      "topology": {
+        "pattern": "`GENERATE_EXECUTE_TEST`，大规模时加 `DECOMPOSE_PARALLEL_SYNTH`。"
+      },
+      "validation": [
+        "behavioral regression suite、build、benchmark。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "AST/code search、tests、git。"
+      ],
+      "inputs": [
+        "旧架构、目标架构、compatibility constraints。"
+      ],
+      "outputs": [
+        "incremental diffs、migration notes。"
+      ],
+      "variants": [
+        "framework upgrade、API migration。"
+      ],
+      "example": "“从旧 SDK 迁移到新 API”；"
+    },
+    {
+      "id": "TEST_QA",
+      "version": "1.0.0",
+      "title": "测试生成与质量验证",
+      "content": "**使用：**目标是发现缺陷或确认系统符合 specification。**拓扑：**`GENERATE_EXECUTE_TEST` + `DRAFT_CRITIQUE_REVISE`。**工具：**test runner、browser、fuzzer、static analyzer。**输入：**system/spec、risk areas。**输出：**test cases、results、defects。**验证：**测试本身需能失败；覆盖正/负/边界情况。**变体：**unit、integration、UI QA、security regression。**例：**“验证结账流程”；**计划：**从 requirements 导出 oracle→生成 cases→执行→保存 evidence→重测 defects。",
+      "use_when": [
+        "目标是发现缺陷或确认系统符合 specification。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "从 requirements 导出 oracle",
+        "生成 cases",
+        "执行",
+        "保存 evidence",
+        "重测 defects。"
+      ],
+      "topology": {
+        "pattern": "`GENERATE_EXECUTE_TEST` + `DRAFT_CRITIQUE_REVISE`。"
+      },
+      "validation": [
+        "测试本身需能失败；覆盖正/负/边界情况。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "test runner、browser、fuzzer、static analyzer。"
+      ],
+      "inputs": [
+        "system/spec、risk areas。"
+      ],
+      "outputs": [
+        "test cases、results、defects。"
+      ],
+      "variants": [
+        "unit、integration、UI QA、security regression。"
+      ],
+      "example": "“验证结账流程”；"
+    },
+    {
+      "id": "FILE_BATCH",
+      "version": "1.0.0",
+      "title": "文件转换与批处理",
+      "content": "**使用：**大量文件重命名、转换、拆分、合并、压缩。**拓扑：**`SAMPLE_INFER_BATCH_QA`。**工具：**Python、shell、format-specific libraries。**输入：**目录、格式、目标规则。**输出：**文件集、manifest/log。**验证：**file count、hash、schema、随机打开样本。**变体：**PDF→text、image conversion、archive operations。**例：**“把 3,000 个 JSON 转 CSV”；**计划：**枚举→采样 schema→script→dry-run→批量→失败清单→数量/hash 检查。",
+      "use_when": [
+        "大量文件重命名、转换、拆分、合并、压缩。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "枚举",
+        "采样 schema",
+        "script",
+        "dry-run",
+        "批量",
+        "失败清单",
+        "数量/hash 检查。"
+      ],
+      "topology": {
+        "pattern": "`SAMPLE_INFER_BATCH_QA`。"
+      },
+      "validation": [
+        "file count、hash、schema、随机打开样本。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Python、shell、format-specific libraries。"
+      ],
+      "inputs": [
+        "目录、格式、目标规则。"
+      ],
+      "outputs": [
+        "文件集、manifest/log。"
+      ],
+      "variants": [
+        "PDF→text、image conversion、archive operations。"
+      ],
+      "example": "“把 3,000 个 JSON 转 CSV”；"
+    },
+    {
+      "id": "DOCUMENT_PRODUCE",
+      "version": "1.0.0",
+      "title": "报告/文档/演示生成",
+      "content": "**使用：**最终产物是高质量报告、proposal、deck 或规范。**拓扑：**`DRAFT_CRITIQUE_REVISE`。**工具：**Docs/slides/file generator，事实型内容可 Search。**输入：**受众、目标、格式、素材。**输出：**artifact。**验证：**rubric、事实/引用检查、render inspection。**变体：**memo、PPT、technical design。**例：**“写董事会市场报告”；**计划：**requirements→outline→draft→criterion-by-criterion critique→revise→检查最终渲染。Self-Refine 和 evaluator-optimizer 都支持这种可明确反馈的迭代结构。 citeturn3search2turn9view0",
+      "use_when": [
+        "最终产物是高质量报告、proposal、deck 或规范。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "requirements",
+        "outline",
+        "draft",
+        "criterion-by-criterion critique",
+        "revise",
+        "检查最终渲染。Self-Refine 和 evaluator-optimizer 都支持这种可明确反馈的迭代结构。 citeturn3search2turn9view0"
+      ],
+      "topology": {
+        "pattern": "`DRAFT_CRITIQUE_REVISE`。"
+      },
+      "validation": [
+        "rubric、事实/引用检查、render inspection。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Docs/slides/file generator，事实型内容可 Search。"
+      ],
+      "inputs": [
+        "受众、目标、格式、素材。"
+      ],
+      "outputs": [
+        "artifact。"
+      ],
+      "variants": [
+        "memo、PPT、technical design。"
+      ],
+      "example": "“写董事会市场报告”；"
+    },
+    {
+      "id": "WRITE_REWRITE_TRANSLATE",
+      "version": "1.0.0",
+      "title": "写作、改写与翻译",
+      "content": "**使用：**内容已有或主要任务是语言表达。**拓扑：**`DRAFT_CRITIQUE_REVISE`，简单改写可 `DIRECT_INFERENCE`。**工具：**通常无。**输入：**原文、受众、语气、不可改变的信息。**输出：**新文本。**验证：**semantic preservation、术语、tone、遗漏检查。**变体：**邮件、润色、压缩、翻译。**例：**“把这封邮件改得坚定但礼貌”；**计划：**提取不可变事实→重写→对照原意→删除新增事实。",
+      "use_when": [
+        "内容已有或主要任务是语言表达。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "提取不可变事实",
+        "重写",
+        "对照原意",
+        "删除新增事实。"
+      ],
+      "topology": {
+        "pattern": "`DRAFT_CRITIQUE_REVISE`，简单改写可 `DIRECT_INFERENCE`。"
+      },
+      "validation": [
+        "semantic preservation、术语、tone、遗漏检查。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "通常无。"
+      ],
+      "inputs": [
+        "原文、受众、语气、不可改变的信息。"
+      ],
+      "outputs": [
+        "新文本。"
+      ],
+      "variants": [
+        "邮件、润色、压缩、翻译。"
+      ],
+      "example": "“把这封邮件改得坚定但礼貌”；"
+    },
+    {
+      "id": "MULTIMODAL_ANALYZE",
+      "version": "1.0.0",
+      "title": "视觉、图表与多模态分析",
+      "content": "**使用：**关键信息位于 screenshot、chart、diagram、image 或混合文档。**拓扑：**`DIRECT_INFERENCE` + `COMPUTE_THEN_EXPLAIN`。**工具：**vision、PDF renderer、Python。**输入：**图像/页面、分析目标。**输出：**视觉证据、结构化读数、解释。**验证：**从原图重新核对关键值；图表数值可与轴/数据重算。**变体：**图表读取、UI screenshot、diagram。**例：**“解释这个 retention chart”；**计划：**识别轴/legend→抽关键点→计算差异→解释，不从视觉印象直接猜结论。GAIA 与 OSWorld 都把多模态 perception 视为通用 Agent 能力。 citeturn5search0turn5search2",
+      "use_when": [
+        "关键信息位于 screenshot、chart、diagram、image 或混合文档。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "识别轴/legend",
+        "抽关键点",
+        "计算差异",
+        "解释，不从视觉印象直接猜结论。GAIA 与 OSWorld 都把多模态 perception 视为通用 Agent 能力。 citeturn5search0turn5search2"
+      ],
+      "topology": {
+        "pattern": "`DIRECT_INFERENCE` + `COMPUTE_THEN_EXPLAIN`。"
+      },
+      "validation": [
+        "从原图重新核对关键值；图表数值可与轴/数据重算。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "vision、PDF renderer、Python。"
+      ],
+      "inputs": [
+        "图像/页面、分析目标。"
+      ],
+      "outputs": [
+        "视觉证据、结构化读数、解释。"
+      ],
+      "variants": [
+        "图表读取、UI screenshot、diagram。"
+      ],
+      "example": "“解释这个 retention chart”；"
+    },
+    {
+      "id": "RAG_KNOWLEDGE_QA",
+      "version": "1.0.0",
+      "title": "知识库 / RAG 问答",
+      "content": "**使用：**答案应以企业知识库、文档集合或领域 corpus 为依据。**拓扑：**`RETRIEVE_THEN_REASON`。**工具：**vector/keyword retrieval、reranker、document parser。**输入：**corpus、query、访问范围。**输出：**answer + evidence。**验证：**retrieval recall、citation entailment、无证据则明确 unknown。**变体：**policy QA、technical docs、customer knowledge。**例：**“公司差旅政策是否允许升级？”；**计划：**query expansion→retrieve→rerank→读取上下文→回答并引用。",
+      "use_when": [
+        "答案应以企业知识库、文档集合或领域 corpus 为依据。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "query expansion",
+        "retrieve",
+        "rerank",
+        "读取上下文",
+        "回答并引用。"
+      ],
+      "topology": {
+        "pattern": "`RETRIEVE_THEN_REASON`。"
+      },
+      "validation": [
+        "retrieval recall、citation entailment、无证据则明确 unknown。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "vector/keyword retrieval、reranker、document parser。"
+      ],
+      "inputs": [
+        "corpus、query、访问范围。"
+      ],
+      "outputs": [
+        "answer + evidence。"
+      ],
+      "variants": [
+        "policy QA、technical docs、customer knowledge。"
+      ],
+      "example": "“公司差旅政策是否允许升级？”；"
+    },
+    {
+      "id": "WEB_NAVIGATE",
+      "version": "1.0.0",
+      "title": "浏览器导航与网页操作",
+      "content": "**使用：**目标需要在真实网站中搜索、登录后导航、读取动态内容或完成表单。**拓扑：**`OBSERVE_ACT_OBSERVE`。**工具：**Browser、Playwright/computer-use。**输入：**目标、网站、权限。**输出：**页面状态或完成的 web task。**验证：**每个关键 action 后重新读取真实状态；最终检查目标状态。**变体：**查订单、表单、后台操作。**例：**“找到发票下载页”；**计划：**观察→定位导航→点击→重新观察→下载/核对。WebArena 的设计正是从高层语言目标执行真实 Web interaction。 citeturn5search1",
+      "use_when": [
+        "目标需要在真实网站中搜索、登录后导航、读取动态内容或完成表单。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "观察",
+        "定位导航",
+        "点击",
+        "重新观察",
+        "下载/核对。WebArena 的设计正是从高层语言目标执行真实 Web interaction。 citeturn5search1"
+      ],
+      "topology": {
+        "pattern": "`OBSERVE_ACT_OBSERVE`。"
+      },
+      "validation": [
+        "每个关键 action 后重新读取真实状态；最终检查目标状态。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Browser、Playwright/computer-use。"
+      ],
+      "inputs": [
+        "目标、网站、权限。"
+      ],
+      "outputs": [
+        "页面状态或完成的 web task。"
+      ],
+      "variants": [
+        "查订单、表单、后台操作。"
+      ],
+      "example": "“找到发票下载页”；"
+    },
+    {
+      "id": "COMPUTER_USE",
+      "version": "1.0.0",
+      "title": "GUI / 桌面电脑操作",
+      "content": "**使用：**任务跨原生桌面应用、文件管理器或无 API 的软件。**拓扑：**`OBSERVE_ACT_OBSERVE`。**工具：**vision + mouse/keyboard/computer-use。**输入：**初始状态、目标、应用。**输出：**真实系统状态/文件。**验证：**execution-based state check；不要只相信视觉动作已成功。**变体：**Excel、IDE、settings、跨应用 workflow。**例：**“把表格导出 PDF 并移动到某文件夹”；**计划：**观察→最小动作→检查窗口/文件→下一动作→最终文件验证。OSWorld 的 benchmark 就使用真实计算机状态与 execution-based evaluator。 citeturn5search2",
+      "use_when": [
+        "任务跨原生桌面应用、文件管理器或无 API 的软件。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "观察",
+        "最小动作",
+        "检查窗口/文件",
+        "下一动作",
+        "最终文件验证。OSWorld 的 benchmark 就使用真实计算机状态与 execution-based evaluator。 citeturn5search2"
+      ],
+      "topology": {
+        "pattern": "`OBSERVE_ACT_OBSERVE`。"
+      },
+      "validation": [
+        "execution-based state check；不要只相信视觉动作已成功。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "vision + mouse/keyboard/computer-use。"
+      ],
+      "inputs": [
+        "初始状态、目标、应用。"
+      ],
+      "outputs": [
+        "真实系统状态/文件。"
+      ],
+      "variants": [
+        "Excel、IDE、settings、跨应用 workflow。"
+      ],
+      "example": "“把表格导出 PDF 并移动到某文件夹”；"
+    },
+    {
+      "id": "TRANSACTION_ACTION",
+      "version": "1.0.0",
+      "title": "事务性外部动作",
+      "content": "**使用：**发送邮件、创建记录、提交表单、预订、购买等会改变外部系统的操作。**拓扑：**`OBSERVE_ACT_OBSERVE`。**工具：**API/browser/connectors。**输入：**目标实体、参数、授权。**输出：**transaction ID / receipt / post-state。**验证：**执行前检查参数和目标；执行后读取 receipt/state。**变体：**send、book、create、submit。**例：**“给团队发送会议邀请”；**计划：**解析收件人/时间→查冲突→预览关键字段→执行→读取创建后的 event。τ-bench 表明以数据库 goal state 而非 Agent 语言声明验证此类任务更可靠。 citeturn5search3",
+      "use_when": [
+        "发送邮件、创建记录、提交表单、预订、购买等会改变外部系统的操作。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "解析收件人/时间",
+        "查冲突",
+        "预览关键字段",
+        "执行",
+        "读取创建后的 event。τ-bench 表明以数据库 goal state 而非 Agent 语言声明验证此类任务更可靠。 citeturn5search3"
+      ],
+      "topology": {
+        "pattern": "`OBSERVE_ACT_OBSERVE`。"
+      },
+      "validation": [
+        "执行前检查参数和目标；执行后读取 receipt/state。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "API/browser/connectors。"
+      ],
+      "inputs": [
+        "目标实体、参数、授权。"
+      ],
+      "outputs": [
+        "transaction ID / receipt / post-state。"
+      ],
+      "variants": [
+        "send、book、create、submit。"
+      ],
+      "example": "“给团队发送会议邀请”；"
+    },
+    {
+      "id": "POLICY_CUSTOMER_SERVICE",
+      "version": "1.0.0",
+      "title": "客服与政策执行",
+      "content": "**使用：**与用户对话，同时必须遵守领域 policy，并可能调用订单/退款等工具。**拓扑：**`RETRIEVE_THEN_REASON` + `OBSERVE_ACT_OBSERVE`。**工具：**policy retrieval、CRM/order APIs。**输入：**用户请求、政策、账户状态。**输出：**正确回复及必要事务。**验证：**policy compliance + final database state；多次试验可检查 consistency。**变体：**退款、改票、取消、升级人工。**例：**“取消订单并退款”；**计划：**确认资格→读取状态→按 policy 决策→工具操作→核对最终状态。τ-bench 专门揭示了这类任务中规则遵循和跨 trial 一致性的难点。 citeturn5search3",
+      "use_when": [
+        "与用户对话，同时必须遵守领域 policy，并可能调用订单/退款等工具。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "确认资格",
+        "读取状态",
+        "按 policy 决策",
+        "工具操作",
+        "核对最终状态。τ-bench 专门揭示了这类任务中规则遵循和跨 trial 一致性的难点。 citeturn5search3"
+      ],
+      "topology": {
+        "pattern": "`RETRIEVE_THEN_REASON` + `OBSERVE_ACT_OBSERVE`。"
+      },
+      "validation": [
+        "policy compliance + final database state；多次试验可检查 consistency。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "policy retrieval、CRM/order APIs。"
+      ],
+      "inputs": [
+        "用户请求、政策、账户状态。"
+      ],
+      "outputs": [
+        "正确回复及必要事务。"
+      ],
+      "variants": [
+        "退款、改票、取消、升级人工。"
+      ],
+      "example": "“取消订单并退款”；"
+    },
+    {
+      "id": "MULTISYSTEM_WORKFLOW",
+      "version": "1.0.0",
+      "title": "跨系统工作流",
+      "content": "**使用：**任务跨邮件、日历、数据库、浏览器、文件等多个系统。**拓扑：**custom `DAG_EXECUTE_VERIFY`，节点内部使用相应 primitive。**工具：**connectors/APIs/browser/Python。**输入：**目标、系统、数据依赖、权限。**输出：**多个 artifacts/state changes。**验证：**逐节点 output contract + 最终 end-to-end state。**变体：**“读邮件→更新 CRM→通知 Slack”。**例：**“从附件提取订单后录入系统”；**计划：**显式 DAG→处理附件→校验→写入→确认→通知。OSWorld 和 GAIA 都包含跨工具/跨应用任务。 citeturn5search2turn5search0",
+      "use_when": [
+        "任务跨邮件、日历、数据库、浏览器、文件等多个系统。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "显式 DAG",
+        "处理附件",
+        "校验",
+        "写入",
+        "确认",
+        "通知。OSWorld 和 GAIA 都包含跨工具/跨应用任务。 citeturn5search2turn5search0"
+      ],
+      "topology": {
+        "pattern": "custom `DAG_EXECUTE_VERIFY`，节点内部使用相应 primitive。"
+      },
+      "validation": [
+        "逐节点 output contract + 最终 end-to-end state。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "connectors/APIs/browser/Python。"
+      ],
+      "inputs": [
+        "目标、系统、数据依赖、权限。"
+      ],
+      "outputs": [
+        "多个 artifacts/state changes。"
+      ],
+      "variants": [
+        "“读邮件→更新 CRM→通知 Slack”。"
+      ],
+      "example": "“从附件提取订单后录入系统”；"
+    },
+    {
+      "id": "OPEN_INVESTIGATION",
+      "version": "1.0.0",
+      "title": "开放式调查与根因分析",
+      "content": "**使用：**问题不是寻找已知答案，而是解释“为什么发生”。**拓扑：**`HYPOTHESIZE_TEST_NARROW`。**工具：**Search、SQL、Python、logs、documents。**输入：**现象、可访问证据、时间范围。**输出：**ranked hypotheses、evidence chain、root cause/confidence。**验证：**必须尝试 falsify 首选解释，并寻找 alternative explanations。**变体：**销售下跌、异常成本、事件调查。**例：**“为什么本季度 churn 上升？”；**计划：**拆潜在 driver→建立假设→查询 discriminating evidence→淘汰→量化贡献。",
+      "use_when": [
+        "问题不是寻找已知答案，而是解释“为什么发生”。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "拆潜在 driver",
+        "建立假设",
+        "查询 discriminating evidence",
+        "淘汰",
+        "量化贡献。"
+      ],
+      "topology": {
+        "pattern": "`HYPOTHESIZE_TEST_NARROW`。"
+      },
+      "validation": [
+        "必须尝试 falsify 首选解释，并寻找 alternative explanations。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "Search、SQL、Python、logs、documents。"
+      ],
+      "inputs": [
+        "现象、可访问证据、时间范围。"
+      ],
+      "outputs": [
+        "ranked hypotheses、evidence chain、root cause/confidence。"
+      ],
+      "variants": [
+        "销售下跌、异常成本、事件调查。"
+      ],
+      "example": "“为什么本季度 churn 上升？”；"
+    },
+    {
+      "id": "PARALLEL_RESEARCH",
+      "version": "1.0.0",
+      "title": "多 Agent 并行研究",
+      "content": "**使用：**复杂问题能拆为真正独立的 research lanes，单 context 会造成信息拥塞。**拓扑：**`DECOMPOSE_PARALLEL_SYNTH`。**工具：**subagents、Search。**输入：**研究问题、分工边界、共享 schema。**输出：**worker packets + synthesis。**验证：**manager 检查重复、矛盾和 coverage gaps，再定向补搜。**变体：**按公司、国家、技术维度并行。**例：**“比较 12 个 Agent frameworks”；**计划：**每个 worker 负责 2–3 个→统一提取字段→manager 合并→冲突核验。Anthropic 将 orchestrator-workers 推荐给无法预先固定 subtasks 的复杂 search，并公开使用多 Agent research。 citeturn9view0turn6search7",
+      "use_when": [
+        "复杂问题能拆为真正独立的 research lanes，单 context 会造成信息拥塞。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "每个 worker 负责 2–3 个",
+        "统一提取字段",
+        "manager 合并",
+        "冲突核验。Anthropic 将 orchestrator-workers 推荐给无法预先固定 subtasks 的复杂 search，并公开使用多 Agent research。 citeturn9view0turn6search7"
+      ],
+      "topology": {
+        "pattern": "`DECOMPOSE_PARALLEL_SYNTH`。"
+      },
+      "validation": [
+        "manager 检查重复、矛盾和 coverage gaps，再定向补搜。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "subagents、Search。"
+      ],
+      "inputs": [
+        "研究问题、分工边界、共享 schema。"
+      ],
+      "outputs": [
+        "worker packets + synthesis。"
+      ],
+      "variants": [
+        "按公司、国家、技术维度并行。"
+      ],
+      "example": "“比较 12 个 Agent frameworks”；"
+    },
+    {
+      "id": "LONG_HORIZON",
+      "version": "1.0.0",
+      "title": "长时程 Agent 工作",
+      "content": "**使用：**任务跨大量 tool calls、多个 context window 或较长执行周期。**拓扑：**custom `CHECKPOINT_RESUME_LOOP`。**工具：**persistent filesystem、git、checkpoint store、task ledger。**输入：**最终 goal、milestones、completion criteria。**输出：**incremental artifacts、progress state、handoff notes。**验证：**每阶段留 clean state；可从 checkpoint 恢复；完成由 objective criteria 判定。**变体：**大型代码迁移、深度研究。**例：**“完整实现一个应用”；**计划：**initializer→task ledger→一次一个 tractable chunk→测试→checkpoint→下一 chunk。Anthropic 的长期实验发现 one-shot 大任务和过早宣布完成是典型失败模式。 citeturn6search2turn6search3",
+      "use_when": [
+        "任务跨大量 tool calls、多个 context window 或较长执行周期。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "initializer",
+        "task ledger",
+        "一次一个 tractable chunk",
+        "测试",
+        "checkpoint",
+        "下一 chunk。Anthropic 的长期实验发现 one-shot 大任务和过早宣布完成是典型失败模式。 citeturn6search2turn6search3"
+      ],
+      "topology": {
+        "pattern": "custom `CHECKPOINT_RESUME_LOOP`。"
+      },
+      "validation": [
+        "每阶段留 clean state；可从 checkpoint 恢复；完成由 objective criteria 判定。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "persistent filesystem、git、checkpoint store、task ledger。"
+      ],
+      "inputs": [
+        "最终 goal、milestones、completion criteria。"
+      ],
+      "outputs": [
+        "incremental artifacts、progress state、handoff notes。"
+      ],
+      "variants": [
+        "大型代码迁移、深度研究。"
+      ],
+      "example": "“完整实现一个应用”；"
+    },
+    {
+      "id": "TOOL_DISCOVERY",
+      "version": "1.0.0",
+      "title": "工具发现与集成",
+      "content": "**使用：**Agent 知道目标，但不清楚应使用哪个 API/tool，或工具集合很大。**拓扑：**custom `DISCOVER_SELECT_INVOKE_VERIFY`。**工具：**tool registry、MCP、API docs。**输入：**目标、available tools、权限。**输出：**selected tool + arguments + result。**验证：**schema/type validation、tool response、错误处理。**变体：**MCP server、enterprise integrations。**例：**“找能查询 Jira issue 的工具”；**计划：**检索 capabilities→比较语义→读取 schema→最小 read call→验证。Anthropic 的工具工程建议强调清晰 namespacing、描述、token-efficient responses 和 eval-driven tool design。 citeturn6search9",
+      "use_when": [
+        "Agent 知道目标，但不清楚应使用哪个 API/tool，或工具集合很大。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "检索 capabilities",
+        "比较语义",
+        "读取 schema",
+        "最小 read call",
+        "验证。Anthropic 的工具工程建议强调清晰 namespacing、描述、token-efficient responses 和 eval-driven tool design。 citeturn6search9"
+      ],
+      "topology": {
+        "pattern": "custom `DISCOVER_SELECT_INVOKE_VERIFY`。"
+      },
+      "validation": [
+        "schema/type validation、tool response、错误处理。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "tool registry、MCP、API docs。"
+      ],
+      "inputs": [
+        "目标、available tools、权限。"
+      ],
+      "outputs": [
+        "selected tool + arguments + result。"
+      ],
+      "variants": [
+        "MCP server、enterprise integrations。"
+      ],
+      "example": "“找能查询 Jira issue 的工具”；"
+    },
+    {
+      "id": "CREATIVE_GENERATION",
+      "version": "1.0.0",
+      "title": "创意生成",
+      "content": "**使用：**命名、故事、概念设计、campaign ideas 等不存在唯一正确答案的任务。**拓扑：**`DRAFT_CRITIQUE_REVISE` 或 `ENUMERATE_SCORE_SELECT`。**工具：**通常无；视觉任务可 image tools。**输入：**目标、风格、约束、受众。**输出：**多候选或成品。**验证：**rubric/constraint fit，而非事实“正确率”。**变体：**divergent ideation、creative writing。**例：**“给新产品起名字”；**计划：**生成不同方向→hard-filter 商标/约束→按品牌 criteria 排序→优化 shortlist。Tree of Thoughts 的实验亦包括 creative writing 中的多路径探索。 citeturn3search3",
+      "use_when": [
+        "命名、故事、概念设计、campaign ideas 等不存在唯一正确答案的任务。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "生成不同方向",
+        "hard-filter 商标/约束",
+        "按品牌 criteria 排序",
+        "优化 shortlist。Tree of Thoughts 的实验亦包括 creative writing 中的多路径探索。 citeturn3search3"
+      ],
+      "topology": {
+        "pattern": "`DRAFT_CRITIQUE_REVISE` 或 `ENUMERATE_SCORE_SELECT`。"
+      },
+      "validation": [
+        "rubric/constraint fit，而非事实“正确率”。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "通常无；视觉任务可 image tools。"
+      ],
+      "inputs": [
+        "目标、风格、约束、受众。"
+      ],
+      "outputs": [
+        "多候选或成品。"
+      ],
+      "variants": [
+        "divergent ideation、creative writing。"
+      ],
+      "example": "“给新产品起名字”；"
+    },
+    {
+      "id": "MONITOR_TRIGGER",
+      "version": "1.0.0",
+      "title": "监控与条件触发",
+      "content": "**使用：**持续观察一个状态，并在满足条件时执行通知或后续流程。**拓扑：**custom `OBSERVE_COMPARE_TRIGGER`。**工具：**scheduler、API/Search、state store、notifications。**输入：**观察对象、condition、频率、动作。**输出：**state snapshots、trigger event。**验证：**避免重复触发；记录 previous/current state；测试边界条件。**变体：**价格、服务健康、库存、法规更新。**例：**“价格低于 500 时通知”；**计划：**定时读取→normalize→比较 threshold→deduplicate→触发→记录状态。",
+      "use_when": [
+        "持续观察一个状态，并在满足条件时执行通知或后续流程。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "定时读取",
+        "normalize",
+        "比较 threshold",
+        "deduplicate",
+        "触发",
+        "记录状态。"
+      ],
+      "topology": {
+        "pattern": "custom `OBSERVE_COMPARE_TRIGGER`。"
+      },
+      "validation": [
+        "避免重复触发；记录 previous/current state；测试边界条件。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "scheduler、API/Search、state store、notifications。"
+      ],
+      "inputs": [
+        "观察对象、condition、频率、动作。"
+      ],
+      "outputs": [
+        "state snapshots、trigger event。"
+      ],
+      "variants": [
+        "价格、服务健康、库存、法规更新。"
+      ],
+      "example": "“价格低于 500 时通知”；"
+    },
+    {
+      "id": "HIGH_RISK_ACTION",
+      "version": "1.0.0",
+      "title": "高风险或不可逆动作",
+      "content": "**使用：**删除、生产环境修改、付款、公开发布、敏感权限或难以撤销的操作。**拓扑：**任何 primitive + custom `AUTHORIZATION_GATE`。**工具：**真实系统工具，但遵循 least privilege。**输入：**明确 target、scope、授权、rollback 条件。**输出：**审计记录、真实 post-state。**验证：**preflight→必要 confirmation→最小动作→立即 post-check；支持 dry-run 时优先 dry-run。**变体：**prod deploy、delete、financial submission。**例：**“删除生产数据库旧表”；**计划：**确认实例/表/备份→展示 impact→授权门→执行→验证。当前 Agent SDK/harness 普遍把 guardrail、permission、sandbox 或 HITL 作为一等机制。 citeturn0search6turn0search1turn2search3turn8search27\n\n这套卡片有两个建议性的全局 override。其一，**如果存在便宜且确定性的程序化 oracle，就不要用 LLM 自我检查代替它**；其二，**parallelism 是 dependency property，不是 difficulty property**。Anthropic 区分了固定 parallelization 与动态 orchestrator-workers；OpenAI 也建议只有在复杂 logic/tool confusion 等真正瓶颈出现后再拆多 Agent。 citeturn9view0turn9view1",
+      "use_when": [
+        "删除、生产环境修改、付款、公开发布、敏感权限或难以撤销的操作。"
+      ],
+      "avoid_when": [],
+      "strategy": [
+        "确认实例/表/备份",
+        "展示 impact",
+        "授权门",
+        "执行",
+        "验证。当前 Agent SDK/harness 普遍把 guardrail、permission、sandbox 或 HITL 作为一等机制。 citeturn0search6turn0search1turn2search3turn8search27\n\n这套卡片有两个建议性的全局 override。其一，**如果存在便宜且确定性的程序化 oracle，就不要用 LLM 自我检查代替它**；其二，**parallelism 是 dependency property，不是 difficulty property**。Anthropic 区分了固定 parallelization 与动态 orchestrator-workers；OpenAI 也建议只有在复杂 logic/tool confusion 等真正瓶颈出现后再拆多 Agent。 citeturn9view0turn9view1"
+      ],
+      "topology": {
+        "pattern": "任何 primitive + custom `AUTHORIZATION_GATE`。"
+      },
+      "validation": [
+        "preflight→必要 confirmation→最小动作→立即 post-check；支持 dry-run 时优先 dry-run。"
+      ],
+      "failure_modes": [],
+      "composition": {},
+      "tools": [
+        "真实系统工具，但遵循 least privilege。"
+      ],
+      "inputs": [
+        "明确 target、scope、授权、rollback 条件。"
+      ],
+      "outputs": [
+        "审计记录、真实 post-state。"
+      ],
+      "variants": [
+        "prod deploy、delete、financial submission。"
+      ],
+      "example": "“删除生产数据库旧表”；"
+    }
+  ]
+}

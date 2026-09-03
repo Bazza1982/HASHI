@@ -95,7 +95,13 @@ class ServiceManager:
             "port": getattr(self.kernel.global_cfg, "api_gateway_port", None) if self.kernel.global_cfg else None,
         }
 
-    async def start_workbench_api(self, global_cfg, secrets):
+    async def start_workbench_api(
+        self,
+        global_cfg,
+        secrets,
+        *,
+        reconcile_session_runs: bool = True,
+    ):
         try:
             server_cls = self._workbench_api_server_cls()
             self.kernel.workbench_api = server_cls(
@@ -104,6 +110,7 @@ class ServiceManager:
                 self.kernel.runtimes,
                 secrets=secrets,
                 orchestrator=self.kernel,
+                reconcile_session_runs=reconcile_session_runs,
             )
             await self.kernel.workbench_api.start()
             bind_host = getattr(self.kernel.workbench_api, "bind_host", "127.0.0.1")
@@ -440,7 +447,11 @@ class ServiceManager:
             bridge_logger.warning("Hot restart: Backend API restart skipped because global config is unavailable")
             return
         await self.stop_workbench_api(timeout=2.0)
-        await self.start_workbench_api(self.kernel.global_cfg, self.kernel.secrets)
+        await self.start_workbench_api(
+            self.kernel.global_cfg,
+            self.kernel.secrets,
+            reconcile_session_runs=False,
+        )
         if self.kernel.workbench_api is not None:
             bridge_logger.info("Hot restart: Backend API recreated with reloaded code")
 
@@ -491,7 +502,11 @@ class ServiceManager:
             "Backend API missing during hot restart; attempting repair on port %s",
             global_cfg.workbench_port,
         )
-        await self.start_workbench_api(global_cfg, self.kernel.secrets)
+        await self.start_workbench_api(
+            global_cfg,
+            self.kernel.secrets,
+            reconcile_session_runs=False,
+        )
 
     async def _workbench_api_healthy(self, host: str, port: int, timeout: float = 1.0) -> bool:
         def _probe():

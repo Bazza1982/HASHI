@@ -180,9 +180,12 @@ def _read_jsonl_increment(file_path: Path, offset: int = 0) -> dict:
             obj = json.loads(line)
         except Exception:
             continue
-        if obj.get("role") not in {"user", "assistant", "thinking"} or not obj.get(
-            "text"
-        ):
+        if obj.get("role") not in {
+            "user",
+            "assistant",
+            "assistant_core",
+            "thinking",
+        } or not obj.get("text"):
             continue
         messages.append(obj)
 
@@ -216,6 +219,7 @@ class WorkbenchApiServer:
         secrets: dict | None = None,
         orchestrator=None,
         connectors: list | None = None,
+        reconcile_session_runs: bool = True,
     ):
         self.config_path = config_path
         self.global_config = global_config
@@ -226,7 +230,11 @@ class WorkbenchApiServer:
         self._agent_config_lock = asyncio.Lock()
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
-        self.reconciled_session_runs = self.session_store.reconcile_incomplete_runs()
+        self.reconciled_session_runs = (
+            self.session_store.reconcile_incomplete_runs()
+            if reconcile_session_runs
+            else []
+        )
         self._audio_cleanup_task: asyncio.Task | None = None
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self.identity_service = self._build_identity_service()
@@ -1022,6 +1030,7 @@ class WorkbenchApiServer:
         timeout_s: float,
         expected_source: str | None = None,
         expected_prompt: str | None = None,
+        expected_request_id: str | None = None,
     ) -> dict:
         deadline = time.monotonic() + timeout_s
         current_offset = offset
@@ -1030,7 +1039,21 @@ class WorkbenchApiServer:
             data = _read_jsonl_increment(transcript_path, current_offset)
             current_offset = data.get("offset", current_offset)
             new_messages = data.get("messages", [])
-            if expected_source or expected_prompt:
+            if expected_request_id:
+                for message in new_messages:
+                    if message.get("request_id") != expected_request_id:
+                        continue
+                    if message.get("role") not in {"assistant", "assistant_core"}:
+                        continue
+                    text = message.get("visible_text") or message.get("text")
+                    if text:
+                        return {
+                            "received": True,
+                            "offset": current_offset,
+                            "assistant_text": text,
+                            "new_messages": new_messages,
+                        }
+            elif expected_source or expected_prompt:
                 for message in new_messages:
                     role = message.get("role")
                     text = message.get("text")
@@ -6091,6 +6114,7 @@ class WorkbenchApiServer:
         payload = await request.json()
         argv = payload.get("argv")
         raw_command = payload.get("command")
+        shell = str(payload.get("shell") or "").strip() or None
         if argv is None and isinstance(raw_command, list):
             argv = raw_command
             command = None
@@ -6115,6 +6139,11 @@ class WorkbenchApiServer:
         if argv and command:
             return web.json_response(
                 {"ok": False, "error": "provide argv or command, not both"}, status=400
+            )
+        if argv and shell:
+            return web.json_response(
+                {"ok": False, "error": "shell is valid only with command mode"},
+                status=400,
             )
 
         cwd = str(
@@ -6149,6 +6178,7 @@ class WorkbenchApiServer:
                 cwd=cwd,
                 argv=argv,
                 command=command,
+                shell=shell,
                 origin=origin,
                 notify_on_complete=bool(payload.get("notify_on_complete", True)),
                 notify_on_failure=bool(payload.get("notify_on_failure", True)),
@@ -6298,18 +6328,23 @@ class WorkbenchApiServer:
                     if agent_row
                     else Path(runtime.get_runtime_metadata()["transcript_path"])
                 )
+                response_path = Path(
+                    getattr(runtime, "core_transcript_log_path", transcript_path)
+                    or transcript_path
+                )
                 start_offset = (
-                    transcript_path.stat().st_size if transcript_path.exists() else 0
+                    response_path.stat().st_size if response_path.exists() else 0
                 )
                 request_id = await runtime.enqueue_api_text(
                     chat_text, source="api-smoke"
                 )
                 wait_result = await self._wait_for_assistant_reply(
-                    transcript_path,
+                    response_path,
                     start_offset,
                     timeout_s,
-                    expected_source="api-smoke",
-                    expected_prompt=chat_text,
+                    expected_source=None if request_id else "api-smoke",
+                    expected_prompt=None if request_id else chat_text,
+                    expected_request_id=request_id or None,
                 )
                 wait_result["request_id"] = request_id
                 wait_result["prompt"] = chat_text

@@ -5,10 +5,13 @@ The canonical engineering rule is:
 > Design for high cohesion, low coupling, a single source of truth, and
 > localized change.
 
-Before editing, read
-[`docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md`](docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
-It defines the four runtime layers, current fact owners, hot-change contract,
-and protected process core.
+Before editing, read [`ARCHITECTURE.md`](ARCHITECTURE.md), the Level 0 system
+architecture. It defines the four functional modules, canonical terminology,
+authority boundaries, and the rule that every capability has one functional
+owner and one engineering-layer placement. Then read
+[`docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md`](docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md)
+for the four engineering layers, current fact owners, hot-change contract, and
+protected process core.
 
 ## Change rules
 
@@ -30,6 +33,12 @@ and protected process core.
    `orchestrator.pathing`.
 8. Keep private machine paths out of tracked runtime and adapters. Local tools
    take paths from instance config, command arguments, or environment variables.
+9. Qualify `Provider` as Engine/Harness Provider or Model Provider whenever the
+   category is ambiguous. Use `Engine` as the canonical term for an agentic
+   Harness, and qualify HASHI Conversation Session versus Engine Session.
+10. Keep PAO, PCM, HER v2, and Frontend Connector ownership distinct. A
+    compatibility filename or command location does not transfer domain
+    authority.
 
 ## Required checks
 

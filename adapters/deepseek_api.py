@@ -12,6 +12,7 @@ Differences from OpenRouter:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
 from adapters.openrouter_api import (
     OpenRouterAdapter,
@@ -53,7 +54,39 @@ def _with_reasoning_content(result: _APIResult, reasoning_content: str) -> _APIR
     return result
 
 
+def _optional_usage_int(usage: Mapping[str, object], key: str) -> int | None:
+    value = usage.get(key)
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _with_deepseek_cache_usage(
+    result: _APIResult,
+    usage: Mapping[str, object],
+) -> _APIResult:
+    """Attach official DeepSeek prompt-cache counters, including across hot reloads."""
+
+    # Like reasoning_content above, dynamic attachment keeps /reboot min safe
+    # when this adapter is reloaded before the shared _APIResult definition.
+    result.prompt_cache_hit_tokens = _optional_usage_int(
+        usage, "prompt_cache_hit_tokens"
+    )
+    result.prompt_cache_miss_tokens = _optional_usage_int(
+        usage, "prompt_cache_miss_tokens"
+    )
+    return result
+
+
 class DeepSeekAdapter(OpenRouterAdapter):
+    # DeepSeek's long-running tool conversations can occasionally lose the
+    # current SSE call after earlier tool results have already been committed.
+    # Retry only that unfinished HTTP call; the base adapter never replays the
+    # completed tool loops.
+    TRANSIENT_PROVIDER_CALL_RETRIES = 1
 
     def _request_headers(self) -> dict[str, str]:
         return self._deepseek_headers()
@@ -160,14 +193,20 @@ class DeepSeekAdapter(OpenRouterAdapter):
         comp_details = usage.get("completion_tokens_details") or {}
         thinking_tokens = comp_details.get("reasoning_tokens", 0)
 
-        return _with_reasoning_content(
-            _APIResult(
-                text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
-                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-                thinking_tokens=thinking_tokens,
-                structured_data=_message_structured_data(message),
+        return _with_deepseek_cache_usage(
+            _with_reasoning_content(
+                _APIResult(
+                    text=ai_text,
+                    tool_calls=tool_calls,
+                    finish_reason=finish_reason,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    thinking_tokens=thinking_tokens,
+                    structured_data=_message_structured_data(message),
+                ),
+                reasoning_content,
             ),
-            reasoning_content,
+            usage,
         )
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
@@ -255,16 +294,19 @@ class DeepSeekAdapter(OpenRouterAdapter):
         reasoning_content = "".join(reasoning_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
         comp_details = stream_usage.get("completion_tokens_details") or {}
-        return _with_reasoning_content(
-            _APIResult(
-                text=full_text,
-                tool_calls=tool_calls,
-                finish_reason=finish_reason or "stop",
-                prompt_tokens=stream_usage.get("prompt_tokens", 0),
-                completion_tokens=stream_usage.get("completion_tokens", 0),
-                thinking_tokens=comp_details.get("reasoning_tokens", 0),
+        return _with_deepseek_cache_usage(
+            _with_reasoning_content(
+                _APIResult(
+                    text=full_text,
+                    tool_calls=tool_calls,
+                    finish_reason=finish_reason or "stop",
+                    prompt_tokens=stream_usage.get("prompt_tokens", 0),
+                    completion_tokens=stream_usage.get("completion_tokens", 0),
+                    thinking_tokens=comp_details.get("reasoning_tokens", 0),
+                ),
+                reasoning_content,
             ),
-            reasoning_content,
+            stream_usage,
         )
 
     async def generate_response(

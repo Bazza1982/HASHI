@@ -472,6 +472,100 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
     capture_backend_binding(runtime, request_id=request_id)
 
 
+def record_assistant_delivery(
+    runtime: Any,
+    item: Any,
+    *,
+    delivered: bool,
+    assistant_text: str | None = None,
+    transport: str,
+    completion_path: str,
+    disposition: str = "",
+) -> dict[str, Any] | None:
+    """Record a final delivery outcome without disrupting response flow."""
+
+    if not getattr(item, "run_id", None):
+        return None
+    surface = str(getattr(item, "session_surface", None) or "").strip().lower()
+    channel_key = str(
+        getattr(item, "session_channel_key", None) or ""
+    ).strip()
+    if not surface or not channel_key:
+        return None
+    try:
+        return ensure_store(runtime).record_assistant_delivery(
+            item.request_id,
+            delivered=delivered,
+            assistant_text=assistant_text,
+            surface=surface,
+            channel_key=channel_key,
+            transport=transport,
+            completion_path=completion_path,
+            disposition=disposition,
+        )
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(
+                "Failed to persist assistant delivery receipt for %s: %s: %s",
+                getattr(item, "request_id", "unknown"),
+                type(exc).__name__,
+                exc,
+            )
+        return None
+
+
+def telegram_delivery_state_for_update(
+    runtime: Any,
+    update: Any,
+) -> tuple[str | None, bool]:
+    """Return delivery state for the Telegram chat targeted by ``/say``.
+
+    Local/API command dispatch uses a Workbench control surface, but ``/say``
+    still sends to ``effective_chat.id`` through Telegram.  Resolve the target
+    Telegram binding rather than the command's ingress surface so local
+    administration retains the same behavior without mixing API responses
+    into the spoken-reply history.
+    """
+
+    (
+        update_surface,
+        _update_channel,
+        resolved_owner,
+        explicit_session_id,
+    ) = _update_session_route(runtime, update)
+    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    if chat_id is None:
+        query = getattr(update, "callback_query", None)
+        chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+    if chat_id is None:
+        return None, False
+    surface = "telegram"
+    channel_key = str(chat_id)
+    if update_surface != "telegram":
+        explicit_session_id = None
+    session = current_session(
+        runtime,
+        surface=surface,
+        channel_key=channel_key,
+        explicit_owner_id=resolved_owner,
+        explicit_session_id=explicit_session_id,
+    )
+    store = ensure_store(runtime)
+    return (
+        store.latest_delivered_assistant_text(
+            session["session_id"],
+            surface=surface,
+            channel_key=channel_key,
+        ),
+        store.has_assistant_delivery_outcome(
+            session["session_id"],
+            surface=surface,
+            channel_key=channel_key,
+        ),
+    )
+
+
 def activate_backend_binding(runtime: Any, item: Any) -> None:
     backend = _active_backend(runtime)
     if backend is None or not getattr(item, "session_id", None):
@@ -1084,6 +1178,7 @@ __all__ = [
     "promote_sessions",
     "promotion_is_due",
     "recent_exchanges",
+    "record_assistant_delivery",
     "record_working_exchange",
     "request_route_for_update",
     "reset_for_retry",
@@ -1091,4 +1186,5 @@ __all__ = [
     "session_workzone",
     "session_workzone_state",
     "start_automatic_promotion",
+    "telegram_delivery_state_for_update",
 ]

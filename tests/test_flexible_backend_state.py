@@ -17,7 +17,11 @@ from adapters.timeout_policy import (
 )
 from orchestrator.audit_mode import load_audit_config
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
-from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.flexible_backend_manager import (
+    AGENT_MODE_POLICY_VERSION_STATE_KEY,
+    CURRENT_AGENT_MODE_POLICY_VERSION,
+    FlexibleBackendManager,
+)
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.privacy_levels import PrivacyLevel
 from orchestrator.wrapper_mode import load_wrapper_config
@@ -35,6 +39,7 @@ def _make_manager(workspace: Path) -> FlexibleBackendManager:
             {"engine": "claude-cli", "model": "claude-haiku-4-5"},
         ],
         active_backend="codex-cli",
+        default_mode="flex",
         project_root=workspace,
     )
     global_cfg = GlobalConfig(
@@ -102,7 +107,7 @@ def test_allowed_persisted_backend_still_overrides_configured_backend(tmp_path):
     assert manager._active_model_override == "claude-haiku-4-5"
 
 
-def test_persisted_mode_overrides_migrated_fixed_default(tmp_path):
+def test_legacy_persisted_flex_migrates_once_to_fixed_default(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
     (workspace / "state.json").write_text(
@@ -128,7 +133,147 @@ def test_persisted_mode_overrides_migrated_fixed_default(tmp_path):
 
     manager = FlexibleBackendManager(config, global_config, secrets={})
 
+    assert manager.agent_mode == "fixed"
+    state = _read_state(workspace)
+    assert state["agent_mode"] == "fixed"
+    assert state[AGENT_MODE_POLICY_VERSION_STATE_KEY] == (
+        CURRENT_AGENT_MODE_POLICY_VERSION
+    )
+
+
+def test_explicit_flex_after_mode_policy_migration_is_preserved(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    config = FlexibleAgentConfig(
+        name="explicit-flex",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="explicit-flex",
+        allowed_backends=[{"engine": "codex-cli", "model": "gpt-5.4"}],
+        active_backend="codex-cli",
+        default_mode="fixed",
+        project_root=workspace,
+    )
+    global_config = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+    )
+
+    manager = FlexibleBackendManager(config, global_config, secrets={})
+    assert manager.agent_mode == "fixed"
+
+    # This mirrors /mode flex: the normal managed-state write records both the
+    # explicit choice and the policy generation under which it was made.
+    manager.agent_mode = "flex"
+    manager._save_state()
+    reloaded = FlexibleBackendManager(config, global_config, secrets={})
+
+    assert reloaded.agent_mode == "flex"
+    assert _read_state(workspace)[AGENT_MODE_POLICY_VERSION_STATE_KEY] == (
+        CURRENT_AGENT_MODE_POLICY_VERSION
+    )
+
+
+@pytest.mark.parametrize("default_mode", ["fixed", "flex"])
+@pytest.mark.parametrize("retired_mode", ["wrapper", "audit", "dual-brain"])
+def test_retired_persisted_mode_migrates_to_default_and_preserves_blocks(
+    tmp_path,
+    caplog,
+    retired_mode,
+    default_mode,
+):
+    workspace = tmp_path / default_mode / retired_mode
+    workspace.mkdir(parents=True)
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "active_backend": "codex-cli",
+                "agent_mode": retired_mode,
+                "wrapper": {"keep": True},
+                "audit": {"keep": True},
+                "dual_brain": {"keep": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = FlexibleAgentConfig(
+        name=f"{default_mode}-default",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="fixed-default",
+        allowed_backends=[{"engine": "codex-cli", "model": "gpt-5.4"}],
+        active_backend="codex-cli",
+        default_mode=default_mode,
+        project_root=workspace,
+    )
+    global_config = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger=f"BackendMgr.{default_mode}-default",
+    ):
+        manager = FlexibleBackendManager(config, global_config, secrets={})
+
+    assert manager.agent_mode == default_mode
+    state = _read_state(workspace)
+    assert state["agent_mode"] == default_mode
+    assert state["wrapper"] == {"keep": True}
+    assert state["audit"] == {"keep": True}
+    assert state["dual_brain"] == {"keep": True}
+    assert f"retired persisted agent mode '{retired_mode}'" in caplog.text
+
+
+def test_persisted_fixed_mode_migrates_to_flex_for_stateless_backend(
+    tmp_path,
+    caplog,
+):
+    workspace = tmp_path / "stateless"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "active_backend": "gemini-cli",
+                "agent_mode": "fixed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = FlexibleAgentConfig(
+        name="capability-fallback",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="capability-fallback",
+        allowed_backends=[
+            {"engine": "codex-cli", "model": "gpt-5.4"},
+            {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"},
+        ],
+        active_backend="codex-cli",
+        project_root=workspace,
+    )
+    global_config = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="BackendMgr.capability-fallback",
+    ):
+        manager = FlexibleBackendManager(config, global_config, secrets={})
+
+    assert manager.config.active_backend == "gemini-cli"
     assert manager.agent_mode == "flex"
+    assert _read_state(workspace)["agent_mode"] == "flex"
+    assert "incompatible with stateless backend gemini-cli" in caplog.text
 
 
 def test_save_state_preserves_unknown_keys(tmp_path):

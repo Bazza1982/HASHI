@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from orchestrator.process_execution import process_group_kwargs, process_is_alive
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_URL
 
 DEFAULT_PORT = 8876
@@ -22,11 +24,7 @@ def _paths(root: Path) -> dict[str, Path]:
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    return process_is_alive(pid)
 
 
 def status(root: Path, host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> dict:
@@ -65,9 +63,15 @@ def start(
     paths = _paths(root)
     paths["pid"].parent.mkdir(parents=True, exist_ok=True)
     paths["log"].parent.mkdir(parents=True, exist_ok=True)
-    python_bin = root / ".venv" / "bin" / "python3"
-    if not python_bin.exists():
-        python_bin = Path(sys.executable)
+    python_candidates = (
+        (root / ".venv" / "Scripts" / "python.exe",)
+        if os.name == "nt"
+        else (root / ".venv" / "bin" / "python3",)
+    )
+    python_bin = next(
+        (candidate for candidate in python_candidates if candidate.is_file()),
+        Path(sys.executable),
+    )
     with paths["log"].open("ab") as log_fh:
         proc = subprocess.Popen(
             [
@@ -90,7 +94,7 @@ def start(
             cwd=str(root),
             stdout=log_fh,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **process_group_kwargs(),
         )
     paths["pid"].write_text(str(proc.pid), encoding="utf-8")
     time.sleep(0.5)
@@ -103,16 +107,26 @@ def stop(root: Path, host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> dict:
     paths = _paths(root)
     if not pid:
         return current
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill.exe") or shutil.which("taskkill")
+        if taskkill:
+            subprocess.run(
+                [taskkill, "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     deadline = time.time() + 5
     while time.time() < deadline:
         if not _pid_alive(pid):
             break
         time.sleep(0.2)
-    if _pid_alive(pid):
+    if os.name != "nt" and _pid_alive(pid):
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:

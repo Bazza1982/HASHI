@@ -245,6 +245,55 @@ async def test_workbench_request_activity_recovers_terminal_run_after_store_loss
 
 
 @pytest.mark.asyncio
+async def test_workbench_request_activity_recovers_interrupted_run_after_agent_restart(
+    tmp_path: Path,
+) -> None:
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(
+        instance_id="HASHI1", authorized_id=7, deployment_profile="personal"
+    )
+    server.session_store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    session = server.session_store.ensure_default_session(
+        owner_id="user:7", agent_id="akane"
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="akane",
+        request_id="req-restart-interrupted",
+        text="hello",
+        source="api",
+        idempotency_key="activity-restart-interrupted",
+    )
+    server.session_store.mark_request_running(
+        accepted.request_id,
+        worker_id="runtime-before-restart",
+    )
+
+    reconciled = server.session_store.reconcile_incomplete_runs(agent_id="akane")
+    server._runtime_map = lambda: {
+        "akane": SimpleNamespace(request_activity=RequestActivityStore())
+    }
+    response = await server.handle_request_activity(
+        SimpleNamespace(
+            match_info={"name": "akane", "request_id": accepted.request_id},
+            query={"after_sequence": "4"},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert [row["run_id"] for row in reconciled] == [accepted.run_id]
+    assert response.status == 200
+    assert payload["state"] == "interrupted"
+    assert payload["terminal"] is True
+    assert payload["success"] is False
+    assert payload["recovered_from"] == "session_store"
+    assert payload["session_id"] == session["session_id"]
+    assert payload["run_id"] == accepted.run_id
+    assert payload["latest_sequence"] == 4
+
+
+@pytest.mark.asyncio
 async def test_workbench_request_activity_hides_cross_owner_and_cross_agent_runs(tmp_path: Path) -> None:
     server = WorkbenchApiServer.__new__(WorkbenchApiServer)
     server.global_config = SimpleNamespace(

@@ -6,10 +6,11 @@
 | API | Persistent Session API v1 |
 | Status | Implemented behind a fail-closed qualification boundary |
 | Scope | Desktop, web, mobile, IDE, operations console and future clients |
+| Architecture | [HASHI Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) |
 
 ## 1. Decision
 
-HASHI is the sole authoritative owner of sent agent-chat state. One user-facing
+PAO is the sole authoritative HASHI owner of sent agent-chat state. One user-facing
 Chat maps to one persistent HASHI Session. An Agent participates in a Session
 but is not the Session identity.
 
@@ -40,18 +41,21 @@ provide an opaque client/channel key. These values bind projections and delivery
 state; they do not grant authorization. Every operation rechecks the
 authenticated owner and target resource.
 
-Backend choice is also hidden from clients. HER v2, fixed CLI backends and API
-providers receive the same Session identity and context-generation semantics.
+Engine choice is also hidden from clients. HER v2 and other Engine Providers
+receive the same outer HASHI Conversation Session identity and
+context-generation semantics. Any Engine Session or Model Provider Context
+behind that binding remains an internal boundary.
 
 ## 3. Ownership
 
 | Concern | Owner |
 |---|---|
-| Sessions, Messages, Runs, Events and consumer ACK | HASHI |
-| Context selection, compaction, PCM and Memory+ | HASHI |
-| Backend/model routing and tool orchestration | HASHI |
-| Approval challenge lifecycle and fencing | HASHI |
-| Durable attachment object or authorized reference | HASHI |
+| Conversation Sessions, Messages, Runs, Events and consumer ACK | PAO |
+| PCM assembly, Context projection and Memory+ | PCM |
+| Engine binding, outer routing and HASHI Tool authority | PAO |
+| Engine-internal Turn orchestration and Model Provider routing | Selected Engine |
+| Approval challenge lifecycle and fencing | PAO |
+| Durable attachment object or authorized reference | PAO |
 | Unsent drafts and window layout | Frontend |
 | Packaging, installation and update selection | Integrator |
 | Non-agent product data and final domain authorization | Owning service |

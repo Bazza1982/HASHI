@@ -19,7 +19,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, constan
 from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
-from orchestrator.config import FlexibleAgentConfig, GlobalConfig
+from orchestrator.config import DEFAULT_AGENT_MODE, FlexibleAgentConfig, GlobalConfig
 from orchestrator.bootstrap_logging import refresh_console_output_filters
 from orchestrator.command_ui import (
     back_label,
@@ -71,6 +71,8 @@ from orchestrator import runtime_wrapper
 from orchestrator import runtime_workzone
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
+    active_slash_command_audit_session,
+    bind_slash_command_audit_session,
     default_audit_path,
     parse_inline_callback_command,
     resolve_handler_kind,
@@ -261,7 +263,15 @@ class FlexibleAgentRuntime:
         self._pending_auto_recall_context: str | None = None
         self._pending_auto_recall_session_id: str | None = None
 
-        self.app = ApplicationBuilder().token(self.token).get_updates_connection_pool_size(8).build()
+        # Telegram control updates must not queue behind a long-running handler.
+        # Agent work itself remains serialized by HASHI's request queue.
+        self.app = (
+            ApplicationBuilder()
+            .token(self.token)
+            .get_updates_connection_pool_size(8)
+            .concurrent_updates(16)
+            .build()
+        )
 
         # Workspace structure
         self.workspace_dir = config.workspace_dir
@@ -350,13 +360,20 @@ class FlexibleAgentRuntime:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.backend_state_dir.mkdir(parents=True, exist_ok=True)
-        from orchestrator.canonical_audit import CanonicalAuditStore
+        from orchestrator.canonical_audit import (
+            BufferedCanonicalAuditWriter,
+            CanonicalAuditStore,
+        )
 
         self.canonical_audit = CanonicalAuditStore(
             self.global_config.bridge_home,
             instance_id=self.global_config.instance_id,
             agent_id=self.config.name,
             config=getattr(self.global_config, "canonical_audit", None),
+        )
+        self.canonical_audit_buffer = BufferedCanonicalAuditWriter(
+            self.canonical_audit,
+            name=f"canonical-audit-{self.config.name}",
         )
         if self.transfer_state_path.exists():
             try:
@@ -385,6 +402,9 @@ class FlexibleAgentRuntime:
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
         self.backend_manager.runtime = self
+        from orchestrator.out_of_band_control import AgentControlLane
+
+        self.control_lane = AgentControlLane(self)
         self._sidecar_invoker, self._sidecar_context_getter = make_backend_sidecar_invoker(
             self.backend_manager,
             session_id_getter=lambda: self.session_id_dt,
@@ -592,7 +612,8 @@ class FlexibleAgentRuntime:
                     ):
                         session.block("channel_denied")
                         return
-                    await handler(update, context)
+                    with bind_slash_command_audit_session(session):
+                        await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -636,7 +657,8 @@ class FlexibleAgentRuntime:
                             ui_language.tr("command.disabled", command=cmd),
                         )
                         return
-                    await handler(update, context)
+                    with bind_slash_command_audit_session(session):
+                        await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -1021,7 +1043,9 @@ class FlexibleAgentRuntime:
         return match.group(1) if match else None
 
     def _log_maintenance(self, item: QueuedRequest, stage: str, **fields):
-        canonical = getattr(self, "canonical_audit", None)
+        canonical = getattr(self, "canonical_audit_buffer", None) or getattr(
+            self, "canonical_audit", None
+        )
         if canonical is not None:
             try:
                 canonical.record(
@@ -1041,6 +1065,7 @@ class FlexibleAgentRuntime:
                     item.request_id,
                     exc,
                 )
+                raise
         if not item.source.startswith("scheduler"):
             return
         task_id = self._extract_task_id(item.summary) or "<none>"
@@ -1109,7 +1134,8 @@ class FlexibleAgentRuntime:
         if (
             str((metadata or {}).get("engine") or "") == HER_V2_ENGINE
             and str(
-                getattr(self.backend_manager, "agent_mode", "flex") or "flex"
+                getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE)
+                or DEFAULT_AGENT_MODE
             ).lower()
             == "flex"
         ):
@@ -1769,7 +1795,21 @@ class FlexibleAgentRuntime:
     def _job_counts(self) -> tuple[int, int]:
         return runtime_status.job_counts(self)
 
-    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str, force: bool = False) -> bool:
+    async def _send_voice_reply(
+        self,
+        chat_id: int,
+        text: str,
+        request_id: str,
+        force: bool = False,
+    ) -> bool | None:
+        """Send a voice reply.
+
+        ``True`` means Telegram acknowledged delivery, ``False`` means the
+        synthesis/send failed, and ``None`` means Telegram timed out after the
+        request may already have arrived.  The ambiguous case must not be
+        retried because that can duplicate the voice message.
+        """
+
         # Guard: skip if Telegram not connected
         if not self.telegram_connected:
             return False
@@ -1797,7 +1837,7 @@ class FlexibleAgentRuntime:
                     self.telegram_logger.warning(
                         f"Voice reply timed out for {request_id} (not retrying to avoid duplicate): {e}"
                     )
-                    raise
+                    return None
                 except Exception as e:
                     last_error = e
                     if attempt >= max_attempts:
@@ -2860,13 +2900,7 @@ class FlexibleAgentRuntime:
             )
 
         elif target == "verbose":
-            self._verbose = value == "on"
-            telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
-            _f = self.workspace_dir / ".verbose_off"
-            if self._verbose:
-                _f.unlink(missing_ok=True)
-            else:
-                _f.touch()
+            self._set_verbose_enabled(value == "on")
             await query.edit_message_text(
                 self._verbose_menu_text(),
                 parse_mode="HTML",
@@ -2879,13 +2913,7 @@ class FlexibleAgentRuntime:
             )
 
         elif target == "think":
-            self._think = value == "on"
-            telegram_stream_policy.set_display_preference(self, "think", self._think)
-            _f = self.workspace_dir / ".think_off"
-            if self._think:
-                _f.unlink(missing_ok=True)
-            else:
-                _f.touch()
+            self._set_think_enabled(value == "on")
             await query.edit_message_text(
                 self._think_menu_text(),
                 parse_mode="HTML",
@@ -4185,14 +4213,22 @@ class FlexibleAgentRuntime:
         """One-shot TTS: synthesize the last assistant message and send as voice."""
         if not self._is_authorized_user(update.effective_user.id):
             return
-        text = self._load_last_text_from_transcript("assistant")
+        text = self._load_last_visible_assistant_text(update)
         if not text:
             await self._reply_text(update, ui_language.tr("voice.no_recent"))
             return
         chat_id = update.effective_chat.id
         request_id = f"say-{int(time.time())}"
         ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
-        if not ok:
+        session = active_slash_command_audit_session()
+        if ok is True:
+            if session is not None:
+                session.add_side_effect("voice_reply_sent")
+        elif ok is None:
+            if session is not None:
+                session.add_side_effect("voice_reply_delivery_unknown")
+            await self._reply_text(update, ui_language.tr("voice.delivery_unknown"))
+        else:
             await self._reply_text(update, ui_language.tr("voice.synthesis_failed"))
 
     # ── /loop — recurring task management ──────────────────────────
@@ -5029,23 +5065,28 @@ class FlexibleAgentRuntime:
             action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
         )
 
+    def _set_verbose_enabled(self, enabled: bool) -> None:
+        self._verbose = bool(enabled)
+        marker = self.workspace_dir / ".verbose_off"
+        if self._verbose:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.touch()
+        telegram_stream_policy.set_display_preference(
+            self,
+            "verbose",
+            self._verbose,
+        )
+        runtime_pipeline.notify_display_preference_change(self)
+
     async def cmd_verbose(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if args and args[0] in {"on", "true", "1"}:
-            self._verbose = True
+            self._set_verbose_enabled(True)
         elif args and args[0] in {"off", "false", "0"}:
-            self._verbose = False
-        else:
-            self._verbose = not self._verbose
-        # Persist so it survives restarts
-        _verbose_file = self.workspace_dir / ".verbose_off"
-        if self._verbose:
-            _verbose_file.unlink(missing_ok=True)
-        else:
-            _verbose_file.touch()
-        telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
+            self._set_verbose_enabled(False)
         await self._reply_text(
             update,
             self._verbose_menu_text(),
@@ -5077,22 +5118,34 @@ class FlexibleAgentRuntime:
             commentary_available=commentary_available,
         )
 
+    def _set_think_enabled(self, enabled: bool) -> None:
+        self._think = bool(enabled)
+        marker = self.workspace_dir / ".think_off"
+        if self._think:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.touch()
+            # A menu selection is the visibility boundary.  Never flush
+            # provider reasoning that was buffered before the user selected
+            # Off, and never replay it after a later On selection.
+            self._think_buffer.clear()
+            self._openrouter_think_chunk = ""
+            self._last_openrouter_think_snippet = None
+        telegram_stream_policy.set_display_preference(
+            self,
+            "think",
+            self._think,
+        )
+        runtime_pipeline.notify_display_preference_change(self)
+
     async def cmd_think(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if args and args[0] in {"on", "true", "1"}:
-            self._think = True
+            self._set_think_enabled(True)
         elif args and args[0] in {"off", "false", "0"}:
-            self._think = False
-        else:
-            self._think = not self._think
-        _think_file = self.workspace_dir / ".think_off"
-        if self._think:
-            _think_file.unlink(missing_ok=True)
-        else:
-            _think_file.touch()
-        telegram_stream_policy.set_display_preference(self, "think", self._think)
+            self._set_think_enabled(False)
         await self._reply_text(
             update,
             self._think_menu_text(),
@@ -5120,6 +5173,7 @@ class FlexibleAgentRuntime:
             "commentary",
             self._commentary,
         )
+        runtime_pipeline.notify_display_preference_change(self)
 
     def _commentary_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
@@ -5281,6 +5335,67 @@ class FlexibleAgentRuntime:
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         current = self._meter_enabled()
+        if len(args) == 1 and args[0] in {"summary", "session", "provider", "turn"}:
+            backend = getattr(self.backend_manager, "current_backend", None)
+            getter = getattr(backend, "durable_meter_summary", None)
+            summary = getter(turn_only=args[0] == "turn") if callable(getter) else {}
+            if not summary:
+                await self._reply_text(
+                    update, ui_language.tr("menu.meter.durable.no_data")
+                )
+                return
+            total = dict(summary.get("total") or {})
+
+            def cost_text(value):
+                return "unknown" if value is None else f"US${float(value):.6f}"
+
+            lines = [
+                f"💰 <b>{html.escape(ui_language.tr('menu.meter.durable.title'))}</b>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.scope'))}</b> · <code>{html.escape(args[0])}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.provider_requests'))}</b> · <code>{int(total.get('provider_requests') or 0):,}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.tokens'))}</b> · <code>{int(total.get('input_tokens') or 0) + int(total.get('output_tokens') or 0) + int(total.get('thinking_tokens') or 0):,}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.cache_hit'))}</b> · <code>{int(total.get('prompt_cache_hit_tokens') or 0):,}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.retries'))}</b> · <code>{int(total.get('retry_count') or 0):,}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.compact_calls'))}</b> · <code>{int(total.get('compact_requests') or 0):,}</code>",
+                "<b>{}</b> · <code>{}</code>".format(
+                    html.escape(ui_language.tr("menu.meter.durable.pricing_revisions")),
+                    html.escape(
+                        ", ".join(
+                            str(value)
+                            for value in (total.get("pricing_revisions") or ["unknown"])
+                        )
+                    )
+                ),
+                f"<b>{html.escape(ui_language.tr('menu.meter.durable.cost'))}</b> · <code>{html.escape(cost_text(total.get('cost_usd')))}</code>",
+            ]
+            if args[0] in {"summary", "session", "provider"}:
+                for row in summary.get("providers") or []:
+                    lines.append(
+                        "\n<b>{}</b> · <code>{}</code> · {} calls · {} tokens · {}".format(
+                            html.escape(str(row.get("provider") or "unknown")),
+                            html.escape(str(row.get("model") or "unknown")),
+                            int(row.get("provider_requests") or 0),
+                            int(row.get("input_tokens") or 0)
+                            + int(row.get("output_tokens") or 0)
+                            + int(row.get("thinking_tokens") or 0),
+                            html.escape(cost_text(row.get("cost_usd"))),
+                        )
+                    )
+            if args[0] in {"summary", "session", "turn"}:
+                for row in summary.get("turns") or []:
+                    lines.append(
+                        "\n<b>{}</b> · <code>{}</code> · {} calls · {} tokens · {}".format(
+                            html.escape(ui_language.tr("menu.meter.durable.turn")),
+                            html.escape(str(row.get("turn_id") or "maintenance")),
+                            int(row.get("provider_requests") or 0),
+                            int(row.get("input_tokens") or 0)
+                            + int(row.get("output_tokens") or 0)
+                            + int(row.get("thinking_tokens") or 0),
+                            html.escape(cost_text(row.get("cost_usd"))),
+                        )
+                    )
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
         if len(args) > 1 or (args and args[0] not in {"on", "off", "status"}):
             await self._reply_text(
                 update,
@@ -6584,16 +6699,16 @@ class FlexibleAgentRuntime:
         )
 
     def _is_wrapper_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") == "wrapper"
+        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "wrapper"
 
     def _is_audit_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") == "audit"
+        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "audit"
 
     def _is_dual_brain_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") == "dual-brain"
+        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "dual-brain"
 
     def _is_managed_core_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", "flex") in {"wrapper", "audit"}
+        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) in {"wrapper", "audit"}
 
     async def _require_wrapper_mode(self, update: Update, command_name: str) -> bool:
         if self._is_wrapper_mode():
@@ -6936,7 +7051,7 @@ class FlexibleAgentRuntime:
             return
 
         state = self.backend_manager.get_state_snapshot()
-        mode = getattr(self.backend_manager, "agent_mode", "flex")
+        mode = getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE)
         cfg = load_wrapper_config(state) if mode == "wrapper" else load_audit_config(state)
         args = context.args or []
         if not args:
@@ -8059,6 +8174,18 @@ class FlexibleAgentRuntime:
     async def cmd_mode(self, update: Update, context: Any):
         await runtime_mode.cmd_mode(self, update, context)
 
+    async def cmd_retired_agent_mode(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        await self._reply_text(update, ui_language.tr("mode.retired"))
+
+    async def callback_retired_agent_mode(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            await query.answer()
+            return
+        await query.answer(ui_language.tr("mode.retired"), show_alert=True)
+
     async def cmd_privacy(self, update: Update, context: Any):
         await runtime_privacy.cmd_privacy(self, update, context)
 
@@ -8981,6 +9108,7 @@ class FlexibleAgentRuntime:
         request_id: Optional[str] = None,
         purpose: str = "response",
         parse_mode: str | None = None,
+        error_context: Mapping[str, Any] | None = None,
     ):
         return await runtime_delivery.send_long_message(
             self,
@@ -8989,6 +9117,7 @@ class FlexibleAgentRuntime:
             request_id=request_id,
             purpose=purpose,
             parse_mode=parse_mode,
+            error_context=error_context,
         )
 
     async def typing_loop(self, chat_id: int, stop_event: asyncio.Event):
@@ -9197,6 +9326,9 @@ class FlexibleAgentRuntime:
 
         async def _edit_placeholder():
             nonlocal last_edit_at, last_rendered_text, dirty, edit_attempts, display_disabled
+            if not bool(getattr(self, "_verbose", True)):
+                dirty = False
+                return
             if display_disabled:
                 dirty = False
                 return
@@ -9272,12 +9404,18 @@ class FlexibleAgentRuntime:
                     await asyncio.gather(*pending, return_exceptions=True)
 
             if stop_task in done and stop_task.result():
-                if event_task in done:
+                if (
+                    event_task in done
+                    and bool(getattr(self, "_verbose", True))
+                ):
                     dirty = (
                         digest.record(event_task.result(), now=time.monotonic())
                         or dirty
                     )
-                while not event_queue.empty():
+                while (
+                    bool(getattr(self, "_verbose", True))
+                    and not event_queue.empty()
+                ):
                     try:
                         queued_event = event_queue.get_nowait()
                     except asyncio.QueueEmpty:
@@ -9287,11 +9425,11 @@ class FlexibleAgentRuntime:
                     )
                 break
 
-            if event_task in done:
+            if event_task in done and bool(getattr(self, "_verbose", True)):
                 event = event_task.result()
                 dirty = digest.record(event, now=time.monotonic()) or dirty
                 last_heartbeat_at = time.monotonic()
-            else:
+            elif event_task not in done:
                 now = time.monotonic()
                 if (now - last_heartbeat_at) >= HEARTBEAT_INTERVAL:
                     dirty = digest.mark_waiting(now=now) or dirty
@@ -9301,6 +9439,13 @@ class FlexibleAgentRuntime:
             if dirty and (now - last_edit_at) >= MIN_EDIT_INTERVAL:
                 await _edit_placeholder()
 
+        if not bool(getattr(self, "_verbose", True)):
+            while not event_queue.empty():
+                try:
+                    event_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            return
         while not event_queue.empty():
             try:
                 queued_event = event_queue.get_nowait()
@@ -9357,6 +9502,7 @@ class FlexibleAgentRuntime:
             owner = explicit_owner or legacy_delivery_class(event.kind)
             if (
                 event_queue is not None
+                and bool(getattr(self, "_verbose", True))
                 and owner == DELIVERY_TECHNICAL
                 and event.kind in verbose_kinds
             ):
@@ -9379,7 +9525,7 @@ class FlexibleAgentRuntime:
                     with suppress(Exception):
                         value = detail.split("=", 1)[1].split(";", 1)[0]
                         self._thinking_chars_this_req += max(0, int(value))
-            if think_buffer is not None:
+            if think_buffer is not None and bool(getattr(self, "_think", True)):
                 if not explicit_owner and event.kind == KIND_COMMENTARY:
                     # Commentary is already a complete model-authored update.
                     # Preserve it verbatim instead of folding it into the short
@@ -9440,6 +9586,11 @@ class FlexibleAgentRuntime:
 
     async def _flush_thinking(self, chat_id: int):
         """Send accumulated thinking events to Telegram, console, and transcript."""
+        if not bool(getattr(self, "_think", True)):
+            self._think_buffer.clear()
+            self._openrouter_think_chunk = ""
+            self._last_openrouter_think_snippet = None
+            return
         if self._openrouter_think_chunk:
             self._think_buffer.append(self._openrouter_think_chunk)
             self._openrouter_think_chunk = ""
@@ -9552,6 +9703,149 @@ class FlexibleAgentRuntime:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_visible_assistant_entry(entry: dict, *, core: bool) -> bool:
+        """Return True for a real, speakable assistant reply entry.
+
+        Thinking traces are excluded regardless of file: ``role == "thinking"``,
+        ``source == "think"``, or 💭-prefixed text.
+        """
+        if entry.get("role") == "thinking" or entry.get("source") == "think":
+            return False
+        text = (entry.get("text") or entry.get("visible_text") or "")
+        if isinstance(text, str) and text.startswith("💭"):
+            return False
+        if core:
+            return entry.get("role") == "assistant_core" and bool(
+                (entry.get("visible_text") or entry.get("text") or "").strip()
+            )
+        return entry.get("role") == "assistant" and bool((entry.get("text") or "").strip())
+
+    @staticmethod
+    def _is_legacy_interactive_reply_source(entry: dict) -> bool:
+        """Exclude known non-user delivery surfaces from legacy transcripts."""
+
+        source = str(entry.get("source") or "").strip().casefold()
+        if not source:
+            return True
+        if source in {
+            "api",
+            "cron",
+            "scheduler",
+            "heartbeat",
+            "proactive",
+            "background-job-event",
+            "background_job_event",
+            "startup",
+            "system",
+            "session_reset",
+        }:
+            return False
+        return not source.startswith(
+            (
+                "api-",
+                "api:",
+                "browser",
+                "workbench",
+                "session-api",
+                "scheduler:",
+                "cron:",
+                "heartbeat:",
+                "proactive:",
+                "bridge:",
+                "bridge-transfer:",
+                "bridge-fork:",
+                "hchat",
+                "background-",
+                "background_",
+            )
+        )
+
+    def _load_last_visible_assistant_text(
+        self, update: Update | None = None
+    ) -> str | None:
+        """Return the latest visible assistant reply for /say.
+
+        The authoritative path is the newest response with a successful
+        transport receipt in the current Session and channel.  Before the
+        first post-upgrade delivery outcome exists, use a compatibility scan
+        of legacy transcripts while excluding scheduler, API, Bridge/HChat,
+        and background sources.  Once delivery tracking starts for the route,
+        failed or ambiguous sends never fall back to an unconfirmed record.
+        """
+        session_store_available = getattr(self, "session_store", None) is not None
+        if update is not None and session_store_available:
+            try:
+                delivered_text, tracking_started = (
+                    runtime_session.telegram_delivery_state_for_update(self, update)
+                )
+                if delivered_text:
+                    return delivered_text
+                if tracking_started:
+                    return None
+            except Exception as exc:
+                # A live Session lookup failure must fail closed: falling back
+                # to a pre-transport transcript could speak an undelivered or
+                # cross-channel response.  Only runtimes with no Session store
+                # at all use the compatibility path below.
+                logger = getattr(self, "error_logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "Could not resolve /say delivery history safely: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                return None
+
+        try:
+            core_path = getattr(self, "core_transcript_log_path", None)
+            if core_path is not None and core_path.exists():
+                last_core = None
+                with core_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except Exception:
+                            continue
+                        if (
+                            self._is_visible_assistant_entry(entry, core=True)
+                            and self._is_legacy_interactive_reply_source(entry)
+                        ):
+                            last_core = entry
+                if last_core is not None:
+                    text = last_core.get("visible_text") or last_core.get("text") or ""
+                    if text.strip():
+                        return text
+        except Exception:
+            pass
+
+        try:
+            path = getattr(self, "transcript_log_path", None)
+            if path is not None and path.exists():
+                last_text = None
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except Exception:
+                            continue
+                        if (
+                            self._is_visible_assistant_entry(entry, core=False)
+                            and self._is_legacy_interactive_reply_source(entry)
+                        ):
+                            last_text = entry.get("text") or ""
+                if last_text and last_text.strip():
+                    return last_text
+        except Exception:
+            pass
+        return None
+
     async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
         return await runtime_wrapper.send_wrapper_polishing_placeholder(self, item)
 
@@ -9597,7 +9891,15 @@ class FlexibleAgentRuntime:
         try:
             from tools.meter_cost import format_cost_tail
 
-            text = format_cost_tail(receipt)
+            locale = str(
+                request_meta.get("ui_locale_at_start")
+                or ui_language.preferred_locale(
+                    self,
+                    actor_id=getattr(item, "owner_id", None)
+                    or getattr(item, "chat_id", None),
+                )
+            )
+            text = format_cost_tail(receipt, locale=locale)
         except Exception:
             self.logger.exception("meter cost tail formatting failed")
             return
@@ -9669,7 +9971,17 @@ class FlexibleAgentRuntime:
                     + float(foreground.cost_usd),
                     6,
                 )
-            text = format_meditation_cost_tail(receipt, task_total_usd=task_total)
+            locale = str(
+                notification.get("ui_locale_at_start")
+                or ui_language.preferred_locale(
+                    self, actor_id=notification.get("chat_id")
+                )
+            )
+            text = format_meditation_cost_tail(
+                receipt,
+                locale=locale,
+                task_total_usd=task_total,
+            )
         except Exception:
             self.logger.exception("meditation cost tail formatting failed")
             return False
@@ -10167,8 +10479,34 @@ class FlexibleAgentRuntime:
                 )
             else:
                 err_msg = response.error or "Unknown error"
+                failure_fields = runtime_pipeline.backend_failure_fields(response)
                 receipt_error = err_msg
                 self._mark_error(err_msg)
+                self.error_logger.error(
+                    "Background task %s failed code=%s retryable=%s status=%s "
+                    "provider_request_id=%s side_effects=%s: %s",
+                    item.request_id,
+                    failure_fields.get("error_code") or "untyped",
+                    failure_fields.get("error_retryable"),
+                    failure_fields.get("http_status"),
+                    failure_fields.get("provider_request_id") or "none",
+                    failure_fields.get("side_effects_possible", False),
+                    err_msg,
+                )
+                failure_diagnostics = runtime_pipeline.backend_failure_diagnostics(
+                    response
+                )
+                if failure_diagnostics:
+                    self.error_logger.error(
+                        "Background failure diagnostics for %s: %s",
+                        item.request_id,
+                        json.dumps(
+                            failure_diagnostics,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ),
+                    )
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
                     item,
@@ -10186,6 +10524,7 @@ class FlexibleAgentRuntime:
                         "error": err_msg,
                         "source": item.source,
                         "summary": item.summary,
+                        **failure_fields,
                         **runtime_pipeline.request_context_warning_fields(
                             self, item.request_id
                         ),
@@ -10194,7 +10533,6 @@ class FlexibleAgentRuntime:
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     return
-                self.error_logger.error(f"Background task {item.request_id} failed: {err_msg}")
                 clipped = (
                     err_msg
                     if len(err_msg) <= 3000
@@ -10241,6 +10579,15 @@ class FlexibleAgentRuntime:
                     completion_path="background",
                     error_type=receipt_error_type,
                 )
+            runtime_session.record_assistant_delivery(
+                self,
+                item,
+                delivered=receipt_delivered,
+                assistant_text=receipt_text,
+                transport="telegram",
+                completion_path="background",
+                disposition=receipt_disposition,
+            )
             runtime_cross_session.record_turn_result(
                 self, item, assistant_text=receipt_text, response=receipt_response,
                 error=receipt_error, delivered=receipt_delivered, completion_path="background",

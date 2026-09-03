@@ -12,6 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.process_execution import (
+    decode_process_output,
+    process_group_kwargs,
+    resolve_argv_invocation,
+    resolve_shell_invocation,
+    terminate_windows_process_tree,
+)
 
 logger = logging.getLogger("BridgeU.BackgroundJobs")
 
@@ -285,8 +292,11 @@ class BackgroundJobManager:
         self.store.recover_nonterminal(reason="background_job_manager_started_without_adoption")
 
     async def stop(self) -> None:
-        for task in list(self._monitor_tasks.values()):
-            task.cancel()
+        for job_id, process in list(self._processes.items()):
+            record = self.store.get(job_id)
+            if record is not None and not record.is_terminal:
+                self.store.update(job_id, state="cancel_requested")
+            await self._terminate_process_group(process, grace_seconds=2.0)
         for task in list(self._monitor_tasks.values()):
             try:
                 await task
@@ -302,6 +312,7 @@ class BackgroundJobManager:
         cwd: str | Path,
         argv: list[str] | None = None,
         command: str | None = None,
+        shell: str | None = None,
         origin: dict[str, Any] | None = None,
         notify_on_complete: bool = True,
         notify_on_failure: bool = True,
@@ -314,9 +325,28 @@ class BackgroundJobManager:
             raise ValueError("argv or command is required")
         if argv and command:
             raise ValueError("provide argv or command, not both")
+        if argv and shell:
+            raise ValueError("shell is valid only with command mode")
         cwd_path = Path(cwd).expanduser().resolve()
         if not cwd_path.exists():
             raise FileNotFoundError(str(cwd_path))
+
+        if argv:
+            invocation = resolve_argv_invocation(argv)
+            spawn_argv = invocation.argv
+            shell_name = None
+            resolved_executable = invocation.resolved_executable
+            launcher = invocation.launcher
+            launcher_executable = invocation.launcher_executable
+            encoding = invocation.encoding
+        else:
+            shell_invocation = resolve_shell_invocation(command or "", shell)
+            spawn_argv = shell_invocation.argv
+            shell_name = shell_invocation.shell
+            resolved_executable = shell_invocation.executable
+            launcher = shell_invocation.launcher
+            launcher_executable = shell_invocation.launcher_executable
+            encoding = shell_invocation.encoding
 
         job_id = new_job_id()
         job_log_dir = self.logs_dir / str(agent or "unknown") / job_id
@@ -330,6 +360,12 @@ class BackgroundJobManager:
             "argv": list(argv) if argv else None,
             "cwd": str(cwd_path),
             "env_keys": [],
+            "shell": shell_name,
+            "shell_executable": resolved_executable if command else None,
+            "resolved_executable": resolved_executable,
+            "launcher": launcher,
+            "launcher_executable": launcher_executable,
+            "encoding": encoding,
         }
         policy = {
             "max_stdout_bytes": int(max_stdout_bytes),
@@ -370,22 +406,18 @@ class BackgroundJobManager:
         )
         self.store.update(job_id, state="starting")
         try:
-            if argv:
-                process = await asyncio.create_subprocess_exec(
-                    *argv,
-                    cwd=str(cwd_path),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    start_new_session=True,
-                )
-            else:
-                process = await asyncio.create_subprocess_shell(
-                    command or "",
-                    cwd=str(cwd_path),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    start_new_session=True,
-                )
+            child_env = dict(os.environ)
+            child_env.setdefault("PYTHONIOENCODING", "utf-8")
+            child_env.setdefault("PYTHONUTF8", "1")
+            process = await asyncio.create_subprocess_exec(
+                *spawn_argv,
+                cwd=str(cwd_path),
+                env=child_env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **process_group_kwargs(),
+            )
         except Exception as exc:
             return self.store.update(job_id, state="start_failed", ended_at=utc_now(), error=str(exc))
 
@@ -395,6 +427,13 @@ class BackgroundJobManager:
             "started_at": utc_now(),
             "ended_at": None,
             "returncode": None,
+            "process_scope": "process_tree" if os.name == "nt" else "process_group",
+            "shell": shell_name,
+            "executable": launcher_executable,
+            "resolved_executable": resolved_executable,
+            "launcher": launcher,
+            "launcher_executable": launcher_executable,
+            "encoding": encoding,
         }
         record = self.store.update(job_id, state="running", process=process_meta)
         self._processes[job_id] = process
@@ -416,7 +455,10 @@ class BackgroundJobManager:
         path = Path(record.logs.get(key) or "")
         if not path.exists():
             return ""
-        rows = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        rows = decode_process_output(
+            path.read_bytes(),
+            encoding=str(record.command.get("encoding") or "utf-8"),
+        ).splitlines()
         return "\n".join(rows[-max(1, int(lines)):])
 
     async def cancel(self, job_id: str, *, grace_seconds: float = 2.0) -> BackgroundJobRecord:
@@ -508,7 +550,12 @@ class BackgroundJobManager:
         pid = process.pid
         pgid = self._pgid(pid)
         try:
-            if pgid is not None and os.name != "nt":
+            if os.name == "nt" and pid:
+                # Windows has no isolated graceful signal for an arbitrary
+                # console process tree; non-forced taskkill can interrupt the
+                # parent console. Terminate only the target tree with /F.
+                await terminate_windows_process_tree(pid, force=True)
+            elif pgid is not None:
                 os.killpg(pgid, signal.SIGTERM)
             else:
                 process.terminate()
@@ -520,7 +567,9 @@ class BackgroundJobManager:
         except asyncio.TimeoutError:
             pass
         try:
-            if pgid is not None and os.name != "nt":
+            if os.name == "nt" and pid:
+                await terminate_windows_process_tree(pid, force=True)
+            elif pgid is not None:
                 os.killpg(pgid, signal.SIGKILL)
             else:
                 process.kill()
@@ -541,7 +590,7 @@ class BackgroundJobManager:
         for key in ("stdout_path", "stderr_path"):
             path = Path(logs.get(key) or "")
             if path.exists():
-                text = path.read_text(encoding="utf-8", errors="replace")
+                text = decode_process_output(path.read_bytes())
                 if text.strip():
                     chunks.append(text[-1000:])
         return "\n".join(chunks)[-2000:]

@@ -7,17 +7,61 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "bash",
+            "name": "shell",
             "description": (
-                "Execute a shell command on the local machine and return stdout/stderr. "
-                "Use for file operations, running scripts, checking system state, etc."
+                "Execute one foreground command through an explicit HASHI shell contract. "
+                "Native Windows defaults to PowerShell; Linux, WSL, and macOS default "
+                "to Bash. Set shell='cmd' only for CMD/.bat/.cmd syntax. Output is UTF-8. "
+                "Use background_job_start for managed jobs and verification_run for "
+                "correctness checks."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The bash command to run.",
+                        "description": (
+                            "Command text in the syntax of the selected shell. Do not mix "
+                            "POSIX, PowerShell, and CMD syntax."
+                        ),
+                    },
+                    "shell": {
+                        "type": "string",
+                        "enum": ["bash", "powershell", "cmd"],
+                        "description": (
+                            "Optional explicit shell. Omit for the platform default reported "
+                            "in execution_environment."
+                        ),
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": (
+                            "Optional timeout in seconds for this command only. "
+                            "Omit it to run without a time limit."
+                        ),
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": (
+                "Deprecated compatibility alias that always invokes a real Bash "
+                "executable. New calls must use shell, whose native Windows default is "
+                "PowerShell. This alias never means CMD."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "A Bash command to run.",
                     },
                     "timeout": {
                         "type": "number",
@@ -171,8 +215,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "file_write",
             "description": (
-                "Write content to a file, creating it or overwriting if it exists. "
-                "Parent directories are created automatically."
+                "Create or fully overwrite one file and return the write result. "
+                "This is not an incremental editor. Parent directories are created; "
+                "use apply_patch when only part of an existing file should change."
             ),
             "parameters": {
                 "type": "object",
@@ -309,9 +354,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "apply_patch",
             "description": (
-                "Apply a unified diff patch to a file. "
-                "The patch must be in standard unified diff format (--- / +++ / @@ headers). "
-                "Safer than file_write for incremental code edits."
+                "Apply one standard unified diff (--- / +++ / @@) after a dry-run check. "
+                "A rejected dry run changes nothing. Use file_write only when the whole "
+                "file should be created or replaced."
             ),
             "parameters": {
                 "type": "object",
@@ -357,8 +402,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "process_kill",
             "description": (
-                "Send a signal to a process by PID. "
-                "Default signal is SIGTERM (graceful). Use signal=9 for SIGKILL."
+                "Terminate a process by PID. Default signal is 15; use signal=9 "
+                "for a forced kill. Other POSIX signal numbers are unavailable on "
+                "native Windows."
             ),
             "parameters": {
                 "type": "object",
@@ -369,7 +415,10 @@ TOOL_SCHEMAS = [
                     },
                     "signal": {
                         "type": "integer",
-                        "description": "Signal number (default 15 = SIGTERM, 9 = SIGKILL).",
+                        "description": (
+                            "Signal number (default 15 = terminate, 9 = force kill). "
+                            "Other values are POSIX-only."
+                        ),
                     },
                 },
                 "required": ["pid"],
@@ -1600,7 +1649,7 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
             "name": "background_job_start",
             "description": (
                 "Start a long-running local OS command through HASHI BackgroundJobManager. "
-                "Use instead of bash for tasks that may outlive the chat turn. The manager "
+                "Use instead of shell for tasks that may outlive the chat turn. The manager "
                 "records stdout/stderr and sends completion/failure notifications when possible."
             ),
             "parameters": {
@@ -1608,7 +1657,18 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to run in the background. Do not provide with argv.",
+                        "description": (
+                            "Shell command to run in the background. Native Windows defaults "
+                            "to PowerShell; Linux/WSL/macOS default to Bash. Do not provide with argv."
+                        ),
+                    },
+                    "shell": {
+                        "type": "string",
+                        "enum": ["bash", "powershell", "cmd"],
+                        "description": (
+                            "Optional shell for command mode. Omit for the platform default; "
+                            "use cmd only for CMD/.bat/.cmd syntax. Invalid with argv."
+                        ),
                     },
                     "argv": {
                         "type": "array",
@@ -1709,7 +1769,9 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
         "function": {
             "name": "hashi_scheduler_list",
             "description": (
-                "List jobs from the authoritative HASHI Scheduler for this agent."
+                "List this agent's jobs from the authoritative HASHI Scheduler. "
+                "This only observes scheduler state. If gateway context is unavailable, "
+                "repeating the call in the same environment will not help."
             ),
             "parameters": {
                 "type": "object",
@@ -1734,7 +1796,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "name": "hashi_scheduler_status",
             "description": (
                 "Read one job's definition, last-run state, and pending recovery state "
-                "from the authoritative HASHI Scheduler."
+                "from the authoritative HASHI Scheduler. It does not run the job. If "
+                "gateway context is unavailable, retrying in the same environment will not help."
             ),
             "parameters": {
                 "type": "object",
@@ -1756,7 +1819,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "name": "hashi_scheduler_run_history",
             "description": (
                 "Read recent isolated execution receipts for this agent's authoritative "
-                "HASHI Scheduler jobs."
+                "HASHI Scheduler jobs. It does not rerun them. If gateway context is "
+                "unavailable, retrying in the same environment will not help."
             ),
             "parameters": {
                 "type": "object",
@@ -1785,7 +1849,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "description": (
                 "Queue exactly one named HASHI Scheduler job for this agent. Call only "
                 "after the user explicitly authorizes that exact rerun; bare continue, "
-                "yes, okay, or similar conversation does not authorize recovery or rerun."
+                "yes, okay, or similar conversation does not authorize recovery or rerun. "
+                "If gateway context is unavailable, retrying in the same environment will not help."
             ),
             "parameters": {
                 "type": "object",
@@ -1947,9 +2012,10 @@ TOOL_SCHEMAS.extend(
             "function": {
                 "name": "workspace_inspect",
                 "description": (
-                    "Read-only HER review tool for workspace snapshots, git status/diff, "
-                    "bounded search, and file or artifact hashes. It cannot write files. "
-                    "Evidence-backed Review and Verification must call snapshot first and last."
+                    "Read workspace snapshots, git status/diff, bounded search, and file "
+                    "or artifact hashes without writing files. A stable snapshot only shows "
+                    "that state did not change; it does not prove correctness. Use "
+                    "verification_run to test correctness."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1992,12 +2058,10 @@ TOOL_SCHEMAS.extend(
             "function": {
                 "name": "verification_run",
                 "description": (
-                    "List configured recipes or run a recipe/direct argv validation command "
-                    "in the authoritative current workspace. The process inherits HASHI's "
-                    "filesystem, identity, environment, HOME, and network authority; the "
-                    "workspace is not copied or sandboxed. argv is executed without an "
-                    "implicit shell. The effective timeout automatically grows with the "
-                    "turn's cumulative Execution duration, and timeout_s can only raise it."
+                    "List validation recipes or run one recipe/direct argv check in the "
+                    "current workspace. This verifies only the command actually run, not all "
+                    "project behaviour. argv has no implicit shell. The process inherits "
+                    "HASHI's authority; timeout_s can raise but not reduce the runtime timeout."
                 ),
                 "parameters": {
                     "type": "object",
