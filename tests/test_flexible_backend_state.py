@@ -17,7 +17,11 @@ from adapters.timeout_policy import (
 )
 from orchestrator.audit_mode import load_audit_config
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
-from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.flexible_backend_manager import (
+    AGENT_MODE_POLICY_VERSION_STATE_KEY,
+    CURRENT_AGENT_MODE_POLICY_VERSION,
+    FlexibleBackendManager,
+)
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.privacy_levels import PrivacyLevel
 from orchestrator.wrapper_mode import load_wrapper_config
@@ -103,7 +107,7 @@ def test_allowed_persisted_backend_still_overrides_configured_backend(tmp_path):
     assert manager._active_model_override == "claude-haiku-4-5"
 
 
-def test_persisted_mode_overrides_migrated_fixed_default(tmp_path):
+def test_legacy_persisted_flex_migrates_once_to_fixed_default(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
     (workspace / "state.json").write_text(
@@ -129,7 +133,47 @@ def test_persisted_mode_overrides_migrated_fixed_default(tmp_path):
 
     manager = FlexibleBackendManager(config, global_config, secrets={})
 
-    assert manager.agent_mode == "flex"
+    assert manager.agent_mode == "fixed"
+    state = _read_state(workspace)
+    assert state["agent_mode"] == "fixed"
+    assert state[AGENT_MODE_POLICY_VERSION_STATE_KEY] == (
+        CURRENT_AGENT_MODE_POLICY_VERSION
+    )
+
+
+def test_explicit_flex_after_mode_policy_migration_is_preserved(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    config = FlexibleAgentConfig(
+        name="explicit-flex",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="explicit-flex",
+        allowed_backends=[{"engine": "codex-cli", "model": "gpt-5.4"}],
+        active_backend="codex-cli",
+        default_mode="fixed",
+        project_root=workspace,
+    )
+    global_config = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+    )
+
+    manager = FlexibleBackendManager(config, global_config, secrets={})
+    assert manager.agent_mode == "fixed"
+
+    # This mirrors /mode flex: the normal managed-state write records both the
+    # explicit choice and the policy generation under which it was made.
+    manager.agent_mode = "flex"
+    manager._save_state()
+    reloaded = FlexibleBackendManager(config, global_config, secrets={})
+
+    assert reloaded.agent_mode == "flex"
+    assert _read_state(workspace)[AGENT_MODE_POLICY_VERSION_STATE_KEY] == (
+        CURRENT_AGENT_MODE_POLICY_VERSION
+    )
 
 
 @pytest.mark.parametrize("default_mode", ["fixed", "flex"])

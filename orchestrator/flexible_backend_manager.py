@@ -64,6 +64,8 @@ from orchestrator.workspace_state import WorkspaceStateStore
 from orchestrator import workzone as workzone_module
 
 HER_HABIT_MEDITATION_STATE_KEY = "her_habit_meditation"
+AGENT_MODE_POLICY_VERSION_STATE_KEY = "agent_mode_policy_version"
+CURRENT_AGENT_MODE_POLICY_VERSION = 1
 
 
 class FlexibleBackendManager:
@@ -228,6 +230,26 @@ class FlexibleBackendManager:
                         # Memory+ flag once backend capabilities are available.
                         self.agent_mode = persisted_mode
                     elif persisted_mode in SUPPORTED_AGENT_MODES:
+                        policy_version = self._agent_mode_policy_version(state)
+                        migrate_legacy_flex = (
+                            persisted_mode == "flex"
+                            and policy_version < CURRENT_AGENT_MODE_POLICY_VERSION
+                            and self._mode_for_backend(
+                                self.config.default_mode,
+                                self.config.active_backend,
+                            )
+                            == "fixed"
+                        )
+                        if migrate_legacy_flex:
+                            persisted_mode = "fixed"
+                            state["agent_mode"] = persisted_mode
+                            state_needs_repair = True
+                            self.logger.warning(
+                                "Migrated legacy persisted flex mode to the fixed "
+                                "product default; future explicit mode choices are "
+                                "preserved by policy version %s.",
+                                CURRENT_AGENT_MODE_POLICY_VERSION,
+                            )
                         self.agent_mode = self._mode_for_backend(
                             persisted_mode,
                             self.config.active_backend,
@@ -259,6 +281,18 @@ class FlexibleBackendManager:
                         )
                         state["agent_mode"] = self.agent_mode
                         state_needs_repair = True
+                if (
+                    self._agent_mode_policy_version(state)
+                    < CURRENT_AGENT_MODE_POLICY_VERSION
+                ):
+                    # This marker distinguishes legacy persisted ``flex`` from
+                    # an explicit choice made after Fixed became the product
+                    # default.  It is written once and then carried by every
+                    # normal state save.
+                    state[AGENT_MODE_POLICY_VERSION_STATE_KEY] = (
+                        CURRENT_AGENT_MODE_POLICY_VERSION
+                    )
+                    state_needs_repair = True
                 if "privacy_level" in state:
                     try:
                         self.privacy_level = parse_privacy_level(state["privacy_level"])
@@ -308,9 +342,23 @@ class FlexibleBackendManager:
             self.logger.error(f"Failed to read state.json: {e}")
         return {}
 
+    @staticmethod
+    def _agent_mode_policy_version(state: dict[str, Any]) -> int:
+        try:
+            return max(
+                0,
+                int(state.get(AGENT_MODE_POLICY_VERSION_STATE_KEY) or 0),
+            )
+        except (TypeError, ValueError):
+            return 0
+
     def _apply_managed_state_fields(self, state: dict[str, Any]) -> None:
         state["active_backend"] = self.config.active_backend
         state["agent_mode"] = self.agent_mode
+        state[AGENT_MODE_POLICY_VERSION_STATE_KEY] = max(
+            self._agent_mode_policy_version(state),
+            CURRENT_AGENT_MODE_POLICY_VERSION,
+        )
         state["privacy_level"] = int(self.privacy_level)
         if (
             self.config.active_backend != HER_V2_ENGINE

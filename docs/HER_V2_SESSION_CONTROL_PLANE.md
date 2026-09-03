@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | Implemented; WIP retirement remains in shadow-validation phase |
-| Date | 2026-08-31 |
+| Date | 2026-09-03 |
 | Scope | HASHI HER v2 fixed Engine Session |
 | Session authority | HER SQLite session/event store |
 | Provider state | Rebuildable transport state, never Session authority |
@@ -108,6 +108,16 @@ the pricing revision that applied when the request was made, without rewriting
 its original usage facts. Unknown cost remains unknown; it is never converted
 to zero.
 
+Compact can run before the first HER Turn is materialised. At that boundary,
+HER first creates an `accounting` Session shell bound to the authoritative
+HASHI Conversation, context generation, owner, Agent, and Workzone, then
+persists the HASHI-to-HER binding. The shell contains neither a fabricated Turn
+nor a fabricated PCM snapshot. The first Fixed `open_session` atomically
+promotes the same row to `open`, preserving every pre-Turn Compact request.
+Repeated preflight is idempotent. The resulting recorder remains bound to that
+request's Session, so a detached Compact cannot be charged to a later active
+Session if the Agent advances while the Provider call is settling.
+
 `/meter summary`, `/meter session`, `/meter provider`, and `/meter turn` expose
 durable Session totals and their Provider/Turn dimensions. The original
 `/meter on|off|status` foreground cost-tail behavior is unchanged.
@@ -123,9 +133,10 @@ conversation history only:
 - route-fit checks instruct the operator to Compact only after settlement; and
 - each real Compact Provider call is durably accounted.
 
-If a fixed HER backend cannot prove that a durable Session meter is bound,
-Compact fails before constructing or calling the Provider. Compact accounting
-errors are terminal and never trigger a replay of an already settled request.
+If HER cannot establish and prove that durable Session meter binding, Compact
+fails before constructing or calling the Provider. This guard applies in both
+Fixed and Flex mode; accounting errors are terminal and never trigger a replay
+of an already settled request.
 
 ## WIP Journal retirement gate
 

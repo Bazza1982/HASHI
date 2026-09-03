@@ -2040,16 +2040,31 @@ class ContextCompactionCoordinator:
         accounting_ready = getattr(
             current_backend, "can_record_maintenance_provider_requests", None
         )
-        if (
-            callable(maintenance_recorder)
-            and callable(accounting_ready)
-            and not accounting_ready()
-        ):
-            raise CompactionFailure(
-                "COMPACTION_ACCOUNTING_UNAVAILABLE",
-                "Compact cannot call its Provider before a durable HER Session is bound",
-                retryable=False,
+        if callable(maintenance_recorder) and callable(accounting_ready):
+            ready = bool(accounting_ready())
+            prepare_accounting = getattr(
+                current_backend,
+                "ensure_maintenance_provider_accounting",
+                None,
             )
+            if callable(prepare_accounting):
+                try:
+                    prepare_accounting(request.request_ref)
+                    # Re-read the durable store rather than trusting the
+                    # preflight's return value or process-local state.
+                    ready = bool(accounting_ready())
+                except Exception as exc:
+                    raise CompactionFailure(
+                        "COMPACTION_ACCOUNTING_UNAVAILABLE",
+                        "Compact could not establish its durable HER Session accounting binding",
+                        retryable=False,
+                    ) from exc
+            if not ready:
+                raise CompactionFailure(
+                    "COMPACTION_ACCOUNTING_UNAVAILABLE",
+                    "Compact cannot call its Provider before a durable HER Session is bound",
+                    retryable=False,
+                )
         backend = manager.create_ephemeral_backend(route.provider, target_model=route.model)
         if hasattr(backend, "tool_registry"):
             backend.tool_registry = None
@@ -2108,6 +2123,7 @@ class ContextCompactionCoordinator:
                         observed_provider_request_ids=(
                             observed_provider_request_ids
                         ),
+                        recorder=maintenance_recorder,
                     )
 
                 physical_observer_setter(observe_physical_call)
@@ -2134,6 +2150,7 @@ class ContextCompactionCoordinator:
                     else "failed_response"
                 ),
                 observed_provider_request_ids=observed_provider_request_ids,
+                recorder=maintenance_recorder,
             )
             if not bool(getattr(response, "is_success", False)):
                 raise CompactionFailure(
@@ -2155,14 +2172,24 @@ class ContextCompactionCoordinator:
         except asyncio.TimeoutError as exc:
             usage_attempted = True
             if not physical_observer_bound:
-                self._record_provider_usage(route, request, None, status="timeout")
+                self._record_provider_usage(
+                    route,
+                    request,
+                    None,
+                    status="timeout",
+                    recorder=maintenance_recorder,
+                )
             raise CompactionFailure("COMPACTION_TIMEOUT", "Compact provider attempt timed out", retryable=True) from exc
         except asyncio.CancelledError:
             if provider_request_started and not usage_attempted:
                 usage_attempted = True
                 if not physical_observer_bound:
                     self._record_provider_usage(
-                        route, request, None, status="cancelled"
+                        route,
+                        request,
+                        None,
+                        status="cancelled",
+                        recorder=maintenance_recorder,
                     )
             raise
         except BaseException:
@@ -2174,6 +2201,7 @@ class ContextCompactionCoordinator:
                         request,
                         None,
                         status="failed_without_receipt",
+                        recorder=maintenance_recorder,
                     )
             raise
         finally:
@@ -2188,13 +2216,21 @@ class ContextCompactionCoordinator:
         status: str,
         calls_override: Sequence[Mapping[str, Any]] | None = None,
         observed_provider_request_ids: set[str] | None = None,
+        recorder: Callable[[list[Mapping[str, Any]]], Any] | None = None,
     ) -> None:
         """Persist each Compact provider call without coupling Compact success."""
 
-        backend = getattr(
-            getattr(self.runtime, "backend_manager", None), "current_backend", None
-        )
-        recorder = getattr(backend, "record_maintenance_provider_requests", None)
+        if recorder is None:
+            backend = getattr(
+                getattr(self.runtime, "backend_manager", None),
+                "current_backend",
+                None,
+            )
+            recorder = getattr(
+                backend,
+                "record_maintenance_provider_requests",
+                None,
+            )
         if not callable(recorder):
             return
         metadata = getattr(response, "stream_metadata", None)
