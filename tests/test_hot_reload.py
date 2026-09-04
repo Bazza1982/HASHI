@@ -109,6 +109,7 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "orchestrator.her_v2.models",
         "orchestrator.her_v2.session_store",
         "orchestrator.her_v2.backend_session",
+        "orchestrator.her_v2.request_policy",
         "orchestrator.her_v2.retry",
         "orchestrator.her_v2.runtime_configuration",
         "orchestrator.her_v2.interfaces",
@@ -146,6 +147,12 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "orchestrator.her_v2.backend_session"
     )
     assert ordered.index("orchestrator.her_v2.backend_session") < ordered.index(
+        "adapters.her_v2"
+    )
+    assert ordered.index("orchestrator.her_v2.models") < ordered.index(
+        "orchestrator.her_v2.request_policy"
+    )
+    assert ordered.index("orchestrator.her_v2.request_policy") < ordered.index(
         "adapters.her_v2"
     )
     assert ordered.index("orchestrator.her_v2.interfaces") < ordered.index(
@@ -241,6 +248,49 @@ def test_hot_reload_refreshes_notification_helpers_before_consumers():
     assert provider_idx < ordered.index("orchestrator.commands.notify")
     assert provider_idx < ordered.index("orchestrator.runtime_pipeline")
     assert provider_idx < ordered.index("orchestrator.flexible_agent_runtime")
+
+
+def test_hot_reload_refreshes_slash_audit_helpers_before_consumers():
+    names = [
+        "orchestrator.admin_local_testing",
+        "orchestrator.flexible_agent_runtime",
+        "orchestrator.slash_command_audit",
+    ]
+
+    ordered = sorted(names, key=module_reload_key)
+
+    provider_idx = ordered.index("orchestrator.slash_command_audit")
+    assert provider_idx < ordered.index("orchestrator.admin_local_testing")
+    assert provider_idx < ordered.index("orchestrator.flexible_agent_runtime")
+
+
+def test_first_hot_upgrade_from_legacy_slash_audit_module_is_import_safe():
+    script = textwrap.dedent(
+        """
+        import importlib
+
+        provider = importlib.import_module("orchestrator.slash_command_audit")
+        consumer = importlib.import_module("orchestrator.admin_local_testing")
+        del provider.bind_slash_command_audit_session
+
+        refreshed_consumer = importlib.reload(consumer)
+        refreshed_provider = importlib.reload(provider)
+
+        assert refreshed_consumer.slash_command_audit is refreshed_provider
+        assert callable(refreshed_consumer.slash_command_audit.bind_slash_command_audit_session)
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_pre_provider_notification_consumers_do_not_bind_helper_symbols():

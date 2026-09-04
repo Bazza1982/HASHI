@@ -334,10 +334,10 @@ def test_formatter_pricing_table_has_approx():
                              cost_source="pricing_table"),
     ])
     tail = format_cost_tail(receipt, locale="zh-CN")
-    assert tail.startswith("💰 前台回合：≈ US$")
-    assert "价目表 2026-08-23.v1" in tail
+    assert tail.startswith("💰 本回合：≈ 1.05 美分")
+    assert "价目表" not in tail
     assert "📥 输入 1.0K" in tail
-    assert len(tail.splitlines()) == 4
+    assert len(tail.splitlines()) == 3
 
 
 def test_formatter_provider_no_approx():
@@ -348,21 +348,73 @@ def test_formatter_provider_no_approx():
     ])
     tail = format_cost_tail(receipt, locale="zh-CN")
     assert "≈" not in tail.splitlines()[0]
-    assert "服务提供方实报" in tail
+    assert "1.23 美分" in tail.splitlines()[0]
 
 
 def test_formatter_small_cost():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(cost_usd=0.00005, cost_source="provider"),
     ])
-    assert "< US$0.0001" in format_cost_tail(receipt, locale="zh-CN")
+    assert "0.01 美分" in format_cost_tail(receipt, locale="zh-CN")
+
+
+def test_formatter_matches_compact_cent_layout():
+    receipt = UsageReceipt(line_items=[
+        PerCallUsageLineItem(
+            engine="deepseek-api",
+            model="deepseek-v4-flash",
+            input_tokens=66_600,
+            output_tokens=154,
+            token_source="provider",
+            thinking_in_output=True,
+            cost_usd=0.009367,
+            cost_source="pricing_table",
+            prompt_cache_hit_tokens=0,
+            prompt_cache_miss_tokens=66_600,
+            pricing_revision="2026-08-23.v1",
+        ),
+    ])
+
+    assert format_cost_tail(receipt, locale="zh-CN").splitlines() == [
+        "💰 本回合：≈ 0.94 美分 · 服务提供方：DeepSeek",
+        "📥 输入 66.6K · 缓存命中 0（0.0%） 📤 输出 154",
+        "🔁 无缓存约 0.94 美分 · 缓存节省约 0 美分（0.0%）",
+    ]
 
 
 def test_formatter_unknown_cost():
     receipt = UsageReceipt(line_items=[
+        PerCallUsageLineItem(
+            engine="hashi-api", cost_usd=None, cost_source="unknown"
+        ),
+    ])
+    tail = format_cost_tail(receipt, locale="zh-CN")
+    assert "成本未知" in tail
+    assert "服务提供方：HASHI API" in tail.splitlines()[0]
+
+
+def test_formatter_lists_each_provider_once_in_first_use_order():
+    receipt = UsageReceipt(line_items=[
+        PerCallUsageLineItem(engine="deepseek-api", cost_usd=None),
+        PerCallUsageLineItem(engine="hashi-api", cost_usd=None),
+        PerCallUsageLineItem(engine="deepseek", cost_usd=None),
+    ])
+
+    chinese = format_cost_tail(receipt, locale="zh-CN")
+    english = format_cost_tail(receipt, locale="en")
+
+    assert "服务提供方：DeepSeek + HASHI API" in chinese.splitlines()[0]
+    assert "Provider: DeepSeek + HASHI API" in english.splitlines()[0]
+
+
+def test_formatter_marks_missing_provider_telemetry_as_unknown():
+    receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(cost_usd=None, cost_source="unknown"),
     ])
-    assert "成本未知" in format_cost_tail(receipt, locale="zh-CN")
+
+    assert "服务提供方：未知" in format_cost_tail(
+        receipt, locale="zh-CN"
+    ).splitlines()[0]
 
 
 def test_formatter_task_total():
@@ -378,6 +430,7 @@ def test_formatter_task_total():
 def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages():
     line_items = [
         PerCallUsageLineItem(
+            engine="deepseek-api",
             model="deepseek-v4-pro",
             input_tokens=2_283_850,
             output_tokens=0,
@@ -390,6 +443,7 @@ def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages
             pricing_revision="2026-08-23.v1",
         ),
         PerCallUsageLineItem(
+            engine="deepseek-api",
             model="deepseek-v4-flash",
             input_tokens=631_748,
             output_tokens=52_184,
@@ -405,6 +459,7 @@ def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages
     ]
     line_items.extend(
         PerCallUsageLineItem(
+            engine="deepseek-api",
             model="deepseek-v4-flash",
             token_source="provider",
             thinking_in_output=True,
@@ -418,13 +473,13 @@ def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages
 
     chinese = format_cost_tail(receipt, locale="zh-CN")
     assert chinese.splitlines() == [
-        "💰 前台回合：≈ US$0.1061 · 价目表 2026-08-23.v1",
-        "📥 输入 2.916M · 缓存命中 2.683M（92.0%）",
-        "📤 输出 52.2K（其中推理 38.1K）",
-        "🔁 服务提供方请求 40 · 无缓存约 US$1.0965 · 缓存节省约 US$0.9904（90.3%）",
+        "💰 本回合：≈ 10.61 美分 · 服务提供方：DeepSeek",
+        "📥 输入 2.916M · 缓存命中 2.683M（92.0%） 📤 输出 52.2K（其中推理 38.1K）",
+        "🔁 无缓存约 109.65 美分 · 缓存节省约 99.04 美分（90.3%）",
     ]
     english = format_cost_tail(receipt, locale="en")
-    assert english.splitlines()[0].startswith("💰 Foreground turn: ≈ US$0.1061")
+    assert english.splitlines()[0].startswith("💰 This turn: ≈ 10.61 cents")
+    assert "Provider: DeepSeek" in english.splitlines()[0]
     assert "cache hit 2.683M (92.0%)" in english
     assert "including 38.1K reasoning" in english
 
@@ -478,8 +533,8 @@ def test_meditation_formatter_label_and_approx():
                              cost_source="pricing_table"),
     ])
     tail = format_meditation_cost_tail(receipt, locale="zh-CN")
-    assert tail.startswith("🧘 冥想：≈ US$")
-    assert "价目表 2026-08-23.v1" in tail
+    assert tail.startswith("🧘 冥想：≈ 0.12 美分")
+    assert "价目表" not in tail
 
 
 def test_meditation_formatter_task_total():

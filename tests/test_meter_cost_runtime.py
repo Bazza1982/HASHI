@@ -88,6 +88,7 @@ def _receipt() -> UsageReceipt:
         request_id="req-1",
         line_items=[
             PerCallUsageLineItem(
+                engine="hashi-api",
                 model="claude-sonnet-4-6",
                 input_tokens=1000,
                 output_tokens=500,
@@ -192,7 +193,8 @@ async def test_foreground_tail_sends_single_deduped_message():
     assert len(runtime.sent) == 1
     _, text, kwargs = runtime.sent[0]
     assert kwargs["purpose"] == "meter-cost"
-    assert text.startswith("💰 前台回合：")
+    assert text.startswith("💰 本回合：")
+    assert "服务提供方：HASHI API" in text.splitlines()[0]
     # Dedup: the tail is a standalone message, never duplicated per stream chunk.
     assert runtime.voice_sent == []
     assert runtime.memory_turns == []
@@ -237,8 +239,8 @@ async def test_foreground_tail_uses_matching_request_state_under_overlap():
     )
 
     assert len(runtime.sent) == 1
-    assert "US$0.0123" in runtime.sent[0][1]
-    assert "US$0.0200" not in runtime.sent[0][1]
+    assert "1.23 cents" in runtime.sent[0][1]
+    assert "2.00 cents" not in runtime.sent[0][1]
 
 
 @pytest.mark.asyncio
@@ -304,6 +306,7 @@ async def test_meditation_tail_sends_when_meter_at_start():
     _, text, kwargs = runtime.sent[0]
     assert kwargs["purpose"] == "meditation-cost"
     assert text.startswith("🧘 冥想：")
+    assert "服务提供方：DeepSeek" in text.splitlines()[0]
     # Never leaks into memory / voice / wrapper / HChat.
     assert runtime.voice_sent == []
     assert runtime.memory_turns == []

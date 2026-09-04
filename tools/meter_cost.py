@@ -374,14 +374,15 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def _fmt_cost(cost_usd: float) -> str:
-    if cost_usd <= 0:
-        return "US$0"
-    if cost_usd < 0.0001:
-        return "< US$0.0001"
-    if cost_usd < 0.01:
-        return f"US${cost_usd:.6f}"
-    return f"US${cost_usd:.4f}"
+def _fmt_cost(cost_usd: float, *, locale: str | None) -> str:
+    """Render USD-denominated cost as cents for the compact meter tail."""
+
+    amount = "0" if cost_usd <= 0 else f"{cost_usd * 100:.2f}"
+    return _translate(
+        "meter.tail.cost.cents",
+        locale=locale,
+        amount=amount,
+    )
 
 
 def _translate(key: str, *, locale: str | None = None, **values: Any) -> str:
@@ -390,6 +391,54 @@ def _translate(key: str, *, locale: str | None = None, **values: Any) -> str:
     from orchestrator import ui_language
 
     return ui_language.tr(key, locale=locale, **values)
+
+
+_PROVIDER_DISPLAY_NAMES = {
+    "hashi-api": "HASHI API",
+    "hashi": "HASHI API",
+    "deepseek-api": "DeepSeek",
+    "deepseek": "DeepSeek",
+    "openrouter-api": "OpenRouter",
+    "openrouter": "OpenRouter",
+    "codex-cli": "Codex CLI",
+    "claude-cli": "Claude CLI",
+    "gemini-cli": "Gemini CLI",
+    "grok-cli": "Grok CLI",
+    "ollama-api": "Ollama",
+    "xai-api": "xAI API",
+    "xai": "xAI",
+    "hashi-runtime": "HASHI Runtime",
+}
+
+
+def _format_provider_names(
+    receipt: UsageReceipt,
+    *,
+    locale: str | None,
+) -> str:
+    """Render the physical provider engines represented by a receipt.
+
+    HER v2 may route different stages through different providers, so this is
+    deliberately derived from every line item instead of the top-level
+    backend.  Preserve first-use order while folding aliases that share the
+    same user-facing brand name.
+    """
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in receipt.line_items:
+        engine = str(getattr(item, "engine", "") or "").strip()
+        if not engine:
+            continue
+        display_name = _PROVIDER_DISPLAY_NAMES.get(engine.casefold(), engine)
+        dedupe_key = display_name.casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        names.append(display_name)
+    if not names:
+        return _translate("meter.tail.provider.unknown", locale=locale)
+    return " + ".join(names)
 
 
 def _format_receipt_lines(
@@ -403,9 +452,6 @@ def _format_receipt_lines(
 ) -> str:
     cost = receipt.cost_usd
     resolved_label = label or _translate(label_key, locale=locale)
-    revisions = ", ".join(receipt.pricing_revisions) or _translate(
-        "meter.tail.pricing_unknown", locale=locale
-    )
     if cost is None:
         cost_line = _translate(
             "meter.tail.cost.unknown",
@@ -419,7 +465,7 @@ def _format_receipt_lines(
             locale=locale,
             icon=icon,
             label=resolved_label,
-            pricing_revision=revisions,
+            cost=_fmt_cost(0.0, locale=locale),
         )
     elif receipt.dominant_cost_source() == "provider":
         cost_line = _translate(
@@ -431,8 +477,7 @@ def _format_receipt_lines(
             locale=locale,
             icon=icon,
             label=resolved_label,
-            cost=_fmt_cost(cost),
-            pricing_revision=revisions,
+            cost=_fmt_cost(cost, locale=locale),
         )
     else:
         cost_line = _translate(
@@ -440,15 +485,19 @@ def _format_receipt_lines(
             locale=locale,
             icon=icon,
             label=resolved_label,
-            cost=_fmt_cost(cost),
-            pricing_revision=revisions,
+            cost=_fmt_cost(cost, locale=locale),
         )
     if task_total_usd is not None:
         cost_line += _translate(
             "meter.tail.task_total",
             locale=locale,
-            cost=_fmt_cost(task_total_usd),
+            cost=_fmt_cost(task_total_usd, locale=locale),
         )
+    cost_line += _translate(
+        "meter.tail.provider",
+        locale=locale,
+        providers=_format_provider_names(receipt, locale=locale),
+    )
 
     cache_hit = receipt.prompt_cache_hit_tokens
     cache_rate = receipt.cache_hit_percent
@@ -499,25 +548,23 @@ def _format_receipt_lines(
         request_line = _translate(
             "meter.tail.requests.savings",
             locale=locale,
-            provider_requests=receipt.provider_request_count,
-            no_cache_cost=_fmt_cost(no_cache_cost),
-            cache_savings=_fmt_cost(cache_savings),
+            no_cache_cost=_fmt_cost(no_cache_cost, locale=locale),
+            cache_savings=_fmt_cost(cache_savings, locale=locale),
             cache_savings_percent=f"{savings_percent:.1f}",
         )
     elif no_cache_cost is not None:
         request_line = _translate(
             "meter.tail.requests.no_cache_only",
             locale=locale,
-            provider_requests=receipt.provider_request_count,
-            no_cache_cost=_fmt_cost(no_cache_cost),
+            no_cache_cost=_fmt_cost(no_cache_cost, locale=locale),
         )
     else:
         request_line = _translate(
             "meter.tail.requests.only",
             locale=locale,
-            provider_requests=receipt.provider_request_count,
         )
-    return "\n".join((cost_line, input_line, output_line, request_line))
+    usage_line = f"{input_line} {output_line}"
+    return "\n".join((cost_line, usage_line, request_line))
 
 
 def format_cost_tail(

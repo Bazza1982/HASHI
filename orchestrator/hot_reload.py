@@ -45,6 +45,10 @@ FOUNDATION_PHASES = {
     # across a newly added symbol cannot bind consumers to the old dictionary.
     "orchestrator.multimodal_contract": 0,
     "orchestrator.command_specs": 0,
+    # Slash-command consumers import audit-session helpers directly. Reload the
+    # provider first so the first hot reboot after adding a helper cannot ask a
+    # new consumer to import it from the previous in-memory module.
+    "orchestrator.slash_command_audit": 1,
     # Notification helpers are imported directly by command and runtime
     # consumers.  Reload the provider first so a hot reboot that introduces a
     # new helper cannot ask freshly reloaded consumers to import it from the
@@ -96,6 +100,10 @@ FOUNDATION_PHASES = {
     "orchestrator.her_v2.session_store": 0,
     "orchestrator.her_v2.backend_session": 1,
     "orchestrator.her_v2.config": 1,
+    # Request policy imports Effort directly and the HER adapter imports its
+    # resolver directly. Refresh it between those two providers so a minimal
+    # reboot adopts new request-scoped routes in one generation.
+    "orchestrator.her_v2.request_policy": 1,
     "orchestrator.her_v2.retry": 1,
     "orchestrator.her_v2.runtime_configuration": 2,
     "orchestrator.her_v2.lifecycle": 1,

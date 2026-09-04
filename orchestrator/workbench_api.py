@@ -4179,6 +4179,7 @@ class WorkbenchApiServer:
         *,
         runtime,
         canonical_content: dict[str, Any],
+        terminal: str | None = None,
     ) -> dict[str, Any] | None:
         voice_parts = [
             dict(part)
@@ -4226,6 +4227,15 @@ class WorkbenchApiServer:
                 )
             )
 
+        manager = getattr(runtime, "voice_manager", None)
+        native_enabled = getattr(manager, "native_audio_enabled", None)
+        native_authorized = False
+        if callable(native_enabled):
+            try:
+                native_authorized = bool(native_enabled(terminal))
+            except TypeError:
+                native_authorized = bool(native_enabled())
+
         state: dict[str, Any] = {
             "task": asyncio.create_task(_transcribe()),
             "ready_event": asyncio.Event(),
@@ -4235,7 +4245,12 @@ class WorkbenchApiServer:
             "attachment_id": attachment_ids[0],
             "attachment_ids": attachment_ids,
             "transcript_decisions": {},
-            "safe_voice": bool(getattr(runtime, "_safevoice_enabled", False)),
+            # A native-audio selection authorizes the complete raw-audio Turn.
+            # Safe Voice belongs only to transcript-authoritative text routes.
+            "safe_voice": bool(
+                getattr(runtime, "_safevoice_enabled", False)
+                and not native_authorized
+            ),
             "confirmation_requested": False,
             "confirmation_presented": False,
             "native_audio_completed": False,
@@ -4451,6 +4466,7 @@ class WorkbenchApiServer:
             transcript_state = self._begin_session_voice_transcription(
                 runtime=runtime,
                 canonical_content=canonical_content,
+                terminal=surface,
             )
             try:
                 request_id = await runtime.enqueue_request(
