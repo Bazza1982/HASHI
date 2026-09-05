@@ -1,6 +1,14 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+try {
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [Console]::InputEncoding = $utf8
+    [Console]::OutputEncoding = $utf8
+    $global:OutputEncoding = $utf8
+    $Host.UI.RawUI.WindowTitle = 'HASHI Portable'
+} catch {}
+
 $script:PortableRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $script:UsbAppRoot = Join-Path $script:PortableRoot 'app'
 $script:UsbPythonRoot = Join-Path $script:PortableRoot 'runtime\python'
@@ -22,6 +30,48 @@ $script:HashiPidPath = Join-Path $script:LauncherStateRoot 'hashi.pid'
 $script:WorkbenchPidPath = Join-Path $script:LauncherStateRoot 'workbench.pid'
 $script:HashiStartupTimeoutSeconds = 1800
 $script:HashiStartupProgressSeconds = 15
+
+function Write-BilingualMessage {
+    param(
+        [string]$English,
+        [string]$Chinese,
+        [ConsoleColor]$ForegroundColor = [ConsoleColor]::Gray
+    )
+    Write-Host $English -ForegroundColor $ForegroundColor
+    Write-Host $Chinese -ForegroundColor $ForegroundColor
+}
+
+function Read-SetupRetryChoice {
+    while ($true) {
+        try {
+            $choice = (Read-Host '[R] Retry / 重试    [X] Exit / 退出').Trim()
+        } catch {
+            return $false
+        }
+        if ($choice -match '^(?i:r|retry)$' -or $choice -eq '重试') { return $true }
+        if ($choice -match '^(?i:x|exit)$' -or $choice -eq '退出') { return $false }
+        Write-BilingualMessage `
+            -English 'Please enter R to retry or X to exit.' `
+            -Chinese '请输入 R 重试，或输入 X 退出。' `
+            -ForegroundColor Yellow
+    }
+}
+
+function Write-LauncherFailureHelp {
+    param([string]$EnglishAction = 'HASHI could not start.')
+    Write-BilingualMessage `
+        -English $EnglishAction `
+        -Chinese 'HASHI 无法启动。' `
+        -ForegroundColor Red
+    Write-BilingualMessage `
+        -English "Logs: $script:DataRoot\logs" `
+        -Chinese "日志位置：$script:DataRoot\logs" `
+        -ForegroundColor Yellow
+    Write-BilingualMessage `
+        -English 'Run Diagnose_HASHI.bat for a guided system check.' `
+        -Chinese '请运行 Diagnose_HASHI.bat 进行引导式系统检查。' `
+        -ForegroundColor Yellow
+}
 
 function Get-PortableConfig {
     return Get-Content -LiteralPath (Join-Path $script:DataRoot 'agents.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -114,52 +164,109 @@ function Use-ExistingLocalCache {
 function Ensure-LocalAccelerationCache {
     if (Use-ExistingLocalCache) { return $true }
     if ([string]$env:HASHI_PORTABLE_SKIP_LOCAL_CACHE -eq '1') {
-        Write-Host 'Local acceleration was skipped by HASHI_PORTABLE_SKIP_LOCAL_CACHE=1.' -ForegroundColor Yellow
+        Write-BilingualMessage `
+            -English 'Local runtime installation was explicitly skipped; HASHI will run from the USB drive.' `
+            -Chinese '已明确跳过本机运行组件安装；HASHI 将直接从 USB 运行。' `
+            -ForegroundColor Yellow
         return $false
     }
     if ($script:LocalCacheInstallAttempted) { return $false }
     $script:LocalCacheInstallAttempted = $true
     if ($null -eq (Get-LocalCacheManifest)) {
-        Write-Host 'This USB has no local acceleration payload; using the expanded USB copy.' -ForegroundColor Yellow
+        Write-BilingualMessage `
+            -English 'This USB has no local runtime installer; HASHI will run from the USB drive.' `
+            -Chinese '此 USB 不包含本机运行组件安装包；HASHI 将直接从 USB 运行。' `
+            -ForegroundColor Yellow
         return $false
     }
 
     $installer = Join-Path $PSScriptRoot 'Install-LocalCache.ps1'
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
-        Write-Host 'Local acceleration installer is missing; using the expanded USB copy.' -ForegroundColor Yellow
+        Write-BilingualMessage `
+            -English 'The local runtime installer is missing; HASHI will run from the USB drive.' `
+            -Chinese '本机运行组件安装程序缺失；HASHI 将直接从 USB 运行。' `
+            -ForegroundColor Yellow
         return $false
     }
-    Write-Host 'First use on this PC: preparing the local acceleration cache.' -ForegroundColor Cyan
-    Write-Host 'Windows will request administrator approval. Installation has no fixed 10-minute cutoff.' -ForegroundColor Yellow
-    try {
-        $powerShell = Join-Path $PSHOME 'powershell.exe'
-        $arguments = @(
-            '-NoLogo',
-            '-NoProfile',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-File',
-            (Quote-ProcessArgument $installer),
-            '-PauseOnError'
-        )
-        $process = Start-Process -FilePath $powerShell -Verb RunAs -ArgumentList $arguments -Wait -PassThru
-        if ($process.ExitCode -ne 0) {
-            Write-Host 'Local acceleration was not installed; continuing safely from the USB.' -ForegroundColor Yellow
-            Use-UsbExecutionRoots
-            return $false
+
+    $isUpdate = $false
+    if (Test-Path -LiteralPath $script:LocalCacheRoot -PathType Container) {
+        $isUpdate = $null -ne (Get-ChildItem -LiteralPath $script:LocalCacheRoot -Directory -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+    }
+    if ($isUpdate) {
+        Write-BilingualMessage `
+            -English 'Updating HASHI runtime' `
+            -Chinese '正在更新 HASHI 运行组件' `
+            -ForegroundColor Cyan
+        Write-BilingualMessage `
+            -English 'HASHI needs to update its local runtime files on this PC.' `
+            -Chinese 'HASHI 需要更新这台电脑上的本机运行组件。' `
+            -ForegroundColor Gray
+    } else {
+        Write-BilingualMessage `
+            -English 'Preparing HASHI for first use' `
+            -Chinese '正在为首次使用准备 HASHI' `
+            -ForegroundColor Cyan
+        Write-BilingualMessage `
+            -English 'HASHI needs to install local runtime files on this PC.' `
+            -Chinese 'HASHI 需要在这台电脑上安装本机运行组件。' `
+            -ForegroundColor Gray
+    }
+    Write-BilingualMessage `
+        -English 'Your conversations, settings, and other personal data will remain on the USB drive.' `
+        -Chinese '您的对话、设置和其他个人数据仍会保留在 USB 中。' `
+        -ForegroundColor Green
+    Write-BilingualMessage `
+        -English 'When Windows asks for permission, select Yes. Keep the USB drive connected until setup is complete.' `
+        -Chinese 'Windows 请求权限时，请选择“是”。安装完成前请勿拔出 USB。' `
+        -ForegroundColor Yellow
+
+    $powerShell = Join-Path $PSHOME 'powershell.exe'
+    $arguments = @(
+        '-NoLogo',
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        (Quote-ProcessArgument $installer)
+    )
+    while ($true) {
+        $failureDetail = $null
+        try {
+            $process = Start-Process -FilePath $powerShell -Verb RunAs -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -eq 0 -and (Use-ExistingLocalCache)) {
+                Write-BilingualMessage `
+                    -English 'Setup complete.' `
+                    -Chinese '安装完成。' `
+                    -ForegroundColor Green
+                return $true
+            }
+            if ($process.ExitCode -eq 0) {
+                $failureDetail = 'The installed runtime did not pass its readiness check.'
+            } else {
+                $failureDetail = "Setup exited with code $($process.ExitCode)."
+            }
+        } catch {
+            $failureDetail = $_.Exception.Message
         }
-    } catch {
-        Write-Host "Local acceleration could not be installed: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host 'Continuing safely from the expanded USB copy.' -ForegroundColor Yellow
+
         Use-UsbExecutionRoots
-        return $false
+        Write-BilingualMessage `
+            -English "Setup did not complete: $failureDetail" `
+            -Chinese "安装未完成：$failureDetail" `
+            -ForegroundColor Red
+        Write-BilingualMessage `
+            -English "Setup log: $script:DataRoot\logs\hashi-setup.log" `
+            -Chinese "安装日志：$script:DataRoot\logs\hashi-setup.log" `
+            -ForegroundColor Yellow
+        Write-BilingualMessage `
+            -English 'Correct the reported problem, then retry. HASHI will not start from an incomplete installation.' `
+            -Chinese '请修正上述问题后重试。安装未完成时，HASHI 不会启动。' `
+            -ForegroundColor Yellow
+        if (-not (Read-SetupRetryChoice)) {
+            throw 'Setup was not completed. HASHI was not started.'
+        }
     }
-    if (-not (Use-ExistingLocalCache)) {
-        Write-Host 'The installed cache did not pass its readiness check; using the USB copy.' -ForegroundColor Yellow
-        return $false
-    }
-    Write-Host 'Using the verified local program cache; authoritative data remains on the USB.' -ForegroundColor Green
-    return $true
 }
 
 function Initialize-PortableEnvironment {
@@ -248,8 +355,14 @@ function Start-HASHIBackend {
         '--agents',
         'portable'
     )
-    Write-Host "Starting HASHI Portable in $script:ExecutionMode mode..." -ForegroundColor Cyan
-    Write-Host 'A slow PC or USB fallback can take several minutes. Please keep this window open.' -ForegroundColor Yellow
+    Write-BilingualMessage `
+        -English 'Starting HASHI...' `
+        -Chinese '正在启动 HASHI……' `
+        -ForegroundColor Cyan
+    Write-BilingualMessage `
+        -English 'This may take a few minutes. Keep this window open and leave the USB connected.' `
+        -Chinese '这可能需要几分钟。请保持此窗口开启，并勿拔出 USB。' `
+        -ForegroundColor Yellow
     $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $script:DataRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Set-Content -LiteralPath $script:HashiPidPath -Value $process.Id -Encoding ASCII
 
@@ -270,7 +383,10 @@ function Start-HASHIBackend {
         $now = Get-Date
         if ($now -ge $nextProgress) {
             $elapsed = [int]($now - $startedAt).TotalSeconds
-            Write-Host "Still starting HASHI... $elapsed seconds elapsed (backend process $($process.Id) is running)." -ForegroundColor Cyan
+            Write-BilingualMessage `
+                -English "HASHI is still starting normally - $elapsed seconds elapsed." `
+                -Chinese "HASHI 仍在正常启动——已用时 $elapsed 秒。" `
+                -ForegroundColor Cyan
             $nextProgress = $now.AddSeconds($script:HashiStartupProgressSeconds)
         }
     } while ((Get-Date) -lt $deadline)
@@ -310,6 +426,10 @@ function Start-WorkbenchServer {
 
     $stdout = Join-Path $script:DataRoot 'logs\workbench-console.log'
     $stderr = Join-Path $script:DataRoot 'logs\workbench-console-error.log'
+    Write-BilingualMessage `
+        -English 'Starting Workbench...' `
+        -Chinese '正在启动 Workbench……' `
+        -ForegroundColor Cyan
     $process = Start-Process -FilePath $node -ArgumentList (Quote-ProcessArgument $server) -WorkingDirectory $script:WorkbenchRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Set-Content -LiteralPath $script:WorkbenchPidPath -Value $process.Id -Encoding ASCII
 

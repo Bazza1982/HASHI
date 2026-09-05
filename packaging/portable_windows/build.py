@@ -573,8 +573,23 @@ def copy_launchers(image_root: Path) -> None:
         "Diagnose_HASHI.bat",
         "PORTABLE_README.txt",
     ):
-        shutil.copy2(TEMPLATES / name, image_root / name)
-    shutil.copytree(TEMPLATES / "launcher", image_root / "launcher")
+        source = TEMPLATES / name
+        destination = image_root / name
+        if name == "PORTABLE_README.txt":
+            destination.write_text(
+                source.read_text(encoding="utf-8-sig"), encoding="utf-8-sig"
+            )
+        else:
+            shutil.copy2(source, destination)
+    launcher_root = image_root / "launcher"
+    shutil.copytree(TEMPLATES / "launcher", launcher_root)
+    # Windows PowerShell 5.1 interprets non-ASCII scripts using the active ANSI
+    # code page unless a UTF-8 BOM is present.  The templates stay ordinary
+    # UTF-8 in git, while every packaged PowerShell launcher is made reliably
+    # bilingual here.
+    for script in launcher_root.rglob("*.ps1"):
+        source = script.read_text(encoding="utf-8-sig")
+        script.write_text(source, encoding="utf-8-sig")
 
 
 def create_local_cache_payload(image_root: Path) -> dict:

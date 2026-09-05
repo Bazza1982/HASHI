@@ -8,7 +8,10 @@ $port = [int]$config.global.workbench_port
 try {
     Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/admin/shutdown" -Headers @{ 'X-Workbench-Token' = [string]$secrets.workbench_admin_token } -ContentType 'application/json' -Body '{"reason":"portable-stop"}' -TimeoutSec 5 | Out-Null
 } catch {
-    Write-Host 'HASHI API was already stopped or did not answer.' -ForegroundColor Yellow
+    Write-BilingualMessage `
+        -English 'HASHI was already stopped or did not answer.' `
+        -Chinese 'HASHI 已停止或没有响应。' `
+        -ForegroundColor Yellow
 }
 
 $hashiProcess = Get-LiveProcessFromPidFile -Path $script:HashiPidPath
@@ -30,5 +33,8 @@ if (Test-Path -LiteralPath $remoteClaim) {
 }
 
 Remove-Item -LiteralPath $script:HashiPidPath, $script:WorkbenchPidPath -Force -ErrorAction SilentlyContinue
-Write-Host 'HASHI Portable has stopped. It is now safe to eject the USB drive.' -ForegroundColor Green
+Write-BilingualMessage `
+    -English 'HASHI Portable has stopped. It is now safe to eject the USB drive.' `
+    -Chinese 'HASHI Portable 已停止，现在可以安全弹出 USB。' `
+    -ForegroundColor Green
 exit 0

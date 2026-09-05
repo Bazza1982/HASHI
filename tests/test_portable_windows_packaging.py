@@ -94,8 +94,9 @@ def test_portable_launcher_allows_slow_usb_cold_start_and_reports_progress():
     common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
 
     assert "$script:HashiStartupTimeoutSeconds = 1800" in common
-    assert "A slow PC or USB fallback can take several minutes" in common
-    assert "Still starting HASHI..." in common
+    assert "This may take a few minutes" in common
+    assert "HASHI is still starting normally" in common
+    assert "HASHI 仍在正常启动" in common
     assert "AddSeconds(75)" not in common
 
 
@@ -112,7 +113,9 @@ def test_portable_local_acceleration_is_admin_atomic_progressive_and_optional():
     assert "CommonApplicationData" in common
     assert "-Verb RunAs" in common
     assert "HASHI_PORTABLE_SKIP_LOCAL_CACHE" in common
-    assert "Continuing safely from the expanded USB copy" in common
+    assert "Read-SetupRetryChoice" in common
+    assert "HASHI will not start from an incomplete installation" in common
+    assert "hashi-setup.log" in common
     assert "SetEnvironmentVariable" not in common
     assert "setx" not in common.lower()
 
@@ -129,6 +132,87 @@ def test_portable_local_acceleration_is_admin_atomic_progressive_and_optional():
     assert "USB data" in uninstaller
     assert "HASHIPortableLocalAcceleration" in uninstaller
     assert "\\data" not in uninstaller.lower()
+
+
+def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
+    tmp_path,
+):
+    builder = _load_builder()
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+    installer = (TEMPLATES / "launcher" / "Install-LocalCache.ps1").read_text(
+        encoding="utf-8"
+    )
+    tui = (TEMPLATES / "launcher" / "Start-TUI.ps1").read_text(encoding="utf-8")
+    workbench = (TEMPLATES / "launcher" / "Start-Workbench.ps1").read_text(
+        encoding="utf-8"
+    )
+    diagnose = (TEMPLATES / "launcher" / "Diagnose-HASHI.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Preparing HASHI for first use" in common
+    assert "正在为首次使用准备 HASHI" in common
+    assert "Updating HASHI runtime" in common
+    assert "正在更新 HASHI 运行组件" in common
+    assert "When Windows asks for permission, select Yes" in common
+    assert "Windows 请求权限时，请选择“是”" in common
+    assert "Your conversations, settings, and other personal data" in common
+    assert "您的对话、设置和其他个人数据" in common
+    assert "[R] Retry / 重试" in common
+    assert "[X] Exit / 退出" in common
+
+    for english, chinese in (
+        ("Checking system requirements", "正在检查系统要求"),
+        ("Installing HASHI runtime", "正在安装 HASHI 运行组件"),
+        ("Verifying installed files", "正在验证已安装文件"),
+        ("Finishing setup", "正在完成安装"),
+    ):
+        assert english in installer
+        assert chinese in installer
+    assert '"$displayPercent%' in installer
+    assert "MB of $totalMiB MB" in installer
+    assert "$verifyIndex of $($records.Count)" in installer
+    assert "HASHI Setup / HASHI 安装" in installer
+    assert "Setup log:" in installer
+    assert "安装日志：" in installer
+
+    assert "HASHI is ready. Opening the terminal interface" in tui
+    assert "HASHI 已就绪。正在打开终端界面" in tui
+    assert "HASHI is ready. Opening Workbench" in workbench
+    assert "HASHI 已就绪。正在打开 Workbench" in workbench
+    assert "HASHI Portable system check" in diagnose
+    assert "HASHI Portable 系统检查" in diagnose
+    assert "All required checks passed" in diagnose
+    assert "所有必要检查均已通过" in diagnose
+    assert "Start-HASHIBackend" not in installer
+
+    user_visible = f"{common}\n{installer}"
+    for internal_wording in (
+        "Installation has no fixed 10-minute cutoff",
+        "HASHI local acceleration installer",
+        "Extracting small program files",
+    ):
+        assert internal_wording not in user_visible
+
+    for name in (
+        "Start_HASHI_TUI.bat",
+        "Start_HASHI_Workbench.bat",
+        "Install_HASHI_On_This_PC.bat",
+        "Uninstall_HASHI_From_This_PC.bat",
+        "Stop_HASHI.bat",
+        "Diagnose_HASHI.bat",
+    ):
+        assert "chcp 65001" in (TEMPLATES / name).read_text(encoding="utf-8")
+
+    builder.copy_launchers(tmp_path)
+    for script in (tmp_path / "launcher").glob("*.ps1"):
+        assert script.read_bytes().startswith(b"\xef\xbb\xbf")
+
+    readme_path = tmp_path / "PORTABLE_README.txt"
+    assert readme_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    readme = readme_path.read_text(encoding="utf-8-sig")
+    assert "Quick start / 快速开始" in readme
+    assert "If setup cannot complete / 如果安装无法完成" in readme
 
 
 def test_builder_consolidates_small_cache_files_but_keeps_large_usb_sources(tmp_path):

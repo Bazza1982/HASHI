@@ -6,6 +6,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+try {
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [Console]::InputEncoding = $utf8
+    [Console]::OutputEncoding = $utf8
+    $global:OutputEncoding = $utf8
+    $Host.UI.RawUI.WindowTitle = 'Remove HASHI Runtime / 删除 HASHI 运行组件'
+} catch {}
+
 $script:ProductRoot = [IO.Path]::GetFullPath(
     (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HASHI Portable')
 )
@@ -41,6 +49,7 @@ function Start-ElevatedUninstaller {
     } catch {
         if (-not $Quiet) {
             Write-Host "Administrator approval was cancelled or failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "管理员授权已取消或失败：$($_.Exception.Message)" -ForegroundColor Yellow
         }
         exit 1
     }
@@ -59,8 +68,10 @@ try {
     }
 
     if (-not $Quiet) {
-        Write-Host 'Removing the HASHI program/runtime cache from this PC...' -ForegroundColor Cyan
+        Write-Host 'Removing the HASHI runtime from this PC...' -ForegroundColor Cyan
+        Write-Host '正在从这台电脑删除 HASHI 运行组件……' -ForegroundColor Cyan
         Write-Host 'USB data, API keys, conversations, configuration, and workspaces will not be touched.' -ForegroundColor Yellow
+        Write-Host '不会更改 USB 中的数据、API 密钥、对话、配置或工作区。' -ForegroundColor Yellow
     }
 
     $cachePrefix = $script:CacheRoot.TrimEnd('\') + '\'
@@ -80,8 +91,10 @@ try {
     Remove-Item -LiteralPath $script:UninstallRegistryPath -Recurse -Force -ErrorAction SilentlyContinue
 
     if (-not $Quiet) {
-        Write-Host 'The local acceleration cache has been removed.' -ForegroundColor Green
+        Write-Host 'The local HASHI runtime has been removed.' -ForegroundColor Green
+        Write-Host 'HASHI 本机运行组件已删除。' -ForegroundColor Green
         Write-Host 'Your USB data is unchanged.' -ForegroundColor Green
+        Write-Host '您的 USB 数据未被更改。' -ForegroundColor Green
     }
 
     # The installed uninstaller may be running from ProductRoot.  A short-lived
@@ -102,8 +115,10 @@ Remove-Item -LiteralPath '$escapedRoot' -Recurse -Force -ErrorAction SilentlyCon
     exit 0
 } catch {
     if (-not $Quiet) {
-        Write-Host "HASHI local acceleration uninstall failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "HASHI runtime removal failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "HASHI 运行组件删除失败：$($_.Exception.Message)" -ForegroundColor Red
         Write-Host 'USB data was not targeted.' -ForegroundColor Yellow
+        Write-Host '操作未以 USB 数据为目标。' -ForegroundColor Yellow
     }
     exit 1
 }

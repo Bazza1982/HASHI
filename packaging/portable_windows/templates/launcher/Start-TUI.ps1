@@ -2,10 +2,13 @@
 
 try {
     $health = Start-HASHIBackend
-    Write-Host "HASHI is ready: $($health.instance_id)" -ForegroundColor Green
+    Write-BilingualMessage `
+        -English 'HASHI is ready. Opening the terminal interface...' `
+        -Chinese 'HASHI 已就绪。正在打开终端界面……' `
+        -ForegroundColor Green
     & (Join-Path $script:PythonRoot 'python.exe') (Join-Path $script:HashiRoot 'tui.py')
     exit $LASTEXITCODE
 } catch {
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-LauncherFailureHelp -EnglishAction "HASHI could not start: $($_.Exception.Message)"
     exit 1
 }
