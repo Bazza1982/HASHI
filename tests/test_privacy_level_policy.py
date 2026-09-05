@@ -15,7 +15,13 @@ from orchestrator.privacy_levels import (
 
 @pytest.mark.parametrize(
     "engine",
-    ("openrouter-api", "deepseek-api", "xai-api", "ollama-api"),
+    (
+        "openrouter-api",
+        "deepseek-api",
+        "openai-compatible-api",
+        "xai-api",
+        "ollama-api",
+    ),
 )
 def test_api_backends_declare_level_two_support(engine: str) -> None:
     assert get_supported_privacy_levels(engine) == (0, 1, 2)

@@ -1,0 +1,27 @@
+# HASHI Portable Remote: LAN discovery and one-click pairing.
+server:
+  host: "0.0.0.0"
+  port: 18767
+  use_tls: false
+
+lifecycle:
+  remote_enabled: true
+  remote_supervised: false
+
+security:
+  # Pairing is one click, but all protected actions still require its token.
+  lan_mode: false
+  pairing_auto_approve: true
+  pairing_token_ttl_seconds: 604800
+  max_terminal_level: "L3_RESTART"
+
+terminal:
+  enabled: true
+  timeout_seconds: 30
+
+discovery:
+  backend: "lan"
+  service_type: "_hashi._tcp.local."
+
+logging:
+  level: INFO

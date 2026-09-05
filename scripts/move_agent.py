@@ -6,10 +6,11 @@ Moves or copies an agent (config + secrets + workspace) between HASHI instances,
 to/from USB/portable paths, or between WSL and Windows.
 
 Usage:
-  # Instance-to-instance (direct)
+  # Instance-to-instance (agent-move-v1 over authenticated HASHI Remote)
   python scripts/move_agent.py zelda hashi2
   python scripts/move_agent.py zelda hashi9 --keep-source
-  python scripts/move_agent.py zelda hashi1 --sync          # move-back with memory sync
+  python scripts/move_agent.py --confirm <move-id>
+  python scripts/move_agent.py --cancel <move-id>
 
   # Export to package file
   python scripts/move_agent.py zelda --export /mnt/usb
@@ -30,11 +31,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import base64
 import getpass
 import json
 import os
-import re
 import shutil
 import sqlite3
 import sys
@@ -43,6 +42,18 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+HASHI_ROOT = Path(__file__).resolve().parent.parent
+if str(HASHI_ROOT) not in sys.path:
+    sys.path.insert(0, str(HASHI_ROOT))
+
+from orchestrator.agent_move.coordinator import (
+    cancel_outbound_move,
+    confirm_outbound_move,
+    prepare_outbound_move,
+    preview_outbound_move,
+)
+from orchestrator.agent_move.package import AgentMoveError
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +119,18 @@ def load_instances(instances_file: Optional[Path] = None) -> dict:
     return {}
 
 
+def local_instance_id() -> str:
+    try:
+        local_cfg = json.loads(
+            (HASHI_ROOT / "agents.json").read_text(encoding="utf-8-sig")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "HASHI"
+    if not isinstance(local_cfg, dict):
+        return "HASHI"
+    return str((local_cfg.get("global") or {}).get("instance_id") or "HASHI").upper()
+
+
 def resolve_instance(name: str, instances: dict) -> dict:
     if name not in instances:
         print(f"Error: unknown instance '{name}'. Known: {list(instances.keys())}")
@@ -125,6 +148,10 @@ def instance_root(inst: dict) -> Path:
     """Return the filesystem root of the instance, accessible from current OS."""
     platform = inst.get("platform", "wsl")
     root = inst.get("root")
+    if root is None and not inst.get("wsl_root") and not inst.get("wsl_root_from_windows"):
+        raise ValueError(
+            "this instance does not publish a filesystem root; use agent-move-v1 over HASHI Remote"
+        )
     if platform == "windows":
         # If running in WSL, use the wsl_root mapping
         if _is_wsl():
@@ -660,11 +687,29 @@ def main():
     parser.add_argument("--list-instances", action="store_true", help="List known instances")
     parser.add_argument("--list-agents", nargs="?", const="auto", metavar="INSTANCE", help="List agents in an instance")
     parser.add_argument("--instances-file", metavar="FILE", help="Path to instances.json")
-    parser.add_argument("--source-instance", metavar="INSTANCE", default="hashi2", help="Source instance (default: hashi2)")
+    parser.add_argument("--source-instance", metavar="INSTANCE", help="Source instance (default: local global.instance_id)")
     parser.add_argument("--password", metavar="PASS", help="Encryption password (prompted if omitted for encrypted packages)")
+    parser.add_argument("--yes", action="store_true", help="Confirm the prepared two-phase move")
+    parser.add_argument("--confirm", metavar="MOVE_ID", help="Commit an already staged agent-move-v1 package")
+    parser.add_argument("--cancel", metavar="MOVE_ID", help="Roll back an already staged agent-move-v1 package")
 
     args = parser.parse_args()
+    if not args.source_instance:
+        args.source_instance = local_instance_id().lower()
     instances = load_instances(Path(args.instances_file) if args.instances_file else None)
+
+    if args.confirm or args.cancel:
+        try:
+            result = (
+                confirm_outbound_move(HASHI_ROOT, instances, args.confirm)
+                if args.confirm
+                else cancel_outbound_move(HASHI_ROOT, instances, args.cancel)
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+        except (AgentMoveError, OSError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # ── list instances ────────────────────────────────────────────────────
     if args.list_instances:
@@ -679,7 +724,11 @@ def main():
     if args.list_agents is not None:
         inst_name = args.list_agents if args.list_agents != "auto" else args.source_instance
         inst = resolve_instance(inst_name, instances)
-        root = instance_root(inst)
+        root = (
+            HASHI_ROOT
+            if str(inst_name).lower() == str(args.source_instance).lower()
+            else instance_root(inst)
+        )
         agents = list_agents_in_instance(root)
         print(f"\nAgents in {inst_name} ({root}):")
         for a in agents:
@@ -691,11 +740,14 @@ def main():
         pkg = Path(args.import_path)
         if args.target:
             inst = resolve_instance(args.target, instances)
-            target_root = instance_root(inst)
+            target_root = (
+                HASHI_ROOT
+                if str(args.target).lower() == str(args.source_instance).lower()
+                else instance_root(inst)
+            )
         else:
-            # default: current hashi2
-            inst = resolve_instance(args.source_instance, instances)
-            target_root = instance_root(inst)
+            # Default to the local instance; no registry root is required.
+            target_root = HASHI_ROOT
 
         password = args.password
         # Check if package has encrypted secrets
@@ -712,8 +764,8 @@ def main():
         if not args.agent_id:
             print("Error: agent_id required for --export"); sys.exit(1)
 
-        inst = resolve_instance(args.source_instance, instances)
-        source_root = instance_root(inst)
+        resolve_instance(args.source_instance, instances)
+        source_root = HASHI_ROOT
         dest_dir = Path(args.export)
 
         password = None
@@ -736,21 +788,66 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    src_inst = resolve_instance(args.source_instance, instances)
-    dst_inst = resolve_instance(args.target_instance, instances)
-    source_root = instance_root(src_inst)
-    target_root = instance_root(dst_inst)
+    local_instance = local_instance_id()
+    source_instance = str(args.source_instance or local_instance).upper()
+    if source_instance != local_instance:
+        print(
+            f"Error: this compatibility CLI can transfer out only from its local instance "
+            f"{local_instance}; run the updated /move or script on {source_instance}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.sync:
+        print(
+            "Error: --sync is retired; agent-move-v1 already includes durable memory. "
+            "Use --keep-source for an inactive copy.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.plain:
+        print("Error: plaintext Agent credentials are not supported by agent-move-v1.", file=sys.stderr)
+        sys.exit(1)
+    if args.no_secrets:
+        print(
+            "Error: the two-phase /move compatibility path always encrypts Agent-only credentials; "
+            "use the HASHI ↔ Hermes transfer tool for offline selective exports.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    success = move_agent(
-        args.agent_id,
-        source_root,
-        target_root,
-        keep_source=args.keep_source,
-        sync_memories=args.sync,
-        include_secrets=not args.no_secrets,
-        dry_run=args.dry_run,
-    )
-    sys.exit(0 if success else 1)
+    try:
+        if args.dry_run:
+            result = preview_outbound_move(
+                HASHI_ROOT,
+                instances,
+                args.agent_id,
+                args.target_instance,
+                source_instance=source_instance,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+
+        prepared = prepare_outbound_move(
+            HASHI_ROOT,
+            instances,
+            args.agent_id,
+            args.target_instance,
+            source_instance=source_instance,
+            keep_source=args.keep_source,
+        )
+        print(json.dumps(prepared, ensure_ascii=False, indent=2))
+        if not args.yes:
+            print(
+                "\nPackage verified and staged inactive; source is unchanged. "
+                f"Run scripts/move_agent.py --confirm {prepared['package_id']} to commit it, "
+                f"or --cancel {prepared['package_id']} to roll it back."
+            )
+            return
+        result = confirm_outbound_move(HASHI_ROOT, instances, prepared["package_id"])
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except (AgentMoveError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,455 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import re
+import shutil
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+import pytest
+import yaml
+
+from orchestrator.config import ConfigManager
+from orchestrator.flexible_backend_manager import FlexibleBackendManager
+
+ROOT = Path(__file__).resolve().parents[1]
+PORTABLE = ROOT / "packaging" / "portable_windows"
+TEMPLATES = PORTABLE / "templates"
+
+
+def _load_builder():
+    spec = importlib.util.spec_from_file_location(
+        "hashi_portable_windows_builder", PORTABLE / "build.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_portable_profile_has_one_her_engine_and_configurable_regional_providers(
+    tmp_path,
+):
+    shutil.copy2(TEMPLATES / "agents.json", tmp_path / "agents.json")
+    workspace = tmp_path / "workspaces" / "portable"
+    workspace.mkdir(parents=True)
+    shutil.copy2(TEMPLATES / "agent.md", workspace / "agent.md")
+    (tmp_path / "secrets.json").write_text(
+        json.dumps(
+            {
+                "authorized_telegram_id": 0,
+                "portable": "WORKBENCH_ONLY_NO_TOKEN",
+                "deepseek_api_key": "test-key",
+                "dashscope_api_key": "test-qwen-key",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    global_config, [agent], secrets = ConfigManager(
+        tmp_path / "agents.json",
+        tmp_path / "secrets.json",
+        bridge_home=tmp_path,
+    ).load()
+    manager = FlexibleBackendManager(agent, global_config, secrets)
+
+    assert agent.active_backend == "her-v2"
+    assert agent.default_mode == "fixed"
+    assert agent.access_scope == "drive"
+    assert global_config.canonical_audit["buffer_flush_timeout_seconds"] == 120
+    assert [item["engine"] for item in agent.allowed_backends] == ["her-v2"]
+    assert {item["engine"] for item in manager.get_her_v2_provider_options()} == {
+        "deepseek-api",
+        "openai-compatible-api",
+    }
+    providers = global_config.her_providers["providers"]
+    assert providers["deepseek"]["base_url"] == "https://api.deepseek.com/v1"
+    assert providers["qwen"]["base_url"] == (
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+
+
+def test_portable_remote_is_one_click_with_seven_day_tokens():
+    config = yaml.safe_load((TEMPLATES / "remote-config.yaml").read_text())
+
+    assert config["security"]["lan_mode"] is False
+    assert config["security"]["pairing_auto_approve"] is True
+    assert config["security"]["pairing_token_ttl_seconds"] == 604800
+    assert config["discovery"]["backend"] == "lan"
+    assert config["lifecycle"] == {
+        "remote_enabled": True,
+        "remote_supervised": False,
+    }
+
+
+def test_portable_launcher_explicitly_grants_all_host_filesystem_drives():
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+
+    assert "Get-PSDrive -PSProvider FileSystem" in common
+    assert "HASHI_ADDITIONAL_ACCESS_ROOTS" in common
+
+
+def test_portable_launcher_allows_slow_usb_cold_start_and_reports_progress():
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+
+    assert "$script:HashiStartupTimeoutSeconds = 1800" in common
+    assert "$script:WorkbenchStartupTimeoutSeconds = 300" in common
+    assert "This may take a few minutes" in common
+    assert "HASHI is still starting normally" in common
+    assert "HASHI 仍在正常启动" in common
+    assert "Workbench is still starting normally" in common
+    assert "Workbench 仍在正常启动" in common
+    assert "AddSeconds(75)" not in common
+    assert "AddSeconds(45)" not in common
+    assert "HASHI_WORKBENCH_OBSERVABILITY_DIR" in common
+    assert "HASHI_REMOTE_LIVE_ENDPOINTS_PATH" in common
+    assert "LocalInstanceRoot 'State'" in common
+    assert "LocalInstanceRoot 'Logs\\workbench'" in common
+
+
+def test_portable_stop_closes_owned_runtime_and_browser_before_safe_eject():
+    stop = (TEMPLATES / "launcher" / "Stop-HASHI.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Get-PortableOwnedProcesses" in stop
+    assert "browser-profile" in stop
+    assert "Start_HASHI_TUI.bat" in stop
+    assert "Start_HASHI_Workbench.bat" in stop
+    assert "Get-CimInstance Win32_Process" in stop
+    assert "Do not eject the USB drive" in stop
+    assert "请勿拔出 USB" in stop
+    assert stop.index("$remaining.Count -gt 0") < stop.index(
+        "HASHI Portable has stopped"
+    )
+
+
+def test_portable_local_acceleration_is_admin_atomic_progressive_and_optional():
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+    installer = (TEMPLATES / "launcher" / "Install-LocalCache.ps1").read_text(
+        encoding="utf-8"
+    )
+    uninstaller = (TEMPLATES / "launcher" / "Uninstall-LocalCache.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Ensure-LocalAccelerationCache" in common
+    assert "CommonApplicationData" in common
+    assert "-Verb RunAs" in common
+    assert "HASHI_PORTABLE_SKIP_LOCAL_CACHE" in common
+    assert "Read-SetupRetryChoice" in common
+    assert "HASHI will not start from an incomplete installation" in common
+    assert "hashi-setup.log" in common
+    assert "SetEnvironmentVariable" not in common
+    assert "setx" not in common.lower()
+
+    assert "Test-IsAdministrator" in installer
+    assert "Write-Progress" in installer
+    assert "Get-Sha256WithProgress" in installer
+    assert "Move-Item -LiteralPath $stage -Destination $finalRoot" in installer
+    assert "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" in installer
+    assert "AddMinutes(10)" not in installer
+    assert "deadline" not in installer.lower()
+    assert "usb:data" in installer
+    assert "Resolve-OwnedLegacyInstallation" in installer
+    assert "Remove-VerifiedLegacyInstallation" in installer
+    assert "HASHIPortableLocalAcceleration" in installer
+    assert "the legacy ownership marker does not match this USB and bundle" in installer
+    assert "Remove-Item -LiteralPath $script:LegacyCacheRoot -Recurse" not in installer
+    assert "Remove-Item -LiteralPath $script:ProductRoot -Recurse" not in installer
+
+    assert "CommonApplicationData" in uninstaller
+    assert "USB data" in uninstaller
+    assert "HASHIPortable-$requestedId" in uninstaller
+    assert "Assert-InstanceOwner" in uninstaller
+    assert "Type REMOVE to continue" in uninstaller
+    assert "portable-instance.json" in uninstaller
+    assert "Remove-Item -LiteralPath $script:ProductRoot -Recurse" not in uninstaller
+    assert "Remove-Item -LiteralPath $script:InstancesRoot -Recurse" not in uninstaller
+
+
+def test_portable_host_runtime_and_uninstall_are_scoped_to_one_random_identity(
+    tmp_path,
+):
+    builder = _load_builder()
+    secrets_path = tmp_path / "source-secrets.json"
+    secrets_path.write_text(
+        json.dumps({"deepseek_api_key": "test-key"}), encoding="utf-8"
+    )
+    builder.configure_data(tmp_path, secrets_path, allow_missing_key=False)
+
+    identity = json.loads(
+        (tmp_path / "data" / "portable-instance.json").read_text(encoding="utf-8")
+    )
+    assert identity["schema_version"] == 1
+    assert identity["product"] == "HASHI Portable Windows x64"
+    assert re.fullmatch(r"[0-9a-f]{32}", identity["portable_instance_id"])
+
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+    installer = (TEMPLATES / "launcher" / "Install-LocalCache.ps1").read_text(
+        encoding="utf-8"
+    )
+    uninstaller = (TEMPLATES / "launcher" / "Uninstall-LocalCache.ps1").read_text(
+        encoding="utf-8"
+    )
+    for source in (common, installer, uninstaller):
+        assert "portable-instance.json" in source
+        assert "Instances\\" in source
+    assert '.hashi-portable-owner.json' in installer
+    assert '.hashi-portable-registration.json' in installer
+    assert 'portable_instance_id = $script:PortableInstanceId' in installer
+    assert 'portable_instance_id = $script:InstanceId' not in installer
+    assert '.hashi-portable-owner.json' in uninstaller
+    assert '.hashi-portable-registration.json' in uninstaller
+    assert "Get-CimInstance Win32_Process" in uninstaller
+    assert "Test-PathInsideRoot" in uninstaller
+    assert "$script:CacheRoot = Join-Path $script:ProductRoot 'Cache'" not in installer
+    assert "$script:LocalCacheRoot = Join-Path $script:LocalProductRoot 'Cache'" not in common
+    assert "source_volume" in installer
+    assert "required_files" in installer
+
+
+def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
+    tmp_path,
+):
+    builder = _load_builder()
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+    installer = (TEMPLATES / "launcher" / "Install-LocalCache.ps1").read_text(
+        encoding="utf-8"
+    )
+    tui = (TEMPLATES / "launcher" / "Start-TUI.ps1").read_text(encoding="utf-8")
+    workbench = (TEMPLATES / "launcher" / "Start-Workbench.ps1").read_text(
+        encoding="utf-8"
+    )
+    diagnose = (TEMPLATES / "launcher" / "Diagnose-HASHI.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Preparing HASHI for first use" in common
+    assert "正在为首次使用准备 HASHI" in common
+    assert "Updating HASHI runtime" in common
+    assert "正在更新 HASHI 运行组件" in common
+    assert "When Windows asks for permission, select Yes" in common
+    assert "Windows 请求权限时，请选择“是”" in common
+    assert "Your conversations, settings, and other personal data" in common
+    assert "您的对话、设置和其他个人数据" in common
+    assert "[R] Retry / 重试" in common
+    assert "[X] Exit / 退出" in common
+
+    for english, chinese in (
+        ("Checking system requirements", "正在检查系统要求"),
+        ("Installing HASHI runtime", "正在安装 HASHI 运行组件"),
+        ("Verifying installed files", "正在验证已安装文件"),
+        ("Finishing setup", "正在完成安装"),
+    ):
+        assert english in installer
+        assert chinese in installer
+    assert '"$displayPercent%' in installer
+    assert "MB of $totalMiB MB" in installer
+    assert "$verifyIndex of $($records.Count)" in installer
+    assert "HASHI Setup / HASHI 安装" in installer
+    assert "Setup log:" in installer
+    assert "安装日志：" in installer
+
+    assert "HASHI is ready. Opening the terminal interface" in tui
+    assert "HASHI 已就绪。正在打开终端界面" in tui
+    assert "HASHI is ready. Opening Workbench" in workbench
+    assert "HASHI 已就绪。正在打开 Workbench" in workbench
+    assert "HASHI Portable system check" in diagnose
+    assert "HASHI Portable 系统检查" in diagnose
+    assert "All required checks passed" in diagnose
+    assert "所有必要检查均已通过" in diagnose
+    assert "Start-HASHIBackend" not in installer
+
+    user_visible = f"{common}\n{installer}"
+    for internal_wording in (
+        "Installation has no fixed 10-minute cutoff",
+        "HASHI local acceleration installer",
+        "Extracting small program files",
+    ):
+        assert internal_wording not in user_visible
+
+    for name in (
+        "Start_HASHI_TUI.bat",
+        "Start_HASHI_Workbench.bat",
+        "Install_HASHI_On_This_PC.bat",
+        "Uninstall_HASHI_From_This_PC.bat",
+        "Stop_HASHI.bat",
+        "Diagnose_HASHI.bat",
+    ):
+        assert "chcp 65001" in (TEMPLATES / name).read_text(encoding="utf-8")
+
+    builder.copy_launchers(tmp_path)
+    for script in (tmp_path / "launcher").glob("*.ps1"):
+        assert script.read_bytes().startswith(b"\xef\xbb\xbf")
+
+    readme_path = tmp_path / "PORTABLE_README.txt"
+    assert readme_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    readme = readme_path.read_text(encoding="utf-8-sig")
+    assert "Quick start / 快速开始" in readme
+    assert "If setup cannot complete / 如果安装无法完成" in readme
+
+
+def test_builder_consolidates_small_cache_files_but_keeps_large_usb_sources(tmp_path):
+    builder = _load_builder()
+    small = tmp_path / "app" / "hashi" / "main.py"
+    small.parent.mkdir(parents=True)
+    small.write_text("print('portable')\n", encoding="utf-8")
+    other = tmp_path / "runtime" / "python" / "python.exe"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"small-runtime")
+    large = tmp_path / "runtime" / "bin" / "ffmpeg.exe"
+    large.parent.mkdir(parents=True)
+    large.write_bytes(b"x" * builder.LOCAL_CACHE_ARCHIVE_MAX_FILE_BYTES)
+
+    manifest = builder.create_local_cache_payload(tmp_path)
+    stored = json.loads(
+        (tmp_path / "install" / builder.LOCAL_CACHE_MANIFEST).read_text(
+            encoding="utf-8"
+        )
+    )
+    records = {record["path"]: record for record in stored["files"]}
+    with zipfile.ZipFile(tmp_path / stored["archive"]["path"]) as archive:
+        archived = set(archive.namelist())
+
+    assert manifest == stored
+    assert records["app/hashi/main.py"]["delivery"] == "archive"
+    assert records["runtime/python/python.exe"]["delivery"] == "archive"
+    assert records["runtime/bin/ffmpeg.exe"]["delivery"] == "direct"
+    assert "app/hashi/main.py" in archived
+    assert "runtime/python/python.exe" in archived
+    assert "runtime/bin/ffmpeg.exe" not in archived
+    assert stored["expanded_usb_fallback"] is True
+    assert stored["administrator_required"] is True
+    assert stored["authoritative_data"] == "usb:data"
+    assert len(stored["bundle_id"]) == 64
+    assert stored["cache_key"] == stored["bundle_id"][:20]
+
+
+def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatch):
+    builder = _load_builder()
+    source = tmp_path / "source"
+    destination = tmp_path / "portable-app"
+    tracked = {
+        "main.py": "print('main')\n",
+        "tui.py": "print('tui')\n",
+        "LICENSE": "MIT\n",
+        "exp/__init__.py": "",
+        "exp/loader.py": "",
+        "exp/asset-packs.json": "{}\n",
+        "orchestrator/tracked.py": "TRACKED = True\n",
+        "adapters/codex_cli.py": "must be pruned\n",
+        "superloops/recordings/tracked-run/state.json": "must be ignored\n",
+    }
+    for relative, content in tracked.items():
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", source], check=True)
+    subprocess.run(["git", "-C", source, "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            source,
+            "-c",
+            "user.name=Portable Test",
+            "-c",
+            "user.email=portable@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+
+    untracked = (
+        source / "orchestrator" / "local-state.json",
+        source / "scripts" / "secrets.json",
+        source / "superloops" / "loops" / "private-run" / "state.json",
+    )
+    for path in untracked:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("private\n", encoding="utf-8")
+
+    monkeypatch.setattr(builder, "HASHI_ROOT", source)
+    builder.copy_hashi_source(destination)
+
+    assert (destination / "orchestrator" / "tracked.py").is_file()
+    assert not (destination / "adapters" / "codex_cli.py").exists()
+    assert not (destination / "superloops" / "recordings").exists()
+    for path in untracked:
+        assert not (destination / path.relative_to(source)).exists()
+
+    builder.require_clean_tracked_worktree(source, label="fixture")
+    (source / "orchestrator" / "tracked.py").write_text(
+        "TRACKED = False\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="uncommitted tracked changes"):
+        builder.require_clean_tracked_worktree(source, label="fixture")
+
+
+def test_portable_dependency_lock_keeps_requested_compact_capabilities():
+    lock = (PORTABLE / "requirements.lock").read_text(encoding="utf-8")
+    for required in (
+        "playwright==1.58.0",
+        "psutil==7.2.2",
+        "pymupdf==1.27.2.2",
+        "textual==8.1.1",
+        "zeroconf==0.148.0",
+    ):
+        assert required in lock
+    for excluded in (
+        "faster-whisper==",
+        "numpy==",
+        "onnxruntime==",
+        "paddleocr==",
+        "paddlepaddle==",
+    ):
+        assert excluded not in lock
+
+
+def test_portable_launchers_are_drive_relative_and_gateway_stays_disabled():
+    for name in (
+        "Start_HASHI_TUI.bat",
+        "Start_HASHI_Workbench.bat",
+        "Install_HASHI_On_This_PC.bat",
+        "Uninstall_HASHI_From_This_PC.bat",
+        "Stop_HASHI.bat",
+        "Diagnose_HASHI.bat",
+    ):
+        source = (TEMPLATES / name).read_text(encoding="utf-8")
+        assert "%~dp0" in source
+        assert "E:\\" not in source
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+    assert "$env:HASHI_TUI_ENABLE_API_GATEWAY = '0'" in common
+    assert "$env:BRIDGE_HOME = $script:DataRoot" in common
+    assert "$env:HASHI_REMOTE_ROOT = $script:DataRoot" in common
+    assert "$env:HASHI_OCR_MODEL_ROOT" in common
+
+
+def test_builder_enforces_capacity_and_prunes_cli_adaptors():
+    builder = _load_builder()
+
+    assert builder.MAX_IMAGE_BYTES == 957_000_000
+    assert builder.CAPACITY_CHECK_CLUSTER_BYTES == 32 * 1024
+    assert builder.PAIRING_TOKEN_TTL_SECONDS == 604800
+    assert builder.LOCAL_CACHE_ARCHIVE_MAX_FILE_BYTES == 512 * 1024
+    assert set(builder.ROOT_SOURCE_FILES) == {"main.py", "tui.py", "LICENSE"}
+    assert "exp/loader.py" in builder.ROOT_PACKAGE_FILES
+    assert "veritas" in builder.SOURCE_DIRS
+    for name in ("codex", "claude", "gemini", "grok"):
+        assert f"adapters/{name}_cli.py" in builder.PRUNED_SOURCE_PATHS
+    for name in ("codex", "claude", "gemini"):
+        assert f"skills/{name}" in builder.PRUNED_SOURCE_PATHS
+
+    remote_config = (TEMPLATES / "remote-config.yaml").read_text(encoding="utf-8")
+    assert "lan_mode: false" in remote_config
+    assert "pairing_auto_approve: true" in remote_config
+
+    builder_source = (PORTABLE / "build.py").read_text(encoding="utf-8")
+    assert "createRequire(import.meta.url)" in builder_source

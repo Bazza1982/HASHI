@@ -48,7 +48,11 @@ def _find_chrome_executable() -> Optional[str]:
         import os
         pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
         pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        local = os.environ.get("LOCALAPPDATA", "")
         candidates = [
+            rf"{pf86}\Microsoft\Edge\Application\msedge.exe",
+            rf"{pf}\Microsoft\Edge\Application\msedge.exe",
+            rf"{local}\Microsoft\Edge\Application\msedge.exe",
             rf"{pf}\Google\Chrome\Application\chrome.exe",
             rf"{pf86}\Google\Chrome\Application\chrome.exe",
             rf"{pf}\Chromium\Application\chrome.exe",

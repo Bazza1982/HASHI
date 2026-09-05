@@ -102,11 +102,11 @@ The following decisions are fixed for the first implementation:
     the allowed range is one minute through indefinite retention.
 13. Indefinite retention means the asset is deliberately preserved for later
     download and for future authorized model access.
-14. Safe Voice retains its confirm-or-discard design, but it is requested only
-    when Triage, fallback, or a tool-capable route is about to consume the
-    voice. A no-tool Audio Direct/Immediate chat never opens Safe Voice merely
-    because its independent audit transcript finished. No correction editor is
-    added.
+14. Selecting native audio is explicit authorization for the complete
+    voice-origin Turn. Audio Direct, Audio Immediate, Triage, fallback, future
+    work stages, and the derived local transcript therefore bypass Safe Voice.
+    Safe Voice retains its confirm-or-discard design only for transcript-first
+    text-model voice routes. No correction editor is added.
 
 ## 3. Goals
 
@@ -669,9 +669,9 @@ For a voice-origin Effort Zero Turn:
 8. emit both immediately; and
 9. store the local input transcript for future PCM when available.
 
-Safe Voice does not gate this no-tool native chat path because no local
-transcript is being released to the model. Future tool-enabled Audio Direct is
-a separate activation gate.
+Safe Voice does not gate this path because selecting native audio authorizes
+the complete Turn. Future tool-enabled Audio Direct still requires its normal
+tool-side approval and fencing; Safe Voice is not a second native-mode gate.
 
 ### 12.3 Low effort and above
 
@@ -692,9 +692,9 @@ Triage chooses independently:
   the required structured Triage response, it may receive the original audio
   and return text-only structured Triage output;
 - otherwise it receives the local transcript through the text-only path; and
-- when Safe Voice is enabled, either Triage input path waits for the same
-  confirm-or-discard decision before Triage consumes the voice. Audio Immediate
-  remains independent and is not delayed.
+- selecting native audio authorizes either Triage input path, so Triage never
+  opens Safe Voice for that Turn. Audio Immediate remains independent and is
+  not delayed.
 
 An audio-capable Triage model must request text output only. It does not need
 native audio output and should not pay the latency or cost of generating it.
@@ -781,30 +781,27 @@ When Safe Voice is off:
 
 ### 13.3 Safe Voice on
 
-Safe Voice governs voice consumption outside the no-tool native chat path.
+Safe Voice governs only transcript-first voice routes, where local STT becomes
+the authoritative input to an ordinary text model. This includes the text
+model + TTS mode and text-only replies produced from the same transcript-first
+path.
 
-- Audio Direct and Audio Immediate remain immediate because they consume raw
-  audio and have no tools in the proof of concept.
-- Finishing local STT alone records a deferred `ready` audit transcript; it
-  does not display a confirmation prompt.
-- A no-tool Audio Direct completion with no other consumer automatically
-  releases that transcript into future PCM without a prompt.
-- Any Triage path waits for confirmation before it receives either the local
-  transcript or original audio. Triage is a routing/action boundary even when
-  its selected model can hear audio natively.
-- Fallback and any other transcript-dependent stage also wait.
-- A future tool-capable Audio Direct route must wait before the audio model is
-  invoked. This proof of concept keeps Audio Direct/Immediate tools disabled.
-- HASHI displays the transcript and offers the existing **confirm** or
-  **discard** actions.
-- Confirm releases the same transcript to transcript-dependent stages and
-  future PCM.
-- Discard stops that transcript-dependent path.
-- There is no transcript edit or correction workflow.
+Selecting native audio is itself the user's explicit authorization for the
+complete Turn:
 
-Safe Voice is therefore consumption-triggered, not transcription-triggered.
-The no-tool native chat path remains fast while routes that can classify or act
-retain the user's explicit boundary.
+- Audio Direct and Audio Immediate receive original audio without a prompt;
+- Triage may receive original audio or the one derived local transcript
+  without a prompt;
+- fallback and later work stages may consume that same transcript without a
+  prompt;
+- the derived transcript is released into future PCM with local-STT
+  provenance; and
+- future tool-capable native routes still use ordinary tool approval and
+  fencing, not Safe Voice.
+
+If a qualified native route is unavailable, HASHI fails clearly at admission.
+It does not silently reinterpret the request as a transcript-first Turn and
+open Safe Voice.
 
 A terminal advertising Safe Voice must support the confirmation event and
 decision control. If Safe Voice is enabled but a terminal cannot present the
@@ -816,12 +813,15 @@ bypass confirmation.
 The original audio Message remains immutable. Input transcription is a derived,
 provenance-bearing record associated with that Message and attachment.
 
-- Safe Voice off: the derived record is automatically eligible for PCM.
-- Safe Voice on with no consumer after no-tool native chat: the derived record
-  is automatically released to PCM without presenting a confirmation.
-- Safe Voice on and confirmed: the confirmed record is eligible for PCM.
-- Safe Voice on and discarded: it remains only as the minimum audit record
-  required by configured policy and is not treated as accepted user text.
+- Native mode: the derived record is automatically eligible for PCM because
+  the mode selection authorized the complete Turn.
+- Transcript-first mode with Safe Voice off: the derived record is
+  automatically eligible for PCM.
+- Transcript-first mode with Safe Voice on and confirmed: the confirmed record
+  is eligible for PCM.
+- Transcript-first mode with Safe Voice on and discarded: it remains only as
+  the minimum audit record required by configured policy and is not treated as
+  accepted user text.
 - No raw audio bytes are copied into PCM.
 
 ## 14. Failure and fallback semantics
@@ -830,7 +830,8 @@ provenance-bearing record associated with that Message and attachment.
 
 1. emit a simple visible native-audio fallback warning;
 2. use the already running local STT result;
-3. if Safe Voice is on, wait for confirm before releasing the transcript;
+3. release the already authorized native-Turn transcript without a second
+   confirmation;
 4. invoke the configured ordinary text fallback target with the same PCM;
 5. deliver its text; and
 6. synthesize that text through existing TTS.
@@ -845,11 +846,9 @@ No second native-audio attempt is required by the proof of concept.
 - emit a simple warning that the input transcript is unavailable; and
 - record a provenance-bearing transcript-unavailable marker.
 
-With Safe Voice off, an audio-capable Triage can continue from original audio.
-With Safe Voice on, a missing transcript cannot be shown for confirmation, so
-Triage ends in a typed degraded state. A text-only Triage also cannot start;
-in either case the already obtained Immediate chat response remains
-deliverable.
+An audio-capable Triage can continue from original audio. A text-only Triage
+cannot start without a transcript and ends in a typed degraded state; the
+already obtained Immediate chat response remains deliverable.
 
 ### 14.3 Both native audio and STT fail
 
@@ -1167,15 +1166,19 @@ of route capability and must be visible in status diagnostics.
 menu stays deliberately small. Provider/model vocabulary belongs in advanced
 typed commands and diagnostics, not in the everyday picker.
 
-The default inline menu contains two compact groups:
+The default inline menu separates generation from native-reply presentation:
 
 ~~~text
-[ Auto ]   [ Native ]
-[ TTS  ]   [ Off    ]
+[ Native audio model ] [ Text model + TTS ]
+[ Voice off ]
 [ Audio + text ] [ Audio only ]
 [ 👩 Warm ] [ 👩 Clear ]
 [ 👨 Warm ] [ 👨 Calm  ]
 ~~~
+
+`Auto` is not a user-visible mode because it never acquired behaviour distinct
+from `native`. Persisted `auto` values and callbacks from already-open legacy
+menus migrate to `native` for compatibility.
 
 The four voice choices are generic semantic profiles:
 `warm_female`, `clear_female`, `warm_male`, and `calm_male`. A compatible
@@ -1183,6 +1186,14 @@ frontend may present equivalent labels. A single selection controls both:
 
 - the concrete native Audio model voice; and
 - the language-aware Edge TTS voice used by ordinary TTS and the local fallback.
+
+Selecting a semantic voice profile sends two short prerecorded Telegram voice
+messages: one generated by the configured native Audio model and one by the
+configured TTS chain. Selecting a generation method sends the matching preview
+for the current profile. Preview delivery is UI-only: it does not create a
+conversation Turn, invoke HER, or enter transcript, context, or memory. Assets
+are generated ahead of time, versioned by locale and profile, and read from the
+shared media root so the menu does not incur provider latency or cost.
 
 The provider/model capability declaration resolves a semantic profile to a
 supported native voice. It must never persist an unsupported voice merely
@@ -1194,7 +1205,7 @@ Required settings:
 
 | Setting | Meaning | PoC default |
 |---|---|---|
-| mode | off, TTS, native, or automatic native-with-fallback | automatic when explicitly enabled |
+| mode | off, TTS, or native Audio model | off |
 | reply trigger | voice message or all input | voice message |
 | reply content | audio and text, audio only, or text only | audio and text |
 | native provider/model | exact Audio Direct/Immediate target | configured OpenRouter GPT Audio Mini |
@@ -1370,8 +1381,8 @@ Phase 5 canary.
 - Add voice-origin Direct and Immediate route targets.
 - Start STT concurrently with native audio.
 - Route Triage to original audio or transcript according to exact capability.
-- Trigger Safe Voice only when Triage, fallback, or an actionable route is
-  about to consume the voice; never on STT completion alone.
+- Mark native admission as explicit authorization for every stage and its
+  derived transcript; retain Safe Voice only for transcript-first routes.
 - Implement Immediate audio resolution without audio mutation.
 - Implement warning and local fallback state.
 
@@ -1411,10 +1422,10 @@ The proof-of-concept implementation completed qualification on HASHI1:
 - the provider PCM16 stream was converted into one integrity-checked WAV asset,
   published through ordered Events, retrieved through the authorized asset
   endpoint, and not replayed after Event ACK;
-- deterministic regression coverage now proves that a local STT result is
-  deferred without presenting Safe Voice, then automatically enters the
-  canonical user Message after a no-tool native Direct reply; Triage, fallback,
-  and future tool-capable audio routes remain confirmation-gated; and
+- deterministic regression coverage now proves that selecting native audio
+  authorizes the complete Turn: local STT enters the canonical user Message,
+  and Direct, Immediate, Triage, fallback, and later native consumers do not
+  open Safe Voice; transcript-first routes remain confirmation-gated; and
 - only Arale was enabled for the canary. HASHI1 remained online and retained
   its original main process throughout Agent-local reloads.
 
@@ -1425,9 +1436,12 @@ live terminal exercise.
 
 The first production Telegram exercise exposed a beta defect in which STT
 completion itself opened Safe Voice after a successful no-tool Audio Direct
-reply. The consumption-triggered gate above replaces that behaviour. The two
-affected completed Arale Turns were reconciled as automatic transcript
-releases rather than being recorded as user confirmations.
+reply. A later exercise showed that deferring the prompt until Triage or
+fallback still violated the simpler mode contract. The current rule therefore
+treats native selection as authorization for the complete Turn and reserves
+Safe Voice for transcript-first routes. The two affected completed Arale Turns
+were reconciled as automatic transcript releases rather than being recorded as
+user confirmations.
 
 After the correction, a second live Arale Session canary ran with Safe Voice
 still enabled. Run `run_01d239e554d3400bbe250e8db50154ae` completed with a
@@ -1478,7 +1492,7 @@ must not move into client-specific branches.
 | NAC-015 | Native audio failure emits a warning and falls back through STT, text model, and TTS |
 | NAC-016 | STT failure does not retry STT or call the audio model again; successful native audio and output text still deliver |
 | NAC-017 | Safe Voice off automatically releases the transcript to text-only Triage and PCM |
-| NAC-018 | Safe Voice on is consumption-triggered: no-tool Audio Direct/Immediate never prompts, while any Triage, fallback, or future tool-capable audio route waits for confirm |
+| NAC-018 | Native selection authorizes the complete Turn: Audio Direct/Immediate, Triage, fallback, future work stages, and the derived transcript never open Safe Voice |
 | NAC-019 | Safe Voice discard stops the transcript-dependent path and does not offer transcript editing |
 | NAC-020 | Provider output audio and transcript are parsed from OpenRouter SSE deltas in order |
 | NAC-021 | OGG/Opus input is normalized only when the exact provider target requires another format |

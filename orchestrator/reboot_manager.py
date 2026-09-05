@@ -545,12 +545,13 @@ def _handoff_reloaded_runtime_contract(
     *,
     current_manager_class=RebootManager,
 ) -> int:
-    """Move the post-reload validator onto an already-running manager class.
+    """Move reload/validation methods onto already-running manager classes.
 
     The first reboot across a contract change is still executing
-    ``hot_restart`` from the previous class generation.  Its subsequent
-    ``self.validate_agent_runtime_contract()`` lookup must resolve to the
-    validator from the source that was just reloaded.
+    ``hot_restart`` from the previous class generation. Its subsequent method
+    lookups must resolve to current source so a newly declared dependency can
+    participate in the next preflight/reload after a partial reload failure,
+    and the final contract validator is also current.
 
     A failed reload can leave the module bound to a newer class generation
     while the kernel still owns an instance from an older generation.  In
@@ -578,9 +579,16 @@ def _handoff_reloaded_runtime_contract(
     for manager_class in manager_classes:
         if manager_class is current_manager_class:
             continue
-        manager_class.validate_agent_runtime_contract = (
-            current_manager_class.validate_agent_runtime_contract
-        )
+        for method_name in (
+            "preflight_project_modules",
+            "reload_project_modules",
+            "validate_agent_runtime_contract",
+        ):
+            setattr(
+                manager_class,
+                method_name,
+                getattr(current_manager_class, method_name),
+            )
         patched += 1
     return patched
 

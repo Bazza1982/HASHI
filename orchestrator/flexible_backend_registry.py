@@ -3,7 +3,9 @@ from __future__ import annotations
 HER_V2_ENGINE = "her-v2"
 RETIRED_HER_ENGINE_ALIASES = frozenset({"her"})
 REMOVED_ENGINE_IDS = frozenset({"claw-cli"})
-PROVIDER_ONLY_ENGINE_IDS = frozenset({"openrouter-api", "deepseek-api"})
+PROVIDER_ONLY_ENGINE_IDS = frozenset(
+    {"openrouter-api", "deepseek-api", "openai-compatible-api"}
+)
 HER_V2_DEFAULT_PERMISSION_MODE = "danger-full-access"
 HER_V2_DEFAULT_ACCESS_SCOPE = "drive"
 HER_V2_DEFAULT_ALLOWED_TOOLS = ("*",)
@@ -120,6 +122,22 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "secret_keys": [
             "deepseek-api_key",
             "deepseek_api_key",
+        ],
+    },
+    "openai-compatible-api": {
+        "label": "OpenAI-compatible",
+        "privacy_levels": [0, 1, 2],
+        # Models and endpoint are instance configuration, not global product
+        # catalogue. This keeps official Qwen and other regional services
+        # selectable inside HER without exposing another top-level Engine.
+        "models": [],
+        "allow_custom_models": True,
+        "default_model": None,
+        "efforts": [],
+        "default_effort": None,
+        "secret_keys": [
+            "openai-compatible-api_key",
+            "openai_compatible_api_key",
         ],
     },
     "ollama-api": {

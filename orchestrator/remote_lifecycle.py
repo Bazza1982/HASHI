@@ -339,6 +339,9 @@ def build_child_command(settings: RemoteLifecycleSettings) -> list[str]:
     if python is None:
         raise FileNotFoundError("No Python interpreter found for Hashi Remote")
     cmd = [str(python), "-m", "remote", "--hashi-root", str(settings.root), "--port", str(settings.port)]
+    control_root = str(os.environ.get("HASHI_REMOTE_CONTROL_ROOT") or "").strip()
+    if control_root:
+        cmd.extend(["--control-hashi-root", str(Path(control_root).expanduser().resolve())])
     if not settings.use_tls:
         cmd.append("--no-tls")
     if settings.backend in {"lan", "tailscale", "both"}:

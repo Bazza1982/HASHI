@@ -21,6 +21,10 @@ security:
   # LAN mode: keeps pairing-auth endpoints permissive for trusted local use.
   # Protocol trust still requires a shared token; leave this false by default.
   lan_mode: false
+  # Optional one-click pairing without granting unauthenticated LAN access.
+  pairing_auto_approve: false
+  # Set a positive number to expire issued bearer tokens; null means unlimited.
+  pairing_token_ttl_seconds: null
 
   # Maximum auth level allowed for terminal commands
   # L0=read-only, L1=read-files, L2=write, L3=restart (never L4=system)

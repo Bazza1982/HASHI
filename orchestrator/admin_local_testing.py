@@ -9,10 +9,9 @@ from typing import Any, Mapping
 
 from orchestrator.command_registry import runtime_command_map
 from orchestrator.runtime_command_binding import COMMAND_BINDINGS
-from orchestrator import ui_language
+from orchestrator import slash_command_audit, ui_language
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
-    bind_slash_command_audit_session,
     default_audit_path,
     is_supported_slash_command,
     looks_like_slash_command,
@@ -285,7 +284,7 @@ async def execute_local_command(
             try:
                 with (
                     ui_language.language_scope(runtime, update),
-                    bind_slash_command_audit_session(session),
+                    slash_command_audit.bind_slash_command_audit_session(session),
                 ):
                     if registry_command is not None:
                         await registry_command.callback(runtime, update, context)

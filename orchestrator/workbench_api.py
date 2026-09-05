@@ -69,8 +69,12 @@ from orchestrator.enterprise.scim import (
     scim_user_resource,
 )
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
-from orchestrator.pathing import resolve_path_value
+from orchestrator.flexible_backend_registry import (
+    BACKEND_REGISTRY,
+    is_selectable_backend,
+)
 from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.pathing import resolve_path_value
 from orchestrator.session_store import (
     TERMINAL_RUN_STATES,
     IdempotencyConflict,
@@ -441,6 +445,9 @@ class WorkbenchApiServer:
         self.app.router.add_post(
             "/api/enterprise/connectors/credentials/{credential_id}/revoke",
             self.handle_enterprise_connector_credential_revoke,
+        )
+        self.app.router.add_get(
+            "/api/backends/catalogue", self.handle_backend_catalogue
         )
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/v1/capabilities", self.handle_v1_capabilities)
@@ -1096,7 +1103,32 @@ class WorkbenchApiServer:
             "new_messages": [],
         }
 
-    def _resolve_transcript_path(self, agent_row: dict, runtime) -> Path:
+    def _resolve_transcript_path(
+        self,
+        agent_row: dict,
+        runtime,
+        *,
+        owner_id: str | None = None,
+        surface: str | None = None,
+        channel_key: str = "default",
+    ) -> Path:
+        # The legacy TUI transcript endpoints predate canonical Sessions.  Live
+        # chat requests now persist their transcript in the Session workspace,
+        # so compatibility readers must resolve the same channel binding or
+        # they will keep polling the obsolete Agent-level transcript forever.
+        if surface:
+            resolved_owner = owner_id or SessionStore.owner_id_for(self.global_config)
+            session = self.session_store.resolve_session(
+                owner_id=resolved_owner,
+                agent_id=agent_row["name"],
+                surface=surface,
+                channel_key=channel_key,
+            )
+            workspace = self.session_store.session_workspace(
+                session["session_id"], int(session["context_generation"])
+            )
+            return workspace / "transcript.jsonl"
+
         if runtime is not None and getattr(runtime, "transcript_log_path", None):
             return Path(runtime.transcript_log_path)
 
@@ -3525,6 +3557,44 @@ class WorkbenchApiServer:
             }
         )
 
+    async def handle_backend_catalogue(self, request):
+        del request
+        public_fields = (
+            "label",
+            "models",
+            "default_model",
+            "efforts",
+            "model_efforts",
+            "default_effort",
+            "allow_custom_models",
+            "privacy_levels",
+        )
+        backends = {}
+        for engine, registry_entry in BACKEND_REGISTRY.items():
+            if not is_selectable_backend(engine):
+                continue
+            entry = {"engine": engine}
+            for field in public_fields:
+                if field in registry_entry:
+                    value = registry_entry[field]
+                    if isinstance(value, list):
+                        value = list(value)
+                    elif isinstance(value, dict):
+                        value = {
+                            str(key): list(item) if isinstance(item, list) else item
+                            for key, item in value.items()
+                        }
+                    entry[field] = value
+            backends[engine] = entry
+        return web.json_response(
+            {
+                "ok": True,
+                "schema_version": 1,
+                "source": "hashi_backend_registry",
+                "backends": backends,
+            }
+        )
+
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
         include_inactive = str(
@@ -3732,7 +3802,11 @@ class WorkbenchApiServer:
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
         transcript_path = self._resolve_transcript_path(
-            agent_row, runtime_map.get(name)
+            agent_row,
+            runtime_map.get(name),
+            owner_id=self._v1_owner_id(request),
+            surface="workbench",
+            channel_key="default",
         )
         return web.json_response(_read_jsonl_recent(transcript_path, limit=limit))
 
@@ -3746,7 +3820,11 @@ class WorkbenchApiServer:
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
         transcript_path = self._resolve_transcript_path(
-            agent_row, runtime_map.get(name)
+            agent_row,
+            runtime_map.get(name),
+            owner_id=self._v1_owner_id(request),
+            surface="workbench",
+            channel_key="default",
         )
         return web.json_response(_read_jsonl_increment(transcript_path, offset=offset))
 
@@ -4179,6 +4257,7 @@ class WorkbenchApiServer:
         *,
         runtime,
         canonical_content: dict[str, Any],
+        terminal: str | None = None,
     ) -> dict[str, Any] | None:
         voice_parts = [
             dict(part)
@@ -4226,6 +4305,15 @@ class WorkbenchApiServer:
                 )
             )
 
+        manager = getattr(runtime, "voice_manager", None)
+        native_enabled = getattr(manager, "native_audio_enabled", None)
+        native_authorized = False
+        if callable(native_enabled):
+            try:
+                native_authorized = bool(native_enabled(terminal))
+            except TypeError:
+                native_authorized = bool(native_enabled())
+
         state: dict[str, Any] = {
             "task": asyncio.create_task(_transcribe()),
             "ready_event": asyncio.Event(),
@@ -4235,7 +4323,12 @@ class WorkbenchApiServer:
             "attachment_id": attachment_ids[0],
             "attachment_ids": attachment_ids,
             "transcript_decisions": {},
-            "safe_voice": bool(getattr(runtime, "_safevoice_enabled", False)),
+            # A native-audio selection authorizes the complete raw-audio Turn.
+            # Safe Voice belongs only to transcript-authoritative text routes.
+            "safe_voice": bool(
+                getattr(runtime, "_safevoice_enabled", False)
+                and not native_authorized
+            ),
             "confirmation_requested": False,
             "confirmation_presented": False,
             "native_audio_completed": False,
@@ -4451,6 +4544,7 @@ class WorkbenchApiServer:
             transcript_state = self._begin_session_voice_transcription(
                 runtime=runtime,
                 canonical_content=canonical_content,
+                terminal=surface,
             )
             try:
                 request_id = await runtime.enqueue_request(

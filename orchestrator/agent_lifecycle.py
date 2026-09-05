@@ -11,6 +11,7 @@ from orchestrator.bootstrap_logging import C_RESET, C_STOP
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
 RUNTIME_TEARDOWN_TIMEOUT_SECONDS = 20.0
+LOCAL_ONLY_TELEGRAM_TOKEN = "WORKBENCH_ONLY_NO_TOKEN"
 
 
 def _consume_teardown_task_result(task: asyncio.Future) -> None:
@@ -79,7 +80,7 @@ class AgentLifecycleManager:
                 agent_cfg.name,
                 agent_cfg.telegram_token_key,
             )
-            token = "WORKBENCH_ONLY_NO_TOKEN"
+            token = LOCAL_ONLY_TELEGRAM_TOKEN
         runtime = _FlexRT(agent_cfg, global_cfg, token, secrets, self.kernel.skill_manager)
         runtime.orchestrator = self.kernel
         runtime.bind_handlers()
@@ -181,6 +182,18 @@ class AgentLifecycleManager:
         Attempt to connect Telegram. Returns True on success, False on failure.
         Does NOT block agent startup — local mode will be used if this fails.
         """
+        if str(getattr(rt, "token", "") or "").strip() == LOCAL_ONLY_TELEGRAM_TOKEN:
+            # This sentinel is an explicit local-surface configuration, not a
+            # malformed Telegram credential.  Never send it to Telegram or
+            # spend startup time retrying a connector that the instance did
+            # not configure.
+            rt.telegram_connected = False
+            bridge_logger.info(
+                "%s: Telegram not configured; starting local surfaces directly",
+                rt.name,
+            )
+            return False
+
         for attempt in range(1, 4):
             preflight_ok = await self.telegram_preflight(rt.token, rt.name, attempt=attempt, max_attempts=3)
             if not preflight_ok:

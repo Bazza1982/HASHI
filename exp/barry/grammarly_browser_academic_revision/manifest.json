@@ -1,0 +1,58 @@
+{
+  "id": "barry/grammarly_browser_academic_revision",
+  "type": "exp",
+  "version": 1,
+  "owner": "barry",
+  "domain": "grammarly_browser_academic_revision",
+  "status": "candidate",
+  "summary": "Candidate context-specific EXP for browser-assisted Grammarly AI-pattern review of Barry's academic Word manuscripts, with local-first revision, bounded batches, exact mapping, reversible write-back, and evidence-backed stabilisation.",
+  "context": {
+    "user": "Barry",
+    "machine": "HASHI Windows desktop",
+    "task_family": "academic manuscript review and revision using Grammarly as a sparse external evaluator",
+    "applications": [
+      "Google Chrome",
+      "Grammarly Docs",
+      "Microsoft Word"
+    ],
+    "toolchain": [
+      "HASHI Browser Bridge",
+      "HASHI Windows desktop bridge",
+      "AIRMS local research records"
+    ],
+    "primary_training_run": "training_runs/paper4_batch001_poc_001/RUN.md",
+    "data_boundary": "Exact manuscript text and provider receipts remain in confidential AIRMS run folders; this EXP stores only generalised operational knowledge and provenance pointers."
+  },
+  "authority": {
+    "operational_guide": "This EXP package",
+    "confidential_run_record": "AIRMS reports/grammarly_browser/runs",
+    "source_document": "Immutable user-selected DOCX",
+    "external_evaluator": "Grammarly observations are evidence, not authorship or misconduct findings"
+  },
+  "configuration": "config/review_policy.json",
+  "training_runs": {
+    "paper4_batch001_poc_001": "training_runs/paper4_batch001_poc_001/RUN.md"
+  },
+  "playbooks": {
+    "browser_local_revision": "playbooks/browser_local_revision.exp.md",
+    "train_and_promote": "playbooks/train_and_promote.exp.md"
+  },
+  "validators": [
+    "validators/grammarly_revision_validators.md"
+  ],
+  "templates": {
+    "run_packet": "templates/run_packet.md",
+    "rewrite_attempt": "templates/rewrite_attempt.md"
+  },
+  "failure_memory": "failures/failure_memory.jsonl",
+  "knowledge_base": "evidence/strategy_register.md",
+  "evidence": "evidence",
+  "scope_limits": [
+    "Known only for Barry's academic Word manuscripts on the HASHI Windows desktop and the current Grammarly Docs interface.",
+    "Not a generic AI-authorship detector, plagiarism check, misconduct assessment, or guarantee that prose was human-authored.",
+    "Not a detector-evasion workflow; academic quality, factual fidelity, citations, and Barry's voice outrank a provider score.",
+    "No manuscript unit may be uploaded merely because it was extracted locally; explicit scope approval and a positive allowlist are required.",
+    "Same-document whole-batch replacement is not yet validated on Grammarly's current Coda editor and must be proven on disposable text before production use.",
+    "The candidate has not completed a real end-to-end batch through revision, recheck, Word write-back, and user acceptance."
+  ]
+}

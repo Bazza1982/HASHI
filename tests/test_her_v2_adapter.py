@@ -1092,6 +1092,7 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
     assert response.stream_metadata["her_v2"]["classification"] is None
     assert response.stream_metadata["her_v2"]["plan_id"] is None
+    assert response.stream_metadata["her_v2"]["stage_timings_s"]["direct"] > 0
     assert response.stream_metadata["her_v2"]["effort"] == {
         "configured": "zero",
         "effective": "zero",
@@ -1180,6 +1181,59 @@ async def test_scheduler_direct_policy_is_request_scoped_and_preserves_instructi
     )
     assert ordinary_execution_profile.model == "configured/lightweight"
     assert ordinary_execution_profile.reasoning == "provider-lightweight"
+    assert adapter.effort == "max"
+    await adapter.shutdown()
+
+
+@pytest.mark.parametrize("source", ["bridge:hchat", "bridge:hchat-draft"])
+@pytest.mark.asyncio
+async def test_hchat_policy_uses_one_direct_call_without_early_delivery(
+    tmp_path,
+    source,
+):
+    provider = _EffortPolicyProvider()
+    request_id = f"request-{source.replace(':', '-')}"
+    runtime_context = SimpleNamespace(
+        current_request_meta={
+            "request_id": request_id,
+            "source": source,
+        }
+    )
+    config = _agent_config(tmp_path / source.replace(":", "-"), effort="max")
+    config._hashi_runtime = runtime_context
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(
+        config,
+        _global_config(tmp_path / source.replace(":", "-")),
+    )
+    events = []
+
+    async def capture(event):
+        events.append(event)
+        return True
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Compose and send the requested HChat message.",
+        request_id,
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert [request.stage for _profile, request in provider.requests] == [Stage.DIRECT]
+    assert provider.requests[0][1].allow_tools is True
+    assert provider.requests[0][1].allow_side_effects is True
+    assert response.stream_metadata["her_v2"]["effort"] == {
+        "configured": "max",
+        "effective": "zero",
+        "reason": "hchat_direct_policy",
+    }
+    assert not any(event.delivery_class == DELIVERY_USER_COMMENTARY for event in events)
+    assert [
+        event.delivery_class
+        for event in events
+        if event.delivery_class in {DELIVERY_FINAL, DELIVERY_USER_COMMENTARY}
+    ] == [DELIVERY_FINAL]
     assert adapter.effort == "max"
     await adapter.shutdown()
 
@@ -3392,7 +3446,9 @@ async def test_policy_denial_returns_before_due_replan_gates_next_admission():
                 )
             return SimpleNamespace(
                 tool_call_id=tool_call_id,
-                output="allowed",
+                # This test exercises the compulsory Replan cadence rather
+                # than a no-new-information cycle, so each read is distinct.
+                output=f"allowed:{tool_call_id}",
                 is_error=False,
             )
 

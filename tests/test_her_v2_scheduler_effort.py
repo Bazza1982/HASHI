@@ -97,6 +97,34 @@ def test_scheduler_source_without_explicit_job_context_keeps_agent_effort():
     assert resolution.reason == "agent_default"
 
 
+@pytest.mark.parametrize("source", ["bridge:hchat", "bridge:hchat-draft"])
+@pytest.mark.parametrize("configured", list(Effort))
+def test_hchat_request_is_forced_to_direct_without_mutating_agent_effort(
+    source,
+    configured,
+):
+    resolution = resolve_request_effort(configured, {"source": source})
+
+    assert resolution.configured is configured
+    assert resolution.effective is Effort.ZERO
+    assert resolution.reason == "hchat_direct_policy"
+    assert resolution.metadata() == {
+        "configured": configured.value,
+        "effective": "zero",
+        "reason": "hchat_direct_policy",
+    }
+
+
+def test_hchat_reply_is_not_mistaken_for_an_outbound_hchat_command():
+    resolution = resolve_request_effort(
+        Effort.MEDIUM,
+        {"source": "hchat-reply:akane"},
+    )
+
+    assert resolution.effective is Effort.MEDIUM
+    assert resolution.reason == "agent_default"
+
+
 @pytest.mark.parametrize(
     "scheduler_context",
     [

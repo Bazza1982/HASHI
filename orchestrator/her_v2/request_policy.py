@@ -1,10 +1,10 @@
-"""Request-scoped HER v2 effort policy for scheduled work.
+"""Request-scoped HER v2 execution policy for deterministic HASHI actions.
 
-Cron and heartbeat prompt work always enters HER v2 through Direct mode so the
-authoritative job instruction reaches the capable Quick agent without Triage
-pre-processing.  This policy controls orchestration stages only.  It must never
-be reused as a provider reasoning setting or stored back into the owning
-Agent's global configuration.
+Cron, heartbeat, and explicit HChat commands enter HER v2 through Direct mode
+so their authoritative instruction reaches the capable Quick agent without
+Immediate Response or Triage pre-processing.  This policy controls
+orchestration stages only.  It must never be reused as a provider reasoning
+setting or stored back into the owning Agent's global configuration.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from .models import Effort, parse_effort
 
 HER_V2_JOB_EFFORT_FIELD = "her_v2_effort"
 HER_V2_SCHEDULED_EFFORT = Effort.ZERO
+HER_V2_HCHAT_EFFORT = Effort.ZERO
+HCHAT_REQUEST_SOURCES = frozenset({"bridge:hchat", "bridge:hchat-draft"})
 SCHEDULED_JOB_KINDS = frozenset({"cron", "heartbeat"})
 SCHEDULER_TRIGGERS = frozenset({"scheduled", "manual", "recovery"})
 
@@ -119,6 +121,14 @@ def resolve_request_effort(
         else parse_effort(str(configured_effort))
     )
     meta = request_meta if isinstance(request_meta, Mapping) else {}
+    source = str(meta.get("source") or "").strip().casefold()
+    if source in HCHAT_REQUEST_SOURCES:
+        return EffortResolution(
+            configured=configured,
+            effective=HER_V2_HCHAT_EFFORT,
+            reason="hchat_direct_policy",
+        )
+
     raw_context = meta.get("scheduler_context")
     if not isinstance(raw_context, Mapping):
         return EffortResolution(

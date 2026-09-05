@@ -22,6 +22,7 @@ replaced with hchat relay and terminal execution.
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -37,14 +38,28 @@ from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 
-from orchestrator.process_execution import process_is_alive
-
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+from orchestrator.agent_move.package import AGENT_MOVE_CAPABILITY, AgentMoveError
+from orchestrator.agent_move.service import (
+    MAX_PACKAGE_BYTES,
+    activate_agent_move,
+    commit_agent_move,
+    get_agent_move_status,
+    receiver_capabilities,
+    rollback_agent_move,
+    stage_agent_move,
+)
+from orchestrator.agent_move.transport_crypto import (
+    ENVELOPE_OVERHEAD_BYTES,
+    ENVELOPE_SCHEME,
+    decrypt_package_transport,
+)
 from orchestrator.pathing import instance_runtime_dir
+from orchestrator.process_execution import process_is_alive
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 
 from ..attachments import AttachmentStore
@@ -70,8 +85,13 @@ from ..security.auth import (
     verify_protocol_request,
     verify_token,
 )
-from ..security.pairing import PairingManager
-from ..security.shared_token import build_auth_headers, load_shared_token
+from ..security.pairing import PairingManager, PairingState
+from ..security.shared_token import (
+    HEADER_NONCE,
+    build_auth_headers,
+    build_response_auth,
+    load_shared_token,
+)
 from ..terminal.executor import AuthLevel, TerminalExecutor
 
 logger = logging.getLogger(__name__)
@@ -95,6 +115,7 @@ API_PROTOCOL_CAPABILITIES = [
     "protocol_reply_v1",
     "workbench_gateway_v1",
     "tui_proxy_v1",
+    AGENT_MOVE_CAPABILITY,
 ]
 
 _WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
@@ -193,6 +214,18 @@ class FilePushPayload(BaseModel):
     sha256: Optional[str] = None
     overwrite: bool = False
     create_dirs: bool = True
+
+
+class AgentMoveStagePayload(BaseModel):
+    from_instance: str
+    encryption: str
+    package_b64: str
+    sha256: str
+
+
+class AgentMoveActionPayload(BaseModel):
+    from_instance: str
+    package_id: str
 
 
 class HashiStartPayload(BaseModel):
@@ -340,6 +373,31 @@ class ProtocolMessageWithAttachmentsPayload(BaseModel):
 # ─────────────────────────────────────────────────────────────
 
 MAX_FILE_PUSH_BYTES = 256 * 1024 * 1024
+
+
+def _agent_move_response(
+    request: Request,
+    content: dict[str, Any],
+    *,
+    status_code: int = 200,
+) -> JSONResponse:
+    """Authenticate a receiver response against its request nonce.
+
+    Request HMAC protects the target from an impersonated source. This proof
+    provides the other half of the exchange: the source must not disable its
+    local Agent after accepting a forged success response from another host.
+    """
+
+    payload = dict(content)
+    shared_token = load_shared_token(Path(_hashi_root) if _hashi_root else None)
+    request_nonce = str(request.headers.get(HEADER_NONCE) or "").strip()
+    if shared_token and request_nonce:
+        payload["response_auth"] = build_response_auth(
+            shared_token=shared_token,
+            request_nonce=request_nonce,
+            payload=payload,
+        )
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 def _resolve_file_push_destination(dest_path: str) -> Path:
@@ -1016,6 +1074,12 @@ def create_app(
                 "peer_count": len(peers),
                 "protocol_auth_mode": protocol_auth_mode(),
                 "lan_mode": is_lan_mode(),
+                "pairing_auto_approve": bool(
+                    _pairing_manager and _pairing_manager.auto_approve
+                ),
+                "pairing_token_ttl_seconds": (
+                    _pairing_manager.token_ttl_seconds if _pairing_manager else None
+                ),
                 "trusted_view": False,
                 "shared_token_configured": has_shared_token(),
             }
@@ -1029,6 +1093,12 @@ def create_app(
             "peers": peers,
             "protocol_auth_mode": protocol_auth_mode(),
             "lan_mode": is_lan_mode(),
+            "pairing_auto_approve": bool(
+                _pairing_manager and _pairing_manager.auto_approve
+            ),
+            "pairing_token_ttl_seconds": (
+                _pairing_manager.token_ttl_seconds if _pairing_manager else None
+            ),
             "trusted_view": True,
         }
 
@@ -2040,6 +2110,207 @@ def create_app(
             "reason": reason_meta["reason"],
         }
 
+    # ── Agent move receiver v1 ───────────────────────────────
+
+    @app.get("/agent-move/v1/capabilities")
+    async def agent_move_capabilities(request: Request):
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=b"",
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Agent move authentication failed", "code": reason},
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            result = await asyncio.to_thread(receiver_capabilities, Path(_hashi_root))
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": str(exc)},
+            )
+        result["instance_id"] = str(
+            _instance_info.get("instance_id") or result.get("instance_id") or "HASHI"
+        ).upper()
+        result["authenticated_instance"] = authenticated_instance
+        result["authenticated_response_proof"] = True
+        return _agent_move_response(request, result)
+
+    @app.post("/agent-move/v1/stage")
+    async def agent_move_stage(request: Request, payload: AgentMoveStagePayload):
+        body_bytes = await request.body()
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Agent move authentication failed", "code": reason},
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        max_envelope_bytes = MAX_PACKAGE_BYTES + ENVELOPE_OVERHEAD_BYTES
+        if len(payload.package_b64) > ((max_envelope_bytes + 2) // 3) * 4 + 4:
+            return _agent_move_response(
+                request,
+                status_code=413,
+                content={"ok": False, "error": "Agent move package exceeds the receiver size limit"},
+            )
+        try:
+            envelope = base64.b64decode(payload.package_b64, validate=True)
+        except (ValueError, binascii.Error):
+            return _agent_move_response(
+                request,
+                status_code=400,
+                content={"ok": False, "error": "Agent move package_b64 is invalid"},
+            )
+        if payload.encryption != ENVELOPE_SCHEME:
+            return _agent_move_response(
+                request,
+                status_code=400,
+                content={"ok": False, "error": "Encrypted Agent move transport is required"},
+            )
+        try:
+            package_bytes = await asyncio.to_thread(
+                decrypt_package_transport,
+                envelope,
+                shared_token=load_shared_token(Path(_hashi_root)) or "",
+                source_instance=authenticated_instance or payload.from_instance,
+                target_instance=str(_instance_info.get("instance_id") or ""),
+                package_sha256=payload.sha256,
+            )
+            result = await asyncio.to_thread(
+                stage_agent_move,
+                Path(_hashi_root),
+                package_bytes,
+                expected_sha256=payload.sha256,
+                source_instance=authenticated_instance or payload.from_instance,
+                target_instance=str(_instance_info.get("instance_id") or "HASHI"),
+                secret_passphrase=load_shared_token(Path(_hashi_root)),
+            )
+            return _agent_move_response(request, result)
+        except AgentMoveError as exc:
+            status_code = 409 if "already" in str(exc).lower() else 400
+            return _agent_move_response(
+                request,
+                status_code=status_code,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    async def _agent_move_action(
+        request: Request,
+        payload: AgentMoveActionPayload,
+        action,
+    ):
+        body_bytes = await request.body()
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Agent move authentication failed", "code": reason},
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            current = await asyncio.to_thread(
+                get_agent_move_status,
+                Path(_hashi_root),
+                payload.package_id,
+            )
+            if str(current.get("source_instance") or "").upper() != str(
+                authenticated_instance or payload.from_instance
+            ).upper():
+                return _agent_move_response(
+                    request,
+                    status_code=403,
+                    content={"ok": False, "error": "Agent move belongs to another source instance"},
+                )
+            kwargs = {}
+            if action is commit_agent_move:
+                kwargs["secret_passphrase"] = load_shared_token(Path(_hashi_root))
+            result = await asyncio.to_thread(
+                action,
+                Path(_hashi_root),
+                payload.package_id,
+                **kwargs,
+            )
+            return _agent_move_response(request, result)
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=409,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    @app.post("/agent-move/v1/commit")
+    async def agent_move_commit(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, commit_agent_move)
+
+    @app.post("/agent-move/v1/activate")
+    async def agent_move_activate(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, activate_agent_move)
+
+    @app.post("/agent-move/v1/rollback")
+    async def agent_move_rollback(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, rollback_agent_move)
+
+    @app.get("/agent-move/v1/status/{package_id}")
+    async def agent_move_status(request: Request, package_id: str):
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=b"",
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "Agent move authentication failed", "code": reason},
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            result = await asyncio.to_thread(get_agent_move_status, Path(_hashi_root), package_id)
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=404,
+                content={"ok": False, "error": str(exc)},
+            )
+        if str(result.get("source_instance") or "").upper() != str(
+            authenticated_instance or ""
+        ).upper():
+            return _agent_move_response(
+                request,
+                status_code=403,
+                content={"ok": False, "error": "Agent move belongs to another source instance"},
+            )
+        return _agent_move_response(request, result)
+
     # ── File push ────────────────────────────────────────────
 
     @app.post("/files/push")
@@ -2125,13 +2396,20 @@ def create_app(
     @app.post("/pair/request")
     async def pair_request(payload: PairRequestPayload):
         if _pairing_manager.is_auto_approved():
-            # LAN mode: auto-approve immediately
+            # One-click mode issues a bearer immediately; protected endpoints
+            # still require that token unless legacy LAN mode is enabled.
             token = _pairing_manager.approve_request_direct(
                 payload.client_id, payload.client_name
             )
+            paired = _pairing_manager.get_paired_client(payload.client_id)
             audit = get_audit_logger()
             audit.log_pairing_request(payload.client_id, payload.client_name, auto_approved=True)
-            return {"ok": True, "auto_approved": True, "token": token}
+            return {
+                "ok": True,
+                "auto_approved": True,
+                "token": token,
+                "expires_at": paired.expires_at if paired else None,
+            }
 
         req = _pairing_manager.create_pairing_request(payload.client_id, payload.client_name)
         audit = get_audit_logger()
@@ -2148,6 +2426,14 @@ def create_app(
     async def pair_status(client_id: str):
         req = _pairing_manager.get_request(client_id)
         if not req:
+            paired = _pairing_manager.get_paired_client(client_id)
+            if paired:
+                return {
+                    "ok": True,
+                    "state": PairingState.APPROVED.value,
+                    "client_id": client_id,
+                    "expires_at": paired.expires_at,
+                }
             raise HTTPException(status_code=404, detail="Pairing request not found")
         return {"ok": True, "state": req.state.value, "client_id": client_id}
 
@@ -2156,7 +2442,12 @@ def create_app(
         token = _pairing_manager.approve_request(client_id)
         if not token:
             raise HTTPException(status_code=404, detail="Request not found or expired")
-        return {"ok": True, "token": token}
+        paired = _pairing_manager.get_paired_client(client_id)
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": paired.expires_at if paired else None,
+        }
 
     @app.post("/pair/reject/{client_id}")
     async def pair_reject(client_id: str, client_id_auth: str = Depends(verify_token)):

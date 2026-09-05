@@ -1,8 +1,8 @@
-"""Route-aware Safe Voice gating for native audio Turns.
+"""Safe Voice gating for transcript-authoritative voice Turns.
 
-Native Audio Direct/Immediate may answer from the original audio without ever
-consuming local STT.  Safe Voice is therefore deferred until a Triage,
-fallback, or tool-capable path actually asks to use/authorize that transcript.
+Selecting Native audio is explicit authorization for the complete raw-audio
+Turn, including its derived local transcript, so native admission stores
+``safe_voice=False``.  Text-model routes retain the confirmation gate.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ async def _call(state: dict[str, Any], key: str) -> None:
 
 
 def state_after_transcription(state: Mapping[str, Any]) -> str:
-    """Resolve STT's initial state without prematurely invoking Safe Voice."""
+    """Resolve STT's initial state from the route's authorization contract."""
 
     if not bool(state.get("safe_voice")):
         return "released"
@@ -48,7 +48,7 @@ async def await_authorized_transcript(
     *,
     require_confirmation: bool = True,
 ) -> tuple[str, str]:
-    """Wait for STT and request Safe Voice only for an actual consumer."""
+    """Wait for STT and enforce Safe Voice only when the route requires it."""
 
     if not isinstance(state, dict):
         return "", "unavailable"

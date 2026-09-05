@@ -1,0 +1,139 @@
+{
+  "global": {
+    "authorized_id": 0,
+    "instance_id": "HASHI-PORTABLE",
+    "display_name": "HASHI Portable",
+    "ui_language": "zh",
+    "api_host": "127.0.0.1",
+    "remote_port": 18767,
+    "workbench_port": 18800,
+    "api_gateway_port": 18801,
+    "canonical_audit": {
+      "buffer_flush_timeout_seconds": 120
+    },
+    "persistent_session_v1": true,
+    "native_audio_chat_v1": true,
+    "native_audio_retention_seconds": 3600,
+    "whatsapp": {
+      "enabled": false,
+      "allowed_numbers": []
+    },
+    "default_tools": {
+      "allowed": [
+        "*",
+        "vision_inspect"
+      ],
+      "vision_inspect": {
+        "provider": "openrouter",
+        "endpoint": "https://openrouter.ai/api/v1",
+        "allowed_hosts": [
+          "openrouter.ai"
+        ],
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key_secret": "openrouter_key",
+        "idle_timeout_seconds": 90
+      }
+    },
+    "her_providers": {
+      "runtime_policy": "require-packaged",
+      "max_permission_mode": "danger-full-access",
+      "habit_meditation": {
+        "enabled": false
+      },
+      "providers": {
+        "deepseek": {
+          "engine": "deepseek-api",
+          "base_url": "https://api.deepseek.com/v1",
+          "secret": "deepseek_api_key",
+          "models": [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro"
+          ],
+          "fast_model": "deepseek-v4-flash",
+          "pro_model": "deepseek-v4-pro",
+          "status": "stable"
+        },
+        "qwen": {
+          "engine": "openai-compatible-api",
+          "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+          "secret": "dashscope_api_key",
+          "models": [
+            "qwen-plus",
+            "qwen-max"
+          ],
+          "fast_model": "qwen-plus",
+          "pro_model": "qwen-max",
+          "status": "stable"
+        }
+      }
+    }
+  },
+  "groups": {
+    "all_active": {
+      "description": "All active portable agents",
+      "members": "@active",
+      "exclude_from_broadcast": []
+    }
+  },
+  "agents": [
+    {
+      "name": "portable",
+      "display_name": "HASHI Portable",
+      "emoji": "🪼",
+      "type": "flex",
+      "workspace_dir": "@home/workspaces/portable",
+      "telegram_token_key": "portable",
+      "is_active": true,
+      "active_backend": "her-v2",
+      "default_mode": "fixed",
+      "access_scope": "drive",
+      "allowed_backends": [
+        {
+          "engine": "her-v2",
+          "model": "role-configured",
+          "effort": "medium",
+          "permission_mode": "danger-full-access",
+          "access_scope": "drive",
+          "idle_timeout_sec": 300,
+          "tools": {
+            "allowed": [
+              "*"
+            ]
+          },
+          "her_v2": {
+            "shadow_mode": false,
+            "user_idle_timeout_s": 300,
+            "audit_failure_terminal": "ERROR",
+            "profiles": {
+              "lightweight": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "reasoning": "high"
+              },
+              "triage": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "reasoning": "high"
+              },
+              "premium": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "high"
+              },
+              "reviewer": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "max"
+              },
+              "orchestrator": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "max"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -17,6 +17,8 @@ genuine ``0.0`` (local / free model).
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -374,14 +376,26 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def _fmt_cost(cost_usd: float) -> str:
-    if cost_usd <= 0:
-        return "US$0"
-    if cost_usd < 0.0001:
-        return "< US$0.0001"
-    if cost_usd < 0.01:
-        return f"US${cost_usd:.6f}"
-    return f"US${cost_usd:.4f}"
+def _fmt_cost(cost_usd: float, *, locale: str | None) -> str:
+    """Render compact cents below US$1 and USD at or above that threshold."""
+
+    if cost_usd < 1.0:
+        amount = "0" if cost_usd <= 0 else f"{cost_usd * 100:.2f}"
+        return _translate(
+            "meter.tail.cost.cents",
+            locale=locale,
+            amount=amount,
+        )
+    amount = f"{cost_usd:.4f}".rstrip("0").rstrip(".")
+    if "." not in amount:
+        amount += ".00"
+    elif len(amount.rsplit(".", 1)[1]) == 1:
+        amount += "0"
+    return _translate(
+        "meter.tail.cost.usd",
+        locale=locale,
+        amount=amount,
+    )
 
 
 def _translate(key: str, *, locale: str | None = None, **values: Any) -> str:
@@ -392,6 +406,152 @@ def _translate(key: str, *, locale: str | None = None, **values: Any) -> str:
     return ui_language.tr(key, locale=locale, **values)
 
 
+def _fmt_duration(seconds: float, *, locale: str | None) -> str:
+    """Render a compact human duration without exposing stopwatch precision."""
+
+    elapsed_s = max(0.0, float(seconds))
+    if elapsed_s == 0:
+        return _translate("meter.tail.duration.seconds", locale=locale, amount="0")
+    if elapsed_s < 0.05:
+        return _translate("meter.tail.duration.lt_tenth", locale=locale)
+    if elapsed_s < 60:
+        amount = f"{elapsed_s:.1f}".rstrip("0").rstrip(".")
+        return _translate(
+            "meter.tail.duration.seconds", locale=locale, amount=amount
+        )
+    whole_seconds = round(elapsed_s)
+    hours, remainder = divmod(whole_seconds, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return _translate(
+            "meter.tail.duration.hours_minutes",
+            locale=locale,
+            hours=hours,
+            minutes=minutes,
+        )
+    return _translate(
+        "meter.tail.duration.minutes_seconds",
+        locale=locale,
+        minutes=minutes,
+        seconds=remaining_seconds,
+    )
+
+
+_USER_STAGE_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("strategy", ("triage",)),
+    ("planning", ("planning",)),
+    ("execution", ("direct", "execution")),
+)
+
+
+def _format_timing_lines(
+    *,
+    total_elapsed_s: float | None,
+    stage_timings_s: Mapping[str, float] | None,
+    locale: str | None,
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    if total_elapsed_s is not None:
+        try:
+            elapsed_s = float(total_elapsed_s)
+        except (TypeError, ValueError):
+            elapsed_s = -1.0
+        if math.isfinite(elapsed_s) and elapsed_s >= 0:
+            lines.append(
+                _translate(
+                    "meter.tail.elapsed",
+                    locale=locale,
+                    duration=_fmt_duration(elapsed_s, locale=locale),
+                )
+            )
+
+    if not isinstance(stage_timings_s, Mapping):
+        return tuple(lines)
+    stage_items: list[str] = []
+    for label_key, raw_stages in _USER_STAGE_BUCKETS:
+        elapsed_s = 0.0
+        observed = False
+        for raw_stage in raw_stages:
+            raw_value = stage_timings_s.get(raw_stage)
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value) or value < 0:
+                continue
+            observed = True
+            elapsed_s += value
+        if not observed:
+            continue
+        stage_items.append(
+            _translate(
+                "meter.tail.stage.item",
+                locale=locale,
+                label=_translate(
+                    f"meter.tail.stage.{label_key}", locale=locale
+                ),
+                duration=_fmt_duration(elapsed_s, locale=locale),
+            )
+        )
+    if stage_items:
+        lines.append(
+            _translate(
+                "meter.tail.stages",
+                locale=locale,
+                stages=" · ".join(stage_items),
+            )
+        )
+    return tuple(lines)
+
+
+_PROVIDER_DISPLAY_NAMES = {
+    "hashi-api": "HASHI API",
+    "hashi": "HASHI API",
+    "deepseek-api": "DeepSeek",
+    "deepseek": "DeepSeek",
+    "openrouter-api": "OpenRouter",
+    "openrouter": "OpenRouter",
+    "codex-cli": "Codex CLI",
+    "claude-cli": "Claude CLI",
+    "gemini-cli": "Gemini CLI",
+    "grok-cli": "Grok CLI",
+    "ollama-api": "Ollama",
+    "xai-api": "xAI API",
+    "xai": "xAI",
+    "hashi-runtime": "HASHI Runtime",
+}
+
+
+def _format_provider_names(
+    receipt: UsageReceipt,
+    *,
+    locale: str | None,
+) -> str:
+    """Render the physical provider engines represented by a receipt.
+
+    HER v2 may route different stages through different providers, so this is
+    deliberately derived from every line item instead of the top-level
+    backend.  Preserve first-use order while folding aliases that share the
+    same user-facing brand name.
+    """
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in receipt.line_items:
+        engine = str(getattr(item, "engine", "") or "").strip()
+        if not engine:
+            continue
+        display_name = _PROVIDER_DISPLAY_NAMES.get(engine.casefold(), engine)
+        dedupe_key = display_name.casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        names.append(display_name)
+    if not names:
+        return _translate("meter.tail.provider.unknown", locale=locale)
+    return " + ".join(names)
+
+
 def _format_receipt_lines(
     receipt: UsageReceipt,
     *,
@@ -400,12 +560,11 @@ def _format_receipt_lines(
     label: str | None,
     locale: str | None,
     task_total_usd: float | None,
+    total_elapsed_s: float | None,
+    stage_timings_s: Mapping[str, float] | None,
 ) -> str:
     cost = receipt.cost_usd
     resolved_label = label or _translate(label_key, locale=locale)
-    revisions = ", ".join(receipt.pricing_revisions) or _translate(
-        "meter.tail.pricing_unknown", locale=locale
-    )
     if cost is None:
         cost_line = _translate(
             "meter.tail.cost.unknown",
@@ -419,7 +578,7 @@ def _format_receipt_lines(
             locale=locale,
             icon=icon,
             label=resolved_label,
-            pricing_revision=revisions,
+            cost=_fmt_cost(0.0, locale=locale),
         )
     elif receipt.dominant_cost_source() == "provider":
         cost_line = _translate(
@@ -431,8 +590,7 @@ def _format_receipt_lines(
             locale=locale,
             icon=icon,
             label=resolved_label,
-            cost=_fmt_cost(cost),
-            pricing_revision=revisions,
+            cost=_fmt_cost(cost, locale=locale),
         )
     else:
         cost_line = _translate(
@@ -440,15 +598,19 @@ def _format_receipt_lines(
             locale=locale,
             icon=icon,
             label=resolved_label,
-            cost=_fmt_cost(cost),
-            pricing_revision=revisions,
+            cost=_fmt_cost(cost, locale=locale),
         )
     if task_total_usd is not None:
         cost_line += _translate(
             "meter.tail.task_total",
             locale=locale,
-            cost=_fmt_cost(task_total_usd),
+            cost=_fmt_cost(task_total_usd, locale=locale),
         )
+    cost_line += _translate(
+        "meter.tail.provider",
+        locale=locale,
+        providers=_format_provider_names(receipt, locale=locale),
+    )
 
     cache_hit = receipt.prompt_cache_hit_tokens
     cache_rate = receipt.cache_hit_percent
@@ -499,25 +661,28 @@ def _format_receipt_lines(
         request_line = _translate(
             "meter.tail.requests.savings",
             locale=locale,
-            provider_requests=receipt.provider_request_count,
-            no_cache_cost=_fmt_cost(no_cache_cost),
-            cache_savings=_fmt_cost(cache_savings),
+            no_cache_cost=_fmt_cost(no_cache_cost, locale=locale),
+            cache_savings=_fmt_cost(cache_savings, locale=locale),
             cache_savings_percent=f"{savings_percent:.1f}",
         )
     elif no_cache_cost is not None:
         request_line = _translate(
             "meter.tail.requests.no_cache_only",
             locale=locale,
-            provider_requests=receipt.provider_request_count,
-            no_cache_cost=_fmt_cost(no_cache_cost),
+            no_cache_cost=_fmt_cost(no_cache_cost, locale=locale),
         )
     else:
         request_line = _translate(
             "meter.tail.requests.only",
             locale=locale,
-            provider_requests=receipt.provider_request_count,
         )
-    return "\n".join((cost_line, input_line, output_line, request_line))
+    usage_line = f"{input_line} {output_line}"
+    timing_lines = _format_timing_lines(
+        total_elapsed_s=total_elapsed_s,
+        stage_timings_s=stage_timings_s,
+        locale=locale,
+    )
+    return "\n".join((cost_line, *timing_lines, usage_line, request_line))
 
 
 def format_cost_tail(
@@ -526,6 +691,8 @@ def format_cost_tail(
     label: str | None = None,
     locale: str | None = None,
     task_total_usd: float | None = None,
+    total_elapsed_s: float | None = None,
+    stage_timings_s: Mapping[str, float] | None = None,
 ) -> str:
     """Deterministically render a cost tail from a receipt (no model call)."""
     return _format_receipt_lines(
@@ -535,6 +702,8 @@ def format_cost_tail(
         label=label,
         locale=locale,
         task_total_usd=task_total_usd,
+        total_elapsed_s=total_elapsed_s,
+        stage_timings_s=stage_timings_s,
     )
 
 
@@ -557,4 +726,6 @@ def format_meditation_cost_tail(
         label=None,
         locale=locale,
         task_total_usd=task_total_usd,
+        total_elapsed_s=None,
+        stage_timings_s=None,
     )

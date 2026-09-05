@@ -7,7 +7,9 @@ import copy
 import hashlib
 import json
 import re
+import time
 from dataclasses import replace
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from orchestrator.her_json_repair import render_json_repair_input
@@ -56,6 +58,42 @@ _CLASSIFICATION_ANCHOR_RE = re.compile(
     r'"classification"\s*:\s*"(DIRECT_RESPONSE|SIMPLE_TASK|COMPLEX_TASK|'
     r'HIGH_VOLUME_TASK|CONFIRMATION_REQUIRED)"'
 )
+
+
+def _measure_stage_runtime(method):
+    """Record one logical stage interval without affecting its outcome.
+
+    The wrapped invocation already owns Provider retries, tool loops, output
+    validation, and JSON repair.  Measuring at this boundary therefore gives
+    the wall-clock duration the user experienced for that stage instead of
+    mislabelling Provider HTTP latency as whole-stage time.
+    """
+
+    @wraps(method)
+    async def measured(self, state, stage, *args, **kwargs):
+        clock = getattr(self, "timing_clock", time.perf_counter)
+        started_at: float | None = None
+        try:
+            started_at = float(clock())
+        except Exception:
+            # Timing is optional observability and must never break a Turn.
+            pass
+        try:
+            return await method(self, state, stage, *args, **kwargs)
+        finally:
+            if started_at is not None:
+                try:
+                    completed_at = float(clock())
+                    intervals = getattr(state, "stage_timing_intervals", None)
+                    if isinstance(intervals, dict) and completed_at >= started_at:
+                        intervals.setdefault(stage.value, []).append(
+                            (started_at, completed_at)
+                        )
+                except Exception:
+                    # Preserve the primary stage result even if telemetry fails.
+                    pass
+
+    return measured
 
 
 def _rejected_output(response: StageResponse) -> str:
@@ -113,6 +151,7 @@ def _used_typed_media_fallback(value: Any) -> bool:
 
 
 class RuntimeInvocationMixin:
+    @_measure_stage_runtime
     async def _invoke_stage(
         self,
         state: _TurnState,

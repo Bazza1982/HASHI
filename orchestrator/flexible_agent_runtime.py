@@ -365,14 +365,20 @@ class FlexibleAgentRuntime:
             CanonicalAuditStore,
         )
 
+        canonical_audit_config = dict(
+            getattr(self.global_config, "canonical_audit", None) or {}
+        )
         self.canonical_audit = CanonicalAuditStore(
             self.global_config.bridge_home,
             instance_id=self.global_config.instance_id,
             agent_id=self.config.name,
-            config=getattr(self.global_config, "canonical_audit", None),
+            config=canonical_audit_config,
         )
         self.canonical_audit_buffer = BufferedCanonicalAuditWriter(
             self.canonical_audit,
+            flush_timeout_s=float(
+                canonical_audit_config.get("buffer_flush_timeout_seconds") or 5.0
+            ),
             name=f"canonical-audit-{self.config.name}",
         )
         if self.transfer_state_path.exists():
@@ -805,6 +811,35 @@ class FlexibleAgentRuntime:
             )
             return None
         operational_prompt = clean_prompt or "Respond to the attached voice message."
+        from orchestrator.agent_move.source_guard import source_move_guard_state
+
+        project_root = getattr(self.global_config, "project_root", None)
+        if getattr(self, "_agent_move_quiesced", False):
+            move_guard = {
+                "status": "cutover_quiesce",
+                "target_instance": str(
+                    getattr(self, "_agent_move_target_instance", "") or ""
+                ),
+            }
+        else:
+            move_guard = (
+                source_move_guard_state(project_root, self.name)
+                if project_root is not None
+                else None
+            )
+        if move_guard is not None:
+            if deliver_to_telegram and not silent:
+                await self._send_text(
+                    chat_id,
+                    ui_language.tr(
+                        "remote.move.source_guard",
+                        target=html.escape(
+                            str(move_guard.get("target_instance") or "target")
+                        ),
+                    ),
+                    parse_mode="HTML",
+                )
+            return None
         request_id = self.next_request_id()
         session, accepted, session_owner, session_surface, session_channel_key = (
             runtime_session.accept_request(
@@ -2040,6 +2075,7 @@ class FlexibleAgentRuntime:
         source: str = "api",
         deliver_to_telegram: bool = True,
         *,
+        chat_id: Any | None = None,
         request_metadata: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
     ):
@@ -2054,7 +2090,7 @@ class FlexibleAgentRuntime:
             return None
         _print_user_message(self.name, text)
         return await self.enqueue_request(
-            self._primary_chat_id(),
+            self._primary_chat_id() if chat_id is None else chat_id,
             text,
             source,
             _safe_excerpt(text),
@@ -2442,19 +2478,15 @@ class FlexibleAgentRuntime:
         rows = [
             [
                 InlineKeyboardButton(
-                    selected_label(ui_language.tr("voice.mode.auto"), mode == "auto"),
-                    callback_data="voice:mode:auto",
-                ),
-                InlineKeyboardButton(
                     selected_label(ui_language.tr("voice.mode.native"), mode == "native"),
                     callback_data="voice:mode:native",
                 ),
-            ],
-            [
                 InlineKeyboardButton(
                     selected_label(ui_language.tr("voice.mode.tts"), mode == "tts"),
                     callback_data="voice:mode:tts",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     selected_label(ui_language.tr("voice.mode.off"), mode == "off"),
                     callback_data="voice:mode:off",
@@ -2492,6 +2524,56 @@ class FlexibleAgentRuntime:
             for index in range(0, len(profile_buttons), 2)
         )
         return InlineKeyboardMarkup(rows)
+
+    async def _send_voice_profile_previews(
+        self,
+        query: Any,
+        profile_id: str,
+        assets: tuple[tuple[str, Path], ...],
+    ) -> int:
+        """Send prerecorded UI previews without creating a conversation Turn."""
+
+        message = getattr(query, "message", None)
+        chat_id = getattr(message, "chat_id", None)
+        if chat_id is None:
+            chat_id = getattr(getattr(message, "chat", None), "id", None)
+        if chat_id is None or not assets:
+            return 0
+        profile_label = ui_language.tr(f"voice.profile.{profile_id}")
+        sent = 0
+        for renderer, path in assets:
+            caption = ui_language.tr(
+                f"voice.preview.caption.{renderer}",
+                voice=profile_label,
+            )
+            try:
+                with path.open("rb") as handle:
+                    await self.app.bot.send_voice(
+                        chat_id=chat_id,
+                        voice=handle,
+                        caption=caption,
+                        read_timeout=30,
+                        write_timeout=30,
+                        connect_timeout=15,
+                    )
+                sent += 1
+            except TelegramTimedOut as exc:
+                # Telegram may already have accepted the upload. A retry can
+                # duplicate the preview, so leave this result ambiguous.
+                self.telegram_logger.warning(
+                    "Voice preview timed out without retry: profile=%s renderer=%s error=%s",
+                    profile_id,
+                    renderer,
+                    exc,
+                )
+            except Exception as exc:
+                self.error_logger.error(
+                    "Voice preview delivery failed: profile=%s renderer=%s error=%s",
+                    profile_id,
+                    renderer,
+                    exc,
+                )
+        return sent
 
     async def cmd_start(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2818,11 +2900,19 @@ class FlexibleAgentRuntime:
         action = parts[1] if len(parts) > 1 else "refresh"
         value = parts[2] if len(parts) > 2 else ""
         message = None
+        preview_profile: str | None = None
+        preview_renderers: tuple[str, ...] = ()
         try:
             if action == "mode":
                 message = self.voice_manager.set_reply_mode(value)
+                preview_profile = self.voice_manager.get_voice_profile_id()
+                selected_mode = self.voice_manager.get_reply_mode()
+                if preview_profile and selected_mode in {"native", "tts"}:
+                    preview_renderers = (selected_mode,)
             elif action == "profile":
                 message = self.voice_manager.set_voice_profile(value)
+                preview_profile = value
+                preview_renderers = ("native", "tts")
             elif action == "content":
                 message = self.voice_manager.set_native_reply_content(value)
             # Keep callbacks from already-open legacy menus valid until those
@@ -2837,9 +2927,26 @@ class FlexibleAgentRuntime:
             await query.answer(str(e), show_alert=True)
             return
 
+        preview_assets: tuple[tuple[str, Path], ...] = ()
+        if preview_profile and preview_renderers:
+            preview_assets = self.voice_manager.get_voice_preview_assets(
+                preview_profile,
+                renderers=preview_renderers,
+            )
+            if len(preview_assets) != len(preview_renderers):
+                preview_assets = ()
         text = self.voice_manager.voice_menu_text()
         await query.edit_message_text(text, reply_markup=self._voice_keyboard(), parse_mode="HTML")
-        await query.answer(message or ui_language.tr("common.updated"))
+        callback_notice = message or ui_language.tr("common.updated")
+        if preview_profile and not preview_assets:
+            callback_notice = ui_language.tr("voice.preview.unavailable")
+        await query.answer(callback_notice)
+        if preview_profile and preview_assets:
+            await self._send_voice_profile_previews(
+                query,
+                preview_profile,
+                preview_assets,
+            )
 
     # ── toggle callback ──────────────────────────────────────────────────────────
     # Handles: tgl:terminal:quiet/activity/debug/raw, tgl:verbose:on/off,
@@ -3255,12 +3362,22 @@ class FlexibleAgentRuntime:
         if args and args[0].lower() == "list":
             lines = [f"<b>{html.escape(ui_language.tr('move.known_instances'))}:</b>"]
             for name, inst in instances.items():
-                root = inst.get("root") or f"({ui_language.tr('move.auto')})"
-                lines.append(f"  • <code>{name}</code> — {inst.get('display_name', '')}  <i>{root}</i>")
+                capabilities = set(inst.get("capabilities") or [])
+                receiver = (
+                    ui_language.tr("move.receiver_ready")
+                    if "agent_move_receive_v1" in capabilities
+                    else ui_language.tr("move.receiver_probe")
+                )
+                platform_name = inst.get("environment_kind") or inst.get("platform") or ui_language.tr("common.unknown")
+                lines.append(
+                    f"  • <code>{html.escape(str(name))}</code> — "
+                    f"{html.escape(str(inst.get('display_name', '')))} · "
+                    f"<code>{html.escape(str(platform_name))}</code> · {html.escape(receiver)}"
+                )
             await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
 
-        # /move <agent> <target> [--keep-source] [--sync] [--dry-run]
+        # /move <agent> <target> [--keep-source] [--dry-run]
         if len(args) >= 2:
             agent_id = args[0]
             target = args[1]
@@ -4056,7 +4173,7 @@ class FlexibleAgentRuntime:
                     update,
                     ui_language.tr(
                         "voice.usage_command",
-                        command="/voice mode <off|tts|native|auto>",
+                        command="/voice mode <off|tts|native>",
                     ),
                 )
                 return
@@ -4190,7 +4307,7 @@ class FlexibleAgentRuntime:
             )
             return
         if mode == "on":
-            await self._reply_text(update, self.voice_manager.set_reply_mode("auto"))
+            await self._reply_text(update, self.voice_manager.set_reply_mode("native"))
             return
         if mode == "off":
             await self._reply_text(update, self.voice_manager.set_reply_mode("off"))
@@ -4201,7 +4318,7 @@ class FlexibleAgentRuntime:
                 "voice.usage_command",
                 command=(
                     "/voice [status|on|off|menu|preset <profile>|voices|use <alias>|providers|"
-                    "provider <name>|name <voice>|rate <n>|mode <off|tts|native|auto>|"
+                    "provider <name>|name <voice>|rate <n>|mode <off|tts|native>|"
                     "target <provider> <model>|native-voice <name>|native-format <format>|"
                     "content <both|audio|text>|fallback <local_chain|native_only>|"
                     "retention <minutes|indefinite>|transcript <on|off>]"
@@ -5512,6 +5629,14 @@ class FlexibleAgentRuntime:
             broadcast_targets = directory.resolve_group(group_name, exclude_self=self.name)
             broadcast_label = ui_language.tr("hchat.label.group", name=group_name)
 
+        # HChat prompts are internal Bridge requests, but they are continuations
+        # of the Conversation in which /hchat was invoked.  Preserve that exact
+        # Session/channel route instead of letting the bridge:* source fall back
+        # to the Agent's default Session.
+        hchat_chat_id, hchat_request_metadata, hchat_deliver_to_telegram = (
+            runtime_session.request_route_for_update(self, update)
+        )
+
         if broadcast_targets is not None:
             if not broadcast_targets:
                 await self._reply_text(
@@ -5540,29 +5665,14 @@ class FlexibleAgentRuntime:
                 f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
                 f"just report the reply content to the user. Do NOT send another hchat message back."
             )
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "hchat.broadcasting",
-                    count=len(broadcast_targets),
-                    target=html.escape(broadcast_label),
-                ),
-                parse_mode="HTML",
-            )
         elif self._hchat_draft_delivery_enabled():
             self_prompt = self._build_hchat_draft_prompt(target_name, intent)
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "hchat.drafting",
-                    agent=html.escape(target_name),
-                ),
-                parse_mode="HTML",
-            )
             await self.enqueue_api_text(
                 self_prompt,
                 source="bridge:hchat-draft",
-                deliver_to_telegram=True,
+                chat_id=hchat_chat_id,
+                deliver_to_telegram=hchat_deliver_to_telegram,
+                request_metadata=hchat_request_metadata,
             )
             return
 
@@ -5583,19 +5693,18 @@ class FlexibleAgentRuntime:
                 f"just report the reply content to the user. Do NOT send another hchat message back — "
                 f"the conversation ends there."
             )
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "hchat.composing",
-                    agent=html.escape(target_name),
-                ),
-                parse_mode="HTML",
-            )
 
+        # A valid /hchat invocation already selects and authorises one clear
+        # action.  Queue it without a user-visible preflight message; HER v2
+        # applies its request-scoped Direct policy and other Engines already
+        # run their ordinary single agent turn.  Only the terminal delivery
+        # report (or a deterministic validation error above) reaches the user.
         await self.enqueue_api_text(
             self_prompt,
             source="bridge:hchat",
-            deliver_to_telegram=True,
+            chat_id=hchat_chat_id,
+            deliver_to_telegram=hchat_deliver_to_telegram,
+            request_metadata=hchat_request_metadata,
         )
 
     def _hchat_draft_delivery_enabled(self) -> bool:
@@ -9865,7 +9974,13 @@ class FlexibleAgentRuntime:
     async def _send_wrapper_verbose_trace(self, item: QueuedRequest, core_raw: str, visible_text: str, wrapper_result) -> None:
         await runtime_wrapper.send_wrapper_verbose_trace(self, item, core_raw, visible_text, wrapper_result)
 
-    async def _send_meter_cost_tail(self, item: QueuedRequest) -> None:
+    async def _send_meter_cost_tail(
+        self,
+        item: QueuedRequest,
+        *,
+        total_elapsed_s: float | None = None,
+        stage_timings_s: Mapping[str, float] | None = None,
+    ) -> None:
         """Send the per-turn cost tail after the answer is confirmed delivered.
 
         Uses request-local ``meter_at_start`` so a mid-flight toggle never changes
@@ -9899,7 +10014,12 @@ class FlexibleAgentRuntime:
                     or getattr(item, "chat_id", None),
                 )
             )
-            text = format_cost_tail(receipt, locale=locale)
+            text = format_cost_tail(
+                receipt,
+                locale=locale,
+                total_elapsed_s=total_elapsed_s,
+                stage_timings_s=stage_timings_s,
+            )
         except Exception:
             self.logger.exception("meter cost tail formatting failed")
             return
@@ -10464,7 +10584,13 @@ class FlexibleAgentRuntime:
                 receipt_chunk_count = chunk_count
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 if receipt_delivered:
-                    await self._send_meter_cost_tail(item)
+                    await self._send_meter_cost_tail(
+                        item,
+                        total_elapsed_s=runtime_pipeline.queued_elapsed_s(item),
+                        stage_timings_s=runtime_pipeline._her_v2_stage_timings_s(
+                            response
+                        ),
+                    )
                 self._schedule_audit_followup(
                     item,
                     core_raw=safe_core_raw,

@@ -1,0 +1,20 @@
+# HASHI Portable Windows x64 runtime dependencies.
+# Direct requirements are pinned; requirements.lock pins and hashes the full
+# Windows/Python 3.12 closure used by the reproducible builder.
+aiohttp==3.13.4
+croniter==6.2.2
+cryptography==48.0.0
+edge-tts==7.2.7
+fastapi==0.135.2
+httpx==0.28.1
+jsonschema==4.26.0
+pillow==12.2.0
+playwright==1.58.0
+psutil==7.2.2
+pymupdf==1.27.2.2
+python-telegram-bot==22.6
+pyyaml==6.0.2
+rich==14.3.3
+textual==8.1.1
+uvicorn==0.46.0
+zeroconf==0.148.0

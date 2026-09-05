@@ -312,7 +312,7 @@ async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
 
     await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
 
-    assert messages == ["💬 Composing Hchat message to <b>akane</b>..."]
+    assert messages == []
     assert len(enqueued) == 1
     assert enqueued[0]["source"] == "bridge:hchat"
     assert enqueued[0]["deliver_to_telegram"] is True
@@ -466,13 +466,132 @@ async def test_cmd_hchat_draft_delivery_flag_enqueues_draft_source(tmp_path):
 
     await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
 
-    assert messages == ["💬 Drafting Hchat message to <b>akane</b>..."]
+    assert messages == []
     assert len(enqueued) == 1
     assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert enqueued[0]["deliver_to_telegram"] is True
     assert '"target": "akane"' in enqueued[0]["prompt"]
     assert "tools/hchat_send.py" not in enqueued[0]["prompt"]
     assert "Do not run shell commands." in enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_hchat_group_broadcast_has_no_preflight_reply(tmp_path):
+    manager = _make_manager(tmp_path)
+    runtime, messages = _make_runtime(manager)
+    runtime.name = "zelda"
+    runtime.agent_directory = SimpleNamespace(
+        group_exists=lambda name: name == "friends",
+        resolve_group=lambda name, *, exclude_self: ["akane", "momo"],
+    )
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+    update, context = _update(["@friends", "review", "the", "delivery", "plan"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert messages == []
+    assert len(enqueued) == 1
+    assert enqueued[0]["source"] == "bridge:hchat"
+    assert "Target agents: akane, momo" in enqueued[0]["prompt"]
+    assert "--to akane --from zelda" in enqueued[0]["prompt"]
+    assert "--to momo --from zelda" in enqueued[0]["prompt"]
+
+
+@pytest.mark.parametrize(
+    ("manager_factory", "draft_enabled", "expected_source"),
+    [
+        (_make_manager, False, "bridge:hchat"),
+        (_make_manager, True, "bridge:hchat-draft"),
+        (_make_her_v2_manager, False, "bridge:hchat"),
+        (_make_her_v2_manager, True, "bridge:hchat-draft"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_cmd_hchat_preserves_invoking_session_for_every_backend(
+    tmp_path,
+    manager_factory,
+    draft_enabled,
+    expected_source,
+):
+    from orchestrator import runtime_session
+
+    manager = manager_factory(tmp_path / expected_source.replace(":", "-"))
+    manager.config.extra = {"hchat_draft_delivery": draft_enabled}
+    runtime, messages = _make_runtime(manager)
+    default = runtime_session.initialize_runtime_sessions(runtime)
+    owner = runtime_session.owner_id(runtime)
+    active = runtime.session_store.create_session(
+        owner_id=owner,
+        agent_id=runtime.name,
+        title="Active Telegram conversation",
+    )
+    runtime.session_store.bind_channel(
+        owner_id=owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        channel_key="123",
+        session_id=active["session_id"],
+    )
+    assert active["session_id"] != default["session_id"]
+
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+    update, context = _update(["akane", "review", "plan", "A"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert messages == []
+    assert len(enqueued) == 1
+    assert enqueued[0]["source"] == expected_source
+    assert enqueued[0]["chat_id"] == 123
+    assert enqueued[0]["deliver_to_telegram"] is True
+    assert enqueued[0]["request_metadata"] == {
+        "session_id": active["session_id"],
+        "owner_id": owner,
+        "session_surface": "telegram",
+        "session_channel_key": "123",
+    }
+
+
+@pytest.mark.asyncio
+async def test_enqueue_api_text_honors_explicit_route_chat_id():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime._should_redirect_after_transfer = lambda: False
+    runtime._primary_chat_id = lambda: 999
+    calls = []
+
+    async def enqueue_request(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "req-routed"
+
+    runtime.enqueue_request = enqueue_request
+    metadata = {
+        "session_id": "ses-active",
+        "session_surface": "telegram",
+        "session_channel_key": "123",
+    }
+
+    result = await FlexibleAgentRuntime.enqueue_api_text(
+        runtime,
+        "continue this conversation",
+        source="bridge:hchat",
+        chat_id=123,
+        request_metadata=metadata,
+    )
+
+    assert result == "req-routed"
+    assert calls[0][0][:3] == (123, "continue this conversation", "bridge:hchat")
+    assert calls[0][1]["request_metadata"] == metadata
 
 
 @pytest.mark.asyncio

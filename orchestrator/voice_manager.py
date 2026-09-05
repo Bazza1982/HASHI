@@ -3,6 +3,7 @@ import copy
 import html
 import json
 import importlib.util
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,8 @@ def _default_tts_provider() -> str:
 class VoiceManager:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     PIPER_MODEL_DIR = PROJECT_ROOT / "voice_models" / "piper"
+    VOICE_PREVIEW_VERSION = "v1"
+    VOICE_PREVIEW_RENDERERS = ("native", "tts")
     DEFAULT_STATE = {
         "enabled": False,
         "mode": "text_and_voice",
@@ -245,7 +248,9 @@ class VoiceManager:
 
     def _default_piper_exe(self) -> str:
         piper_exe = Path(sys.executable).with_name("piper.exe")
-        return str(piper_exe) if piper_exe.exists() else "piper"
+        if piper_exe.exists():
+            return str(piper_exe)
+        return shutil.which("piper") or "piper"
 
     def _default_python_exe(self) -> str:
         return sys.executable
@@ -257,7 +262,13 @@ class VoiceManager:
         if name == "edge":
             return "installed" if importlib.util.find_spec("edge_tts") else "not installed"
         if name == "piper":
-            return "installed" if importlib.util.find_spec("piper") else "not installed"
+            exe = self._default_piper_exe()
+            executable_available = Path(exe).is_file() or shutil.which(exe) is not None
+            return (
+                "installed"
+                if importlib.util.find_spec("piper") or executable_available
+                else "not installed"
+            )
         if name == "kokoro":
             return "installed" if importlib.util.find_spec("kokoro") else f"not installed in Python {sys.version_info.major}.{sys.version_info.minor}"
         if name == "coqui":
@@ -274,7 +285,9 @@ class VoiceManager:
         if payload.get("provider") == "piper":
             provider_options.setdefault("exe", self._default_piper_exe())
             provider_options.setdefault("python_exe", self._default_python_exe())
-            provider_options.setdefault("module_mode", True)
+            provider_options.setdefault(
+                "module_mode", importlib.util.find_spec("piper") is not None
+            )
         payload["provider_options"] = provider_options
         return payload
 
@@ -393,6 +406,143 @@ class VoiceManager:
                 )
         return ()
 
+    @staticmethod
+    def _capability_values(value: object) -> tuple[str, ...]:
+        if isinstance(value, str):
+            values = (value,)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = tuple(value)
+        else:
+            values = ()
+        return tuple(
+            str(item).strip()
+            for item in values
+            if str(item or "").strip()
+        )
+
+    @classmethod
+    def _is_complete_native_audio_capability(cls, row: dict) -> bool:
+        """Require every capability dimension used by the native route."""
+
+        nested = row.get("extra")
+        resolved = dict(nested) if isinstance(nested, dict) else {}
+        resolved.update(row)
+        input_modalities = {
+            value.casefold()
+            for value in cls._capability_values(resolved.get("input_modalities"))
+        }
+        output_modalities = {
+            value.casefold()
+            for value in cls._capability_values(resolved.get("output_modalities"))
+        }
+        input_transports = resolved.get("input_transports")
+        input_formats = resolved.get("input_formats")
+        output_formats = resolved.get("output_formats")
+        audio_transports = (
+            cls._capability_values(input_transports.get("audio"))
+            if isinstance(input_transports, dict)
+            else ()
+        )
+        audio_input_formats = (
+            cls._capability_values(input_formats.get("audio"))
+            if isinstance(input_formats, dict)
+            else ()
+        )
+        audio_output_formats = (
+            cls._capability_values(output_formats.get("audio"))
+            if isinstance(output_formats, dict)
+            else ()
+        )
+        output_streaming = str(
+            resolved.get("output_streaming") or ""
+        ).strip().casefold()
+        api_surface = str(resolved.get("api_surface") or "").strip().casefold()
+        supported_voices = cls._capability_values(
+            resolved.get("supported_voices")
+            or resolved.get("native_audio_voices")
+        )
+        return bool(
+            str(resolved.get("engine") or "").strip()
+            and str(resolved.get("model") or "").strip()
+            and "audio" in input_modalities
+            and "audio" in output_modalities
+            and audio_transports
+            and audio_input_formats
+            and audio_output_formats
+            and output_streaming not in {"", "none", "unknown"}
+            and api_surface not in {"", "none", "unknown"}
+            and supported_voices
+        )
+
+    def _native_audio_targets(self) -> tuple[tuple[str, str], ...]:
+        targets: list[tuple[str, str]] = []
+        for row in self._native_capabilities:
+            if not self._is_complete_native_audio_capability(row):
+                continue
+            target = (
+                str(row.get("engine") or "").strip(),
+                str(row.get("model") or "").strip(),
+            )
+            if target not in targets:
+                targets.append(target)
+        return tuple(targets)
+
+    @staticmethod
+    def _target_matches(
+        provider: object,
+        model: object,
+        target: tuple[str, str],
+    ) -> bool:
+        return (
+            str(provider or "").strip().casefold() == target[0].casefold()
+            and str(model or "").strip().casefold() == target[1].casefold()
+        )
+
+    def _prepare_native_mode(self, state: dict, native: dict) -> None:
+        """Resolve a declared target before native mode becomes persistent."""
+
+        targets = self._native_audio_targets()
+        selected = next(
+            (
+                target
+                for target in targets
+                if self._target_matches(
+                    native.get("provider"), native.get("model"), target
+                )
+            ),
+            None,
+        )
+        if selected is None and targets:
+            selected = targets[0]
+        if selected is None:
+            # Tests and advanced embedders may construct VoiceManager without
+            # the Agent capability registry.  A complete manually configured
+            # target remains valid there; a real Agent always supplies the
+            # registry and therefore fails closed when no audio row qualifies.
+            manually_configured = bool(
+                not self._native_capabilities
+                and native.get("provider")
+                and native.get("model")
+            )
+            if not manually_configured:
+                raise RuntimeError(ui_language.tr("voice.native.unavailable"))
+        else:
+            native["provider"], native["model"] = selected
+
+        profile_id = self._voice_profile_from_state(state)
+        if profile_id is None and selected is not None:
+            profile_id = "warm_female"
+            state["voice_profile"] = profile_id
+            state["provider"] = "edge"
+            state["voice_name"] = self._tts_voice_for_profile(
+                profile_id, "Hello."
+            )
+            state["provider_options"] = {}
+        if profile_id is not None:
+            native["voice"] = self._native_voice_for_profile(
+                profile_id, native
+            )
+
     def _native_voice_for_profile(self, profile_id: str, policy: dict) -> str:
         profile = self.VOICE_PROFILES[profile_id]
         candidates = tuple(
@@ -446,16 +596,23 @@ class VoiceManager:
     def get_reply_mode(self) -> str:
         state = self._load()
         native_mode = self._native_policy_from_state(state)["mode"]
-        if native_mode in {"auto", "native", "tts"}:
+        if native_mode in {"native", "tts"}:
             return native_mode
         return "tts" if state.get("enabled") else "off"
 
     def set_reply_mode(self, mode: str) -> str:
         normalized = str(mode or "").strip().casefold()
-        if normalized not in {"off", "tts", "native", "auto"}:
-            raise RuntimeError("Voice mode must be off, tts, native, or auto.")
+        # ``auto`` never acquired behaviour distinct from ``native``.  Keep
+        # accepting the old value so persisted state, typed commands, and
+        # already-open Telegram keyboards migrate without an error.
+        if normalized == "auto":
+            normalized = "native"
+        if normalized not in {"off", "tts", "native"}:
+            raise RuntimeError("Voice mode must be off, tts, or native.")
         state = self._load()
         native = self._native_policy_from_state(state)
+        if normalized == "native":
+            self._prepare_native_mode(state, native)
         native["mode"] = normalized
         state["native"] = native
         state["enabled"] = normalized == "tts"
@@ -480,18 +637,94 @@ class VoiceManager:
         current = f"<b>{html.escape(mode.upper())}</b>"
         if ui_language.current_locale() != ui_language.DEFAULT_LOCALE:
             current = f"<b>{html.escape(mode_label)}</b> · <code>{html.escape(mode)}</code>"
+        native_label = ui_language.tr("voice.mode.native")
+        tts_label = ui_language.tr("voice.mode.tts")
+        off_label = ui_language.tr("voice.mode.off")
         return setting_card(
             "🔊",
             "Voice",
             current=current,
             facts=[
-                f"<b>{html.escape(ui_language.tr('voice.field.voice'))}</b> · "
-                f"{html.escape(str(profile_label))}",
-                f"<b>{html.escape(ui_language.tr('voice.field.reply'))}</b> · "
-                f"{html.escape(reply_labels[native['reply_content']])}",
+                f"<b>{html.escape(ui_language.tr('voice.field.mode'))}</b>",
+                (
+                    f"• <b>{html.escape(native_label)}</b> · "
+                    f"{html.escape(ui_language.tr('voice.mode.native.description'))}"
+                ),
+                (
+                    f"• <b>{html.escape(tts_label)}</b> · "
+                    f"{html.escape(ui_language.tr('voice.mode.tts.description'))}"
+                ),
+                (
+                    f"• <b>{html.escape(off_label)}</b> · "
+                    f"{html.escape(ui_language.tr('voice.mode.off.description'))}"
+                ),
+                (
+                    f"<b>{html.escape(ui_language.tr('voice.field.reply'))}</b> · "
+                    f"{html.escape(reply_labels[native['reply_content']])} · "
+                    f"{html.escape(ui_language.tr('voice.reply.scope'))}"
+                ),
+                (
+                    f"<b>{html.escape(ui_language.tr('voice.field.voice'))}</b> · "
+                    f"{html.escape(str(profile_label))}"
+                ),
             ],
             action=ui_language.tr("voice.action"),
         )
+
+    def voice_preview_path(
+        self,
+        profile_id: str,
+        renderer: str,
+        *,
+        locale: str | None = None,
+    ) -> Path:
+        """Return the stable, shared path for one prerecorded preview."""
+
+        profile = str(profile_id or "").strip().casefold()
+        if profile not in self.VOICE_PROFILES:
+            raise RuntimeError(f"Unknown voice profile: {profile_id}.")
+        output_renderer = str(renderer or "").strip().casefold()
+        if output_renderer not in self.VOICE_PREVIEW_RENDERERS:
+            raise RuntimeError(f"Unknown voice preview renderer: {renderer}.")
+        selected_locale = ui_language.normalize_locale(
+            locale or ui_language.current_locale()
+        )
+        return (
+            self.media_dir.parent
+            / "_voice_previews"
+            / self.VOICE_PREVIEW_VERSION
+            / selected_locale
+            / profile
+            / f"{output_renderer}.ogg"
+        )
+
+    def get_voice_preview_assets(
+        self,
+        profile_id: str,
+        *,
+        renderers: tuple[str, ...] | None = None,
+        locale: str | None = None,
+    ) -> tuple[tuple[str, Path], ...]:
+        """Resolve readable OGG previews without generating or mutating them."""
+
+        selected = renderers or self.VOICE_PREVIEW_RENDERERS
+        assets: list[tuple[str, Path]] = []
+        for renderer in selected:
+            path = self.voice_preview_path(
+                profile_id,
+                renderer,
+                locale=locale,
+            )
+            try:
+                valid = path.is_file() and path.stat().st_size > 4
+                if valid:
+                    with path.open("rb") as handle:
+                        valid = handle.read(4) == b"OggS"
+            except OSError:
+                valid = False
+            if valid:
+                assets.append((str(renderer), path))
+        return tuple(assets)
 
     def _load(self) -> dict:
         if not self.state_path.exists():
@@ -543,7 +776,9 @@ class VoiceManager:
         policy = copy.deepcopy(cls.DEFAULT_STATE["native"])
         policy.update(raw if isinstance(raw, dict) else {})
         mode = str(policy.get("mode") or "off").strip().casefold()
-        policy["mode"] = mode if mode in {"off", "tts", "native", "auto"} else "off"
+        if mode == "auto":
+            mode = "native"
+        policy["mode"] = mode if mode in {"off", "tts", "native"} else "off"
         trigger = str(policy.get("reply_trigger") or "voice_message").strip().casefold()
         policy["reply_trigger"] = trigger if trigger in {"voice_message", "all"} else "voice_message"
         content = str(policy.get("reply_content") or "audio_and_text").strip().casefold()
@@ -600,15 +835,12 @@ class VoiceManager:
         merged.update(override)
         merged["terminal_overrides"] = dict(overrides)
         resolved = self._normalise_native_policy(merged)
-        if policy["mode"] not in {"native", "auto"}:
+        if policy["mode"] != "native":
             resolved["mode"] = policy["mode"]
         return resolved
 
     def native_audio_enabled(self, terminal: str | None = None) -> bool:
-        return self.native_policy_for_terminal(terminal)["mode"] in {
-            "native",
-            "auto",
-        }
+        return self.native_policy_for_terminal(terminal)["mode"] == "native"
 
     def set_native_mode(self, mode: str) -> str:
         return self.set_reply_mode(mode)

@@ -190,6 +190,43 @@ def test_tool_registry_uses_external_workzone_as_access_root_when_outside_scope(
     assert manager.current_backend.tool_registry.access_root == zone.resolve()
 
 
+def test_tool_registry_adds_explicit_host_filesystem_roots(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    workspace = project / "workspaces" / "agent"
+    host_one = tmp_path / "host-one"
+    host_two = tmp_path / "host-two"
+    for path in (workspace, host_one, host_two):
+        path.mkdir(parents=True)
+    monkeypatch.setenv(
+        "HASHI_ADDITIONAL_ACCESS_ROOTS",
+        os.pathsep.join((str(host_one), str(host_two))),
+    )
+
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.current_backend = SimpleNamespace(tool_registry=None)
+    manager.secrets = {}
+    manager.global_config = SimpleNamespace(authorized_id=123)
+    manager.config = SimpleNamespace(name="agent", telegram_token_key="agent")
+    manager.logger = SimpleNamespace(
+        error=lambda *args, **kwargs: None,
+        info=lambda *args, **kwargs: None,
+    )
+    adapter_cfg = SimpleNamespace(
+        name="agent",
+        extra={},
+        workspace_dir=workspace,
+        resolve_access_root=lambda: project,
+    )
+
+    manager._attach_tool_registry({"allowed": ["file_read"]}, adapter_cfg)
+
+    assert manager.current_backend.tool_registry.access_roots == (
+        project.resolve(),
+        host_one.resolve(),
+        host_two.resolve(),
+    )
+
+
 def test_multi_workzone_roots_never_widen_to_common_parent(tmp_path: Path):
     project = tmp_path / "project"
     workspace = project / "workspaces" / "agent"

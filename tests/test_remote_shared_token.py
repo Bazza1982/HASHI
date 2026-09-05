@@ -31,6 +31,9 @@ class _ProtocolStub:
     def get_local_agent_directory_state(self):
         return {"directory_state": "fresh", "version": "local-snapshot"}
 
+    def _local_network_profile(self):
+        return {}
+
     def handle_handshake(self, payload: dict) -> dict:
         self.handshakes.append(payload)
         return {"status": "handshake_accept", "instance_id": "HASHI_LOCAL"}
@@ -173,6 +176,48 @@ def test_terminal_exec_still_accepts_pairing_bearer_when_lan_mode_off(tmp_path):
 
     assert response.status_code == 200
     assert response.json()["success"] is True
+
+
+def test_one_click_pairing_issues_required_bearer_when_lan_is_untrusted(tmp_path):
+    manager = PairingManager(
+        storage_dir=tmp_path / "pairing",
+        lan_mode=False,
+        auto_approve=True,
+        token_ttl_seconds=604_800,
+    )
+    app = create_app(
+        {"instance_id": "HASHI_LOCAL", "display_name": "Local", "remote_port": 8766},
+        manager,
+        TerminalExecutor(),
+        peer_registry=_PeerRegistryStub(),
+        protocol_manager=_ProtocolStub(),
+        hashi_root=str(tmp_path),
+        workbench_port=18800,
+    )
+    client = TestClient(app)
+
+    pairing = client.post(
+        "/pair/request",
+        json={"client_id": "one-click-client", "client_name": "One click"},
+    )
+    assert pairing.status_code == 200
+    assert pairing.json()["auto_approved"] is True
+    assert pairing.json()["expires_at"] is not None
+    health = client.get("/health").json()
+    assert health["lan_mode"] is False
+    assert health["pairing_auto_approve"] is True
+    assert health["pairing_token_ttl_seconds"] == 604_800
+
+    unauthenticated = client.post("/terminal/exec", json={"command": "hostname"})
+    authenticated = client.post(
+        "/terminal/exec",
+        json={"command": "hostname"},
+        headers={"Authorization": f"Bearer {pairing.json()['token']}"},
+    )
+
+    assert unauthenticated.status_code == 401
+    assert authenticated.status_code == 200
+    assert authenticated.json()["success"] is True
 
 
 def test_protocol_handshake_accepts_valid_shared_token(tmp_path):

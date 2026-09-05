@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.agent_lifecycle import AgentLifecycleManager
+from orchestrator.agent_lifecycle import (
+    LOCAL_ONLY_TELEGRAM_TOKEN,
+    AgentLifecycleManager,
+)
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.session_store import SessionStore
 
@@ -27,6 +30,29 @@ class DummyKernel:
 
     def _runtime_map(self):
         return {runtime.name: runtime for runtime in self.runtimes}
+
+
+@pytest.mark.asyncio
+async def test_local_only_token_skips_telegram_preflight(monkeypatch):
+    runtime = SimpleNamespace(
+        name="portable",
+        token=LOCAL_ONLY_TELEGRAM_TOKEN,
+        telegram_connected=None,
+    )
+    manager = AgentLifecycleManager(DummyKernel([runtime]))
+    preflight_calls = []
+
+    async def unexpected_preflight(*args, **kwargs):
+        preflight_calls.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(manager, "telegram_preflight", unexpected_preflight)
+
+    connected = await manager.try_telegram_connect(runtime)
+
+    assert connected is False
+    assert runtime.telegram_connected is False
+    assert preflight_calls == []
 
 
 @pytest.mark.asyncio
