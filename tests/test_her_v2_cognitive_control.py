@@ -223,6 +223,40 @@ def test_a_b_c_d_e_cycle_is_detected_in_every_tool_stage(stage):
     assert controller.awaiting_decision is True
 
 
+def test_incident_style_single_read_cycle_is_detected_after_three_repetitions():
+    controller = StageCognitiveController(
+        stage=Stage.PLANNING.value,
+        goal="Summarise the completed background job",
+    )
+    interrupt = None
+
+    for repetition in range(3):
+        interrupt = controller.observe(
+            tool_name="file_read",
+            arguments={"path": "report.md", "offset": 1, "limit": 1},
+            output="# HASHI Wiki Pipeline Report",
+            details={"smart_effect": "observed", "receipt_serial": repetition + 1},
+            is_error=False,
+        )
+        if repetition < 2:
+            assert interrupt is None
+
+    assert interrupt is not None
+    assert interrupt.code == "NO_NEW_INFORMATION_CYCLE"
+    assert interrupt.cycle_period == 1
+    assert interrupt.cycle_repetitions == 3
+    assert interrupt.cycle_tools == ("file_read",)
+    assert controller.awaiting_decision is True
+
+
+@pytest.mark.parametrize(
+    "legacy_options",
+    [
+        {},
+        {"cognitive_control_enabled": False},
+    ],
+    ids=["current-adapter", "legacy-false-is-inert"],
+)
 @pytest.mark.parametrize(
     "stage",
     [
@@ -235,7 +269,9 @@ def test_a_b_c_d_e_cycle_is_detected_in_every_tool_stage(stage):
     ],
 )
 @pytest.mark.asyncio
-async def test_stage_provider_mandatorily_installs_cognitive_control(stage):
+async def test_stage_provider_mandatorily_installs_cognitive_control(
+    stage, legacy_options
+):
     class Backend:
         def __init__(self):
             self.config = SimpleNamespace(extra={}, name="agent1", system_md=None)
@@ -275,6 +311,7 @@ async def test_stage_provider_mandatorily_installs_cognitive_control(stage):
     provider = HashiStageProvider(
         backend_manager=manager,
         tool_registry=_Registry(("probe_a",)),
+        **legacy_options,
     )
 
     response = await provider.invoke(
