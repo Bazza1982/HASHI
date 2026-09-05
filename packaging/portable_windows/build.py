@@ -990,6 +990,7 @@ def build(args: argparse.Namespace) -> Path:
                 "administrator_local_acceleration": True,
                 "expanded_usb_fallback": True,
                 "instance_scoped_host_uninstall": True,
+                "verified_legacy_cache_cleanup": True,
             },
             "local_cache_bundle_id": local_cache_manifest["bundle_id"],
             "local_cache_install_bytes": local_cache_manifest["install_bytes"],

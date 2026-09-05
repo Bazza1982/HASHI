@@ -128,6 +128,12 @@ def test_portable_local_acceleration_is_admin_atomic_progressive_and_optional():
     assert "AddMinutes(10)" not in installer
     assert "deadline" not in installer.lower()
     assert "usb:data" in installer
+    assert "Resolve-OwnedLegacyInstallation" in installer
+    assert "Remove-VerifiedLegacyInstallation" in installer
+    assert "HASHIPortableLocalAcceleration" in installer
+    assert "the legacy ownership marker does not match this USB and bundle" in installer
+    assert "Remove-Item -LiteralPath $script:LegacyCacheRoot -Recurse" not in installer
+    assert "Remove-Item -LiteralPath $script:ProductRoot -Recurse" not in installer
 
     assert "CommonApplicationData" in uninstaller
     assert "USB data" in uninstaller
@@ -176,6 +182,8 @@ def test_portable_host_runtime_and_uninstall_are_scoped_to_one_random_identity(
     assert "Test-PathInsideRoot" in uninstaller
     assert "$script:CacheRoot = Join-Path $script:ProductRoot 'Cache'" not in installer
     assert "$script:LocalCacheRoot = Join-Path $script:LocalProductRoot 'Cache'" not in common
+    assert "source_volume" in installer
+    assert "required_files" in installer
 
 
 def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(

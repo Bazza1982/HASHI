@@ -27,6 +27,10 @@ $script:StageRoot = ''
 $script:OwnerPath = ''
 $script:RegistrationPath = ''
 $script:UninstallRegistryPath = ''
+$script:LegacyCacheRoot = Join-Path $script:ProductRoot 'Cache'
+$script:LegacyStageRoot = Join-Path $script:ProductRoot 'Stage'
+$script:LegacyUninstallerPath = Join-Path $script:ProductRoot 'Uninstall-LocalCache.ps1'
+$script:LegacyUninstallRegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HASHIPortableLocalAcceleration'
 $script:CopyBufferBytes = 4 * 1024 * 1024
 
 function Write-BilingualSetupMessage {
@@ -61,6 +65,22 @@ function Test-IsAdministrator {
 function Quote-ProcessArgument {
     param([string]$Value)
     return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Test-SamePath {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+    if (-not $Left -or -not $Right) { return $false }
+    try {
+        return [IO.Path]::GetFullPath($Left).TrimEnd('\').Equals(
+            [IO.Path]::GetFullPath($Right).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    } catch {
+        return $false
+    }
 }
 
 function Initialize-InstancePaths {
@@ -228,6 +248,157 @@ function Test-InstalledCache {
     }
 }
 
+function Resolve-OwnedLegacyInstallation {
+    param([object]$Manifest)
+
+    $legacyArtifactsPresent = $false
+    foreach ($path in @(
+        $script:LegacyCacheRoot,
+        $script:LegacyStageRoot,
+        $script:LegacyUninstallerPath,
+        $script:LegacyUninstallRegistryPath
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            $legacyArtifactsPresent = $true
+            break
+        }
+    }
+    if (-not $legacyArtifactsPresent) { return $null }
+
+    $bundleId = [string]$Manifest.bundle_id
+    $cacheKey = [string]$Manifest.cache_key
+    $legacyInstallRoot = Join-Path $script:LegacyCacheRoot $cacheKey
+    $markerPath = Join-Path $legacyInstallRoot '.hashi-local-cache.json'
+    try {
+        if (-not (Test-Path -LiteralPath $script:LegacyCacheRoot -PathType Container)) {
+            throw 'the legacy cache directory is missing'
+        }
+        $cacheItem = Get-Item -LiteralPath $script:LegacyCacheRoot -Force
+        if (($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'the legacy cache directory is a reparse point'
+        }
+        if (-not (Test-Path -LiteralPath $legacyInstallRoot -PathType Container)) {
+            throw 'the expected legacy bundle directory is missing'
+        }
+        $legacyItem = Get-Item -LiteralPath $legacyInstallRoot -Force
+        if (($legacyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'the legacy bundle directory is a reparse point'
+        }
+        $cacheChildren = @(Get-ChildItem -LiteralPath $script:LegacyCacheRoot -Force)
+        if (
+            $cacheChildren.Count -ne 1 -or
+            -not (Test-SamePath -Left $cacheChildren[0].FullName -Right $legacyInstallRoot)
+        ) {
+            throw 'the legacy cache contains an unexpected item'
+        }
+        if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+            throw 'the legacy ownership marker is missing'
+        }
+        $markerItem = Get-Item -LiteralPath $markerPath -Force
+        if (($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'the legacy ownership marker is a reparse point'
+        }
+        $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $portableVolume = [IO.Path]::GetPathRoot($script:PortableRoot)
+        if (
+            [int]$marker.schema_version -ne 1 -or
+            [string]$marker.bundle_id -ne $bundleId -or
+            [string]$marker.cache_key -ne $cacheKey -or
+            [string]$marker.authoritative_data -ne 'usb:data' -or
+            -not (Test-SamePath -Left ([string]$marker.source_volume) -Right $portableVolume)
+        ) {
+            throw 'the legacy ownership marker does not match this USB and bundle'
+        }
+        foreach ($required in @($Manifest.required_files)) {
+            $relative = Convert-ManifestRelativePath ([string]$required)
+            if (-not (Test-Path -LiteralPath (Resolve-ChildPath $legacyInstallRoot $relative) -PathType Leaf)) {
+                throw "the legacy cache is missing required file $relative"
+            }
+        }
+        if (Test-Path -LiteralPath $script:LegacyStageRoot) {
+            $stageItem = Get-Item -LiteralPath $script:LegacyStageRoot -Force
+            if (
+                -not $stageItem.PSIsContainer -or
+                ($stageItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $null -ne (Get-ChildItem -LiteralPath $script:LegacyStageRoot -Force | Select-Object -First 1)
+            ) {
+                throw 'the legacy staging directory is not an empty ordinary directory'
+            }
+        }
+        if (Test-Path -LiteralPath $script:LegacyUninstallerPath) {
+            $uninstallerItem = Get-Item -LiteralPath $script:LegacyUninstallerPath -Force
+            if (
+                -not ($uninstallerItem -is [IO.FileInfo]) -or
+                ($uninstallerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            ) {
+                throw 'the legacy uninstaller is not an ordinary file'
+            }
+        }
+        if (Test-Path -LiteralPath $script:LegacyUninstallRegistryPath) {
+            $registry = Get-ItemProperty -LiteralPath $script:LegacyUninstallRegistryPath
+            if (
+                [string]$registry.DisplayName -ne 'HASHI Portable Local Acceleration Cache' -or
+                [string]$registry.Publisher -ne 'HASHI' -or
+                [string]$registry.DisplayVersion -ne $bundleId.Substring(0, 12) -or
+                -not (Test-SamePath -Left ([string]$registry.InstallLocation) -Right $legacyInstallRoot) -or
+                ([string]$registry.UninstallString).IndexOf(
+                    $script:LegacyUninstallerPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -lt 0
+            ) {
+                throw 'the legacy Windows Installed Apps entry does not match'
+            }
+        }
+        return [pscustomobject]@{
+            install_root = $legacyInstallRoot
+            marker_path = $markerPath
+        }
+    } catch {
+        throw (
+            'An older shared HASHI runtime is present but could not be safely ' +
+            "attributed to this USB. Nothing was removed. Details: $($_.Exception.Message)"
+        )
+    }
+}
+
+function Remove-VerifiedLegacyInstallation {
+    param([object]$Manifest)
+
+    $legacy = Resolve-OwnedLegacyInstallation -Manifest $Manifest
+    if ($null -eq $legacy) { return }
+    Write-BilingualSetupMessage `
+        -English 'Removing an older HASHI runtime from this PC...' `
+        -Chinese '正在清理这台电脑上的旧版 HASHI 运行组件……' `
+        -ForegroundColor Cyan
+    Write-SetupLog "Removing verified legacy runtime at $($legacy.install_root)"
+
+    if (Test-Path -LiteralPath $script:LegacyUninstallRegistryPath) {
+        Remove-Item -LiteralPath $script:LegacyUninstallRegistryPath -Recurse -Force -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $script:LegacyUninstallerPath -PathType Leaf) {
+        Remove-Item -LiteralPath $script:LegacyUninstallerPath -Force -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $legacy.install_root -PathType Container) {
+        $marker = Get-Content -LiteralPath $legacy.marker_path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (
+            [string]$marker.bundle_id -ne [string]$Manifest.bundle_id -or
+            [string]$marker.cache_key -ne [string]$Manifest.cache_key
+        ) {
+            throw 'The legacy ownership marker changed during setup. Nothing else was removed.'
+        }
+        Remove-Item -LiteralPath $legacy.install_root -Recurse -Force -ErrorAction Stop
+    }
+    foreach ($path in @($script:LegacyCacheRoot, $script:LegacyStageRoot)) {
+        if (
+            (Test-Path -LiteralPath $path -PathType Container) -and
+            $null -eq (Get-ChildItem -LiteralPath $path -Force | Select-Object -First 1)
+        ) {
+            [IO.Directory]::Delete($path, $false)
+        }
+    }
+    Write-SetupLog 'Verified legacy runtime removal completed.'
+}
+
 function Grant-CacheReadAccess {
     $acl = Get-Acl -LiteralPath $script:InstanceRoot
     $users = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
@@ -374,6 +545,10 @@ try {
     if ([string]$manifest.authoritative_data -ne 'usb:data' -or -not [bool]$manifest.expanded_usb_fallback) {
         throw 'The local-cache manifest could move or strand authoritative USB data.'
     }
+    $legacyInstallation = Resolve-OwnedLegacyInstallation -Manifest $manifest
+    if ($null -ne $legacyInstallation) {
+        Write-SetupLog "Verified an older runtime owned by this USB at $($legacyInstallation.install_root)"
+    }
 
     Write-SetupLog 'Checking system requirements and acquiring the installer lock.'
     $installMutex = [Threading.Mutex]::new($false, "Global\HASHIPortableInstall-$script:PortableInstanceId")
@@ -389,6 +564,7 @@ try {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     $finalRoot = Join-Path $script:CacheRoot $cacheKey
     if (Test-InstalledCache -Root $finalRoot -Manifest $manifest) {
+        Remove-VerifiedLegacyInstallation -Manifest $manifest
         Register-Uninstaller -Manifest $manifest -InstallRoot $finalRoot
         Show-ProgressValue `
             -Percent 100 `
@@ -632,6 +808,7 @@ try {
         throw
     }
 
+    Remove-VerifiedLegacyInstallation -Manifest $manifest
     try {
         Register-Uninstaller -Manifest $manifest -InstallRoot $finalRoot
     } catch {

@@ -26,7 +26,11 @@ ownership marker, running processes, and Installed Apps key are all scoped to
 that identity. The uninstaller always requires matching identity and ownership
 markers, cross-checks bundle and Windows registration metadata when present,
 and fails closed on any mismatch; it never recursively deletes the shared
-product root or another portable instance's directory.
+product root or another portable instance's directory. During an upgrade from
+the earlier shared-cache layout, setup removes the obsolete cache and its
+unsafe shared uninstall entry only after its marker, bundle, source volume,
+required files, directory shape, and Windows registration all match the current
+USB. An unknown or ambiguous legacy layout stops setup without deleting it.
 
 The image contains HER v2, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the complete browser

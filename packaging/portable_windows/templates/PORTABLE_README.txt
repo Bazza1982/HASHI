@@ -25,6 +25,12 @@ Quick start / 快速开始
    USB 连接。安装窗口会显示当前阶段、真实百分比、已复制容量和验证文件数。
    安装完成后，所选的 TUI 或 Workbench 会自动打开，无需再次双击。
 
+   When upgrading from an older HASHI Portable, setup removes its obsolete
+   shared local runtime only after verifying that it belongs to this USB and
+   bundle. If ownership is unclear, setup stops without deleting it.
+   从旧版 HASHI Portable 升级时，安装程序只会在确认旧本机运行组件属于此 USB
+   与当前程序包后才清理它；如归属不明确，安装会安全停止且不会删除它。
+
 Other launchers / 其他启动文件
 -------------------------------
 Install_HASHI_On_This_PC.bat
