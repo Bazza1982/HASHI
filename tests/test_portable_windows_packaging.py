@@ -101,6 +101,23 @@ def test_portable_launcher_allows_slow_usb_cold_start_and_reports_progress():
     assert "AddSeconds(75)" not in common
 
 
+def test_portable_stop_closes_owned_runtime_and_browser_before_safe_eject():
+    stop = (TEMPLATES / "launcher" / "Stop-HASHI.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Get-PortableOwnedProcesses" in stop
+    assert "browser-profile" in stop
+    assert "Start_HASHI_TUI.bat" in stop
+    assert "Start_HASHI_Workbench.bat" in stop
+    assert "Get-CimInstance Win32_Process" in stop
+    assert "Do not eject the USB drive" in stop
+    assert "请勿拔出 USB" in stop
+    assert stop.index("$remaining.Count -gt 0") < stop.index(
+        "HASHI Portable has stopped"
+    )
+
+
 def test_portable_local_acceleration_is_admin_atomic_progressive_and_optional():
     common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
     installer = (TEMPLATES / "launcher" / "Install-LocalCache.ps1").read_text(

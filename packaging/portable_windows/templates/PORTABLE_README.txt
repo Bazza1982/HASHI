@@ -50,7 +50,11 @@ Uninstall_HASHI_From_This_PC.bat
 
 Stop_HASHI.bat
   Stops HASHI, Workbench, and Remote. Run this before safely ejecting the USB.
+  It closes this USB's Workbench browser profile and confirms all portable
+  runtime processes have ended before reporting that ejection is safe.
   停止 HASHI、Workbench 和 Remote。安全弹出 USB 前请先运行此文件。
+  它也会关闭本 U 盘的 Workbench 浏览器配置，并确认全部便携运行进程均已结束，
+  然后才会提示可以安全弹出。
 
 Diagnose_HASHI.bat
   Checks runtimes, local services, write access, and free space without sending
