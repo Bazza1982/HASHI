@@ -9,8 +9,8 @@ import sys
 import zipfile
 from pathlib import Path
 
-import yaml
 import pytest
+import yaml
 
 from orchestrator.config import ConfigManager
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -106,6 +106,8 @@ def test_portable_launcher_allows_slow_usb_cold_start_and_reports_progress():
     assert "AddSeconds(75)" not in common
     assert "AddSeconds(45)" not in common
     assert "HASHI_WORKBENCH_OBSERVABILITY_DIR" in common
+    assert "HASHI_REMOTE_LIVE_ENDPOINTS_PATH" in common
+    assert "LocalInstanceRoot 'State'" in common
     assert "LocalInstanceRoot 'Logs\\workbench'" in common
 
 

@@ -1034,6 +1034,7 @@ def build(args: argparse.Namespace) -> Path:
                 "git_tracked_source_only": True,
                 "clean_tracked_inputs_required": True,
                 "local_workbench_observability": True,
+                "local_remote_route_cache": True,
             },
             "local_cache_bundle_id": local_cache_manifest["bundle_id"],
             "local_cache_install_bytes": local_cache_manifest["install_bytes"],

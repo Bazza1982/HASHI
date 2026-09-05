@@ -35,8 +35,11 @@ USB. An unknown or ambiguous legacy layout stops setup without deleting it.
 browser-profile processes, and reports safe ejection only after they are gone.
 When local acceleration is active, disposable Workbench diagnostic logs use the
 instance-scoped host directory so synchronous log writes cannot stall a slow
-USB; uninstalling that instance removes those logs. Authoritative data remains
-on the USB.
+USB. The host-specific Remote live-route cache uses the same instance-scoped
+host storage so LAN handshakes cannot block Remote while the removable drive is
+busy. USB execution fallback keeps using USB storage, and uninstalling an
+instance removes its host-only derived state. Authoritative data remains on the
+USB.
 
 The image contains HER v2, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the complete browser

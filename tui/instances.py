@@ -20,6 +20,7 @@ from orchestrator.runtime_defaults import (
     DEFAULT_HASHI_REMOTE_PORT,
     DEFAULT_WORKBENCH_PORT,
 )
+from remote.live_endpoints import live_endpoints_path
 from remote.local_http import local_http_hosts
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,7 @@ class InstanceResolver:
         if isinstance(own_entry, dict):
             add(own_entry.get("remote_port"))
 
-        live = _read_json(self.bridge_home / "state" / "remote_live_endpoints.json")
+        live = _read_json(live_endpoints_path(self.bridge_home))
         endpoints = live.get("endpoints") if isinstance(live.get("endpoints"), dict) else {}
         own_live = endpoints.get(self.launch_instance_id.lower(), {})
         if isinstance(own_live, dict):

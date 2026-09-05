@@ -37,13 +37,17 @@ if str(ROOT) not in sys.path:
 if __name__ == "__main__":
     sys.modules.setdefault("tools.hchat_send", sys.modules[__name__])
 
+from orchestrator.runtime_defaults import (
+    DEFAULT_HASHI_REMOTE_PORT,
+    DEFAULT_WORKBENCH_PORT,
+)
 from remote.delivery_results import format_delivery_result
+from remote.live_endpoints import live_endpoints_path
 from remote.security.client_auth import build_client_auth_headers
-from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
 
 CONTACTS_FILE = ROOT / "contacts.json"
 INSTANCES_FILE = ROOT / "instances.json"
-LIVE_ENDPOINTS_FILE = ROOT / "state" / "remote_live_endpoints.json"
+LIVE_ENDPOINTS_FILE = live_endpoints_path(ROOT)
 DEFAULT_TTL = 3600
 DEFAULT_REMOTE_PORT = DEFAULT_HASHI_REMOTE_PORT
 LIVE_ENDPOINT_TTL_SECONDS = int(os.getenv("HASHI_HCHAT_LIVE_ENDPOINT_TTL", "7200"))

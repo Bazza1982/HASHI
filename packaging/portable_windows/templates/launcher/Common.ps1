@@ -308,6 +308,17 @@ function Initialize-PortableEnvironment {
     $env:HASHI_REMOTE_ROOT = $script:DataRoot
     $env:HASHI_REMOTE_CONTROL_ROOT = $script:HashiRoot
     $env:HASHI_REMOTE_STATE_DIR = Join-Path $script:DataRoot 'state\remote'
+    $remoteLiveEndpointsPath = Join-Path $script:DataRoot 'state\remote_live_endpoints.json'
+    if ($script:ExecutionMode -eq 'local-cache') {
+        try {
+            $remoteDerivedStateRoot = Join-Path $script:LocalInstanceRoot 'State'
+            New-Item -ItemType Directory -Force -Path $remoteDerivedStateRoot -ErrorAction Stop | Out-Null
+            $remoteLiveEndpointsPath = Join-Path $remoteDerivedStateRoot 'remote_live_endpoints.json'
+        } catch {
+            $remoteLiveEndpointsPath = Join-Path $script:DataRoot 'state\remote_live_endpoints.json'
+        }
+    }
+    $env:HASHI_REMOTE_LIVE_ENDPOINTS_PATH = $remoteLiveEndpointsPath
     $env:HASHI_PORTABLE_USB_ROOT = $script:PortableRoot
     $env:HASHI_PORTABLE_EXECUTION_MODE = $script:ExecutionMode
     $env:HASHI_TUI_ENABLE_API_GATEWAY = '0'
