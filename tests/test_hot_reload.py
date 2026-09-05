@@ -92,6 +92,7 @@ def test_hot_reload_discovery_rejects_prefixed_modules_outside_project(tmp_path)
 
 def test_hot_reload_orders_adapter_protocol_before_consumers():
     names = [
+        "remote.security.shared_token",
         "adapters.her_v2",
         "adapters.openrouter_api",
         "adapters.base",
@@ -123,10 +124,14 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "orchestrator.workzone",
         "orchestrator.agent_overview",
         "orchestrator.runtime_workzone",
+        "orchestrator.runtime_remote",
     ]
 
     ordered = sorted(names, key=module_reload_key)
 
+    assert ordered.index("remote.security.shared_token") < ordered.index(
+        "orchestrator.runtime_remote"
+    )
     assert ordered.index("adapters.stream_events") < ordered.index("adapters.base")
     assert ordered.index("adapters.stream_io") < ordered.index("adapters.her_v2")
     assert ordered.index("orchestrator.multimodal_contract") < ordered.index(

@@ -388,6 +388,14 @@ def test_reload_hands_current_contract_to_live_legacy_manager():
         LegacyRebootManager.validate_agent_runtime_contract
         is reloaded_manager_class.validate_agent_runtime_contract
     )
+    assert (
+        LegacyRebootManager.preflight_project_modules
+        is reloaded_manager_class.preflight_project_modules
+    )
+    assert (
+        LegacyRebootManager.reload_project_modules
+        is reloaded_manager_class.reload_project_modules
+    )
     with pytest.raises(ValueError, match="Unknown engine: claw-cli"):
         backend_registry.get_backend_class("claw-cli")
 
@@ -422,6 +430,14 @@ def test_handoff_repairs_kernel_manager_stranded_before_module_generation():
     assert (
         IntermediateRebootManager.validate_agent_runtime_contract
         is reloaded_manager_class.validate_agent_runtime_contract
+    )
+    assert (
+        OldestRebootManager.reload_project_modules
+        is reloaded_manager_class.reload_project_modules
+    )
+    assert (
+        IntermediateRebootManager.preflight_project_modules
+        is reloaded_manager_class.preflight_project_modules
     )
     with pytest.raises(ValueError, match="Unknown engine: claw-cli"):
         backend_registry.get_backend_class("claw-cli")

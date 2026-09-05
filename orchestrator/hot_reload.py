@@ -6,7 +6,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 
-HOT_RELOAD_PREFIXES = ("adapters.", "tools.", "orchestrator.")
+HOT_RELOAD_PREFIXES = (
+    "adapters.",
+    "tools.",
+    "orchestrator.",
+    # Core runtime_remote imports the stdlib-only response-auth helpers at
+    # module load. Refresh that leaf dependency before its orchestrator
+    # consumer without widening hot reload to the Remote server/process graph.
+    "remote.security.shared_token",
+)
 
 # These modules define identity objects already owned by the running process.
 # They are not function-layer modules: changing one is incomplete until it has
@@ -25,6 +33,7 @@ PROCESS_IDENTITY_MODULES = frozenset(
 # constants/classes at module import time.  Otherwise a hot reload can combine
 # new consumer source with the previous in-memory protocol module.
 FOUNDATION_PHASES = {
+    "remote.security.shared_token": 0,
     # The HER gateway context imports ToolRegistry at module scope.  Reload
     # schemas, then the registry, then the context so a hot restart cannot
     # retain the pre-change ToolRegistry class after its constructor evolves.
