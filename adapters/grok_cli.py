@@ -54,7 +54,6 @@ class GrokCLIAdapter(BaseBackend):
         self.current_proc = None
         self._active_read_tasks: list[asyncio.Task] = []
         self.cmd_base = getattr(self.global_config, "grok_cmd", "grok")
-        self.access_root = str(self.config.resolve_access_root())
         self._session_id: str | None = None
         self._session_mode: bool = bool((self.config.extra or {}).get("session_mode", False))
         requested_effort = self._extra_str("effort", self.DEFAULT_REASONING_EFFORT).lower()
@@ -132,7 +131,7 @@ class GrokCLIAdapter(BaseBackend):
             "--no-auto-update",
             "--no-alt-screen",
             "--cwd",
-            self.access_root,
+            str(self.effective_workdir),
             "-m",
             self.config.model,
             "--output-format",
@@ -399,7 +398,7 @@ class GrokCLIAdapter(BaseBackend):
             invocation = resolve_argv_invocation(cmd)
             self.current_proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
-                cwd=str(self.config.workspace_dir),
+                cwd=str(self.effective_workdir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **process_group_kwargs(),

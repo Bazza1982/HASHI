@@ -297,7 +297,7 @@ def test_console_filter_keeps_risky_logs_outside_raw(tmp_path) -> None:
     )
 
 
-def test_hot_reload_refresh_replaces_only_console_filter(monkeypatch) -> None:
+def test_runtime_startup_refresh_replaces_only_console_filter(monkeypatch) -> None:
     class ConsoleOutputFilter:  # noqa: N801 - simulates the pre-reload class
         pass
 

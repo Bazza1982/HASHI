@@ -5,7 +5,6 @@ import base64
 import json
 import logging
 import mimetypes
-import socket
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -21,6 +20,7 @@ from orchestrator.admin_local_testing import (
     try_execute_slash_command_text,
 )
 from orchestrator.agent_overview import build_agent_overview
+from orchestrator.capability_broker import CapabilityBrokerError
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
@@ -71,6 +71,7 @@ from orchestrator.enterprise.scim import (
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.pathing import resolve_path_value
+from orchestrator.service_endpoints import ServiceEndpointError, select_service_bind_host
 from orchestrator.session_store import (
     TERMINAL_RUN_STATES,
     IdempotencyConflict,
@@ -219,6 +220,7 @@ class WorkbenchApiServer:
         secrets: dict | None = None,
         orchestrator=None,
         connectors: list | None = None,
+        reconcile_session_runs: bool = True,
     ):
         self.config_path = config_path
         self.global_config = global_config
@@ -228,7 +230,11 @@ class WorkbenchApiServer:
         self.admin_token = (self.secrets.get("workbench_admin_token") or "").strip()
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
-        self.reconciled_session_runs = self.session_store.reconcile_incomplete_runs()
+        self.reconciled_session_runs = (
+            self.session_store.reconcile_incomplete_runs()
+            if reconcile_session_runs
+            else []
+        )
         self._audio_cleanup_task: asyncio.Task | None = None
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self.identity_service = self._build_identity_service()
@@ -624,6 +630,18 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/admin/stop-agent", self.handle_admin_stop_agent)
         self.app.router.add_post("/api/admin/shutdown", self.handle_admin_shutdown)
         self.app.router.add_post("/api/admin/notify", self.handle_admin_notify)
+        self.app.router.add_post(
+            "/api/device-capabilities/register",
+            self.handle_device_capability_register,
+        )
+        self.app.router.add_post(
+            "/api/device-capabilities/heartbeat",
+            self.handle_device_capability_heartbeat,
+        )
+        self.app.router.add_get(
+            "/api/device-capabilities/status",
+            self.handle_device_capability_status,
+        )
         self.app.router.add_get("/api/health", self.handle_health)
         self.app.router.add_post("/api/jobs/import", self.handle_jobs_import)
         self.runner = None
@@ -1129,6 +1147,12 @@ class WorkbenchApiServer:
             self.runner, bind_host, self.global_config.workbench_port
         )
         await self.site.start()
+        sockets = tuple(getattr(getattr(self.site, "_server", None), "sockets", ()) or ())
+        self.bound_port = (
+            int(sockets[0].getsockname()[1])
+            if sockets
+            else int(self.global_config.workbench_port)
+        )
         self._audio_cleanup_task = asyncio.create_task(
             self._audio_cleanup_loop(),
             name="hashi-native-audio-cleanup",
@@ -1147,26 +1171,9 @@ class WorkbenchApiServer:
                 )
 
     def _select_bind_host(self) -> str:
-        configured = str(
-            getattr(self.global_config, "api_host", "") or "127.0.0.1"
-        ).strip()
-        if configured not in {"127.0.0.1", "localhost"}:
-            return configured
-        for candidate in ("10.255.255.254",):
-            if self._host_can_bind(candidate):
-                return candidate
-        return "127.0.0.1"
-
-    @staticmethod
-    def _host_can_bind(host: str) -> bool:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.bind((host, 0))
-            return True
-        except OSError:
-            return False
-        finally:
-            sock.close()
+        return select_service_bind_host(
+            getattr(self.global_config, "api_host", None)
+        )
 
     async def shutdown(self):
         if self._audio_cleanup_task is not None:
@@ -3564,8 +3571,9 @@ class WorkbenchApiServer:
                 },
                 status=404,
             )
+        poll_activity = getattr(runtime, "poll_request_activity", None)
         store = getattr(runtime, "request_activity", None)
-        if store is None:
+        if store is None and not callable(poll_activity):
             return web.json_response(
                 {
                     "ok": False,
@@ -3611,7 +3619,18 @@ class WorkbenchApiServer:
                 },
                 status=404,
             )
-        result = store.poll(request_id, after_sequence=after_sequence, limit=limit)
+        if callable(poll_activity):
+            result = await poll_activity(
+                request_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+        else:
+            result = store.poll(
+                request_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
         identity = {
             "session_id": run["session_id"],
             "run_id": run["run_id"],
@@ -3704,6 +3723,9 @@ class WorkbenchApiServer:
     ) -> bool:
         if not self._native_audio_chat_v1_ready():
             return False
+        proxy_ready = getattr(runtime, "native_audio_ready", None)
+        if getattr(runtime, "is_function_worker_proxy", False) and callable(proxy_ready):
+            return bool(proxy_ready(terminal))
         manager = getattr(runtime, "voice_manager", None)
         native_enabled = getattr(manager, "native_audio_enabled", None)
         if not callable(native_enabled):
@@ -3978,7 +4000,12 @@ class WorkbenchApiServer:
         *,
         runtime,
         canonical_content: dict[str, Any],
+        terminal: str | None = None,
     ) -> dict[str, Any] | None:
+        if getattr(runtime, "is_function_worker_proxy", False):
+            # The canonical content and its lifecycle cross the route boundary;
+            # transcription state must stay with the active Function Worker.
+            return None
         voice_parts = [
             dict(part)
             for part in canonical_content.get("parts", ())
@@ -4025,6 +4052,15 @@ class WorkbenchApiServer:
                 )
             )
 
+        manager = getattr(runtime, "voice_manager", None)
+        native_enabled = getattr(manager, "native_audio_enabled", None)
+        native_authorized = False
+        if callable(native_enabled):
+            try:
+                native_authorized = bool(native_enabled(terminal))
+            except TypeError:
+                native_authorized = bool(native_enabled())
+
         state: dict[str, Any] = {
             "task": asyncio.create_task(_transcribe()),
             "ready_event": asyncio.Event(),
@@ -4034,7 +4070,10 @@ class WorkbenchApiServer:
             "attachment_id": attachment_ids[0],
             "attachment_ids": attachment_ids,
             "transcript_decisions": {},
-            "safe_voice": bool(getattr(runtime, "_safevoice_enabled", False)),
+            "safe_voice": bool(
+                getattr(runtime, "_safevoice_enabled", False)
+                and not native_authorized
+            ),
             "confirmation_requested": False,
             "confirmation_presented": False,
             "native_audio_completed": False,
@@ -4051,6 +4090,8 @@ class WorkbenchApiServer:
         state: dict[str, Any] | None,
         request_id: str,
     ) -> None:
+        if getattr(runtime, "is_function_worker_proxy", False):
+            return
         if state is None:
             return
         registry = getattr(runtime, "_native_voice_transcripts", None)
@@ -4250,6 +4291,7 @@ class WorkbenchApiServer:
             transcript_state = self._begin_session_voice_transcription(
                 runtime=runtime,
                 canonical_content=canonical_content,
+                terminal=surface,
             )
             try:
                 request_id = await runtime.enqueue_request(
@@ -4608,6 +4650,24 @@ class WorkbenchApiServer:
                 include_deleted=False,
             )
             runtime = self._runtime_map().get(session["agent_id"])
+            remote_decider = getattr(runtime, "decide_native_voice_transcript", None)
+            if getattr(runtime, "is_function_worker_proxy", False) and callable(
+                remote_decider
+            ):
+                await remote_decider(
+                    request_id=str(transcript.get("request_id") or ""),
+                    transcript_id=str(transcript["transcript_id"]),
+                    decision=decision,
+                )
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "transcript": {
+                            "transcript_id": transcript["transcript_id"],
+                            "safe_voice_state": transcript["safe_voice_state"],
+                        },
+                    }
+                )
             registry = getattr(runtime, "_native_voice_transcripts", None)
             state = (
                 registry.get(str(transcript.get("request_id") or ""))
@@ -4868,12 +4928,15 @@ class WorkbenchApiServer:
         if reply_route and isinstance(reply_route, dict):
             self._learn_reply_route(text, reply_route)
 
+        supplied_metadata = payload.get("request_metadata")
         session_metadata = {
             "session_id": payload.get("session_id") or None,
             "owner_id": self._v1_owner_id(request),
             "session_surface": payload.get("surface") or "workbench",
             "session_channel_key": payload.get("client_id") or "default",
         }
+        if isinstance(supplied_metadata, dict):
+            session_metadata.update(supplied_metadata)
         slash_result = await try_execute_slash_command_text(
             runtime,
             text,
@@ -4888,6 +4951,7 @@ class WorkbenchApiServer:
 
         request_id = await runtime.enqueue_api_text(
             text,
+            source=str(payload.get("source") or "api"),
             request_metadata=session_metadata,
             idempotency_key=str(payload.get("idempotency_key") or "").strip() or None,
         )
@@ -6166,12 +6230,30 @@ class WorkbenchApiServer:
             runtime.name for runtime in self._runtime_list() if runtime.startup_success
         ]
         orchestrator = self.orchestrator
+        endpoint = None
+        endpoint_registry = getattr(orchestrator, "endpoint_registry", None)
+        if endpoint_registry is not None:
+            try:
+                endpoint = endpoint_registry.resolve(
+                    "workbench",
+                    expected_instance=getattr(self.global_config, "instance_id", None),
+                )
+            except ServiceEndpointError:
+                endpoint = None
         payload = {
             "ok": True,
             "instance_id": getattr(self.global_config, "instance_id", None)
             or getattr(orchestrator, "instance_id", None)
             or "HASHI",
-            "workbench_port": getattr(self.global_config, "workbench_port", None),
+            "workbench_port": (
+                endpoint.port
+                if endpoint is not None
+                else getattr(self, "bound_port", None)
+                or getattr(self.global_config, "workbench_port", None)
+            ),
+            "workbench_endpoint": (
+                endpoint.to_dict() if endpoint is not None else None
+            ),
             "api_gateway_port": getattr(self.global_config, "api_gateway_port", None),
             "api_gateway_enabled": bool(getattr(orchestrator, "api_gateway", None)),
             "api_gateway_default_model": getattr(
@@ -6187,15 +6269,128 @@ class WorkbenchApiServer:
                 "platform_abi": runtime.platform_abi,
                 "core_api": runtime.core_api,
                 "function_api": runtime.function_api,
+                "worker_model": runtime.worker_model,
+                "worker_protocol": runtime.worker_protocol,
+                "generation_schema": runtime.generation_schema,
                 "dependency_digest": runtime.dependency_digest,
                 "core_source_digest": runtime.core_source_digest,
             }
         generation = getattr(orchestrator, "function_generation", None)
         if isinstance(generation, dict):
             payload["function_generation"] = dict(generation)
+        payload["function_workers"] = [
+            {
+                "agent": runtime.name,
+                "pid": int(getattr(runtime, "worker_pid", 0) or 0),
+                "generation_id": str(
+                    getattr(runtime, "generation_id", "") or ""
+                ),
+                "phase": str(
+                    getattr(runtime, "metadata", {}).get("worker_phase") or ""
+                ),
+                "accepting": bool(
+                    getattr(runtime, "metadata", {}).get(
+                        "worker_accepting", False
+                    )
+                ),
+                "alive": bool(
+                    getattr(getattr(runtime, "client", None), "process", None)
+                    and runtime.client.process.is_alive()
+                ),
+                "telegram_ingress": (
+                    getattr(
+                        getattr(orchestrator, "function_workers", None),
+                        "telegram_ingress_snapshot",
+                        lambda _name: {"running": False, "connected": False, "offset": None},
+                    )(runtime.name)
+                ),
+            }
+            for runtime in self._runtime_list()
+            if getattr(runtime, "is_function_worker_proxy", False)
+        ]
+        capability_broker = getattr(orchestrator, "capability_broker", None)
+        payload["device_capabilities"] = (
+            capability_broker.status()
+            if capability_broker is not None
+            else {
+                "instance_id": payload["instance_id"],
+                "capabilities": [],
+                "leases": [],
+            }
+        )
         if self._is_governed_profile():
             payload["enterprise"] = self._enterprise_health_payload()
         return web.json_response(payload)
+
+    async def handle_device_capability_register(self, request):
+        broker = getattr(self.orchestrator, "capability_broker", None)
+        if broker is None:
+            return web.json_response(
+                {"ok": False, "error": "Core capability broker is unavailable"},
+                status=503,
+            )
+        try:
+            payload = await request.json()
+            registration = await asyncio.to_thread(
+                broker.register,
+                payload,
+                bootstrap_token=request.headers.get(
+                    "X-HASHI-Capability-Bootstrap",
+                    "",
+                ),
+            )
+        except (ValueError, TypeError, CapabilityBrokerError) as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc)},
+                status=403,
+            )
+        workers = getattr(self.orchestrator, "function_workers", None)
+        if workers is not None:
+            await workers.broadcast_topology()
+        return web.json_response(
+            {"ok": True, "registration": registration.to_dict()},
+            status=201,
+        )
+
+    async def handle_device_capability_heartbeat(self, request):
+        broker = getattr(self.orchestrator, "capability_broker", None)
+        if broker is None:
+            return web.json_response(
+                {"ok": False, "error": "Core capability broker is unavailable"},
+                status=503,
+            )
+        authorization = str(request.headers.get("Authorization") or "")
+        worker_token = (
+            authorization.removeprefix("Bearer ").strip()
+            if authorization.startswith("Bearer ")
+            else ""
+        )
+        try:
+            payload = await request.json()
+            registration = await asyncio.to_thread(
+                broker.heartbeat,
+                str(payload.get("capability_id") or ""),
+                worker_token=worker_token,
+                identity=payload.get("identity") or {},
+                ttl_seconds=float(payload.get("ttl_seconds") or 90),
+            )
+        except (ValueError, TypeError, CapabilityBrokerError) as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc)},
+                status=403,
+            )
+        return web.json_response(
+            {"ok": True, "registration": registration.to_dict()}
+        )
+
+    async def handle_device_capability_status(self, request):
+        broker = getattr(self.orchestrator, "capability_broker", None)
+        if broker is None:
+            return web.json_response(
+                {"ok": False, "error": "Core capability broker is unavailable"},
+                status=503,
+            )
+        return web.json_response({"ok": True, **broker.status()})
 
     def _enterprise_health_payload(self) -> dict:
         policy_evaluator = self._enterprise_policy_evaluator()

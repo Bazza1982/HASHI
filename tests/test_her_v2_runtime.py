@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from collections import defaultdict, deque
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,7 @@ from orchestrator.her_v2.presentation import (
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.her_v2.runtime_support import _merged_stage_timings_s
 from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
@@ -376,6 +378,20 @@ def _runtime(
     )
 
 
+def test_stage_timing_merges_overlapping_parallel_invocations():
+    state = SimpleNamespace(
+        stage_timing_intervals={
+            "execution": [(10.0, 12.0), (11.0, 13.0), (15.0, 16.5)],
+            "planning": [(3.0, 4.25)],
+        }
+    )
+
+    assert _merged_stage_timings_s(state) == {
+        "execution": 4.5,
+        "planning": 1.25,
+    }
+
+
 def _triage(
     classification: str,
     *,
@@ -708,6 +724,7 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
     assert result.review_count == 0
     assert result.replan_count == 0
     assert result.checkpoint_count == 0
+    assert result.stage_timings_s["direct"] > 0
     assert result.evidence_refs == (receipt.evidence_ref,)
     assert [(item.kind, item.text) for item in result.delivery_records] == [
         ("final", "Please provide the missing account ID.")

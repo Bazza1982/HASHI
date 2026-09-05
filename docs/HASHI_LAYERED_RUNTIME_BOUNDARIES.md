@@ -16,8 +16,8 @@ Layer 4: instance configuration
 ```
 
 The core stays stable across platforms and instances. Feature changes should
-land in hot-reloadable functions or configuration layers. Pulling from `main`
-must not erase local platform or instance configuration.
+land in replaceable per-Agent Function Workers or configuration layers.
+Pulling from `main` must not erase local platform or instance configuration.
 
 ## Canonical Engineering Rule
 
@@ -51,10 +51,12 @@ Current authoritative owners include:
 |---|---|
 | backend models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
 | built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
-| initial/hot manager construction | `orchestrator/manager_registry.py` |
+| stable Core manager construction | `orchestrator/manager_registry.py` |
 | Python, ABI, dependency and protected-Core identity | `orchestrator/runtime_contract.py` and `[tool.hashi.runtime]` |
-| transactional function-generation staging and rollback | `orchestrator/function_generation.py` |
-| function discovery, ordering, and public contract | `orchestrator/hot_reload.py` |
+| Function generation qualification and manifests | `orchestrator/function_generation.py` |
+| Worker lifecycle, IPC routing and crash recovery | `orchestrator/function_worker_supervisor.py` |
+| transactional target switching and rollback | `orchestrator/reboot_manager.py` |
+| function discovery, ordering, and public contract | `orchestrator/function_contract.py` |
 | shared workspace `state.json` persistence | `orchestrator/workspace_state.py` |
 | instance process lock and PID paths | `orchestrator/pathing.py` |
 | compatibility port defaults | `orchestrator/runtime_defaults.py` |
@@ -74,7 +76,8 @@ Examples:
 - kernel construction and process lifecycle entrypoint
 - single-instance lock
 - crash/fatal exit handling
-- manager rebuild transaction contract
+- immutable Function generation and Worker protocol contract
+- stable Telegram/Workbench/API ingress and shared service ownership
 - shared protocol schemas and compatibility boundaries
 
 Rules:
@@ -109,11 +112,11 @@ The Windows helper (`tools.windows_helper` and
 modules are excluded from the in-process function generation and are launched
 with their own declared `uv` dependency set.
 
-Hot-reloadable manager implementations are Layer 2 unless they define or mutate
-the kernel/process contract. For example, `orchestrator/service_manager.py` is a
-hot-reloadable function-layer manager; its public contract with kernel-owned
-service handles is protected, but ordinary implementation changes such as adding
-a new managed service should not require full core authorization.
+Core managers and live Core services are not rebuilt by `/reboot`. Their object
+identity is part of the running Core contract. Product behavior reached through
+those services must route through an `AgentRuntimeHandle` rather than being
+implemented in the stable ingress layer. Changing a Core manager or service is
+a planned Core migration.
 
 The manifest is enforced by agent instructions first and by a local preflight
 check:
@@ -144,17 +147,17 @@ change.
 
 ## Layer 2: HASHI Functions
 
-Purpose: hot-reloadable behavior that can change with `/reboot`.
+Purpose: replaceable Agent behavior that changes through a Worker `/reboot`.
 
 Examples:
 
-- orchestration managers
 - runtime command handlers
 - menus and Telegram/UI command surfaces
-- scheduler and superloop behavior
+- request execution, backend adapters, tools and skills
 - hchat delivery logic
 - wrapper/audit/Anatta runtime features
-- Remote route planner and profile resolver, once extracted from legacy core
+- Agent-local memory, media and voice behavior
+- Remote route planner and profile resolver when they execute inside an Agent
 
 Rules:
 
@@ -166,9 +169,10 @@ Rules:
 - A targeted reboot must never be widened or rejected because class members,
   signatures, fields, or other valid Python interfaces changed. Only an
   explicit `same` or `max` request may select multiple Agents.
-- Managers may use kernel-owned handles but must not silently replace them.
-- New behavior should be modular and swappable rather than hard-coded into one
-  large runtime object.
+- Workers may request a narrow Core capability through versioned JSON IPC; they
+  may not receive or mutate Core Python objects.
+- New behavior should be modular and swappable rather than added to stable
+  Workbench/API ingress or a large Core manager.
 
 ## Layer 3: Platform Configuration
 
@@ -252,49 +256,43 @@ every `main.py` process or assume a repository-wide `.bridge_u_f.pid`.
 The lock file is persistent. The operating-system file lock, not file
 existence, is authoritative. This avoids the unlock/delete inode race.
 
-## Hot-change contract
+## Function-change contract
 
 Tracked feature and adoption behavior should be usable after `/reboot` whenever
 the process bootstrap contract itself did not change:
 
-1. Resolve the requested lifecycle scope once; targeted modes must contain
-   exactly one immutable target, and malformed input must not fall back to all.
-2. Fingerprint and compile the candidate source without creating bytecode or
-   changing live state.
-3. Import the complete runtime closure in an isolated staging process using
-   the exact running Core executable, ABI, dependency and Core-source digest.
-4. Materialise fresh module objects, validate cross-module identity, and build
-   the complete Manager bundle while the old canonical generation remains
-   installed. In-place `importlib.reload()` is forbidden.
-5. Reject any pre-commit failure without stopping an Agent.
-6. Stop only the resolved target(s), verify the candidate source digest again,
-   and atomically install module bindings plus the Manager bundle.
-7. Start only the selected Agent(s), then recreate and health-check warm
-   services—Workbench API, enabled API Gateway and WhatsApp transport,
-   scheduler, delivery watcher, and background jobs.
-8. If Agent or service cutover fails, stop any new target, restore the prior
-   module map and Manager bundle, and restart the prior target generation.
-9. Keep the process lock, Core runtime fingerprint, kernel identity, and
-   process-wide persistence locks outside the function-generation replacement.
-   The live WhatsApp handle stays on the kernel but its transport object is
-   replaced transactionally when it is enabled.
+1. Resolve the requested lifecycle scope once; targeted modes contain exactly
+   one immutable target and malformed input never falls back to all.
+2. Compile and hash the complete functional source/asset closure.
+3. Import and validate it in an isolated probe with the exact Core runtime.
+4. Materialise a content-addressed immutable artifact.
+5. Spawn one candidate Worker per selected Agent and require a READY receipt.
+6. Reject any pre-READY failure without closing an active route.
+7. Close only the selected stable route gates, drain their old Workers, and
+   reverify runtime, Core and source fingerprints.
+8. Activate every candidate, then replace all selected handle pointers under
+   their route locks with no await point between the first and last mutation.
+9. Open the gates together, publish topology, and retire the old Workers.
+10. If anything before pointer commit fails, terminate every candidate, resume
+    the prior Workers, and reopen the same routes.
+11. Keep Core PID, instance lock, runtime fingerprint, Core managers, Workbench,
+    API Gateway, scheduler, background jobs and unselected Agent handles intact.
 
-Cold process restart is not an allowed function-change adoption or recovery
-path. Process bootstrap, lock implementation, and native supervision are core
-boundaries rather than function-layer changes. A proposed change to one of
-those boundaries must include an explicit warm-handoff mechanism before it can
-be promoted. `orchestrator.hot_reload.PROCESS_IDENTITY_MODULES` excludes the
-already-held process lock and path-identity objects so `/reboot` cannot falsely
-claim to have replaced them.
+Cold process restart is not an allowed Function-change adoption or recovery
+path. Process bootstrap, runtime policy, Core services and native supervision
+are Core boundaries. `orchestrator.runtime_contract.CORE_SOURCE_PATHS` is the
+single exclusion and fingerprint manifest; there is no second reload list.
+Unexpected Worker failure is recovered from its last immutable generation and
+never by reloading Core.
 
 The exact Python and generation rules are normative in
 `docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`. A Python, dependency, platform-ABI,
 protected-Core source, Core API, or Function API change is a planned Core
 migration and is rejected by `/reboot` before lifecycle cutover.
 
-Hot reload discovery is also rooted to the checked-out project. A third-party
-module whose name happens to start with `tools.` or `orchestrator.` must never
-be reloaded.
+Function discovery is rooted to the checked-out project. A third-party module
+whose name happens to start with `tools.` or `orchestrator.` must never enter a
+generation artifact.
 
 ## Stable Random Port Allocation
 
@@ -413,7 +411,7 @@ message rather than booting into a wrong identity or conflicting port.
 Changes that touch these boundaries require focused checks:
 
 - protected core touched: explicit user authorization + independent review;
-- function layer touched: `/reboot min` or targeted hot-reload check;
+- function layer touched: isolated probe plus `/reboot min` Worker switch;
 - platform config touched: at least one WSL/Windows/macOS-relevant fixture;
 - instance config touched: migration test preserving existing local values;
 - port allocation touched: collision, persistence, and legacy migration tests.

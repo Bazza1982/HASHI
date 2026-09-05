@@ -71,6 +71,8 @@ from orchestrator import runtime_wrapper
 from orchestrator import runtime_workzone
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
+    active_slash_command_audit_session,
+    bind_slash_command_audit_session,
     default_audit_path,
     parse_inline_callback_command,
     resolve_handler_kind,
@@ -112,6 +114,7 @@ from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.pcm import load_pcm_document
+from orchestrator.path_presentation import normalize_user_visible_paths
 from orchestrator.post_turn_observer import (
     PostTurnObserver,
     PreTurnContextProvider,
@@ -307,16 +310,20 @@ class FlexibleAgentRuntime:
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
         default_session = runtime_session.initialize_runtime_sessions(self)
         legacy_workzone = load_workzone(self.workspace_dir)
-        if default_session.get("workzone"):
-            self._workzone_dir = Path(str(default_session["workzone"]))
-        else:
-            self._workzone_dir = legacy_workzone
-            if legacy_workzone is not None:
-                # One-time compatibility migration: the old Agent-wide value
-                # becomes only the permanent default Session's Workzone.
-                self.session_store.set_workzone(
-                    default_session["session_id"], str(legacy_workzone)
-                )
+        workzone_state = self.session_store.get_workzone_set(
+            default_session["session_id"]
+        )
+        if not workzone_state["slots"] and legacy_workzone is not None:
+            # One-time compatibility migration: the old Agent-wide value
+            # becomes only the permanent default Session's main Workzone.
+            workzone_state = self.session_store.set_workzone_slot(
+                default_session["session_id"],
+                "main",
+                path=str(legacy_workzone),
+                enabled=True,
+                source="legacy_workzone_json",
+            )
+        runtime_workzone.install_runtime_state(self, workzone_state)
         self._sync_workzone_to_backend_config()
         self.voice_manager = VoiceManager(
             self.workspace_dir,
@@ -381,6 +388,9 @@ class FlexibleAgentRuntime:
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
         self.backend_manager.runtime = self
+        from orchestrator.out_of_band_control import AgentControlLane
+
+        self.control_lane = AgentControlLane(self)
         self._sidecar_invoker, self._sidecar_context_getter = make_backend_sidecar_invoker(
             self.backend_manager,
             session_id_getter=lambda: self.session_id_dt,
@@ -588,7 +598,8 @@ class FlexibleAgentRuntime:
                     ):
                         session.block("channel_denied")
                         return
-                    await handler(update, context)
+                    with bind_slash_command_audit_session(session):
+                        await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -632,7 +643,8 @@ class FlexibleAgentRuntime:
                             ui_language.tr("command.disabled", command=cmd),
                         )
                         return
-                    await handler(update, context)
+                    with bind_slash_command_audit_session(session):
+                        await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -821,6 +833,12 @@ class FlexibleAgentRuntime:
                         session["session_id"], int(session["context_generation"])
                     )
                 ),
+                # Freeze the working-environment topology at admission so the
+                # provider prompt, CLI flags and HASHI Tool Registry cannot
+                # observe different Workzone revisions for one request.
+                "workzone_snapshot": runtime_session.session_workzone_state(
+                    self, session_id=session["session_id"]
+                ),
             }
         )
         item = runtime_common.QueuedRequest(
@@ -1001,7 +1019,7 @@ class FlexibleAgentRuntime:
     def _sync_workzone_to_backend_config(self) -> None:
         runtime_workzone.sync_workzone_to_backend_config(self)
 
-    def _workzone_prompt_section(self) -> list[tuple[str, str]]:
+    def _workzone_prompt_section(self) -> list[tuple]:
         return runtime_workzone.workzone_prompt_section(self)
 
     def _extract_task_id(self, summary: str) -> Optional[str]:
@@ -1761,7 +1779,19 @@ class FlexibleAgentRuntime:
     def _job_counts(self) -> tuple[int, int]:
         return runtime_status.job_counts(self)
 
-    async def _send_voice_reply(self, chat_id: int, text: str, request_id: str, force: bool = False) -> bool:
+    async def _send_voice_reply(
+        self,
+        chat_id: int,
+        text: str,
+        request_id: str,
+        force: bool = False,
+    ) -> bool | None:
+        """Send voice and preserve Telegram's ambiguous timeout outcome.
+
+        ``True`` is an acknowledged delivery, ``False`` is a hard failure,
+        and ``None`` means Telegram may have accepted the upload before the
+        acknowledgement timed out.  That last case must never be retried.
+        """
         # Guard: skip if Telegram not connected
         if not self.telegram_connected:
             return False
@@ -1789,7 +1819,7 @@ class FlexibleAgentRuntime:
                     self.telegram_logger.warning(
                         f"Voice reply timed out for {request_id} (not retrying to avoid duplicate): {e}"
                     )
-                    raise
+                    return None
                 except Exception as e:
                     last_error = e
                     if attempt >= max_attempts:
@@ -1992,6 +2022,7 @@ class FlexibleAgentRuntime:
         source: str = "api",
         deliver_to_telegram: bool = True,
         *,
+        chat_id: Any | None = None,
         request_metadata: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
     ):
@@ -2006,7 +2037,7 @@ class FlexibleAgentRuntime:
             return None
         _print_user_message(self.name, text)
         return await self.enqueue_request(
-            self._primary_chat_id(),
+            self._primary_chat_id() if chat_id is None else chat_id,
             text,
             source,
             _safe_excerpt(text),
@@ -2394,19 +2425,15 @@ class FlexibleAgentRuntime:
         rows = [
             [
                 InlineKeyboardButton(
-                    selected_label(ui_language.tr("voice.mode.auto"), mode == "auto"),
-                    callback_data="voice:mode:auto",
-                ),
-                InlineKeyboardButton(
                     selected_label(ui_language.tr("voice.mode.native"), mode == "native"),
                     callback_data="voice:mode:native",
                 ),
-            ],
-            [
                 InlineKeyboardButton(
                     selected_label(ui_language.tr("voice.mode.tts"), mode == "tts"),
                     callback_data="voice:mode:tts",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     selected_label(ui_language.tr("voice.mode.off"), mode == "off"),
                     callback_data="voice:mode:off",
@@ -2444,6 +2471,56 @@ class FlexibleAgentRuntime:
             for index in range(0, len(profile_buttons), 2)
         )
         return InlineKeyboardMarkup(rows)
+
+    async def _send_voice_profile_previews(
+        self,
+        query: Any,
+        profile_id: str,
+        assets: tuple[tuple[str, Path], ...],
+    ) -> int:
+        """Send prerecorded UI previews without creating a conversation Turn."""
+
+        message = getattr(query, "message", None)
+        chat_id = getattr(message, "chat_id", None)
+        if chat_id is None:
+            chat_id = getattr(getattr(message, "chat", None), "id", None)
+        if chat_id is None or not assets:
+            return 0
+        profile_label = ui_language.tr(f"voice.profile.{profile_id}")
+        sent = 0
+        for renderer, path in assets:
+            caption = ui_language.tr(
+                f"voice.preview.caption.{renderer}",
+                voice=profile_label,
+            )
+            try:
+                with path.open("rb") as handle:
+                    await self.app.bot.send_voice(
+                        chat_id=chat_id,
+                        voice=handle,
+                        caption=caption,
+                        read_timeout=30,
+                        write_timeout=30,
+                        connect_timeout=15,
+                    )
+                sent += 1
+            except TelegramTimedOut as exc:
+                # Telegram may already have accepted the upload. A retry can
+                # duplicate the preview, so leave this result ambiguous.
+                self.telegram_logger.warning(
+                    "Voice preview timed out without retry: profile=%s renderer=%s error=%s",
+                    profile_id,
+                    renderer,
+                    exc,
+                )
+            except Exception as exc:
+                self.error_logger.error(
+                    "Voice preview delivery failed: profile=%s renderer=%s error=%s",
+                    profile_id,
+                    renderer,
+                    exc,
+                )
+        return sent
 
     async def cmd_start(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2770,11 +2847,19 @@ class FlexibleAgentRuntime:
         action = parts[1] if len(parts) > 1 else "refresh"
         value = parts[2] if len(parts) > 2 else ""
         message = None
+        preview_profile: str | None = None
+        preview_renderers: tuple[str, ...] = ()
         try:
             if action == "mode":
                 message = self.voice_manager.set_reply_mode(value)
+                preview_profile = self.voice_manager.get_voice_profile_id()
+                selected_mode = self.voice_manager.get_reply_mode()
+                if preview_profile and selected_mode in {"native", "tts"}:
+                    preview_renderers = (selected_mode,)
             elif action == "profile":
                 message = self.voice_manager.set_voice_profile(value)
+                preview_profile = value
+                preview_renderers = ("native", "tts")
             elif action == "content":
                 message = self.voice_manager.set_native_reply_content(value)
             # Keep callbacks from already-open legacy menus valid until those
@@ -2789,9 +2874,26 @@ class FlexibleAgentRuntime:
             await query.answer(str(e), show_alert=True)
             return
 
+        preview_assets: tuple[tuple[str, Path], ...] = ()
+        if preview_profile and preview_renderers:
+            preview_assets = self.voice_manager.get_voice_preview_assets(
+                preview_profile,
+                renderers=preview_renderers,
+            )
+            if len(preview_assets) != len(preview_renderers):
+                preview_assets = ()
         text = self.voice_manager.voice_menu_text()
         await query.edit_message_text(text, reply_markup=self._voice_keyboard(), parse_mode="HTML")
-        await query.answer(message or ui_language.tr("common.updated"))
+        callback_notice = message or ui_language.tr("common.updated")
+        if preview_profile and not preview_assets:
+            callback_notice = ui_language.tr("voice.preview.unavailable")
+        await query.answer(callback_notice)
+        if preview_profile and preview_assets:
+            await self._send_voice_profile_previews(
+                query,
+                preview_profile,
+                preview_assets,
+            )
 
     # ── toggle callback ──────────────────────────────────────────────────────────
     # Handles: tgl:terminal:quiet/activity/debug/raw, tgl:verbose:on/off,
@@ -2852,13 +2954,7 @@ class FlexibleAgentRuntime:
             )
 
         elif target == "verbose":
-            self._verbose = value == "on"
-            telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
-            _f = self.workspace_dir / ".verbose_off"
-            if self._verbose:
-                _f.unlink(missing_ok=True)
-            else:
-                _f.touch()
+            self._set_verbose_enabled(value == "on")
             await query.edit_message_text(
                 self._verbose_menu_text(),
                 parse_mode="HTML",
@@ -2871,13 +2967,7 @@ class FlexibleAgentRuntime:
             )
 
         elif target == "think":
-            self._think = value == "on"
-            telegram_stream_policy.set_display_preference(self, "think", self._think)
-            _f = self.workspace_dir / ".think_off"
-            if self._think:
-                _f.unlink(missing_ok=True)
-            else:
-                _f.touch()
+            self._set_think_enabled(value == "on")
             await query.edit_message_text(
                 self._think_menu_text(),
                 parse_mode="HTML",
@@ -3374,6 +3464,17 @@ class FlexibleAgentRuntime:
                 sock_connect=10,
             )
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                health_endpoint = runtime_transfer.handoff_health_endpoint(endpoint)
+                async with session.get(health_endpoint) as health_response:
+                    health = await health_response.json()
+                    if health_response.status >= 400:
+                        raise RuntimeError(
+                            str(health.get("error") or f"HTTP {health_response.status}")
+                        )
+                    runtime_transfer.verify_handoff_instance_identity(
+                        health,
+                        expected_instance=target_instance,
+                    )
                 async with session.post(endpoint, json=package) as response:
                     body = await response.json()
                     if response.status >= 400 or not body.get("ok"):
@@ -3487,6 +3588,10 @@ class FlexibleAgentRuntime:
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
             return {"answered": False, "response": None, "reason": "no_orchestrator"}
+
+        routed_query = getattr(orchestrator, "query_chief_of_staff", None)
+        if callable(routed_query):
+            return await routed_query(self.name, question)
 
         lily_runtime = None
         for rt in getattr(orchestrator, "runtimes", []):
@@ -3631,10 +3736,27 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
+        capability_status = None
+        capability_reader = getattr(
+            getattr(self, "orchestrator", None),
+            "refresh_capability_status",
+            None,
+        )
+        if callable(capability_reader):
+            try:
+                capability_status = await capability_reader()
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to refresh Computer Control capability status: %s",
+                    exc,
+                )
         if not args:
             await self._reply_text(
                 update,
-                get_usecomputer_status(self.sys_prompt_manager),
+                get_usecomputer_status(
+                    self.sys_prompt_manager,
+                    capability_status=capability_status,
+                ),
                 parse_mode="HTML",
             )
             return
@@ -3649,7 +3771,10 @@ class FlexibleAgentRuntime:
         if sub == "status":
             await self._reply_text(
                 update,
-                get_usecomputer_status(self.sys_prompt_manager),
+                get_usecomputer_status(
+                    self.sys_prompt_manager,
+                    capability_status=capability_status,
+                ),
                 parse_mode="HTML",
             )
             return
@@ -3692,14 +3817,34 @@ class FlexibleAgentRuntime:
                 except Exception as e:
                     self.logger.warning("Failed to refresh secrets for /browser status: %s", e)
             active_backend = getattr(self.config, "active_backend", None)
-            try:
-                from tools.browser_extension_bridge import healthcheck as browser_bridge_healthcheck
+            capability_reader = getattr(
+                getattr(self, "orchestrator", None),
+                "refresh_capability_status",
+                None,
+            )
+            if callable(capability_reader):
+                try:
+                    capability_status = await capability_reader()
+                    extension_bridge_configured = any(
+                        isinstance(item, dict)
+                        and item.get("capability_kind") == "browser_control"
+                        for item in capability_status.get("capabilities") or []
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        "Failed to refresh Browser Control capability status: %s",
+                        e,
+                    )
+                    extension_bridge_configured = False
+            else:
+                try:
+                    from tools.browser_extension_bridge import healthcheck as browser_bridge_healthcheck
 
-                bridge_health = await asyncio.to_thread(browser_bridge_healthcheck, timeout_s=2.0)
-                extension_bridge_configured = bool(bridge_health.get("connected"))
-            except Exception as e:
-                self.logger.warning("Failed to probe browser extension bridge for /browser status: %s", e)
-                extension_bridge_configured = False
+                    bridge_health = await asyncio.to_thread(browser_bridge_healthcheck, timeout_s=2.0)
+                    extension_bridge_configured = bool(bridge_health.get("connected"))
+                except Exception as e:
+                    self.logger.warning("Failed to probe browser extension bridge for /browser status: %s", e)
+                    extension_bridge_configured = False
             await self._reply_text(
                 update,
                 get_browser_status_text(
@@ -4020,7 +4165,7 @@ class FlexibleAgentRuntime:
                     update,
                     ui_language.tr(
                         "voice.usage_command",
-                        command="/voice mode <off|tts|native|auto>",
+                        command="/voice mode <off|tts|native>",
                     ),
                 )
                 return
@@ -4154,7 +4299,7 @@ class FlexibleAgentRuntime:
             )
             return
         if mode == "on":
-            await self._reply_text(update, self.voice_manager.set_reply_mode("auto"))
+            await self._reply_text(update, self.voice_manager.set_reply_mode("native"))
             return
         if mode == "off":
             await self._reply_text(update, self.voice_manager.set_reply_mode("off"))
@@ -4165,7 +4310,7 @@ class FlexibleAgentRuntime:
                 "voice.usage_command",
                 command=(
                     "/voice [status|on|off|menu|preset <profile>|voices|use <alias>|providers|"
-                    "provider <name>|name <voice>|rate <n>|mode <off|tts|native|auto>|"
+                    "provider <name>|name <voice>|rate <n>|mode <off|tts|native>|"
                     "target <provider> <model>|native-voice <name>|native-format <format>|"
                     "content <both|audio|text>|fallback <local_chain|native_only>|"
                     "retention <minutes|indefinite>|transcript <on|off>]"
@@ -4177,14 +4322,22 @@ class FlexibleAgentRuntime:
         """One-shot TTS: synthesize the last assistant message and send as voice."""
         if not self._is_authorized_user(update.effective_user.id):
             return
-        text = self._load_last_text_from_transcript("assistant")
+        text = self._load_last_visible_assistant_text(update)
         if not text:
             await self._reply_text(update, ui_language.tr("voice.no_recent"))
             return
         chat_id = update.effective_chat.id
         request_id = f"say-{int(time.time())}"
         ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
-        if not ok:
+        session = active_slash_command_audit_session()
+        if ok is True:
+            if session is not None:
+                session.add_side_effect("voice_reply_sent")
+        elif ok is None:
+            if session is not None:
+                session.add_side_effect("voice_reply_delivery_unknown")
+            await self._reply_text(update, ui_language.tr("voice.delivery_unknown"))
+        else:
             await self._reply_text(update, ui_language.tr("voice.synthesis_failed"))
 
     # ── /loop — recurring task management ──────────────────────────
@@ -5021,23 +5174,28 @@ class FlexibleAgentRuntime:
             action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
         )
 
+    def _set_verbose_enabled(self, enabled: bool) -> None:
+        self._verbose = bool(enabled)
+        marker = self.workspace_dir / ".verbose_off"
+        if self._verbose:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.touch()
+        telegram_stream_policy.set_display_preference(
+            self,
+            "verbose",
+            self._verbose,
+        )
+        runtime_pipeline.notify_display_preference_change(self)
+
     async def cmd_verbose(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if args and args[0] in {"on", "true", "1"}:
-            self._verbose = True
+            self._set_verbose_enabled(True)
         elif args and args[0] in {"off", "false", "0"}:
-            self._verbose = False
-        else:
-            self._verbose = not self._verbose
-        # Persist so it survives restarts
-        _verbose_file = self.workspace_dir / ".verbose_off"
-        if self._verbose:
-            _verbose_file.unlink(missing_ok=True)
-        else:
-            _verbose_file.touch()
-        telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
+            self._set_verbose_enabled(False)
         await self._reply_text(
             update,
             self._verbose_menu_text(),
@@ -5069,22 +5227,34 @@ class FlexibleAgentRuntime:
             commentary_available=commentary_available,
         )
 
+    def _set_think_enabled(self, enabled: bool) -> None:
+        self._think = bool(enabled)
+        marker = self.workspace_dir / ".think_off"
+        if self._think:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.touch()
+            # A menu selection is the visibility boundary.  Never flush
+            # provider reasoning that was buffered before the user selected
+            # Off, and never replay it after a later On selection.
+            self._think_buffer.clear()
+            self._openrouter_think_chunk = ""
+            self._last_openrouter_think_snippet = None
+        telegram_stream_policy.set_display_preference(
+            self,
+            "think",
+            self._think,
+        )
+        runtime_pipeline.notify_display_preference_change(self)
+
     async def cmd_think(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if args and args[0] in {"on", "true", "1"}:
-            self._think = True
+            self._set_think_enabled(True)
         elif args and args[0] in {"off", "false", "0"}:
-            self._think = False
-        else:
-            self._think = not self._think
-        _think_file = self.workspace_dir / ".think_off"
-        if self._think:
-            _think_file.unlink(missing_ok=True)
-        else:
-            _think_file.touch()
-        telegram_stream_policy.set_display_preference(self, "think", self._think)
+            self._set_think_enabled(False)
         await self._reply_text(
             update,
             self._think_menu_text(),
@@ -5112,6 +5282,7 @@ class FlexibleAgentRuntime:
             "commentary",
             self._commentary,
         )
+        runtime_pipeline.notify_display_preference_change(self)
 
     def _commentary_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
@@ -5450,6 +5621,13 @@ class FlexibleAgentRuntime:
             broadcast_targets = directory.resolve_group(group_name, exclude_self=self.name)
             broadcast_label = ui_language.tr("hchat.label.group", name=group_name)
 
+        # HChat is an internal Bridge request, but it continues the exact
+        # Conversation where /hchat was invoked.  Preserve that Session and
+        # channel instead of falling back to the Agent's default route.
+        hchat_chat_id, hchat_request_metadata, hchat_deliver_to_telegram = (
+            runtime_session.request_route_for_update(self, update)
+        )
+
         if broadcast_targets is not None:
             if not broadcast_targets:
                 await self._reply_text(
@@ -5478,29 +5656,14 @@ class FlexibleAgentRuntime:
                 f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
                 f"just report the reply content to the user. Do NOT send another hchat message back."
             )
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "hchat.broadcasting",
-                    count=len(broadcast_targets),
-                    target=html.escape(broadcast_label),
-                ),
-                parse_mode="HTML",
-            )
         elif self._hchat_draft_delivery_enabled():
             self_prompt = self._build_hchat_draft_prompt(target_name, intent)
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "hchat.drafting",
-                    agent=html.escape(target_name),
-                ),
-                parse_mode="HTML",
-            )
             await self.enqueue_api_text(
                 self_prompt,
                 source="bridge:hchat-draft",
-                deliver_to_telegram=True,
+                chat_id=hchat_chat_id,
+                deliver_to_telegram=hchat_deliver_to_telegram,
+                request_metadata=hchat_request_metadata,
             )
             return
 
@@ -5521,19 +5684,15 @@ class FlexibleAgentRuntime:
                 f"just report the reply content to the user. Do NOT send another hchat message back — "
                 f"the conversation ends there."
             )
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "hchat.composing",
-                    agent=html.escape(target_name),
-                ),
-                parse_mode="HTML",
-            )
-
+        # The command already authorises one clear action.  Queue it without a
+        # second user-visible preflight reply; only its final delivery report
+        # (or a deterministic validation error above) is presented.
         await self.enqueue_api_text(
             self_prompt,
             source="bridge:hchat",
-            deliver_to_telegram=True,
+            chat_id=hchat_chat_id,
+            deliver_to_telegram=hchat_deliver_to_telegram,
+            request_metadata=hchat_request_metadata,
         )
 
     def _hchat_draft_delivery_enabled(self) -> bool:
@@ -5610,6 +5769,7 @@ class FlexibleAgentRuntime:
             if result.success
             else f"[hchat] Delivery failed to {result.target}: {result.error or 'unknown error'}"
         )
+        visible_text = normalize_user_visible_paths(visible_text)
         if result.success:
             self._mark_success()
         else:
@@ -6469,9 +6629,9 @@ class FlexibleAgentRuntime:
         selected_session = runtime_session.current_session(
             self, surface="telegram", channel_key=str(chat_id)
         )
-        workzone_value = str(selected_session.get("workzone") or "").strip()
-        self._workzone_dir = Path(workzone_value) if workzone_value else None
-        self._sync_workzone_to_backend_config()
+        runtime_session.apply_session_workzones(
+            self, selected_session["session_id"]
+        )
         switch_ok = await self.backend_manager.switch_backend(
             target_engine,
             target_model=target_model,
@@ -8133,6 +8293,9 @@ class FlexibleAgentRuntime:
     async def cmd_workzone(self, update: Update, context: Any):
         await runtime_workzone.cmd_workzone(self, update, context)
 
+    async def callback_workzone(self, update: Update, context: Any):
+        await runtime_workzone.callback_workzone(self, update, context)
+
     async def cmd_new(self, update: Update, context: Any):
         await runtime_session.cmd_new(self, update, context)
 
@@ -8995,6 +9158,8 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, self._transfer_redirect_text())
             return
         text = update.message.text
+        if await runtime_workzone.handle_pending_path_reply(self, update):
+            return
         # /long is scoped to the chat that started it.
         if runtime_long.collect_text(self, update.effective_chat.id, text):
             return
@@ -9041,6 +9206,7 @@ class FlexibleAgentRuntime:
         request_id: Optional[str] = None,
         purpose: str = "response",
         parse_mode: str | None = None,
+        error_context: Mapping[str, Any] | None = None,
     ):
         return await runtime_delivery.send_long_message(
             self,
@@ -9049,6 +9215,7 @@ class FlexibleAgentRuntime:
             request_id=request_id,
             purpose=purpose,
             parse_mode=parse_mode,
+            error_context=error_context,
         )
 
     async def typing_loop(self, chat_id: int, stop_event: asyncio.Event):
@@ -9257,6 +9424,9 @@ class FlexibleAgentRuntime:
 
         async def _edit_placeholder():
             nonlocal last_edit_at, last_rendered_text, dirty, edit_attempts, display_disabled
+            if not bool(getattr(self, "_verbose", True)):
+                dirty = False
+                return
             if display_disabled:
                 dirty = False
                 return
@@ -9332,12 +9502,18 @@ class FlexibleAgentRuntime:
                     await asyncio.gather(*pending, return_exceptions=True)
 
             if stop_task in done and stop_task.result():
-                if event_task in done:
+                if (
+                    event_task in done
+                    and bool(getattr(self, "_verbose", True))
+                ):
                     dirty = (
                         digest.record(event_task.result(), now=time.monotonic())
                         or dirty
                     )
-                while not event_queue.empty():
+                while (
+                    bool(getattr(self, "_verbose", True))
+                    and not event_queue.empty()
+                ):
                     try:
                         queued_event = event_queue.get_nowait()
                     except asyncio.QueueEmpty:
@@ -9347,11 +9523,11 @@ class FlexibleAgentRuntime:
                     )
                 break
 
-            if event_task in done:
+            if event_task in done and bool(getattr(self, "_verbose", True)):
                 event = event_task.result()
                 dirty = digest.record(event, now=time.monotonic()) or dirty
                 last_heartbeat_at = time.monotonic()
-            else:
+            elif event_task not in done:
                 now = time.monotonic()
                 if (now - last_heartbeat_at) >= HEARTBEAT_INTERVAL:
                     dirty = digest.mark_waiting(now=now) or dirty
@@ -9361,6 +9537,13 @@ class FlexibleAgentRuntime:
             if dirty and (now - last_edit_at) >= MIN_EDIT_INTERVAL:
                 await _edit_placeholder()
 
+        if not bool(getattr(self, "_verbose", True)):
+            while not event_queue.empty():
+                try:
+                    event_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            return
         while not event_queue.empty():
             try:
                 queued_event = event_queue.get_nowait()
@@ -9417,6 +9600,7 @@ class FlexibleAgentRuntime:
             owner = explicit_owner or legacy_delivery_class(event.kind)
             if (
                 event_queue is not None
+                and bool(getattr(self, "_verbose", True))
                 and owner == DELIVERY_TECHNICAL
                 and event.kind in verbose_kinds
             ):
@@ -9439,7 +9623,7 @@ class FlexibleAgentRuntime:
                     with suppress(Exception):
                         value = detail.split("=", 1)[1].split(";", 1)[0]
                         self._thinking_chars_this_req += max(0, int(value))
-            if think_buffer is not None:
+            if think_buffer is not None and bool(getattr(self, "_think", True)):
                 if not explicit_owner and event.kind == KIND_COMMENTARY:
                     # Commentary is already a complete model-authored update.
                     # Preserve it verbatim instead of folding it into the short
@@ -9500,6 +9684,11 @@ class FlexibleAgentRuntime:
 
     async def _flush_thinking(self, chat_id: int):
         """Send accumulated thinking events to Telegram, console, and transcript."""
+        if not bool(getattr(self, "_think", True)):
+            self._think_buffer.clear()
+            self._openrouter_think_chunk = ""
+            self._last_openrouter_think_snippet = None
+            return
         if self._openrouter_think_chunk:
             self._think_buffer.append(self._openrouter_think_chunk)
             self._openrouter_think_chunk = ""
@@ -9612,6 +9801,148 @@ class FlexibleAgentRuntime:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_visible_assistant_entry(entry: dict, *, core: bool) -> bool:
+        """Return whether a transcript row is a real, speakable reply."""
+
+        if entry.get("role") == "thinking" or entry.get("source") == "think":
+            return False
+        text = entry.get("text") or entry.get("visible_text") or ""
+        if isinstance(text, str) and text.startswith("💭"):
+            return False
+        if core:
+            return entry.get("role") == "assistant_core" and bool(
+                (entry.get("visible_text") or entry.get("text") or "").strip()
+            )
+        return entry.get("role") == "assistant" and bool(
+            (entry.get("text") or "").strip()
+        )
+
+    @staticmethod
+    def _is_legacy_interactive_reply_source(entry: dict) -> bool:
+        """Exclude known non-user delivery surfaces from legacy transcripts."""
+
+        source = str(entry.get("source") or "").strip().casefold()
+        if not source:
+            return True
+        if source in {
+            "api",
+            "cron",
+            "scheduler",
+            "heartbeat",
+            "proactive",
+            "background-job-event",
+            "background_job_event",
+            "startup",
+            "system",
+            "session_reset",
+        }:
+            return False
+        return not source.startswith(
+            (
+                "api-",
+                "api:",
+                "browser",
+                "workbench",
+                "session-api",
+                "scheduler:",
+                "cron:",
+                "heartbeat:",
+                "proactive:",
+                "bridge:",
+                "bridge-transfer:",
+                "bridge-fork:",
+                "hchat",
+                "background-",
+                "background_",
+            )
+        )
+
+    def _load_last_visible_assistant_text(
+        self,
+        update: Update | None = None,
+    ) -> str | None:
+        """Return the newest reply confirmed on the current /say route.
+
+        Before delivery-aware Session receipts exist, a bounded compatibility
+        scan accepts only interactive legacy transcript sources.  Once receipt
+        tracking starts on a route, a failed or ambiguous delivery fails closed
+        instead of speaking an unconfirmed or cross-channel response.
+        """
+
+        session_store_available = getattr(self, "session_store", None) is not None
+        if update is not None and session_store_available:
+            try:
+                delivered_text, tracking_started = (
+                    runtime_session.telegram_delivery_state_for_update(self, update)
+                )
+                if delivered_text:
+                    return delivered_text
+                if tracking_started:
+                    return None
+            except Exception as exc:
+                logger = getattr(self, "error_logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "Could not resolve /say delivery history safely: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                return None
+
+        try:
+            core_path = getattr(self, "core_transcript_log_path", None)
+            if core_path is not None and core_path.exists():
+                last_core = None
+                with core_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except Exception:
+                            continue
+                        if (
+                            self._is_visible_assistant_entry(entry, core=True)
+                            and self._is_legacy_interactive_reply_source(entry)
+                        ):
+                            last_core = entry
+                if last_core is not None:
+                    text = (
+                        last_core.get("visible_text")
+                        or last_core.get("text")
+                        or ""
+                    )
+                    if text.strip():
+                        return text
+        except Exception:
+            pass
+
+        try:
+            path = getattr(self, "transcript_log_path", None)
+            if path is not None and path.exists():
+                last_text = None
+                with path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except Exception:
+                            continue
+                        if (
+                            self._is_visible_assistant_entry(entry, core=False)
+                            and self._is_legacy_interactive_reply_source(entry)
+                        ):
+                            last_text = entry.get("text") or ""
+                if last_text and last_text.strip():
+                    return last_text
+        except Exception:
+            pass
+        return None
+
     async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
         return await runtime_wrapper.send_wrapper_polishing_placeholder(self, item)
 
@@ -9631,7 +9962,13 @@ class FlexibleAgentRuntime:
     async def _send_wrapper_verbose_trace(self, item: QueuedRequest, core_raw: str, visible_text: str, wrapper_result) -> None:
         await runtime_wrapper.send_wrapper_verbose_trace(self, item, core_raw, visible_text, wrapper_result)
 
-    async def _send_meter_cost_tail(self, item: QueuedRequest) -> None:
+    async def _send_meter_cost_tail(
+        self,
+        item: QueuedRequest,
+        *,
+        total_elapsed_s: float | None = None,
+        stage_timings_s: Mapping[str, float] | None = None,
+    ) -> None:
         """Send the per-turn cost tail after the answer is confirmed delivered.
 
         Uses request-local ``meter_at_start`` so a mid-flight toggle never changes
@@ -9657,7 +9994,20 @@ class FlexibleAgentRuntime:
         try:
             from tools.meter_cost import format_cost_tail
 
-            text = format_cost_tail(receipt)
+            locale = str(
+                request_meta.get("ui_locale_at_start")
+                or ui_language.preferred_locale(
+                    self,
+                    actor_id=getattr(item, "owner_id", None)
+                    or getattr(item, "chat_id", None),
+                )
+            )
+            text = format_cost_tail(
+                receipt,
+                locale=locale,
+                total_elapsed_s=total_elapsed_s,
+                stage_timings_s=stage_timings_s,
+            )
         except Exception:
             self.logger.exception("meter cost tail formatting failed")
             return
@@ -9729,7 +10079,17 @@ class FlexibleAgentRuntime:
                     + float(foreground.cost_usd),
                     6,
                 )
-            text = format_meditation_cost_tail(receipt, task_total_usd=task_total)
+            locale = str(
+                notification.get("ui_locale_at_start")
+                or ui_language.preferred_locale(
+                    self, actor_id=notification.get("chat_id")
+                )
+            )
+            text = format_meditation_cost_tail(
+                receipt,
+                locale=locale,
+                task_total_usd=task_total,
+            )
         except Exception:
             self.logger.exception("meditation cost tail formatting failed")
             return False
@@ -9996,6 +10356,7 @@ class FlexibleAgentRuntime:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                visible_text = normalize_user_visible_paths(visible_text)
                 receipt_text = visible_text
                 runtime_retry.clear_completed_interrupted_task(self, item)
                 safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
@@ -10212,7 +10573,13 @@ class FlexibleAgentRuntime:
                 receipt_chunk_count = chunk_count
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 if receipt_delivered:
-                    await self._send_meter_cost_tail(item)
+                    await self._send_meter_cost_tail(
+                        item,
+                        total_elapsed_s=runtime_pipeline.queued_elapsed_s(item),
+                        stage_timings_s=runtime_pipeline._her_v2_stage_timings_s(
+                            response
+                        ),
+                    )
                 self._schedule_audit_followup(
                     item,
                     core_raw=safe_core_raw,
@@ -10227,8 +10594,34 @@ class FlexibleAgentRuntime:
                 )
             else:
                 err_msg = response.error or "Unknown error"
+                failure_fields = runtime_pipeline.backend_failure_fields(response)
                 receipt_error = err_msg
                 self._mark_error(err_msg)
+                self.error_logger.error(
+                    "Background task %s failed code=%s retryable=%s status=%s "
+                    "provider_request_id=%s side_effects=%s: %s",
+                    item.request_id,
+                    failure_fields.get("error_code") or "untyped",
+                    failure_fields.get("error_retryable"),
+                    failure_fields.get("http_status"),
+                    failure_fields.get("provider_request_id") or "none",
+                    failure_fields.get("side_effects_possible", False),
+                    err_msg,
+                )
+                failure_diagnostics = runtime_pipeline.backend_failure_diagnostics(
+                    response
+                )
+                if failure_diagnostics:
+                    self.error_logger.error(
+                        "Background failure diagnostics for %s: %s",
+                        item.request_id,
+                        json.dumps(
+                            failure_diagnostics,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ),
+                    )
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
                     item,
@@ -10246,6 +10639,7 @@ class FlexibleAgentRuntime:
                         "error": err_msg,
                         "source": item.source,
                         "summary": item.summary,
+                        **failure_fields,
                         **runtime_pipeline.request_context_warning_fields(
                             self, item.request_id
                         ),
@@ -10254,7 +10648,6 @@ class FlexibleAgentRuntime:
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     return
-                self.error_logger.error(f"Background task {item.request_id} failed: {err_msg}")
                 clipped = (
                     err_msg
                     if len(err_msg) <= 3000
@@ -10300,6 +10693,15 @@ class FlexibleAgentRuntime:
                     chunk_count=receipt_chunk_count,
                     completion_path="background",
                     error_type=receipt_error_type,
+                )
+                runtime_session.record_assistant_delivery(
+                    self,
+                    item,
+                    delivered=receipt_delivered,
+                    assistant_text=receipt_text,
+                    transport="telegram",
+                    completion_path="background",
+                    disposition=receipt_disposition,
                 )
             runtime_cross_session.record_turn_result(
                 self, item, assistant_text=receipt_text, response=receipt_response,

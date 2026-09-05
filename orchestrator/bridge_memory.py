@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
+from orchestrator.path_presentation import path_presentation_policy
 from orchestrator.pcm import PCMDocument, load_pcm_document
 from orchestrator.process_resources import path_lock as process_path_lock
 from tools.token_tracker import estimate_tokens as _estimate_tokens
@@ -1325,6 +1326,7 @@ class BridgeContextAssembler:
     _TRANSPORT_ORDER_SLOTS: ClassVar[dict[str, int]] = {
         "permanent_system": 1,
         "instance_global_sys": 1,
+        "instance_path_presentation": 2,
         "agent_local_sys": 1,
         "current_user_request": 1,
         "permanent_memory": 1,
@@ -1466,7 +1468,7 @@ class BridgeContextAssembler:
         user_prompt: str,
         engine: str,
         incremental: bool = False,
-        extra_sections: list[tuple[str, str]] | None = None,
+        extra_sections: list[tuple[str, str] | tuple[str, str, dict[str, Any]]] | None = None,
         context_profile: str | None = None,
         recent_exchanges: list[dict[str, Any]] | None = None,
     ) -> str:
@@ -1530,7 +1532,7 @@ class BridgeContextAssembler:
         user_prompt: str,
         engine: str,
         incremental: bool = False,
-        extra_sections: list[tuple[str, str]] | None = None,
+        extra_sections: list[tuple[str, str] | tuple[str, str, dict[str, Any]]] | None = None,
         inject_memory: bool = True,
         context_profile: str | None = None,
         recent_exchanges: list[dict[str, Any]] | None = None,
@@ -1594,6 +1596,13 @@ class BridgeContextAssembler:
                 protected=True,
                 item_count=len(global_entries),
             )
+        add_section(
+            "instance_path_presentation",
+            "INSTANCE PATH PRESENTATION",
+            path_presentation_policy(),
+            "global_system",
+            protected=True,
+        )
         local_entries = (
             self.sys_prompt_manager.get_active_texts() if self.sys_prompt_manager else []
         )
@@ -1740,16 +1749,30 @@ class BridgeContextAssembler:
                 item_count=len(active_runtime),
             )
 
-        for title, body in extra_sections or []:
+        for raw_section in extra_sections or []:
+            if len(raw_section) < 2:
+                continue
+            title, body = raw_section[0], raw_section[1]
+            options = (
+                dict(raw_section[2])
+                if len(raw_section) > 2 and isinstance(raw_section[2], dict)
+                else {}
+            )
             if not title or not body:
                 continue
             authority = "history" if managed_history_title and title == managed_history_title else "runtime_context"
+            section_key = str(
+                options.pop("key", f"extra:{str(title).lower().replace(' ', '_')}")
+            )
+            protected = bool(options.pop("protected", False))
             add_section(
-                f"extra:{str(title).lower().replace(' ', '_')}",
+                section_key,
                 str(title),
                 str(body),
                 authority,
+                protected=protected,
                 item_count=1,
+                metadata=options,
             )
 
         skill_lines = self._catalogue_lines(self.skill_catalog_provider)

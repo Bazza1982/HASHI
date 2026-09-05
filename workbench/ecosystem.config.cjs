@@ -1,14 +1,8 @@
-const os = require('node:os');
+const { resolveBridgeEndpoint } = require('./endpoint_config.cjs');
 
-const INSTANCE_SUFFIX = process.env.HASHI_BRIDGE_API_PORT || '18800';
-const STABLE_WSL_HOST = '10.255.255.254';
-const interfaceAddresses = Object.values(os.networkInterfaces()).flat().filter(Boolean);
-const bridgeHost = process.env.HASHI_BRIDGE_API_HOST
-  || (interfaceAddresses.some((entry) => entry.address === STABLE_WSL_HOST)
-    ? STABLE_WSL_HOST
-    : '127.0.0.1');
-const bridgeApi = process.env.BRIDGE_U_API
-  || `http://${bridgeHost}:${process.env.HASHI_BRIDGE_API_PORT || '18800'}`;
+const bridgeEndpoint = resolveBridgeEndpoint({ root: require('node:path').join(__dirname, '..') });
+const INSTANCE_SUFFIX = String(bridgeEndpoint.port);
+const bridgeApi = bridgeEndpoint.baseUrl;
 
 module.exports = {
   apps: [

@@ -289,6 +289,9 @@ def record_usage(
                 thinking_in_output=thinking_in_output,
                 cost_usd=resolved_cost,
                 cost_source=cost_source,
+                pricing_revision=(
+                    PRICING_REVISION if cost_source == "pricing_table" else "unknown"
+                ),
             )
         ]
     receipt = UsageReceipt(
@@ -300,18 +303,38 @@ def record_usage(
     # turns.  Repricing the role-configured aggregate can contradict /meter and
     # previously wrote a known non-zero receipt as 0.0 in token_usage.jsonl.
     cost = receipt.cost_usd
+    cache_metrics_complete = receipt.cache_metrics_complete
+    no_cache_cost_usd = receipt.no_cache_cost_usd
+    cache_savings_usd = receipt.cache_savings_usd
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "model": model,
         "backend": backend,
-        "input": input_tokens,
-        "output": output_tokens,
-        "thinking": thinking_tokens,
+        "input": receipt.total_input,
+        "output": receipt.total_output,
+        "thinking": receipt.total_thinking,
         "cost_usd": cost,
         "cost_known": cost is not None,
         "cost_source": receipt.dominant_cost_source(),
         "total_tokens": receipt.total_tokens,
         "session_id": session_id or "",
+        "request_id": str(request_id or receipt.request_id or ""),
+        "provider_requests": receipt.provider_request_count,
+        "prompt_cache_hit_tokens": (
+            receipt.prompt_cache_hit_tokens if cache_metrics_complete else None
+        ),
+        "prompt_cache_miss_tokens": (
+            receipt.prompt_cache_miss_tokens if cache_metrics_complete else None
+        ),
+        "cache_observed_input_tokens": (
+            receipt.total_input if cache_metrics_complete else 0
+        ),
+        "cache_metrics_complete": cache_metrics_complete,
+        "no_cache_cost_usd": no_cache_cost_usd,
+        "cache_savings_usd": cache_savings_usd,
+        "pricing_revisions": list(receipt.pricing_revisions),
+        "thinking_in_output_tokens": receipt.thinking_in_output_tokens,
+        "separate_thinking_tokens": receipt.separate_thinking_tokens,
     }
     path = _usage_path(workspace_dir)
     try:
@@ -376,6 +399,19 @@ def get_summary(
             "cost_usd": 0.0,
             "unknown_cost_requests": 0,
             "requests": 0,
+            "provider_requests": 0,
+            "provider_metrics_records": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+            "cache_observed_input_tokens": 0,
+            "cache_metrics_records": 0,
+            "no_cache_cost_usd": 0.0,
+            "no_cache_cost_known_records": 0,
+            "cache_savings_usd": 0.0,
+            "cache_savings_known_records": 0,
+            "pricing_revisions": [],
+            "thinking_in_output_tokens": 0,
+            "separate_thinking_tokens": 0,
         }
 
     all_time = empty()
@@ -418,6 +454,59 @@ def _add(acc: dict, record: dict) -> None:
         ) + 1
     else:
         acc["cost_usd"] += float(raw_cost)
+    if "provider_requests" in record:
+        acc["provider_metrics_records"] = int(
+            acc.get("provider_metrics_records") or 0
+        ) + 1
+        acc["provider_requests"] = int(acc.get("provider_requests") or 0) + int(
+            record.get("provider_requests") or 0
+        )
+    if record.get("cache_metrics_complete") is True:
+        acc["cache_metrics_records"] = int(
+            acc.get("cache_metrics_records") or 0
+        ) + 1
+        acc["prompt_cache_hit_tokens"] = int(
+            acc.get("prompt_cache_hit_tokens") or 0
+        ) + int(record.get("prompt_cache_hit_tokens") or 0)
+        acc["prompt_cache_miss_tokens"] = int(
+            acc.get("prompt_cache_miss_tokens") or 0
+        ) + int(record.get("prompt_cache_miss_tokens") or 0)
+        acc["cache_observed_input_tokens"] = int(
+            acc.get("cache_observed_input_tokens") or 0
+        ) + int(
+            record.get("cache_observed_input_tokens")
+            if record.get("cache_observed_input_tokens") is not None
+            else record.get("input") or 0
+        )
+    no_cache_cost = record.get("no_cache_cost_usd")
+    if no_cache_cost is not None:
+        acc["no_cache_cost_usd"] = float(
+            acc.get("no_cache_cost_usd") or 0.0
+        ) + float(no_cache_cost)
+        acc["no_cache_cost_known_records"] = int(
+            acc.get("no_cache_cost_known_records") or 0
+        ) + 1
+    cache_savings = record.get("cache_savings_usd")
+    if cache_savings is not None:
+        acc["cache_savings_usd"] = float(
+            acc.get("cache_savings_usd") or 0.0
+        ) + float(cache_savings)
+        acc["cache_savings_known_records"] = int(
+            acc.get("cache_savings_known_records") or 0
+        ) + 1
+    revisions = {
+        str(value)
+        for value in list(acc.get("pricing_revisions") or [])
+        + list(record.get("pricing_revisions") or [])
+        if str(value).strip()
+    }
+    acc["pricing_revisions"] = sorted(revisions)
+    acc["thinking_in_output_tokens"] = int(
+        acc.get("thinking_in_output_tokens") or 0
+    ) + int(record.get("thinking_in_output_tokens") or 0)
+    acc["separate_thinking_tokens"] = int(
+        acc.get("separate_thinking_tokens") or 0
+    ) + int(record.get("separate_thinking_tokens") or 0)
     acc["requests"] += 1
 
 
@@ -500,7 +589,7 @@ def format_status_line(summary: dict) -> str:
 
 def _fmt_tokens(n: int) -> str:
     if n >= 1_000_000:
-        return f"{n/1_000_000:.1f}M"
+        return f"{n/1_000_000:.3f}M"
     if n >= 1_000:
         return f"{n/1_000:.1f}K"
     return str(n)
@@ -542,6 +631,19 @@ def get_summary_extended(
             "cost_usd": 0.0,
             "unknown_cost_requests": 0,
             "requests": 0,
+            "provider_requests": 0,
+            "provider_metrics_records": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
+            "cache_observed_input_tokens": 0,
+            "cache_metrics_records": 0,
+            "no_cache_cost_usd": 0.0,
+            "no_cache_cost_known_records": 0,
+            "cache_savings_usd": 0.0,
+            "cache_savings_known_records": 0,
+            "pricing_revisions": [],
+            "thinking_in_output_tokens": 0,
+            "separate_thinking_tokens": 0,
         }
 
     all_time = empty()

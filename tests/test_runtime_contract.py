@@ -15,10 +15,17 @@ from orchestrator.runtime_contract import (
     compare_runtime_fingerprints,
     current_runtime_fingerprint,
     load_runtime_policy,
+    runtime_policy_digest,
     validate_standard_dependencies,
     validate_runtime_policy,
 )
-from orchestrator.hot_reload import PROCESS_IDENTITY_MODULES
+from orchestrator.function_contract import PROCESS_IDENTITY_MODULES
+from orchestrator.function_generation import (
+    FUNCTION_GENERATION_ENTRYPOINTS,
+    FUNCTION_GENERATION_SCHEMA_VERSION,
+)
+from orchestrator.function_worker_protocol import FUNCTION_WORKER_PROTOCOL_VERSION
+from orchestrator.manager_registry import CORE_MANAGER_SPECS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +46,9 @@ def _write_policy(
                 'portable-build-date = "20260303"',
                 "core-api = 4",
                 "function-api = 7",
+                'worker-model = "per-agent-process"',
+                "worker-protocol = 3",
+                "generation-schema = 5",
                 "",
             ]
         ),
@@ -59,6 +69,9 @@ def test_runtime_policy_has_one_exact_python_minor(tmp_path):
     assert policy.portable_build_date == "20260303"
     assert policy.core_api == 4
     assert policy.function_api == 7
+    assert policy.worker_model == "per-agent-process"
+    assert policy.worker_protocol == 3
+    assert policy.generation_schema == 5
 
 
 def test_current_process_satisfies_repository_runtime_contract():
@@ -77,6 +90,32 @@ def test_current_process_satisfies_repository_runtime_contract():
     else:
         assert fingerprint.platform_abi.startswith("cpython-312-")
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint.dependency_digest)
+    assert re.fullmatch(
+        r"sha256:[0-9a-f]{64}", fingerprint.runtime_policy_digest
+    )
+    assert fingerprint.worker_model == "per-agent-process"
+    assert fingerprint.worker_protocol == 1
+    assert fingerprint.generation_schema == 2
+
+
+def test_machine_policy_matches_implemented_worker_protocols():
+    policy = load_runtime_policy(ROOT)
+
+    assert policy.worker_model == "per-agent-process"
+    assert policy.worker_protocol == FUNCTION_WORKER_PROTOCOL_VERSION
+    assert policy.generation_schema == FUNCTION_GENERATION_SCHEMA_VERSION
+
+
+def test_core_managers_are_protected_and_function_entrypoints_are_disjoint():
+    core_modules = {
+        relative.removesuffix("/__init__.py")
+        .removesuffix(".py")
+        .replace("/", ".")
+        for relative in CORE_SOURCE_PATHS
+    }
+
+    assert {spec.module for spec in CORE_MANAGER_SPECS} <= core_modules
+    assert set(FUNCTION_GENERATION_ENTRYPOINTS).isdisjoint(core_modules)
 
 
 def test_wrong_python_minor_is_rejected_as_core_migration_not_function_reboot():
@@ -94,6 +133,25 @@ def test_unapproved_python_patch_is_rejected_as_planned_core_migration():
     incompatible = dataclasses.replace(current, python="3.12.12")
 
     with pytest.raises(RuntimeContractError, match="approved production patch"):
+        validate_runtime_policy(policy, incompatible)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("core_api", 99),
+        ("function_api", 99),
+        ("worker_model", "in-process"),
+        ("worker_protocol", 99),
+        ("generation_schema", 99),
+    ],
+)
+def test_process_contract_rejects_noncanonical_worker_boundary(field, replacement):
+    policy = load_runtime_policy(ROOT)
+    current = current_runtime_fingerprint(policy, code_root=ROOT)
+    incompatible = dataclasses.replace(current, **{field: replacement})
+
+    with pytest.raises(RuntimeContractError, match=field):
         validate_runtime_policy(policy, incompatible)
 
 
@@ -122,9 +180,14 @@ def test_standard_dependency_generation_rejects_missing_or_drifted_package():
         ("platform_abi", "cpython-312-arm64-linux-gnu"),
         ("machine", "arm64"),
         ("environment_prefix", "/another/core/environment"),
+        ("runtime_policy_digest", "sha256:" + "f" * 64),
         ("dependency_digest", "sha256:" + "0" * 64),
         ("core_source_digest", "sha256:" + "1" * 64),
+        ("core_api", 99),
         ("function_api", 99),
+        ("worker_model", "in-process"),
+        ("worker_protocol", 99),
+        ("generation_schema", 99),
     ],
 )
 def test_candidate_must_match_running_core_fingerprint(field, replacement):
@@ -145,6 +208,21 @@ def test_packaging_metadata_is_derived_from_runtime_policy():
     assert "Programming Language :: Python :: 3.10" not in pyproject
     assert "Programming Language :: Python :: 3.11" not in pyproject
     assert "Programming Language :: Python :: 3.13" not in pyproject
+
+
+def test_runtime_policy_digest_binds_policy_and_exact_lock_bytes(tmp_path):
+    _write_policy(tmp_path)
+    lock = tmp_path / "constraints" / "standard-py312.lock"
+    lock.parent.mkdir()
+    lock.write_text("example==1.0\n", encoding="utf-8")
+    policy = load_runtime_policy(tmp_path)
+
+    first = runtime_policy_digest(tmp_path, policy)
+    lock.write_text("example==1.1\n", encoding="utf-8")
+    second = runtime_policy_digest(tmp_path, policy)
+
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", first)
+    assert first != second
 
 
 def test_deployment_versions_derive_from_the_runtime_authority():
@@ -369,5 +447,25 @@ def test_replaceable_function_modules_do_not_own_process_lock_registries():
                         and isinstance(value, ast.Dict)
                     ):
                         violations.append(f"{relative}:{node.lineno}:{target.id}")
+
+    assert violations == []
+
+
+def test_cross_platform_modules_do_not_call_posix_only_fchmod_directly():
+    violations = []
+    for top_level in ("adapters", "flow", "nagare", "orchestrator", "remote", "tools", "transports"):
+        for path in (ROOT / top_level).rglob("*.py"):
+            if path.name == "file_permissions.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "os"
+                    and node.func.attr == "fchmod"
+                ):
+                    violations.append(f"{path.relative_to(ROOT)}:{node.lineno}")
 
     assert violations == []

@@ -106,7 +106,7 @@ async def test_shutdown_marks_unclean_and_finishes_when_queue_ignores_cancel(mon
 
 
 @pytest.mark.asyncio
-async def test_shutdown_treats_already_stopped_telegram_actions_as_idempotent():
+async def test_shutdown_skips_dormant_worker_updater_and_application_stop():
     shutdown_states = []
 
     async def _shutdown_backend():
@@ -127,7 +127,8 @@ async def test_shutdown_treats_already_stopped_telegram_actions_as_idempotent():
         backend_manager=SimpleNamespace(shutdown=_shutdown_backend),
         startup_success=True,
         app=SimpleNamespace(
-            updater=SimpleNamespace(stop=_not_running),
+            updater=SimpleNamespace(running=False, stop=_not_running),
+            running=False,
             stop=_not_running,
             shutdown=_not_running,
         ),
@@ -137,7 +138,8 @@ async def test_shutdown_treats_already_stopped_telegram_actions_as_idempotent():
     await runtime_lifecycle.shutdown(runtime)
 
     assert shutdown_states == [True]
-    assert len(runtime.error_logger.messages) == 3
+    assert len(runtime.error_logger.messages) == 1
+    assert "telegram-app-shutdown" in runtime.error_logger.messages[0]
 
 
 @pytest.mark.asyncio
@@ -170,7 +172,8 @@ async def test_shutdown_gives_telegram_updater_request_timeout_headroom(monkeypa
         backend_manager=SimpleNamespace(shutdown=_shutdown_backend),
         startup_success=True,
         app=SimpleNamespace(
-            updater=SimpleNamespace(stop=_slow_updater_stop),
+            updater=SimpleNamespace(running=True, stop=_slow_updater_stop),
+            running=True,
             stop=_stop_app,
             shutdown=_shutdown_app,
         ),

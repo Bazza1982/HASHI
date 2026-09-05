@@ -120,7 +120,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("focus", "cmd_focus", "Narrow scope and continue the original task", "execution"),
     CommandSpec("recall", "cmd_recall", "Clear selected queued requests", "execution"),
     CommandSpec("terminate", "cmd_terminate", "Shut down this agent", "execution"),
-    CommandSpec("reboot", "cmd_reboot", "Hot restart agents", "execution"),
+    CommandSpec("reboot", "cmd_reboot", "Switch Agent Function Workers", "execution"),
     CommandSpec("resend", "cmd_resend", "Replay previous model or Bridge output", "execution"),
     CommandSpec("retry", "cmd_retry", "Reset context and rerun last prompt", "execution"),
     CommandSpec("language", "cmd_language", "Choose interface language", "session"),

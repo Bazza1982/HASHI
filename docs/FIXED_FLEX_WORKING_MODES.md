@@ -1,6 +1,6 @@
 # Fixed and Flex Working Modes
 
-Status: **accepted product contract for HASHI v4.0.0-alpha.2 (2026-09-01)**.
+Status: **accepted product contract for HASHI v4.0.0-alpha.2 (2026-09-03)**.
 
 HASHI exposes two Agent working modes: **Fixed** and **Flex**. Fixed is the
 default when the selected backend can preserve a native session. Flex is the
@@ -58,9 +58,23 @@ Rules:
   and Flex for a stateless active backend;
 - an explicit Fixed default paired with a stateless active backend fails
   configuration validation;
-- a valid persisted `agent_mode` takes precedence over `default_mode`;
+- after the current mode-policy migration, a valid persisted `agent_mode`
+  takes precedence over `default_mode`;
 - `default_mode` remains the fallback for missing, retired, or unsupported
   persisted mode values.
+
+### One-time Fixed-default migration
+
+State written before Fixed became the session-capable product default has no
+`agent_mode_policy_version`. On its first load under policy version 1, a legacy
+persisted `flex` value is migrated to `fixed` only when the configured default
+and active backend support Fixed. HASHI then writes
+`agent_mode_policy_version: 1`.
+
+The marker makes this migration one-shot. A later explicit `/mode flex` writes
+Flex together with the current policy version, so subsequent reloads preserve
+the user's choice. Stateless backends and an explicit `default_mode: "flex"`
+are never forced into Fixed.
 
 ## Commands and transitions
 

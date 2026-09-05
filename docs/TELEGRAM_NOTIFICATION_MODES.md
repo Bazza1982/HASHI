@@ -26,7 +26,7 @@ chunk.
 
 Notification policy is fail-open for delivery: if policy evaluation fails, the
 message is still sent and defaults to normal notification signalling. A policy
-or hot-reload mismatch must never turn into a silent delivery failure.
+or Function Worker contract mismatch must never turn into a silent delivery failure.
 
 ## Sound and vibration
 
@@ -41,7 +41,7 @@ It normally reflects Telegram or device settings.
 
 ## Reload contract
 
-The notification provider module is a hot-reload foundation dependency. Both
+The notification provider module is a Function generation foundation dependency. Both
 targeted `/reboot min` and full `/reboot max` validate that the current
 three-mode helpers, purpose-aware delivery policy, and `/notify` command are
 loaded before accepting the refreshed runtime.

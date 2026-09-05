@@ -628,6 +628,7 @@ def test_incremental_memory_plus_prompt_keeps_authoritative_request_marker_witho
     assert "do this now" in payload["final_prompt"]
     assert {item["key"] for item in payload["audit"]["sections"]} == {
         "current_user_request",
+        "instance_path_presentation",
         "time",
     }
 

@@ -59,30 +59,33 @@ This means:
 
 ## Where To Look First
 
-### Slim core / hot reboot
+### Stable Core / Function Worker reboot
 
 Look at:
 
 - `main.py`
 - `orchestrator/reboot_manager.py`
-- `orchestrator/service_manager.py`
+- `orchestrator/function_worker_supervisor.py`
+- `orchestrator/function_worker_host.py`
 - `orchestrator/agent_lifecycle.py`
 - `docs/HASHI_SLIM_CORE_ARCHITECTURE.md`
 - `logs/bridge.log`
 
 Questions:
 
-- did `/reboot` log `Hot restart begin` with the expected mode and targets?
-- did selected agents stop with the expected `hot-restart:<mode>` reason?
-- did module reload finish before manager rebuild?
-- did the hot manager rebuild log include skill, config, backend preflight, agent lifecycle, service, reboot, shutdown, startup, and WhatsApp managers?
-- did every restarted agent reach `ONLINE` or an expected `LOCAL MODE`?
-- did scheduler recreation happen after the agent restart phase?
-- did Workbench health still report the expected agent list?
+- did generation qualification report one digest, module count, probe PID and
+  the same Core runtime ID?
+- did every selected candidate reach `READY` before any route was gated?
+- did only the requested Agent handles enter drain/cutover?
+- did commit report each new Worker PID and generation?
+- on failure, were candidates discarded and previous Workers resumed?
+- does Workbench health show the expected Core PID-independent runtime plus
+  per-Agent Worker PID, generation, `ACTIVE`, `accepting=true`, and `alive=true`?
 
 Important rule:
 
-- long-lived handles should remain on the kernel; managers should control them through `self.kernel.*`, not cache or own them directly.
+- Core managers and services retain object identity. Functional calls cross a
+  stable `AgentRuntimeHandle`; no active project module is reloaded in Core.
 
 ### Bridge startup
 
@@ -123,6 +126,10 @@ Look at:
   - `workspaces/<agent>/history.json`
   - `workspaces/<agent>/handoff.md`
   - `workspaces/<agent>/recent_context.jsonl`
+
+Codex event logs are bounded, credential-redacted JSONL with `.1`/`.2`
+backups. See [CODEX_FAILURE_CONTRACT.md](CODEX_FAILURE_CONTRACT.md) for
+terminal-event parsing, typed errors, replay safety, and retention settings.
 
 Questions:
 

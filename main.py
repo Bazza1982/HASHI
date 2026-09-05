@@ -33,10 +33,11 @@ from orchestrator.bootstrap_logging import (
     setup_console_logging,
 )
 from orchestrator.instance_lock import InstanceLock
+from orchestrator.function_worker_supervisor import FunctionWorkerSupervisor
 from orchestrator.lifecycle_state import LifecycleState
 from orchestrator.manager_registry import (
-    build_hot_manager_bundle,
-    install_hot_manager_bundle,
+    build_core_manager_bundle,
+    install_core_manager_bundle,
 )
 from orchestrator.onboarding_gate import run_onboarding_gate
 from orchestrator.pathing import BridgePaths, build_bridge_paths
@@ -59,15 +60,17 @@ class UniversalOrchestrator:
         self.enable_api_gateway = enable_api_gateway
         self.global_cfg = None
         self.secrets = {}
+        self.agent_authority_roots: dict[str, str] = {}
         self.runtime_fingerprint = RUNTIME_FINGERPRINT
         self.function_generation = {
             "generation_id": "bootstrap",
             "module_count": 0,
             "runtime_id": RUNTIME_FINGERPRINT.runtime_id,
         }
-        install_hot_manager_bundle(
+        self.function_workers = FunctionWorkerSupervisor(self)
+        install_core_manager_bundle(
             self,
-            build_hot_manager_bundle(self, _handler),
+            build_core_manager_bundle(self, _handler),
         )
         self.workbench_api = None
         self.api_gateway = None
@@ -172,6 +175,10 @@ class UniversalOrchestrator:
         global_cfg, agent_configs, secrets = cfg_mgr.load()
         self.global_cfg = global_cfg
         self.secrets = secrets
+        self.agent_authority_roots = {
+            str(config.name): str(config.resolve_access_root().resolve())
+            for config in agent_configs
+        }
         return global_cfg, agent_configs, secrets
 
     def get_all_agents_raw(self) -> list[dict]:
@@ -203,21 +210,6 @@ class UniversalOrchestrator:
         self, agent_configs, engine_status: dict[str, tuple[bool, str]]
     ) -> tuple[list, list[tuple[str, str]]]:
         return self.backend_preflight.partition_agents_by_availability(agent_configs, engine_status)
-
-    def _build_runtime(self, agent_cfg, global_cfg, secrets):
-        return self.agent_lifecycle.build_runtime(agent_cfg, global_cfg, secrets)
-
-    async def _cleanup_runtime_start_failure(self, rt):
-        await self.agent_lifecycle.cleanup_runtime_start_failure(rt)
-
-    async def telegram_preflight(self, token: str, agent_name: str, attempt: int = 0, max_attempts: int = 0) -> bool:
-        return await self.agent_lifecycle.telegram_preflight(token, agent_name, attempt, max_attempts)
-
-    async def _start_runtime(self, rt) -> tuple[bool, str]:
-        return await self.agent_lifecycle.start_runtime(rt)
-
-    async def _try_telegram_connect(self, rt) -> bool:
-        return await self.agent_lifecycle.try_telegram_connect(rt)
 
     async def start_agent(self, agent_name: str) -> tuple[bool, str]:
         return await self.agent_lifecycle.start_agent(agent_name)

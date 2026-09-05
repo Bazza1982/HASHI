@@ -262,7 +262,7 @@ class BaseBackend(ABC):
     def authorized_media_roots(self) -> tuple[Path, ...]:
         candidates: list[Any] = [getattr(self.config, "workspace_dir", None)]
         try:
-            candidates.append(self.effective_add_dir)
+            candidates.extend(self.effective_add_dirs)
         except (AttributeError, OSError, TypeError, ValueError):
             pass
         candidates.append(getattr(self.global_config, "base_media_dir", None))
@@ -420,6 +420,25 @@ class BaseBackend(ABC):
         return path if path.is_dir() else None
 
     @property
+    def workzone_dirs(self) -> tuple[Path, ...]:
+        extra = getattr(self.config, "extra", {}) or {}
+        raw_values = extra.get("workzone_dirs") or ()
+        if isinstance(raw_values, (str, Path)):
+            raw_values = (raw_values,)
+        paths: list[Path] = []
+        for raw in raw_values:
+            try:
+                path = Path(str(raw)).expanduser().resolve()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                continue
+            if path.is_dir() and path not in paths:
+                paths.append(path)
+        legacy = self.workzone_dir
+        if legacy is not None and legacy not in paths:
+            paths.insert(0, legacy)
+        return tuple(paths)
+
+    @property
     def effective_workdir(self) -> Path:
         if self.workzone_dir is not None:
             return self.workzone_dir
@@ -427,9 +446,22 @@ class BaseBackend(ABC):
 
     @property
     def effective_add_dir(self) -> str:
-        if self.workzone_dir is not None:
-            return str(self.workzone_dir)
-        return str(self.config.resolve_access_root())
+        return str(self.effective_add_dirs[0])
+
+    @property
+    def effective_add_dirs(self) -> tuple[Path, ...]:
+        if self.workzone_dirs:
+            return self.workzone_dirs
+        extra = getattr(self.config, "extra", {}) or {}
+        state = extra.get("workzone_state")
+        if isinstance(state, Mapping) and any(
+            isinstance(item, Mapping) and bool(item.get("enabled"))
+            for item in (state.get("slots") or ())
+        ):
+            # An enabled but currently unavailable Workzone must not make a
+            # native CLI fall back to the broader default access root.
+            return (Path(self.config.workspace_dir).expanduser().resolve(),)
+        return (self.config.resolve_access_root(),)
 
     def _preview_text(self, text: str | bytes | None, limit: int = 400) -> str:
         if text is None:
@@ -461,6 +493,78 @@ class BaseBackend(ABC):
             except Exception as exc:
                 return f"<tasklist failed: {exc}>"
         return f"pid={pid}"
+
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> bool:
+        """Synchronously terminate active CLI children from a control thread.
+
+        This performs no asyncio work. The owning event loop still performs
+        normal task cancellation and shutdown; API-only backends have no local
+        process and therefore return ``False``.
+        """
+
+        candidates: list[Any] = []
+        current = getattr(self, "current_proc", None)
+        if current is not None:
+            candidates.append(current)
+        external = getattr(self, "_external_tool_processes", None)
+        if external is not None:
+            try:
+                candidates.extend(tuple(external))
+            except (RuntimeError, TypeError):
+                pass
+
+        interrupted = False
+        seen: set[int] = set()
+        logger = getattr(self, "logger", None)
+        for proc in candidates:
+            pid = getattr(proc, "pid", None)
+            if (
+                not isinstance(pid, int)
+                or pid <= 0
+                or pid == os.getpid()
+                or pid in seen
+                or getattr(proc, "returncode", None) is not None
+            ):
+                continue
+            seen.add(pid)
+            try:
+                if os.name == "nt":
+                    completed = subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if completed.returncode not in {0, 128}:
+                        raise RuntimeError(
+                            self._preview_text(completed.stderr or completed.stdout)
+                        )
+                else:
+                    pgid = os.getpgid(pid)
+                    own_pgid = os.getpgrp()
+                    if pgid == pid and pgid != own_pgid:
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                interrupted = True
+                if logger:
+                    logger.warning(
+                        "Out-of-band provider interrupt pid=%s reason=%r",
+                        pid,
+                        reason,
+                    )
+            except ProcessLookupError:
+                continue
+            except Exception as exc:
+                if logger:
+                    logger.warning(
+                        "Out-of-band provider interrupt failed pid=%s "
+                        "reason=%r: %s",
+                        pid,
+                        reason,
+                        exc,
+                    )
+        return interrupted
 
     async def force_kill_process_tree(self, proc, logger=None, reason: str = "") -> bool:
         if not proc:

@@ -148,10 +148,7 @@ def sys_slots_text(
     items = (
         manager.list_slots()
         if hasattr(manager, "list_slots")
-        else [
-            {"slot": slot_id, **manager._slot(slot_id)}
-            for slot_id in manager.SLOTS
-        ]
+        else [{"slot": slot_id, **manager._slot(slot_id)} for slot_id in manager.SLOTS]
     )
     for item in items:
         slot_id = str(item.get("slot") or "")
@@ -162,7 +159,10 @@ def sys_slots_text(
         slots.append((slot_id, active, text))
 
     lines = [
-        card_title("🌐" if is_global else "🧾", "Global system prompt slots" if is_global else "System prompt slots"),
+        card_title(
+            "🌐" if is_global else "🧾",
+            "Global system prompt slots" if is_global else "System prompt slots",
+        ),
         "",
         f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
         f"<code>{active_count}</code> {html.escape(ui_language.tr('sys.active_suffix'))}",
@@ -200,9 +200,16 @@ def sys_slots_text(
             "",
             f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
             _command(f"{prefix} <slot>", ui_language.tr("sys.action.view_slot")),
-            _command(f"{prefix} <slot> on|off", ui_language.tr("sys.action.change_state")),
-            _command(f"{prefix} <slot> save|replace <text>", ui_language.tr("sys.action.update_content")),
-            _command(f"{prefix} output <slot>", ui_language.tr("sys.action.raw_content")),
+            _command(
+                f"{prefix} <slot> on|off", ui_language.tr("sys.action.change_state")
+            ),
+            _command(
+                f"{prefix} <slot> save|replace <text>",
+                ui_language.tr("sys.action.update_content"),
+            ),
+            _command(
+                f"{prefix} output <slot>", ui_language.tr("sys.action.raw_content")
+            ),
         ]
     )
     if is_global:
@@ -219,12 +226,19 @@ def sys_slot_text(
 ) -> str:
     is_global = scope == "global"
     prefix = _sys_command_prefix(scope)
-    slot = manager.get_slot(slot_id) if hasattr(manager, "get_slot") else manager._slot(slot_id)
+    slot = (
+        manager.get_slot(slot_id)
+        if hasattr(manager, "get_slot")
+        else manager._slot(slot_id)
+    )
     active = bool(slot.get("active"))
     text = str(slot.get("text") or "")
     return "\n".join(
         [
-            card_title("🌐" if is_global else "🧾", "Global system prompt slot" if is_global else "System prompt slot"),
+            card_title(
+                "🌐" if is_global else "🧾",
+                "Global system prompt slot" if is_global else "System prompt slot",
+            ),
             "",
             f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{status_label(active)}</b>",
             f"<b>{html.escape(ui_language.tr('common.slot'))}</b> · <code>{html.escape(slot_id)}</code>",
@@ -244,9 +258,16 @@ def sys_slot_text(
             f"<pre>{html.escape(text or ui_language.tr('common.empty'))}</pre>",
             "",
             f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
-            _command(f"{prefix} {slot_id} on|off", ui_language.tr("sys.action.change_state")),
-            _command(f"{prefix} {slot_id} replace <text>", ui_language.tr("sys.action.replace_content")),
-            _command(f"{prefix} output {slot_id}", ui_language.tr("sys.action.raw_content")),
+            _command(
+                f"{prefix} {slot_id} on|off", ui_language.tr("sys.action.change_state")
+            ),
+            _command(
+                f"{prefix} {slot_id} replace <text>",
+                ui_language.tr("sys.action.replace_content"),
+            ),
+            _command(
+                f"{prefix} output {slot_id}", ui_language.tr("sys.action.raw_content")
+            ),
         ]
     )
 
@@ -309,9 +330,7 @@ def model_menu_text(
             else _tr("menu.model.typed")
         ),
         action=(
-            _tr("menu.model.choose")
-            if has_choices
-            else _tr("menu.model.typed_action")
+            _tr("menu.model.choose") if has_choices else _tr("menu.model.typed_action")
         ),
     )
 
@@ -478,7 +497,7 @@ def her_v2_model_menu_text(
     pro_provider = pro_provider or provider
     return setting_card(
         "🧠",
-        "HER v2 models",
+        "HER v2 model settings",
         current=(
             f"<code>{html.escape(routing_mode.upper())}</code>"
             + (f" · {_state('common.draft')}" if draft else "")
@@ -493,12 +512,13 @@ def her_v2_model_menu_text(
                 "menu.her.pro_target",
                 f"<code>{html.escape(pro_provider)} / {html.escape(pro_model)}</code>",
             ),
+            _fact("menu.her.mode.direct", _tr("menu.her.mode.direct_path")),
+            _fact("menu.her.mode.strategic", _tr("menu.her.mode.strategic_path")),
+            _fact("menu.her.mode.planned", _tr("menu.her.mode.planned_path")),
         ],
         consequence=_tr("menu.her.model_effect"),
         action=(
-            _tr("menu.her.review_apply")
-            if draft
-            else _tr("menu.her.choose_target")
+            _tr("menu.her.review_apply") if draft else _tr("menu.her.choose_target")
         ),
     )
 
@@ -527,33 +547,110 @@ def her_v2_slot_model_text(
 
 def her_v2_routes_text(
     *,
-    route_count: int,
-    explicit_reasoning_count: int,
-    custom_target_count: int = 0,
+    execution_mode: str,
+    execution_reasoning: str,
     draft: bool = False,
 ) -> str:
     return setting_card(
         "🧭",
-        "HER v2 task routes",
+        "HER v2 task stages",
         current=(
-            f"<code>{route_count}</code> {html.escape(_tr('menu.her.effective_routes'))}"
+            f"<code>4</code> {html.escape(_tr('menu.her.visible_stages'))}"
             + (f" · {_state('common.draft')}" if draft else "")
         ),
         facts=[
-            _fact("common.target", _tr("menu.her.route_target")),
-            _fact("menu.her.custom_targets", f"<code>{custom_target_count}</code>"),
+            _fact("menu.her.mode.direct", _tr("menu.her.mode.direct_path")),
+            _fact("menu.her.mode.strategic", _tr("menu.her.mode.strategic_path")),
+            _fact("menu.her.mode.planned", _tr("menu.her.mode.planned_path")),
             _fact(
-                "menu.her.reasoning_label",
-                html.escape(_tr("menu.her.reasoning")),
-            ),
-            _fact(
-                "menu.her.custom_reasoning",
-                f"<code>{explicit_reasoning_count}</code> "
-                f"{html.escape(_tr('menu.her.route_overrides'))}",
+                "menu.her.stage.execution",
+                f"<code>{html.escape(execution_mode)}</code> · "
+                f"<code>{html.escape(execution_reasoning)}</code>",
             ),
         ],
         consequence=_tr("menu.her.routes_effect"),
         action=_tr("menu.her.choose_route"),
+    )
+
+
+def her_v2_execution_text(
+    *,
+    mode: str,
+    reasoning: str,
+    simple: str,
+    complex_: str,
+    high_volume: str,
+    draft: bool = False,
+) -> str:
+    return setting_card(
+        "🛠️",
+        "HER v2 execution settings",
+        current=(
+            f"<code>{html.escape(mode)}</code> · <code>{html.escape(reasoning)}</code>"
+            + (f" · {_state('common.draft')}" if draft else "")
+        ),
+        facts=[
+            _fact("menu.her.execution.simple", f"<code>{html.escape(simple)}</code>"),
+            _fact(
+                "menu.her.execution.complex", f"<code>{html.escape(complex_)}</code>"
+            ),
+            _fact(
+                "menu.her.execution.high_volume",
+                f"<code>{html.escape(high_volume)}</code>",
+            ),
+        ],
+        consequence=_tr("menu.her.execution_effect"),
+        action=_tr("menu.her.execution_choose"),
+    )
+
+
+def her_v2_advanced_text(
+    *,
+    routing_mode: str,
+    custom_target_count: int,
+    draft: bool = False,
+) -> str:
+    return setting_card(
+        "⚙️",
+        "HER v2 advanced model settings",
+        current=(
+            f"<code>{html.escape(routing_mode.upper())}</code>"
+            + (f" · {_state('common.draft')}" if draft else "")
+        ),
+        facts=[
+            _fact(
+                "menu.her.custom_targets",
+                f"<code>{custom_target_count}</code>",
+            ),
+            _fact("menu.her.internal_stages", _tr("menu.her.internal_stages_kept")),
+        ],
+        consequence=_tr("menu.her.advanced_effect"),
+        action=_tr("menu.her.advanced_choose"),
+    )
+
+
+def her_v2_advanced_routes_text(
+    *,
+    routing_mode: str,
+    custom_target_count: int,
+    draft: bool = False,
+) -> str:
+    return setting_card(
+        "🧩",
+        "HER v2 advanced task targets",
+        current=(
+            f"<code>{html.escape(routing_mode.upper())}</code>"
+            + (f" · {_state('common.draft')}" if draft else "")
+        ),
+        facts=[
+            _fact(
+                "menu.her.custom_targets",
+                f"<code>{custom_target_count}</code>",
+            ),
+            _fact("common.scope", _tr("menu.her.advanced_routes_scope")),
+        ],
+        consequence=_tr("menu.her.advanced_routes_effect"),
+        action=_tr("menu.her.advanced_routes_choose"),
     )
 
 
@@ -630,9 +727,7 @@ def backend_model_prompt_text(
     with_context: bool,
 ) -> str:
     mode_text = _tr(
-        "menu.backend.with_handoff"
-        if with_context
-        else "menu.backend.without_handoff"
+        "menu.backend.with_handoff" if with_context else "menu.backend.without_handoff"
     )
     return setting_card(
         "🧠",
@@ -760,7 +855,9 @@ def skills_menu_text(
 def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
     skill_id = str(getattr(skill, "id", _tr("common.unknown")) or _tr("common.unknown"))
     skill_name = str(getattr(skill, "name", skill_id) or skill_id)
-    description = str(getattr(skill, "description", "") or _tr("menu.skill.no_description"))
+    description = str(
+        getattr(skill, "description", "") or _tr("menu.skill.no_description")
+    )
     enabled_method = getattr(manager, "is_skill_enabled", None)
     enabled = (
         bool(enabled_method(workspace_dir, skill_id))
@@ -785,9 +882,7 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
     dependencies = dependency_method(skill_id) if callable(dependency_method) else []
     usage_method = getattr(manager, "skill_usage_stats", None)
     usage_stats = (
-        usage_method(skill_id)
-        if callable(usage_method)
-        else {"total": 0, "agents": 0}
+        usage_method(skill_id) if callable(usage_method) else {"total": 0, "agents": 0}
     )
     facts = [
         _fact("common.id", f"<code>{html.escape(skill_id)}</code>"),
@@ -818,13 +913,19 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
     ]
     version = str(getattr(skill, "version", "") or "")
     if version:
-        facts.append(_fact("common.version", f"<code>{html.escape(version[:120])}</code>"))
+        facts.append(
+            _fact("common.version", f"<code>{html.escape(version[:120])}</code>")
+        )
     author = str((getattr(skill, "metadata", {}) or {}).get("author") or "")
     if author:
-        facts.append(_fact("common.author", f"<code>{html.escape(author[:120])}</code>"))
+        facts.append(
+            _fact("common.author", f"<code>{html.escape(author[:120])}</code>")
+        )
     license_name = str(getattr(skill, "license", "") or "")
     if license_name:
-        facts.append(_fact("common.license", f"<code>{html.escape(license_name[:120])}</code>"))
+        facts.append(
+            _fact("common.license", f"<code>{html.escape(license_name[:120])}</code>")
+        )
     compatibility = str(getattr(skill, "compatibility", "") or "")
     if compatibility:
         facts.append(_fact("common.compatibility", html.escape(compatibility[:240])))
@@ -859,7 +960,9 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
             if len(body) <= 700
             else body[:700].rstrip() + "\n\n" + _tr("menu.skill.truncated")
         )
-        text += f"\n\n{_label('menu.skill.reference')}\n<pre>{html.escape(preview)}</pre>"
+        text += (
+            f"\n\n{_label('menu.skill.reference')}\n<pre>{html.escape(preview)}</pre>"
+        )
     return text
 
 
@@ -906,9 +1009,7 @@ def skill_invalid_packages_text(errors: Sequence[str]) -> str:
         for error in errors:
             rendered = f"• {html.escape(str(error)[:600])}"
             if used + len(rendered) > 3000:
-                lines.append(
-                    _tr("menu.skill.errors_clipped")
-                )
+                lines.append(_tr("menu.skill.errors_clipped"))
                 break
             lines.append(rendered)
             used += len(rendered)
@@ -1045,11 +1146,7 @@ def cos_menu_text(*, enabled: bool) -> str:
         "Chief of Staff routing",
         current=f"<b>{status_label(enabled)}</b>",
         facts=[_fact("common.route", html.escape(_tr("menu.cos.route")))],
-        consequence=(
-            _tr("menu.cos.enabled")
-            if enabled
-            else _tr("menu.cos.disabled")
-        ),
+        consequence=(_tr("menu.cos.enabled") if enabled else _tr("menu.cos.disabled")),
         action=_tr("menu.cos.action"),
     )
 
@@ -1061,9 +1158,7 @@ def safevoice_menu_text(*, enabled: bool) -> str:
         current=f"<b>{status_label(enabled)}</b>",
         facts=[_fact("common.scope", html.escape(_tr("menu.safevoice.scope")))],
         consequence=(
-            _tr("menu.safevoice.enabled")
-            if enabled
-            else _tr("menu.safevoice.disabled")
+            _tr("menu.safevoice.enabled") if enabled else _tr("menu.safevoice.disabled")
         ),
         action=_tr("menu.safevoice.action"),
     )

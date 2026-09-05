@@ -127,7 +127,7 @@ def test_background_job_store_recovery_marks_nonterminal_abandoned(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_service_manager_starts_and_restarts_background_jobs(tmp_path: Path):
+async def test_service_manager_owns_background_jobs_for_the_core_lifetime(tmp_path: Path):
     kernel = SimpleNamespace(
         paths=SimpleNamespace(bridge_home=tmp_path),
         background_job_manager=None,
@@ -138,7 +138,13 @@ async def test_service_manager_starts_and_restarts_background_jobs(tmp_path: Pat
     assert kernel.background_job_manager is first
     assert (tmp_path / "state" / "background_jobs" / "jobs.db").exists()
 
-    second = await manager.restart_background_jobs()
+    same = await manager.start_background_jobs()
+    assert same is first
+
+    await manager.stop_background_jobs()
+    assert kernel.background_job_manager is None
+
+    second = await manager.start_background_jobs()
     assert kernel.background_job_manager is second
     assert second is not first
 

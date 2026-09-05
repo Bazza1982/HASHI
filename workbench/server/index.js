@@ -6,6 +6,7 @@ import { execSync } from 'node:child_process';
 import { getAgents, getAgentMap, updateAgentMetadata } from './agents.js';
 import { createMinatoMcpRouter } from './minato_mcp.js';
 import { NativeAudioBridge } from './native_audio.js';
+import endpointConfig from '../endpoint_config.cjs';
 import { parseMinatoContext, stripHeaders, appendEntry, appendLogEntry, appendStructuredActivity, readEntries, listProjects } from './project_log.js';
 
 // Per-agent active project context — updated when an outbound message carries MINATO CONTEXT.
@@ -13,7 +14,7 @@ import { parseMinatoContext, stripHeaders, appendEntry, appendLogEntry, appendSt
 const agentContextMap = {};
 
 const PORT = Number(process.env.PORT || 3001);
-const BRIDGE_U_API = process.env.BRIDGE_U_API || 'http://127.0.0.1:18800';
+const { baseUrl: BRIDGE_U_API } = endpointConfig.resolveBridgeEndpoint();
 const KASUMI_MCP_API = process.env.KASUMI_MCP_API || '';
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
 const nativeAudio = new NativeAudioBridge(BRIDGE_U_API);

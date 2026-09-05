@@ -69,6 +69,20 @@ if AVAILABLE:
     user32.SetCursorPos.restype = wintypes.BOOL
     user32.GetCursorPos.argtypes = [ctypes.c_void_p]
     user32.GetCursorPos.restype = wintypes.BOOL
+    user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    user32.GetSystemMetrics.restype = ctypes.c_int
+    user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    user32.OpenInputDesktop.restype = wintypes.HANDLE
+    user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+    user32.CloseDesktop.restype = wintypes.BOOL
+    user32.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    user32.GetUserObjectInformationW.restype = wintypes.BOOL
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     user32.GetAsyncKeyState.restype = ctypes.c_short
     user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
@@ -114,6 +128,8 @@ GMEM_ZEROINIT = 0x0040
 VK_LBUTTON = 0x01
 VK_RBUTTON = 0x02
 VK_MBUTTON = 0x04
+DESKTOP_READOBJECTS = 0x0001
+UOI_NAME = 2
 
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
@@ -408,6 +424,97 @@ def get_cursor_position() -> dict:
     if not user32.GetCursorPos(ctypes.byref(point)):
         raise ctypes.WinError(ctypes.get_last_error())
     return {"x": int(point.x), "y": int(point.y)}
+
+
+def get_display_info() -> dict:
+    """Return display geometry without launching an external utility."""
+    return {
+        "count": int(user32.GetSystemMetrics(80)),
+        "primary": {
+            "x": 0,
+            "y": 0,
+            "width": int(user32.GetSystemMetrics(0)),
+            "height": int(user32.GetSystemMetrics(1)),
+        },
+        "virtual_screen": {
+            "x": int(user32.GetSystemMetrics(76)),
+            "y": int(user32.GetSystemMetrics(77)),
+            "width": int(user32.GetSystemMetrics(78)),
+            "height": int(user32.GetSystemMetrics(79)),
+        },
+    }
+
+
+def get_desktop_state() -> dict:
+    """Report whether this process can reach the signed-in input desktop."""
+    if not AVAILABLE:
+        return {
+            "available": False,
+            "interactive": False,
+            "locked": None,
+            "desktop_name": None,
+            "error": "Win32 desktop APIs are unavailable",
+        }
+    desktop = user32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS)
+    if not desktop:
+        return {
+            "available": False,
+            "interactive": False,
+            "locked": True,
+            "desktop_name": None,
+            "error": f"OpenInputDesktop failed with Win32 error {ctypes.get_last_error()}",
+        }
+    try:
+        required = wintypes.DWORD()
+        user32.GetUserObjectInformationW(
+            desktop,
+            UOI_NAME,
+            None,
+            0,
+            ctypes.byref(required),
+        )
+        if required.value <= 0:
+            return {
+                "available": True,
+                "interactive": False,
+                "locked": None,
+                "desktop_name": None,
+                "error": "input desktop name is unavailable",
+            }
+        character_count = max(
+            1,
+            (int(required.value) + ctypes.sizeof(ctypes.c_wchar) - 1)
+            // ctypes.sizeof(ctypes.c_wchar),
+        )
+        name_buffer = ctypes.create_unicode_buffer(character_count)
+        if not user32.GetUserObjectInformationW(
+            desktop,
+            UOI_NAME,
+            name_buffer,
+            required.value,
+            ctypes.byref(required),
+        ):
+            return {
+                "available": True,
+                "interactive": False,
+                "locked": None,
+                "desktop_name": None,
+                "error": (
+                    "GetUserObjectInformation failed with Win32 error "
+                    f"{ctypes.get_last_error()}"
+                ),
+            }
+        name = name_buffer.value.strip()
+        interactive = name.casefold() == "default"
+        return {
+            "available": True,
+            "interactive": interactive,
+            "locked": not interactive,
+            "desktop_name": name or None,
+            "error": None,
+        }
+    finally:
+        user32.CloseDesktop(desktop)
 
 
 def move_mouse(x: int, y: int) -> dict:

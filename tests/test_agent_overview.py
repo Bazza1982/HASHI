@@ -64,7 +64,22 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
 
     canonical = get_summary(workspace_dir, session_id="session-current")
     assert overview["agent"]["status"] == "online"
-    assert overview["workzone"] == {"active": True, "path": str(workzone)}
+    assert overview["workzone"] == {
+        "active": True,
+        "path": str(workzone),
+        "active_count": 1,
+        "configured_count": 1,
+        "slots": [
+            {
+                "slot": "main",
+                "role": "primary",
+                "path": str(workzone),
+                "label": workzone.name,
+                "enabled": True,
+                "available": True,
+            }
+        ],
+    }
     assert overview["usage"]["all_time"]["input"] == canonical["all_time"]["input"]
     assert overview["usage"]["all_time"]["cost_usd"] == canonical["all_time"]["cost_usd"]
     # Provider completion tokens already contain their reasoning-token subset.
@@ -90,6 +105,49 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
     serialized = json.dumps(overview)
     assert "Private recent context" not in serialized
     assert "Private user text" not in serialized
+
+
+def test_overview_projects_runtime_multi_workzones_instead_of_stale_legacy_file(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    legacy = tmp_path / "legacy"
+    attached = tmp_path / "attached"
+    for path in (workspace, legacy, attached):
+        path.mkdir()
+    save_workzone(workspace, legacy, source="legacy")
+    runtime = _runtime(workspace)
+    runtime._workzone_state = {
+        "revision": 9,
+        "slots": [
+            {
+                "slot_id": "main",
+                "path": str(legacy),
+                "enabled": False,
+            },
+            {
+                "slot_id": "1",
+                "path": str(attached),
+                "enabled": True,
+                "label": "shared",
+            },
+        ],
+    }
+
+    overview = build_agent_overview(
+        metadata={"name": "akane", "status": "online", "online": True},
+        workspace_dir=workspace,
+        runtime=runtime,
+    )["workzone"]
+
+    assert overview["active"] is True
+    assert overview["path"] is None
+    assert overview["active_count"] == 1
+    assert overview["configured_count"] == 2
+    assert [(slot["slot"], slot["enabled"]) for slot in overview["slots"]] == [
+        ("main", False),
+        ("1", True),
+    ]
 
 
 class _Request:

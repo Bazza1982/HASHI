@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.her_json_repair import render_json_repair_input
+from orchestrator.file_permissions import tighten_fd_permissions
 from orchestrator.process_resources import path_lock as process_path_lock
 
 HABIT_FORMAT = "her-habit-v1"
@@ -433,7 +434,7 @@ def _atomic_write_json(destination: Path, payload: Mapping[str, Any]) -> None:
         dir=destination.parent,
     )
     try:
-        os.fchmod(fd, 0o600)
+        tighten_fd_permissions(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(dict(payload), handle, ensure_ascii=False, indent=2)
             handle.write("\n")

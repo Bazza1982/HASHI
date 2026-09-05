@@ -61,9 +61,11 @@ from orchestrator.privacy_levels import (
     require_level_available,
 )
 from orchestrator.workspace_state import WorkspaceStateStore
-from orchestrator.workzone import access_root_for_workzone
+from orchestrator import workzone as workzone_module
 
 HER_HABIT_MEDITATION_STATE_KEY = "her_habit_meditation"
+AGENT_MODE_POLICY_VERSION_STATE_KEY = "agent_mode_policy_version"
+CURRENT_AGENT_MODE_POLICY_VERSION = 1
 
 
 class FlexibleBackendManager:
@@ -228,6 +230,26 @@ class FlexibleBackendManager:
                         # Memory+ flag once backend capabilities are available.
                         self.agent_mode = persisted_mode
                     elif persisted_mode in SUPPORTED_AGENT_MODES:
+                        policy_version = self._agent_mode_policy_version(state)
+                        migrate_legacy_flex = (
+                            persisted_mode == "flex"
+                            and policy_version < CURRENT_AGENT_MODE_POLICY_VERSION
+                            and self._mode_for_backend(
+                                self.config.default_mode,
+                                self.config.active_backend,
+                            )
+                            == "fixed"
+                        )
+                        if migrate_legacy_flex:
+                            persisted_mode = "fixed"
+                            state["agent_mode"] = persisted_mode
+                            state_needs_repair = True
+                            self.logger.warning(
+                                "Migrated legacy persisted flex mode to the fixed "
+                                "product default; future explicit mode choices are "
+                                "preserved by policy version %s.",
+                                CURRENT_AGENT_MODE_POLICY_VERSION,
+                            )
                         self.agent_mode = self._mode_for_backend(
                             persisted_mode,
                             self.config.active_backend,
@@ -259,6 +281,18 @@ class FlexibleBackendManager:
                         )
                         state["agent_mode"] = self.agent_mode
                         state_needs_repair = True
+                if (
+                    self._agent_mode_policy_version(state)
+                    < CURRENT_AGENT_MODE_POLICY_VERSION
+                ):
+                    # This marker distinguishes legacy persisted ``flex`` from
+                    # an explicit choice made after Fixed became the product
+                    # default.  It is written once and then carried by every
+                    # normal state save.
+                    state[AGENT_MODE_POLICY_VERSION_STATE_KEY] = (
+                        CURRENT_AGENT_MODE_POLICY_VERSION
+                    )
+                    state_needs_repair = True
                 if "privacy_level" in state:
                     try:
                         self.privacy_level = parse_privacy_level(state["privacy_level"])
@@ -308,9 +342,23 @@ class FlexibleBackendManager:
             self.logger.error(f"Failed to read state.json: {e}")
         return {}
 
+    @staticmethod
+    def _agent_mode_policy_version(state: dict[str, Any]) -> int:
+        try:
+            return max(
+                0,
+                int(state.get(AGENT_MODE_POLICY_VERSION_STATE_KEY) or 0),
+            )
+        except (TypeError, ValueError):
+            return 0
+
     def _apply_managed_state_fields(self, state: dict[str, Any]) -> None:
         state["active_backend"] = self.config.active_backend
         state["agent_mode"] = self.agent_mode
+        state[AGENT_MODE_POLICY_VERSION_STATE_KEY] = max(
+            self._agent_mode_policy_version(state),
+            CURRENT_AGENT_MODE_POLICY_VERSION,
+        )
         state["privacy_level"] = int(self.privacy_level)
         if (
             self.config.active_backend != HER_V2_ENGINE
@@ -1399,9 +1447,30 @@ class FlexibleBackendManager:
             if not allowed:
                 return
 
-            workzone_dir = (adapter_cfg.extra or {}).get("workzone_dir")
-            workspace_dir = Path(workzone_dir).expanduser().resolve() if workzone_dir else adapter_cfg.workspace_dir
-            access_root = access_root_for_workzone(adapter_cfg.resolve_access_root(), workspace_dir if workzone_dir else None)
+            extra = adapter_cfg.extra or {}
+            state = workzone_module.normalize_workzone_state(
+                extra.get("workzone_state")
+            )
+            workzone_dir = str(extra.get("workzone_dir") or "").strip()
+            if not state["slots"] and workzone_dir:
+                state = workzone_module.normalize_workzone_state(
+                    {
+                        "slots": [
+                            {
+                                "slot_id": "main",
+                                "path": workzone_dir,
+                                "enabled": True,
+                            }
+                        ]
+                    }
+                )
+            primary = workzone_module.primary_workzone_path(state)
+            workspace_dir = primary or adapter_cfg.workspace_dir
+            access_roots = workzone_module.access_roots_for_workzones(
+                adapter_cfg.resolve_access_root(),
+                state,
+                workspace_dir=adapter_cfg.workspace_dir,
+            )
             # Per-tool options (e.g. bash.timeout_max, file_write.max_file_size_kb)
             tool_options = {k: v for k, v in tools_cfg.items()
                             if k != "allowed"}
@@ -1416,7 +1485,7 @@ class FlexibleBackendManager:
 
             registry = ToolRegistry(
                 allowed_tools=allowed,
-                access_root=access_root,
+                access_root=access_roots[0],
                 workspace_dir=workspace_dir,
                 secrets=enriched_secrets,
                 tool_options=tool_options,
@@ -1432,6 +1501,7 @@ class FlexibleBackendManager:
                 canonical_audit=getattr(
                     getattr(self, "runtime", None), "canonical_audit", None
                 ),
+                access_roots=list(access_roots),
             )
             self.current_backend.tool_registry = registry
             self.logger.info(
@@ -1670,7 +1740,28 @@ class FlexibleBackendManager:
         request_metadata = request_meta.get("request_metadata")
         context.pop("memory_search_authorization", None)
         context.pop("request_tool_allowlist", None)
+        for key in (
+            "system_exchange",
+            "system_exchange_kind",
+            "system_exchange_terminal",
+            "protocol_message_id",
+            "protocol_conversation_id",
+            "protocol_from_instance",
+            "protocol_from_agent",
+        ):
+            context.pop(key, None)
         if isinstance(request_metadata, dict):
+            for key in (
+                "system_exchange",
+                "system_exchange_kind",
+                "system_exchange_terminal",
+                "protocol_message_id",
+                "protocol_conversation_id",
+                "protocol_from_instance",
+                "protocol_from_agent",
+            ):
+                if key in request_metadata:
+                    context[key] = request_metadata[key]
             raw_allowlist = request_metadata.get("tool_allowlist")
             if isinstance(raw_allowlist, list):
                 context["request_tool_allowlist"] = sorted(

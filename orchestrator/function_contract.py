@@ -25,9 +25,6 @@ FUNCTION_SIDECAR_PREFIXES = (
     "tools.windows_helper",
     "tools.windows_use_mcp_client",
 )
-# Compatibility name for extensions that inspected the old discovery policy.
-HOT_RELOAD_PREFIXES = FUNCTION_MODULE_PREFIXES
-
 # These modules define identity objects already owned by the running process.
 # They are not function-layer modules: changing one is incomplete until it has
 # an explicit warm-handoff design.  /reboot must never claim that merely
@@ -144,11 +141,11 @@ FOUNDATION_PHASES = {
 }
 
 
-class HotReloadError(RuntimeError):
-    pass
+class FunctionContractError(RuntimeError):
+    """A candidate Function Worker generation violates its public contract."""
 
 
-def module_reload_key(name: str) -> tuple[int, str]:
+def function_module_order_key(name: str) -> tuple[int, str]:
     if name in FOUNDATION_PHASES:
         return (FOUNDATION_PHASES[name], name)
     if name.startswith(("adapters.", "tools.")):
@@ -158,7 +155,7 @@ def module_reload_key(name: str) -> tuple[int, str]:
     return (4, name)
 
 
-def discover_loaded_project_modules(
+def discover_loaded_function_modules(
     modules: Mapping[str, ModuleType] | None = None,
     *,
     code_root: Path | None = None,
@@ -191,7 +188,7 @@ def discover_loaded_project_modules(
 
     return sorted(
         (name for name in list(loaded) if is_reloadable_project_module(name)),
-        key=module_reload_key,
+        key=function_module_order_key,
     )
 
 
@@ -227,18 +224,18 @@ def validate_function_contract(
 
     acknowledgement_kind = getattr(stream_events, "KIND_ACKNOWLEDGEMENT", None)
     if acknowledgement_kind != "acknowledgement":
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: adapters.stream_events does not expose "
             "KIND_ACKNOWLEDGEMENT='acknowledgement'"
         )
     resolver = getattr(backend_registry, "get_backend_class", None)
     supported_adapter = getattr(her_v2, "HERv2Adapter", None)
     if not callable(resolver) or supported_adapter is None:
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: HER v2 registry contract unavailable"
         )
     if any(resolver(engine) is not supported_adapter for engine in ("her-v2", "her")):
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: a HER ID can reach a stale or retired adapter"
         )
     base_backend = getattr(adapter_base, "BaseBackend", None)
@@ -248,7 +245,7 @@ def validate_function_contract(
         try:
             adapter_class = resolver(engine)
         except Exception as exc:
-            raise HotReloadError(
+            raise FunctionContractError(
                 f"Function contract failed: backend {engine!r} cannot resolve: {exc}"
             ) from exc
         if (
@@ -258,7 +255,7 @@ def validate_function_contract(
         ):
             invalid_adapters.append(str(engine))
     if invalid_adapters:
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: invalid backend adapter classes for "
             + ", ".join(sorted(invalid_adapters))
         )
@@ -268,11 +265,11 @@ def validate_function_contract(
         != frozenset({"fixed", "flex"})
         or not callable(getattr(runtime_config, "default_agent_mode_for_backend", None))
     ):
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: fixed/flex configuration is not current"
         )
     if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: runtime acknowledgement pipeline unavailable"
         )
     notification_mode = getattr(telegram_notifications, "notification_mode", None)
@@ -294,7 +291,7 @@ def validate_function_contract(
         or "purpose" not in disable_parameters
         or "notify" not in runtime_commands
     ):
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: Telegram notification mode or /notify "
             "command is not current"
         )
@@ -314,11 +311,11 @@ def validate_function_contract(
         "habit_learning_eligible" not in queued_fields
         or "habit_learning_eligible" not in enqueue_parameters
     ):
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: habit learning request intake is incomplete"
         )
     if getattr(flexible_runtime, "QueuedRequest", None) is not queued_request:
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: flexible runtime retained a stale "
             "QueuedRequest class"
         )
@@ -328,14 +325,14 @@ def validate_function_contract(
         or getattr(runtime_session, "SessionStore", None) is not session_store_class
         or not callable(getattr(session_store_class, "recent_agent_exchanges", None))
     ):
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: runtime session handling retained a stale "
             "SessionStore class"
         )
     if getattr(gateway_context, "ToolRegistry", None) is not getattr(
         tool_registry, "ToolRegistry", None
     ):
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: tools.gateway.context retained a stale "
             "ToolRegistry class"
         )
@@ -346,10 +343,14 @@ def validate_function_contract(
             None,
         )
     ):
-        raise HotReloadError(
+        raise FunctionContractError(
             "Function contract failed: ToolRegistry scoped audit context is unavailable"
         )
     if not isinstance(getattr(whatsapp_transport, "WhatsAppTransport", None), type):
-        raise HotReloadError("Function contract failed: WhatsApp transport unavailable")
+        raise FunctionContractError(
+            "Function contract failed: WhatsApp transport unavailable"
+        )
     if not isinstance(getattr(chat_router, "ChatRouter", None), type):
-        raise HotReloadError("Function contract failed: WhatsApp router unavailable")
+        raise FunctionContractError(
+            "Function contract failed: WhatsApp router unavailable"
+        )

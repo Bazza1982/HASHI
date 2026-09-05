@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import inspect
 import logging
 from typing import Any
 
@@ -30,6 +31,13 @@ def _instance_id(runtime: Any) -> str:
 def _service_manager(runtime: Any):
     orchestrator = getattr(runtime, "orchestrator", None)
     return getattr(orchestrator, "service_manager", None)
+
+
+async def _set_gateway_model(service_manager: Any, model: str) -> tuple[bool, str]:
+    result = service_manager.set_api_gateway_default_model(model)
+    if inspect.isawaitable(result):
+        result = await result
+    return bool(result[0]), str(result[1])
 
 
 def _authorized(runtime: Any, update: Any) -> bool:
@@ -143,7 +151,7 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
         return
     if action == "model":
         if len(args) > 1:
-            ok, message = service_manager.set_api_gateway_default_model(args[1])
+            ok, message = await _set_gateway_model(service_manager, args[1])
             await runtime._reply_text(
                 update,
                 f"{message}\n\n{_gateway_status_text(runtime)}",
@@ -379,7 +387,7 @@ async def api_callback(runtime: Any, update: Any, context: Any) -> None:
             await query.edit_message_text(_gateway_status_text(runtime), parse_mode="HTML", reply_markup=_gateway_model_keyboard(runtime))
         elif data.startswith("apigw:model:"):
             model = data.split(":", 2)[2]
-            ok, message = service_manager.set_api_gateway_default_model(model)
+            ok, message = await _set_gateway_model(service_manager, model)
             if not ok:
                 await query.answer(message, show_alert=True)
                 return

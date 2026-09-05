@@ -90,7 +90,11 @@ class _Runtime:
         return accepted.request_id
 
 
-def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _Runtime]:
+def _server(
+    tmp_path: Path,
+    *,
+    reconcile_session_runs: bool = True,
+) -> tuple[WorkbenchApiServer, _Runtime]:
     config_path = tmp_path / "agents.json"
     config_path.write_text(
         json.dumps({"global": {}, "agents": [{"name": "lily"}]}),
@@ -109,6 +113,7 @@ def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _Runtime]:
             deployment_profile="personal",
         ),
         runtimes=[runtime],
+        reconcile_session_runs=reconcile_session_runs,
     )
     runtime.server = server
     return server, runtime
@@ -177,6 +182,32 @@ def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
     assert [row["run_id"] for row in restarted.reconciled_session_runs] == [
         accepted.run_id
     ]
+
+
+def test_workbench_service_refresh_preserves_runs_owned_by_live_workers(tmp_path):
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.ensure_default_session(
+        owner_id="user:7", agent_id="lily"
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="req-live-during-service-refresh",
+        text="still executing in a live Function Worker",
+        source="test",
+        idempotency_key="live-during-service-refresh",
+    )
+    server.session_store.mark_request_running(
+        accepted.request_id,
+        worker_id="function-worker-live",
+    )
+
+    refreshed, _runtime = _server(tmp_path, reconcile_session_runs=False)
+
+    run = refreshed.session_store.get_run(accepted.run_id, owner_id="user:7")
+    assert run["state"] == "running"
+    assert refreshed.reconciled_session_runs == []
 
 
 @pytest.mark.asyncio

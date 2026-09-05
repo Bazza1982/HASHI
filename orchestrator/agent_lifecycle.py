@@ -2,206 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import suppress
-
-import httpx
 
 from orchestrator.bootstrap_logging import C_RESET, C_STOP
+from orchestrator.function_worker_supervisor import (
+    AgentRuntimeHandle,
+    WORKER_DRAIN_TIMEOUT_SECONDS,
+)
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
-RUNTIME_TEARDOWN_TIMEOUT_SECONDS = 20.0
-
-
-def _consume_teardown_task_result(task: asyncio.Future) -> None:
-    try:
-        task.result()
-    except (asyncio.CancelledError, Exception):
-        pass
+RUNTIME_TEARDOWN_TIMEOUT_SECONDS = WORKER_DRAIN_TIMEOUT_SECONDS + 35.0
 
 
 class AgentLifecycleManager:
-    """Start, stop, and tear down agent runtimes for the live kernel."""
+    """Start and stop isolated per-Agent Function Workers."""
 
     def __init__(self, kernel):
         self.kernel = kernel
-
-    def build_runtime(self, agent_cfg, global_cfg, secrets):
-        # Local imports so hot restart picks up reloaded module code.
-        from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime as _FlexRT
-
-        token = secrets.get(agent_cfg.telegram_token_key)
-        if not token:
-            main_logger.warning(
-                "No Telegram token found for agent '%s' (key: %s).",
-                agent_cfg.name,
-                agent_cfg.telegram_token_key,
-            )
-            token = "WORKBENCH_ONLY_NO_TOKEN"
-        runtime = _FlexRT(agent_cfg, global_cfg, token, secrets, self.kernel.skill_manager)
-        runtime.orchestrator = self.kernel
-        runtime.bind_handlers()
-        return runtime
-
-    async def cleanup_runtime_start_failure(self, rt):
-        with suppress(Exception):
-            await rt.app.shutdown()
-        if hasattr(rt, "backend"):
-            with suppress(Exception):
-                await rt.backend.shutdown()
-        else:
-            with suppress(Exception):
-                await rt.shutdown()
-
-    async def telegram_preflight(self, token: str, agent_name: str, attempt: int = 0, max_attempts: int = 0) -> bool:
-        url = f"https://api.telegram.org/bot{token}/getMe"
-        attempt_tag = f" (attempt {attempt}/{max_attempts})" if attempt else ""
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-                if not data.get("ok"):
-                    msg = f"Telegram preflight failed for '{agent_name}'{attempt_tag}: API returned not ok."
-                    main_logger.error(msg)
-                    bridge_logger.error(msg)
-                    return False
-                bridge_logger.info("Telegram preflight OK for '%s'%s", agent_name, attempt_tag)
-                return True
-        except Exception as e:
-            err_text = str(e) or "<no error message>"
-            msg = f"Telegram preflight failed for '{agent_name}'{attempt_tag}: {type(e).__name__}: {err_text}"
-            main_logger.warning(msg)
-            bridge_logger.warning(msg)
-            return False
-
-    async def start_runtime(self, rt) -> tuple[bool, str]:
-        """
-        Start an agent runtime. Backend initialization failure is fatal.
-        Telegram connection failure results in LOCAL MODE (Workbench + WhatsApp only).
-        """
-        bridge_logger.info("%s: starting backend initialization", rt.name)
-        for attempt in range(1, 4):
-            try:
-                main_logger.info("Initializing backend for '%s' (attempt %s/3)...", rt.name, attempt)
-                if hasattr(rt, "backend"):
-                    backend_ok = await rt.backend.initialize()
-                    if not backend_ok:
-                        await rt.backend.shutdown()
-                        bridge_logger.error("%s: backend.initialize() returned False", rt.name)
-                        return False, f"Backend for '{rt.name}' failed to initialize."
-                else:
-                    backend_ok = await rt.initialize()
-                    if not backend_ok:
-                        await rt.shutdown()
-                        bridge_logger.error("%s: flex initialize() returned False", rt.name)
-                        return False, f"Flex initialization for '{rt.name}' failed."
-                rt.backend_ready = True
-                bridge_logger.info("%s: backend ready (attempt %s/3)", rt.name, attempt)
-                break
-            except Exception as e:
-                bridge_logger.warning("%s: backend init attempt %s/3 failed: %s: %s", rt.name, attempt, type(e).__name__, e)
-                if attempt < 3:
-                    main_logger.warning(
-                        "Backend init for '%s' attempt %s failed: %s. Retrying in 5s...",
-                        rt.name,
-                        attempt,
-                        e,
-                    )
-                    await self.cleanup_runtime_start_failure(rt)
-                    await asyncio.sleep(5)
-                    continue
-                if hasattr(rt, "error_logger"):
-                    rt.error_logger.exception("Backend startup error for '%s' after 3 attempts: %s", rt.name, e)
-                else:
-                    main_logger.error("Backend startup error for '%s' after 3 attempts: %s", rt.name, e)
-                bridge_logger.error("%s: backend init FAILED after 3 attempts", rt.name)
-                return False, f"Failed to start '{rt.name}': {e}"
-
-        bridge_logger.info("%s: starting Telegram connection", rt.name)
-        telegram_ok = await self.try_telegram_connect(rt)
-
-        rt.startup_success = True
-        if hasattr(rt, "prepare_post_start_state"):
-            rt.prepare_post_start_state()
-
-        if telegram_ok:
-            bridge_logger.info("%s: ONLINE (backend + Telegram)", rt.name)
-            main_logger.info("Bot '%s' is online.", rt.name)
-            return True, f"Started agent '{rt.name}'."
-
-        bridge_logger.warning("%s: LOCAL MODE (backend ok, Telegram failed)", rt.name)
-        main_logger.info("Bot '%s' started in LOCAL MODE (Telegram unavailable).", rt.name)
-        return True, f"Started '{rt.name}' in LOCAL MODE (Workbench + WhatsApp only)."
-
-    async def try_telegram_connect(self, rt) -> bool:
-        """
-        Attempt to connect Telegram. Returns True on success, False on failure.
-        Does NOT block agent startup — local mode will be used if this fails.
-        """
-        for attempt in range(1, 4):
-            preflight_ok = await self.telegram_preflight(rt.token, rt.name, attempt=attempt, max_attempts=3)
-            if not preflight_ok:
-                last_failure_reason = f"preflight {attempt}/3 failed"
-                if attempt < 3:
-                    bridge_logger.info("%s: %s, retrying in 5s...", rt.name, last_failure_reason)
-                    await asyncio.sleep(5)
-                    continue
-                msg = (
-                    f"⚠️ Telegram unavailable for '{rt.name}'. "
-                    f"Agent will run in LOCAL MODE (Workbench + WhatsApp only)."
-                )
-                main_logger.warning(msg)
-                bridge_logger.warning("%s: all 3 preflight attempts failed → LOCAL MODE", rt.name)
-                rt.telegram_connected = False
-                return False
-
-            try:
-                main_logger.info("Connecting Telegram for '%s'...", rt.name)
-                await rt.app.initialize()
-                await rt.app.start()
-                error_callback = getattr(rt, "handle_polling_error", None)
-                await rt.app.updater.start_polling(
-                    drop_pending_updates=True,
-                    error_callback=error_callback,
-                    timeout=30,
-                )
-                rt.telegram_connected = True
-                try:
-                    from orchestrator.runtime_command_binding import (
-                        register_flexible_bot_commands,
-                    )
-
-                    await register_flexible_bot_commands(rt)
-                except Exception as e:
-                    if hasattr(rt, "logger"):
-                        rt.logger.warning("Could not register command menu: %s", e)
-                return True
-            except Exception as e:
-                last_failure_reason = f"connect attempt {attempt}/3: {type(e).__name__}: {e}"
-                bridge_logger.warning("%s: %s", rt.name, last_failure_reason)
-                if attempt < 3:
-                    main_logger.warning(
-                        "Telegram connect for '%s' attempt %s failed: %s. Retrying in 5s...",
-                        rt.name,
-                        attempt,
-                        e,
-                    )
-                    with suppress(Exception):
-                        await rt.app.shutdown()
-                    await asyncio.sleep(5)
-                    continue
-                main_logger.warning(
-                    "⚠️ Telegram connection failed for '%s' after 3 attempts: %s. Agent will run in LOCAL MODE.",
-                    rt.name,
-                    e,
-                )
-                bridge_logger.warning("%s: all 3 connect attempts failed → LOCAL MODE", rt.name)
-                rt.telegram_connected = False
-                return False
-
-        rt.telegram_connected = False
-        return False
 
     async def start_agent(self, agent_name: str) -> tuple[bool, str]:
         current_task = asyncio.current_task()
@@ -222,142 +39,231 @@ class AgentLifecycleManager:
                     if agent_name in self.kernel._runtime_map():
                         return False, f"Agent '{agent_name}' is already running."
                     try:
-                        global_cfg, agent_configs, secrets = self.kernel._load_config_bundle()
-                    except Exception as e:
-                        return False, f"Failed to load configuration: {e}"
-
-                    agent_cfg = next((cfg for cfg in agent_configs if cfg.name == agent_name), None)
+                        global_cfg, agent_configs, loaded_secrets = (
+                            self.kernel._load_config_bundle()
+                        )
+                    except Exception as exc:
+                        return False, f"Failed to load configuration: {exc}"
+                    agent_cfg = next(
+                        (cfg for cfg in agent_configs if cfg.name == agent_name),
+                        None,
+                    )
                     if agent_cfg is None:
                         return False, f"Agent '{agent_name}' is not configured."
 
                 try:
-                    runtime = self.build_runtime(agent_cfg, global_cfg, secrets)
-                except Exception as e:
+                    handle = await self.kernel.function_workers.create_active_handle(
+                        agent_name
+                    )
+                except Exception as exc:
                     message = (
-                        f"Failed to initialize '{agent_name}': "
-                        f"{type(e).__name__}: {e}"
+                        f"Failed to initialize Function Worker for '{agent_name}': "
+                        f"{type(exc).__name__}: {exc}"
                     )
                     main_logger.exception(message)
                     bridge_logger.exception(message)
                     return False, message
 
-                ok, message = await self.start_runtime(runtime)
-                if not ok:
-                    await self.cleanup_runtime_start_failure(runtime)
-                    return False, message
-
-                runtime.process_task = asyncio.create_task(runtime.process_queue(), name=f"queue-{runtime.name}")
                 async with self.kernel._lifecycle_lock:
-                    self.kernel.runtimes.append(runtime)
-                if runtime.telegram_connected:
-                    if hasattr(runtime, "enqueue_startup_bootstrap"):
-                        await runtime.enqueue_startup_bootstrap(global_cfg.authorized_id)
-                elif self.kernel.whatsapp is not None:
-                    await self.kernel._send_whatsapp_startup_notification(runtime)
+                    if agent_name in self.kernel._runtime_map():
+                        await handle.client.shutdown(force=True)
+                        return False, f"Agent '{agent_name}' started concurrently."
+                    self.kernel.runtimes.append(handle)
+                    self.kernel.function_workers.publish_generation_state()
+
+                if handle.telegram_connected:
+                    token = str(
+                        loaded_secrets.get(agent_cfg.telegram_token_key) or ""
+                    )
+                    try:
+                        await self.kernel.function_workers.start_telegram_ingress(
+                            agent_name,
+                            token,
+                            drop_pending_updates=True,
+                        )
+                    except Exception as exc:
+                        bridge_logger.warning(
+                            "Core Telegram ingress failed for %s: %s",
+                            agent_name,
+                            exc,
+                        )
+                        await self.kernel.function_workers.set_worker_telegram_status(
+                            agent_name,
+                            False,
+                        )
+                await self.kernel.function_workers.broadcast_topology()
+
+                if handle.telegram_connected and (
+                    self.kernel.function_workers.telegram_ingress_running(
+                        agent_name
+                    )
+                ):
+                    try:
+                        await handle.enqueue_startup_bootstrap(
+                            global_cfg.authorized_id
+                        )
+                    except Exception as exc:
+                        bridge_logger.warning(
+                            "Startup bootstrap failed for %s: %s",
+                            agent_name,
+                            exc,
+                        )
+                    message = f"Started agent '{agent_name}'."
+                    bridge_logger.info(
+                        "%s: ONLINE in Function Worker pid=%s generation=%s",
+                        agent_name,
+                        handle.worker_pid,
+                        handle.generation_id,
+                    )
+                else:
+                    if self.kernel.whatsapp is not None:
+                        await self.kernel._send_whatsapp_startup_notification(handle)
+                    message = (
+                        f"Started '{agent_name}' in LOCAL MODE "
+                        "(Workbench + WhatsApp only)."
+                    )
+                    bridge_logger.info(
+                        "%s: LOCAL MODE in Function Worker pid=%s generation=%s",
+                        agent_name,
+                        handle.worker_pid,
+                        handle.generation_id,
+                    )
                 return True, message
         finally:
-            try:
-                async with self.kernel._lifecycle_lock:
-                    if self.kernel._startup_tasks.get(agent_name) is current_task:
-                        self.kernel._startup_tasks.pop(agent_name, None)
-            except Exception:
-                self.kernel._startup_tasks.pop(agent_name, None)
+            async with self.kernel._lifecycle_lock:
+                if self.kernel._startup_tasks.get(agent_name) is current_task:
+                    self.kernel._startup_tasks.pop(agent_name, None)
 
-    async def stop_agent(self, agent_name: str, reason: str = "manual-stop") -> tuple[bool, str]:
-        async with self.kernel._lifecycle_lock:
-            if agent_name in self.kernel._startup_tasks:
-                return False, f"Agent '{agent_name}' is still starting."
-            runtime = self.kernel._runtime_map().get(agent_name)
+    async def stop_agent(
+        self,
+        agent_name: str,
+        reason: str = "manual-stop",
+    ) -> tuple[bool, str]:
+        agent_lock = self.kernel._agent_lock(agent_name)
+        async with agent_lock:
+            async with self.kernel._lifecycle_lock:
+                if agent_name in self.kernel._startup_tasks:
+                    return False, f"Agent '{agent_name}' is still starting."
+                runtime = self.kernel._runtime_map().get(agent_name)
             if runtime is None:
                 return False, f"Agent '{agent_name}' is not running."
+            if not isinstance(runtime, AgentRuntimeHandle):
+                return False, (
+                    f"Agent '{agent_name}' is not running in an isolated Function Worker."
+                )
 
-            bridge_logger.info("Stopping agent '%s' (reason=%s)", agent_name, reason)
-            stopped = await self.teardown_runtime(runtime)
-            if not stopped:
+            bridge_logger.info(
+                "Stopping Function Worker agent=%s pid=%s reason=%s",
+                agent_name,
+                runtime.worker_pid,
+                reason,
+            )
+            try:
+                client = await runtime.begin_cutover()
+                try:
+                    await client.call(
+                        "worker.quiesce",
+                        {"timeout": WORKER_DRAIN_TIMEOUT_SECONDS},
+                        timeout=WORKER_DRAIN_TIMEOUT_SECONDS + 10.0,
+                    )
+                except Exception:
+                    await runtime.abort_cutover()
+                    raise
+                await self.kernel.function_workers.stop_telegram_ingress(
+                    agent_name
+                )
+            except Exception as exc:
                 message = (
-                    f"Agent '{agent_name}' did not stop cleanly; it remains registered. "
-                    "Resolve the active operation and retry /reboot."
+                    f"Agent '{agent_name}' did not quiesce; it remains registered: "
+                    f"{type(exc).__name__}: {exc}"
                 )
                 main_logger.error(message)
-                bridge_logger.error("%s (reason=%s)", message, reason)
+                bridge_logger.error(message)
                 return False, message
 
-            self.kernel.runtimes[:] = [rt for rt in self.kernel.runtimes if rt.name != agent_name]
+            async with self.kernel._lifecycle_lock:
+                self.kernel.runtimes[:] = [
+                    item for item in self.kernel.runtimes if item is not runtime
+                ]
+                self.kernel.function_workers.publish_generation_state()
+            await runtime.close_route(f"Agent {agent_name!r} was stopped")
+            await self.kernel.function_workers.broadcast_topology()
+            await client.shutdown(force=True)
             main_logger.info("Agent '%s' stopped.", agent_name)
-            bridge_logger.info("Agent '%s' stopped (reason=%s)", agent_name, reason)
-            print(f"{C_STOP}[system] Agent '{agent_name}' stopped{C_RESET}", flush=True)
+            bridge_logger.info(
+                "Agent '%s' Function Worker stopped (reason=%s)",
+                agent_name,
+                reason,
+            )
+            print(
+                f"{C_STOP}[system] Agent '{agent_name}' stopped{C_RESET}",
+                flush=True,
+            )
             return True, f"Stopped agent '{agent_name}'."
 
     async def teardown_runtime(
         self,
-        runtime,
+        runtime: AgentRuntimeHandle,
         timeout: float | None = None,
     ) -> bool:
-        """Stop one runtime within a hard deadline, even if it ignores cancellation."""
-        if timeout is None:
-            timeout = RUNTIME_TEARDOWN_TIMEOUT_SECONDS
-        process_task = getattr(runtime, "process_task", None)
-        if process_task is not None:
-            process_task.cancel()
-
-        shutdown_task = asyncio.create_task(
-            runtime.shutdown(),
-            name=f"teardown-{runtime.name}",
-        )
-        try:
-            done, _pending = await asyncio.wait({shutdown_task}, timeout=timeout)
-        except asyncio.CancelledError:
-            shutdown_task.cancel()
-            if not shutdown_task.done():
-                shutdown_task.add_done_callback(_consume_teardown_task_result)
-            raise
-        if shutdown_task not in done:
-            shutdown_task.cancel()
-            shutdown_task.add_done_callback(_consume_teardown_task_result)
-            main_logger.warning("Shutdown timed out for '%s'.", runtime.name)
-            bridge_logger.warning("Agent '%s' shutdown timed out after %.1fs", runtime.name, timeout)
+        timeout = float(timeout or RUNTIME_TEARDOWN_TIMEOUT_SECONDS)
+        if not isinstance(runtime, AgentRuntimeHandle):
             return False
         try:
-            shutdown_task.result()
-        except asyncio.CancelledError:
-            main_logger.warning("Shutdown was cancelled for '%s'.", runtime.name)
-            bridge_logger.warning("Agent '%s' shutdown task was cancelled", runtime.name)
+            client = await runtime.begin_cutover()
+            try:
+                await client.call(
+                    "worker.quiesce",
+                    {"timeout": max(0.1, timeout - 35.0)},
+                    timeout=max(1.0, timeout - 25.0),
+                )
+            except Exception:
+                await runtime.abort_cutover()
+                raise
+            await self.kernel.function_workers.stop_telegram_ingress(runtime.name)
+            await client.shutdown(force=True)
+            await runtime.close_route(f"Agent {runtime.name!r} was stopped")
+            return not client.process.is_alive()
+        except Exception as exc:
+            main_logger.warning(
+                "Function Worker shutdown warning for '%s': %s",
+                runtime.name,
+                exc,
+            )
+            bridge_logger.warning(
+                "Function Worker shutdown warning for '%s': %s: %s",
+                runtime.name,
+                type(exc).__name__,
+                exc,
+            )
             return False
-        except Exception as e:
-            main_logger.warning("Shutdown warning for '%s': %s", runtime.name, e)
-            bridge_logger.warning("Agent '%s' shutdown warning: %s: %s", runtime.name, type(e).__name__, e)
-            return False
-        runtime.process_task = None
-        return True
 
-    async def shutdown_all_agents(self, timeout: float = 30.0):
-        """Parallel shutdown of all agents. Used during orchestrator exit."""
+    async def shutdown_all_agents(self, timeout: float = 180.0):
         agents = list(self.kernel.runtimes)
         if not agents:
             return
-
-        main_logger.info("Shutting down %s agents in parallel...", len(agents))
-        bridge_logger.warning("Shutting down %s active agents in parallel", len(agents))
-
-        async def _stop_one(rt):
-            stopped = await self.teardown_runtime(rt, timeout=timeout - 2.0)
-            if stopped:
-                main_logger.info("Agent '%s' stopped.", rt.name)
-                bridge_logger.info("Agent '%s' fully torn down", rt.name)
-                print(f"{C_STOP}[system] Agent '{rt.name}' stopped{C_RESET}", flush=True)
-            else:
-                main_logger.error("Agent '%s' did not stop cleanly.", rt.name)
-
+        main_logger.info(
+            "Shutting down %s isolated Function Workers...", len(agents)
+        )
+        bridge_logger.warning(
+            "Shutting down %s isolated Function Workers", len(agents)
+        )
         try:
             await asyncio.wait_for(
-                asyncio.gather(*[_stop_one(rt) for rt in agents], return_exceptions=True),
-                timeout=timeout,
+                self.kernel.function_workers.shutdown_all(),
+                timeout=max(1.0, float(timeout)),
             )
         except asyncio.TimeoutError:
-            main_logger.warning(
-                "Parallel agent shutdown timed out after %ss. Some agents may not have exited cleanly.",
-                timeout,
+            main_logger.error(
+                "Function Worker shutdown exceeded %.1fs", float(timeout)
             )
-            bridge_logger.warning("Parallel agent shutdown timed out after %.1fs", timeout)
-
+        for runtime in agents:
+            await runtime.close_route(
+                f"Agent {runtime.name!r} is stopping with HASHI Core"
+            )
+            print(
+                f"{C_STOP}[system] Agent '{runtime.name}' stopped{C_RESET}",
+                flush=True,
+            )
         self.kernel.runtimes.clear()
+        self.kernel.function_workers.publish_generation_state()

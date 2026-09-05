@@ -76,6 +76,7 @@ configuration, transition, migration, and regression contract.
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
 - `/commentary [on|off]` — HER only: show explicitly model-authored Persona acknowledgements and interim reports once each; independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show one temporary deterministic activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status. The same Telegram card is edited as work advances; raw technical events remain in logs, while Persona speech, reasoning, and answer drafts stay excluded.
+- Bare `/think`, `/commentary`, and `/verbose` commands only open their menus. Choosing On or Off applies to the active turn immediately; display events produced while Off are not replayed later.
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/notify [on|quiet|off]` — `on` notifies for every message; `quiet` silences interim activity but not final results, errors, warnings, recovery, or important alerts; `off` delivers every message silently
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
@@ -83,11 +84,11 @@ configuration, transition, migration, and regression contract.
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
-- `/reboot [min|max|number|help]` — preflight and hot-reload Python code,
-  rebuild managers, restart the exact selected lifecycle scope, and
-  warm-recreate Workbench/API gateway/scheduler/watchers; `min` and numbered
-  targets are never widened or rejected because a valid class interface
-  changed, while the process lock and live WhatsApp transport remain intact
+- `/reboot [min|max|number|help]` — qualify an immutable Function generation,
+  prepare isolated candidate Worker processes, drain the exact selected Agent
+  scope, and atomically switch its stable route handles; `min` and numbered
+  targets are never widened, while the Core PID, process lock, Workbench/API
+  ingress, scheduler, shared services, and unselected Agents remain intact
 - `/rebuild` — one-version compatibility notice for the retired native HER build workflow; performs no build, reload, or restart
 - Alias: `/usercomputer`
 

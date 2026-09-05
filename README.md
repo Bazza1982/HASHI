@@ -8,7 +8,7 @@
 > Enterprise `0.1.0a1` resets the enterprise-grade package version line for
 > alpha testing; it is not a production-certified deployment claim.
 >
-> **Current integration checkpoint:** see [`docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
+> **Current integration checkpoint:** see [`docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) · **HASHI3 runtime closeout:** see [`docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
 
@@ -147,6 +147,13 @@ and binary packages are no longer part of the active program.
   modes: Fixed by default plus explicit Flex. Wrapper, Audit, and Dual-brain
   modes are retired. This is the broader platform line, not the enterprise
   package version line.
+- **HASHI3 runtime pilot (live-adopted)** — Core mandates CPython 3.12.13 and
+  places each Agent in an isolated Function Worker. Cold/hot generation
+  identity, targeted cutover, crash recovery, dynamic endpoints, immediate
+  provider interruption, Session-scoped multi-root Workzones, and the WSL
+  Core-to-Windows Computer Worker passed their authorized live gates. Logged-in
+  Browser, HASHI3 Remote deployment, and external/disruptive canaries remain
+  explicit; see the [closeout](docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
 - **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
@@ -227,7 +234,15 @@ HASHI 2.x proved that local agents could execute tools, browse, switch backends,
 - **From implicit runtime behavior to two clear working modes:** Fixed is the default for session-capable backends; Flex enables explicit backend switching and full context injection.
 - **From generic skills to learned expertise:** `/exp` adds context-specific guidebooks with playbooks, validators, failure memory, templates, evidence, and training runs for repeatable high-skill work.
 - **From browser automation to browser routing:** `/browser` exposes a route dashboard that chooses between headless browser tools, CLI-native browsing, Brave Search, and the real logged-in Chrome extension bridge.
-- **From a monolith to a hot-reloadable core:** v3.2's slim core moves frequently changed behavior into managers and runtime modules so `/reboot min` can adopt most code changes without a full process restart.
+- **From in-process reload to isolated generations:** the HASHI3 source
+  keeps Core and shared ingress stable while `/reboot min` replaces one
+  verified per-Agent Function Worker. HASHI3 live adoption, targeted cutover,
+  crash recovery, and cold/hot generation consistency passed; the linked
+  closeout records the remaining operator-dependent canaries.
+- **From one project path to Session Workzones:** each Session can activate a
+  primary `main` root plus slots `1` through `9`. Backends and tools receive
+  those exact roots rather than an inferred common parent, and stale menu or
+  path replies are rejected by revision.
 - **From scripts to a local work platform:** Workbench, API Gateway, Workzone helpers, Nagare, Minato, and the EXP corpus now give HASHI a stronger operating surface for research, writing, office automation, and cross-device work.
 
 ---
@@ -502,7 +517,11 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 - **Explicit over Automatic** — Skills, jobs, and features are user-activated, never magic
 - **Single Instance** — File-based locking prevents multiple HASHI processes from conflicting
 - **Remote Provider Policy** — Remote provider calls are permission-gated for automated flows to prevent runaway costs
-- **Slim Core** — process bootstrap stays small while hot-reloadable managers own feature behavior
+- **Stable Core + Function Workers** — process/shared-service authority stays
+  fixed while each Agent's feature behavior is replaced as an isolated,
+  immutable generation; Core-owned ingress uses versioned Worker RPC, and a
+  dedicated provider-interrupt lane can stop active CLI work without waiting
+  for the Worker's orderly event loop
 
 ### File Structure
 
@@ -684,7 +703,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/recall [count]` | Remove all queued requests, or up to the newest positive `count`, without interrupting the active task |
 | `/delay <minutes> <message>` | Persist a message for 1–10080 minutes, then append it to the normal request queue without interrupting active work |
 | `/queue [list\|show <id>\|cancel <id>\|clear]` | Inspect or manage READY requests and FUTURE delayed messages |
-| `/reboot [min\|max\|#]` | Hot restart agents |
+| `/reboot [min\|max\|#]` | Transactionally switch verified Agent Function Workers |
 | `/rebuild` | One-version compatibility notice: native HER rebuild is retired and performs no action |
 | `/restart` | Hard restart this HASHI instance through WatchTower supervision |
 | `/status [full]` | Show agent status, backend info |
@@ -710,7 +729,8 @@ examples, timing semantics, persistence, and cancellation, see
 | `/mode [fixed\|flex]` | Switch working mode; Fixed is the session-capable default, while `/mode memory+` only enables independent continuity |
 | `/backend [engine]` | Switch backend in Flex; Fixed first offers an explicit switch-to-Flex confirmation |
 | `/provider [name\|hybrid]` | Choose a Single provider or open a HER v2 Hybrid routing draft |
-| `/model [name]` | Configure HER v2 Quick/Pro and task-route targets, or change the active model on other backends |
+| `/model [name]` | Configure HER v2 Direct, Strategy, Planning, and Execution provider/model targets, or change the active model on other backends |
+| `/workzone [main\|1-9] [path\|on\|off\|reset\|delete]` | Manage the current Session's primary and attached exact-access roots |
 | `/anatta [status\|off\|shadow\|on]` | Inspect or switch Anatta live self-assembly mode for the current agent |
 | `/effort` | Change HER execution mode, or model reasoning effort on supported non-HER backends |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
@@ -786,13 +806,18 @@ configuration summary.
 | `/verbose [on\|off]` | Show one deterministic rolling activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status; raw technical events remain in logs |
 | `/think [on\|off]` | Show backend-owned reasoning output; for HER this is genuine provider-returned reasoning only |
 | `/commentary [on\|off]` | HER only: show each explicitly model-authored Persona acknowledgement or interim report once, independently from `/think` and `/verbose` |
+| `/meter [on\|off\|summary\|session\|provider\|turn]` | Show or persist turn usage, cost, cache savings, total time, and HER stage timing |
 | `/typing [on\|off\|status]` | Control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator |
 | `/safevoice [on\|off]` | Toggle voice confirmation (default: ON) |
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |
 | `/whisper [small\|medium\|large]` | Set local voice transcription model |
 | `/voice [on\|off\|menu\|use <alias>]` | Control bridge voice replies |
-| `/say` | Read the last assistant reply as voice; forces one TTS attempt even when `/voice off` if a voice is configured |
+| `/say` | Read the latest confirmed-delivered assistant reply on the current Session route; forces one TTS attempt even when `/voice off` if a voice is configured |
 | `/api [status\|on\|off\|model <name>]` | Show API Gateway address, switch it on/off, or set its default model |
+
+For `/verbose`, `/think`, and `/commentary`, the bare command only opens the
+menu. Choosing On or Off (or passing it explicitly) changes the active turn
+immediately. Events emitted while a display is Off are not replayed later.
 
 #### Lifecycle Commands
 
@@ -1317,8 +1342,11 @@ Direct agent-to-agent messaging over Hashi Remote (`/protocol/message`):
 For crash recovery, Hashi Remote should be run under an OS-level supervisor
 rather than only through `/remote on`. The fixed rescue protocol exposes
 `GET /control/hashi/status`, `GET /control/hashi/logs`, and
-`POST /control/hashi/start`; start is blocked unless Remote is launched with
-`max_terminal_level=L3_RESTART`. See
+`POST /control/hashi/start`, `/restart`, and `/reboot`; mutating rescue is
+blocked unless Remote is launched with `max_terminal_level=L3_RESTART`.
+`/reboot` requests a target Agent's ordinary `/reboot min` through the
+token-protected Workbench admin endpoint and uses the audited hard-restart
+fallback only when Workbench is unreachable. See
 [`docs/HASHI_REMOTE_RESCUE_PROTOCOL.md`](docs/HASHI_REMOTE_RESCUE_PROTOCOL.md).
 
 For rollout and rollback notes, see
@@ -1660,6 +1688,11 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ### v3.2.1 — Workbench/HChat/Remote Recovery (May 2026)
 
+Historical note: the in-process reload and Workbench self-repair mechanisms
+below describe the v3.2 line. The HASHI3 source candidate supersedes them with
+stable Core services and isolated Function Workers; HASHI3 live adoption is
+recorded in the 2026-09-05 closeout.
+
 - **Workbench API self-repair** — `/reboot` health-checks the live Workbench API and rebuilds it when the listener exists but `/api/health` is unresponsive
 - **HChat reloadability** — hot reboot reloads `tools.*`, and HChat draft delivery refreshes `tools.hchat_send` before sending so delivery fixes do not require a full HASHI process restart
 - **Cross-instance Hchat protocol transport** — `tools/hchat_send.py` now prefers shared-token `/protocol/message` delivery for `agent@INSTANCE` and only keeps legacy `/hchat` as fallback, removing the old bearer-only transport mismatch
@@ -1671,7 +1704,9 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ### v3.2.0 — Slim Core, EXP, Browser Routing & Runtime Hardening (May 2026)
 
-- **Slim core architecture accepted** — `main.py` reduced from a large feature host into a slim process bootstrap/kernel wrapper; hot-reloadable managers now own agent lifecycle, service management, reboot, startup, shutdown, config, backend preflight, skills, and WhatsApp control
+- **Slim core architecture accepted (historical v3.2 design)** — `main.py`
+  became a kernel wrapper and Managers were rebuilt during the former
+  in-process reload flow; HASHI3 no longer rebuilds those Core Managers
 - **Wrapper Agent Mode implemented (historical; retired in v4)** — agents could run a functional core model and a separate stateless wrapper model for final visible persona/style rewriting
   - `/core`, `/wrap`, and `/wrapper` configured the core model, wrapper model/context, and persona/style slots with Telegram inline controls
   - `/verbose on` showed a compact wrapper status, latency, and fallback summary without echoing raw answer drafts

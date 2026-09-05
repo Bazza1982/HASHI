@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402 -- dependency stubs must be installed before project imports.
 
 import asyncio
 import stat
@@ -2608,8 +2609,9 @@ def _reply_manager(tmp_path):
     manager._outbound_path = tmp_path / "outbound.json"
     manager.get_local_agents_snapshot = lambda: [{"agent_name": "zelda"}]
 
-    async def enqueue(agent_name, text):
+    async def enqueue(agent_name, text, **kwargs):
         manager._last_enqueue = (agent_name, text)
+        manager._last_enqueue_kwargs = kwargs
         return "req-1"
 
     manager._enqueue_local_prompt = enqueue
@@ -2655,7 +2657,82 @@ def test_agent_reply_accepts_and_records_legacy_missing_correlation(tmp_path):
     assert result["correlation_state"] == "missing_legacy_allowed"
     assert manager._inflight["msg-1:reply"]["state"] == "reply_delivered_locally"
     assert manager._inflight["msg-1:reply"]["correlation_state"] == "missing_legacy_allowed"
-    assert manager._last_enqueue == ("zelda", "System exchange reply from rika@HASHI2:\ndone")
+    assert manager._last_enqueue[0] == "zelda"
+    assert manager._last_enqueue[1].startswith(
+        "System exchange reply from rika@HASHI2:\ndone"
+    )
+    assert "Terminal protocol notice" in manager._last_enqueue[1]
+    assert manager._last_enqueue_kwargs == {
+        "exchange_kind": "reply",
+        "message_id": "msg-1:reply",
+        "conversation_id": "conv-1",
+        "from_instance": "HASHI2",
+        "from_agent": "rika",
+    }
+
+
+def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._workbench_port = 18804
+    manager._local_workbench_routes = lambda: [("127.0.0.1", 18804)]
+    manager._probe_local_workbench = lambda _host, _port: True
+    captured = []
+
+    def post(_url, payload, timeout):
+        captured.append((payload, timeout))
+        return {"ok": True, "request_id": "req-terminal"}
+
+    manager._post_json = post
+    monkeypatch.setattr(
+        "remote.protocol_manager.local_http_hosts",
+        lambda: ("127.0.0.1",),
+    )
+
+    request_id = asyncio.run(
+        manager._enqueue_local_prompt(
+            "zelda",
+            "terminal reply",
+            exchange_kind="reply",
+            message_id="reply-1",
+            conversation_id="conversation-1",
+            from_instance="HASHI2",
+            from_agent="rika",
+        )
+    )
+
+    assert request_id == "req-terminal"
+    payload = captured[0][0]
+    assert payload["source"] == "protocol:reply"
+    assert payload["idempotency_key"] == "protocol:reply:reply-1"
+    assert payload["request_metadata"]["system_exchange_terminal"] is True
+    assert payload["request_metadata"]["tool_allowlist"] == []
+
+
+def test_protocol_local_workbench_probe_rejects_wrong_instance_identity():
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI3"}
+    manager._workbench_identity_cache = {}
+    manager._get_json = lambda _url, timeout: {
+        "ok": True,
+        "instance_id": "HASHI1",
+        "workbench_endpoint": {"instance_id": "HASHI1"},
+    }
+
+    assert manager._probe_local_workbench("127.0.0.1", 18804) is False
+
+
+def test_protocol_message_prompt_forbids_side_channel_ack():
+    manager = ProtocolManager.__new__(ProtocolManager)
+
+    prompt = manager._render_remote_message_prompt(
+        "rika",
+        "HASHI2",
+        {"text": "please inspect this"},
+    )
+
+    assert "respond once" in prompt
+    assert "Do not send Hchat" in prompt
+    assert "protocol returns this response automatically" in prompt
 
 
 def test_agent_reply_marks_existing_correlation_terminal(tmp_path):

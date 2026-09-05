@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import inspect
 from typing import Any
 
 from orchestrator.background_jobs import TERMINAL_STATES
@@ -89,6 +90,10 @@ def _manager(runtime: Any) -> Any | None:
     return manager or getattr(runtime, "background_job_manager", None)
 
 
+async def _resolve(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
+
+
 def _job_line(record: Any) -> str:
     command = html.escape(_short((getattr(record, "command", {}) or {}).get("display", "")))
     state = html.escape(str(getattr(record, "state", "?")))
@@ -165,7 +170,7 @@ async def _list_jobs(runtime: Any, update: Any, _arg: str) -> None:
     if manager is None:
         await _send(runtime, update, ui_language.tr("bg.manager_missing"))
         return
-    records = manager.list(limit=20)
+    records = await _resolve(manager.list(limit=20))
     if not records:
         await _send(
             runtime,
@@ -205,7 +210,7 @@ async def _status(runtime: Any, update: Any, arg: str) -> None:
         return
     job_id = arg.strip()
     if not job_id:
-        records = manager.list(limit=10)
+        records = await _resolve(manager.list(limit=10))
         running = [record for record in records if getattr(record, "state", "") not in TERMINAL_STATES]
         failed = [record for record in records if getattr(record, "state", "") in {"failed", "timeout", "start_failed"}]
         lines = [
@@ -221,7 +226,7 @@ async def _status(runtime: Any, update: Any, arg: str) -> None:
             lines.extend(_job_line(record) for record in records[:5])
         await _send(runtime, update, "\n".join(lines))
         return
-    record = manager.get(job_id)
+    record = await _resolve(manager.get(job_id))
     if record is None:
         await _send(
             runtime,
@@ -258,7 +263,7 @@ async def _tail(runtime: Any, update: Any, arg: str) -> None:
         return
     job_id = parts[0]
     try:
-        text = manager.tail(job_id, lines=80)
+        text = await _resolve(manager.tail(job_id, lines=80))
     except KeyError:
         await _send(runtime, update, ui_language.tr("bg.not_found", job_id=html.escape(job_id)))
         return

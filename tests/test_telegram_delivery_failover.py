@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,6 +45,61 @@ def _runtime(tmp_path: Path, name: str, *, preview_default: bool = True):
         token=f"token-{name}",
     )
     return runtime
+
+
+def _write_delivery_state(tmp_path: Path, agent: str, record: dict) -> Path:
+    path = tmp_path / "state" / "telegram_delivery_health.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    agent: {
+                        "token_key": f"telegram:{agent}",
+                        "per_chat": {},
+                        **record,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_only_unexpired_retry_after_window_blocks_delivery(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "blocked",
+            "blocked_until": "2999-01-01T00:00:00+00:00",
+        },
+    )
+
+    assert failover.is_delivery_blocked(source) is True
+    assert failover.delivery_status_summary(source) is not None
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["agents"]["zelda"]["blocked_until"] = "2000-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert failover.is_delivery_blocked(source) is False
+    assert failover.delivery_status_summary(source) is None
+
+    state["agents"]["zelda"]["status"] = "recovery_due"
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert failover.is_delivery_blocked(source) is False
+    assert failover.delivery_status_summary(source) is None
+
+
+def test_retry_after_duration_rounds_up_to_full_wait():
+    assert failover.retry_after_seconds(
+        SimpleNamespace(retry_after=timedelta(seconds=5, microseconds=1))
+    ) == 6
 
 
 @pytest.mark.asyncio
@@ -197,6 +253,202 @@ async def test_tick_recovery_retry_after_reextends_block(tmp_path):
     assert record["retry_after_s"] == 90
     assert record["blocked_until"] is not None
     assert not source.app.bot.messages
+
+
+@pytest.mark.asyncio
+async def test_tick_recovery_retries_recovery_due_after_transient_error(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    source.app.bot = _Bot(send_error=RuntimeError("temporary gateway failure"))
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "blocked",
+            "blocked_until": "2000-01-01T00:00:00+00:00",
+            "retry_after_s": 5,
+            "incident_id": "tg-zelda-test",
+            "per_chat": {
+                "321": {"first_warned_at": "2000-01-01T00:00:00+00:00"}
+            },
+        },
+    )
+
+    await failover._tick_recovery(orchestrator)
+
+    failed = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert failed["status"] == "recovery_due"
+    assert "temporary gateway failure" in failed["last_recovery_error"]
+
+    source.app.bot.send_error = None
+    await failover._tick_recovery(orchestrator)
+
+    recovered = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert recovered["status"] == "healthy"
+    assert "last_recovery_error" not in recovered
+    assert len(source.app.bot.messages) == 1
+    assert "Delivery recovered" in source.app.bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_stale_recovery_result_cannot_clear_new_active_block(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_due",
+            "blocked_until": "2000-01-01T00:00:00+00:00",
+            "incident_id": "tg-zelda-old",
+            "per_chat": {"321": {}},
+        },
+    )
+
+    class _BotThatObservesNewBlock(_Bot):
+        async def send_message(self, **kwargs):
+            state = json.loads(path.read_text(encoding="utf-8"))
+            record = state["agents"]["zelda"]
+            record["status"] = "blocked"
+            record["blocked_until"] = "2999-01-01T00:00:00+00:00"
+            record["incident_id"] = "tg-zelda-new"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            return await super().send_message(**kwargs)
+
+    source.app.bot = _BotThatObservesNewBlock()
+
+    await failover._tick_recovery(orchestrator)
+
+    record = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert record["status"] == "blocked"
+    assert record["incident_id"] == "tg-zelda-new"
+    assert "recovery_notice_sent_at" not in record["per_chat"]["321"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_due_never_suppresses_normal_delivery(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    fail = _runtime(tmp_path, "lily")
+    orchestrator = SimpleNamespace(runtimes=[source, fail], raw_config={})
+    source.orchestrator = orchestrator
+    fail.orchestrator = orchestrator
+    _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_due",
+            "blocked_until": "2000-01-01T00:00:05+00:00",
+            "retry_after_s": 5,
+            "incident_id": "tg-zelda-test",
+            "active_failover_agent": "lily",
+        },
+    )
+
+    blocked = await failover.handle_blocked_send(
+        source,
+        chat_id=321,
+        request_id="req-after-expiry",
+        purpose="response",
+        text="answer generated after the original block expired",
+    )
+
+    assert blocked is False
+    assert fail.app.bot.messages == []
+    assert not (
+        tmp_path
+        / "workspaces"
+        / "zelda"
+        / "undelivered"
+        / "req-after-expiry.md"
+    ).exists()
+
+
+@pytest.mark.asyncio
+async def test_handle_blocked_send_releases_expired_wait_without_watcher(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "blocked",
+            "blocked_until": "2000-01-01T00:00:00+00:00",
+            "retry_after_s": 5,
+            "incident_id": "tg-zelda-expired",
+        },
+    )
+
+    blocked = await failover.handle_blocked_send(
+        source,
+        chat_id=321,
+        request_id="req-normal-business",
+        purpose="response",
+        text="normal business response",
+    )
+
+    assert blocked is False
+    record = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert record["status"] == "healthy"
+    assert record["delivery_restored_at"]
+    assert not (
+        tmp_path
+        / "workspaces"
+        / "zelda"
+        / "undelivered"
+        / "req-normal-business.md"
+    ).exists()
+
+
+@pytest.mark.asyncio
+async def test_tick_recovery_normalizes_completed_legacy_notice(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_due",
+            "blocked_until": "2000-01-01T00:00:00+00:00",
+            "incident_id": "tg-zelda-legacy",
+            "per_chat": {
+                "321": {"recovery_notice_sent_at": "2000-01-01T00:00:01+00:00"}
+            },
+        },
+    )
+
+    await failover._tick_recovery(orchestrator)
+
+    record = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert record["status"] == "healthy"
+    assert source.app.bot.messages == []
+
+
+def test_recovery_due_status_does_not_show_expired_block_deadline():
+    text = runtime_status._delivery_line(
+        {
+            "status": "recovery_due",
+            "blocked_until": "2000-01-01T00:00:05+00:00",
+            "active_failover_agent": "lily",
+        }
+    )
+
+    assert "RECOVERY_DUE" in text
+    assert "2000-01-01T00:00:05+00:00" not in text
+    assert "lily" in text
 
 
 def test_persisted_typing_only_defaults_override_legacy_preview_config(tmp_path):

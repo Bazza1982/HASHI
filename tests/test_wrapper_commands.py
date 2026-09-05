@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402 - dependency stubs must be installed before runtime imports.
+
 import asyncio
 import json
 import sys
@@ -17,7 +19,10 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from adapters.base import BackendResponse
 from adapters.stream_events import KIND_SHELL_EXEC, StreamEvent
-from orchestrator.audit_mode import AuditTelemetryCollector, DEFAULT_AUDIT_CRITERION_SLOT_TEXT
+from orchestrator.audit_mode import (
+    AuditTelemetryCollector,
+    DEFAULT_AUDIT_CRITERION_SLOT_TEXT,
+)
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -32,6 +37,7 @@ from orchestrator import (
     runtime_cross_session,
     runtime_model_selection,
     telegram_stream_policy,
+    ui_language,
 )
 from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT
 
@@ -157,7 +163,9 @@ def _make_her_v2_manager(workspace: Path) -> FlexibleBackendManager:
     return manager
 
 
-def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime, list[str]]:
+def _make_runtime(
+    manager: FlexibleBackendManager,
+) -> tuple[FlexibleAgentRuntime, list[str]]:
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.backend_manager = manager
     runtime.config = manager.config
@@ -173,7 +181,9 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     runtime._sync_workzone_to_backend_config = lambda: None
     runtime._clear_handoff_state = lambda: None
     runtime._arm_session_primer = lambda note: None
-    runtime.get_current_model = lambda: getattr(manager, "_active_model_override", None) or "gpt-5.4"
+    runtime.get_current_model = lambda: (
+        getattr(manager, "_active_model_override", None) or "gpt-5.4"
+    )
     runtime._get_current_effort = lambda: None
     runtime.last_backend_switch_at = None
     messages: list[str] = []
@@ -304,7 +314,7 @@ async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
 
     await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
 
-    assert messages == ["💬 Composing Hchat message to <b>akane</b>..."]
+    assert messages == []
     assert len(enqueued) == 1
     assert enqueued[0]["source"] == "bridge:hchat"
     assert enqueued[0]["deliver_to_telegram"] is True
@@ -319,7 +329,9 @@ async def test_cmd_notepad_show_edit_replace_clear(tmp_path):
     manager.agent_mode = "memory+"
     runtime, messages = _make_runtime(manager)
 
-    update, context = _update(["edit", "Dad likes jasmine rice"], "/notepad edit Dad likes jasmine rice")
+    update, context = _update(
+        ["edit", "Dad likes jasmine rice"], "/notepad edit Dad likes jasmine rice"
+    )
     await FlexibleAgentRuntime.cmd_notepad(runtime, update, context)
     assert "updated" in messages[-1]
 
@@ -328,7 +340,10 @@ async def test_cmd_notepad_show_edit_replace_clear(tmp_path):
     assert "Dad likes jasmine rice" in messages[-1]
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
 
-    update, context = _update(["replace", "- Manual: Dad avoids eggplant"], "/notepad replace - Manual: Dad avoids eggplant")
+    update, context = _update(
+        ["replace", "- Manual: Dad avoids eggplant"],
+        "/notepad replace - Manual: Dad avoids eggplant",
+    )
     await FlexibleAgentRuntime.cmd_notepad(runtime, update, context)
     assert "replaced" in messages[-1]
 
@@ -374,7 +389,10 @@ async def test_callback_notepad_clear_uses_confirmation(tmp_path):
     )
     path = session_workspace / "memory" / "memory_plus_notepad.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# Memory+ Notepad\n\nDate: 2026-05-18\n\n## Continuity\n\n- keep this\n", encoding="utf-8")
+    path.write_text(
+        "# Memory+ Notepad\n\nDate: 2026-05-18\n\n## Continuity\n\n- keep this\n",
+        encoding="utf-8",
+    )
 
     edited: list[dict] = []
     answered: list[dict] = []
@@ -391,13 +409,17 @@ async def test_callback_notepad_clear_uses_confirmation(tmp_path):
         edit_message_text=edit_message_text,
         answer=answer,
     )
-    await FlexibleAgentRuntime.callback_notepad(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
+    await FlexibleAgentRuntime.callback_notepad(
+        runtime, SimpleNamespace(callback_query=query), SimpleNamespace()
+    )
 
     assert "<b>CLEAR NOTEPAD</b>" in edited[-1]["text"]
     assert "keep this" in path.read_text(encoding="utf-8")
 
     query.data = "npad:clear_now"
-    await FlexibleAgentRuntime.callback_notepad(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
+    await FlexibleAgentRuntime.callback_notepad(
+        runtime, SimpleNamespace(callback_query=query), SimpleNamespace()
+    )
 
     assert "Cleared" in edited[-1]["text"]
     rendered = path.read_text(encoding="utf-8")
@@ -446,7 +468,7 @@ async def test_cmd_hchat_draft_delivery_flag_enqueues_draft_source(tmp_path):
 
     await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
 
-    assert messages == ["💬 Drafting Hchat message to <b>akane</b>..."]
+    assert messages == []
     assert len(enqueued) == 1
     assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert enqueued[0]["deliver_to_telegram"] is True
@@ -456,11 +478,136 @@ async def test_cmd_hchat_draft_delivery_flag_enqueues_draft_source(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cmd_hchat_group_broadcast_has_no_preflight_reply(tmp_path):
+    manager = _make_manager(tmp_path)
+    runtime, messages = _make_runtime(manager)
+    runtime.name = "zelda"
+    runtime.agent_directory = SimpleNamespace(
+        group_exists=lambda name: name == "friends",
+        resolve_group=lambda name, *, exclude_self: ["akane", "momo"],
+    )
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+    update, context = _update(["@friends", "review", "the", "delivery", "plan"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert messages == []
+    assert len(enqueued) == 1
+    assert enqueued[0]["source"] == "bridge:hchat"
+    assert "Target agents: akane, momo" in enqueued[0]["prompt"]
+    assert "--to akane --from zelda" in enqueued[0]["prompt"]
+    assert "--to momo --from zelda" in enqueued[0]["prompt"]
+
+
+@pytest.mark.parametrize(
+    ("manager_factory", "draft_enabled", "expected_source"),
+    [
+        (_make_manager, False, "bridge:hchat"),
+        (_make_manager, True, "bridge:hchat-draft"),
+        (_make_her_v2_manager, False, "bridge:hchat"),
+        (_make_her_v2_manager, True, "bridge:hchat-draft"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_cmd_hchat_preserves_invoking_session_for_every_backend(
+    tmp_path,
+    manager_factory,
+    draft_enabled,
+    expected_source,
+):
+    from orchestrator import runtime_session
+
+    manager = manager_factory(tmp_path / expected_source.replace(":", "-"))
+    manager.config.extra = {"hchat_draft_delivery": draft_enabled}
+    runtime, messages = _make_runtime(manager)
+    default = runtime_session.initialize_runtime_sessions(runtime)
+    owner = runtime_session.owner_id(runtime)
+    active = runtime.session_store.create_session(
+        owner_id=owner,
+        agent_id=runtime.name,
+        title="Active Telegram conversation",
+    )
+    runtime.session_store.bind_channel(
+        owner_id=owner,
+        agent_id=runtime.name,
+        surface="telegram",
+        channel_key="123",
+        session_id=active["session_id"],
+    )
+    assert active["session_id"] != default["session_id"]
+
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+    update, context = _update(["akane", "review", "plan", "A"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert messages == []
+    assert len(enqueued) == 1
+    assert enqueued[0]["source"] == expected_source
+    assert enqueued[0]["chat_id"] == 123
+    assert enqueued[0]["deliver_to_telegram"] is True
+    assert enqueued[0]["request_metadata"] == {
+        "session_id": active["session_id"],
+        "owner_id": owner,
+        "session_surface": "telegram",
+        "session_channel_key": "123",
+    }
+
+
+@pytest.mark.asyncio
+async def test_enqueue_api_text_honors_explicit_route_chat_id():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime._should_redirect_after_transfer = lambda: False
+    runtime._primary_chat_id = lambda: 999
+    calls = []
+
+    async def enqueue_request(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "req-routed"
+
+    runtime.enqueue_request = enqueue_request
+    metadata = {
+        "session_id": "ses-active",
+        "session_surface": "telegram",
+        "session_channel_key": "123",
+    }
+
+    result = await FlexibleAgentRuntime.enqueue_api_text(
+        runtime,
+        "continue this conversation",
+        source="bridge:hchat",
+        chat_id=123,
+        request_metadata=metadata,
+    )
+
+    assert result == "req-routed"
+    assert calls[0][0][:3] == (123, "continue this conversation", "bridge:hchat")
+    assert calls[0][1]["request_metadata"] == metadata
+
+
+@pytest.mark.asyncio
 async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
     runtime, _sent, _voices = _make_background_runtime(tmp_path)
     listener_payloads = []
-    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
-    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    runtime.register_request_listener = (
+        FlexibleAgentRuntime.register_request_listener.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime.register_request_listener(
+        "req-001", lambda payload: listener_payloads.append(payload)
+    )
     sender_calls = []
 
     def fake_sender(to_agent, from_agent, text, **kwargs):
@@ -491,10 +638,18 @@ async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
 async def test_hchat_draft_parse_error_does_not_send(tmp_path):
     runtime, _sent, _voices = _make_background_runtime(tmp_path)
     listener_payloads = []
-    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
-    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    runtime.register_request_listener = (
+        FlexibleAgentRuntime.register_request_listener.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime.register_request_listener(
+        "req-001", lambda payload: listener_payloads.append(payload)
+    )
     sender_calls = []
-    runtime._hchat_draft_sender = lambda *args, **kwargs: sender_calls.append((args, kwargs)) or True
+    runtime._hchat_draft_sender = lambda *args, **kwargs: (
+        sender_calls.append((args, kwargs)) or True
+    )
     item = _queued_request_from("bridge:hchat-draft")
 
     result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
@@ -504,7 +659,10 @@ async def test_hchat_draft_parse_error_does_not_send(tmp_path):
         completion_path="foreground",
     )
 
-    assert result.visible_text == '[hchat] Draft parse error: missing required field "target". Message not sent.'
+    assert (
+        result.visible_text
+        == '[hchat] Draft parse error: missing required field "target". Message not sent.'
+    )
     assert sender_calls == []
     assert listener_payloads[0]["success"] is False
     assert listener_payloads[0]["error"] == result.visible_text
@@ -596,7 +754,11 @@ def test_status_text_shows_wrapper_model_configuration():
         "wrapper",
         {
             "core": {"backend": "codex-cli", "model": "gpt-5.5"},
-            "wrapper": {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3},
+            "wrapper": {
+                "backend": "claude-cli",
+                "model": "claude-haiku-4-5",
+                "context_window": 3,
+            },
             "wrapper_slots": {"1": "Warm.", "2": "Concise."},
         },
     )
@@ -667,7 +829,10 @@ def test_status_full_includes_audit_criteria_and_wrapper_slots():
     )
 
     audit_detailed = audit_runtime._build_status_text(detailed=True)
-    assert "🧪 <b>AUDIT CRITERIA</b>\n<code>1</code> · Catch tool-risk drift." in audit_detailed
+    assert (
+        "🧪 <b>AUDIT CRITERIA</b>\n<code>1</code> · Catch tool-risk drift."
+        in audit_detailed
+    )
     assert "<code>9</code> ·" in audit_detailed
     assert DEFAULT_AUDIT_CRITERION_SLOT_TEXT[:40] in audit_detailed
     detailed = wrapper_runtime._build_status_text(detailed=True)
@@ -711,7 +876,9 @@ class FakeProjectChatLogger:
         self.exchanges.append((prompt, response, source))
 
 
-def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse | None = None):
+def _make_background_runtime(
+    tmp_path: Path, wrapper_response: BackendResponse | None = None
+):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.is_shutting_down = False
     runtime.name = "zelda"
@@ -729,8 +896,12 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._thinking_chars_this_req = 0
     runtime._verbose = False
     runtime.last_response = None
-    runtime.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
-    runtime.error_logger = SimpleNamespace(error=lambda *a, **k: None, exception=lambda *a, **k: None)
+    runtime.logger = SimpleNamespace(
+        info=lambda *a, **k: None, warning=lambda *a, **k: None
+    )
+    runtime.error_logger = SimpleNamespace(
+        error=lambda *a, **k: None, exception=lambda *a, **k: None
+    )
     runtime._request_listeners = {}
     runtime._pending_request_results = {}
     runtime._suppressed_transfer_results = []
@@ -738,12 +909,18 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._pre_turn_context_providers = []
 
     async def fake_wrapper_response(**kwargs):
-        return wrapper_response or BackendResponse(text="wrapped visible", duration_ms=1.0)
+        return wrapper_response or BackendResponse(
+            text="wrapped visible", duration_ms=1.0
+        )
 
     runtime.backend_manager = SimpleNamespace(
         agent_mode="wrapper",
         get_state_snapshot=lambda: {
-            "wrapper": {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 1},
+            "wrapper": {
+                "backend": "claude-cli",
+                "model": "claude-haiku-4-5",
+                "context_window": 1,
+            },
             "wrapper_slots": {"1": "Be warm."},
         },
         generate_ephemeral_response=fake_wrapper_response,
@@ -751,28 +928,77 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._mark_success = lambda: None
     runtime._mark_error = lambda error: None
     runtime._should_buffer_during_transfer = lambda request_id: False
-    runtime._record_suppressed_transfer_result = lambda item, **kwargs: runtime._suppressed_transfer_results.append(kwargs)
+    runtime._record_suppressed_transfer_result = lambda item, **kwargs: (
+        runtime._suppressed_transfer_results.append(kwargs)
+    )
     runtime.get_current_model = lambda: "gpt-5.5"
     runtime._get_system_prompt_text = lambda: "system"
-    runtime.typing_loop = FlexibleAgentRuntime.typing_loop.__get__(runtime, FlexibleAgentRuntime)
-    runtime._wrapper_enabled = FlexibleAgentRuntime._wrapper_enabled.__get__(runtime, FlexibleAgentRuntime)
-    runtime._wrapper_visible_context = FlexibleAgentRuntime._wrapper_visible_context.__get__(runtime, FlexibleAgentRuntime)
-    runtime._wrapper_audit_fields = FlexibleAgentRuntime._wrapper_audit_fields.__get__(runtime, FlexibleAgentRuntime)
-    runtime._core_memory_assistant_text = FlexibleAgentRuntime._core_memory_assistant_text.__get__(
+    runtime.typing_loop = FlexibleAgentRuntime.typing_loop.__get__(
         runtime, FlexibleAgentRuntime
     )
-    runtime._format_wrapper_verbose_trace = FlexibleAgentRuntime._format_wrapper_verbose_trace.__get__(runtime, FlexibleAgentRuntime)
-    runtime._send_wrapper_verbose_trace = FlexibleAgentRuntime._send_wrapper_verbose_trace.__get__(runtime, FlexibleAgentRuntime)
-    runtime._append_core_transcript = FlexibleAgentRuntime._append_core_transcript.__get__(runtime, FlexibleAgentRuntime)
-    runtime._send_wrapper_polishing_placeholder = FlexibleAgentRuntime._send_wrapper_polishing_placeholder.__get__(runtime, FlexibleAgentRuntime)
-    runtime._delete_wrapper_polishing_placeholder = FlexibleAgentRuntime._delete_wrapper_polishing_placeholder.__get__(runtime, FlexibleAgentRuntime)
-    runtime._apply_wrapper_to_visible_text = FlexibleAgentRuntime._apply_wrapper_to_visible_text.__get__(runtime, FlexibleAgentRuntime)
-    runtime._notify_request_listeners = FlexibleAgentRuntime._notify_request_listeners.__get__(runtime, FlexibleAgentRuntime)
+    runtime._wrapper_enabled = FlexibleAgentRuntime._wrapper_enabled.__get__(
+        runtime, FlexibleAgentRuntime
+    )
+    runtime._wrapper_visible_context = (
+        FlexibleAgentRuntime._wrapper_visible_context.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime._wrapper_audit_fields = FlexibleAgentRuntime._wrapper_audit_fields.__get__(
+        runtime, FlexibleAgentRuntime
+    )
+    runtime._core_memory_assistant_text = (
+        FlexibleAgentRuntime._core_memory_assistant_text.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime._format_wrapper_verbose_trace = (
+        FlexibleAgentRuntime._format_wrapper_verbose_trace.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime._send_wrapper_verbose_trace = (
+        FlexibleAgentRuntime._send_wrapper_verbose_trace.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime._append_core_transcript = (
+        FlexibleAgentRuntime._append_core_transcript.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime._send_wrapper_polishing_placeholder = (
+        FlexibleAgentRuntime._send_wrapper_polishing_placeholder.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime._delete_wrapper_polishing_placeholder = (
+        FlexibleAgentRuntime._delete_wrapper_polishing_placeholder.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime._apply_wrapper_to_visible_text = (
+        FlexibleAgentRuntime._apply_wrapper_to_visible_text.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime._notify_request_listeners = (
+        FlexibleAgentRuntime._notify_request_listeners.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
     sent = []
     voices = []
 
     async def send_long_message(chat_id, text, request_id=None, purpose=None):
-        sent.append({"chat_id": chat_id, "text": text, "request_id": request_id, "purpose": purpose})
+        sent.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "request_id": request_id,
+                "purpose": purpose,
+            }
+        )
         return 0.0, 1
 
     async def send_voice_reply(chat_id, text, request_id):
@@ -789,7 +1015,9 @@ class FakeBot:
         self.deleted = []
 
     async def send_message(self, chat_id, text, parse_mode=None, **kwargs):
-        self.messages.append({"chat_id": chat_id, "text": text, "parse_mode": parse_mode, **kwargs})
+        self.messages.append(
+            {"chat_id": chat_id, "text": text, "parse_mode": parse_mode, **kwargs}
+        )
         return SimpleNamespace(message_id=len(self.messages))
 
     async def delete_message(self, chat_id, message_id):
@@ -822,11 +1050,17 @@ class FakeContextAssembler:
         }
 
 
-def _make_foreground_runtime(tmp_path: Path, wrapper_response: BackendResponse | None = None):
-    runtime, sent, voices = _make_background_runtime(tmp_path, wrapper_response=wrapper_response)
+def _make_foreground_runtime(
+    tmp_path: Path, wrapper_response: BackendResponse | None = None
+):
+    runtime, sent, voices = _make_background_runtime(
+        tmp_path, wrapper_response=wrapper_response
+    )
     runtime.queue = asyncio.Queue()
     runtime.app = SimpleNamespace(bot=FakeBot())
-    runtime.telegram_logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    runtime.telegram_logger = SimpleNamespace(
+        info=lambda *a, **k: None, warning=lambda *a, **k: None
+    )
     runtime.context_assembler = FakeContextAssembler()
     runtime.backend_manager.current_backend = SimpleNamespace(_session_id=None)
     runtime.backend_manager.generate_response = lambda *a, **k: _completed_task(
@@ -848,10 +1082,14 @@ def _make_foreground_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     hchat_replies = []
 
     async def hchat_route_reply(item, text):
-        hchat_replies.append({"request_id": item.request_id, "text": text, "source": item.source})
+        hchat_replies.append(
+            {"request_id": item.request_id, "text": text, "source": item.source}
+        )
 
     runtime._hchat_route_reply = hchat_route_reply
-    runtime.process_queue = FlexibleAgentRuntime.process_queue.__get__(runtime, FlexibleAgentRuntime)
+    runtime.process_queue = FlexibleAgentRuntime.process_queue.__get__(
+        runtime, FlexibleAgentRuntime
+    )
     return runtime, sent, voices, hchat_replies
 
 
@@ -891,9 +1129,7 @@ def test_wrapper_visible_context_isolated_by_hashi_session(tmp_path):
         builder.append_transcript("user", marker, "text")
         builder.append_transcript("assistant", f"answer {marker}", "text")
 
-    context = FlexibleAgentRuntime._wrapper_visible_context(
-        runtime, 3, item=item_a
-    )
+    context = FlexibleAgentRuntime._wrapper_visible_context(runtime, 3, item=item_a)
     rendered = "\n".join(row["text"] for row in context)
     assert "SESSION_A_ONLY" in rendered
     assert "SESSION_B_ONLY" not in rendered
@@ -938,7 +1174,9 @@ async def test_wrapper_mode_memory_plus_has_one_core_writer_and_hides_update_blo
     assert MEMORY_PLUS_OPEN not in safe_core
 
 
-def _make_audit_followup_runtime(tmp_path: Path, *, item_silent: bool = False, delivery: str = "always"):
+def _make_audit_followup_runtime(
+    tmp_path: Path, *, item_silent: bool = False, delivery: str = "always"
+):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.config = SimpleNamespace(active_backend="codex-cli")
     runtime.workspace_dir = tmp_path
@@ -952,7 +1190,14 @@ def _make_audit_followup_runtime(tmp_path: Path, *, item_silent: bool = False, d
     audit_calls = []
 
     async def send_long_message(chat_id, text, request_id=None, purpose=None):
-        sent.append({"chat_id": chat_id, "text": text, "request_id": request_id, "purpose": purpose})
+        sent.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "request_id": request_id,
+                "purpose": purpose,
+            }
+        )
         return 0.0, 1
 
     async def generate_ephemeral_response(**kwargs):
@@ -1009,7 +1254,9 @@ def _make_audit_followup_runtime(tmp_path: Path, *, item_silent: bool = False, d
 
 
 def test_write_audit_evidence_sanitizes_path_and_writes_full_record(tmp_path):
-    runtime, item, response, collector, sent, audit_calls = _make_audit_followup_runtime(tmp_path)
+    runtime, item, response, collector, sent, audit_calls = (
+        _make_audit_followup_runtime(tmp_path)
+    )
     item.request_id = "req/with spaces:001"
 
     path = FlexibleAgentRuntime._write_audit_evidence(
@@ -1033,7 +1280,9 @@ def test_write_audit_evidence_sanitizes_path_and_writes_full_record(tmp_path):
 
 
 def test_write_audit_evidence_failure_returns_empty_string(tmp_path):
-    runtime, item, response, collector, sent, audit_calls = _make_audit_followup_runtime(tmp_path)
+    runtime, item, response, collector, sent, audit_calls = (
+        _make_audit_followup_runtime(tmp_path)
+    )
     blocker = tmp_path / "not_a_directory"
     blocker.write_text("block", encoding="utf-8")
     runtime.workspace_dir = blocker
@@ -1067,8 +1316,14 @@ async def test_wrapper_only_commands_reject_flex_mode(tmp_path):
 
 @pytest.mark.asyncio
 async def test_audit_followup_is_scheduled_after_core_delivery_and_tracked(tmp_path):
-    runtime, item, response, collector, sent, audit_calls = _make_audit_followup_runtime(tmp_path)
-    await collector.record(StreamEvent(kind=KIND_SHELL_EXEC, summary="Running command", detail="rm -rf /tmp/demo"))
+    runtime, item, response, collector, sent, audit_calls = (
+        _make_audit_followup_runtime(tmp_path)
+    )
+    await collector.record(
+        StreamEvent(
+            kind=KIND_SHELL_EXEC, summary="Running command", detail="rm -rf /tmp/demo"
+        )
+    )
 
     sent.append({"purpose": "response", "text": response.text})
     FlexibleAgentRuntime._schedule_audit_followup(
@@ -1105,7 +1360,9 @@ async def test_audit_followup_is_scheduled_after_core_delivery_and_tracked(tmp_p
 
 @pytest.mark.asyncio
 async def test_silent_audit_writes_transcript_without_user_notification(tmp_path):
-    runtime, item, response, collector, sent, audit_calls = _make_audit_followup_runtime(tmp_path, item_silent=True)
+    runtime, item, response, collector, sent, audit_calls = (
+        _make_audit_followup_runtime(tmp_path, item_silent=True)
+    )
     await collector.record(StreamEvent(kind=KIND_SHELL_EXEC, summary="Running command"))
 
     FlexibleAgentRuntime._schedule_audit_followup(
@@ -1323,7 +1580,7 @@ async def test_provider_typed_choice_commits_both_model_slots_atomically(tmp_pat
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
     text = messages[-1]
-    assert "HER V2 MODELS" in text
+    assert "HER V2 MODEL SETTINGS" in text
     assert "<code>openrouter-api</code>" in text
     assert "deepseek/deepseek-v4-flash" in text
     assert "openai/gpt-4.1-mini" in text
@@ -1344,7 +1601,7 @@ async def test_provider_typed_name_is_case_insensitive(tmp_path):
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
-    assert "HER V2 MODELS" in messages[-1]
+    assert "HER V2 MODEL SETTINGS" in messages[-1]
     assert "<code>openrouter-api</code>" in messages[-1]
     assert manager.get_her_v2_configuration().provider == "openrouter-api"
 
@@ -1359,9 +1616,7 @@ async def test_typed_hybrid_configuration_stays_draft_until_apply(tmp_path):
     assert "DRAFT" in messages[-1]
     assert manager.get_her_v2_configuration().routing_mode == "single"
 
-    update, context = _update(
-        ["quick", "openrouter", "deepseek/deepseek-v4-flash"]
-    )
+    update, context = _update(["quick", "openrouter", "deepseek/deepseek-v4-flash"])
     await FlexibleAgentRuntime.cmd_model(runtime, update, context)
     update, context = _update(
         [
@@ -1407,13 +1662,17 @@ async def test_provider_command_respects_managed_model_modes(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_provider_button_commits_provider_and_both_slots_without_model_step(tmp_path):
+async def test_provider_button_commits_provider_and_both_slots_without_model_step(
+    tmp_path,
+):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
 
-    callback_data = runtime_model_selection.her_v2_provider_keyboard(
-        runtime
-    ).inline_keyboard[2][0].callback_data
+    callback_data = (
+        runtime_model_selection.her_v2_provider_keyboard(runtime)
+        .inline_keyboard[2][0]
+        .callback_data
+    )
     update, edits, _answers = _callback_update(callback_data)
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
@@ -1422,18 +1681,22 @@ async def test_provider_button_commits_provider_and_both_slots_without_model_ste
     assert state["her_v2_configuration"]["provider"] == "openrouter-api"
     assert "active_provider" not in state
     assert "active_model" not in state
-    assert "HER V2 MODELS" in edits[-1]["text"]
+    assert "HER V2 MODEL SETTINGS" in edits[-1]["text"]
     assert "her_model_slot:fast" in str(edits[-1]["reply_markup"])
     assert "pmodel:" not in str(edits[-1]["reply_markup"])
 
 
 @pytest.mark.asyncio
-async def test_stale_active_provider_button_cannot_switch_from_non_her_v2_backend(tmp_path):
+async def test_stale_active_provider_button_cannot_switch_from_non_her_v2_backend(
+    tmp_path,
+):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
-    callback_data = runtime_model_selection.her_v2_provider_keyboard(
-        runtime
-    ).inline_keyboard[1][0].callback_data
+    callback_data = (
+        runtime_model_selection.her_v2_provider_keyboard(runtime)
+        .inline_keyboard[1][0]
+        .callback_data
+    )
     manager.config.active_backend = "codex-cli"
     update, edits, answers = _callback_update(callback_data)
 
@@ -1450,10 +1713,14 @@ async def test_stale_her_v2_model_button_cannot_bypass_managed_mode(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     manager.agent_mode = "wrapper"
     runtime, _messages = _make_runtime(manager)
-    callback_data = runtime_model_selection.her_v2_slot_model_keyboard(
-        runtime,
-        "fast",
-    ).inline_keyboard[1][0].callback_data
+    callback_data = (
+        runtime_model_selection.her_v2_slot_model_keyboard(
+            runtime,
+            "fast",
+        )
+        .inline_keyboard[1][0]
+        .callback_data
+    )
     update, edits, answers = _callback_update(callback_data)
 
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
@@ -1468,10 +1735,14 @@ async def test_stale_her_v2_model_button_cannot_bypass_managed_mode(tmp_path):
 async def test_stale_her_v2_route_button_cannot_bypass_managed_mode(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
-    callback_data = runtime_model_selection.her_v2_route_keyboard(
-        runtime,
-        "planning",
-    ).inline_keyboard[0][0].callback_data
+    callback_data = (
+        runtime_model_selection.her_v2_route_keyboard(
+            runtime,
+            "planning",
+        )
+        .inline_keyboard[0][0]
+        .callback_data
+    )
     before = manager.get_her_v2_configuration().to_dict()
     manager.agent_mode = "wrapper"
     update, edits, answers = _callback_update(callback_data)
@@ -1485,7 +1756,7 @@ async def test_stale_her_v2_route_button_cannot_bypass_managed_mode(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_her_v2_model_menu_shows_quick_pro_and_routes_without_derived_reasoning(tmp_path):
+async def test_her_v2_model_menu_aligns_with_direct_strategic_and_planned(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
@@ -1494,17 +1765,63 @@ async def test_her_v2_model_menu_shows_quick_pro_and_routes_without_derived_reas
 
     text = messages[-1]
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
-    assert "HER V2 MODELS" in text
+    assert "HER V2 MODEL SETTINGS" in text
     assert "<b>Provider</b> · <code>deepseek-api</code>" in text
-    assert "<b>Quick target</b> · <code>deepseek-api / deepseek-v4-flash</code>" in text
-    assert "<b>Pro target</b> · <code>deepseek-api / deepseek-v4-pro</code>" in text
+    assert "<b>Quick model</b> · <code>deepseek-api / deepseek-v4-flash</code>" in text
+    assert "<b>Pro model</b> · <code>deepseek-api / deepseek-v4-pro</code>" in text
+    assert "<b>Direct</b> · Quick" in text
+    assert "<b>Strategic</b> · Strategy → Execution" in text
+    assert "<b>Planned</b> · Strategy → read-only Planning → Execution" in text
+    assert "simple tasks and Pro for complex or high-volume tasks" in text
     assert "role-configured" not in text
     assert "mixed" not in text.lower()
     assert "her_model_slot:fast" in markup
     assert "her_model_slot:pro" in markup
-    assert "her_routes" in markup
-    assert "her_model_compact" in markup
+    assert "her_route_menu:direct" in markup
+    assert "her_route_menu:triage" in markup
+    assert "her_route_menu:planning" in markup
+    assert "her_execution" in markup
+    assert "her_model_advanced" in markup
+    assert "her_model_compact" not in markup
+    assert "Replanning" not in markup
+    assert "Review" not in markup
     assert "her_reasoning" not in markup
+
+
+def test_her_v2_model_menu_is_clear_in_english_and_chinese(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+
+    with ui_language.language_scope(runtime, locale="en"):
+        english_text = runtime_model_selection.her_v2_model_menu_text(runtime)
+        english_markup = str(runtime_model_selection.her_v2_model_keyboard(runtime))
+        english_execution = runtime_model_selection.her_v2_execution_text(runtime)
+        english_execution_markup = str(
+            runtime_model_selection.her_v2_execution_keyboard(runtime)
+        )
+        english_advanced = runtime_model_selection.her_v2_advanced_text(runtime)
+    with ui_language.language_scope(runtime, locale="zh-CN"):
+        chinese_text = runtime_model_selection.her_v2_model_menu_text(runtime)
+        chinese_markup = str(runtime_model_selection.her_v2_model_keyboard(runtime))
+        chinese_execution = runtime_model_selection.her_v2_execution_text(runtime)
+        chinese_execution_markup = str(
+            runtime_model_selection.her_v2_execution_keyboard(runtime)
+        )
+        chinese_advanced = runtime_model_selection.her_v2_advanced_text(runtime)
+
+    assert "HER V2 MODEL SETTINGS" in english_text
+    assert "Strategy → read-only Planning → Execution" in english_text
+    assert "Execution (Strategic + Planned) · Auto · High / Max" in english_markup
+    assert "Auto assigns simple tasks to Quick" in english_execution
+    assert "Reasoning · Off" in english_execution_markup
+    assert "saved settings are retained and hidden" in english_advanced
+    assert "HER V2 模型设置" in chinese_text
+    assert "策略 → 只读规划 → 执行" in chinese_text
+    assert "执行（Strategic／Planned）· 自动 · 高 / 最大" in chinese_markup
+    assert "高级设置" in chinese_markup
+    assert "“自动”会让简单任务使用 Quick" in chinese_execution
+    assert "推理 · 关闭" in chinese_execution_markup
+    assert "已保存设置会继续保留" in chinese_advanced
 
 
 def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp_path):
@@ -1527,9 +1844,13 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
         runtime_model_selection.her_v2_provider_keyboard(runtime),
         runtime_model_selection.her_v2_slot_model_keyboard(runtime, "fast"),
         runtime_model_selection.her_v2_routes_keyboard(runtime),
+        runtime_model_selection.her_v2_execution_keyboard(runtime),
+        runtime_model_selection.her_v2_advanced_keyboard(runtime),
+        runtime_model_selection.her_v2_advanced_routes_keyboard(runtime),
         runtime_model_selection.her_v2_route_keyboard(
             runtime,
             "execution_high_volume",
+            advanced=True,
         ),
         runtime_model_selection.her_v2_compact_keyboard(runtime),
         runtime_model_selection.her_v2_compact_provider_keyboard(runtime),
@@ -1537,6 +1858,7 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
         runtime_model_selection.her_v2_route_provider_keyboard(
             runtime,
             "execution_high_volume",
+            advanced=True,
         ),
     ]
     for provider_index, option in enumerate(manager.get_her_v2_provider_options()):
@@ -1560,6 +1882,7 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
                 runtime,
                 "execution_high_volume",
                 provider_index,
+                advanced=True,
             )
         )
         for model_index, _model in enumerate(option["models"]):
@@ -1612,9 +1935,7 @@ def test_compact_route_follows_quick_target_after_provider_change(tmp_path):
     runtime, _messages = _make_runtime(manager)
 
     before = resolve_compact_route(runtime)
-    manager.apply_her_v2_configuration(
-        manager.prepare_her_v2_provider("openrouter")
-    )
+    manager.apply_her_v2_configuration(manager.prepare_her_v2_provider("openrouter"))
     after = resolve_compact_route(runtime)
 
     assert before.provider == "deepseek-api"
@@ -1626,13 +1947,13 @@ def test_compact_route_follows_quick_target_after_provider_change(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_backend_her_v2_button_switches_backend_without_provider_or_model_step(tmp_path):
+async def test_backend_her_v2_button_switches_backend_without_provider_or_model_step(
+    tmp_path,
+):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     manager.config.active_backend = "codex-cli"
-    manager.config.allowed_backends.append(
-        {"engine": "codex-cli", "model": "gpt-5.4"}
-    )
+    manager.config.allowed_backends.append({"engine": "codex-cli", "model": "gpt-5.4"})
     update, edits, _answers = _callback_update("backend:her-v2:plain")
 
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
@@ -1648,9 +1969,7 @@ async def test_backend_her_v2_typed_command_switches_without_role_model(tmp_path
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     manager.config.active_backend = "codex-cli"
-    manager.config.allowed_backends.append(
-        {"engine": "codex-cli", "model": "gpt-5.4"}
-    )
+    manager.config.allowed_backends.append({"engine": "codex-cli", "model": "gpt-5.4"})
     update, context = _update(["her-v2"])
 
     await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
@@ -1707,9 +2026,7 @@ async def test_backend_her_v2_rejects_single_model_argument(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     manager.config.active_backend = "codex-cli"
-    manager.config.allowed_backends.append(
-        {"engine": "codex-cli", "model": "gpt-5.4"}
-    )
+    manager.config.allowed_backends.append({"engine": "codex-cli", "model": "gpt-5.4"})
     update, context = _update(["her-v2", "role-configured"])
 
     await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
@@ -1723,10 +2040,14 @@ async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
 
-    model_callback = runtime_model_selection.her_v2_slot_model_keyboard(
-        runtime,
-        "fast",
-    ).inline_keyboard[1][0].callback_data
+    model_callback = (
+        runtime_model_selection.her_v2_slot_model_keyboard(
+            runtime,
+            "fast",
+        )
+        .inline_keyboard[1][0]
+        .callback_data
+    )
     update, edits, _answers = _callback_update(model_callback)
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
     selected = manager.get_her_v2_configuration()
@@ -1735,10 +2056,14 @@ async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_
     reasoning_before = dict(selected.profile_reasoning)
     routes_before = dict(selected.route_model_slots)
 
-    route_callback = runtime_model_selection.her_v2_route_keyboard(
-        runtime,
-        "planning",
-    ).inline_keyboard[0][0].callback_data
+    route_callback = (
+        runtime_model_selection.her_v2_route_keyboard(
+            runtime,
+            "planning",
+        )
+        .inline_keyboard[0][0]
+        .callback_data
+    )
     update, edits, _answers = _callback_update(route_callback)
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
     selected = manager.get_her_v2_configuration()
@@ -1747,58 +2072,260 @@ async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_
     assert selected.fast_model == "deepseek-v4-pro"
     assert selected.pro_model == "deepseek-v4-pro"
 
-    route_keyboard = runtime_model_selection.her_v2_route_keyboard(runtime, "review")
+    route_keyboard = runtime_model_selection.her_v2_route_keyboard(runtime, "planning")
     reasoning_callback = next(
         button.callback_data
         for row in route_keyboard.inline_keyboard
         for button in row
-        if button.callback_data.startswith("her_route_reasoning:review:1:")
+        if button.text.endswith("Max")
     )
     update, edits, _answers = _callback_update(reasoning_callback)
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
     selected = manager.get_her_v2_configuration()
-    assert selected.route_reasoning == {"review": "low"}
+    assert selected.route_reasoning == {"planning": "max"}
     assert selected.model_slot_for_route("planning") == "fast"
     assert selected.model_slot_for_route("review") == routes_before["review"]
     assert selected.profile_reasoning == reasoning_before
-    assert "HER V2 ROUTE" in edits[-1]["text"]
+    assert "HER V2 TASK STAGE" in edits[-1]["text"]
 
 
-def test_her_v2_route_menu_splits_execution_without_removed_repair_route(tmp_path):
+def test_her_v2_stage_menu_groups_execution_and_hides_internal_routes(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
 
     route_markup = str(runtime_model_selection.her_v2_routes_keyboard(runtime))
-    review_markup = str(
-        runtime_model_selection.her_v2_route_keyboard(runtime, "review")
-    )
     direct_markup = str(
         runtime_model_selection.her_v2_route_keyboard(runtime, "direct")
     )
+    execution_markup = str(runtime_model_selection.her_v2_execution_keyboard(runtime))
+    advanced_markup = str(
+        runtime_model_selection.her_v2_advanced_routes_keyboard(runtime)
+    )
 
     assert "Direct" in route_markup
-    assert "Simple execution" in route_markup
-    assert "Complex execution" in route_markup
-    assert "High-volume execution" in route_markup
+    assert "Strategy (Strategic + Planned)" in route_markup
+    assert "Planning (Planned only)" in route_markup
+    assert "Execution (Strategic + Planned) · Auto" in route_markup
+    assert "Simple execution" not in route_markup
+    assert "Complex execution" not in route_markup
+    assert "High-volume execution" not in route_markup
+    assert "Replanning" not in route_markup
+    assert "Review" not in route_markup
+    assert "Meditation" not in route_markup
     assert "Structure repair" not in route_markup
-    assert "Follow source" not in review_markup
     assert "Model · Quick" in direct_markup
     assert "Model · Pro" not in direct_markup
     assert "Model · Custom" not in direct_markup
-    assert "Inherit (high)" in direct_markup
+    assert "Reasoning · Off" in direct_markup
+    assert "Reasoning · High" in direct_markup
+    assert "Reasoning · Max" in direct_markup
+    assert "Reasoning · Low" not in direct_markup
+    assert "Configured default (High)" in direct_markup
+    assert "Auto" in execution_markup
+    assert "Quick" in execution_markup
+    assert "Pro" in execution_markup
+    assert "Simple execution" in advanced_markup
+    assert "Complex execution" in advanced_markup
+    assert "High-volume execution" in advanced_markup
+    assert "Replanning" not in advanced_markup
+    assert "Review" not in advanced_markup
+    assert "Meditation" not in advanced_markup
+
+
+def test_her_v2_reasoning_menu_does_not_invent_undeclared_provider_levels(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    manager.apply_her_v2_configuration(manager.prepare_her_v2_provider("openrouter"))
+
+    markup = str(runtime_model_selection.her_v2_route_keyboard(runtime, "direct"))
+
+    assert "Configured default (High)" in markup
+    assert "Reasoning · Off" not in markup
+    assert "Reasoning · Low" not in markup
+    assert "Reasoning · High" not in markup
+    assert "Reasoning · Max" not in markup
+
+
+def test_her_v2_custom_targets_appear_only_in_hybrid_advanced_settings(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    manager.begin_her_v2_hybrid_draft()
+
+    standard = str(runtime_model_selection.her_v2_route_keyboard(runtime, "triage"))
+    advanced = str(
+        runtime_model_selection.her_v2_route_keyboard(
+            runtime,
+            "triage",
+            advanced=True,
+        )
+    )
+
+    assert "Model · Custom" not in standard
+    assert "Model · Custom" in advanced
+    assert "her_adv_custom:triage" in advanced
+    assert "Replanning" not in str(
+        runtime_model_selection.her_v2_advanced_routes_keyboard(runtime)
+    )
+
+
+@pytest.mark.asyncio
+async def test_her_v2_advanced_custom_target_callback_stays_in_advanced_flow(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    manager.begin_her_v2_hybrid_draft()
+
+    custom_callback = next(
+        button.callback_data
+        for row in runtime_model_selection.her_v2_route_keyboard(
+            runtime,
+            "triage",
+            advanced=True,
+        ).inline_keyboard
+        for button in row
+        if button.callback_data.startswith("her_adv_custom:")
+    )
+    update, edits, _answers = _callback_update(custom_callback)
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+    assert "her_adv_provider:triage" in str(edits[-1]["reply_markup"])
+
+    options = manager.get_her_v2_provider_options()
+    provider_index = next(
+        index
+        for index, option in enumerate(options)
+        if option["engine"] == "openrouter-api"
+    )
+    provider_callback = next(
+        button.callback_data
+        for row in runtime_model_selection.her_v2_route_provider_keyboard(
+            runtime,
+            "triage",
+            advanced=True,
+        ).inline_keyboard
+        for button in row
+        if button.callback_data.startswith(f"her_adv_provider:triage:{provider_index}:")
+    )
+    update, edits, _answers = _callback_update(provider_callback)
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+    assert "her_adv_model:triage" in str(edits[-1]["reply_markup"])
+
+    model_callback = (
+        runtime_model_selection.her_v2_route_model_keyboard(
+            runtime,
+            "triage",
+            provider_index,
+            advanced=True,
+        )
+        .inline_keyboard[0][0]
+        .callback_data
+    )
+    update, edits, _answers = _callback_update(model_callback)
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    active = manager.get_her_v2_configuration()
+    draft = manager.get_her_v2_edit_configuration()
+    assert active.routing_mode == "single"
+    assert "triage" not in active.route_targets
+    assert draft.routing_mode == "hybrid"
+    assert draft.target_for_route("triage").provider == "openrouter-api"
+    assert "her_adv_custom:triage" in str(edits[-1]["reply_markup"])
+
+
+@pytest.mark.asyncio
+async def test_her_v2_execution_auto_quick_pro_and_reasoning_are_grouped_atomically(
+    tmp_path,
+):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    before = manager.get_her_v2_configuration()
+    execution_names = {
+        route.value for route in runtime_model_selection.HER_V2_EXECUTION_ROUTES
+    }
+    untouched_slots = {
+        name: value
+        for name, value in before.route_model_slots.items()
+        if name not in execution_names
+    }
+    untouched_reasoning = {
+        name: value
+        for name, value in before.route_reasoning.items()
+        if name not in execution_names
+    }
+    review_slot = before.model_slot_for_route("review")
+    review_reasoning = before.reasoning_for_route(
+        manager._her_v2_base_config(),
+        "review",
+    )
+
+    assert runtime_model_selection._her_v2_execution_mode(runtime) == "auto"
+    update, _edits, _answers = _callback_update("her_execution_mode:fast")
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    selected = manager.get_her_v2_configuration()
+    assert [
+        selected.model_slot_for_route(route)
+        for route in runtime_model_selection.HER_V2_EXECUTION_ROUTES
+    ] == ["fast", "fast", "fast"]
+    assert selected.model_slot_for_route("review") == review_slot
+
+    update, _edits, _answers = _callback_update("her_execution_mode:auto")
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+    selected = manager.get_her_v2_configuration()
+    assert [
+        selected.model_slot_for_route(route)
+        for route in runtime_model_selection.HER_V2_EXECUTION_ROUTES
+    ] == ["fast", "pro", "pro"]
+
+    reasoning_keyboard = runtime_model_selection.her_v2_execution_keyboard(runtime)
+    reasoning_callback = next(
+        button.callback_data
+        for row in reasoning_keyboard.inline_keyboard
+        for button in row
+        if button.text.endswith("Max")
+    )
+    update, _edits, _answers = _callback_update(reasoning_callback)
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    selected = manager.get_her_v2_configuration()
+    assert {
+        route.value: selected.route_reasoning.get(route.value)
+        for route in runtime_model_selection.HER_V2_EXECUTION_ROUTES
+    } == {
+        "execution_simple": "max",
+        "execution_complex": "max",
+        "execution_high_volume": "max",
+    }
+    assert (
+        selected.reasoning_for_route(
+            manager._her_v2_base_config(),
+            "review",
+        )
+        == review_reasoning
+    )
+    assert {
+        name: value
+        for name, value in selected.route_model_slots.items()
+        if name not in execution_names
+    } == untouched_slots
+    assert {
+        name: value
+        for name, value in selected.route_reasoning.items()
+        if name not in execution_names
+    } == untouched_reasoning
 
 
 @pytest.mark.asyncio
 async def test_stale_her_v2_model_menu_cannot_cross_provider_boundary(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
-    stale_callback = runtime_model_selection.her_v2_slot_model_keyboard(
-        runtime,
-        "fast",
-    ).inline_keyboard[1][0].callback_data
-    manager.apply_her_v2_configuration(
-        manager.prepare_her_v2_provider("openrouter")
+    stale_callback = (
+        runtime_model_selection.her_v2_slot_model_keyboard(
+            runtime,
+            "fast",
+        )
+        .inline_keyboard[1][0]
+        .callback_data
     )
+    manager.apply_her_v2_configuration(manager.prepare_her_v2_provider("openrouter"))
     update, edits, answers = _callback_update(stale_callback)
 
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
@@ -1813,10 +2340,14 @@ async def test_stale_her_v2_model_menu_cannot_cross_provider_boundary(tmp_path):
 async def test_stale_her_v2_model_menu_rejects_reordered_model_grants(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
-    stale_callback = runtime_model_selection.her_v2_slot_model_keyboard(
-        runtime,
-        "fast",
-    ).inline_keyboard[1][0].callback_data
+    stale_callback = (
+        runtime_model_selection.her_v2_slot_model_keyboard(
+            runtime,
+            "fast",
+        )
+        .inline_keyboard[1][0]
+        .callback_data
+    )
     deepseek = next(
         row
         for row in manager.config.allowed_backends
@@ -1855,7 +2386,7 @@ async def test_her_v2_model_typed_commands_update_slots_and_route_reasoning(tmp_
     selected = manager.get_her_v2_configuration()
     assert selected.route_reasoning["review"] == "low"
     assert selected.stage_reasoning == {}
-    assert "HER V2 ROUTE" in messages[-1]
+    assert "HER V2 TASK STAGE" in messages[-1]
 
 
 @pytest.mark.asyncio
@@ -1992,7 +2523,10 @@ async def test_backend_confirmation_cancel_keeps_mode_and_backend(tmp_path):
     assert manager.agent_mode == "audit"
     assert manager.config.active_backend == "codex-cli"
     assert "BACKEND UNCHANGED" in edits[-1]["text"]
-    assert "No mode, backend, model, or saved configuration was changed" in edits[-1]["text"]
+    assert (
+        "No mode, backend, model, or saved configuration was changed"
+        in edits[-1]["text"]
+    )
 
 
 @pytest.mark.asyncio
@@ -2185,7 +2719,9 @@ async def test_cmd_wrap_updates_wrapper_translator_state(tmp_path):
     manager = _make_manager(tmp_path / "agent")
     manager.agent_mode = "wrapper"
     runtime, messages = _make_runtime(manager)
-    update, context = _update(["backend=claude-cli", "model=claude-haiku-4-5", "context=5"])
+    update, context = _update(
+        ["backend=claude-cli", "model=claude-haiku-4-5", "context=5"]
+    )
 
     await FlexibleAgentRuntime.cmd_wrap(runtime, update, context)
 
@@ -2211,7 +2747,9 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     assert "Choose a model below" in messages[-1]
     assert runtime._reply_payloads[-1]["parse_mode"] == "HTML"
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
-    assert "wcfg:core:codex-cli:gpt-5.5" in str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "wcfg:core:codex-cli:gpt-5.5" in str(
+        runtime._reply_payloads[-1]["reply_markup"]
+    )
 
     await FlexibleAgentRuntime.cmd_wrap(runtime, update, context)
     assert "<b>WRAPPER TRANSLATOR MODEL</b>" in messages[-1]
@@ -2256,7 +2794,9 @@ async def test_wrapper_config_buttons_update_core_model(tmp_path):
     query.answer = answer
     update = SimpleNamespace(callback_query=query)
 
-    await FlexibleAgentRuntime.callback_wrapper_config(runtime, update, SimpleNamespace())
+    await FlexibleAgentRuntime.callback_wrapper_config(
+        runtime, update, SimpleNamespace()
+    )
 
     state = _read_state(tmp_path / "agent")
     assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.4"}
@@ -2358,7 +2898,9 @@ async def test_audit_model_menu_and_buttons_update_auditor_model(tmp_path):
 
     query.edit_message_text = edit_message_text
     query.answer = answer
-    await FlexibleAgentRuntime.callback_audit_config(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
+    await FlexibleAgentRuntime.callback_audit_config(
+        runtime, SimpleNamespace(callback_query=query), SimpleNamespace()
+    )
 
     state = _read_state(tmp_path / "agent")
     assert state["audit"]["backend"] == "claude-cli"
@@ -2373,8 +2915,13 @@ def test_audit_model_choice_labels_include_versions():
     runtime._allowed_wrapper_engine = lambda _backend: True
     runtime._get_available_models_for = lambda _backend: []
 
-    core_labels = {choice[1] for choice in FlexibleAgentRuntime._audit_core_model_choices(runtime)}
-    auditor_labels = {choice[1] for choice in FlexibleAgentRuntime._audit_auditor_model_choices(runtime)}
+    core_labels = {
+        choice[1] for choice in FlexibleAgentRuntime._audit_core_model_choices(runtime)
+    }
+    auditor_labels = {
+        choice[1]
+        for choice in FlexibleAgentRuntime._audit_auditor_model_choices(runtime)
+    }
 
     for labels in (core_labels, auditor_labels):
         assert "Claude Opus 4.7" in labels
@@ -2425,7 +2972,9 @@ async def test_audit_config_buttons_update_delivery_and_threshold(tmp_path):
         )
         query.edit_message_text = edit_message_text
         query.answer = answer
-        await FlexibleAgentRuntime.callback_audit_config(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
+        await FlexibleAgentRuntime.callback_audit_config(
+            runtime, SimpleNamespace(callback_query=query), SimpleNamespace()
+        )
 
     state = _read_state(tmp_path / "agent")
     assert state["audit"]["delivery"] == "issues_only"
@@ -2481,7 +3030,9 @@ async def test_cmd_new_creates_session_without_visible_llm_turn(tmp_path):
     )
     runtime._clear_transfer_state = lambda: None
     runtime._pending_auto_recall_context = "old"
-    runtime.context_assembler = SimpleNamespace(memory_store=SimpleNamespace(clear_turns=lambda: None))
+    runtime.context_assembler = SimpleNamespace(
+        memory_store=SimpleNamespace(clear_turns=lambda: None)
+    )
     from orchestrator import runtime_session
 
     default = runtime_session.initialize_runtime_sessions(runtime)
@@ -2540,7 +3091,9 @@ async def test_wrapper_config_buttons_update_wrapper_model_across_backends(tmp_p
     query.answer = answer
     update = SimpleNamespace(callback_query=query)
 
-    await FlexibleAgentRuntime.callback_wrapper_config(runtime, update, SimpleNamespace())
+    await FlexibleAgentRuntime.callback_wrapper_config(
+        runtime, update, SimpleNamespace()
+    )
 
     state = _read_state(tmp_path / "agent")
     assert state["wrapper"] == {
@@ -2597,7 +3150,11 @@ async def test_reset_preserves_wrapper_config_and_sys_prompts(tmp_path):
     manager._active_model_override = "gpt-5.5"
     manager.update_wrapper_blocks(
         core={"backend": "codex-cli", "model": "gpt-5.5"},
-        wrapper={"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3},
+        wrapper={
+            "backend": "claude-cli",
+            "model": "claude-haiku-4-5",
+            "context_window": 3,
+        },
         wrapper_slots={"1": "Keep the Xishi persona."},
     )
     state = manager.get_state_snapshot()
@@ -2635,7 +3192,11 @@ async def test_reset_preserves_wrapper_config_and_sys_prompts(tmp_path):
     assert state["active_backend"] == "codex-cli"
     assert state["active_model"] == "gpt-5.5"
     assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.5"}
-    assert state["wrapper"] == {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3}
+    assert state["wrapper"] == {
+        "backend": "claude-cli",
+        "model": "claude-haiku-4-5",
+        "context_window": 3,
+    }
     assert state["wrapper_slots"] == {"1": "Keep the Xishi persona."}
     assert state["her_v2_configuration"] == {
         "provider": "openrouter-api",
@@ -2655,8 +3216,14 @@ async def test_reset_preserves_wrapper_config_and_sys_prompts(tmp_path):
 async def test_foreground_completion_uses_wrapper_output_for_visible_surfaces(tmp_path):
     runtime, sent, voices, hchat_replies = _make_foreground_runtime(tmp_path)
     listener_payloads = []
-    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
-    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    runtime.register_request_listener = (
+        FlexibleAgentRuntime.register_request_listener.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime.register_request_listener(
+        "req-001", lambda payload: listener_payloads.append(payload)
+    )
     item = _queued_request()
     await runtime.queue.put(item)
 
@@ -2675,10 +3242,22 @@ async def test_foreground_completion_uses_wrapper_output_for_visible_surfaces(tm
         assert runtime.last_response["text"] == "wrapped visible"
         assert runtime.memory_store.turns == []
         assert runtime.memory_store.exchanges == []
-        assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
-        assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
+        assert (
+            "assistant",
+            "wrapped visible",
+            "text",
+        ) in runtime.handoff_builder.transcript
+        assert runtime.project_chat_logger.exchanges[0] == (
+            "hello",
+            "wrapped visible",
+            "text",
+        )
         assert hchat_replies[0]["text"] == "wrapped visible"
-        core_entry = json.loads((tmp_path / "core_transcript.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        core_entry = json.loads(
+            (tmp_path / "core_transcript.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()[0]
+        )
         assert core_entry["text"] == "core raw foreground"
         assert core_entry["visible_text"] == "wrapped visible"
         assert core_entry["completion_path"] == "foreground"
@@ -2727,7 +3306,14 @@ async def test_wrapper_polishing_placeholder_bridges_after_core_output(tmp_path)
         "preview": True,
         "promote": True,
     }
-    for switch in ("enabled", "placeholder", "typing", "progress", "preview", "promote"):
+    for switch in (
+        "enabled",
+        "placeholder",
+        "typing",
+        "progress",
+        "preview",
+        "promote",
+    ):
         telegram_stream_policy.set_policy_value(runtime, switch, True)
     item = _queued_request()
     await runtime.queue.put(item)
@@ -2776,10 +3362,18 @@ async def test_wrapper_final_only_skips_polishing_placeholder_and_typing(tmp_pat
 async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     listener_payloads = []
-    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
-    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    runtime.register_request_listener = (
+        FlexibleAgentRuntime.register_request_listener.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime.register_request_listener(
+        "req-001", lambda payload: listener_payloads.append(payload)
+    )
     item = _queued_request()
-    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw", duration_ms=1.0)))
+    task = asyncio.create_task(
+        _completed_task(BackendResponse(text="core raw", duration_ms=1.0))
+    )
     await task
 
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
@@ -2791,11 +3385,21 @@ async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tm
     assert runtime.last_response["text"] == "wrapped visible"
     assert runtime.memory_store.turns == []
     assert runtime.memory_store.exchanges == []
-    assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
-    assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
+    assert (
+        "assistant",
+        "wrapped visible",
+        "text",
+    ) in runtime.handoff_builder.transcript
+    assert runtime.project_chat_logger.exchanges[0] == (
+        "hello",
+        "wrapped visible",
+        "text",
+    )
     assert sent[0]["text"] == "wrapped visible"
     assert voices[0]["text"] == "wrapped visible"
-    core_entry = json.loads((tmp_path / "core_transcript.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    core_entry = json.loads(
+        (tmp_path / "core_transcript.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
     assert core_entry["text"] == "core raw"
     assert core_entry["visible_text"] == "wrapped visible"
     assert core_entry["completion_path"] == "background"
@@ -2837,12 +3441,16 @@ async def test_background_transfer_suppression_buffers_wrapper_output(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     runtime._should_buffer_during_transfer = lambda request_id: True
     item = _queued_request()
-    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw", duration_ms=1.0)))
+    task = asyncio.create_task(
+        _completed_task(BackendResponse(text="core raw", duration_ms=1.0))
+    )
     await task
 
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
 
-    assert runtime._suppressed_transfer_results == [{"success": True, "text": "wrapped visible"}]
+    assert runtime._suppressed_transfer_results == [
+        {"success": True, "text": "wrapped visible"}
+    ]
     assert sent == []
     assert voices == []
 
@@ -2851,10 +3459,18 @@ async def test_background_transfer_suppression_buffers_wrapper_output(tmp_path):
 async def test_background_bypass_source_does_not_wrap(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     listener_payloads = []
-    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
-    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    runtime.register_request_listener = (
+        FlexibleAgentRuntime.register_request_listener.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime.register_request_listener(
+        "req-001", lambda payload: listener_payloads.append(payload)
+    )
     item = _queued_request_from("scheduler")
-    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw", duration_ms=1.0)))
+    task = asyncio.create_task(
+        _completed_task(BackendResponse(text="core raw", duration_ms=1.0))
+    )
     await task
 
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
@@ -2874,7 +3490,9 @@ async def test_background_bypass_source_does_not_wrap(tmp_path):
 async def test_background_voice_source_wraps(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     item = _queued_request_from("voice")
-    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw voice", duration_ms=1.0)))
+    task = asyncio.create_task(
+        _completed_task(BackendResponse(text="core raw voice", duration_ms=1.0))
+    )
     await task
 
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
@@ -2887,7 +3505,9 @@ async def test_background_voice_source_wraps(tmp_path):
 async def test_background_hchat_source_bypasses_wrapper(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     item = _queued_request_from("bridge:hchat")
-    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw hchat", duration_ms=1.0)))
+    task = asyncio.create_task(
+        _completed_task(BackendResponse(text="core raw hchat", duration_ms=1.0))
+    )
     await task
 
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
@@ -2900,13 +3520,23 @@ async def test_background_hchat_source_bypasses_wrapper(tmp_path):
 async def test_background_wrapper_failure_falls_back_to_core_raw(tmp_path):
     runtime, sent, voices = _make_background_runtime(
         tmp_path,
-        wrapper_response=BackendResponse(text="", duration_ms=1.0, error="wrapper failed", is_success=False),
+        wrapper_response=BackendResponse(
+            text="", duration_ms=1.0, error="wrapper failed", is_success=False
+        ),
     )
     listener_payloads = []
-    runtime.register_request_listener = FlexibleAgentRuntime.register_request_listener.__get__(runtime, FlexibleAgentRuntime)
-    runtime.register_request_listener("req-001", lambda payload: listener_payloads.append(payload))
+    runtime.register_request_listener = (
+        FlexibleAgentRuntime.register_request_listener.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime.register_request_listener(
+        "req-001", lambda payload: listener_payloads.append(payload)
+    )
     item = _queued_request()
-    task = asyncio.create_task(_completed_task(BackendResponse(text="core raw fallback", duration_ms=1.0)))
+    task = asyncio.create_task(
+        _completed_task(BackendResponse(text="core raw fallback", duration_ms=1.0))
+    )
     await task
 
     await FlexibleAgentRuntime._on_background_complete(runtime, task, item)
@@ -2934,7 +3564,9 @@ def test_core_transcript_helper_records_foreground_path(tmp_path):
         wrapper_result=wrapper_result,
     )
 
-    entry = json.loads((tmp_path / "core_transcript.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    entry = json.loads(
+        (tmp_path / "core_transcript.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
     assert entry["role"] == "assistant_core"
     assert entry["text"] == "core raw foreground"
     assert entry["visible_text"] == "wrapped foreground"

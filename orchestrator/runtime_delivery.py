@@ -4,6 +4,7 @@ import asyncio
 import html as html_lib
 import json
 import re
+from collections.abc import Mapping
 from time import monotonic
 from typing import Any
 
@@ -21,7 +22,7 @@ from orchestrator.runtime_common import _md_to_html
 
 def _retry_after_seconds(exc: Exception) -> int | None:
     if isinstance(exc, RetryAfter):
-        return int(getattr(exc, "retry_after", 0) or 0)
+        return telegram_delivery_failover.retry_after_seconds(exc)
     return None
 
 
@@ -107,8 +108,10 @@ def format_backend_error_for_user(
     error_text: str,
     *,
     locale: str | None = None,
+    error_context: Mapping[str, Any] | None = None,
 ) -> str:
     selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
+    context = error_context if isinstance(error_context, Mapping) else {}
     raw = str(error_text or "").strip() or ui_language.tr(
         "error.unknown",
         locale=selected,
@@ -116,11 +119,42 @@ def format_backend_error_for_user(
     exact = _extract_backend_error_message(raw)
     lines: list[str] = [
         ui_language.tr(
-            "error.exact_failure",
+            "error.details",
             locale=selected,
             error=exact,
         )
     ]
+
+    error_code = str(context.get("error_code") or "").strip()
+    if not error_code:
+        code_match = re.match(r"^\[([A-Z][A-Z0-9_]+)\]", exact)
+        error_code = code_match.group(1) if code_match else ""
+    if error_code and error_code not in exact:
+        lines.append(ui_language.tr("error.code", locale=selected, code=error_code))
+
+    http_status = context.get("http_status")
+    if http_status is not None and str(http_status).strip():
+        lines.append(
+            ui_language.tr(
+                "error.http_status",
+                locale=selected,
+                status=http_status,
+            )
+        )
+    provider_request_id = str(context.get("provider_request_id") or "").strip()
+    if provider_request_id:
+        lines.append(
+            ui_language.tr(
+                "error.provider_request_id",
+                locale=selected,
+                request_id=provider_request_id,
+            )
+        )
+
+    if bool(context.get("side_effects_possible")):
+        lines.append(
+            ui_language.tr("error.warning_partial_execution", locale=selected)
+        )
 
     if "requires a newer version of" in exact:
         match = re.search(r"requires a newer version of ([^.]+)", exact, re.IGNORECASE)
@@ -141,6 +175,10 @@ def format_backend_error_for_user(
                 runtime=runtime_name,
             )
         )
+    elif error_code == "PROVIDER_BAD_REQUEST":
+        lines.append(ui_language.tr("error.action_bad_request", locale=selected))
+    elif context.get("error_retryable") is True:
+        lines.append(ui_language.tr("error.action_retryable", locale=selected))
 
     if exact != raw:
         lines.append("")
@@ -157,6 +195,7 @@ async def send_long_message(
     purpose: str = "response",
     delivery_mode: str = "final_delivery",
     parse_mode: str | None = None,
+    error_context: Mapping[str, Any] | None = None,
 ):
     """Send Markdown or pre-rendered Telegram HTML with safe chunking."""
     canonical = getattr(runtime, "canonical_audit", None)
@@ -263,6 +302,7 @@ async def send_long_message(
             runtime.config.active_backend,
             text,
             locale=locale,
+            error_context=error_context,
         )
         if len(s) > max_excerpt:
             head = s[:1200]
@@ -272,12 +312,18 @@ async def send_long_message(
         else:
             excerpt = s
 
-        msg = (
-            f"{header}\n\n"
-            f"{excerpt}\n\n"
-            f"{ui_language.tr('error.full_log', locale=locale, path=errors_path)}\n"
-            f"{ui_language.tr('error.verbose_tip', locale=locale)}"
-        )
+        log_lines = [
+            ui_language.tr("error.diagnostic_log", locale=locale, path=errors_path)
+        ]
+        if request_id:
+            log_lines.append(
+                ui_language.tr(
+                    "error.log_lookup",
+                    locale=locale,
+                    request_id=request_id,
+                )
+            )
+        msg = f"{header}\n\n{excerpt}\n\n" + "\n".join(log_lines)
         if len(msg) > tg_max_len:
             truncated = ui_language.tr("error.truncated", locale=locale)
             msg = msg[: tg_max_len - len(truncated) - 9] + f"\n... ({truncated})"

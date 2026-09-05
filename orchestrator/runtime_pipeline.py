@@ -6,10 +6,11 @@ import hashlib as _hashlib
 import html
 import inspect
 import json
+import math
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
     is_memory_plus_enabled,
 )
+from orchestrator.path_presentation import normalize_user_visible_paths
 from orchestrator.runtime_common import (
     _md_to_html,
     _print_final_response,
@@ -523,10 +525,10 @@ def _store_context_compaction_warnings(
 def request_context_warning_fields(runtime, request_id: str) -> dict[str, Any]:
     meta = request_meta_for(runtime, request_id)
     result: dict[str, Any] = {}
-    for field in ("context_compaction_warnings", "wip_recovery_warnings"):
-        warnings = meta.get(field)
+    for warning_field in ("context_compaction_warnings", "wip_recovery_warnings"):
+        warnings = meta.get(warning_field)
         if isinstance(warnings, list) and warnings:
-            result[field] = list(warnings)
+            result[warning_field] = list(warnings)
     return result
 
 
@@ -758,6 +760,28 @@ def _her_v2_delivery_metadata(response: Any) -> dict[str, Any]:
     }
 
 
+def _her_v2_stage_timings_s(response: Any) -> dict[str, float]:
+    """Read validated, optional stage wall times from HER v2 metadata."""
+
+    metadata = getattr(response, "stream_metadata", None)
+    her_v2 = metadata.get("her_v2") if isinstance(metadata, Mapping) else None
+    raw_timings = (
+        her_v2.get("stage_timings_s") if isinstance(her_v2, Mapping) else None
+    )
+    if not isinstance(raw_timings, Mapping):
+        return {}
+    timings: dict[str, float] = {}
+    for raw_stage, raw_elapsed_s in raw_timings.items():
+        try:
+            elapsed_s = float(raw_elapsed_s)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(elapsed_s) or elapsed_s < 0:
+            continue
+        timings[str(raw_stage)] = elapsed_s
+    return timings
+
+
 async def record_her_v2_transport_receipt(
     runtime: Any,
     item: Any,
@@ -812,6 +836,20 @@ def _resolve_session_scope(item) -> str:
         SESSION_SCOPE_ISOLATED_RESUME,
     }:
         return explicit
+    scheduler_context = getattr(item, "scheduler_context", None)
+    if isinstance(scheduler_context, Mapping):
+        kind = str(scheduler_context.get("kind") or "").strip().lower()
+        task_id = str(scheduler_context.get("task_id") or "").strip()
+        trigger = str(scheduler_context.get("trigger") or "").strip().lower()
+        if (
+            kind in {"cron", "heartbeat"}
+            and task_id
+            and trigger in {"scheduled", "manual", "recovery"}
+        ):
+            # A typed scheduler invocation is a standalone request.  Sharing
+            # the ordinary chat timeline would let a preceding job masquerade
+            # as context for the current authoritative task prompt.
+            return SESSION_SCOPE_ISOLATED
     return SESSION_SCOPE_PERSISTENT
 
 
@@ -827,7 +865,7 @@ class QueueItemStart:
 class TurnPrompt:
     effective_prompt: str
     final_prompt: str
-    extra_sections: list[tuple[str, str]]
+    extra_sections: list[tuple]
     incremental: bool
     prompt_audit: dict[str, Any]
     context_warnings: tuple[str, ...] = ()
@@ -875,6 +913,8 @@ class VerboseDisplayState:
     current_message: Any
     message_ids: list[int]
     rollover_count: int = 0
+    deleted_message_ids: set[int] = field(default_factory=set)
+    ever_activated: bool = False
 
 
 @dataclass(frozen=True)
@@ -899,6 +939,32 @@ class InteractiveFeedback:
     on_stream_event: Any | None
     her_message_router: Any | None
     verbose_display_state: VerboseDisplayState | None = None
+    preference_event: asyncio.Event | None = None
+
+
+def _display_preference_events(runtime) -> set[asyncio.Event]:
+    events = getattr(runtime, "_display_preference_events", None)
+    if not isinstance(events, set):
+        events = set()
+        runtime._display_preference_events = events
+    return events
+
+
+def notify_display_preference_change(runtime) -> None:
+    """Wake every in-flight presentation session for this Agent."""
+
+    for event in tuple(_display_preference_events(runtime)):
+        event.set()
+
+
+def release_display_preference_event(
+    runtime,
+    event: asyncio.Event | None,
+) -> None:
+    if event is None:
+        return
+    _display_preference_events(runtime).discard(event)
+    event.set()
 
 
 def begin_queue_item(runtime, item) -> QueueItemStart:
@@ -932,6 +998,10 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         # notification policy for this already-started task.
         "verbose_at_start": bool(getattr(runtime, "_verbose", False)),
         "meter_at_start": bool(getattr(runtime, "_meter", False)),
+        "ui_locale_at_start": ui_language.preferred_locale(
+            runtime,
+            actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),
+        ),
         "silent": bool(item.silent),
         "deliver_to_telegram": bool(item.deliver_to_telegram),
         "hashi_session_id": getattr(item, "session_id", None),
@@ -1032,6 +1102,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     )
     provider_session_id = getattr(backend, "_session_id", None)
     session_scope = str(request_meta.get("session_scope") or SESSION_SCOPE_PERSISTENT)
+    isolated_scheduler_run = session_scope == SESSION_SCOPE_ISOLATED
     incremental = (
         supports_sessions
         and provider_session_id is not None
@@ -1041,13 +1112,22 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     if incremental and runtime.config.active_backend == "her-v2":
         can_resume = getattr(backend, "can_resume_fixed_session", None)
         incremental = bool(callable(can_resume) and can_resume())
-    continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
+    continuity_enabled = (
+        is_memory_plus_enabled(runtime.workspace_dir)
+        and not isolated_scheduler_run
+    )
     session_scoped = bool(str(getattr(item, "session_id", "") or ""))
     session_workspace = runtime_session.item_session_workspace(runtime, item)
-    session_history = runtime_session.recent_exchanges(
-        runtime,
-        item,
-        limit=int(getattr(runtime.context_assembler, "MAX_RECENT_EXCHANGES", 8)),
+    session_history = (
+        []
+        if isolated_scheduler_run
+        else runtime_session.recent_exchanges(
+            runtime,
+            item,
+            limit=int(
+                getattr(runtime.context_assembler, "MAX_RECENT_EXCHANGES", 8)
+            ),
+        )
     )
     extra_sections = runtime._workzone_prompt_section()
     pre_turn_builder = runtime._build_pre_turn_context_sections
@@ -1063,7 +1143,10 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "session_workspace": str(session_workspace),
             "engine": runtime.config.active_backend,
         }
-    extra_sections += await pre_turn_builder(item, effective_prompt, **pre_turn_kwargs)
+    if not isolated_scheduler_run:
+        extra_sections += await pre_turn_builder(
+            item, effective_prompt, **pre_turn_kwargs
+        )
     base_extra_sections = list(extra_sections)
     context_profile = None
     if continuity_enabled:
@@ -1071,7 +1154,9 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     prompt_builder = runtime.context_assembler.build_prompt_payload
     prompt_kwargs = {
         "extra_sections": extra_sections,
-        "inject_memory": not item.skip_memory_injection,
+        "inject_memory": (
+            not item.skip_memory_injection and not isolated_scheduler_run
+        ),
         "incremental": incremental,
     }
     if "context_profile" in inspect.signature(prompt_builder).parameters:
@@ -1088,6 +1173,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         runtime.config.active_backend == "her-v2"
         and not incremental
         and not item.skip_memory_injection
+        and not isolated_scheduler_run
         and not is_bridge_request
         and bool(
             getattr(
@@ -1118,7 +1204,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         history_compaction_enabled = compaction_snapshot is not None
         prompt_kwargs["extra_sections"] = extra_sections
 
-    def assemble(sections: list[tuple[str, str]]) -> dict[str, Any]:
+    def assemble(sections: list[tuple]) -> dict[str, Any]:
         current_kwargs = dict(prompt_kwargs)
         current_kwargs["extra_sections"] = sections
         return prompt_builder(
@@ -1532,9 +1618,13 @@ async def cleanup_interactive_feedback(
     placeholder,
     delete_placeholder: bool = True,
     verbose_display_state: VerboseDisplayState | None = None,
+    preference_event: asyncio.Event | None = None,
 ) -> None:
     if stop_typing:
         stop_typing.set()
+    # Detach from command notifications before awaiting child shutdown so a
+    # cancelled cleanup cannot leave a stale per-request Event registered.
+    release_display_preference_event(runtime, preference_event)
     await settle_interactive_feedback_task(runtime, typing_task, label="typing")
     await settle_interactive_feedback_task(runtime, escalation_task, label="escalation")
     await settle_interactive_feedback_task(
@@ -1556,12 +1646,20 @@ async def cleanup_interactive_feedback(
             label="thinking-flush-final",
         )
 
-    active_placeholder = (
-        verbose_display_state.current_message
-        if verbose_display_state is not None
-        else placeholder
+    if verbose_display_state is None:
+        active_placeholder = placeholder
+    elif verbose_display_state.current_message is not None:
+        active_placeholder = verbose_display_state.current_message
+    elif verbose_display_state.ever_activated:
+        active_placeholder = None
+    else:
+        active_placeholder = placeholder
+    active_message_id = getattr(active_placeholder, "message_id", None)
+    already_deleted = bool(
+        verbose_display_state is not None
+        and active_message_id in verbose_display_state.deleted_message_ids
     )
-    if active_placeholder and delete_placeholder:
+    if active_placeholder and delete_placeholder and not already_deleted:
         delete_started = time.monotonic()
         deleted = await _run_interactive_feedback_cleanup_step(
             runtime,
@@ -1572,6 +1670,8 @@ async def cleanup_interactive_feedback(
             label="placeholder-delete",
         )
         if deleted:
+            if verbose_display_state is not None and active_message_id is not None:
+                verbose_display_state.deleted_message_ids.add(active_message_id)
             delete_elapsed_s = max(0.0, time.monotonic() - delete_started)
             runtime.telegram_logger.info(
                 f"Deleted placeholder for {item.request_id} "
@@ -1638,7 +1738,7 @@ async def answer_preview_loop(
     assurance_status_kinds = {KIND_REVIEW, KIND_TESTING, KIND_VALIDATION}
 
     def _preview_text() -> str:
-        text = "".join(chunks).strip()
+        text = normalize_user_visible_paths("".join(chunks).strip())
         if len(text) > max_chars:
             text = "...\n" + text[-max_chars:]
         elapsed = max(0, int(loop.time() - started))
@@ -1734,7 +1834,7 @@ async def answer_preview_loop(
             elif kind in status_kinds and summary and (
                 not chunks or kind in assurance_status_kinds
             ):
-                latest_status = summary[:240]
+                latest_status = normalize_user_visible_paths(summary)[:240]
                 latest_status_visible_with_text = kind in assurance_status_kinds
                 dirty = True
         except asyncio.TimeoutError:
@@ -1853,7 +1953,9 @@ def wrap_her_persona_stream(
                     purpose=purpose,
                 )
             )
-        raw_text = str(getattr(event, "summary", "") or "").strip()
+        raw_text = normalize_user_visible_paths(
+            str(getattr(event, "summary", "") or "").strip()
+        )
         if has_audio and reply_policy == "audio_only":
             raw_text = ""
         if not raw_text and audio_task is None:
@@ -1994,7 +2096,9 @@ def wrap_her_persona_stream(
                 )
                 provisional_messages.pop(target_event_id, None)
                 return True
-            raw_text = str(getattr(event, "summary", "") or "").strip()
+            raw_text = normalize_user_visible_paths(
+                str(getattr(event, "summary", "") or "").strip()
+            )
             if not raw_text:
                 return False
             if resolution == "commentary" and not raw_text.startswith("💬"):
@@ -2169,6 +2273,188 @@ def wrap_her_persona_stream(
     return callback
 
 
+async def _send_live_verbose_placeholder(runtime, item):
+    try:
+        if await telegram_delivery_failover.handle_blocked_send(
+            runtime,
+            chat_id=item.chat_id,
+            request_id=item.request_id,
+            purpose="placeholder",
+        ):
+            return None
+        text, parse_mode = runtime.get_progress_placeholder()
+        message = await runtime.app.bot.send_message(
+            chat_id=item.chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            disable_notification=telegram_notifications.disable_notification(
+                runtime,
+                purpose="placeholder",
+            ),
+        )
+        runtime.telegram_logger.info(
+            "Started live verbose display for %s after preference activation.",
+            item.request_id,
+        )
+        return message
+    except RetryAfter as exc:
+        await telegram_delivery_failover.handle_retry_after(
+            runtime,
+            exc=exc,
+            chat_id=item.chat_id,
+            request_id=item.request_id,
+            purpose="placeholder",
+        )
+        runtime.telegram_logger.warning(
+            "Live verbose display blocked by flood control for %s: %s",
+            item.request_id,
+            exc,
+        )
+    except Exception as exc:
+        runtime.telegram_logger.warning(
+            "Live verbose display could not start for %s: %s",
+            item.request_id,
+            exc,
+        )
+    return None
+
+
+async def _delete_live_verbose_placeholder(runtime, item, message) -> bool:
+    if message is None:
+        return True
+    try:
+        await runtime.app.bot.delete_message(
+            chat_id=item.chat_id,
+            message_id=message.message_id,
+        )
+        return True
+    except Exception as exc:
+        debug = getattr(runtime.telegram_logger, "debug", None)
+        if callable(debug):
+            debug(
+                "Live verbose placeholder cleanup will be retried for %s: %s",
+                item.request_id,
+                type(exc).__name__,
+            )
+        return False
+
+
+def _drain_stream_queue(event_queue: asyncio.Queue) -> None:
+    while not event_queue.empty():
+        try:
+            event_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
+
+async def live_verbose_display_loop(
+    runtime,
+    item,
+    *,
+    request_stop: asyncio.Event,
+    preference_event: asyncio.Event,
+    event_queue: asyncio.Queue,
+    backend,
+    display_state: VerboseDisplayState,
+    seed_placeholder=None,
+) -> None:
+    """Lazily start and stop the current turn's verbose presentation.
+
+    Provider events are never replayed: the stream callback admits technical
+    events only while ``runtime._verbose`` is true, and every Off transition
+    drains anything already queued at that visibility boundary.
+    """
+
+    active_task: asyncio.Task | None = None
+    active_stop: asyncio.Event | None = None
+    available_placeholder = seed_placeholder
+
+    async def deactivate(*, delete_message: bool) -> None:
+        nonlocal active_task, active_stop, available_placeholder
+        if delete_message:
+            # Off is a visibility boundary.  Drop admitted-but-not-yet-rendered
+            # events before asking the child display loop to stop.
+            _drain_stream_queue(event_queue)
+        if active_stop is not None:
+            active_stop.set()
+        if active_task is not None:
+            await settle_interactive_feedback_task(
+                runtime,
+                active_task,
+                label="live-verbose-display",
+            )
+        active_task = None
+        active_stop = None
+        current = display_state.current_message
+        if delete_message and current is not None:
+            deleted = await _delete_live_verbose_placeholder(runtime, item, current)
+            if deleted:
+                display_state.deleted_message_ids.add(current.message_id)
+                if available_placeholder is current:
+                    available_placeholder = None
+                display_state.current_message = None
+        _drain_stream_queue(event_queue)
+
+    async def activate() -> None:
+        nonlocal active_task, active_stop, available_placeholder
+        if active_task is not None and not active_task.done():
+            return
+        message = display_state.current_message or available_placeholder
+        if message is None:
+            message = await _send_live_verbose_placeholder(runtime, item)
+        if message is None:
+            return
+        available_placeholder = None
+        display_state.ever_activated = True
+        display_state.current_message = message
+        if message.message_id not in display_state.message_ids:
+            display_state.message_ids.append(message.message_id)
+        active_stop = asyncio.Event()
+        active_task = asyncio.create_task(
+            runtime._streaming_display_loop(
+                item.chat_id,
+                message,
+                item.request_id,
+                active_stop,
+                event_queue,
+                backend=backend,
+                display_state=display_state,
+            ),
+            name=f"live-verbose-{item.request_id}",
+        )
+
+    try:
+        while not request_stop.is_set():
+            preference_event.clear()
+            if bool(getattr(runtime, "_verbose", False)):
+                await activate()
+            else:
+                await deactivate(delete_message=True)
+
+            stop_wait = asyncio.create_task(request_stop.wait())
+            preference_wait = asyncio.create_task(preference_event.wait())
+            done: set[asyncio.Task] = set()
+            try:
+                done, _pending = await asyncio.wait(
+                    {stop_wait, preference_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                pending = {stop_wait, preference_wait} - done
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+        await deactivate(delete_message=False)
+    except asyncio.CancelledError:
+        if active_stop is not None:
+            active_stop.set()
+        if active_task is not None:
+            active_task.cancel()
+            await asyncio.gather(active_task, return_exceptions=True)
+        raise
+
+
 async def setup_interactive_feedback(
     runtime,
     item,
@@ -2185,6 +2471,7 @@ async def setup_interactive_feedback(
     answer_preview_task = None
     answer_stream_state = None
     verbose_display_state = None
+    preference_event = None
     delivery_requested = not item.silent and item.deliver_to_telegram
     display_policy = telegram_stream_policy.get_display_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
@@ -2206,9 +2493,6 @@ async def setup_interactive_feedback(
             f"think={think_delivery_enabled}, source={display_policy.source}, "
             f"blocked={delivery_blocked}"
         )
-
-    if typing_delivery_enabled or verbose_delivery_enabled or think_delivery_enabled:
-        stop_typing = asyncio.Event()
 
     if typing_delivery_enabled or verbose_delivery_enabled:
         if typing_delivery_enabled:
@@ -2258,51 +2542,74 @@ async def setup_interactive_feedback(
         typing_delivery_enabled = typing_delivery_enabled and not delivery_blocked
         verbose_delivery_enabled = verbose_delivery_enabled and not delivery_blocked
         think_delivery_enabled = think_delivery_enabled and not delivery_blocked
-        if typing_delivery_enabled and stop_typing is not None:
-            typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
+    capabilities = getattr(backend, "capabilities", None)
+    runtime.logger.info(
+        f"Verbose event eligibility {item.request_id}: enabled={verbose_delivery_enabled}, "
+        f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
+        f"progress={bool(getattr(capabilities, 'supports_progress_stream', False))}, "
+        f"tools={bool(getattr(capabilities, 'supports_tool_stream', False))}"
+    )
 
-        capabilities = getattr(backend, "capabilities", None)
-        runtime.logger.info(
-            f"Verbose event eligibility {item.request_id}: enabled={verbose_delivery_enabled}, "
-            f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
-            f"progress={bool(getattr(capabilities, 'supports_progress_stream', False))}, "
-            f"tools={bool(getattr(capabilities, 'supports_tool_stream', False))}"
-        )
-        if verbose_delivery_enabled and placeholder is not None and stop_typing is not None:
-            verbose_display_state = VerboseDisplayState(
-                current_message=placeholder,
-                message_ids=[placeholder.message_id],
-            )
-            stream_queue = asyncio.Queue(maxsize=200)
-            stream_callback = runtime._make_stream_callback(
-                event_queue=stream_queue,
-                think_buffer=runtime._think_buffer if think_delivery_enabled else None,
-                audit_collector=None if is_her_backend else audit_collector,
-            )
-            escalation_task = asyncio.create_task(
-                runtime._streaming_display_loop(
-                    item.chat_id,
-                    placeholder,
-                    item.request_id,
-                    stop_typing,
-                    stream_queue,
-                    backend=backend,
-                    display_state=verbose_display_state,
-                )
+    # Presentation receivers remain attached for the lifetime of the request.
+    # The live flags admit only events emitted after the user's menu choice;
+    # no disabled interval is buffered for later replay.
+    if delivery_requested and not delivery_blocked:
+        runtime._verbose = bool(getattr(runtime, "_verbose", False))
+        runtime._think = bool(getattr(runtime, "_think", False))
+        if not isinstance(getattr(runtime, "_think_buffer", None), list):
+            runtime._think_buffer = []
+        if not isinstance(getattr(runtime, "_openrouter_think_chunk", None), str):
+            runtime._openrouter_think_chunk = ""
+        if not hasattr(runtime, "_last_openrouter_think_snippet"):
+            runtime._last_openrouter_think_snippet = None
+        stop_typing = asyncio.Event()
+        preference_event = asyncio.Event()
+        _display_preference_events(runtime).add(preference_event)
+        if typing_delivery_enabled:
+            typing_task = asyncio.create_task(
+                runtime.typing_loop(item.chat_id, stop_typing)
             )
 
-    if think_delivery_enabled and stop_typing is not None:
         runtime._think_buffer.clear()
         runtime._openrouter_think_chunk = ""
         runtime._last_openrouter_think_snippet = None
-        if stream_callback is None:
-            stream_callback = runtime._make_stream_callback(
-                think_buffer=runtime._think_buffer,
-                audit_collector=None if is_her_backend else audit_collector,
-            )
-        think_flush_task = asyncio.create_task(
-            runtime._thinking_flush_loop(item.chat_id, stop_typing)
+        stream_queue = asyncio.Queue(maxsize=200)
+        stream_callback = runtime._make_stream_callback(
+            event_queue=stream_queue,
+            think_buffer=runtime._think_buffer,
+            audit_collector=None if is_her_backend else audit_collector,
         )
+        verbose_display_state = VerboseDisplayState(
+            current_message=(placeholder if verbose_delivery_enabled else None),
+            message_ids=(
+                [placeholder.message_id]
+                if verbose_delivery_enabled and placeholder is not None
+                else []
+            ),
+            ever_activated=bool(verbose_delivery_enabled and placeholder is not None),
+        )
+        escalation_task = asyncio.create_task(
+            live_verbose_display_loop(
+                runtime,
+                item,
+                request_stop=stop_typing,
+                preference_event=preference_event,
+                event_queue=stream_queue,
+                backend=backend,
+                display_state=verbose_display_state,
+                seed_placeholder=placeholder,
+            ),
+            name=f"live-verbose-supervisor-{item.request_id}",
+        )
+        think_flush_task = asyncio.create_task(
+            runtime._thinking_flush_loop(item.chat_id, stop_typing),
+            name=f"live-think-{item.request_id}",
+        )
+        if verbose_delivery_enabled:
+            # Preserve the old guarantee that a request which starts in
+            # verbose mode has its display consumer active before generation
+            # begins.  Later menu changes are woken by ``preference_event``.
+            await asyncio.sleep(0)
 
     if stream_callback is None and audit_active and not is_her_backend:
         stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
@@ -2330,7 +2637,7 @@ async def setup_interactive_feedback(
 
         async def _activity_callback(event):
             activity_store.publish_stream(item.request_id, event)
-            if downstream_callback is not None:
+            if callable(downstream_callback):
                 result = downstream_callback(event)
                 if inspect.isawaitable(result):
                     await result
@@ -2393,6 +2700,7 @@ async def setup_interactive_feedback(
         on_stream_event=on_stream_event,
         her_message_router=her_message_router,
         verbose_display_state=verbose_display_state,
+        preference_event=preference_event,
     )
 
 
@@ -2573,6 +2881,7 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         response.stream_metadata = metadata
         display_text = fallback
         visible_text = fallback
+    visible_text = normalize_user_visible_paths(visible_text)
     has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
     if not visible_text.strip() and not has_typed_audio:
         return SuccessfulResponse(
@@ -2905,6 +3214,59 @@ def clear_context_compaction_request_state(runtime, request_id: str) -> None:
         execution_requests.discard(str(request_id))
 
 
+def backend_failure_fields(response: Any) -> dict[str, Any]:
+    """Expose typed provider failure metadata without changing error text."""
+
+    fields: dict[str, Any] = {}
+    for name in (
+        "error_code",
+        "error_retryable",
+        "http_status",
+        "provider_request_id",
+        "retry_after_s",
+    ):
+        value = getattr(response, name, None)
+        if value is not None and value != "":
+            fields[name] = value
+    tool_call_count = int(getattr(response, "tool_call_count", 0) or 0)
+    if tool_call_count:
+        fields["tool_call_count"] = tool_call_count
+    if bool(getattr(response, "side_effects_possible", False)):
+        fields["side_effects_possible"] = True
+    return fields
+
+
+def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
+    """Return the complete local diagnostic envelope for an errors.log record."""
+
+    metadata = getattr(response, "stream_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return {}
+    her = metadata.get("her_v2")
+    if isinstance(her, Mapping):
+        chain = her.get("failure_chain")
+        primary = chain.get("primary_failure") if isinstance(chain, Mapping) else None
+        details = primary.get("details") if isinstance(primary, Mapping) else None
+        if isinstance(details, Mapping) and details:
+            return {
+                "primary_failure": dict(primary),
+                "recovery_decision": (
+                    dict(chain.get("recovery_decision") or {})
+                    if isinstance(chain, Mapping)
+                    else {}
+                ),
+                "foreground_cleanup": (
+                    dict(chain.get("foreground_cleanup") or {})
+                    if isinstance(chain, Mapping)
+                    else {}
+                ),
+            }
+    provider_http_failure = metadata.get("provider_http_failure")
+    if isinstance(provider_http_failure, Mapping) and provider_http_failure:
+        return {"provider_http_failure": dict(provider_http_failure)}
+    return {}
+
+
 def _typed_capacity_recovery_is_safe(response: Any) -> bool:
     if str(getattr(response, "error_code", "") or "") != "CONTEXT_CAPACITY_REJECTED":
         return False
@@ -3108,6 +3470,7 @@ async def handle_backend_error(
     await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
     observe_terminal_response(runtime, item, response)
     err_msg = response.error or "Unknown error"
+    failure_fields = backend_failure_fields(response)
     # /stop, /steer, and /retry intentionally kill the backend process
     # (e.g. exit -9 / SIGKILL).
     # That is expected course-correction, not a backend failure — never show ❌ Backend error.
@@ -3158,6 +3521,31 @@ async def handle_backend_error(
         return
 
     runtime._mark_error(err_msg)
+    runtime.error_logger.error(
+        "Flex Backend error for %s (%s, source=%s, code=%s, retryable=%s, "
+        "status=%s, provider_request_id=%s, side_effects=%s): %s",
+        item.request_id,
+        runtime.config.active_backend,
+        item.source,
+        failure_fields.get("error_code") or "untyped",
+        failure_fields.get("error_retryable"),
+        failure_fields.get("http_status"),
+        failure_fields.get("provider_request_id") or "none",
+        failure_fields.get("side_effects_possible", False),
+        err_msg,
+    )
+    failure_diagnostics = backend_failure_diagnostics(response)
+    if failure_diagnostics:
+        runtime.error_logger.error(
+            "Backend failure diagnostics for %s: %s",
+            item.request_id,
+            json.dumps(
+                failure_diagnostics,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ),
+        )
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
     await runtime._notify_request_listeners(
@@ -3169,6 +3557,7 @@ async def handle_backend_error(
             "error": err_msg,
             "source": item.source,
             "summary": item.summary,
+            **failure_fields,
             **request_context_warning_fields(runtime, item.request_id),
         },
     )
@@ -3186,10 +3575,6 @@ async def handle_backend_error(
             completion_path="foreground",
         )
         return
-    runtime.error_logger.error(
-        f"Flex Backend error for {item.request_id} "
-        f"({runtime.config.active_backend}, source={item.source}): {err_msg}"
-    )
     if runtime._should_retry_codex_scheduler_failure(item, err_msg):
         runtime._schedule_codex_scheduler_retry(item)
     if not item.deliver_to_telegram:
@@ -3217,6 +3602,7 @@ async def handle_backend_error(
         text=err_msg,
         request_id=item.request_id,
         purpose="error",
+        error_context=failure_fields,
     )
     total_elapsed_s = (
         max(0.0, time.monotonic() - queued_monotonic)
@@ -3338,6 +3724,7 @@ async def handle_success_delivery(
             response_text = cos_result["response"]
         else:
             cos_handled = True
+    response_text = normalize_user_visible_paths(response_text)
     _print_final_response(runtime.name, response_text)
     her_delivery = _her_v2_delivery_metadata(response)
     delivered_at_initial_resolution = bool(
@@ -3483,6 +3870,15 @@ async def handle_success_delivery(
             else ""
         ),
     )
+    runtime_session.record_assistant_delivery(
+        runtime,
+        item,
+        delivered=final_delivered,
+        assistant_text=response_text,
+        transport="telegram",
+        completion_path="foreground",
+        disposition=receipt_disposition,
+    )
     runtime_cross_session.record_turn_result(
         runtime,
         item,
@@ -3526,7 +3922,16 @@ async def handle_success_delivery(
                 item.chat_id, response_text, item.request_id
             )
     if final_delivered and callable(getattr(runtime, "_send_meter_cost_tail", None)):
-        await runtime._send_meter_cost_tail(item)
+        meter_elapsed_s = (
+            max(0.0, time.monotonic() - queued_monotonic)
+            if queued_monotonic is not None
+            else max(0.0, (datetime.now() - queued_at).total_seconds())
+        )
+        await runtime._send_meter_cost_tail(
+            item,
+            total_elapsed_s=meter_elapsed_s,
+            stage_timings_s=_her_v2_stage_timings_s(response),
+        )
     runtime._schedule_audit_followup(
         item,
         core_raw=safe_core_raw,

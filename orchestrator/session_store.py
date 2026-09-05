@@ -84,7 +84,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, db_path: str | Path, *, instance_id: str = "HASHI"):
         self.db_path = Path(db_path)
@@ -141,6 +141,7 @@ class SessionStore:
                     context_generation INTEGER NOT NULL DEFAULT 1,
                     memory_policy TEXT NOT NULL DEFAULT 'promote',
                     workzone TEXT,
+                    workzone_revision INTEGER NOT NULL DEFAULT 0,
                     revision INTEGER NOT NULL DEFAULT 1,
                     next_message_ordinal INTEGER NOT NULL DEFAULT 1,
                     next_event_sequence INTEGER NOT NULL DEFAULT 1,
@@ -153,6 +154,20 @@ class SessionStore:
                     WHERE is_default = 1;
                 CREATE INDEX IF NOT EXISTS sessions_owner_agent_updated
                     ON sessions(instance_id, owner_id, agent_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS session_workzones (
+                    session_id TEXT NOT NULL,
+                    slot_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    label TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(session_id, slot_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS session_workzones_session_enabled
+                    ON session_workzones(session_id, enabled, slot_id);
 
                 CREATE TABLE IF NOT EXISTS session_participants (
                     session_id TEXT NOT NULL,
@@ -494,6 +509,28 @@ class SessionStore:
                     "ALTER TABLE runs ADD COLUMN "
                     "response_preferences_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            session_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "workzone_revision" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN "
+                    "workzone_revision INTEGER NOT NULL DEFAULT 0"
+                )
+            # One-time compatibility projection.  The former scalar Workzone
+            # becomes the enabled ``main`` slot without changing the Session's
+            # effective working directory.
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO session_workzones(
+                    session_id, slot_id, path, enabled, label, created_at, updated_at
+                )
+                SELECT session_id, 'main', workzone, 1, '', created_at, updated_at
+                FROM sessions
+                WHERE workzone IS NOT NULL AND TRIM(workzone) != ''
+                """
+            )
             connection.execute(
                 "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
@@ -1355,6 +1392,156 @@ class SessionStore:
                 "SELECT * FROM runs WHERE run_id = ?", (run["run_id"],)
             ).fetchone()
             return self._run_dict(result)
+
+    def record_assistant_delivery(
+        self,
+        request_id: str,
+        *,
+        delivered: bool,
+        assistant_text: str | None = None,
+        surface: str,
+        channel_key: str,
+        transport: str,
+        completion_path: str,
+        disposition: str = "",
+    ) -> dict[str, Any] | None:
+        """Persist one final-response delivery outcome for a Session Run."""
+
+        normalized_surface = str(surface or "").strip().lower()
+        normalized_channel = str(channel_key or "").strip()
+        if not normalized_surface or not normalized_channel:
+            return None
+        route_phase = f"transport:{normalized_surface}:{normalized_channel}"
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                """
+                SELECT r.*, m.text AS canonical_assistant_text
+                FROM runs AS r
+                JOIN sessions AS s ON s.session_id = r.session_id
+                JOIN messages AS m ON m.message_id = r.final_message_id
+                WHERE r.request_id = ? AND r.state = 'completed'
+                  AND s.instance_id = ?
+                """,
+                (str(request_id), self.instance_id),
+            ).fetchone()
+            if run is None:
+                return None
+
+            outcome_status = "delivered" if delivered else "failed"
+            existing = connection.execute(
+                """
+                SELECT * FROM run_events
+                WHERE run_id = ? AND kind = 'assistant.delivery.outcome'
+                  AND status = ? AND phase = ?
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (str(run["run_id"]), outcome_status, route_phase),
+            ).fetchone()
+            if existing is not None:
+                detail = _json_object(existing["detail_json"])
+                event = dict(existing)
+                event["detail"] = detail
+                event.pop("detail_json", None)
+                return event
+
+            delivered_text = str(assistant_text or "").strip()
+            canonical_text = str(run["canonical_assistant_text"] or "").strip()
+            detail = {
+                "request_id": str(request_id),
+                "message_id": str(run["final_message_id"]),
+                "surface": normalized_surface,
+                "channel_key": normalized_channel,
+                "transport": str(transport or "").strip().lower(),
+                "completion_path": str(completion_path or "").strip().lower(),
+                "disposition": str(disposition or "").strip(),
+            }
+            if delivered_text and delivered_text != canonical_text:
+                detail["text_override"] = delivered_text
+            return self._append_event(
+                connection,
+                session_id=str(run["session_id"]),
+                run_id=str(run["run_id"]),
+                kind="assistant.delivery.outcome",
+                status=outcome_status,
+                phase=route_phase,
+                summary=(
+                    "Assistant final response delivered"
+                    if delivered
+                    else "Assistant final response delivery failed"
+                ),
+                detail=detail,
+            )
+
+    def latest_delivered_assistant_text(
+        self,
+        session_id: str,
+        *,
+        surface: str,
+        channel_key: str,
+    ) -> str | None:
+        """Return the newest visible assistant text confirmed on one route."""
+
+        self.get_session(session_id)
+        normalized_surface = str(surface or "").strip().lower()
+        normalized_channel = str(channel_key or "").strip()
+        if not normalized_surface or not normalized_channel:
+            return None
+        route_phase = f"transport:{normalized_surface}:{normalized_channel}"
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT e.detail_json, m.text
+                FROM run_events AS e
+                JOIN runs AS r ON r.run_id = e.run_id
+                JOIN messages AS m ON m.message_id = r.final_message_id
+                JOIN sessions AS s ON s.session_id = e.session_id
+                WHERE e.session_id = ? AND s.instance_id = ?
+                  AND e.kind = 'assistant.delivery.outcome'
+                  AND e.status = 'delivered'
+                  AND e.phase = ?
+                  AND r.state = 'completed'
+                  AND m.role = 'assistant'
+                  AND m.visibility = 'visible'
+                ORDER BY e.sequence DESC
+                """,
+                (str(session_id), self.instance_id, route_phase),
+            ).fetchall()
+        for row in rows:
+            detail = _json_object(row["detail_json"])
+            text = str(detail.get("text_override") or row["text"] or "").strip()
+            if text:
+                return text
+        return None
+
+    def has_assistant_delivery_outcome(
+        self,
+        session_id: str,
+        *,
+        surface: str,
+        channel_key: str,
+    ) -> bool:
+        """Return whether delivery-aware tracking has begun on this route."""
+
+        self.get_session(session_id)
+        normalized_surface = str(surface or "").strip().lower()
+        normalized_channel = str(channel_key or "").strip()
+        if not normalized_surface or not normalized_channel:
+            return False
+        route_phase = f"transport:{normalized_surface}:{normalized_channel}"
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM run_events AS e
+                JOIN sessions AS s ON s.session_id = e.session_id
+                WHERE e.session_id = ? AND s.instance_id = ?
+                  AND e.kind = 'assistant.delivery.outcome'
+                  AND e.phase = ?
+                LIMIT 1
+                """,
+                (str(session_id), self.instance_id, route_phase),
+            ).fetchone()
+        return row is not None
 
     def cancel_run(
         self, run_id: str, *, owner_id: str, reason: str = "cancelled_by_user"
@@ -2556,7 +2743,11 @@ class SessionStore:
         result["scope"] = _json_object(result.pop("scope_json"))
         return result
 
-    def reconcile_incomplete_runs(self) -> list[dict[str, Any]]:
+    def reconcile_incomplete_runs(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Terminalize Runs whose in-memory executor was lost on restart.
 
         The current runtime has no durable queue or safe execution-stack replay.
@@ -2565,30 +2756,49 @@ class SessionStore:
         fences every pre-existing non-terminal Run as ``interrupted``, preserves
         its user Message and evidence, and appends one durable terminal Event.
         A later user continuation is a new child Run with a new idempotency key.
+
+        Process startup reconciles the whole instance.  Per-Agent Function
+        Worker startup and recovery pass ``agent_id`` so one executor cannot
+        interrupt Runs that still belong to another live Agent.
         """
 
         now = _utc_now()
+        target_agent_id = str(agent_id or "").strip().lower() or None
         reconciled_ids: list[str] = []
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            agent_clause = " AND r.agent_id = ?" if target_agent_id else ""
+            params: tuple[str, ...] = (
+                (self.instance_id, target_agent_id)
+                if target_agent_id
+                else (self.instance_id,)
+            )
             rows = connection.execute(
-                """
+                f"""
                 SELECT r.* FROM runs AS r
                 JOIN sessions AS s ON s.session_id = r.session_id
                 WHERE s.instance_id = ? AND r.state IN ('queued', 'running')
+                {agent_clause}
                 ORDER BY r.created_at, r.run_id
                 """,
-                (self.instance_id,),
+                params,
             ).fetchall()
             for run in rows:
                 prior_state = str(run["state"])
                 run_id = str(run["run_id"])
                 session_id = str(run["session_id"])
-                reason = (
-                    "HASHI restarted before the accepted Run began"
-                    if prior_state == "queued"
-                    else "HASHI restarted while the Run was executing"
-                )
+                if target_agent_id:
+                    reason = (
+                        f"Agent '{target_agent_id}' restarted before the accepted Run began"
+                        if prior_state == "queued"
+                        else f"Agent '{target_agent_id}' restarted while the Run was executing"
+                    )
+                else:
+                    reason = (
+                        "HASHI restarted before the accepted Run began"
+                        if prior_state == "queued"
+                        else "HASHI restarted while the Run was executing"
+                    )
                 updated = connection.execute(
                     """
                     UPDATE runs
@@ -2621,8 +2831,10 @@ class SessionStore:
                     phase="recovery",
                     summary=reason,
                     detail={
+                        "agent_id": str(run["agent_id"]),
                         "error_code": "runtime_restart_interrupted",
                         "prior_state": prior_state,
+                        "recovery_scope": "agent" if target_agent_id else "instance",
                     },
                     outbox=True,
                 )
@@ -2970,33 +3182,373 @@ class SessionStore:
             ).fetchone()
             return self._session_dict(updated)
 
-    def set_workzone(self, session_id: str, workzone: str | None) -> dict[str, Any]:
+    @staticmethod
+    def _workzone_slot_sort_key(slot_id: str) -> tuple[int, int]:
+        if str(slot_id) == "main":
+            return (0, 0)
+        try:
+            return (1, int(slot_id))
+        except (TypeError, ValueError):
+            return (2, 0)
+
+    def _workzone_set_from_connection(
+        self, connection: sqlite3.Connection, session_id: str
+    ) -> dict[str, Any]:
+        session = connection.execute(
+            "SELECT * FROM sessions WHERE session_id = ? AND instance_id = ?",
+            (str(session_id), self.instance_id),
+        ).fetchone()
+        if session is None:
+            raise SessionNotFound(str(session_id))
+        rows = connection.execute(
+            """
+            SELECT slot_id, path, enabled, label, created_at, updated_at
+            FROM session_workzones WHERE session_id = ?
+            """,
+            (str(session_id),),
+        ).fetchall()
+        slots = []
+        for row in sorted(
+            rows,
+            key=lambda item: self._workzone_slot_sort_key(str(item["slot_id"])),
+        ):
+            item = dict(row)
+            item["enabled"] = bool(item.get("enabled"))
+            slots.append(item)
+        return {
+            "session_id": str(session_id),
+            "revision": int(session["workzone_revision"] or 0),
+            "slots": slots,
+        }
+
+    def get_workzone_set(self, session_id: str) -> dict[str, Any]:
+        """Return the Session-scoped, revisioned Workzone slot collection."""
+
+        with self._lock, self._connect() as connection:
+            return self._workzone_set_from_connection(connection, str(session_id))
+
+    @staticmethod
+    def _require_workzone_slot(slot_id: str) -> str:
+        slot = str(slot_id or "").strip().lower()
+        if slot in {"default", "0"}:
+            slot = "main"
+        if slot != "main" and slot not in {str(number) for number in range(1, 10)}:
+            raise ValueError("workzone slot must be main or 1..9")
+        return slot
+
+    @staticmethod
+    def _check_workzone_revision(
+        session: sqlite3.Row, expected_revision: int | None
+    ) -> None:
+        if expected_revision is None:
+            return
+        actual = int(session["workzone_revision"] or 0)
+        if actual != int(expected_revision):
+            raise SessionConflict(
+                f"Workzone menu is stale (expected revision {expected_revision}, current {actual})"
+            )
+
+    def set_workzone_slot(
+        self,
+        session_id: str,
+        slot_id: str,
+        *,
+        path: str | None = None,
+        enabled: bool | None = None,
+        label: str | None = None,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        """Atomically create or update one Workzone slot."""
+
+        slot = self._require_workzone_slot(slot_id)
         now = _utc_now()
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            updated = connection.execute(
+            session = connection.execute(
                 """
-                UPDATE sessions SET workzone = ?, revision = revision + 1, updated_at = ?
-                WHERE session_id = ? AND status = 'active'
+                SELECT * FROM sessions
+                WHERE session_id = ? AND instance_id = ? AND status = 'active'
                 """,
-                (str(workzone) if workzone else None, now, str(session_id)),
+                (str(session_id), self.instance_id),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(str(session_id))
+            self._check_workzone_revision(session, expected_revision)
+            existing = connection.execute(
+                "SELECT * FROM session_workzones WHERE session_id = ? AND slot_id = ?",
+                (str(session_id), slot),
+            ).fetchone()
+            before = None
+            if existing is not None:
+                before = {
+                    "path": str(existing["path"]),
+                    "enabled": bool(existing["enabled"]),
+                    "label": str(existing["label"] or ""),
+                }
+            resolved_path = str(path).strip() if path is not None else ""
+            if not resolved_path and existing is not None:
+                resolved_path = str(existing["path"])
+            if not resolved_path:
+                raise ValueError("path is required for an empty workzone slot")
+            resolved_enabled = (
+                bool(enabled)
+                if enabled is not None
+                else bool(existing["enabled"] if existing is not None else True)
             )
-            if updated.rowcount != 1:
+            resolved_label = (
+                str(label).strip()
+                if label is not None
+                else str(existing["label"] or "") if existing is not None else ""
+            )
+            after = {
+                "path": resolved_path,
+                "enabled": resolved_enabled,
+                "label": resolved_label,
+            }
+            if before == after:
+                return self._workzone_set_from_connection(connection, str(session_id))
+            connection.execute(
+                """
+                INSERT INTO session_workzones(
+                    session_id, slot_id, path, enabled, label, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, slot_id) DO UPDATE SET
+                    path = excluded.path,
+                    enabled = excluded.enabled,
+                    label = excluded.label,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(session_id),
+                    slot,
+                    resolved_path,
+                    int(resolved_enabled),
+                    resolved_label,
+                    now,
+                    now,
+                ),
+            )
+            legacy_main = resolved_path if slot == "main" and resolved_enabled else None
+            if slot == "main":
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone = ?, workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (legacy_main, now, str(session_id)),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, str(session_id)),
+                )
+            self._append_event(
+                connection,
+                session_id=str(session_id),
+                run_id=None,
+                kind="session.workzone_slot_changed",
+                status="active",
+                phase="control",
+                summary=f"Session Workzone slot {slot} changed",
+                detail={
+                    "slot": slot,
+                    "source": str(source),
+                    "before": before,
+                    "after": after,
+                },
+            )
+            return self._workzone_set_from_connection(connection, str(session_id))
+
+    def delete_workzone_slot(
+        self,
+        session_id: str,
+        slot_id: str,
+        *,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        """Delete one slot configuration without touching its filesystem path."""
+
+        slot = self._require_workzone_slot(slot_id)
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE session_id = ? AND instance_id = ? AND status = 'active'
+                """,
+                (str(session_id), self.instance_id),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(str(session_id))
+            self._check_workzone_revision(session, expected_revision)
+            existing = connection.execute(
+                "SELECT * FROM session_workzones WHERE session_id = ? AND slot_id = ?",
+                (str(session_id), slot),
+            ).fetchone()
+            if existing is None:
+                return self._workzone_set_from_connection(connection, str(session_id))
+            before = {
+                "path": str(existing["path"]),
+                "enabled": bool(existing["enabled"]),
+                "label": str(existing["label"] or ""),
+            }
+            connection.execute(
+                "DELETE FROM session_workzones WHERE session_id = ? AND slot_id = ?",
+                (str(session_id), slot),
+            )
+            if slot == "main":
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone = NULL, workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, str(session_id)),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, str(session_id)),
+                )
+            self._append_event(
+                connection,
+                session_id=str(session_id),
+                run_id=None,
+                kind="session.workzone_slot_deleted",
+                status="active",
+                phase="control",
+                summary=f"Session Workzone slot {slot} deleted",
+                detail={"slot": slot, "source": str(source), "before": before},
+            )
+            return self._workzone_set_from_connection(connection, str(session_id))
+
+    def disable_all_workzones(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        """Disable every configured slot in one revisioned transaction."""
+
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE session_id = ? AND instance_id = ? AND status = 'active'
+                """,
+                (str(session_id), self.instance_id),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(str(session_id))
+            self._check_workzone_revision(session, expected_revision)
+            changed = connection.execute(
+                """
+                UPDATE session_workzones SET enabled = 0, updated_at = ?
+                WHERE session_id = ? AND enabled != 0
+                """,
+                (now, str(session_id)),
+            )
+            if changed.rowcount:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone = NULL, workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, str(session_id)),
+                )
+                self._append_event(
+                    connection,
+                    session_id=str(session_id),
+                    run_id=None,
+                    kind="session.workzones_disabled",
+                    status="active",
+                    phase="control",
+                    summary="All Session Workzones disabled",
+                    detail={"source": str(source), "changed": int(changed.rowcount)},
+                )
+            return self._workzone_set_from_connection(connection, str(session_id))
+
+    def record_workzone_reload(
+        self, session_id: str, *, slots: Iterable[str], source: str = "telegram"
+    ) -> None:
+        """Audit a revalidation/rebind that deliberately leaves state unchanged."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                "SELECT status FROM sessions WHERE session_id = ? AND instance_id = ?",
+                (str(session_id), self.instance_id),
+            ).fetchone()
+            if session is None or str(session["status"]) != "active":
                 raise SessionNotFound(str(session_id))
             self._append_event(
                 connection,
                 session_id=str(session_id),
                 run_id=None,
-                kind="session.workzone_changed",
+                kind="session.workzones_reloaded",
                 status="active",
                 phase="control",
-                summary="Session Workzone changed",
-                detail={"workzone": str(workzone) if workzone else None},
+                summary="Session Workzones reloaded",
+                detail={
+                    "slots": [self._require_workzone_slot(slot) for slot in slots],
+                    "source": str(source),
+                },
             )
-            row = connection.execute(
-                "SELECT * FROM sessions WHERE session_id = ?", (str(session_id),)
-            ).fetchone()
-            return self._session_dict(row)
+
+    def set_workzone(self, session_id: str, workzone: str | None) -> dict[str, Any]:
+        """Compatibility wrapper for the former scalar ``sessions.workzone`` API."""
+
+        if workzone:
+            self.set_workzone_slot(
+                session_id,
+                "main",
+                path=str(workzone),
+                enabled=True,
+                source="legacy_set_workzone",
+            )
+            return self.get_session(session_id)
+        state = self.get_workzone_set(session_id)
+        if any(item["slot_id"] == "main" for item in state["slots"]):
+            self.set_workzone_slot(
+                session_id,
+                "main",
+                enabled=False,
+                source="legacy_set_workzone",
+            )
+            return self.get_session(session_id)
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE sessions SET workzone = NULL, revision = revision + 1, updated_at = ?
+                WHERE session_id = ? AND status = 'active'
+                """,
+                (now, str(session_id)),
+            )
+            if updated.rowcount != 1:
+                raise SessionNotFound(str(session_id))
+        return self.get_session(session_id)
 
     def archive_session(
         self, session_id: str, *, deleted: bool = False
@@ -3302,6 +3854,7 @@ class SessionStore:
             ).fetchone()
         return {
             "session": session,
+            "workzones": self.get_workzone_set(session_id),
             "messages": self.messages(session_id, owner_id=owner_id, limit=1000),
             "runs": [_json_object(row["projection_json"]) for row in projections],
             "earliest_available_sequence": int(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import http.client
 import importlib
 import logging
 import os
@@ -10,9 +9,6 @@ import sys
 import traceback
 from contextlib import suppress
 from pathlib import Path
-from types import MethodType
-
-from adapters.base import BaseBackend
 from orchestrator.agent_directory import AgentDirectory
 from orchestrator.api_gateway import available_gateway_models
 from orchestrator.api_gateway_config import (
@@ -22,18 +18,12 @@ from orchestrator.api_gateway_config import (
 )
 from orchestrator.background_jobs import BackgroundJobManager
 from orchestrator.scheduler import TaskScheduler
+from orchestrator.service_endpoints import ServiceEndpointError
 from orchestrator.telegram_delivery_failover import delivery_health_watcher
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
-_LEGACY_API_GATEWAY_SHUTDOWN_BUDGET_SEC = 30.0
-_LEGACY_API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0
-_HOT_SERVICE_HEALTH_ATTEMPTS = 20
-_HOT_SERVICE_HEALTH_INTERVAL_SEC = 0.1
-
-
-class HotServiceCutoverError(RuntimeError):
-    """A replacement service set did not become healthy after cutover."""
+API_GATEWAY_SHUTDOWN_BUDGET_SEC = 30.0
 
 
 class ServiceManager:
@@ -84,10 +74,37 @@ class ServiceManager:
             module = importlib.import_module("orchestrator.api_gateway")
         return module.APIGatewayServer
 
+    def _publish_service_endpoint(self, service: str, server, global_cfg, port: int):
+        registry = getattr(self.kernel, "endpoint_registry", None)
+        if registry is None:
+            return None
+        return registry.publish(
+            service,
+            instance_id=getattr(global_cfg, "instance_id", None)
+            or getattr(self.kernel.paths, "instance_id", None),
+            host=getattr(server, "bind_host", None),
+            port=int(getattr(server, "bound_port", None) or port),
+            metadata={"pid": os.getpid()},
+        )
+
+    def _unpublish_service_endpoint(self, service: str) -> None:
+        registry = getattr(self.kernel, "endpoint_registry", None)
+        if registry is not None:
+            registry.unpublish(service)
+
     def api_gateway_base_url(self) -> str | None:
         global_cfg = self.kernel.global_cfg
         if global_cfg is None:
             return None
+        registry = getattr(self.kernel, "endpoint_registry", None)
+        if registry is not None:
+            try:
+                return registry.resolve(
+                    "api_gateway",
+                    expected_instance=getattr(global_cfg, "instance_id", None),
+                ).base_url
+            except ServiceEndpointError:
+                return None
         running = self.kernel.api_gateway
         host = getattr(running, "bind_host", None) or str(getattr(global_cfg, "api_host", "") or "127.0.0.1").strip()
         if host in {"", "0.0.0.0", "localhost"}:
@@ -114,21 +131,48 @@ class ServiceManager:
                 self.kernel.runtimes,
                 secrets=secrets,
                 orchestrator=self.kernel,
+                # HASHI3 starts and reconciles each isolated Worker before
+                # Core services.  A second instance-wide sweep here could
+                # interrupt a request already accepted by a live Worker.
+                reconcile_session_runs=False,
             )
             await self.kernel.workbench_api.start()
             bind_host = getattr(self.kernel.workbench_api, "bind_host", "127.0.0.1")
+            endpoint = self._publish_service_endpoint(
+                "workbench",
+                self.kernel.workbench_api,
+                global_cfg,
+                global_cfg.workbench_port,
+            )
+            capability_broker = getattr(self.kernel, "capability_broker", None)
+            if capability_broker is not None and endpoint is not None:
+                capability_broker.start(endpoint)
             main_logger.info(
                 "Workbench API listening on http://%s:%s",
                 bind_host,
-                global_cfg.workbench_port,
+                endpoint.port if endpoint is not None else global_cfg.workbench_port,
             )
             bridge_logger.info(
                 "Workbench API listening on http://%s:%s",
                 bind_host,
-                global_cfg.workbench_port,
+                endpoint.port if endpoint is not None else global_cfg.workbench_port,
             )
         except Exception as e:
+            failed_server = self.kernel.workbench_api
+            capability_broker = getattr(self.kernel, "capability_broker", None)
+            if capability_broker is not None:
+                capability_broker.stop()
+            self._unpublish_service_endpoint("workbench")
             self.kernel.workbench_api = None
+            if failed_server is not None:
+                try:
+                    await asyncio.wait_for(failed_server.shutdown(), timeout=5.0)
+                except Exception as shutdown_error:
+                    bridge_logger.warning(
+                        "Workbench rollback shutdown warning: %s: %s",
+                        type(shutdown_error).__name__,
+                        shutdown_error,
+                    )
             main_logger.warning(
                 "Workbench API failed to start; continuing without workbench integration: %s",
                 e,
@@ -159,17 +203,24 @@ class ServiceManager:
             )
             await self.kernel.api_gateway.start()
             bind_host = getattr(self.kernel.api_gateway, "bind_host", None) or "127.0.0.1"
+            endpoint = self._publish_service_endpoint(
+                "api_gateway",
+                self.kernel.api_gateway,
+                global_cfg,
+                global_cfg.api_gateway_port,
+            )
             main_logger.info(
                 "API Gateway listening on http://%s:%s",
                 bind_host,
-                global_cfg.api_gateway_port,
+                endpoint.port if endpoint is not None else global_cfg.api_gateway_port,
             )
             bridge_logger.info(
                 "API Gateway listening on http://%s:%s",
                 bind_host,
-                global_cfg.api_gateway_port,
+                endpoint.port if endpoint is not None else global_cfg.api_gateway_port,
             )
         except Exception as e:
+            self._unpublish_service_endpoint("api_gateway")
             self.kernel.api_gateway = None
             main_logger.warning("API Gateway failed to start; continuing without it: %s", e)
             main_logger.debug(traceback.format_exc())
@@ -226,7 +277,13 @@ class ServiceManager:
         value = str(raw_url or "").strip()
         if value:
             return value
-        return str(self.kernel.paths.bridge_home / "state" / "enterprise.sqlite")
+        path = (
+            self.kernel.paths.bridge_home / "state" / "enterprise.sqlite"
+        ).resolve()
+        # A bare Windows drive path is parsed as URL scheme ``c``.  Emit one
+        # canonical SQLite URL on every platform so the enterprise store does
+        # not mistake a local path for an unsupported backend.
+        return "sqlite:///" + path.as_posix()
 
     def _scheduler_enterprise_lease_kwargs(self, global_cfg) -> dict:
         if not bool(getattr(global_cfg, "enterprise_scheduler_lease_enabled", False)):
@@ -343,12 +400,6 @@ class ServiceManager:
             await task
         self.kernel.delivery_health_task = None
 
-    async def restart_delivery_health_watcher(self):
-        await self.stop_delivery_health_watcher()
-        self.start_delivery_health_watcher()
-        main_logger.info("Hot restart: delivery health watcher adopted candidate generation.")
-        bridge_logger.info("Hot restart: delivery health watcher adopted candidate generation")
-
     async def start_background_jobs(self):
         existing = getattr(self.kernel, "background_job_manager", None)
         if existing is not None:
@@ -372,20 +423,6 @@ class ServiceManager:
         main_logger.info("Background job manager stopped.")
         bridge_logger.info("Background job manager stopped")
 
-    async def restart_background_jobs(self):
-        await self.stop_background_jobs()
-        module = sys.modules.get("orchestrator.background_jobs")
-        manager_cls = BackgroundJobManager if module is None else module.BackgroundJobManager
-        manager = manager_cls(
-            self.kernel.paths.bridge_home / "state" / "background_jobs",
-            kernel=self.kernel,
-        )
-        await manager.start()
-        self.kernel.background_job_manager = manager
-        main_logger.info("Hot restart: background job manager adopted candidate generation.")
-        bridge_logger.info("Hot restart: background job manager adopted candidate generation")
-        return manager
-
     async def start_runtime_services(self, global_cfg, secrets):
         self.build_agent_directory()
         await self.start_workbench_api(global_cfg, secrets)
@@ -393,6 +430,9 @@ class ServiceManager:
         self.start_scheduler(global_cfg)
         self.start_delivery_health_watcher()
         await self.start_background_jobs()
+        workers = getattr(self.kernel, "function_workers", None)
+        if workers is not None:
+            await workers.broadcast_topology()
 
     async def stop_scheduler(self, timeout: float = 5.0):
         if self.kernel.scheduler_task is None:
@@ -420,255 +460,12 @@ class ServiceManager:
             self.kernel.scheduler_task = None
             self.kernel.scheduler = None
 
-    async def refresh_hot_services(
-        self,
-        *,
-        expected_whatsapp: bool | None = None,
-    ):
-        """Recreate and verify every warm service for the candidate generation."""
-        if expected_whatsapp is None:
-            expected_whatsapp = getattr(self.kernel, "whatsapp", None) is not None
-        await self.restart_workbench_api()
-        await self.restart_api_gateway()
-        await self.restart_whatsapp_transport(
-            expected_running=expected_whatsapp,
-        )
-        await self.stop_scheduler()
-        reloaded_scheduler = sys.modules["orchestrator.scheduler"].TaskScheduler
-        lease_kwargs = (
-            self._scheduler_enterprise_lease_kwargs(self.kernel.global_cfg)
-            if self.kernel.global_cfg
-            else {}
-        )
-        self.kernel.scheduler = reloaded_scheduler(
-            self.kernel.paths.tasks_path,
-            self.kernel.paths.state_path,
-            self.kernel.runtimes,
-            self.kernel.global_cfg.authorized_id if self.kernel.global_cfg else 0,
-            self.kernel.skill_manager,
-            orchestrator=self.kernel,
-            **lease_kwargs,
-        )
-        self.kernel.scheduler_task = asyncio.create_task(self.kernel.scheduler.run(), name="scheduler")
-        main_logger.info("Hot restart: scheduler adopted candidate generation.")
-        bridge_logger.info("Hot restart: scheduler adopted candidate generation")
-        await self.restart_delivery_health_watcher()
-        await self.restart_background_jobs()
-        await self.assert_hot_services_healthy(
-            expected_whatsapp=expected_whatsapp,
-        )
-
-    async def restart_scheduler(self):
-        """Compatibility alias for callers predating the full service refresh."""
-        await self.refresh_hot_services()
-
-    async def restart_workbench_api(self):
-        if self.kernel.global_cfg is None:
-            raise HotServiceCutoverError(
-                "Workbench API cannot be replaced without loaded global config"
-            )
-        await self.stop_workbench_api(timeout=2.0)
-        await self.start_workbench_api(self.kernel.global_cfg, self.kernel.secrets)
-        if self.kernel.workbench_api is None:
-            raise HotServiceCutoverError(
-                "Candidate Workbench API did not start"
-            )
-        bridge_logger.info("Hot restart: Workbench API adopted candidate generation")
-
-    async def restart_api_gateway(self):
-        """Recreate an enabled Gateway so one /reboot adopts the candidate."""
-        if self.kernel.global_cfg is None:
-            raise HotServiceCutoverError(
-                "API Gateway cannot be replaced without loaded global config"
-            )
-        state = self._load_api_gateway_state()
-        should_run = bool(
-            self.kernel.api_gateway is not None
-            or getattr(self.kernel, "enable_api_gateway", False)
-            or state.get("enabled")
-        )
-        if not should_run:
-            return
-
-        self.kernel.enable_api_gateway = True
-        if not await self.stop_api_gateway():
-            raise HotServiceCutoverError(
-                "API Gateway replacement aborted because the old generation "
-                "did not stop safely"
-            )
-        await self.start_api_gateway(self.kernel.global_cfg, self.kernel.secrets)
-        if self.kernel.api_gateway is None:
-            raise HotServiceCutoverError(
-                "Candidate API Gateway did not start"
-            )
-        bridge_logger.info("Hot restart: API Gateway adopted candidate generation")
-
-    async def restart_whatsapp_transport(self, *, expected_running: bool) -> None:
-        """Replace the optional WhatsApp transport without changing its policy."""
-
-        if self.kernel.whatsapp is not None:
-            ok, message = await self.kernel.whatsapp_manager.stop_transport(
-                persist_enabled=False,
-            )
-            if not ok:
-                raise HotServiceCutoverError(
-                    f"WhatsApp transport did not stop safely: {message}"
-                )
-        if not expected_running:
-            return
-        ok, message = await self.kernel.whatsapp_manager.start_transport(
-            persist_enabled=False,
-        )
-        if not ok or self.kernel.whatsapp is None:
-            raise HotServiceCutoverError(
-                f"Candidate WhatsApp transport did not start: {message}"
-            )
-        bridge_logger.info(
-            "Hot restart: WhatsApp transport adopted candidate generation"
-        )
-
-    async def assert_hot_services_healthy(
-        self,
-        *,
-        expected_whatsapp: bool = False,
-    ) -> None:
-        """Prove the candidate service set is live before generation commit returns."""
-
-        global_cfg = self.kernel.global_cfg
-        if global_cfg is None:
-            raise HotServiceCutoverError("Global config is unavailable")
-
-        workbench = self.kernel.workbench_api
-        if workbench is None:
-            raise HotServiceCutoverError("Workbench API is not running")
-        workbench_host = getattr(workbench, "bind_host", None) or "127.0.0.1"
-        if not await self._wait_for_http_health(
-            workbench_host,
-            global_cfg.workbench_port,
-            "/api/health",
-        ):
-            raise HotServiceCutoverError(
-                "Workbench API did not pass its health check"
-            )
-
-        api_state = self._load_api_gateway_state()
-        api_expected = bool(
-            getattr(self.kernel, "enable_api_gateway", False)
-            or api_state.get("enabled")
-        )
-        if api_expected:
-            gateway = self.kernel.api_gateway
-            if gateway is None:
-                raise HotServiceCutoverError("API Gateway is enabled but not running")
-            gateway_host = getattr(gateway, "bind_host", None) or "127.0.0.1"
-            if not await self._wait_for_http_health(
-                gateway_host,
-                global_cfg.api_gateway_port,
-                "/health",
-            ):
-                raise HotServiceCutoverError(
-                    "API Gateway did not pass its health check"
-                )
-
-        # Give newly created tasks one event-loop turn. A task that terminates
-        # immediately is not a successful warm-service cutover.
-        await asyncio.sleep(0)
-        for attribute, label in (
-            ("scheduler_task", "scheduler"),
-            ("delivery_health_task", "delivery health watcher"),
-        ):
-            task = getattr(self.kernel, attribute, None)
-            if task is None:
-                raise HotServiceCutoverError(f"{label} task is missing")
-            if task.done():
-                detail = "cancelled" if task.cancelled() else repr(task.exception())
-                raise HotServiceCutoverError(
-                    f"{label} task terminated during cutover: {detail}"
-                )
-        if getattr(self.kernel, "background_job_manager", None) is None:
-            raise HotServiceCutoverError("Background job manager is not running")
-        if expected_whatsapp:
-            whatsapp = getattr(self.kernel, "whatsapp", None)
-            if whatsapp is None:
-                raise HotServiceCutoverError("WhatsApp transport is not running")
-            connect_task = getattr(whatsapp, "_connect_task", None)
-            if connect_task is not None and connect_task.done():
-                detail = (
-                    "cancelled"
-                    if connect_task.cancelled()
-                    else repr(connect_task.exception())
-                )
-                raise HotServiceCutoverError(
-                    "WhatsApp transport terminated during cutover: " + detail
-                )
-
-    async def _wait_for_http_health(
-        self,
-        host: str,
-        port: int,
-        path: str,
-    ) -> bool:
-        normalized_host = "127.0.0.1" if host in {"", "0.0.0.0", "localhost"} else host
-        for attempt in range(_HOT_SERVICE_HEALTH_ATTEMPTS):
-            if await self._http_endpoint_healthy(normalized_host, port, path):
-                return True
-            if attempt + 1 < _HOT_SERVICE_HEALTH_ATTEMPTS:
-                await asyncio.sleep(_HOT_SERVICE_HEALTH_INTERVAL_SEC)
-        return False
-
-    async def _http_endpoint_healthy(
-        self,
-        host: str,
-        port: int,
-        path: str,
-        timeout: float = 1.0,
-    ) -> bool:
-        def _probe():
-            conn = http.client.HTTPConnection(host, int(port), timeout=timeout)
-            try:
-                conn.request("GET", path)
-                response = conn.getresponse()
-                response.read()
-                return 200 <= response.status < 300
-            except Exception:
-                return False
-            finally:
-                conn.close()
-
-        return await asyncio.to_thread(_probe)
-
-    async def repair_workbench_api_if_needed(self):
-        global_cfg = self.kernel.global_cfg
-        if global_cfg is None:
-            bridge_logger.warning("Workbench API repair skipped: global config is unavailable")
-            return
-        workbench_api = self.kernel.workbench_api
-        if workbench_api is not None:
-            bind_host = getattr(workbench_api, "bind_host", None) or "127.0.0.1"
-            if await self._workbench_api_healthy(bind_host, global_cfg.workbench_port):
-                return
-            bridge_logger.warning(
-                "Workbench API exists but health check failed on %s:%s; rebuilding service",
-                bind_host,
-                global_cfg.workbench_port,
-            )
-            await self.stop_workbench_api(timeout=2.0)
-        bridge_logger.warning(
-            "Workbench API missing during hot restart; attempting repair on port %s",
-            global_cfg.workbench_port,
-        )
-        await self.start_workbench_api(global_cfg, self.kernel.secrets)
-
-    async def _workbench_api_healthy(self, host: str, port: int, timeout: float = 1.0) -> bool:
-        return await self._http_endpoint_healthy(
-            host,
-            port,
-            "/api/health",
-            timeout=timeout,
-        )
-
     async def stop_workbench_api(self, timeout: float = 5.0):
         if self.kernel.workbench_api is None:
+            capability_broker = getattr(self.kernel, "capability_broker", None)
+            if capability_broker is not None:
+                capability_broker.stop()
+            self._unpublish_service_endpoint("workbench")
             return
         bridge_logger.info("Stopping Workbench API")
         try:
@@ -678,54 +475,17 @@ class ServiceManager:
             bridge_logger.warning("Workbench API shutdown warning: %s: %s", type(e).__name__, e)
         finally:
             self.kernel.workbench_api = None
-
-    async def _quiesce_legacy_api_gateway(self, gateway) -> None:
-        """Drain a pre-reload Gateway before invoking its legacy pool-first stop."""
-        if callable(getattr(gateway, "begin_shutdown", None)):
-            return
-
-        pool = getattr(gateway, "_pool", None)
-        adapters = getattr(pool, "_adapters", {})
-        guarded_adapters = 0
-        for adapter in tuple(getattr(adapters, "values", lambda: ())()):
-            if not callable(getattr(adapter, "force_kill_process_tree", None)):
-                continue
-            # The live Gateway belongs to the pre-reload class generation.
-            # Its active adapter objects likewise retain the old, unsafe base
-            # method. Hand the new kill guard to those instances *before*
-            # runner.cleanup() can cancel an in-flight MCP discovery.
-            adapter.force_kill_process_tree = MethodType(
-                BaseBackend.force_kill_process_tree,
-                adapter,
-            )
-            guarded_adapters += 1
-        if guarded_adapters:
-            bridge_logger.info(
-                "Hot restart: installed process-group guard on %s legacy API adapter(s)",
-                guarded_adapters,
-            )
-
-        site = getattr(gateway, "_site", None)
-        if site is not None:
-            await site.stop()
-            gateway._site = None
-
-        runner = getattr(gateway, "_runner", None)
-        if runner is not None:
-            # Older Gateway generations used aiohttp's 60-second default and
-            # shut adapters down before the runner.  Bound and complete the
-            # transport drain here so the legacy stop cannot kill an in-flight
-            # tool subprocess while adopting this fix for the first time.
-            if hasattr(runner, "_shutdown_timeout"):
-                runner._shutdown_timeout = _LEGACY_API_GATEWAY_DRAIN_TIMEOUT_SEC
-            await runner.cleanup()
-            gateway._runner = None
+            capability_broker = getattr(self.kernel, "capability_broker", None)
+            if capability_broker is not None:
+                capability_broker.stop()
+            self._unpublish_service_endpoint("workbench")
 
     async def stop_api_gateway(
         self,
-        timeout: float = _LEGACY_API_GATEWAY_SHUTDOWN_BUDGET_SEC,
+        timeout: float = API_GATEWAY_SHUTDOWN_BUDGET_SEC,
     ) -> bool:
         if self.kernel.api_gateway is None:
+            self._unpublish_service_endpoint("api_gateway")
             return True
         bridge_logger.info("Stopping API Gateway")
         gateway = self.kernel.api_gateway
@@ -735,23 +495,20 @@ class ServiceManager:
                 getattr(
                     gateway,
                     "shutdown_budget_sec",
-                    _LEGACY_API_GATEWAY_SHUTDOWN_BUDGET_SEC,
+                    API_GATEWAY_SHUTDOWN_BUDGET_SEC,
                 )
             ),
         )
-
-        async def _stop_safely():
-            await self._quiesce_legacy_api_gateway(gateway)
-            await gateway.stop()
-
         try:
-            await asyncio.wait_for(_stop_safely(), timeout=shutdown_budget)
+            await asyncio.wait_for(gateway.stop(), timeout=shutdown_budget)
         except (asyncio.TimeoutError, Exception) as e:
             main_logger.warning("API Gateway shutdown warning: %s", e)
             bridge_logger.warning("API Gateway shutdown warning: %s: %s", type(e).__name__, e)
+            self._unpublish_service_endpoint("api_gateway")
             return False
         else:
             self.kernel.api_gateway = None
+            self._unpublish_service_endpoint("api_gateway")
             return True
 
     async def stop_runtime_services(self):

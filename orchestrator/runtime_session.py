@@ -472,6 +472,93 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
     capture_backend_binding(runtime, request_id=request_id)
 
 
+def record_assistant_delivery(
+    runtime: Any,
+    item: Any,
+    *,
+    delivered: bool,
+    assistant_text: str | None = None,
+    transport: str,
+    completion_path: str,
+    disposition: str = "",
+) -> dict[str, Any] | None:
+    """Record a final delivery outcome without disrupting response flow."""
+
+    if not getattr(item, "run_id", None):
+        return None
+    surface = str(getattr(item, "session_surface", None) or "").strip().lower()
+    channel_key = str(
+        getattr(item, "session_channel_key", None) or ""
+    ).strip()
+    if not surface or not channel_key:
+        return None
+    try:
+        return ensure_store(runtime).record_assistant_delivery(
+            item.request_id,
+            delivered=delivered,
+            assistant_text=assistant_text,
+            surface=surface,
+            channel_key=channel_key,
+            transport=transport,
+            completion_path=completion_path,
+            disposition=disposition,
+        )
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(
+                "Failed to persist assistant delivery receipt for %s: %s: %s",
+                getattr(item, "request_id", "unknown"),
+                type(exc).__name__,
+                exc,
+            )
+        return None
+
+
+def telegram_delivery_state_for_update(
+    runtime: Any,
+    update: Any,
+) -> tuple[str | None, bool]:
+    """Return confirmed assistant delivery state for the target Telegram chat."""
+
+    (
+        update_surface,
+        _update_channel,
+        resolved_owner,
+        explicit_session_id,
+    ) = _update_session_route(runtime, update)
+    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    if chat_id is None:
+        query = getattr(update, "callback_query", None)
+        chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+    if chat_id is None:
+        return None, False
+    surface = "telegram"
+    channel_key = str(chat_id)
+    if update_surface != "telegram":
+        explicit_session_id = None
+    session = current_session(
+        runtime,
+        surface=surface,
+        channel_key=channel_key,
+        explicit_owner_id=resolved_owner,
+        explicit_session_id=explicit_session_id,
+    )
+    store = ensure_store(runtime)
+    return (
+        store.latest_delivered_assistant_text(
+            session["session_id"],
+            surface=surface,
+            channel_key=channel_key,
+        ),
+        store.has_assistant_delivery_outcome(
+            session["session_id"],
+            surface=surface,
+            channel_key=channel_key,
+        ),
+    )
+
+
 def activate_backend_binding(runtime: Any, item: Any) -> None:
     backend = _active_backend(runtime)
     if backend is None or not getattr(item, "session_id", None):
@@ -525,8 +612,61 @@ def session_workzone(runtime: Any, item: Any | None = None, *, update: Any | Non
     return _session_workzone_path(session)
 
 
+def session_workzone_state(
+    runtime: Any,
+    item: Any | None = None,
+    *,
+    session_id: str | None = None,
+    update: Any | None = None,
+) -> dict[str, Any]:
+    from orchestrator.workzone import normalize_workzone_state
+
+    metadata = getattr(item, "request_metadata", None)
+    if isinstance(metadata, Mapping):
+        snapshot = metadata.get("workzone_snapshot")
+        if isinstance(snapshot, Mapping):
+            return normalize_workzone_state(snapshot)
+    resolved_session_id = str(session_id or getattr(item, "session_id", "") or "")
+    try:
+        if not resolved_session_id and update is not None:
+            resolved_session_id = str(current_session_for_update(runtime, update)["session_id"])
+        if not resolved_session_id:
+            resolved_session_id = str(runtime.default_session_id)
+        store = ensure_store(runtime)
+        getter = getattr(store, "get_workzone_set", None)
+        if callable(getter):
+            return normalize_workzone_state(getter(resolved_session_id))
+        session = store.get_session(resolved_session_id)
+    except (AttributeError, SessionNotFound):
+        return {"session_id": resolved_session_id, "revision": 0, "slots": []}
+    value = str(session.get("workzone") or "").strip()
+    return normalize_workzone_state(
+        {
+            "session_id": resolved_session_id,
+            "slots": (
+                [{"slot_id": "main", "path": value, "enabled": True}]
+                if value
+                else []
+            ),
+        }
+    )
+
+
+def apply_session_workzones(runtime: Any, session_id: str) -> dict[str, Any]:
+    from orchestrator import runtime_workzone
+
+    state = session_workzone_state(runtime, session_id=str(session_id))
+    runtime_workzone.install_runtime_state(runtime, state)
+    sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
+    if callable(sync):
+        sync()
+    return state
+
+
 def apply_item_workzone(runtime: Any, item: Any) -> None:
-    runtime._workzone_dir = session_workzone(runtime, item)
+    from orchestrator import runtime_workzone
+
+    runtime_workzone.install_runtime_state(runtime, session_workzone_state(runtime, item))
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     if callable(sync):
         sync()
@@ -609,7 +749,7 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
     session = ensure_store(runtime).create_session(
         owner_id=resolved_owner, agent_id=runtime.name, title="New session"
     )
-    previous_workzone = getattr(runtime, "_workzone_dir", None)
+    previous_workzones = getattr(runtime, "_workzone_state", None)
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     logger = getattr(runtime, "logger", None)
     try:
@@ -617,14 +757,14 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
         _prepare_clean_context(
             runtime, disable_saved_memory=False, clear_session_primer=True
         )
-        runtime._workzone_dir = None
-        if callable(sync):
-            sync()
+        apply_session_workzones(runtime, session["session_id"])
         await _bind_session(runtime, update, session["session_id"])
     except Exception:  # noqa: BLE001 - backend adapters expose heterogeneous failures
         if logger is not None:
             logger.exception("Could not activate new Session safely")
-        runtime._workzone_dir = previous_workzone
+        from orchestrator import runtime_workzone
+
+        runtime_workzone.install_runtime_state(runtime, previous_workzones)
         if callable(sync):
             try:
                 sync()
@@ -761,10 +901,7 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
     await _bind_session(runtime, update, session["session_id"])
     _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     await _reset_cli_backend(runtime, reason="cmd_use_session")
-    runtime._workzone_dir = _session_workzone_path(session)
-    sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
-    if callable(sync):
-        sync()
+    apply_session_workzones(runtime, session["session_id"])
     await runtime._reply_text(
         update,
         ui_language.tr(
@@ -810,10 +947,7 @@ async def cmd_archive(runtime: Any, update: Any, context: Any) -> None:
         runtime, disable_saved_memory=False, clear_session_primer=True
     )
     await _reset_cli_backend(runtime, reason="cmd_archive_session")
-    runtime._workzone_dir = _session_workzone_path(default)
-    sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
-    if callable(sync):
-        sync()
+    apply_session_workzones(runtime, default["session_id"])
     await runtime._reply_text(
         update,
         ui_language.tr("session.archived"),
@@ -1016,6 +1150,7 @@ __all__ = [
     "accept_request",
     "activate_backend_binding",
     "apply_item_workzone",
+    "apply_session_workzones",
     "bridge_recent_exchanges",
     "capture_backend_binding",
     "cmd_archive",
@@ -1036,10 +1171,13 @@ __all__ = [
     "promote_sessions",
     "promotion_is_due",
     "recent_exchanges",
+    "record_assistant_delivery",
     "record_working_exchange",
     "request_route_for_update",
     "reset_for_retry",
     "session_memory_store",
     "session_workzone",
+    "session_workzone_state",
     "start_automatic_promotion",
+    "telegram_delivery_state_for_update",
 ]

@@ -79,7 +79,7 @@ async def test_bash_nonzero_exit_is_failed_not_false_success(
 ) -> None:
     registry = _registry(tmp_path, "bash")
 
-    async def fake_dispatch(tool_name, arguments):
+    async def fake_dispatch(tool_name, arguments, **_kwargs):
         assert tool_name == "bash"
         assert arguments == {"command": "false"}
         return BuiltinExecutionResult(
@@ -129,7 +129,7 @@ async def test_scheduler_without_gateway_is_unavailable_and_not_retryable(
 ) -> None:
     registry = _registry(tmp_path, "hashi_scheduler_list")
 
-    async def fake_dispatch(_tool_name, _arguments):
+    async def fake_dispatch(_tool_name, _arguments, **_kwargs):
         return "Error: HASHI Workbench API is unavailable in this gateway context"
 
     monkeypatch.setattr(registry, "_dispatch", fake_dispatch)
@@ -178,7 +178,7 @@ async def test_rejected_patch_is_failed_and_known_no_change(
 ) -> None:
     registry = _registry(tmp_path, "apply_patch")
 
-    async def fake_dispatch(_tool_name, _arguments):
+    async def fake_dispatch(_tool_name, _arguments, **_kwargs):
         return "Error: patch rejected (dry-run):\nhunk failed"
 
     monkeypatch.setattr(registry, "_dispatch", fake_dispatch)
@@ -198,7 +198,7 @@ async def test_third_identical_query_warns_and_writes_one_row_per_call(
 ) -> None:
     registry = _registry(tmp_path, "file_read")
 
-    async def fake_dispatch(_tool_name, _arguments):
+    async def fake_dispatch(_tool_name, _arguments, **_kwargs):
         return "same result"
 
     monkeypatch.setattr(registry, "_dispatch", fake_dispatch)
@@ -244,7 +244,7 @@ async def test_poll_repeat_warns_with_backoff_but_never_stops(
     registry = _registry(tmp_path, "background_job_status")
     calls = 0
 
-    async def fake_dispatch(_tool_name, _arguments):
+    async def fake_dispatch(_tool_name, _arguments, **_kwargs):
         nonlocal calls
         calls += 1
         return '{"status":"running"}'
@@ -266,7 +266,7 @@ async def test_repeated_side_effect_warns_after_execution(tmp_path, monkeypatch)
     registry = _registry(tmp_path, "telegram_send")
     calls = 0
 
-    async def fake_dispatch(_tool_name, _arguments):
+    async def fake_dispatch(_tool_name, _arguments, **_kwargs):
         nonlocal calls
         calls += 1
         return "sent"
@@ -291,7 +291,7 @@ async def test_idempotent_action_is_rechecked_not_short_circuited(
     registry = _registry(tmp_path, "file_write")
     calls = 0
 
-    async def fake_dispatch(_tool_name, _arguments):
+    async def fake_dispatch(_tool_name, _arguments, **_kwargs):
         nonlocal calls
         calls += 1
         return '{"changed":false}'
@@ -315,7 +315,7 @@ async def test_her_receipt_stays_internal_to_five_field_result(
 ) -> None:
     registry = _registry(tmp_path, "file_read")
 
-    async def fake_dispatch(_tool_name, _arguments):
+    async def fake_dispatch(_tool_name, _arguments, **_kwargs):
         return "observed"
 
     monkeypatch.setattr(registry, "_dispatch", fake_dispatch)

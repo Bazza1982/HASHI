@@ -28,27 +28,73 @@ class RuntimeContractError(RuntimeError):
 CORE_SOURCE_PATHS = (
     "__main__.py",
     "main.py",
+    "adapters/base.py",
+    "adapters/registry.py",
     "adapters/stream_events.py",
+    "adapters/timeout_policy.py",
+    "adapters/xai_imagine.py",
+    "adapters/xai_oauth_credentials.py",
     "orchestrator/activity_digest.py",
+    "orchestrator/agent_directory.py",
+    "orchestrator/agent_lifecycle.py",
+    "orchestrator/api_gateway.py",
+    "orchestrator/api_gateway_config.py",
+    "orchestrator/api_gateway_preflight.py",
     "orchestrator/bootstrap_logging.py",
+    "orchestrator/backend_preflight.py",
+    "orchestrator/background_jobs.py",
+    "orchestrator/bridge_protocol.py",
+    "orchestrator/capability_broker.py",
     "orchestrator/config.py",
+    "orchestrator/config_admin.py",
     "orchestrator/enterprise/profile.py",
+    "orchestrator/file_permissions.py",
+    "orchestrator/flexible_backend_registry.py",
     "orchestrator/function_generation.py",
-    "orchestrator/hot_reload.py",
+    "orchestrator/function_worker_bootstrap.py",
+    "orchestrator/function_worker_host.py",
+    "orchestrator/function_worker_protocol.py",
+    "orchestrator/function_worker_supervisor.py",
+    "orchestrator/her_v2/models.py",
+    "orchestrator/her_v2/request_policy.py",
+    "orchestrator/function_contract.py",
     "orchestrator/instance_lock.py",
+    "orchestrator/job_ownership.py",
     "orchestrator/lifecycle_state.py",
     "orchestrator/manager_registry.py",
+    "orchestrator/model_catalog.py",
+    "orchestrator/multimodal_contract.py",
     "orchestrator/onboarding_gate.py",
     "orchestrator/pathing.py",
+    "orchestrator/process_execution.py",
     "orchestrator/process_resources.py",
     "orchestrator/reboot_manager.py",
+    "orchestrator/runtime_common.py",
     "orchestrator/runtime_contract.py",
     "orchestrator/runtime_defaults.py",
     "orchestrator/pcm.py",
+    "orchestrator/runtime_pending.py",
+    "orchestrator/scheduler.py",
+    "orchestrator/scheduler_recovery.py",
+    "orchestrator/service_endpoints.py",
     "orchestrator/shutdown_manager.py",
+    "orchestrator/service_manager.py",
+    "orchestrator/skill_manager.py",
     "orchestrator/startup_manager.py",
+    "orchestrator/superloop_interlock.py",
+    "orchestrator/superloop_issues.py",
+    "orchestrator/superloop_runner.py",
+    "orchestrator/superloop_scheduler.py",
+    "orchestrator/superloop_store.py",
+    "orchestrator/superloop_taskboard.py",
+    "orchestrator/superloop_validator.py",
+    "orchestrator/superloop_waits.py",
+    "orchestrator/telegram_delivery_failover.py",
+    "orchestrator/telegram_ingress.py",
+    "orchestrator/telegram_stream_policy.py",
     "orchestrator/terminal_console.py",
     "orchestrator/ui_language.py",
+    "orchestrator/whatsapp_manager.py",
 )
 
 
@@ -60,6 +106,9 @@ class RuntimePolicy:
     portable_build_date: str
     core_api: int
     function_api: int
+    worker_model: str
+    worker_protocol: int
+    generation_schema: int
 
     @property
     def python_text(self) -> str:
@@ -91,10 +140,14 @@ class RuntimeFingerprint:
     pointer_bits: int
     executable: str
     environment_prefix: str
+    runtime_policy_digest: str
     dependency_digest: str
     core_source_digest: str
     core_api: int
     function_api: int
+    worker_model: str
+    worker_protocol: int
+    generation_schema: int
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -112,17 +165,22 @@ class RuntimeFingerprint:
             pointer_bits=int(value["pointer_bits"]),
             executable=str(value["executable"]),
             environment_prefix=str(value["environment_prefix"]),
+            runtime_policy_digest=str(value["runtime_policy_digest"]),
             dependency_digest=str(value["dependency_digest"]),
             core_source_digest=str(value["core_source_digest"]),
             core_api=int(value["core_api"]),
             function_api=int(value["function_api"]),
+            worker_model=str(value["worker_model"]),
+            worker_protocol=int(value["worker_protocol"]),
+            generation_schema=int(value["generation_schema"]),
         )
 
     @property
     def runtime_id(self) -> str:
         return (
             f"{self.implementation}-{self.python_minor}/core-{self.core_api}/"
-            f"function-{self.function_api}/{self.cache_tag}/{self.machine}"
+            f"function-{self.function_api}/worker-{self.worker_protocol}/"
+            f"{self.cache_tag}/{self.machine}"
         )
 
 
@@ -163,6 +221,9 @@ def load_runtime_policy(code_root: Path) -> RuntimePolicy:
         "portable-build-date",
         "core-api",
         "function-api",
+        "worker-model",
+        "worker-protocol",
+        "generation-schema",
     }
     missing = sorted(required - values.keys())
     if missing:
@@ -194,6 +255,9 @@ def load_runtime_policy(code_root: Path) -> RuntimePolicy:
         portable_build_date=portable_build_date,
         core_api=int(values["core-api"]),
         function_api=int(values["function-api"]),
+        worker_model=values["worker-model"].strip().lower(),
+        worker_protocol=int(values["worker-protocol"]),
+        generation_schema=int(values["generation-schema"]),
     )
 
 
@@ -216,6 +280,37 @@ def dependency_digest() -> str:
         f"{name}=={version}" for name, version in sorted(installed.items())
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def runtime_policy_digest(code_root: Path, policy: RuntimePolicy) -> str:
+    """Hash the complete machine policy and its exact dependency lock."""
+
+    lock_path = Path(code_root).resolve() / policy.standard_lock
+    try:
+        lock_bytes = lock_path.read_bytes()
+    except OSError as exc:
+        raise RuntimeContractError(
+            f"HASHI standard dependency lock is unavailable: {lock_path}: {exc}"
+        ) from exc
+    payload = {
+        "implementation": policy.implementation,
+        "python": policy.python_text,
+        "standard_lock": policy.standard_lock,
+        "portable_build_date": policy.portable_build_date,
+        "core_api": policy.core_api,
+        "function_api": policy.function_api,
+        "worker_model": policy.worker_model,
+        "worker_protocol": policy.worker_protocol,
+        "generation_schema": policy.generation_schema,
+        "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 _LOCKED_REQUIREMENT = re.compile(
@@ -363,10 +458,14 @@ def current_runtime_fingerprint(
         pointer_bits=struct.calcsize("P") * 8,
         executable=executable,
         environment_prefix=str(Path(sys.prefix).resolve()),
+        runtime_policy_digest=runtime_policy_digest(code_root, policy),
         dependency_digest=dependency_digest(),
         core_source_digest=core_source_digest(code_root),
         core_api=policy.core_api,
         function_api=policy.function_api,
+        worker_model=policy.worker_model,
+        worker_protocol=policy.worker_protocol,
+        generation_schema=policy.generation_schema,
     )
 
 
@@ -395,6 +494,35 @@ def validate_runtime_policy(
         failures.append("platform ABI is unavailable")
     if fingerprint.pointer_bits not in {32, 64}:
         failures.append(f"pointer_bits={fingerprint.pointer_bits}")
+    if fingerprint.core_api != policy.core_api:
+        failures.append(
+            f"core_api={fingerprint.core_api} (required {policy.core_api})"
+        )
+    if fingerprint.function_api != policy.function_api:
+        failures.append(
+            f"function_api={fingerprint.function_api} "
+            f"(required {policy.function_api})"
+        )
+    if policy.worker_model != "per-agent-process":
+        failures.append(
+            f"policy worker_model={policy.worker_model!r} "
+            "(required 'per-agent-process')"
+        )
+    if fingerprint.worker_model != policy.worker_model:
+        failures.append(
+            f"worker_model={fingerprint.worker_model!r} "
+            f"(required {policy.worker_model!r})"
+        )
+    if fingerprint.worker_protocol != policy.worker_protocol:
+        failures.append(
+            f"worker_protocol={fingerprint.worker_protocol} "
+            f"(required {policy.worker_protocol})"
+        )
+    if fingerprint.generation_schema != policy.generation_schema:
+        failures.append(
+            f"generation_schema={fingerprint.generation_schema} "
+            f"(required {policy.generation_schema})"
+        )
     if failures:
         raise RuntimeContractError(
             "HASHI Core runtime contract rejected this process: "
@@ -421,10 +549,14 @@ def compare_runtime_fingerprints(
         "pointer_bits",
         "executable",
         "environment_prefix",
+        "runtime_policy_digest",
         "dependency_digest",
         "core_source_digest",
         "core_api",
         "function_api",
+        "worker_model",
+        "worker_protocol",
+        "generation_schema",
     )
     mismatches = [
         f"{field}: core={getattr(core, field)!r}, candidate={getattr(candidate, field)!r}"

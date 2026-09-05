@@ -80,6 +80,19 @@ def test_user_language_preference_is_shared_across_agent_runtimes(tmp_path) -> N
     assert ui_language.preferred_locale(first, update) == "en"
 
 
+def test_session_owner_id_uses_same_user_language_preference(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    ui_language.set_preferred_locale(runtime, "zh-CN", actor_id=42)
+
+    assert ui_language.preferred_locale(runtime, actor_id="user:42") == "zh-CN"
+    assert (
+        ui_language.actor_id_from_update(
+            SimpleNamespace(_hashi_session_owner_id="user:42")
+        )
+        == "42"
+    )
+
+
 def test_instance_default_is_used_when_user_has_no_saved_preference(tmp_path) -> None:
     runtime = _runtime(tmp_path)
     runtime.global_config.ui_language = "zh-CN"
@@ -130,8 +143,13 @@ def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) ->
     assert group_keyboard.inline_keyboard[-1][0].text == "新建群组"
 
     assert "<b>语音风格</b> · 自定义" in voice_text
-    assert "<b>回复内容</b> · 语音和文字" in voice_text
-    assert [button.text for button in voice_keyboard[0]] == ["自动", "原生语音"]
+    assert "<b>语音生成方式</b>" in voice_text
+    assert "将原始音频直接交给音频模型" in voice_text
+    assert "<b>原生语音回复形式</b> · 语音 + 文字 · 仅控制原生语音回复" in voice_text
+    assert [button.text for button in voice_keyboard[0]] == [
+        "原生音频模型",
+        "文字模型 + TTS",
+    ]
 
     assert "<b>当前</b> · 核心模型" in wrapper_text
     assert "<b>角色 / 风格槽位</b>" in wrapper_text
@@ -239,7 +257,7 @@ def test_backend_wrapper_is_localized_but_exact_provider_error_is_unchanged() ->
 
     text = format_backend_error_for_user("her-v2", raw, locale="zh-CN")
 
-    assert text.startswith("后端返回的准确错误：")
+    assert text.startswith("错误详情：")
     assert raw in text
 
 

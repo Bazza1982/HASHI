@@ -3,18 +3,43 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import secrets
 import threading
 import time
+import hashlib
 from multiprocessing import AuthenticationError
 from multiprocessing.connection import Client
 from pathlib import Path
 from typing import Any
 
 
+def _bridge_namespace() -> str:
+    instance_id = str(os.environ.get("HASHI_INSTANCE_ID") or "").strip()
+    code_root = Path(__file__).resolve().parent.parent
+    if not instance_id:
+        candidates = []
+        bridge_home = str(os.environ.get("BRIDGE_HOME") or "").strip()
+        if bridge_home:
+            candidates.append(Path(bridge_home) / "agents.json")
+        candidates.append(code_root / "agents.json")
+        for path in candidates:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+                instance_id = str((payload.get("global") or {}).get("instance_id") or "").strip()
+            except (OSError, json.JSONDecodeError, AttributeError):
+                continue
+            if instance_id:
+                break
+    slug = re.sub(r"[^a-z0-9_-]+", "-", instance_id.casefold()).strip("-")
+    root_digest = hashlib.sha256(str(code_root).casefold().encode("utf-8")).hexdigest()[:8]
+    return f"{slug or 'instance'}-{root_digest}"
+
+
+BRIDGE_NAMESPACE = _bridge_namespace()
 DEFAULT_WINDOWS_PIPE = os.environ.get(
     "HASHI_BROWSER_BRIDGE_PIPE",
-    r"\\.\pipe\hashi-browser-bridge",
+    rf"\\.\pipe\hashi-browser-bridge-{BRIDGE_NAMESPACE}",
 )
 DEFAULT_WINDOWS_AUTH_FILE = Path(
     os.environ.get(
@@ -23,8 +48,15 @@ DEFAULT_WINDOWS_AUTH_FILE = Path(
             Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
             / "HASHI"
             / "browser_bridge"
+            / BRIDGE_NAMESPACE
             / "bridge-auth.key"
         ),
+    )
+)
+DEFAULT_UNIX_SOCKET = Path(
+    os.environ.get(
+        "HASHI_BROWSER_BRIDGE_SOCKET",
+        str(Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / f"hashi-browser-bridge-{BRIDGE_NAMESPACE}.sock"),
     )
 )
 

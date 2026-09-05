@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -290,7 +291,9 @@ async def test_send_long_message_error_uses_plain_summary(tmp_path):
     assert message["disable_notification"] is True
     assert "parse_mode" not in message
     assert "Backend error (codex-cli) | req-err" in message["text"]
-    assert "Full log (local):" in message["text"]
+    assert "Diagnostic log (local):" in message["text"]
+    assert "search the log for HASHI request ID req-err" in message["text"]
+    assert "/verbose off" not in message["text"]
     assert "... (truncated) ..." in message["text"]
 
 
@@ -303,7 +306,7 @@ def test_format_backend_error_for_user_adds_upgrade_action_for_version_gated_mod
 
     text = runtime_delivery.format_backend_error_for_user("codex-cli", raw)
 
-    assert "Exact backend failure: The 'gpt-5.6-sol' model requires a newer version of Codex." in text
+    assert "Error details: The 'gpt-5.6-sol' model requires a newer version of Codex." in text
     assert "Action: this model is not supported by the installed Codex." in text
     assert "Raw error:" in text
 
@@ -327,9 +330,42 @@ async def test_send_long_message_formats_backend_failure_once(tmp_path):
 
     assert chunks == 1
     message = runtime.app.bot.messages[0]["text"]
-    assert message.count("Exact backend failure:") == 1
+    assert message.count("Error details:") == 1
     assert "Action: this model is not supported by the installed Codex." in message
     assert "Raw error:" in message
+
+
+@pytest.mark.asyncio
+async def test_backend_error_exposes_actionable_typed_context_in_chinese(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.ui_language = "zh-CN"
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="[PROVIDER_BAD_REQUEST] The provider rejected the request as invalid.",
+        request_id="req-sunny-0003",
+        purpose="error",
+        error_context={
+            "error_code": "PROVIDER_BAD_REQUEST",
+            "error_retryable": False,
+            "http_status": 400,
+            "provider_request_id": "provider-abc",
+            "side_effects_possible": True,
+        },
+    )
+
+    assert chunks == 1
+    message = runtime.app.bot.messages[0]["text"]
+    assert "错误详情：[PROVIDER_BAD_REQUEST]" in message
+    assert "HTTP 状态：400" in message
+    assert "服务提供方请求编号：provider-abc" in message
+    assert "任务可能已部分执行" in message
+    assert "原样重试通常无法解决问题" in message
+    assert "诊断日志：" in message
+    assert "HASHI 请求编号 req-sunny-0003" in message
+    assert "准确错误" not in message
+    assert "/verbose off" not in message
 
 
 @pytest.mark.asyncio
@@ -346,6 +382,45 @@ async def test_send_long_message_skips_retry_after_without_raising(tmp_path):
     assert chunks == 0
     assert runtime.app.bot.messages == []
     assert any("Telegram flood control" in message for _level, message in runtime.telegram_logger.messages)
+
+
+@pytest.mark.asyncio
+async def test_send_long_message_resumes_immediately_after_retry_wait(tmp_path):
+    runtime = _runtime(tmp_path)
+    state_path = tmp_path / "state" / "telegram_delivery_health.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "test-agent": {
+                        "token_key": "telegram:test-agent",
+                        "status": "blocked",
+                        "blocked_until": "2000-01-01T00:00:00+00:00",
+                        "retry_after_s": 5,
+                        "incident_id": "tg-test-agent-expired",
+                        "per_chat": {},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="normal business is back",
+        request_id="req-after-wait",
+        purpose="response",
+    )
+
+    assert chunks == 1
+    assert runtime.app.bot.messages[0]["text"] == "normal business is back"
+    record = json.loads(state_path.read_text(encoding="utf-8"))["agents"]["test-agent"]
+    assert record["status"] == "healthy"
+    assert not (tmp_path / "undelivered" / "req-after-wait.md").exists()
 
 
 @pytest.mark.asyncio

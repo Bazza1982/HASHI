@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from tools.browser_bridge_transport import (
+    DEFAULT_UNIX_SOCKET,
     DEFAULT_WINDOWS_AUTH_FILE,
     DEFAULT_WINDOWS_PIPE,
     is_windows_pipe,
@@ -21,9 +22,7 @@ from tools.browser_bridge_transport import (
 
 logger = logging.getLogger("hashi.browser_extension_bridge")
 
-DEFAULT_SOCKET_PATH = Path(
-    os.environ.get("HASHI_BROWSER_BRIDGE_SOCKET", "/tmp/hashi-browser-bridge.sock")
-)
+DEFAULT_SOCKET_PATH = DEFAULT_UNIX_SOCKET
 DEFAULT_ENDPOINT: str | Path = (
     os.environ.get("HASHI_BROWSER_BRIDGE_ENDPOINT")
     or os.environ.get("HASHI_BROWSER_BRIDGE_SOCKET")

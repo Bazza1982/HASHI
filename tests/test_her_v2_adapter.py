@@ -266,6 +266,97 @@ class _ZeroProvider:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent_mode", ["fixed", "flex"])
+async def test_adapter_prepares_pre_turn_compaction_accounting_in_both_modes(
+    tmp_path,
+    agent_mode,
+):
+    config = _agent_config(tmp_path)
+    config._her_v2_stage_provider = _DirectProvider()
+    global_config = _global_config(tmp_path)
+    from orchestrator import runtime_session
+
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(
+            agent_mode=agent_mode,
+            current_backend=None,
+        ),
+        _request_meta_by_id={},
+        current_request_meta={},
+        global_config=global_config,
+        config=SimpleNamespace(active_backend="her-v2"),
+        workspace_dir=config.workspace_dir,
+        name=config.name,
+    )
+    outer_session = runtime_session.initialize_runtime_sessions(runtime)
+    request_meta = {
+        "request_id": "request-accounting",
+        "hashi_session_id": outer_session["session_id"],
+        "hashi_message_id": "message-accounting",
+        "context_generation": outer_session["context_generation"],
+        "owner_id": outer_session["owner_id"],
+        "session_workspace": str(
+            runtime_session.ensure_store(runtime).session_workspace(
+                outer_session["session_id"],
+                outer_session["context_generation"],
+            )
+        ),
+    }
+    runtime._request_meta_by_id["request-accounting"] = request_meta
+    runtime.current_request_meta = request_meta
+    config._hashi_runtime = runtime
+    adapter = HERv2Adapter(config, global_config)
+    assert await adapter.initialize() is True
+    runtime.backend_manager.current_backend = adapter
+
+    assert adapter.can_record_maintenance_provider_requests() is False
+    assert adapter.ensure_maintenance_provider_accounting(
+        "request-accounting"
+    ) is True
+    session_id = adapter._session_id
+    assert session_id
+    shell = adapter._session_coordinator.store.session(session_id)
+    assert shell["status"] == "accounting"
+    assert shell["hashi_conversation_id"] == outer_session["session_id"]
+    assert runtime_session.ensure_store(runtime).backend_binding(
+        agent_id=config.name,
+        session_id=outer_session["session_id"],
+        context_generation=outer_session["context_generation"],
+        backend_id="her-v2",
+    ) == session_id
+    assert adapter.can_resume_fixed_session() is False
+    assert adapter._session_id == session_id
+
+    # The preflight is idempotent and retains one shell/session ID.
+    assert adapter.ensure_maintenance_provider_accounting(
+        "request-accounting"
+    ) is True
+    assert adapter._session_id == session_id
+
+    # A later request may replace the adapter's current Session while detached
+    # Compact is settling. The request-bound ledger target must not move.
+    adapter._session_id = "unrelated-later-session"
+    assert adapter.record_maintenance_provider_requests(
+        [
+            {
+                "provider_request_id": f"compact-{agent_mode}",
+                "parent_request_id": "request-accounting",
+                "phase": "compact",
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "input": 10,
+                "output": 2,
+                "compact": True,
+            }
+        ]
+    ) == 1
+    assert adapter._session_coordinator.store.usage_summary(session_id)["total"][
+        "provider_requests"
+    ] == 1
+    adapter._session_id = session_id
+
+
+@pytest.mark.asyncio
 async def test_adapter_fixed_backend_keeps_one_session_and_accepts_incremental_turns(
     tmp_path,
 ):
@@ -712,6 +803,21 @@ class _SideEffectFailureProvider(_DirectProvider):
                 "provider stream ended before completion",
                 code=ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT,
                 human_description=("The provider response began but did not complete."),
+                http_status=400,
+                provider_request_id="gateway-reject-side-effect-1",
+                details={
+                    "tool_call_count": 3,
+                    "tool_loop_count": 3,
+                    "provider_http_failure": {
+                        "response": {
+                            "status": 400,
+                            "body": '{"error":{"code":"invalid_tool_result"}}',
+                        },
+                        "transport_audit_refs": [
+                            "hashi-transport:test:client_response_rejected"
+                        ],
+                    },
+                },
             )
         elif request.stage is Stage.FINALISATION:
             payload = {
@@ -986,6 +1092,7 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
     assert response.stream_metadata["her_v2"]["classification"] is None
     assert response.stream_metadata["her_v2"]["plan_id"] is None
+    assert response.stream_metadata["her_v2"]["stage_timings_s"]["direct"] > 0
     assert response.stream_metadata["her_v2"]["effort"] == {
         "configured": "zero",
         "effective": "zero",
@@ -1212,12 +1319,24 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
     recovery_code = ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
     assert response.is_success is False
     assert response.error_code == primary_code
+    assert response.http_status == 400
+    assert response.provider_request_id == "gateway-reject-side-effect-1"
+    assert response.side_effects_possible is True
+    assert response.tool_call_count == 3
+    assert response.tool_loop_count == 3
     assert primary_code in response.error
     assert primary_code in response.text
     assert recovery_code in response.text
     assert "Foreground cleanup:" in response.text
     chain = response.stream_metadata["her_v2"]["failure_chain"]
     assert chain["primary_failure"]["code"] == primary_code
+    assert chain["primary_failure"]["http_status"] == 400
+    assert chain["primary_failure"]["provider_request_id"] == (
+        "gateway-reject-side-effect-1"
+    )
+    assert chain["primary_failure"]["details"]["provider_http_failure"][
+        "response"
+    ]["body"] == '{"error":{"code":"invalid_tool_result"}}'
     assert chain["recovery_decision"]["code"] == recovery_code
     assert chain["recovery_decision"]["automatic_replay_attempted"] is False
     assert chain["foreground_cleanup"]["status"] == "terminated"

@@ -157,6 +157,18 @@ def preferences_path(runtime: Any) -> Path:
     return _bridge_home(runtime) / "state" / "ui_language.json"
 
 
+def _preference_actor_key(value: Any) -> str:
+    """Map Session owner IDs and Telegram actor IDs to one preference key."""
+
+    raw = str(value) if value is not None else ""
+    raw = raw.strip()
+    if raw.casefold().startswith("user:"):
+        session_actor = raw.split(":", 1)[1].strip()
+        if session_actor:
+            return session_actor
+    return raw or "default"
+
+
 def _read_preferences(runtime: Any) -> dict[str, Any]:
     path = preferences_path(runtime)
     with _PREFERENCES_LOCK:
@@ -174,7 +186,7 @@ def _read_preferences(runtime: Any) -> dict[str, Any]:
     return {
         "version": PREFERENCES_VERSION,
         "users": {
-            str(key): normalize_locale(value)
+            _preference_actor_key(key): normalize_locale(value)
             for key, value in users.items()
             if str(key).strip()
         },
@@ -206,15 +218,15 @@ def actor_id_from_update(update: Any | None, *, fallback: Any = None) -> str:
     if update is not None:
         owner_id = getattr(update, "_hashi_session_owner_id", None)
         if owner_id is not None and str(owner_id).strip():
-            return str(owner_id)
+            return _preference_actor_key(owner_id)
         effective_user = getattr(update, "effective_user", None)
         user_id = getattr(effective_user, "id", None)
         if user_id is None:
             query = getattr(update, "callback_query", None)
             user_id = getattr(getattr(query, "from_user", None), "id", None)
         if user_id is not None:
-            return str(user_id)
-    return str(fallback) if fallback is not None and str(fallback).strip() else "default"
+            return _preference_actor_key(user_id)
+    return _preference_actor_key(fallback)
 
 
 def chat_id_from_update(update: Any | None, *, fallback: Any = None) -> int | str | None:

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from adapters import her_habits
+from orchestrator.file_permissions import tighten_fd_permissions
 from orchestrator.her_json_repair import render_json_repair_input
 from orchestrator.process_resources import path_lock as process_path_lock
 
@@ -61,7 +62,7 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         dir=path.parent,
     )
     try:
-        os.fchmod(fd, 0o600)
+        tighten_fd_permissions(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(
                 dict(payload), handle, ensure_ascii=False, indent=2, sort_keys=True
@@ -88,7 +89,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
         dir=path.parent,
     )
     try:
-        os.fchmod(fd, 0o600)
+        tighten_fd_permissions(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(str(text or ""))
             if text and not text.endswith("\n"):

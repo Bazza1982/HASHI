@@ -33,9 +33,9 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 
 from orchestrator.process_execution import process_is_alive
-from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -160,6 +160,17 @@ class FilePushPayload(BaseModel):
 
 class HashiStartPayload(BaseModel):
     reason: Optional[str] = None
+
+
+class HashiRestartPayload(BaseModel):
+    reason: Optional[str] = None
+
+
+class HashiRebootPayload(BaseModel):
+    agent: str
+    mode: str = "min"
+    reason: Optional[str] = None
+    fallback_restart: bool = True
 
 
 class PairRequestPayload(BaseModel):
@@ -437,14 +448,15 @@ def _hashi_start_command() -> list[str]:
     raise FileNotFoundError("No supported HASHI launcher found under bin/")
 
 
-def _start_hashi_process() -> dict[str, Any]:
+def _launch_hashi_process(
+    cmd: list[str], *, log_name: str
+) -> dict[str, Any]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
-    cmd = _hashi_start_command()
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "remote_rescue_hashi_start.log"
+    log_path = log_dir / log_name
     log_handle = log_path.open("ab")
     kwargs: dict[str, Any] = {
         "cwd": str(root),
@@ -473,6 +485,49 @@ def _start_hashi_process() -> dict[str, Any]:
     }
 
 
+def _start_hashi_process() -> dict[str, Any]:
+    return _launch_hashi_process(
+        _hashi_start_command(),
+        log_name="remote_rescue_hashi_start.log",
+    )
+
+
+def _hashi_restart_command() -> list[str]:
+    if not _control_hashi_root:
+        raise ValueError("Hashi root is unavailable")
+    root = Path(_control_hashi_root)
+    if platform.system().lower() == "windows":
+        ctl = root / "bin" / "bridge_ctl.ps1"
+        if ctl.exists():
+            return [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ctl),
+                "-Action",
+                "restart",
+                "-Resume",
+            ]
+    launcher = root / "bin" / "bridge-u.sh"
+    if launcher.exists():
+        return [
+            str(launcher),
+            "--resume-last",
+            "--api-gateway",
+            "--force",
+        ]
+    raise FileNotFoundError("No supported HASHI restart launcher found under bin/")
+
+
+def _restart_hashi_process() -> dict[str, Any]:
+    return _launch_hashi_process(
+        _hashi_restart_command(),
+        log_name="remote_rescue_hashi_restart.log",
+    )
+
+
 def _append_rescue_audit(
     *,
     requester: str,
@@ -485,6 +540,10 @@ def _append_rescue_audit(
     log_path: str | None = None,
     status: dict[str, Any] | None = None,
     error: str | None = None,
+    operation: str = "start",
+    agent: str | None = None,
+    mode: str | None = None,
+    fallback_used: bool = False,
 ) -> None:
     if not _control_hashi_root:
         return
@@ -493,6 +552,10 @@ def _append_rescue_audit(
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "requester": requester,
+        "operation": str(operation or "unknown"),
+        "agent": agent,
+        "mode": mode,
+        "fallback_used": bool(fallback_used),
         "reason": reason,
         "reason_truncated": bool(reason_truncated),
         "reason_original_length": reason_original_length,
@@ -513,12 +576,13 @@ def _read_rescue_log(name: str, tail: int = 120) -> dict[str, Any]:
     root = Path(_control_hashi_root)
     files = {
         "start": root / "logs" / "remote_rescue_hashi_start.log",
+        "restart": root / "logs" / "remote_rescue_hashi_restart.log",
         "audit": root / "logs" / "remote_rescue_audit.jsonl",
         "supervisor": root / "logs" / "hashi-remote-supervisor.log",
     }
     key = str(name or "start").strip().lower()
     if key not in files:
-        raise ValueError("log name must be one of: start, audit, supervisor")
+        raise ValueError("log name must be one of: start, restart, audit, supervisor")
     path = files[key]
     try:
         requested_tail = int(tail)
@@ -568,6 +632,19 @@ def _workbench_health_url() -> str:
     return local_http_url(_workbench_port, "/api/health")
 
 
+def _workbench_admin_token() -> str:
+    """Return the local Workbench token without exposing it remotely."""
+
+    if not _control_hashi_root:
+        return ""
+    secrets_path = Path(_control_hashi_root) / "secrets.json"
+    try:
+        data = json.loads(secrets_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return ""
+    return str((data or {}).get("workbench_admin_token") or "").strip()
+
+
 def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
     for host in local_http_hosts():
         req = urllib_request.Request(local_http_url(_workbench_port, "/api/health", host=host), method="GET")
@@ -577,6 +654,48 @@ def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
         except Exception:
             continue
     return None
+
+
+def _request_workbench_reboot(
+    *, agent: str, mode: str, timeout: float = 30.0
+) -> tuple[int, dict[str, Any]]:
+    """Request an ordinary hot reboot through loopback Workbench."""
+
+    normalized_agent = str(agent or "").strip()
+    normalized_mode = str(mode or "").strip().casefold()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", normalized_agent):
+        raise ValueError("agent must be a configured HASHI Agent name")
+    if normalized_mode != "min":
+        raise ValueError("out-of-process reboot control supports mode=min only")
+    body = json.dumps(
+        {"agent": normalized_agent, "command": "/reboot min"}
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    admin_token = _workbench_admin_token()
+    if admin_token:
+        headers["X-Workbench-Token"] = admin_token
+    last_error: Exception | None = None
+    path = "/api/admin/command"
+    for host in local_http_hosts():
+        req = urllib_request.Request(
+            local_http_url(_workbench_port, path, host=host),
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=max(0.5, float(timeout))) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                return int(resp.status), dict(payload or {})
+        except HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                payload = {"ok": False, "error": str(exc)}
+            return int(exc.code), dict(payload or {})
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+    raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
 
 
 def _hashi_control_status() -> dict[str, Any]:
@@ -723,6 +842,8 @@ def create_app(
                 "ok": True,
                 **_redacted_protocol_status(),
                 "rescue_start_enabled": rescue_start_enabled,
+                "rescue_restart_enabled": rescue_start_enabled,
+                "rescue_reboot_enabled": rescue_start_enabled,
                 "rescue_start_requirement": "L3_RESTART",
             }
         return {
@@ -736,6 +857,8 @@ def create_app(
             "lan_mode": is_lan_mode(),
             "protocol_api_state": _protocol_api_state_summary(),
             "rescue_start_enabled": rescue_start_enabled,
+            "rescue_restart_enabled": rescue_start_enabled,
+            "rescue_reboot_enabled": rescue_start_enabled,
             "rescue_start_requirement": "L3_RESTART",
             "trusted_view": True,
         }
@@ -1293,6 +1416,207 @@ def create_app(
             "reason": reason_meta["reason"],
             "reason_truncated": reason_meta["truncated"],
             "status": status,
+        }
+
+    @app.post("/control/hashi/restart")
+    async def hashi_control_restart(request: Request, payload: HashiRestartPayload):
+        """Recover a stuck HASHI core through the independent Remote service."""
+
+        body_bytes = await request.body()
+        client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
+        if not _terminal_executor or not _terminal_executor.allows_level(
+            AuthLevel.L3_RESTART
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": "HASHI restart requires max_terminal_level=L3_RESTART",
+                },
+            )
+        reason_meta = _sanitize_rescue_reason(payload.reason)
+        before = _hashi_control_status()
+        try:
+            started = _restart_hashi_process()
+        except Exception as exc:
+            logger.exception("HASHI rescue restart failed")
+            _append_rescue_audit(
+                requester=client_id,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
+                outcome="failed",
+                status=before,
+                error=str(exc),
+                operation="restart",
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": str(exc)},
+            )
+        deadline = time.monotonic() + 15.0
+        status = _hashi_control_status()
+        while not status["hashi_running"] and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            status = _hashi_control_status()
+        _append_rescue_audit(
+            requester=client_id,
+            reason=reason_meta["reason"],
+            reason_truncated=reason_meta["truncated"],
+            reason_original_length=reason_meta["original_length"],
+            outcome="restart_launched",
+            command=started["command"],
+            pid=started["pid"],
+            log_path=started["log_path"],
+            status=status,
+            operation="restart",
+        )
+        return {
+            "ok": True,
+            "restart_launched": True,
+            "pid": started["pid"],
+            "command": started["command"],
+            "log_path": started["log_path"],
+            "launcher_kind": started.get("launcher_kind"),
+            "platform": started.get("platform"),
+            "reason": reason_meta["reason"],
+            "reason_truncated": reason_meta["truncated"],
+            "status_before": before,
+            "status": status,
+        }
+
+    @app.post("/control/hashi/reboot")
+    async def hashi_control_reboot(request: Request, payload: HashiRebootPayload):
+        """Supervise `/reboot min`, falling back only when HASHI is unreachable."""
+
+        body_bytes = await request.body()
+        client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
+        if not _terminal_executor or not _terminal_executor.allows_level(
+            AuthLevel.L3_RESTART
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": "HASHI reboot rescue requires max_terminal_level=L3_RESTART",
+                },
+            )
+        reason_meta = _sanitize_rescue_reason(payload.reason)
+        try:
+            status_code, command_result = await asyncio.to_thread(
+                _request_workbench_reboot,
+                agent=payload.agent,
+                mode=payload.mode,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": str(exc)},
+            )
+        except ConnectionError as exc:
+            if not payload.fallback_restart:
+                _append_rescue_audit(
+                    requester=client_id,
+                    reason=reason_meta["reason"],
+                    reason_truncated=reason_meta["truncated"],
+                    reason_original_length=reason_meta["original_length"],
+                    outcome="workbench_unreachable",
+                    status=_hashi_control_status(),
+                    error=str(exc),
+                    operation="reboot",
+                    agent=payload.agent,
+                    mode=payload.mode,
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={"ok": False, "error": str(exc)},
+                )
+            try:
+                started = _restart_hashi_process()
+            except Exception as restart_exc:
+                _append_rescue_audit(
+                    requester=client_id,
+                    reason=reason_meta["reason"],
+                    reason_truncated=reason_meta["truncated"],
+                    reason_original_length=reason_meta["original_length"],
+                    outcome="fallback_restart_failed",
+                    status=_hashi_control_status(),
+                    error=str(restart_exc),
+                    operation="reboot",
+                    agent=payload.agent,
+                    mode=payload.mode,
+                    fallback_used=True,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={"ok": False, "error": str(restart_exc)},
+                )
+            _append_rescue_audit(
+                requester=client_id,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
+                outcome="fallback_restart_launched",
+                command=started["command"],
+                pid=started["pid"],
+                log_path=started["log_path"],
+                status=_hashi_control_status(),
+                error=str(exc),
+                operation="reboot",
+                agent=payload.agent,
+                mode=payload.mode,
+                fallback_used=True,
+            )
+            return {
+                "ok": True,
+                "hot_reboot_requested": False,
+                "fallback_restart_launched": True,
+                "pid": started["pid"],
+                "command": started["command"],
+                "log_path": started["log_path"],
+                "reason": reason_meta["reason"],
+            }
+
+        if status_code < 200 or status_code >= 300 or not command_result.get("ok"):
+            _append_rescue_audit(
+                requester=client_id,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
+                outcome="hot_reboot_rejected",
+                status=_hashi_control_status(),
+                error=str(command_result.get("error") or f"HTTP {status_code}"),
+                operation="reboot",
+                agent=payload.agent,
+                mode=payload.mode,
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "error": command_result.get("error") or "hot reboot rejected",
+                    "workbench_status": status_code,
+                },
+            )
+        _append_rescue_audit(
+            requester=client_id,
+            reason=reason_meta["reason"],
+            reason_truncated=reason_meta["truncated"],
+            reason_original_length=reason_meta["original_length"],
+            outcome="hot_reboot_requested",
+            status=_hashi_control_status(),
+            operation="reboot",
+            agent=payload.agent,
+            mode=payload.mode,
+        )
+        return {
+            "ok": True,
+            "hot_reboot_requested": True,
+            "fallback_restart_launched": False,
+            "agent": payload.agent,
+            "mode": payload.mode,
+            "command_result": command_result,
+            "reason": reason_meta["reason"],
         }
 
     # ── File push ────────────────────────────────────────────

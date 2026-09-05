@@ -8,12 +8,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_workbench_backend_uses_stable_wsl_bridge_host_when_available():
+def test_workbench_backend_uses_explicit_non_default_endpoint_without_host_constants():
     script = r"""
-const os = require('node:os');
-os.networkInterfaces = () => ({ stable: [{ address: '10.255.255.254' }] });
 delete process.env.BRIDGE_U_API;
-delete process.env.HASHI_BRIDGE_API_HOST;
+process.env.HASHI_BRIDGE_API_HOST = '172.29.144.7';
 process.env.HASHI_BRIDGE_API_PORT = '18842';
 const config = require('./workbench/ecosystem.config.cjs');
 process.stdout.write(config.apps[0].env.BRIDGE_U_API);
@@ -29,4 +27,4 @@ process.stdout.write(config.apps[0].env.BRIDGE_U_API);
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "http://10.255.255.254:18842"
+    assert result.stdout == "http://172.29.144.7:18842"

@@ -1,259 +1,273 @@
-# HASHI Python Runtime and Function Generation Contract
+# HASHI Core Runtime and Function Worker Contract
 
-Status: accepted for the HASHI3 pilot
+Status: accepted and live-adopted on HASHI3; promotion and external canaries remain gated
 
-Decision date: 2026-09-03
+Decision date: 2026-09-03; revised for Function Workers on 2026-09-04
 
 Owners: HASHI Core maintainers
 
-Scope: process bootstrap, Python and dependency ABI, function-layer adoption,
-rollback, packaging, CI, and release gates
+Current implementation and verification status is recorded in
+[`HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
 
 ## Decision
 
-HASHI Core owns one runtime. Function code may target that runtime; it may not
-select, replace, or relax it.
+HASHI Core owns one mandatory runtime. Functional code runs in replaceable,
+per-Agent Worker processes created by that Core. Functional code may use the
+Core contract; it may not choose a Python version, mutate Core, or share Python
+objects across the process boundary.
 
-The current production contract is:
+The machine-readable authority is `[tool.hashi.runtime]` in `pyproject.toml`:
 
 ```text
-implementation: CPython
-Python:          3.12.13 (approved production runtime)
-compatibility:   >=3.12,<3.13
-standard lock:   constraints/standard-py312.lock
-Core API:        1
-Function API:    1
+implementation:    CPython
+approved Python:   3.12.13
+source range:      >=3.12,<3.13
+standard lock:     constraints/standard-py312.lock
+Core API:          2
+Function API:      2
+Worker model:      per-agent-process
+Worker protocol:   1
+generation schema: 2
 ```
 
-The machine-readable authority is `[tool.hashi.runtime]` in `pyproject.toml`.
-Packaging metadata, launchers, containers, portable builds, documentation and
-CI must agree with that section. `orchestrator.runtime_contract` enforces it;
-tests reject duplicated version claims that drift.
+Python 3.10 and 3.11 are unsupported. Python 3.13 remains a candidate until
+the complete standard, media, voice, OCR, vector, WhatsApp, Remote, Workbench,
+API Gateway and native-extension matrix passes and a planned Core migration is
+approved.
 
-Supported source code targets the 3.12 minor line, but a production Core starts
-only on the approved security patch. Moving to another 3.12 patch is a planned
-Core migration because the interpreter and dependency fingerprint change.
+Source compatibility covers the 3.12 minor line. A deployed Core starts only
+on the approved patch and exact standard dependency lock. Changing even the
+patch version changes the runtime fingerprint and is a planned Core migration.
 
-Windows and macOS portable packages use the approved
-`python-build-standalone` release for the exact security patch. This avoids a
-false dependency on python.org's Windows embeddable archives, which are no
-longer published for source-only 3.12 security releases. Portable packages use
-the bundled `ensurepip` and install the same standard lock as every other
-deployment; legacy `_pth` mutation and downloaded `get-pip.py` are retired.
+## Non-negotiable invariant
 
-Python 3.10 and 3.11 are unsupported. Python 3.13 is a candidate only. It must
-pass the full standard, media, voice, OCR, vector, WhatsApp, Remote, Workbench,
-API Gateway and native-extension profile matrix before a planned Core API
-migration can change the canonical minor.
+> A Function generation can either become READY and replace the selected
+> Worker, or be discarded. It must never modify the running Core or the active
+> Worker generation.
+
+There is no supported state called “Core environment polluted; cold restart
+required.” The architecture prevents that state:
+
+- Core never calls `importlib.reload()` on active project modules;
+- candidate code is imported only in disposable probe and Worker processes;
+- Core communicates with Workers through versioned JSON values, never pickle
+  or shared Python objects;
+- a failed candidate is terminated while existing route handles keep pointing
+  to the previous Worker;
+- an unexpected active Worker exit is recovered from its last immutable
+  generation without replacing Core.
+
+A Core process can still fail because of an operating-system failure, hardware
+failure, or a defect in Core itself. That is a Core incident, not a Function
+reboot recovery mechanism.
 
 ## Runtime identity
 
-At process entry, before any function module is imported, Core first verifies
-the exact Python patch and every package in the standard lock, then records:
+Before importing functional code, Core records an immutable fingerprint:
 
 ```text
-implementation
-Python full and major.minor versions
-sys.implementation.cache_tag
-platform ABI (`SOABI` on POSIX, native-extension suffix on Windows)
-operating system and machine architecture
-pointer width
-resolved interpreter executable
-resolved virtual-environment prefix
-installed-distribution digest
+implementation and exact Python version
+cache tag and platform/native-extension ABI
+operating system, machine architecture and pointer width
+resolved interpreter and virtual-environment prefix
+runtime-policy and dependency-set digests
 protected Core source digest
-Core API and Function API versions
+Core API and Function API
+Worker model, protocol and generation schema
 ```
 
-That immutable record is the `core_runtime_id`. Every candidate staging worker
-must produce an exact match. A difference is a release/deployment error, not a
-hot-reboot error.
+`orchestrator.runtime_contract` loads and enforces this contract before normal
+project imports in `main.py`. Every probe and Worker recomputes the fingerprint
+with the same executable and must exactly match Core.
 
-Platform helpers that run as separate processes are not in-process function
-modules. In particular, `tools.windows_helper` and
-`tools.windows_use_mcp_client` run in their own Windows `uv` environment and
-communicate through their versioned JSON/HTTP boundary. Core must not import
-or materialise those sidecars during `/reboot`; their launcher and protocol
-contracts are tested separately.
+The standard lock defines required production packages. Extra packages may be
+installed for an approved optional profile, but the effective installed set is
+part of `dependency_digest`; Core and every Worker must therefore see the same
+environment.
 
-Examples that require a planned Core migration are:
+## Ownership boundary
 
-- any Python patch or minor change, including 3.12.13 to another patch;
-- replacing the virtual environment or interpreter executable;
-- adding, removing or upgrading a dependency while Core is running;
-- changing platform ABI, CPU architecture or pointer width;
-- editing a protected Core source file;
-- changing Core API or Function API.
+### Stable Core
 
-`/reboot` must reject all of those before it stops an Agent. It must never
-suggest that retrying an in-process reload can repair them.
+Core owns only process and shared-resource authority:
 
-## Core and function ownership
+- process entry, runtime enforcement, paths and instance lock;
+- lifecycle locks, fatal shutdown and external supervision boundary;
+- Telegram long polling, Workbench/API ingress and shared
+  background/scheduler services;
+- immutable generation qualification and artifacts;
+- Worker process supervision, route gates, crash recovery and `/reboot` scope;
+- cross-Agent routing and shared service capability RPC;
+- stable protocol and persistence-schema boundaries.
 
-Core owns:
+The authoritative file manifest is
+`orchestrator.runtime_contract.CORE_SOURCE_PATHS`. Core-source edits invalidate
+the running fingerprint and cannot be adopted by `/reboot`.
 
-- process entry and the runtime check;
-- instance lock and path identity;
-- process-wide lock identities used by overlapping function generations;
-- lifecycle state and fatal shutdown;
-- the manager manifest;
-- function-generation staging, commit and rollback;
-- reboot scope resolution;
-- startup and shutdown coordination;
-- cross-process/cross-instance protocol boundaries.
+Core service objects remain alive during a Function reboot. A feature-specific
+operation reached through Workbench, API Gateway, Scheduler, HChat, background
+jobs or another ingress must cross `AgentRuntimeHandle` into the selected
+Worker. New product behavior must not be added to the stable ingress merely to
+avoid defining an IPC method.
 
-The authoritative Core file manifest is
-`orchestrator.runtime_contract.CORE_SOURCE_PATHS`. The protected-core change
-check imports this tuple instead of maintaining a second list.
+### Function generation
 
-Function space includes loaded project modules below `adapters`, `tools`,
-`orchestrator`, `flow`, `nagare`, `remote`, and `transports`, except the Core
-manifest. The staging worker expands the initial active set to its complete
-cold-import closure. Contract validation resolves every registered backend and
-the WhatsApp transport surface, so an inactive adapter or transport cannot
-evade the release gate.
+Each Agent Worker owns its replaceable behavior, including:
+
+- `FlexibleAgentRuntime`, commands and request execution;
+- backend adapters and provider routing;
+- tools and skills used inside an Agent turn;
+- message rendering, Agent-specific Telegram handlers and outbound delivery;
+- Agent-local memory, media, voice and workbench execution behavior;
+- function-layer transports reached through stable Core capabilities.
+
+`orchestrator.function_generation` starts from the declared operational
+entrypoints, expands every static or literal dynamic import in the functional
+namespace, compiles each source, includes non-Python assets, and hashes the
+result. Protected Core modules are excluded.
+
+The resulting content-addressed artifact lives below
+`state/function_generations/<sha256>`. A Worker reads functional imports from
+that artifact through exact manifest routing; arbitrary `sys.path` shadowing is
+forbidden. The live checkout is reverified before commit so an edit between
+probe and cutover cannot enter service.
+
+### External sidecars
+
+Platform helpers such as `tools.windows_helper` and
+`tools.windows_use_mcp_client` have independent runtimes. They cross a
+versioned JSON/HTTP boundary and are neither Core imports nor Function Worker
+modules. Their Python/dependency policy must be declared and tested by the
+sidecar itself.
+
+## Worker protocol
+
+Core and a Worker use a private duplex byte pipe carrying UTF-8 JSON envelopes:
+
+```text
+version + kind + request id/method/params
+version + kind + response id/ok/result|error
+version + kind + event/payload
+```
+
+Protocol version, message kind, required and unexpected fields, finite numbers
+and a 16 MiB frame limit are validated at both ends. Paths are serialized as
+text. Python instances, exceptions, callables and arbitrary objects are
+rejected rather than pickled.
+
+The Worker lifecycle is:
+
+```text
+BOOTING -> READY -> ACTIVATING -> ACTIVE -> DRAINING -> QUIESCED -> STOPPED
+              \-------------------------------- failure ------------> discarded
+```
+
+READY means the Worker has matched the Core runtime, verified the immutable
+artifact, imported the complete functional closure, validated public
+cross-module identities, constructed the real Agent runtime and initialized
+its backend. It does not yet own the active Core route.
+
+Telegram `getUpdates` offset and long polling remain in Core. Each update is
+converted to JSON and delivered through the stable handle. While a route gate
+is closed, the Core poller holds the update until commit or rollback; a
+candidate cannot fetch, acknowledge or process it early.
 
 ## Transactional `/reboot`
 
-The former implementation used `importlib.reload()` on live module objects.
-After module 34 succeeded and module 35 failed, Python offered no reliable way
-to undo the first 34 mutations. Restoring old Manager pointers therefore did
-not restore the old code generation. That path is retired and now fails
-closed.
+For `min`, a number, `same`, or `max`, Core performs:
 
-The replacement state machine is:
+1. Resolve an immutable target set. Invalid input fails without widening it.
+2. Qualify one generation in an isolated process.
+3. Materialize and verify its immutable artifact.
+4. Spawn one READY candidate Worker for every selected Agent.
+5. Close only those stable route gates and wait for in-flight Core calls.
+6. Quiesce the selected old Workers and their Agent-local ingress.
+7. Reverify runtime, Core and generation fingerprints.
+8. Activate all candidates and require their health receipts.
+9. Acquire every selected route lock, replace all Worker pointers without an
+   await point, then open the gates together.
+10. Publish topology and retire the old Workers after commit.
 
-```text
-DISCOVER
-   -> fingerprint and compile source manifest
-   -> ISOLATED PROBE
-   -> materialise fresh module objects
-   -> validate all cross-module identities
-   -> build the complete Manager bundle
-   -> READY
-   -> quiesce exactly the selected Agent lifecycle scope
-   -> verify the source manifest again
-   -> atomically install module bindings and Manager bundle
-   -> start selected Agent(s)
-   -> refresh and health-check warm services, including enabled transports
-   -> COMMITTED
-```
+Before step 9, any failure terminates all candidates and resumes every old
+Worker that was quiesced. Core objects, unselected Agents, services and route
+pointers retain identity. After step 9, diagnostic publication failures are
+logged but cannot falsely report that an already committed pointer swap was
+rolled back.
 
-Every pre-READY failure becomes `DISCARDED`; no Agent is stopped. The isolated
-probe runs with the exact Core executable and environment prefix and rejects a
-different runtime, dependency set, Core source or API version.
+`/reboot min` and `/reboot N` work in a multi-Agent Core because every Agent has
+an independent Worker and stable handle. Different Agents may intentionally
+run different generation IDs during a staged rollout; health output reports
+that aggregate state as `mixed`.
 
-Candidate materialisation uses new module objects. It never edits an active
-module object with `importlib.reload()`. Canonical bindings and project package
-dictionaries are restored while the candidate is inactive. Candidate imports
-are guarded against file writes, process creation, and thread or asynchronous
-task creation. A function module with import-time operational side effects is
-not reloadable and must be refactored.
+## Failure and recovery rules
 
-At cutover, Core recomputes the complete runtime fingerprint and verifies the
-source digest again to close the edit-between-probe-and-commit window. If
-activation, Agent startup, transport replacement, or warm-service health fails,
-Core restores the previous module map and Manager bundle, tears down any new
-target runtime, restarts the target on the previous generation, and rebuilds
-the prior service generation. A failed candidate is never a reason to
-cold-restart Core.
+- Candidate import, contract, construction or readiness failure: discard it;
+  old Workers are never gated.
+- Drain or activation failure: discard every candidate in that transaction,
+  resume old Workers and reopen the same routes.
+- Candidate loses a previously working Telegram capability: reject it and
+  resume the old Worker.
+- Source or Core changes after qualification: reject before pointer commit.
+- Unexpected active Worker exit: close only that Agent route, start the same
+  immutable generation up to three times, then either restore it or leave the
+  route explicitly failed.
+- Core/Python/dependency/ABI change: reject `/reboot`; use a planned Core
+  migration.
 
-Old and new Agent generations may briefly overlap during a targeted cutover.
-Any lock protecting shared persisted state must therefore come from the
-Core-owned `orchestrator.process_resources` registry. Replaceable module-global
-lock maps are forbidden because they split synchronization across generations.
+No failure silently expands a target set, changes another Agent, or turns an
+unknown state into a claimed rollback.
 
-## Target scope
+## Core migration
 
-`min` and numeric modes resolve to exactly one immutable target. `same` and
-`max` are the only broad modes. Invalid input never falls back to all Agents.
+These require a new Core rather than `/reboot`:
 
-The HASHI3 pilot makes function-generation commit atomic at process scope. A
-targeted cutover is therefore permitted only when its target is the sole live
-Agent. In a multi-Agent process, `min` and numeric modes fail before staging or
-stopping anything; `same` and `max` quiesce the complete live set and may
-commit one process generation. This fail-closed rule prevents an unselected
-old runtime from later importing a module from the new canonical generation.
+- Python patch/minor or interpreter implementation;
+- virtual environment, dependency lock or native ABI;
+- any protected Core source;
+- Core API, Function API, Worker protocol or generation schema.
 
-True targeted switching in a multi-Agent production instance requires an
-independent Function Worker for each Agent. Until that boundary exists and its
-qualification suite passes, the Core must reject the operation rather than
-widen its scope or pretend the mixed-generation state is safe.
+On HASHI3, one controlled cold restart is permitted to load this architecture.
+Production should use an external supervisor and a blue/green handoff when
+zero downtime is required. A Core migration is planned deployment work, never
+the fallback for a failed Function generation.
 
-## Dependency generations
+## Test contract
 
-`requirements.txt` remains the human-maintained input range. The tested
-standard deployment installs `constraints/standard-py312.lock`, generated by:
+Tests protect outcomes rather than the retired implementation. Required
+assertions include:
 
-```bash
-uv pip compile requirements.txt --python-version 3.12 --universal \
-  --output-file constraints/standard-py312.lock
-```
+1. policy, exact Python patch, locks and all fingerprint fields are enforced;
+2. Core enforcement is the first project import in `main.py`;
+3. Core and Function manifests are disjoint and their declared closures exist;
+4. a real isolated probe imports the full functional closure;
+5. artifacts are content-addressed, immutable and reject tampering;
+6. IPC rejects non-JSON values, wrong versions, malformed fields and oversized
+   frames;
+7. READY failure never gates or stops an active Worker;
+8. targeted reboot changes only its Agent in a multi-Agent Core;
+9. broad reboot publishes all selected routes together or restores all old
+   routes;
+10. Core and Core-service object identity survives repeated Function reboots;
+11. a source edit after probe cannot commit;
+12. active Worker death recovers the same artifact or fails that route closed;
+13. Workbench health exposes Core contract plus per-Agent Worker PID,
+    generation, phase, acceptance and liveness;
+14. two live HASHI3 `/reboot` switches succeed under the same Core PID.
 
-Updating the lock is a dependency/Core migration:
+Tests of `importlib.reload()` order, partial module replacement, rebuilt Core
+Managers, warm-service recreation or legacy mixed-class repair are obsolete
+and must be removed with those APIs.
 
-1. regenerate it intentionally;
-2. rebuild a clean environment;
-3. run every applicable profile;
-4. record the new dependency digest;
-5. replace Core through a planned cold or blue/green handoff.
+## Promotion gate
 
-Installing packages into a live Core environment is forbidden. The candidate
-worker will detect the digest change and reject `/reboot`.
+HASHI3 may be promoted to HASHI1/HASHI2 only after:
 
-## Required tests
-
-The release gate must assert outcomes, not implementation trivia:
-
-1. approved CPython 3.12.13 and the standard dependency lock satisfy the policy;
-2. another implementation/minor, platform ABI, architecture, dependency digest,
-   Core digest, or API level is rejected;
-3. the runtime guard precedes every function import in `main.py`;
-4. every registered backend resolves and the complete active import closure
-   succeeds in an isolated process;
-5. provider modules are ordered before consumers and stale cross-generation
-   class/function/module bindings are rejected;
-6. syntax/import/contract/Manager-construction failure does not stop an Agent;
-7. source change after probe cannot commit;
-8. target stop failure never activates a candidate;
-9. target start, transport, and warm-service health failures roll back code,
-   Managers, Agent, and the service generation;
-10. repeated complete generations can be adopted without Core restart;
-11. protected Core modules and process-owned file locks retain object identity
-    across function generations;
-12. a real HASHI3 cold boot, `/reboot min`, API health check and second
-    `/reboot min` succeed under the same Core PID.
-
-Tests whose only assertion was the order or partial progress of
-`importlib.reload()` are obsolete and must be deleted. A passing count from a
-bounded suite is not evidence of compatibility unless these contract tests are
-inside that suite.
-
-## Deployment and recovery
-
-There are only two supported operations:
-
-| Change | Operation |
-|---|---|
-| Function source, same runtime/Core contract | transactional `/reboot` |
-| Python, dependency generation, Core source/API, native ABI | planned Core migration |
-
-A planned Core migration may use one cold restart on a development instance.
-A zero-downtime production deployment should start and health-check a new Core
-under an external supervisor before transferring ports/queues and draining the
-old Core. Neither operation is an emergency repair for a polluted process;
-the function-generation design must prevent that state.
-
-## HASHI3 pilot exit criteria
-
-HASHI3 may be used to validate this contract because its Core can be restarted
-without disrupting HASHI1 or HASHI2. Promotion requires:
-
-- all contract and bounded product tests pass;
-- the protected-core authorization check passes;
-- launchers, CI, container and portable builders select CPython 3.12.13;
-- HASHI3 uses its own environment rather than another instance's virtualenv;
-- two real generation switches succeed under one Core PID;
-- injected candidate failure leaves the live Agent and service health intact;
-- multi-Agent lazy-import isolation is either proven or moved to per-Agent
-  Function Workers.
+- focused runtime, generation, protocol, supervisor, lifecycle, service and
+  reboot suites pass;
+- the curated Core gate and explicit offline product suite pass;
+- protected-Core and runtime-authority checks pass;
+- a real HASHI3 cold start reports CPython 3.12.13 and Worker protocol 1;
+- targeted and repeated live reboots preserve the Core PID and Core services;
+- an injected candidate failure is shown to leave the active generation live;
+- launchers, CI, containers and portable builders agree with
+  `[tool.hashi.runtime]`.

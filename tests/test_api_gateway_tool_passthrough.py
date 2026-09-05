@@ -607,7 +607,167 @@ async def test_gateway_external_stream_marks_activity_on_typed_backend_error(
     ]
     error = next(event["error"] for event in events if "error" in event)
     assert error["code"] == "PROVIDER_MODALITY_UNSUPPORTED"
-    assert error["metadata"] == {"provider_activity": True}
+    assert error["metadata"] == {
+        "provider_activity": True,
+        "tool_call_count": 1,
+        "side_effects_possible": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_text_stream_emits_typed_error_without_success_terminal_or_cache(
+    tmp_path,
+):
+    class _FailedTextAdapter(_ExternalAdapter):
+        async def generate_response(
+            self,
+            *_args,
+            on_stream_event=None,
+            **_kwargs,
+        ):
+            if on_stream_event is not None:
+                await on_stream_event(
+                    StreamEvent(kind=KIND_TEXT_DELTA, summary="partial progress")
+                )
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                error="Selected model is at capacity.",
+                is_success=False,
+                error_code="PROVIDER_CAPACITY_UNAVAILABLE",
+                error_retryable=True,
+                http_status=503,
+                provider_request_id="req_capacity_1",
+            )
+
+    server = _server(tmp_path, _FailedTextAdapter())
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-5.5",
+                "messages": [{"role": "user", "content": "Continue."}],
+                "session_id": "failed-stream-session",
+                "stream": True,
+            },
+        )
+        raw = await response.text()
+
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in raw.splitlines()
+        if line.startswith("data: {")
+    ]
+    error = next(event["error"] for event in events if "error" in event)
+    assert response.status == 200  # SSE headers were committed before provider failure.
+    assert error["code"] == "PROVIDER_CAPACITY_UNAVAILABLE"
+    assert error["status"] == 503
+    assert error["metadata"] == {
+        "provider_activity": True,
+        "retryable": True,
+        "provider_request_id": "req_capacity_1",
+    }
+    assert not any(
+        event.get("choices", [{}])[0].get("finish_reason") == "stop"
+        for event in events
+        if event.get("choices")
+    )
+    assert raw.rstrip().endswith("data: [DONE]")
+    assert server._sessions.get("failed-stream-session") is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_text_sync_uses_typed_backend_status_and_error_contract(tmp_path):
+    class _FailedTextAdapter(_ExternalAdapter):
+        async def generate_response(self, *_args, **_kwargs):
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                error="You've hit your usage limit.",
+                is_success=False,
+                error_code="PROVIDER_QUOTA_EXHAUSTED",
+                error_retryable=True,
+                http_status=429,
+                retry_after_s=30,
+            )
+
+    server = _server(tmp_path, _FailedTextAdapter())
+    response = await server.handle_chat_completions(
+        _Request(
+            {
+                "model": "gpt-5.5",
+                "messages": [{"role": "user", "content": "Continue."}],
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 429
+    assert payload["error"]["message"] == "You've hit your usage limit."
+    assert payload["error"]["type"] == "rate_limit_error"
+    assert payload["error"]["code"] == "PROVIDER_QUOTA_EXHAUSTED"
+    assert payload["error"]["metadata"] == {
+        "retryable": True,
+        "retry_after_s": 30.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_serializes_same_session_before_reading_cached_history(tmp_path):
+    class _SessionAdapter(_ExternalAdapter):
+        def __init__(self):
+            super().__init__()
+            self.prompts = []
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def generate_response(self, prompt, *_args, **_kwargs):
+            self.prompts.append(prompt)
+            turn = len(self.prompts)
+            if turn == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            return BackendResponse(
+                text=f"reply-{turn}",
+                duration_ms=1,
+                is_success=True,
+            )
+
+    adapter = _SessionAdapter()
+    server = _server(tmp_path, adapter)
+    first = asyncio.create_task(
+        server.handle_chat_completions(
+            _Request(
+                {
+                    "model": "gpt-5.5",
+                    "session_id": "serial-session",
+                    "messages": [{"role": "user", "content": "first"}],
+                }
+            )
+        )
+    )
+    await adapter.first_started.wait()
+    second = asyncio.create_task(
+        server.handle_chat_completions(
+            _Request(
+                {
+                    "model": "gpt-5.5",
+                    "session_id": "serial-session",
+                    "messages": [{"role": "user", "content": "second"}],
+                }
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert adapter.prompts == ["User: first"]
+    adapter.release_first.set()
+    await asyncio.gather(first, second)
+
+    assert len(adapter.prompts) == 2
+    assert "User: first" in adapter.prompts[1]
+    assert "Assistant: reply-1" in adapter.prompts[1]
+    assert adapter.prompts[1].endswith("User: second")
 
 
 @pytest.mark.asyncio
@@ -795,8 +955,8 @@ async def test_gateway_pool_passes_xai_static_and_refresh_credentials(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
-    tmp_path, monkeypatch
+async def test_core_gateway_shutdown_drains_active_tool_request_before_adapter_shutdown(
+    tmp_path,
 ):
     events = []
     request_started = asyncio.Event()
@@ -818,28 +978,8 @@ async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
     adapter = _BlockingAdapter()
     server = _server(tmp_path, adapter)
     server._pool = _DrainingPool(adapter)
-    kernel = SimpleNamespace(
-        paths=SimpleNamespace(
-            bridge_home=tmp_path,
-            workspaces_root=tmp_path / "workspaces",
-        ),
-        global_cfg=server.global_config,
-        secrets={},
-        api_gateway=server,
-        enable_api_gateway=True,
-    )
+    kernel = SimpleNamespace(api_gateway=server)
     manager = ServiceManager(kernel)
-    monkeypatch.setattr(
-        manager,
-        "_load_api_gateway_state",
-        lambda: {"enabled": True, "default_model": "gpt-5.5"},
-    )
-
-    async def start_reloaded_gateway(_global_cfg, _secrets):
-        events.append("reloaded_gateway_started")
-        kernel.api_gateway = SimpleNamespace(bind_host="127.0.0.1")
-
-    monkeypatch.setattr(manager, "start_api_gateway", start_reloaded_gateway)
 
     body = {
         "model": "gpt-5.5",
@@ -857,7 +997,7 @@ async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
         )
         await asyncio.wait_for(request_started.wait(), timeout=1)
 
-        reboot_refresh = asyncio.create_task(manager.restart_api_gateway())
+        core_shutdown = asyncio.create_task(manager.stop_api_gateway())
         await asyncio.wait_for(wait_until_draining(), timeout=1)
 
         rejected = await client.post("/v1/chat/completions", json=body)
@@ -870,13 +1010,12 @@ async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
         release_request.set()
         completed = await active_request
         assert completed.status == 200
-        await reboot_refresh
+        assert await core_shutdown is True
 
     assert events == [
         "request_started",
         "request_finished",
         "adapter_pool_shutdown",
-        "reloaded_gateway_started",
     ]
 
 
@@ -1069,6 +1208,102 @@ async def test_external_tools_reject_gateway_session_cache(tmp_path):
     assert response.status == 400
     assert payload["error"]["code"] == "external_tools_session_unsupported"
     assert server._pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_persists_complete_prelease_rejection_evidence(tmp_path):
+    adapter = _ExternalAdapter()
+    server = _server(tmp_path, adapter)
+    body = {
+        "model": "gpt-5.6-luna",
+        "messages": [
+            {
+                "role": "tool",
+                "tool_call_id": "call-missing",
+                "content": "diagnostic output that must remain in the raw log",
+            }
+        ],
+        "tools": [TOOL_SCHEMA],
+        "session_id": "internal-tool-session",
+    }
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={
+                "X-Hashi-Correlation-ID": "req-prelease-log-gap",
+                "X-Hashi-Provider-Call": "4",
+                "X-Hashi-After-Tool-End": "true",
+            },
+            json=body,
+        )
+        rejected_payload = await response.json()
+
+    assert response.status == 400
+    assert rejected_payload["error"]["code"] == "external_tools_session_unsupported"
+    records = [
+        json.loads(line)
+        for line in server.observability_path.read_text(encoding="utf-8").splitlines()
+    ]
+    received = next(
+        row for row in records if row["event"] == "gateway_http_request_received"
+    )
+    assert received["upstream_request_id"] == "req-prelease-log-gap"
+    assert received["provider_call"] == "4"
+    assert received["after_tool_end"] is True
+    assert json.loads(received["body"])["messages"] == body["messages"]
+    assert received["body_bytes"] > 0
+    assert received["body_sha256"]
+
+    rejected = next(row for row in records if row["event"] == "request_rejected")
+    assert rejected["gateway_request_id"] == received["gateway_request_id"]
+    assert rejected["validation_stage"] == "continuation_contract"
+    assert rejected["status"] == 400
+    assert json.loads(rejected["body"]) == rejected_payload
+    assert rejected["provider_call"] == "4"
+    assert rejected["after_tool_end"] is True
+    assert response.headers["X-Hashi-Gateway-Request-ID"] == received[
+        "gateway_request_id"
+    ]
+    assert response.headers["X-Hashi-Rejection-Stage"] == "continuation_contract"
+    assert all(row["event"] != "session_lease_acquired" for row in records)
+    assert all(row["event"] != "request_received" for row in records)
+    assert server._pool.calls == []
+
+
+def test_gateway_mandatory_observability_uses_fallback_and_fails_closed(
+    tmp_path,
+):
+    server = _server(tmp_path, _ExternalAdapter())
+    blocked_primary = tmp_path / "blocked-primary-log"
+    blocked_primary.mkdir()
+    server.observability_path = blocked_primary
+    server.observability_fallback_path = tmp_path / "fallback.jsonl"
+
+    server._observe(
+        "mandatory_test_event",
+        required=True,
+        gateway_request_id="apireq-fallback",
+    )
+
+    fallback_record = json.loads(
+        server.observability_fallback_path.read_text(encoding="utf-8").strip()
+    )
+    assert fallback_record["event"] == "mandatory_test_event"
+    assert fallback_record["gateway_request_id"] == "apireq-fallback"
+
+    blocked_fallback = tmp_path / "blocked-fallback-log"
+    blocked_fallback.mkdir()
+    server.observability_fallback_path = blocked_fallback
+    with pytest.raises(
+        RuntimeError,
+        match="mandatory observability persistence failed",
+    ):
+        server._observe(
+            "unpersistable_test_event",
+            required=True,
+            gateway_request_id="apireq-fail-closed",
+        )
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,13 @@ def _manager(tmp_path: Path) -> VoiceManager:
             {
                 "engine": "openrouter-api",
                 "model": "openai/gpt-audio-mini",
+                "input_modalities": ["text", "audio"],
+                "input_transports": {"audio": ["inline"]},
+                "input_formats": {"audio": ["wav"]},
+                "output_modalities": ["text", "audio"],
+                "output_formats": {"audio": ["pcm16"]},
+                "output_streaming": "sse",
+                "api_surface": "chat_completions",
                 "supported_voices": [
                     "alloy",
                     "ash",
@@ -68,9 +75,13 @@ def test_voice_modes_coordinate_native_and_legacy_tts_state(tmp_path):
     assert manager.native_policy["mode"] == "tts"
 
     manager.set_reply_mode("auto")
-    assert manager.get_reply_mode() == "auto"
+    assert manager.get_reply_mode() == "native"
     assert manager.is_enabled() is False
     assert manager.native_audio_enabled() is True
+    assert manager.native_policy["provider"] == "openrouter-api"
+    assert manager.native_policy["model"] == "openai/gpt-audio-mini"
+    assert manager.native_policy["voice"] == "shimmer"
+    assert manager.get_voice_profile_id() == "warm_female"
 
     manager.set_reply_mode("off")
     assert manager.get_reply_mode() == "off"
@@ -78,7 +89,28 @@ def test_voice_modes_coordinate_native_and_legacy_tts_state(tmp_path):
     assert manager.native_audio_enabled() is False
 
 
-def test_voice_menu_is_compact_two_by_two_mode_and_profile_picker(tmp_path):
+def test_native_mode_fails_closed_without_a_complete_audio_capability(tmp_path):
+    manager = VoiceManager(
+        tmp_path / "workspace",
+        tmp_path / "media",
+        native_capabilities=[
+            {
+                "engine": "text-api",
+                "model": "text-only",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+            }
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="no compatible audio model"):
+        manager.set_reply_mode("native")
+
+    assert manager.get_reply_mode() == "off"
+    assert manager.state_path.exists() is False
+
+
+def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_path):
     manager = _manager(tmp_path)
     manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")
     manager.set_reply_mode("auto")
@@ -89,25 +121,28 @@ def test_voice_menu_is_compact_two_by_two_mode_and_profile_picker(tmp_path):
     menu = manager.voice_menu_text()
     keyboard = runtime._voice_keyboard().inline_keyboard
 
-    assert "<b>Current</b> · <b>AUTO</b>" in menu
+    assert "<b>Current</b> · <b>NATIVE</b>" in menu
+    assert "<b>Voice generation</b>" in menu
+    assert "Voice messages go directly to an audio model" in menu
+    assert "Speech is transcribed, a text model answers" in menu
     assert "<b>Voice</b> · 👩 Clear" in menu
-    assert "<b>Reply</b> · Audio + text" in menu
+    assert "<b>Native reply format</b> · Audio + text · native replies only" in menu
     assert "Native target" not in menu
     assert "Retention" not in menu
     assert "Audio-model tools" not in menu
 
     assert len(keyboard) == 5
-    assert all(len(row) == 2 for row in keyboard)
+    assert [len(row) for row in keyboard] == [2, 1, 2, 2, 2]
     assert [[button.text for button in row] for row in keyboard] == [
-        ["✓ Auto", "Native"],
-        ["TTS", "Off"],
+        ["✓ Native audio model", "Text model + TTS"],
+        ["Voice off"],
         ["✓ Audio + text", "Audio only"],
         ["👩 Warm", "✓ 👩 Clear"],
         ["👨 Warm", "👨 Calm"],
     ]
     assert [[button.callback_data for button in row] for row in keyboard] == [
-        ["voice:mode:auto", "voice:mode:native"],
-        ["voice:mode:tts", "voice:mode:off"],
+        ["voice:mode:native", "voice:mode:tts"],
+        ["voice:mode:off"],
         ["voice:content:both", "voice:content:audio"],
         ["voice:profile:warm_female", "voice:profile:clear_female"],
         ["voice:profile:warm_male", "voice:profile:calm_male"],
@@ -123,10 +158,30 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.voice_manager = manager
     runtime._is_authorized_user = lambda _user_id: True
+    sent_previews = []
+
+    for renderer in ("native", "tts"):
+        preview = manager.voice_preview_path("calm_male", renderer)
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        preview.write_bytes(b"OggS" + renderer.encode("ascii"))
+
+    class Bot:
+        async def send_voice(self, **kwargs):
+            sent_previews.append(
+                {
+                    **kwargs,
+                    "payload": kwargs["voice"].read(),
+                }
+            )
+
+    runtime.app = SimpleNamespace(bot=Bot())
+    runtime.telegram_logger = SimpleNamespace(warning=lambda *_args: None)
+    runtime.error_logger = SimpleNamespace(error=lambda *_args: None)
 
     class Query:
         data = "voice:profile:calm_male"
         from_user = SimpleNamespace(id=7)
+        message = SimpleNamespace(chat_id=99)
 
         def __init__(self):
             self.edits = []
@@ -151,6 +206,59 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
     assert "native echo" not in query.edits[0][0]
     assert len(query.edits[0][1]["reply_markup"].inline_keyboard) == 5
     assert query.answers[0][0].startswith("Voice set to 👨 Calm")
+    assert [call["chat_id"] for call in sent_previews] == [99, 99]
+    assert [call["caption"] for call in sent_previews] == [
+        "🎧 Native audio model · 👨 Calm",
+        "🎧 Text model + TTS · 👨 Calm",
+    ]
+    assert [call["payload"] for call in sent_previews] == [
+        b"OggSnative",
+        b"OggStts",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_voice_mode_callback_sends_only_matching_current_profile_preview(
+    tmp_path,
+):
+    manager = _manager(tmp_path)
+    manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")
+    manager.set_voice_profile("warm_female")
+    for renderer in ("native", "tts"):
+        preview = manager.voice_preview_path("warm_female", renderer)
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        preview.write_bytes(b"OggS" + renderer.encode("ascii"))
+
+    sent = []
+
+    class Bot:
+        async def send_voice(self, **kwargs):
+            sent.append(kwargs["caption"])
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.voice_manager = manager
+    runtime._is_authorized_user = lambda _user_id: True
+    runtime.app = SimpleNamespace(bot=Bot())
+    runtime.telegram_logger = SimpleNamespace(warning=lambda *_args: None)
+    runtime.error_logger = SimpleNamespace(error=lambda *_args: None)
+
+    class Query:
+        data = "voice:mode:tts"
+        from_user = SimpleNamespace(id=7)
+        message = SimpleNamespace(chat_id=99)
+
+        async def edit_message_text(self, *_args, **_kwargs):
+            return None
+
+        async def answer(self, *_args, **_kwargs):
+            return None
+
+    await runtime.callback_voice(
+        SimpleNamespace(callback_query=Query()), SimpleNamespace()
+    )
+
+    assert manager.get_reply_mode() == "tts"
+    assert sent == ["🎧 Text model + TTS · 👩 Warm"]
 
 
 @pytest.mark.asyncio

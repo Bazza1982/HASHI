@@ -128,8 +128,11 @@ implementation = "cpython"
 python = "3.12.13"
 standard-lock = "constraints/standard-py312.lock"
 portable-build-date = "20260303"
-core-api = 1
-function-api = 1
+core-api = 2
+function-api = 2
+worker-model = "per-agent-process"
+worker-protocol = 1
+generation-schema = 2
 
 [tool.setuptools.packages.find]
 include = ["flow*", "nagare*"]
@@ -141,14 +144,22 @@ addopts = ["--strict-markers"]
 testpaths = [
     "tests/test_api_gateway_preflight.py",
     "tests/test_api_gateway_tool_passthrough.py",
+    "tests/test_agent_lifecycle.py",
     "tests/test_architecture_boundaries.py",
+    "tests/test_capability_broker.py",
+    "tests/test_browser_extension_identity.py",
     "tests/test_codex_api_tool_bridge.py",
     "tests/test_command_registry.py",
     "tests/test_dependency_profiles.py",
+    "tests/test_device_control_worker.py",
+    "tests/test_device_paths.py",
     "tests/test_her_v2_adapter.py",
     "tests/test_her_v2_core.py",
-    "tests/test_hot_reload.py",
+    "tests/test_function_contract.py",
     "tests/test_function_generation.py",
+    "tests/test_function_worker_protocol.py",
+    "tests/test_function_worker_supervisor.py",
+    "tests/test_hchat_send.py",
     "tests/test_manager_registry.py",
     "tests/test_model_catalog.py",
     "tests/test_protocol_ack.py",
@@ -159,8 +170,12 @@ testpaths = [
     "tests/test_runtime_lifecycle.py",
     "tests/test_runtime_contract.py",
     "tests/test_service_manager_scheduler_lease.py",
+    "tests/test_service_endpoints.py",
     "tests/test_smart_tool_registry.py",
+    "tests/test_telegram_ingress.py",
+    "tests/test_tool_registry_device_capabilities.py",
     "tests/test_workbench_enterprise_health.py",
+    "tests/test_workbench_device_capabilities.py",
     "tests/test_workspace_state.py",
 ]
 python_files = ["test_*.py"]
