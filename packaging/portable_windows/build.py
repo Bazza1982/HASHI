@@ -23,6 +23,19 @@ CAPACITY_CHECK_CLUSTER_BYTES = 32 * 1024
 PYTHON_VERSION = "3.12.10"
 NODE_VERSION = "22.23.2"
 PAIRING_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
+LOCAL_CACHE_ARCHIVE_MAX_FILE_BYTES = 512 * 1024
+LOCAL_CACHE_INSTALL_RESERVE_BYTES = 512 * 1024 * 1024
+LOCAL_CACHE_MANIFEST = "local-cache-manifest.json"
+LOCAL_CACHE_PAYLOAD = "local-cache-small-files.zip"
+LOCAL_CACHE_REQUIRED_FILES = (
+    "runtime/python/python.exe",
+    "runtime/node/node.exe",
+    "runtime/bin/ffmpeg.exe",
+    "app/hashi/main.py",
+    "app/hashi/tui.py",
+    "app/workbench/server.mjs",
+    "app/workbench/ui/index.html",
+)
 
 HERE = Path(__file__).resolve().parent
 HASHI_ROOT = HERE.parents[1]
@@ -171,7 +184,13 @@ def sha256_file(path: Path) -> str:
 
 
 def run(argv: list[str], *, cwd: Path | None = None) -> None:
-    status("run: " + " ".join(Path(value).name if index == 0 else value for index, value in enumerate(argv)))
+    status(
+        "run: "
+        + " ".join(
+            Path(value).name if index == 0 else value
+            for index, value in enumerate(argv)
+        )
+    )
     subprocess.run(argv, cwd=cwd, check=True)
 
 
@@ -187,8 +206,13 @@ def download(asset: Asset, cache: Path) -> Path:
     if partial.exists():
         partial.unlink()
     status(f"download: {asset.filename}")
-    request = urllib.request.Request(asset.url, headers={"User-Agent": "HASHI-Portable-Builder/1"})
-    with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as output:
+    request = urllib.request.Request(
+        asset.url, headers={"User-Agent": "HASHI-Portable-Builder/1"}
+    )
+    with (
+        urllib.request.urlopen(request, timeout=120) as response,
+        partial.open("wb") as output,
+    ):
         shutil.copyfileobj(response, output, length=1024 * 1024)
     actual = sha256_file(partial)
     if actual != asset.sha256:
@@ -281,7 +305,9 @@ def install_python_dependencies(runtime_python: Path) -> None:
     remove_path(site_packages / "bin")
 
 
-def install_piper(runtime_python: Path, app_hashi: Path, licenses: Path, cache: Path) -> None:
+def install_piper(
+    runtime_python: Path, app_hashi: Path, licenses: Path, cache: Path
+) -> None:
     archive = download(ASSETS["piper"], cache)
     status("install standalone Piper and Chinese voice")
     with zipfile.ZipFile(archive) as package:
@@ -295,18 +321,26 @@ def install_piper(runtime_python: Path, app_hashi: Path, licenses: Path, cache: 
                 shutil.copyfileobj(source, output)
     model_dir = app_hashi / "voice_models" / "piper"
     model_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(download(ASSETS["piper_voice"], cache), model_dir / "zh_CN-huayan-medium.onnx")
+    shutil.copy2(
+        download(ASSETS["piper_voice"], cache), model_dir / "zh_CN-huayan-medium.onnx"
+    )
     shutil.copy2(
         download(ASSETS["piper_voice_config"], cache),
         model_dir / "zh_CN-huayan-medium.onnx.json",
     )
     shutil.copy2(download(ASSETS["piper_voice_card"], cache), model_dir / "MODEL_CARD")
-    shutil.copy2(download(ASSETS["piper_license"], cache), licenses / "Piper-LICENSE.md")
+    shutil.copy2(
+        download(ASSETS["piper_license"], cache), licenses / "Piper-LICENSE.md"
+    )
 
 
 def extract_selected_zip_file(archive: Path, predicate, destination: Path) -> None:
     with zipfile.ZipFile(archive) as package:
-        members = [member for member in package.infolist() if not member.is_dir() and predicate(member.filename)]
+        members = [
+            member
+            for member in package.infolist()
+            if not member.is_dir() and predicate(member.filename)
+        ]
         if not members:
             raise RuntimeError(f"required payload is missing from {archive.name}")
         for member in members:
@@ -320,15 +354,21 @@ def install_node(runtime_node: Path, licenses: Path, cache: Path) -> None:
     archive = download(ASSETS["node"], cache)
     status(f"install Node {NODE_VERSION} runtime without npm/corepack")
     runtime_node.mkdir(parents=True, exist_ok=True)
-    extract_selected_zip_file(archive, lambda name: name.endswith("/node.exe"), runtime_node)
-    extract_selected_zip_file(archive, lambda name: name.endswith("/LICENSE"), licenses / "node")
+    extract_selected_zip_file(
+        archive, lambda name: name.endswith("/node.exe"), runtime_node
+    )
+    extract_selected_zip_file(
+        archive, lambda name: name.endswith("/LICENSE"), licenses / "node"
+    )
 
 
 def install_ffmpeg(runtime_bin: Path, licenses: Path, cache: Path) -> None:
     archive = download(ASSETS["ffmpeg"], cache)
     status("install FFmpeg executable")
     runtime_bin.mkdir(parents=True, exist_ok=True)
-    extract_selected_zip_file(archive, lambda name: name.endswith("/bin/ffmpeg.exe"), runtime_bin)
+    extract_selected_zip_file(
+        archive, lambda name: name.endswith("/bin/ffmpeg.exe"), runtime_bin
+    )
     extract_selected_zip_file(
         archive,
         lambda name: name.endswith(("/LICENSE", "/README.txt")),
@@ -336,7 +376,9 @@ def install_ffmpeg(runtime_bin: Path, licenses: Path, cache: Path) -> None:
     )
 
 
-def install_tesseract(app_hashi: Path, licenses: Path, cache: Path, build_temp: Path) -> None:
+def install_tesseract(
+    app_hashi: Path, licenses: Path, cache: Path, build_temp: Path
+) -> None:
     installer = download(ASSETS["tesseract"], cache)
     extract_root = build_temp / "tesseract-extracted"
     extract_root.mkdir(parents=True, exist_ok=True)
@@ -360,7 +402,9 @@ def install_tesseract(app_hashi: Path, licenses: Path, cache: Path, build_temp: 
     revision = str(manifest["revision"])
     model_root = app_hashi / "hashi_assets" / "ocr" / f"tessdata_fast-{revision}"
     model_root.mkdir(parents=True, exist_ok=True)
-    source_url = f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/{revision}"
+    source_url = (
+        f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/{revision}"
+    )
     entries = [manifest["license_file"], *manifest["files"]]
     for entry in entries:
         name = str(entry.get("name") or Path(str(entry.get("path"))).name)
@@ -376,7 +420,12 @@ def install_tesseract(app_hashi: Path, licenses: Path, cache: Path, build_temp: 
 def copy_workbench_licenses(workbench_root: Path, licenses: Path) -> None:
     destination = licenses / "workbench"
     destination.mkdir(parents=True, exist_ok=True)
-    for name in ("LICENSE", "LICENSE_SCOPE.md", "NOTICE_WORKBENCH.md", "THIRD_PARTY_NOTICES.md"):
+    for name in (
+        "LICENSE",
+        "LICENSE_SCOPE.md",
+        "NOTICE_WORKBENCH.md",
+        "THIRD_PARTY_NOTICES.md",
+    ):
         source = workbench_root / name
         if source.is_file():
             shutil.copy2(source, destination / name)
@@ -386,7 +435,9 @@ def copy_workbench_licenses(workbench_root: Path, licenses: Path) -> None:
             shutil.copy2(source, destination / f"kasumi-{name}")
 
 
-def build_workbench(workbench_root: Path, destination: Path, build_temp: Path, *, skip_build: bool) -> str:
+def build_workbench(
+    workbench_root: Path, destination: Path, build_temp: Path, *, skip_build: bool
+) -> str:
     if not skip_build:
         run(["npm", "run", "build"], cwd=workbench_root)
     if not (workbench_root / "dist" / "index.html").is_file():
@@ -401,11 +452,15 @@ def build_workbench(workbench_root: Path, destination: Path, build_temp: Path, *
     if kasumi_source.is_dir():
         shutil.copytree(kasumi_source, destination / "kasumi-app")
     else:
-        shutil.copytree(workbench_root / "dist" / "kasumi-app", destination / "kasumi-app")
+        shutil.copytree(
+            workbench_root / "dist" / "kasumi-app", destination / "kasumi-app"
+        )
 
     esbuild = workbench_root / "node_modules" / "esbuild" / "bin" / "esbuild"
     if not esbuild.is_file():
-        raise RuntimeError("Workbench esbuild dependency is missing; run npm install in the Workbench repository")
+        raise RuntimeError(
+            "Workbench esbuild dependency is missing; run npm install in the Workbench repository"
+        )
     run(
         [
             str(esbuild),
@@ -424,7 +479,9 @@ def build_workbench(workbench_root: Path, destination: Path, build_temp: Path, *
     sharp_stage = build_temp / "sharp-runtime"
     sharp_stage.mkdir(parents=True, exist_ok=True)
     shutil.copy2(HERE / "sharp_runtime" / "package.json", sharp_stage / "package.json")
-    shutil.copy2(HERE / "sharp_runtime" / "package-lock.json", sharp_stage / "package-lock.json")
+    shutil.copy2(
+        HERE / "sharp_runtime" / "package-lock.json", sharp_stage / "package-lock.json"
+    )
     run(
         [
             "npm",
@@ -456,7 +513,9 @@ def git_revision(root: Path) -> str:
     return result.stdout.strip()
 
 
-def configure_data(image_root: Path, source_secrets: Path, *, allow_missing_key: bool) -> None:
+def configure_data(
+    image_root: Path, source_secrets: Path, *, allow_missing_key: bool
+) -> None:
     data = image_root / "data"
     for relative in (
         "logs",
@@ -471,12 +530,18 @@ def configure_data(image_root: Path, source_secrets: Path, *, allow_missing_key:
         (data / relative).mkdir(parents=True, exist_ok=True)
     shutil.copy2(TEMPLATES / "agents.json", data / "agents.json")
     shutil.copy2(TEMPLATES / "tasks.json", data / "tasks.json")
-    shutil.copy2(TEMPLATES / "agent_capabilities.json", data / "agent_capabilities.json")
+    shutil.copy2(
+        TEMPLATES / "agent_capabilities.json", data / "agent_capabilities.json"
+    )
     shutil.copy2(TEMPLATES / "api_gateway_state.json", data / "api_gateway_state.json")
     shutil.copy2(TEMPLATES / "agent.md", data / "workspaces" / "portable" / "agent.md")
     shutil.copy2(TEMPLATES / "remote-config.yaml", data / "remote" / "config.yaml")
 
-    source = json.loads(source_secrets.read_text(encoding="utf-8-sig")) if source_secrets.is_file() else {}
+    source = (
+        json.loads(source_secrets.read_text(encoding="utf-8-sig"))
+        if source_secrets.is_file()
+        else {}
+    )
     deepseek_key = str(source.get("deepseek_api_key") or "").strip()
     if not deepseek_key and not allow_missing_key:
         raise RuntimeError("deepseek_api_key is missing from the source secrets file")
@@ -502,12 +567,120 @@ def copy_launchers(image_root: Path) -> None:
     for name in (
         "Start_HASHI_TUI.bat",
         "Start_HASHI_Workbench.bat",
+        "Install_HASHI_On_This_PC.bat",
+        "Uninstall_HASHI_From_This_PC.bat",
         "Stop_HASHI.bat",
         "Diagnose_HASHI.bat",
         "PORTABLE_README.txt",
     ):
         shutil.copy2(TEMPLATES / name, image_root / name)
     shutil.copytree(TEMPLATES / "launcher", image_root / "launcher")
+
+
+def create_local_cache_payload(image_root: Path) -> dict:
+    """Create a compact installer payload while retaining expanded USB fallback.
+
+    Thousands of small Python and Workbench files are expensive to read from a
+    low-end flash drive.  They are duplicated into one ZIP for sequential
+    installation reads.  Large files remain direct-copy inputs so the payload
+    costs little additional USB capacity.
+    """
+
+    install_dir = image_root / "install"
+    remove_path(install_dir)
+    install_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = install_dir / LOCAL_CACHE_PAYLOAD
+    records: list[dict] = []
+    bundle_digest = hashlib.sha256()
+    archive_bytes = 0
+    archive_files = 0
+    direct_bytes = 0
+    direct_files = 0
+
+    source_files = sorted(
+        path
+        for root_name in ("app", "runtime")
+        for path in (image_root / root_name).rglob("*")
+        if path.is_file()
+    )
+    status(
+        "create local acceleration payload from "
+        f"{len(source_files):,} app/runtime files"
+    )
+    with zipfile.ZipFile(
+        archive_path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+        allowZip64=True,
+        strict_timestamps=False,
+    ) as archive:
+        for path in source_files:
+            relative = path.relative_to(image_root).as_posix()
+            size = path.stat().st_size
+            digest = sha256_file(path)
+            delivery = (
+                "archive" if size < LOCAL_CACHE_ARCHIVE_MAX_FILE_BYTES else "direct"
+            )
+            record = {
+                "path": relative,
+                "size": size,
+                "sha256": digest,
+                "delivery": delivery,
+            }
+            records.append(record)
+            bundle_digest.update(f"{relative}\0{size}\0{digest}\n".encode("utf-8"))
+            if delivery == "archive":
+                archive.write(path, arcname=relative)
+                archive_bytes += size
+                archive_files += 1
+            else:
+                direct_bytes += size
+                direct_files += 1
+
+    bundle_id = bundle_digest.hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "product": "HASHI Portable Local Acceleration Cache",
+        "bundle_id": bundle_id,
+        "cache_key": bundle_id[:20],
+        "install_scope": "machine",
+        "administrator_required": True,
+        "authoritative_data": "usb:data",
+        "expanded_usb_fallback": True,
+        "install_bytes": archive_bytes + direct_bytes,
+        "minimum_free_bytes": (
+            archive_bytes + direct_bytes + LOCAL_CACHE_INSTALL_RESERVE_BYTES
+        ),
+        "archive": {
+            "path": f"install/{LOCAL_CACHE_PAYLOAD}",
+            "sha256": sha256_file(archive_path),
+            "compressed_bytes": archive_path.stat().st_size,
+            "uncompressed_bytes": archive_bytes,
+            "file_count": archive_files,
+            "maximum_source_file_bytes": LOCAL_CACHE_ARCHIVE_MAX_FILE_BYTES,
+        },
+        "direct": {
+            "bytes": direct_bytes,
+            "file_count": direct_files,
+        },
+        "bytecode_roots": [
+            "app/hashi",
+            "runtime/python/Lib/site-packages",
+        ],
+        "required_files": list(LOCAL_CACHE_REQUIRED_FILES),
+        "files": records,
+    }
+    (install_dir / LOCAL_CACHE_MANIFEST).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    status(
+        "local acceleration payload: "
+        f"{archive_files:,} small files -> {archive_path.stat().st_size:,} bytes; "
+        f"{direct_files:,} large files stay direct-copy"
+    )
+    return manifest
 
 
 def tree_size(path: Path) -> int:
@@ -536,20 +709,31 @@ def write_manifest(image_root: Path, build_info: dict) -> int:
     marker.write_text("HASHI Portable Windows x64\n", encoding="utf-8")
     manifest_path = image_root / "SHA256SUMS.txt"
     lines = []
-    for path in sorted(item for item in image_root.rglob("*") if item.is_file() and item != manifest_path):
+    for path in sorted(
+        item
+        for item in image_root.rglob("*")
+        if item.is_file() and item != manifest_path
+    ):
         lines.append(f"{sha256_file(path)}  {path.relative_to(image_root).as_posix()}")
     manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return tree_size(image_root)
 
 
 def validate_image(image_root: Path) -> None:
-    config = json.loads((image_root / "data" / "agents.json").read_text(encoding="utf-8"))
+    config = json.loads(
+        (image_root / "data" / "agents.json").read_text(encoding="utf-8")
+    )
     [agent] = config["agents"]
     engines = [item["engine"] for item in agent["allowed_backends"]]
     if engines != ["her-v2"] or agent["active_backend"] != "her-v2":
         raise RuntimeError("portable Agent exposes a non-HER Engine")
-    remote_config = (image_root / "data" / "remote" / "config.yaml").read_text(encoding="utf-8")
-    if "lan_mode: false" not in remote_config or "pairing_auto_approve: true" not in remote_config:
+    remote_config = (image_root / "data" / "remote" / "config.yaml").read_text(
+        encoding="utf-8"
+    )
+    if (
+        "lan_mode: false" not in remote_config
+        or "pairing_auto_approve: true" not in remote_config
+    ):
         raise RuntimeError("portable Remote must use token-required one-click pairing")
     if f"pairing_token_ttl_seconds: {PAIRING_TOKEN_TTL_SECONDS}" not in remote_config:
         raise RuntimeError("portable pairing TTL is not seven days")
@@ -577,10 +761,103 @@ def validate_image(image_root: Path) -> None:
         "app/workbench/ui/index.html",
         "app/hashi/voice_models/piper/zh_CN-huayan-medium.onnx",
         "app/hashi/hashi_assets/ocr/bin/windows-x86_64/tesseract.exe",
+        f"install/{LOCAL_CACHE_MANIFEST}",
+        f"install/{LOCAL_CACHE_PAYLOAD}",
+        "Install_HASHI_On_This_PC.bat",
+        "Uninstall_HASHI_From_This_PC.bat",
+        "launcher/Install-LocalCache.ps1",
+        "launcher/Uninstall-LocalCache.ps1",
+        "launcher/Compile-LocalCache.py",
     )
-    missing = [relative for relative in required if not (image_root / relative).is_file()]
+    missing = [
+        relative for relative in required if not (image_root / relative).is_file()
+    ]
     if missing:
         raise RuntimeError(f"portable image is incomplete: {missing}")
+
+    cache_manifest = json.loads(
+        (image_root / "install" / LOCAL_CACHE_MANIFEST).read_text(encoding="utf-8")
+    )
+    if cache_manifest.get("install_scope") != "machine":
+        raise RuntimeError("portable local acceleration cache must be machine scoped")
+    if not cache_manifest.get("administrator_required"):
+        raise RuntimeError(
+            "portable local acceleration install must require administrator"
+        )
+    if not cache_manifest.get("expanded_usb_fallback"):
+        raise RuntimeError(
+            "portable local acceleration must retain expanded USB fallback"
+        )
+    if cache_manifest.get("authoritative_data") != "usb:data":
+        raise RuntimeError("portable local cache must not own authoritative user data")
+    records = cache_manifest.get("files", [])
+    delivery = {record.get("delivery") for record in records}
+    if delivery != {"archive", "direct"}:
+        raise RuntimeError(
+            "portable local cache must contain archive and direct-copy inputs"
+        )
+    record_paths = [str(record.get("path") or "") for record in records]
+    if len(record_paths) != len(set(record_paths)):
+        raise RuntimeError("portable local cache manifest contains duplicate paths")
+    actual_paths = {
+        path.relative_to(image_root).as_posix()
+        for root_name in ("app", "runtime")
+        for path in (image_root / root_name).rglob("*")
+        if path.is_file()
+    }
+    if set(record_paths) != actual_paths:
+        raise RuntimeError(
+            "portable local cache manifest does not cover app/runtime exactly"
+        )
+    digest = hashlib.sha256()
+    archive_records = []
+    direct_records = []
+    for record in records:
+        relative = str(record["path"])
+        source = image_root / relative
+        size = source.stat().st_size
+        actual_hash = sha256_file(source)
+        if size != record.get("size") or actual_hash != record.get("sha256"):
+            raise RuntimeError(
+                f"portable local cache record is inconsistent: {relative}"
+            )
+        digest.update(f"{relative}\0{size}\0{actual_hash}\n".encode("utf-8"))
+        (archive_records if record["delivery"] == "archive" else direct_records).append(
+            record
+        )
+    if digest.hexdigest() != cache_manifest.get("bundle_id"):
+        raise RuntimeError("portable local cache bundle identity is inconsistent")
+    if cache_manifest.get("cache_key") != digest.hexdigest()[:20]:
+        raise RuntimeError("portable local cache key is inconsistent")
+    archive = cache_manifest.get("archive") or {}
+    archive_path = image_root / str(archive.get("path") or "")
+    if sha256_file(archive_path) != archive.get("sha256"):
+        raise RuntimeError("portable local cache archive hash is inconsistent")
+    with zipfile.ZipFile(archive_path) as package:
+        if package.testzip() is not None:
+            raise RuntimeError("portable local cache archive failed its CRC check")
+        archive_names = {
+            item.filename for item in package.infolist() if not item.is_dir()
+        }
+    if archive_names != {str(record["path"]) for record in archive_records}:
+        raise RuntimeError("portable local cache archive contents are inconsistent")
+    if archive.get("file_count") != len(archive_records):
+        raise RuntimeError("portable local cache archive file count is inconsistent")
+    if archive.get("uncompressed_bytes") != sum(
+        int(record["size"]) for record in archive_records
+    ):
+        raise RuntimeError("portable local cache archive byte count is inconsistent")
+    direct = cache_manifest.get("direct") or {}
+    if direct.get("file_count") != len(direct_records):
+        raise RuntimeError("portable local cache direct-copy count is inconsistent")
+    if direct.get("bytes") != sum(int(record["size"]) for record in direct_records):
+        raise RuntimeError("portable local cache direct-copy bytes are inconsistent")
+    if cache_manifest.get("install_bytes") != sum(
+        int(record["size"]) for record in records
+    ):
+        raise RuntimeError("portable local cache install size is inconsistent")
+    if not set(LOCAL_CACHE_REQUIRED_FILES).issubset(actual_paths):
+        raise RuntimeError("portable local cache required-file list is inconsistent")
 
 
 def build(args: argparse.Namespace) -> Path:
@@ -588,12 +865,16 @@ def build(args: argparse.Namespace) -> Path:
     if output.exists():
         marker = output / ".hashi-portable-bundle"
         if not args.overwrite:
-            raise RuntimeError(f"output already exists: {output}; pass --overwrite to replace it")
+            raise RuntimeError(
+                f"output already exists: {output}; pass --overwrite to replace it"
+            )
         if not marker.is_file():
             raise RuntimeError(f"refusing to replace unmarked directory: {output}")
         shutil.rmtree(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.building-", dir=output.parent))
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{output.name}.building-", dir=output.parent)
+    )
     build_temp = Path(tempfile.mkdtemp(prefix="hashi-portable-build-"))
     try:
         app_hashi = staging / "app" / "hashi"
@@ -618,13 +899,24 @@ def build(args: argparse.Namespace) -> Path:
             skip_build=args.skip_workbench_build,
         )
         copy_workbench_licenses(args.workbench_root.resolve(), licenses)
-        configure_data(staging, args.secrets.resolve(), allow_missing_key=args.allow_missing_deepseek_key)
+        configure_data(
+            staging,
+            args.secrets.resolve(),
+            allow_missing_key=args.allow_missing_deepseek_key,
+        )
         copy_launchers(staging)
+        local_cache_manifest = create_local_cache_payload(staging)
         validate_image(staging)
 
         categories = {
             name: tree_size(staging / name)
-            for name in ("app", "runtime", "data", "THIRD_PARTY_LICENSES")
+            for name in (
+                "app",
+                "runtime",
+                "install",
+                "data",
+                "THIRD_PARTY_LICENSES",
+            )
         }
         build_info = {
             "schema_version": 1,
@@ -654,7 +946,14 @@ def build(args: argparse.Namespace) -> Path:
                 "piper_chinese_tts": True,
                 "ffmpeg": True,
                 "playwright_without_browser": True,
+                "administrator_local_acceleration": True,
+                "expanded_usb_fallback": True,
             },
+            "local_cache_bundle_id": local_cache_manifest["bundle_id"],
+            "local_cache_install_bytes": local_cache_manifest["install_bytes"],
+            "local_cache_payload_bytes": local_cache_manifest["archive"][
+                "compressed_bytes"
+            ],
         }
         final_size = 0
         for _attempt in range(5):
@@ -665,9 +964,7 @@ def build(args: argparse.Namespace) -> Path:
             build_info["final_image_bytes"] = measured
         else:
             raise RuntimeError("portable logical size did not stabilize")
-        allocated_size = estimated_allocated_size(
-            staging, CAPACITY_CHECK_CLUSTER_BYTES
-        )
+        allocated_size = estimated_allocated_size(staging, CAPACITY_CHECK_CLUSTER_BYTES)
         build_info["estimated_allocated_bytes_32k"] = allocated_size
         build_info["within_target"] = allocated_size <= TARGET_IMAGE_BYTES
         for _attempt in range(5):
@@ -677,8 +974,7 @@ def build(args: argparse.Namespace) -> Path:
             )
             if (
                 build_info.get("final_image_bytes") == measured
-                and build_info.get("estimated_allocated_bytes_32k")
-                == allocated_size
+                and build_info.get("estimated_allocated_bytes_32k") == allocated_size
             ):
                 final_size = measured
                 break
@@ -733,7 +1029,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     try:
         build(parse_args(argv))
-    except (OSError, RuntimeError, subprocess.CalledProcessError, zipfile.BadZipFile) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        subprocess.CalledProcessError,
+        zipfile.BadZipFile,
+    ) as exc:
         print(f"[portable] ERROR: {exc}", file=sys.stderr)
         return 1
     return 0

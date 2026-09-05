@@ -4,6 +4,21 @@ This builder produces an allowlisted, self-contained Windows directory image
 for a USB drive whose total capacity is 957,000,000 bytes. It does not write to
 or format a USB device.
 
+The generated image also provides a machine-level local acceleration layer.
+The first TUI or Workbench start requests administrator approval, expands a
+compact small-file payload, streams the remaining large files, precompiles
+Python bytecode, verifies every installed source file, and atomically activates
+the cache under Windows ProgramData. There is no fixed ten-minute installation
+cutoff. The private Python and Node runtimes are never installed globally and
+the system PATH is not changed.
+
+Only immutable program/runtime files enter the local cache. API keys, Sessions,
+Workspace, configuration, browser profile, and all other user data remain on
+the USB. A complete expanded program copy remains on the USB as fallback when
+elevation is cancelled or installation fails. The generated root includes
+explicit install/uninstall launchers, and the cache also registers a removable
+entry in Windows Installed Apps.
+
 The image contains HER v2, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the complete browser
 Workbench, Remote/LAN/HChat, Scheduler, Nagare, Superloops, browser/desktop

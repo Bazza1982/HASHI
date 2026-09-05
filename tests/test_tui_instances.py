@@ -107,3 +107,29 @@ async def test_proxied_api_client_rejects_wrong_target_identity():
 
     assert health["ok"] is False
     assert health["error"] == "target_identity_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_transcript_poll_waits_for_initial_history_offset(monkeypatch):
+    client = TuiApiClient()
+    requests = []
+
+    async def fake_request(method, path, **_kwargs):
+        requests.append((method, path))
+        if "poll" in path:
+            return {"messages": [{"role": "assistant", "text": "new"}], "offset": 8}
+        return {"messages": [{"role": "assistant", "text": "recent"}], "offset": 4}
+
+    monkeypatch.setattr(client, "_direct_request", fake_request)
+    client.reset_offset("portable")
+
+    assert await client.poll_transcript("portable") == []
+    assert requests == []
+    recent = await client.get_recent_transcript("portable")
+    assert [message["text"] for message in recent] == ["recent"]
+    polled = await client.poll_transcript("portable")
+    assert [message["text"] for message in polled] == ["new"]
+    assert requests[-1] == (
+        "GET",
+        "/api/transcript/portable/poll?offset=4",
+    )

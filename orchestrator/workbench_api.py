@@ -1096,7 +1096,32 @@ class WorkbenchApiServer:
             "new_messages": [],
         }
 
-    def _resolve_transcript_path(self, agent_row: dict, runtime) -> Path:
+    def _resolve_transcript_path(
+        self,
+        agent_row: dict,
+        runtime,
+        *,
+        owner_id: str | None = None,
+        surface: str | None = None,
+        channel_key: str = "default",
+    ) -> Path:
+        # The legacy TUI transcript endpoints predate canonical Sessions.  Live
+        # chat requests now persist their transcript in the Session workspace,
+        # so compatibility readers must resolve the same channel binding or
+        # they will keep polling the obsolete Agent-level transcript forever.
+        if surface:
+            resolved_owner = owner_id or SessionStore.owner_id_for(self.global_config)
+            session = self.session_store.resolve_session(
+                owner_id=resolved_owner,
+                agent_id=agent_row["name"],
+                surface=surface,
+                channel_key=channel_key,
+            )
+            workspace = self.session_store.session_workspace(
+                session["session_id"], int(session["context_generation"])
+            )
+            return workspace / "transcript.jsonl"
+
         if runtime is not None and getattr(runtime, "transcript_log_path", None):
             return Path(runtime.transcript_log_path)
 
@@ -3732,7 +3757,11 @@ class WorkbenchApiServer:
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
         transcript_path = self._resolve_transcript_path(
-            agent_row, runtime_map.get(name)
+            agent_row,
+            runtime_map.get(name),
+            owner_id=self._v1_owner_id(request),
+            surface="workbench",
+            channel_key="default",
         )
         return web.json_response(_read_jsonl_recent(transcript_path, limit=limit))
 
@@ -3746,7 +3775,11 @@ class WorkbenchApiServer:
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
         transcript_path = self._resolve_transcript_path(
-            agent_row, runtime_map.get(name)
+            agent_row,
+            runtime_map.get(name),
+            owner_id=self._v1_owner_id(request),
+            surface="workbench",
+            channel_key="default",
         )
         return web.json_response(_read_jsonl_increment(transcript_path, offset=offset))
 

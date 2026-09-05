@@ -365,14 +365,20 @@ class FlexibleAgentRuntime:
             CanonicalAuditStore,
         )
 
+        canonical_audit_config = dict(
+            getattr(self.global_config, "canonical_audit", None) or {}
+        )
         self.canonical_audit = CanonicalAuditStore(
             self.global_config.bridge_home,
             instance_id=self.global_config.instance_id,
             agent_id=self.config.name,
-            config=getattr(self.global_config, "canonical_audit", None),
+            config=canonical_audit_config,
         )
         self.canonical_audit_buffer = BufferedCanonicalAuditWriter(
             self.canonical_audit,
+            flush_timeout_s=float(
+                canonical_audit_config.get("buffer_flush_timeout_seconds") or 5.0
+            ),
             name=f"canonical-audit-{self.config.name}",
         )
         if self.transfer_state_path.exists():

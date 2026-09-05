@@ -209,6 +209,47 @@ async def test_tui_and_workbench_legacy_chat_share_default_conversation_binding(
     ]
 
 
+@pytest.mark.asyncio
+async def test_tui_legacy_transcript_reads_shared_canonical_session(tmp_path):
+    server, runtime = _server(tmp_path)
+    session = server.session_store.resolve_session(
+        owner_id="user:7",
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+    )
+    transcript_path = (
+        server.session_store.session_workspace(
+            session["session_id"], session["context_generation"]
+        )
+        / "transcript.jsonl"
+    )
+    transcript_path.write_text(
+        json.dumps({"role": "user", "text": "ping", "source": "api"})
+        + "\n"
+        + json.dumps({"role": "assistant", "text": "pong", "source": "api"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    legacy_path = tmp_path / "legacy-transcript.jsonl"
+    legacy_path.write_text(
+        json.dumps({"role": "assistant", "text": "stale"}) + "\n",
+        encoding="utf-8",
+    )
+    runtime.transcript_log_path = legacy_path
+
+    response = await server.handle_transcript_recent(
+        _Request(match_info={"name": "lily"})
+    )
+    payload = json.loads(response.text)
+
+    assert [message["text"] for message in payload["messages"]] == [
+        "ping",
+        "pong",
+    ]
+
+
 def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
     server, _runtime = _server(tmp_path)
     session = server.session_store.ensure_default_session(

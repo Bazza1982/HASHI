@@ -8,6 +8,9 @@
     "remote_port": 18767,
     "workbench_port": 18800,
     "api_gateway_port": 18801,
+    "canonical_audit": {
+      "buffer_flush_timeout_seconds": 120
+    },
     "persistent_session_v1": true,
     "native_audio_chat_v1": true,
     "native_audio_retention_seconds": 3600,

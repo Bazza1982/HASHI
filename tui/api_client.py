@@ -39,7 +39,7 @@ class TuiApiClient:
         self.expected_instance_id = str(expected_instance_id or target_instance or "").strip().upper()
         self.remote_url = str(remote_url or "").rstrip("/")
         self.target_instance = str(target_instance or "").strip().upper()
-        self._offsets: dict[str, int] = {}
+        self._offsets: dict[str, int | None] = {}
 
     @property
     def proxied(self) -> bool:
@@ -185,6 +185,11 @@ class TuiApiClient:
 
     async def poll_transcript(self, agent: str) -> list[dict]:
         offset = self._offsets.get(agent, 0)
+        if offset is None:
+            # Agent selection starts an asynchronous recent-history load.  Do
+            # not race that request from byte zero or the initial assistant
+            # messages will be rendered twice.
+            return []
         if self.proxied:
             data = await self._proxy_request("transcript_poll", agent=agent, offset=offset)
         else:
@@ -220,4 +225,4 @@ class TuiApiClient:
         return messages if isinstance(messages, list) else []
 
     def reset_offset(self, agent: str):
-        self._offsets.pop(agent, None)
+        self._offsets[agent] = None

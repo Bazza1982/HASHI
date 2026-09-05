@@ -708,12 +708,14 @@ class BufferedCanonicalAuditWriter:
         coalesce_window_s: float = 0.25,
         max_coalesced_deltas: int = 128,
         max_coalesced_chars: int = 64 * 1024,
+        flush_timeout_s: float = 5.0,
         name: str = "canonical-audit",
     ) -> None:
         self.store = store
         self.coalesce_window_s = max(0.01, float(coalesce_window_s))
         self.max_coalesced_deltas = max(1, int(max_coalesced_deltas))
         self.max_coalesced_chars = max(1024, int(max_coalesced_chars))
+        self.flush_timeout_s = max(0.1, float(flush_timeout_s))
         self._queue: queue.Queue[
             _BufferedAuditRecord | _BufferedAuditBatch | _BufferedAuditBarrier | None
         ] = queue.Queue()
@@ -817,20 +819,22 @@ class BufferedCanonicalAuditWriter:
         )
         return event_id
 
-    def flush(self, timeout_s: float = 5.0) -> None:
+    def flush(self, timeout_s: float | None = None) -> None:
         self._raise_if_failed()
         future: concurrent.futures.Future[None] = concurrent.futures.Future()
         self._queue.put(_BufferedAuditBarrier(future))
-        future.result(timeout=max(0.1, float(timeout_s)))
+        timeout = self.flush_timeout_s if timeout_s is None else max(0.1, float(timeout_s))
+        future.result(timeout=timeout)
         self._raise_if_failed()
 
-    def close(self, timeout_s: float = 5.0) -> None:
+    def close(self, timeout_s: float | None = None) -> None:
         if self._closed.is_set():
             return
-        self.flush(timeout_s=timeout_s)
+        timeout = self.flush_timeout_s if timeout_s is None else max(0.1, float(timeout_s))
+        self.flush(timeout_s=timeout)
         self._closed.set()
         self._queue.put(None)
-        self._thread.join(timeout=max(0.1, float(timeout_s)))
+        self._thread.join(timeout=timeout)
         if self._thread.is_alive():
             raise TimeoutError("canonical audit writer did not stop")
         with self._error_lock:
