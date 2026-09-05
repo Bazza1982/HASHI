@@ -4,6 +4,7 @@ import importlib.util
 import json
 import re
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -318,6 +319,45 @@ def test_builder_consolidates_small_cache_files_but_keeps_large_usb_sources(tmp_
     assert stored["authoritative_data"] == "usb:data"
     assert len(stored["bundle_id"]) == 64
     assert stored["cache_key"] == stored["bundle_id"][:20]
+
+
+def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatch):
+    builder = _load_builder()
+    source = tmp_path / "source"
+    destination = tmp_path / "portable-app"
+    tracked = {
+        "main.py": "print('main')\n",
+        "tui.py": "print('tui')\n",
+        "LICENSE": "MIT\n",
+        "exp/__init__.py": "",
+        "exp/loader.py": "",
+        "exp/asset-packs.json": "{}\n",
+        "orchestrator/tracked.py": "TRACKED = True\n",
+        "adapters/codex_cli.py": "must be pruned\n",
+    }
+    for relative, content in tracked.items():
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", source], check=True)
+    subprocess.run(["git", "-C", source, "add", "."], check=True)
+
+    untracked = (
+        source / "orchestrator" / "local-state.json",
+        source / "scripts" / "secrets.json",
+        source / "superloops" / "loops" / "private-run" / "state.json",
+    )
+    for path in untracked:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("private\n", encoding="utf-8")
+
+    monkeypatch.setattr(builder, "HASHI_ROOT", source)
+    builder.copy_hashi_source(destination)
+
+    assert (destination / "orchestrator" / "tracked.py").is_file()
+    assert not (destination / "adapters" / "codex_cli.py").exists()
+    for path in untracked:
+        assert not (destination / path.relative_to(source)).exists()
 
 
 def test_portable_dependency_lock_keeps_requested_compact_capabilities():

@@ -61,3 +61,7 @@ SHA-256, Python dependencies are hash locked, and `SHA256SUMS.txt` covers the
 expanded image. Capacity is checked conservatively using 32 KiB allocation
 units (including directory overhead); NTFS with its default 4 KiB allocation
 unit is recommended for the target drive.
+
+Only Git-tracked files from the explicit source allowlist enter `app/hashi`.
+Untracked development state, logs, local secrets, and generated workflow runs
+cannot leak into a portable image even when the source worktree is dirty.

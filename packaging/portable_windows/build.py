@@ -158,19 +158,6 @@ PRUNED_SOURCE_PATHS = (
     "veritas/SETUP.md",
     "veritas/test_adapters.py",
 )
-IGNORED_NAMES = {
-    ".git",
-    ".github",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    "__pycache__",
-    "node_modules",
-    "recordings",
-    "runs",
-}
-
-
 def status(message: str) -> None:
     print(f"[portable] {message}", flush=True)
 
@@ -224,18 +211,6 @@ def download(asset: Asset, cache: Path) -> Path:
     return destination
 
 
-def ignored_source(_directory: str, names: list[str]) -> set[str]:
-    ignored: set[str] = set()
-    for name in names:
-        if (
-            name in IGNORED_NAMES
-            or name.endswith((".pyc", ".pyo", ".log", ".lock", ".pid"))
-            or (name.startswith(".") and name != ".well-known")
-        ):
-            ignored.add(name)
-    return ignored
-
-
 def remove_path(path: Path) -> None:
     if path.is_dir():
         shutil.rmtree(path)
@@ -244,21 +219,38 @@ def remove_path(path: Path) -> None:
 
 
 def copy_hashi_source(destination: Path) -> None:
-    status("copy allowlisted HASHI source")
+    status("copy allowlisted, Git-tracked HASHI source")
     destination.mkdir(parents=True, exist_ok=True)
-    for name in SOURCE_DIRS:
-        source = HASHI_ROOT / name
-        if source.exists():
-            shutil.copytree(source, destination / name, ignore=ignored_source)
-    for name in ROOT_SOURCE_FILES:
-        shutil.copy2(HASHI_ROOT / name, destination / name)
-    for relative in ROOT_PACKAGE_FILES:
+    requested = (*SOURCE_DIRS, *ROOT_SOURCE_FILES, *ROOT_PACKAGE_FILES)
+    result = subprocess.run(
+        ["git", "-C", str(HASHI_ROOT), "ls-files", "-z", "--", *requested],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"could not enumerate Git-tracked source files: {detail}")
+    tracked = [
+        Path(value.decode("utf-8", errors="surrogateescape"))
+        for value in result.stdout.split(b"\0")
+        if value
+    ]
+    if not tracked:
+        raise RuntimeError("Git-tracked portable source set is empty")
+
+    pruned = tuple(Path(value) for value in PRUNED_SOURCE_PATHS)
+    for relative in tracked:
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError(f"unsafe Git-tracked source path: {relative}")
+        if any(relative == item or item in relative.parents for item in pruned):
+            continue
         source = HASHI_ROOT / relative
+        if source.is_symlink() or not source.is_file():
+            raise RuntimeError(f"Git-tracked source is missing or not a file: {relative}")
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-    for relative in PRUNED_SOURCE_PATHS:
-        remove_path(destination / relative)
 
 
 def extract_python(runtime_python: Path, cache: Path) -> None:
@@ -992,6 +984,7 @@ def build(args: argparse.Namespace) -> Path:
                 "instance_scoped_host_uninstall": True,
                 "verified_legacy_cache_cleanup": True,
                 "verified_shutdown_quiescence": True,
+                "git_tracked_source_only": True,
             },
             "local_cache_bundle_id": local_cache_manifest["bundle_id"],
             "local_cache_install_bytes": local_cache_manifest["install_bytes"],
