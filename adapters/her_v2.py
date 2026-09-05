@@ -1939,6 +1939,12 @@ class HERv2Adapter(BaseBackend):
                 "evidence_refs": list(result.evidence_refs),
                 "limitations": list(result.limitations),
                 "task_state": dict(result.task_state) if result.task_state else None,
+                "stage_timings_s": {
+                    str(stage): float(elapsed_s)
+                    for stage, elapsed_s in dict(
+                        getattr(result, "stage_timings_s", {}) or {}
+                    ).items()
+                },
                 "shadow_mode": self._v2_config.shadow_mode,
                 "effort": effort_resolution.metadata(),
             }

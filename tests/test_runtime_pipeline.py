@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -4205,6 +4206,13 @@ async def test_finalize_streamed_answer_without_deltas_deletes_placeholder_and_f
 async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_text():
     runtime = _runtime()
     item = _item(prompt="user text")
+    meter_tails = []
+
+    async def _send_meter_cost_tail(item, **timing):
+        meter_tails.append((item.request_id, timing))
+
+    runtime._send_meter_cost_tail = _send_meter_cost_tail
+    queued_monotonic = time.monotonic() - 1.0
     stream_state = runtime_pipeline.StreamedAnswerState(
         request_id=item.request_id,
         chat_id=item.chat_id,
@@ -4219,7 +4227,18 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
     await runtime_pipeline.handle_success_delivery(
         runtime,
         item,
-        SimpleNamespace(text="core text"),
+        SimpleNamespace(
+            text="core text",
+            stream_metadata={
+                "her_v2": {
+                    "stage_timings_s": {
+                        "triage": 0.2,
+                        "execution": 0.7,
+                        "invalid": "not-a-number",
+                    }
+                }
+            },
+        ),
         visible_text="wrapped final text",
         wrapper_result={"mode": "wrapper"},
         is_bridge_request=False,
@@ -4229,12 +4248,19 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
         backend_elapsed_s=0.3,
         audit_collector="audit",
         answer_stream_state=stream_state,
+        queued_monotonic=queued_monotonic,
     )
 
     assert runtime.app.bot.edits[-1]["text"] == "wrapped final text"
     assert not hasattr(runtime, "sent_message")
     assert runtime.voice_replies == [(123, "wrapped final text", "req-1")]
     assert runtime.hchat_routes == [("req-1", "wrapped final text")]
+    assert meter_tails[0][0] == "req-1"
+    assert meter_tails[0][1]["total_elapsed_s"] >= 1.0
+    assert meter_tails[0][1]["stage_timings_s"] == {
+        "triage": 0.2,
+        "execution": 0.7,
+    }
 
 
 @pytest.mark.asyncio

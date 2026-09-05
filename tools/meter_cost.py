@@ -17,6 +17,8 @@ genuine ``0.0`` (local / free model).
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -375,11 +377,22 @@ def _fmt_tokens(n: int) -> str:
 
 
 def _fmt_cost(cost_usd: float, *, locale: str | None) -> str:
-    """Render USD-denominated cost as cents for the compact meter tail."""
+    """Render compact cents below US$1 and USD at or above that threshold."""
 
-    amount = "0" if cost_usd <= 0 else f"{cost_usd * 100:.2f}"
+    if cost_usd < 1.0:
+        amount = "0" if cost_usd <= 0 else f"{cost_usd * 100:.2f}"
+        return _translate(
+            "meter.tail.cost.cents",
+            locale=locale,
+            amount=amount,
+        )
+    amount = f"{cost_usd:.4f}".rstrip("0").rstrip(".")
+    if "." not in amount:
+        amount += ".00"
+    elif len(amount.rsplit(".", 1)[1]) == 1:
+        amount += "0"
     return _translate(
-        "meter.tail.cost.cents",
+        "meter.tail.cost.usd",
         locale=locale,
         amount=amount,
     )
@@ -391,6 +404,104 @@ def _translate(key: str, *, locale: str | None = None, **values: Any) -> str:
     from orchestrator import ui_language
 
     return ui_language.tr(key, locale=locale, **values)
+
+
+def _fmt_duration(seconds: float, *, locale: str | None) -> str:
+    """Render a compact human duration without exposing stopwatch precision."""
+
+    elapsed_s = max(0.0, float(seconds))
+    if elapsed_s == 0:
+        return _translate("meter.tail.duration.seconds", locale=locale, amount="0")
+    if elapsed_s < 0.05:
+        return _translate("meter.tail.duration.lt_tenth", locale=locale)
+    if elapsed_s < 60:
+        amount = f"{elapsed_s:.1f}".rstrip("0").rstrip(".")
+        return _translate(
+            "meter.tail.duration.seconds", locale=locale, amount=amount
+        )
+    whole_seconds = round(elapsed_s)
+    hours, remainder = divmod(whole_seconds, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return _translate(
+            "meter.tail.duration.hours_minutes",
+            locale=locale,
+            hours=hours,
+            minutes=minutes,
+        )
+    return _translate(
+        "meter.tail.duration.minutes_seconds",
+        locale=locale,
+        minutes=minutes,
+        seconds=remaining_seconds,
+    )
+
+
+_USER_STAGE_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("strategy", ("triage",)),
+    ("planning", ("planning",)),
+    ("execution", ("direct", "execution")),
+)
+
+
+def _format_timing_lines(
+    *,
+    total_elapsed_s: float | None,
+    stage_timings_s: Mapping[str, float] | None,
+    locale: str | None,
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    if total_elapsed_s is not None:
+        try:
+            elapsed_s = float(total_elapsed_s)
+        except (TypeError, ValueError):
+            elapsed_s = -1.0
+        if math.isfinite(elapsed_s) and elapsed_s >= 0:
+            lines.append(
+                _translate(
+                    "meter.tail.elapsed",
+                    locale=locale,
+                    duration=_fmt_duration(elapsed_s, locale=locale),
+                )
+            )
+
+    if not isinstance(stage_timings_s, Mapping):
+        return tuple(lines)
+    stage_items: list[str] = []
+    for label_key, raw_stages in _USER_STAGE_BUCKETS:
+        elapsed_s = 0.0
+        observed = False
+        for raw_stage in raw_stages:
+            raw_value = stage_timings_s.get(raw_stage)
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value) or value < 0:
+                continue
+            observed = True
+            elapsed_s += value
+        if not observed:
+            continue
+        stage_items.append(
+            _translate(
+                "meter.tail.stage.item",
+                locale=locale,
+                label=_translate(
+                    f"meter.tail.stage.{label_key}", locale=locale
+                ),
+                duration=_fmt_duration(elapsed_s, locale=locale),
+            )
+        )
+    if stage_items:
+        lines.append(
+            _translate(
+                "meter.tail.stages",
+                locale=locale,
+                stages=" · ".join(stage_items),
+            )
+        )
+    return tuple(lines)
 
 
 _PROVIDER_DISPLAY_NAMES = {
@@ -449,6 +560,8 @@ def _format_receipt_lines(
     label: str | None,
     locale: str | None,
     task_total_usd: float | None,
+    total_elapsed_s: float | None,
+    stage_timings_s: Mapping[str, float] | None,
 ) -> str:
     cost = receipt.cost_usd
     resolved_label = label or _translate(label_key, locale=locale)
@@ -564,7 +677,12 @@ def _format_receipt_lines(
             locale=locale,
         )
     usage_line = f"{input_line} {output_line}"
-    return "\n".join((cost_line, usage_line, request_line))
+    timing_lines = _format_timing_lines(
+        total_elapsed_s=total_elapsed_s,
+        stage_timings_s=stage_timings_s,
+        locale=locale,
+    )
+    return "\n".join((cost_line, *timing_lines, usage_line, request_line))
 
 
 def format_cost_tail(
@@ -573,6 +691,8 @@ def format_cost_tail(
     label: str | None = None,
     locale: str | None = None,
     task_total_usd: float | None = None,
+    total_elapsed_s: float | None = None,
+    stage_timings_s: Mapping[str, float] | None = None,
 ) -> str:
     """Deterministically render a cost tail from a receipt (no model call)."""
     return _format_receipt_lines(
@@ -582,6 +702,8 @@ def format_cost_tail(
         label=label,
         locale=locale,
         task_total_usd=task_total_usd,
+        total_elapsed_s=total_elapsed_s,
+        stage_timings_s=stage_timings_s,
     )
 
 
@@ -604,4 +726,6 @@ def format_meditation_cost_tail(
         label=None,
         locale=locale,
         task_total_usd=task_total_usd,
+        total_elapsed_s=None,
+        stage_timings_s=None,
     )

@@ -6,6 +6,7 @@ import hashlib as _hashlib
 import html
 import inspect
 import json
+import math
 import os
 import time
 from collections.abc import Mapping
@@ -776,6 +777,28 @@ def _her_v2_delivery_metadata(response: Any) -> dict[str, Any]:
             her_v2.get("final_already_delivered")
         ),
     }
+
+
+def _her_v2_stage_timings_s(response: Any) -> dict[str, float]:
+    """Read validated, optional stage wall times from HER v2 metadata."""
+
+    metadata = getattr(response, "stream_metadata", None)
+    her_v2 = metadata.get("her_v2") if isinstance(metadata, Mapping) else None
+    raw_timings = (
+        her_v2.get("stage_timings_s") if isinstance(her_v2, Mapping) else None
+    )
+    if not isinstance(raw_timings, Mapping):
+        return {}
+    timings: dict[str, float] = {}
+    for raw_stage, raw_elapsed_s in raw_timings.items():
+        try:
+            elapsed_s = float(raw_elapsed_s)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(elapsed_s) or elapsed_s < 0:
+            continue
+        timings[str(raw_stage)] = elapsed_s
+    return timings
 
 
 async def record_her_v2_transport_receipt(
@@ -3913,7 +3936,16 @@ async def handle_success_delivery(
                 item.chat_id, response_text, item.request_id
             )
     if final_delivered and callable(getattr(runtime, "_send_meter_cost_tail", None)):
-        await runtime._send_meter_cost_tail(item)
+        meter_elapsed_s = (
+            max(0.0, time.monotonic() - queued_monotonic)
+            if queued_monotonic is not None
+            else max(0.0, (datetime.now() - queued_at).total_seconds())
+        )
+        await runtime._send_meter_cost_tail(
+            item,
+            total_elapsed_s=meter_elapsed_s,
+            stage_timings_s=_her_v2_stage_timings_s(response),
+        )
     runtime._schedule_audit_followup(
         item,
         core_raw=safe_core_raw,

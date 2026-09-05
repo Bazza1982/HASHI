@@ -358,6 +358,68 @@ def test_formatter_small_cost():
     assert "0.01 美分" in format_cost_tail(receipt, locale="zh-CN")
 
 
+@pytest.mark.parametrize(
+    ("cost_usd", "expected_zh", "expected_en"),
+    [
+        (0.9999, "99.99 美分", "99.99 cents"),
+        (1.0, "US$1.00", "US$1.00"),
+        (1.2345, "US$1.2345", "US$1.2345"),
+        (1.45, "US$1.45", "US$1.45"),
+    ],
+)
+def test_formatter_switches_from_cents_to_usd_at_one_dollar(
+    cost_usd, expected_zh, expected_en
+):
+    receipt = UsageReceipt(line_items=[
+        PerCallUsageLineItem(cost_usd=cost_usd, cost_source="provider"),
+    ])
+
+    assert expected_zh in format_cost_tail(receipt, locale="zh-CN").splitlines()[0]
+    assert expected_en in format_cost_tail(receipt, locale="en").splitlines()[0]
+
+
+def test_formatter_adds_total_and_effort_aware_stage_wall_times():
+    receipt = UsageReceipt(line_items=[
+        PerCallUsageLineItem(cost_usd=0.0145, cost_source="provider"),
+    ])
+
+    tail = format_cost_tail(
+        receipt,
+        locale="zh-CN",
+        total_elapsed_s=138.4,
+        stage_timings_s={
+            "triage": 12.8,
+            "planning": 18.6,
+            "execution": 102.2,
+            "immediate_response": 5.0,
+        },
+    )
+
+    assert tail.splitlines()[1:3] == [
+        "⏱️ 本回合耗时：2分18秒",
+        "🧭 主要阶段：策略 12.8秒 · 规划 18.6秒 · 执行 1分42秒",
+    ]
+    assert "immediate" not in tail.casefold()
+
+
+def test_formatter_direct_timing_omits_unrun_strategy_and_planning():
+    receipt = UsageReceipt(line_items=[
+        PerCallUsageLineItem(cost_usd=0.001, cost_source="provider"),
+    ])
+
+    tail = format_cost_tail(
+        receipt,
+        locale="en",
+        total_elapsed_s=8.9,
+        stage_timings_s={"direct": 8.7},
+    )
+
+    assert "⏱️ Turn time: 8.9s" in tail
+    assert "🧭 Main stages: Execution 8.7s" in tail
+    assert "Strategy" not in tail
+    assert "Planning" not in tail
+
+
 def test_formatter_matches_compact_cent_layout():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(
@@ -475,7 +537,7 @@ def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages
     assert chinese.splitlines() == [
         "💰 本回合：≈ 10.61 美分 · 服务提供方：DeepSeek",
         "📥 输入 2.916M · 缓存命中 2.683M（92.0%） 📤 输出 52.2K（其中推理 38.1K）",
-        "🔁 无缓存约 109.65 美分 · 缓存节省约 99.04 美分（90.3%）",
+        "🔁 无缓存约 US$1.0965 · 缓存节省约 99.04 美分（90.3%）",
     ]
     english = format_cost_tail(receipt, locale="en")
     assert english.splitlines()[0].startswith("💰 This turn: ≈ 10.61 cents")

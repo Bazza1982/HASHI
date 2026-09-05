@@ -1092,6 +1092,7 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
     assert response.stream_metadata["her_v2"]["classification"] is None
     assert response.stream_metadata["her_v2"]["plan_id"] is None
+    assert response.stream_metadata["her_v2"]["stage_timings_s"]["direct"] > 0
     assert response.stream_metadata["her_v2"]["effort"] == {
         "configured": "zero",
         "effective": "zero",

@@ -9929,7 +9929,13 @@ class FlexibleAgentRuntime:
     async def _send_wrapper_verbose_trace(self, item: QueuedRequest, core_raw: str, visible_text: str, wrapper_result) -> None:
         await runtime_wrapper.send_wrapper_verbose_trace(self, item, core_raw, visible_text, wrapper_result)
 
-    async def _send_meter_cost_tail(self, item: QueuedRequest) -> None:
+    async def _send_meter_cost_tail(
+        self,
+        item: QueuedRequest,
+        *,
+        total_elapsed_s: float | None = None,
+        stage_timings_s: Mapping[str, float] | None = None,
+    ) -> None:
         """Send the per-turn cost tail after the answer is confirmed delivered.
 
         Uses request-local ``meter_at_start`` so a mid-flight toggle never changes
@@ -9963,7 +9969,12 @@ class FlexibleAgentRuntime:
                     or getattr(item, "chat_id", None),
                 )
             )
-            text = format_cost_tail(receipt, locale=locale)
+            text = format_cost_tail(
+                receipt,
+                locale=locale,
+                total_elapsed_s=total_elapsed_s,
+                stage_timings_s=stage_timings_s,
+            )
         except Exception:
             self.logger.exception("meter cost tail formatting failed")
             return
@@ -10528,7 +10539,13 @@ class FlexibleAgentRuntime:
                 receipt_chunk_count = chunk_count
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 if receipt_delivered:
-                    await self._send_meter_cost_tail(item)
+                    await self._send_meter_cost_tail(
+                        item,
+                        total_elapsed_s=runtime_pipeline.queued_elapsed_s(item),
+                        stage_timings_s=runtime_pipeline._her_v2_stage_timings_s(
+                            response
+                        ),
+                    )
                 self._schedule_audit_followup(
                     item,
                     core_raw=safe_core_raw,

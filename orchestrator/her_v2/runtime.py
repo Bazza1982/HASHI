@@ -267,6 +267,9 @@ class _TurnState:
     execution_draft_event_id: str = ""
     execution_draft_text: str = ""
     execution_draft_delivered: bool = False
+    stage_timing_intervals: dict[str, list[tuple[float, float]]] = field(
+        default_factory=dict
+    )
 
 
 class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
@@ -289,6 +292,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         retry_policy: ProviderRetryPolicy | None = None,
         workzone_ref: str = "",
         checkpoint_clock: Callable[[], float] = time.monotonic,
+        timing_clock: Callable[[], float] = time.perf_counter,
         skills_catalogue: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         self.config = config
@@ -308,6 +312,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.workzone_ref = str(workzone_ref or "")
         self.checkpoint_clock = checkpoint_clock
+        self.timing_clock = timing_clock
         self.skills_catalogue = tuple(
             dict(item)
             for item in (skills_catalogue or ())

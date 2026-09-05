@@ -202,6 +202,27 @@ async def test_foreground_tail_sends_single_deduped_message():
 
 
 @pytest.mark.asyncio
+async def test_foreground_tail_renders_frozen_total_and_stage_timings():
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = FakeMeterRuntime(meter_at_start=True, receipt=_receipt())
+    item = SimpleNamespace(
+        request_id="req-1", chat_id=99, silent=False, deliver_to_telegram=True
+    )
+
+    await FlexibleAgentRuntime._send_meter_cost_tail(
+        runtime,
+        item,
+        total_elapsed_s=75.2,
+        stage_timings_s={"triage": 5.4, "execution": 68.1},
+    )
+
+    text = runtime.sent[0][1]
+    assert "⏱️ 本回合耗时：1分15秒" in text
+    assert "🧭 主要阶段：策略 5.4秒 · 执行 1分8秒" in text
+
+
+@pytest.mark.asyncio
 async def test_foreground_tail_uses_matching_request_state_under_overlap():
     """A later request must not replace an earlier request's meter receipt."""
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
