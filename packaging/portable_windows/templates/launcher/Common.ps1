@@ -34,6 +34,7 @@ $script:HashiPidPath = Join-Path $script:LauncherStateRoot 'hashi.pid'
 $script:WorkbenchPidPath = Join-Path $script:LauncherStateRoot 'workbench.pid'
 $script:HashiStartupTimeoutSeconds = 1800
 $script:HashiStartupProgressSeconds = 15
+$script:WorkbenchStartupTimeoutSeconds = 300
 
 function Initialize-PortableInstanceIdentity {
     if (-not (Test-Path -LiteralPath $script:PortableIdentityPath -PathType Leaf)) {
@@ -462,7 +463,9 @@ function Start-WorkbenchServer {
     $process = Start-Process -FilePath $node -ArgumentList (Quote-ProcessArgument $server) -WorkingDirectory $script:WorkbenchRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Set-Content -LiteralPath $script:WorkbenchPidPath -Value $process.Id -Encoding ASCII
 
-    $deadline = (Get-Date).AddSeconds(45)
+    $startedAt = Get-Date
+    $deadline = $startedAt.AddSeconds($script:WorkbenchStartupTimeoutSeconds)
+    $nextProgress = $startedAt.AddSeconds($script:HashiStartupProgressSeconds)
     do {
         Start-Sleep -Milliseconds 400
         if ($process.HasExited) {
@@ -473,8 +476,17 @@ function Start-WorkbenchServer {
             $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/" -TimeoutSec 2
             if ($response.StatusCode -eq 200) { return }
         } catch {}
+        $now = Get-Date
+        if ($now -ge $nextProgress) {
+            $elapsed = [int]($now - $startedAt).TotalSeconds
+            Write-BilingualMessage `
+                -English "Workbench is still starting normally - $elapsed seconds elapsed." `
+                -Chinese "Workbench 仍在正常启动——已用时 $elapsed 秒。" `
+                -ForegroundColor Cyan
+            $nextProgress = $now.AddSeconds($script:HashiStartupProgressSeconds)
+        }
     } while ((Get-Date) -lt $deadline)
-    throw "Workbench did not become healthy on port $port within 45 seconds."
+    throw "Workbench did not become healthy on port $port within $script:WorkbenchStartupTimeoutSeconds seconds."
 }
 
 function Find-SystemBrowser {

@@ -97,10 +97,14 @@ def test_portable_launcher_allows_slow_usb_cold_start_and_reports_progress():
     common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
 
     assert "$script:HashiStartupTimeoutSeconds = 1800" in common
+    assert "$script:WorkbenchStartupTimeoutSeconds = 300" in common
     assert "This may take a few minutes" in common
     assert "HASHI is still starting normally" in common
     assert "HASHI 仍在正常启动" in common
+    assert "Workbench is still starting normally" in common
+    assert "Workbench 仍在正常启动" in common
     assert "AddSeconds(75)" not in common
+    assert "AddSeconds(45)" not in common
 
 
 def test_portable_stop_closes_owned_runtime_and_browser_before_safe_eject():
