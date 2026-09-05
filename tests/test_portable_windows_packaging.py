@@ -335,6 +335,7 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
         "exp/asset-packs.json": "{}\n",
         "orchestrator/tracked.py": "TRACKED = True\n",
         "adapters/codex_cli.py": "must be pruned\n",
+        "superloops/recordings/tracked-run/state.json": "must be ignored\n",
     }
     for relative, content in tracked.items():
         path = source / relative
@@ -372,6 +373,7 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
 
     assert (destination / "orchestrator" / "tracked.py").is_file()
     assert not (destination / "adapters" / "codex_cli.py").exists()
+    assert not (destination / "superloops" / "recordings").exists()
     for path in untracked:
         assert not (destination / path.relative_to(source)).exists()
 

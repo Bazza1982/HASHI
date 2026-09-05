@@ -158,6 +158,17 @@ PRUNED_SOURCE_PATHS = (
     "veritas/SETUP.md",
     "veritas/test_adapters.py",
 )
+IGNORED_SOURCE_NAMES = {
+    ".git",
+    ".github",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    "node_modules",
+    "recordings",
+    "runs",
+}
 def status(message: str) -> None:
     print(f"[portable] {message}", flush=True)
 
@@ -218,6 +229,17 @@ def remove_path(path: Path) -> None:
         path.unlink()
 
 
+def ignored_tracked_source(relative: Path) -> bool:
+    for part in relative.parts:
+        if (
+            part in IGNORED_SOURCE_NAMES
+            or part.endswith((".pyc", ".pyo", ".log", ".lock", ".pid"))
+            or (part.startswith(".") and part != ".well-known")
+        ):
+            return True
+    return False
+
+
 def copy_hashi_source(destination: Path) -> None:
     status("copy allowlisted, Git-tracked HASHI source")
     destination.mkdir(parents=True, exist_ok=True)
@@ -243,6 +265,8 @@ def copy_hashi_source(destination: Path) -> None:
     for relative in tracked:
         if relative.is_absolute() or ".." in relative.parts:
             raise RuntimeError(f"unsafe Git-tracked source path: {relative}")
+        if ignored_tracked_source(relative):
+            continue
         if any(relative == item or item in relative.parents for item in pruned):
             continue
         source = HASHI_ROOT / relative
