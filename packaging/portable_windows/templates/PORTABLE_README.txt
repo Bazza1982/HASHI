@@ -34,10 +34,13 @@ Install_HASHI_On_This_PC.bat
   无需手动运行此文件。
 
 Uninstall_HASHI_From_This_PC.bat
-  Removes only HASHI runtime files installed on this PC and its Windows
-  Installed Apps entry. USB data is never removed.
-  仅删除安装在这台电脑上的 HASHI 运行组件及 Windows“已安装的应用”条目，
-  绝不会删除 USB 数据。
+  Stops this portable instance and removes only its local runtime and Windows
+  Installed Apps entry. Type REMOVE to confirm. A unique instance identity and
+  matching ownership markers prevent it from touching other HASHI instances.
+  USB data is never removed.
+  停止此便携实例，并只删除它自己的本机运行组件及 Windows“已安装的应用”
+  条目。输入 REMOVE 后才会继续。唯一实例身份和匹配的所有权标记会防止它
+  触及其他 HASHI 实例；USB 数据绝不会被删除。
 
 Stop_HASHI.bat
   Stops HASHI, Workbench, and Remote. Run this before safely ejecting the USB.

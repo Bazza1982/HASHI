@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import sys
 import zipfile
@@ -130,8 +131,51 @@ def test_portable_local_acceleration_is_admin_atomic_progressive_and_optional():
 
     assert "CommonApplicationData" in uninstaller
     assert "USB data" in uninstaller
-    assert "HASHIPortableLocalAcceleration" in uninstaller
-    assert "\\data" not in uninstaller.lower()
+    assert "HASHIPortable-$requestedId" in uninstaller
+    assert "Assert-InstanceOwner" in uninstaller
+    assert "Type REMOVE to continue" in uninstaller
+    assert "portable-instance.json" in uninstaller
+    assert "Remove-Item -LiteralPath $script:ProductRoot -Recurse" not in uninstaller
+    assert "Remove-Item -LiteralPath $script:InstancesRoot -Recurse" not in uninstaller
+
+
+def test_portable_host_runtime_and_uninstall_are_scoped_to_one_random_identity(
+    tmp_path,
+):
+    builder = _load_builder()
+    secrets_path = tmp_path / "source-secrets.json"
+    secrets_path.write_text(
+        json.dumps({"deepseek_api_key": "test-key"}), encoding="utf-8"
+    )
+    builder.configure_data(tmp_path, secrets_path, allow_missing_key=False)
+
+    identity = json.loads(
+        (tmp_path / "data" / "portable-instance.json").read_text(encoding="utf-8")
+    )
+    assert identity["schema_version"] == 1
+    assert identity["product"] == "HASHI Portable Windows x64"
+    assert re.fullmatch(r"[0-9a-f]{32}", identity["portable_instance_id"])
+
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+    installer = (TEMPLATES / "launcher" / "Install-LocalCache.ps1").read_text(
+        encoding="utf-8"
+    )
+    uninstaller = (TEMPLATES / "launcher" / "Uninstall-LocalCache.ps1").read_text(
+        encoding="utf-8"
+    )
+    for source in (common, installer, uninstaller):
+        assert "portable-instance.json" in source
+        assert "Instances\\" in source
+    assert '.hashi-portable-owner.json' in installer
+    assert '.hashi-portable-registration.json' in installer
+    assert 'portable_instance_id = $script:PortableInstanceId' in installer
+    assert 'portable_instance_id = $script:InstanceId' not in installer
+    assert '.hashi-portable-owner.json' in uninstaller
+    assert '.hashi-portable-registration.json' in uninstaller
+    assert "Get-CimInstance Win32_Process" in uninstaller
+    assert "Test-PathInsideRoot" in uninstaller
+    assert "$script:CacheRoot = Join-Path $script:ProductRoot 'Cache'" not in installer
+    assert "$script:LocalCacheRoot = Join-Path $script:LocalProductRoot 'Cache'" not in common
 
 
 def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(

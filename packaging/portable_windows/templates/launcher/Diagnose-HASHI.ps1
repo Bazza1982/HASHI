@@ -30,6 +30,7 @@ $required = @(
     (Join-Path $script:WorkbenchRoot 'server.mjs'),
     (Join-Path $script:DataRoot 'agents.json'),
     (Join-Path $script:DataRoot 'secrets.json'),
+    (Join-Path $script:DataRoot 'portable-instance.json'),
     (Join-Path $script:PythonRoot 'piper.exe'),
     (Join-Path $script:BinRoot 'ffmpeg.exe'),
     (Join-Path $script:HashiRoot 'voice_models\piper\zh_CN-huayan-medium.onnx'),

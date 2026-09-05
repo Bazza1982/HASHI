@@ -20,7 +20,13 @@ installation; the original non-elevated launcher offers Retry or Exit and points
 to the setup log. A complete expanded program copy remains available for
 explicitly selected USB execution and backward-compatible images. The generated
 root includes explicit install/uninstall launchers, and the runtime also
-registers a removable entry in Windows Installed Apps.
+registers a removable entry in Windows Installed Apps. Every generated USB has
+a random 128-bit portable-instance identity. Its ProgramData directory,
+ownership marker, running processes, and Installed Apps key are all scoped to
+that identity. The uninstaller always requires matching identity and ownership
+markers, cross-checks bundle and Windows registration metadata when present,
+and fails closed on any mismatch; it never recursively deletes the shared
+product root or another portable instance's directory.
 
 The image contains HER v2, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the complete browser

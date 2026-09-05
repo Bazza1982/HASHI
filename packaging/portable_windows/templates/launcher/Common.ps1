@@ -18,18 +18,46 @@ $script:AppRoot = $script:UsbAppRoot
 $script:HashiRoot = Join-Path $script:AppRoot 'hashi'
 $script:WorkbenchRoot = Join-Path $script:AppRoot 'workbench'
 $script:DataRoot = Join-Path $script:PortableRoot 'data'
+$script:PortableIdentityPath = Join-Path $script:DataRoot 'portable-instance.json'
 $script:PythonRoot = $script:UsbPythonRoot
 $script:NodeRoot = $script:UsbNodeRoot
 $script:BinRoot = $script:UsbBinRoot
 $script:ExecutionMode = 'usb'
 $script:LocalCacheManifestPath = Join-Path $script:PortableRoot 'install\local-cache-manifest.json'
-$script:LocalCacheRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HASHI Portable\Cache'
+$script:LocalProductRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HASHI Portable'
+$script:PortableInstanceId = ''
+$script:LocalInstanceRoot = ''
+$script:LocalCacheRoot = ''
 $script:LocalCacheInstallAttempted = $false
 $script:LauncherStateRoot = Join-Path $script:DataRoot 'state\launcher'
 $script:HashiPidPath = Join-Path $script:LauncherStateRoot 'hashi.pid'
 $script:WorkbenchPidPath = Join-Path $script:LauncherStateRoot 'workbench.pid'
 $script:HashiStartupTimeoutSeconds = 1800
 $script:HashiStartupProgressSeconds = 15
+
+function Initialize-PortableInstanceIdentity {
+    if (-not (Test-Path -LiteralPath $script:PortableIdentityPath -PathType Leaf)) {
+        throw "Portable instance identity is missing: $script:PortableIdentityPath"
+    }
+    try {
+        $identity = Get-Content -LiteralPath $script:PortableIdentityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "Portable instance identity is unreadable: $($_.Exception.Message)"
+    }
+    $instanceId = [string]$identity.portable_instance_id
+    if (
+        [int]$identity.schema_version -ne 1 -or
+        [string]$identity.product -ne 'HASHI Portable Windows x64' -or
+        $instanceId -notmatch '^[0-9a-f]{32}$'
+    ) {
+        throw 'Portable instance identity is invalid.'
+    }
+    $script:PortableInstanceId = $instanceId
+    $script:LocalInstanceRoot = Join-Path $script:LocalProductRoot ("Instances\$instanceId")
+    $script:LocalCacheRoot = Join-Path $script:LocalInstanceRoot 'Cache'
+}
+
+Initialize-PortableInstanceIdentity
 
 function Write-BilingualMessage {
     param(
@@ -132,6 +160,7 @@ function Test-LocalCacheReady {
     if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $false }
     try {
         $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$marker.portable_instance_id -ne $script:PortableInstanceId) { return $false }
         if ([string]$marker.bundle_id -ne [string]$Manifest.bundle_id) { return $false }
         foreach ($relativeValue in @($Manifest.required_files)) {
             $relative = ([string]$relativeValue).Replace('/', '\')

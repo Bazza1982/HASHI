@@ -529,6 +529,17 @@ def configure_data(
     ):
         (data / relative).mkdir(parents=True, exist_ok=True)
     shutil.copy2(TEMPLATES / "agents.json", data / "agents.json")
+    portable_identity = {
+        "schema_version": 1,
+        "product": "HASHI Portable Windows x64",
+        "portable_instance_id": secrets_module.token_hex(16),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    (data / "portable-instance.json").write_text(
+        json.dumps(portable_identity, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
     shutil.copy2(TEMPLATES / "tasks.json", data / "tasks.json")
     shutil.copy2(
         TEMPLATES / "agent_capabilities.json", data / "agent_capabilities.json"
@@ -735,6 +746,20 @@ def write_manifest(image_root: Path, build_info: dict) -> int:
 
 
 def validate_image(image_root: Path) -> None:
+    portable_identity = json.loads(
+        (image_root / "data" / "portable-instance.json").read_text(encoding="utf-8")
+    )
+    if (
+        portable_identity.get("schema_version") != 1
+        or portable_identity.get("product") != "HASHI Portable Windows x64"
+        or not isinstance(portable_identity.get("portable_instance_id"), str)
+        or len(portable_identity["portable_instance_id"]) != 32
+        or any(
+            character not in "0123456789abcdef"
+            for character in portable_identity["portable_instance_id"]
+        )
+    ):
+        raise RuntimeError("portable instance identity is invalid")
     config = json.loads(
         (image_root / "data" / "agents.json").read_text(encoding="utf-8")
     )
@@ -768,6 +793,7 @@ def validate_image(image_root: Path) -> None:
         "runtime/python/python.exe",
         "runtime/node/node.exe",
         "runtime/bin/ffmpeg.exe",
+        "data/portable-instance.json",
         "app/hashi/main.py",
         "app/hashi/tui.py",
         "app/hashi/exp/loader.py",
@@ -963,6 +989,7 @@ def build(args: argparse.Namespace) -> Path:
                 "playwright_without_browser": True,
                 "administrator_local_acceleration": True,
                 "expanded_usb_fallback": True,
+                "instance_scoped_host_uninstall": True,
             },
             "local_cache_bundle_id": local_cache_manifest["bundle_id"],
             "local_cache_install_bytes": local_cache_manifest["install_bytes"],

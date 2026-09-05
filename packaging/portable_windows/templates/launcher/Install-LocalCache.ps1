@@ -18,10 +18,15 @@ $script:PortableRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '.
 $script:DataRoot = Join-Path $script:PortableRoot 'data'
 $script:SetupLogPath = Join-Path $script:DataRoot 'logs\hashi-setup.log'
 $script:ManifestPath = Join-Path $script:PortableRoot 'install\local-cache-manifest.json'
+$script:PortableIdentityPath = Join-Path $script:DataRoot 'portable-instance.json'
 $script:ProductRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HASHI Portable'
-$script:CacheRoot = Join-Path $script:ProductRoot 'Cache'
-$script:StageRoot = Join-Path $script:ProductRoot 'Stage'
-$script:UninstallRegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HASHIPortableLocalAcceleration'
+$script:PortableInstanceId = ''
+$script:InstanceRoot = ''
+$script:CacheRoot = ''
+$script:StageRoot = ''
+$script:OwnerPath = ''
+$script:RegistrationPath = ''
+$script:UninstallRegistryPath = ''
 $script:CopyBufferBytes = 4 * 1024 * 1024
 
 function Write-BilingualSetupMessage {
@@ -56,6 +61,28 @@ function Test-IsAdministrator {
 function Quote-ProcessArgument {
     param([string]$Value)
     return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Initialize-InstancePaths {
+    if (-not (Test-Path -LiteralPath $script:PortableIdentityPath -PathType Leaf)) {
+        throw "Portable instance identity is missing: $script:PortableIdentityPath"
+    }
+    $identity = Get-Content -LiteralPath $script:PortableIdentityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $instanceId = [string]$identity.portable_instance_id
+    if (
+        [int]$identity.schema_version -ne 1 -or
+        [string]$identity.product -ne 'HASHI Portable Windows x64' -or
+        $instanceId -notmatch '^[0-9a-f]{32}$'
+    ) {
+        throw 'Portable instance identity is invalid.'
+    }
+    $script:PortableInstanceId = $instanceId
+    $script:InstanceRoot = Join-Path $script:ProductRoot ("Instances\$instanceId")
+    $script:CacheRoot = Join-Path $script:InstanceRoot 'Cache'
+    $script:StageRoot = Join-Path $script:InstanceRoot 'Stage'
+    $script:OwnerPath = Join-Path $script:InstanceRoot '.hashi-portable-owner.json'
+    $script:RegistrationPath = Join-Path $script:InstanceRoot '.hashi-portable-registration.json'
+    $script:UninstallRegistryPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HASHIPortable-$instanceId"
 }
 
 function Start-ElevatedInstaller {
@@ -187,6 +214,7 @@ function Test-InstalledCache {
     if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $false }
     try {
         $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$marker.portable_instance_id -ne $script:PortableInstanceId) { return $false }
         if ([string]$marker.bundle_id -ne [string]$Manifest.bundle_id) { return $false }
         foreach ($required in @($Manifest.required_files)) {
             $relative = Convert-ManifestRelativePath ([string]$required)
@@ -201,8 +229,7 @@ function Test-InstalledCache {
 }
 
 function Grant-CacheReadAccess {
-    New-Item -ItemType Directory -Force -Path $script:ProductRoot | Out-Null
-    $acl = Get-Acl -LiteralPath $script:ProductRoot
+    $acl = Get-Acl -LiteralPath $script:InstanceRoot
     $users = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
     $rule = New-Object Security.AccessControl.FileSystemAccessRule(
         $users,
@@ -212,7 +239,44 @@ function Grant-CacheReadAccess {
         [Security.AccessControl.AccessControlType]::Allow
     )
     $acl.SetAccessRule($rule)
-    Set-Acl -LiteralPath $script:ProductRoot -AclObject $acl
+    Set-Acl -LiteralPath $script:InstanceRoot -AclObject $acl
+}
+
+function Assert-OrCreateInstanceOwner {
+    if (Test-Path -LiteralPath $script:InstanceRoot) {
+        $instanceItem = Get-Item -LiteralPath $script:InstanceRoot -Force
+        if (-not $instanceItem.PSIsContainer) {
+            throw 'The local HASHI instance path is not a directory.'
+        }
+        if (($instanceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The local HASHI instance path is a reparse point.'
+        }
+    }
+    if (Test-Path -LiteralPath $script:OwnerPath -PathType Leaf) {
+        $existing = Get-Content -LiteralPath $script:OwnerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (
+            [int]$existing.schema_version -ne 1 -or
+            [string]$existing.product -ne 'HASHI Portable Windows x64' -or
+            [string]$existing.portable_instance_id -ne $script:PortableInstanceId
+        ) {
+            throw 'The local HASHI instance ownership marker does not match this USB.'
+        }
+        return
+    }
+    if (Test-Path -LiteralPath $script:InstanceRoot) {
+        if ($null -ne (Get-ChildItem -LiteralPath $script:InstanceRoot -Force | Select-Object -First 1)) {
+            throw 'Refusing to claim a non-empty local directory without an ownership marker.'
+        }
+    } else {
+        New-Item -ItemType Directory -Path $script:InstanceRoot | Out-Null
+    }
+    $owner = @{
+        schema_version = 1
+        product = 'HASHI Portable Windows x64'
+        portable_instance_id = $script:PortableInstanceId
+        created_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    $owner | ConvertTo-Json | Set-Content -LiteralPath $script:OwnerPath -Encoding UTF8
 }
 
 function Register-Uninstaller {
@@ -220,27 +284,49 @@ function Register-Uninstaller {
         [object]$Manifest,
         [string]$InstallRoot
     )
-    $installedUninstaller = Join-Path $script:ProductRoot 'Uninstall-LocalCache.ps1'
+    $installedUninstaller = Join-Path $script:InstanceRoot 'Uninstall-LocalCache.ps1'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-LocalCache.ps1') -Destination $installedUninstaller -Force
+    $registration = @{
+        schema_version = 1
+        product = 'HASHI Portable Windows x64'
+        portable_instance_id = $script:PortableInstanceId
+        bundle_id = [string]$Manifest.bundle_id
+        cache_key = [string]$Manifest.cache_key
+        install_root = [IO.Path]::GetFullPath($InstallRoot)
+        registered_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    $registration | ConvertTo-Json | Set-Content -LiteralPath $script:RegistrationPath -Encoding UTF8
     $powerShell = Join-Path $PSHOME 'powershell.exe'
-    $baseCommand = (Quote-ProcessArgument $powerShell) + ' -NoLogo -NoProfile -ExecutionPolicy Bypass -File ' + (Quote-ProcessArgument $installedUninstaller)
+    $baseCommand = (Quote-ProcessArgument $powerShell) + ' -NoLogo -NoProfile -ExecutionPolicy Bypass -File ' + (Quote-ProcessArgument $installedUninstaller) + ' -PortableInstanceId ' + $script:PortableInstanceId
     New-Item -Path $script:UninstallRegistryPath -Force | Out-Null
     $values = @{
-        DisplayName = 'HASHI Portable Runtime'
+        DisplayName = "HASHI Portable Runtime ($($script:PortableInstanceId.Substring(0, 8)))"
         DisplayVersion = ([string]$Manifest.bundle_id).Substring(0, 12)
         Publisher = 'HASHI'
-        InstallLocation = $InstallRoot
+        InstallLocation = $script:InstanceRoot
         UninstallString = $baseCommand
         QuietUninstallString = $baseCommand + ' -Quiet'
         InstallDate = (Get-Date).ToString('yyyyMMdd')
         EstimatedSize = [int][Math]::Ceiling(([long]$Manifest.install_bytes) / 1KB)
         NoModify = 1
         NoRepair = 1
-        Comments = 'Program/runtime files only. Personal data remains on the USB drive.'
+        PortableInstanceId = $script:PortableInstanceId
+        BundleId = [string]$Manifest.bundle_id
+        Comments = 'Runtime files for one HASHI Portable instance only. Personal data remains on the USB drive.'
     }
     foreach ($entry in $values.GetEnumerator()) {
         New-ItemProperty -Path $script:UninstallRegistryPath -Name $entry.Key -Value $entry.Value -Force | Out-Null
     }
+}
+
+try {
+    Initialize-InstancePaths
+} catch {
+    Write-BilingualSetupMessage `
+        -English "Setup refused to continue: $($_.Exception.Message)" `
+        -Chinese "安装已拒绝继续：$($_.Exception.Message)" `
+        -ForegroundColor Red
+    exit 1
 }
 
 if (-not (Test-IsAdministrator)) {
@@ -290,12 +376,13 @@ try {
     }
 
     Write-SetupLog 'Checking system requirements and acquiring the installer lock.'
-    $installMutex = [Threading.Mutex]::new($false, 'Global\HASHIPortableLocalAccelerationInstall')
+    $installMutex = [Threading.Mutex]::new($false, "Global\HASHIPortableInstall-$script:PortableInstanceId")
     try {
         $installMutexHeld = $installMutex.WaitOne()
     } catch [Threading.AbandonedMutexException] {
         $installMutexHeld = $true
     }
+    Assert-OrCreateInstanceOwner
     Grant-CacheReadAccess
     New-Item -ItemType Directory -Force -Path $script:CacheRoot, $script:StageRoot | Out-Null
     Get-ChildItem -LiteralPath $script:StageRoot -Directory -Force -ErrorAction SilentlyContinue |
@@ -521,6 +608,7 @@ try {
         -ChineseStatus '正在完成安装'
     $marker = @{
         schema_version = 1
+        portable_instance_id = $script:PortableInstanceId
         bundle_id = $bundleId
         cache_key = $cacheKey
         installed_at = (Get-Date).ToUniversalTime().ToString('o')
