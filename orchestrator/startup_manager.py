@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from orchestrator import remote_lifecycle
 from orchestrator.bootstrap_logging import AnimMute
@@ -87,7 +88,9 @@ class StartupManager:
         return True, wa_cfg
 
     async def _ensure_remote_lifecycle(self) -> None:
-        root = getattr(getattr(self.kernel, "global_config", None), "project_root", None)
+        global_config = getattr(self.kernel, "global_config", None)
+        portable_root = str(os.environ.get("HASHI_REMOTE_ROOT") or "").strip()
+        root = portable_root or getattr(global_config, "project_root", None)
         try:
             result = await remote_lifecycle.ensure_remote_started(root)
         except Exception as exc:

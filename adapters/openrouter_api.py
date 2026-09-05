@@ -942,6 +942,11 @@ class OpenRouterAdapter(BaseBackend):
             "X-Title": "Bridge-U Orchestrator",
         }
 
+    def _chat_completions_url(self) -> str:
+        """Return the concrete provider endpoint for this adapter."""
+
+        return self.global_config.openrouter_url
+
     def _augment_assistant_tool_message(
         self,
         assistant_msg: dict[str, Any],
@@ -1518,7 +1523,7 @@ class OpenRouterAdapter(BaseBackend):
         on_stream_event: StreamCallback,
     ) -> _APIResult:
         response = await self.client.post(
-            self.global_config.openrouter_url,
+            self._chat_completions_url(),
             json=payload,
             headers=headers,
         )
@@ -1604,7 +1609,7 @@ class OpenRouterAdapter(BaseBackend):
 
         async with self.client.stream(
             "POST",
-            self.global_config.openrouter_url,
+            self._chat_completions_url(),
             json=payload,
             headers=headers,
         ) as response:
@@ -1616,7 +1621,7 @@ class OpenRouterAdapter(BaseBackend):
                 # doubles may omit httpx's response.request metadata.  Error
                 # events still need a concrete request for HTTPStatusError.
                 stream_request = httpx.Request(
-                    "POST", self.global_config.openrouter_url
+                    "POST", self._chat_completions_url()
                 )
 
             async for line in response.aiter_lines():

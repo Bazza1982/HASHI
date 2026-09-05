@@ -40,6 +40,27 @@ def _manager(tmp_path: Path) -> VoiceManager:
     )
 
 
+def test_piper_preset_uses_standalone_executable_without_python_module(
+    tmp_path, monkeypatch
+):
+    python_exe = tmp_path / "python.exe"
+    piper_exe = tmp_path / "piper.exe"
+    python_exe.touch()
+    piper_exe.touch()
+    monkeypatch.setattr("orchestrator.voice_manager.sys.executable", str(python_exe))
+    monkeypatch.setattr(
+        "orchestrator.voice_manager.importlib.util.find_spec", lambda _name: None
+    )
+
+    manager = _manager(tmp_path)
+    preset = manager._preset_payload("pcn")
+
+    assert preset is not None
+    assert preset["provider_options"]["exe"] == str(piper_exe)
+    assert preset["provider_options"]["module_mode"] is False
+    assert manager._provider_status("piper") == "installed"
+
+
 def test_voice_profiles_resolve_supported_native_voice_and_tts_fallback(tmp_path):
     manager = _manager(tmp_path)
     manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")

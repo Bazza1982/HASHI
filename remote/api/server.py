@@ -70,7 +70,7 @@ from ..security.auth import (
     verify_protocol_request,
     verify_token,
 )
-from ..security.pairing import PairingManager
+from ..security.pairing import PairingManager, PairingState
 from ..security.shared_token import build_auth_headers, load_shared_token
 from ..terminal.executor import AuthLevel, TerminalExecutor
 
@@ -1016,6 +1016,12 @@ def create_app(
                 "peer_count": len(peers),
                 "protocol_auth_mode": protocol_auth_mode(),
                 "lan_mode": is_lan_mode(),
+                "pairing_auto_approve": bool(
+                    _pairing_manager and _pairing_manager.auto_approve
+                ),
+                "pairing_token_ttl_seconds": (
+                    _pairing_manager.token_ttl_seconds if _pairing_manager else None
+                ),
                 "trusted_view": False,
                 "shared_token_configured": has_shared_token(),
             }
@@ -1029,6 +1035,12 @@ def create_app(
             "peers": peers,
             "protocol_auth_mode": protocol_auth_mode(),
             "lan_mode": is_lan_mode(),
+            "pairing_auto_approve": bool(
+                _pairing_manager and _pairing_manager.auto_approve
+            ),
+            "pairing_token_ttl_seconds": (
+                _pairing_manager.token_ttl_seconds if _pairing_manager else None
+            ),
             "trusted_view": True,
         }
 
@@ -2125,13 +2137,20 @@ def create_app(
     @app.post("/pair/request")
     async def pair_request(payload: PairRequestPayload):
         if _pairing_manager.is_auto_approved():
-            # LAN mode: auto-approve immediately
+            # One-click mode issues a bearer immediately; protected endpoints
+            # still require that token unless legacy LAN mode is enabled.
             token = _pairing_manager.approve_request_direct(
                 payload.client_id, payload.client_name
             )
+            paired = _pairing_manager.get_paired_client(payload.client_id)
             audit = get_audit_logger()
             audit.log_pairing_request(payload.client_id, payload.client_name, auto_approved=True)
-            return {"ok": True, "auto_approved": True, "token": token}
+            return {
+                "ok": True,
+                "auto_approved": True,
+                "token": token,
+                "expires_at": paired.expires_at if paired else None,
+            }
 
         req = _pairing_manager.create_pairing_request(payload.client_id, payload.client_name)
         audit = get_audit_logger()
@@ -2148,6 +2167,14 @@ def create_app(
     async def pair_status(client_id: str):
         req = _pairing_manager.get_request(client_id)
         if not req:
+            paired = _pairing_manager.get_paired_client(client_id)
+            if paired:
+                return {
+                    "ok": True,
+                    "state": PairingState.APPROVED.value,
+                    "client_id": client_id,
+                    "expires_at": paired.expires_at,
+                }
             raise HTTPException(status_code=404, detail="Pairing request not found")
         return {"ok": True, "state": req.state.value, "client_id": client_id}
 
@@ -2156,7 +2183,12 @@ def create_app(
         token = _pairing_manager.approve_request(client_id)
         if not token:
             raise HTTPException(status_code=404, detail="Request not found or expired")
-        return {"ok": True, "token": token}
+        paired = _pairing_manager.get_paired_client(client_id)
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": paired.expires_at if paired else None,
+        }
 
     @app.post("/pair/reject/{client_id}")
     async def pair_reject(client_id: str, client_id_auth: str = Depends(verify_token)):

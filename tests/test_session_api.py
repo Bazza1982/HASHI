@@ -39,6 +39,7 @@ class _Runtime:
     def __init__(self):
         self.server = None
         self.last_request_metadata = None
+        self.api_request_metadata = []
         self._safevoice_enabled = False
         self._native_voice_transcripts = {}
         self.voice_manager = SimpleNamespace(
@@ -88,6 +89,17 @@ class _Runtime:
             response_preferences=request_metadata.get("response_preferences"),
         )
         return accepted.request_id
+
+    async def enqueue_api_text(
+        self,
+        _text,
+        *,
+        request_metadata,
+        idempotency_key=None,
+    ):
+        del idempotency_key
+        self.api_request_metadata.append(dict(request_metadata))
+        return f"req-api-{len(self.api_request_metadata)}"
 
 
 def _server(
@@ -154,6 +166,47 @@ async def test_qualified_capability_is_client_neutral_and_limit_driven(
         "client" in str(value).lower() and "specific" in str(value).lower()
         for value in capabilities.values()
     )
+
+
+@pytest.mark.asyncio
+async def test_tui_and_workbench_legacy_chat_share_default_conversation_binding(
+    tmp_path,
+):
+    server, runtime = _server(tmp_path)
+    tui_request = _Request({"agent": "lily", "text": "from TUI"})
+    tui_request.content_type = "application/json"
+    workbench_request = _Request(
+        {
+            "agent": "lily",
+            "text": "from Workbench",
+            "source": "workbench_ui_chat",
+            "client_session_id": "workbench:lily",
+            "reply_target": {
+                "type": "ui_chat",
+                "surface": "workbench",
+                "conversation_id": "workbench:lily",
+            },
+        }
+    )
+    workbench_request.content_type = "application/json"
+
+    assert (await server.handle_chat(tui_request)).status == 200
+    assert (await server.handle_chat(workbench_request)).status == 200
+
+    assert runtime.api_request_metadata == [
+        {
+            "session_id": None,
+            "owner_id": "user:7",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+        },
+        {
+            "session_id": None,
+            "owner_id": "user:7",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+        },
+    ]
 
 
 def test_workbench_startup_reconciles_lost_session_runs(tmp_path):

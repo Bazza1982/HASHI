@@ -18,7 +18,14 @@ from orchestrator.privacy_levels import PrivacyPolicyError, require_backend_comp
 
 _MAX_STATUS_CHARS = 800
 _TOOL_FREE_API_ENGINES = frozenset(
-    {"deepseek-api", "hashi-api", "ollama-api", "openrouter-api", "xai-api"}
+    {
+        "deepseek-api",
+        "hashi-api",
+        "ollama-api",
+        "openai-compatible-api",
+        "openrouter-api",
+        "xai-api",
+    }
 )
 
 
@@ -94,7 +101,13 @@ def _tool_free_api_context(runtime: Any) -> tuple[str, str] | None:
         # tool-free Hashi API backend when that backend is explicitly allowed.
         ordered_engines.append("hashi-api")
     ordered_engines.extend(
-        ["openrouter-api", "deepseek-api", "xai-api", "ollama-api"]
+        [
+            "openrouter-api",
+            "deepseek-api",
+            "openai-compatible-api",
+            "xai-api",
+            "ollama-api",
+        ]
     )
     seen: set[str] = set()
     for candidate in ordered_engines:

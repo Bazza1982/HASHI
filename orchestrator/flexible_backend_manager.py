@@ -1,6 +1,7 @@
 import inspect
 import json
 import logging
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
@@ -64,6 +65,25 @@ from orchestrator.workspace_state import WorkspaceStateStore
 from orchestrator import workzone as workzone_module
 
 HER_HABIT_MEDITATION_STATE_KEY = "her_habit_meditation"
+
+
+def _additional_access_roots_from_environment() -> tuple[Path, ...]:
+    """Return explicitly granted filesystem roots for portable/host access."""
+
+    configured = str(os.environ.get("HASHI_ADDITIONAL_ACCESS_ROOTS") or "").strip()
+    if not configured:
+        return ()
+    roots: list[Path] = []
+    for value in configured.split(os.pathsep):
+        value = value.strip()
+        if not value:
+            continue
+        root = Path(value).expanduser().resolve()
+        if root.is_dir() and root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
 AGENT_MODE_POLICY_VERSION_STATE_KEY = "agent_mode_policy_version"
 CURRENT_AGENT_MODE_POLICY_VERSION = 1
 
@@ -1219,7 +1239,7 @@ class FlexibleBackendManager:
         from adapters.registry import get_backend_class
 
         BackendClass = get_backend_class(engine)
-        api_key = self._resolve_api_key(engine)
+        api_key = self._resolve_api_key(engine, backend_cfg_raw)
         return BackendClass(adapter_cfg, self.global_config, api_key)
 
     async def generate_ephemeral_response(
@@ -1262,6 +1282,7 @@ class FlexibleBackendManager:
             "deepseek-api",
             "hashi-api",
             "ollama-api",
+            "openai-compatible-api",
             "openrouter-api",
             "xai-api",
         }:
@@ -1306,13 +1327,31 @@ class FlexibleBackendManager:
             }
         return None
 
-    def _resolve_api_key(self, engine: str) -> Optional[Any]:
+    def _resolve_api_key(
+        self,
+        engine: str,
+        backend_cfg_raw: dict[str, Any] | None = None,
+    ) -> Optional[Any]:
         if engine == "xai-api":
             creds = self._resolve_xai_api_credentials()
             if creds:
                 self.logger.info("Resolved xAI API credentials from secrets.json")
                 return creds
             return None
+        explicit_secret = str(
+            (backend_cfg_raw or {}).get("api_key_secret")
+            or (backend_cfg_raw or {}).get("secret")
+            or ""
+        ).strip()
+        if explicit_secret:
+            api_key = self.secrets.get(explicit_secret)
+            if api_key:
+                self.logger.info(
+                    "Resolved API key for %s via configured secret '%s'",
+                    engine,
+                    explicit_secret,
+                )
+                return api_key
         for secret_key in get_secret_lookup_order(engine, self.config.name):
             api_key = self.secrets.get(secret_key)
             if api_key:
@@ -1355,7 +1394,7 @@ class FlexibleBackendManager:
         try:
             from adapters.registry import get_backend_class
             BackendClass = get_backend_class(engine)
-            api_key = self._resolve_api_key(engine)
+            api_key = self._resolve_api_key(engine, backend_cfg_raw)
             self._attach_runtime_context(adapter_cfg)
 
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
@@ -1367,6 +1406,7 @@ class FlexibleBackendManager:
             if engine in (
                 "openrouter-api",
                 "deepseek-api",
+                "openai-compatible-api",
                 "hashi-api",
                 "ollama-api",
                 "xai-api",
@@ -1470,6 +1510,11 @@ class FlexibleBackendManager:
                 adapter_cfg.resolve_access_root(),
                 state,
                 workspace_dir=adapter_cfg.workspace_dir,
+            )
+            access_roots = tuple(
+                dict.fromkeys(
+                    [*access_roots, *_additional_access_roots_from_environment()]
+                )
             )
             # Per-tool options (e.g. bash.timeout_max, file_write.max_file_size_kb)
             tool_options = {k: v for k, v in tools_cfg.items()

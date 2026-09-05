@@ -3,6 +3,7 @@ import copy
 import html
 import json
 import importlib.util
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -247,7 +248,9 @@ class VoiceManager:
 
     def _default_piper_exe(self) -> str:
         piper_exe = Path(sys.executable).with_name("piper.exe")
-        return str(piper_exe) if piper_exe.exists() else "piper"
+        if piper_exe.exists():
+            return str(piper_exe)
+        return shutil.which("piper") or "piper"
 
     def _default_python_exe(self) -> str:
         return sys.executable
@@ -259,7 +262,13 @@ class VoiceManager:
         if name == "edge":
             return "installed" if importlib.util.find_spec("edge_tts") else "not installed"
         if name == "piper":
-            return "installed" if importlib.util.find_spec("piper") else "not installed"
+            exe = self._default_piper_exe()
+            executable_available = Path(exe).is_file() or shutil.which(exe) is not None
+            return (
+                "installed"
+                if importlib.util.find_spec("piper") or executable_available
+                else "not installed"
+            )
         if name == "kokoro":
             return "installed" if importlib.util.find_spec("kokoro") else f"not installed in Python {sys.version_info.major}.{sys.version_info.minor}"
         if name == "coqui":
@@ -276,7 +285,9 @@ class VoiceManager:
         if payload.get("provider") == "piper":
             provider_options.setdefault("exe", self._default_piper_exe())
             provider_options.setdefault("python_exe", self._default_python_exe())
-            provider_options.setdefault("module_mode", True)
+            provider_options.setdefault(
+                "module_mode", importlib.util.find_spec("piper") is not None
+            )
         payload["provider_options"] = provider_options
         return payload
 

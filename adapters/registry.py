@@ -17,6 +17,10 @@ def get_backend_class(engine_name: str):
         from adapters.deepseek_api import DeepSeekAdapter
 
         return DeepSeekAdapter
+    elif engine_name == "openai-compatible-api":
+        from adapters.openai_compatible_api import OpenAICompatibleAdapter
+
+        return OpenAICompatibleAdapter
     elif engine_name == "claude-cli":
         from adapters.claude_cli import ClaudeCLIAdapter
 

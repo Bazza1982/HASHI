@@ -350,10 +350,12 @@ class HASHITuiApp(App):
         *,
         workbench_urls: list[str] | tuple[str, ...] | None = None,
         bridge_home: Path | None = None,
+        code_root: Path | None = None,
         launch_instance_id: str | None = None,
     ):
         super().__init__()
         self.bridge_home = Path(bridge_home).resolve() if bridge_home else self._find_bridge_home()
+        self.code_root = Path(code_root).resolve() if code_root else Path(__file__).resolve().parent.parent
         configured_instance_id, _workbench_port = load_launch_instance(self.bridge_home)
         self.launch_instance_id = str(launch_instance_id or configured_instance_id).strip().upper()
         local_urls = list(workbench_urls or [workbench_url])
@@ -502,7 +504,7 @@ class HASHITuiApp(App):
                 final_logo
                 + [
                     "",
-                    "[#63ffd9]Universal Flexible Safe AI Agents[/]  [#7fb6c7]Powered by CLI backends[/]",
+                    "[#63ffd9]Universal Flexible Safe AI Agents[/]  [#7fb6c7]Powered by agent Engines[/]",
                     "",
                     *poem_lines,
                     "",
@@ -515,7 +517,7 @@ class HASHITuiApp(App):
             final_logo
             + [
                 "",
-                "[#63ffd9]Universal Flexible Safe AI Agents[/]  [#7fb6c7]Powered by CLI backends[/]",
+                "[#63ffd9]Universal Flexible Safe AI Agents[/]  [#7fb6c7]Powered by agent Engines[/]",
                 "",
                 "[#ffdf6b]「橋」は「知」を繋ぎ、[/]",
                 "[#71b7ff]「知」は未来を拓く。[/]",
@@ -653,12 +655,22 @@ class HASHITuiApp(App):
 
         self._write_log_line("[TUI] Starting HASHI main process...")
 
+        command = [
+            sys.executable,
+            str(self.code_root / "main.py"),
+            "--bridge-home",
+            str(self.bridge_home),
+        ]
+        enable_gateway = str(
+            os.environ.get("HASHI_TUI_ENABLE_API_GATEWAY", "1")
+        ).strip().casefold() not in {"0", "false", "no", "off"}
+        if enable_gateway:
+            command.append("--api-gateway")
         self.bridge_proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(self.bridge_home / "main.py"),
-            "--api-gateway",
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            cwd=str(self.bridge_home),
+            cwd=str(self.code_root),
         )
 
         # Stream stdout to log panel

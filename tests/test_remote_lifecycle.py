@@ -252,6 +252,28 @@ def test_build_child_command_pins_hashi_root(monkeypatch, tmp_path):
     assert str(tmp_path) in cmd
 
 
+def test_build_child_command_supports_separate_portable_control_root(monkeypatch, tmp_path):
+    python = tmp_path / "python"
+    python.write_text("", encoding="utf-8")
+    control_root = tmp_path / "app" / "hashi"
+    control_root.mkdir(parents=True)
+    monkeypatch.setattr(remote_lifecycle, "find_python", lambda root: python)
+    monkeypatch.setenv("HASHI_REMOTE_CONTROL_ROOT", str(control_root))
+    settings = remote_lifecycle.RemoteLifecycleSettings(
+        root=tmp_path,
+        enabled=True,
+        supervised=False,
+        disabled_path=tmp_path / "state" / "remote_disabled.json",
+        port=8766,
+        use_tls=False,
+        backend="lan",
+    )
+
+    cmd = remote_lifecycle.build_child_command(settings)
+
+    assert cmd[cmd.index("--control-hashi-root") + 1] == str(control_root.resolve())
+
+
 @pytest.mark.asyncio
 async def test_find_owned_remote_accepts_claim_port_with_matching_identity(monkeypatch, tmp_path):
     (tmp_path / "agents.json").write_text(
@@ -408,3 +430,22 @@ async def test_startup_manager_runs_remote_lifecycle(monkeypatch, tmp_path):
     await manager._ensure_remote_lifecycle()
 
     assert calls == [tmp_path]
+
+
+@pytest.mark.asyncio
+async def test_startup_manager_uses_portable_remote_root(monkeypatch, tmp_path):
+    calls = []
+    portable_root = tmp_path / "data"
+
+    async def fake_ensure(root):
+        calls.append(root)
+        return {"ok": True, "action": "already_running", "settings": SimpleNamespace(port=8766)}
+
+    monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", fake_ensure)
+    monkeypatch.setenv("HASHI_REMOTE_ROOT", str(portable_root))
+    kernel = SimpleNamespace(global_config=SimpleNamespace(project_root=tmp_path / "code"))
+    manager = StartupManager(kernel, console_handler=None)
+
+    await manager._ensure_remote_lifecycle()
+
+    assert calls == [str(portable_root)]
