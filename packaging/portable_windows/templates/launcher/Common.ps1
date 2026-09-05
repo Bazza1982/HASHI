@@ -453,6 +453,13 @@ function Start-WorkbenchServer {
     $env:HASHI_WORKBENCH_REPOSITORY_ROOT = $script:HashiRoot
     $env:HASHI_WORKBENCH_AGENTS_JSON = Join-Path $script:DataRoot 'agents.json'
     $env:HASHI_WORKBENCH_PYTHON = Join-Path $script:PythonRoot 'python.exe'
+    if ($script:ExecutionMode -eq 'local-cache') {
+        $observabilityRoot = Join-Path $script:LocalInstanceRoot 'Logs\workbench'
+    } else {
+        $observabilityRoot = Join-Path $script:DataRoot 'logs\workbench-observability'
+    }
+    New-Item -ItemType Directory -Force -Path $observabilityRoot | Out-Null
+    $env:HASHI_WORKBENCH_OBSERVABILITY_DIR = $observabilityRoot
 
     $stdout = Join-Path $script:DataRoot 'logs\workbench-console.log'
     $stderr = Join-Path $script:DataRoot 'logs\workbench-console-error.log'

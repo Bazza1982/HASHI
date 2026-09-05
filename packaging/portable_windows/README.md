@@ -33,6 +33,10 @@ required files, directory shape, and Windows registration all match the current
 USB. An unknown or ambiguous legacy layout stops setup without deleting it.
 `Stop_HASHI.bat` closes this instance's runtime, TUI launcher, and dedicated
 browser-profile processes, and reports safe ejection only after they are gone.
+When local acceleration is active, disposable Workbench diagnostic logs use the
+instance-scoped host directory so synchronous log writes cannot stall a slow
+USB; uninstalling that instance removes those logs. Authoritative data remains
+on the USB.
 
 The image contains HER v2, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the complete browser

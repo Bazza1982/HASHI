@@ -105,6 +105,8 @@ def test_portable_launcher_allows_slow_usb_cold_start_and_reports_progress():
     assert "Workbench 仍在正常启动" in common
     assert "AddSeconds(75)" not in common
     assert "AddSeconds(45)" not in common
+    assert "HASHI_WORKBENCH_OBSERVABILITY_DIR" in common
+    assert "LocalInstanceRoot 'Logs\\workbench'" in common
 
 
 def test_portable_stop_closes_owned_runtime_and_browser_before_safe_eject():
