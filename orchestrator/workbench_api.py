@@ -69,8 +69,12 @@ from orchestrator.enterprise.scim import (
     scim_user_resource,
 )
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
-from orchestrator.pathing import resolve_path_value
+from orchestrator.flexible_backend_registry import (
+    BACKEND_REGISTRY,
+    is_selectable_backend,
+)
 from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.pathing import resolve_path_value
 from orchestrator.session_store import (
     TERMINAL_RUN_STATES,
     IdempotencyConflict,
@@ -441,6 +445,9 @@ class WorkbenchApiServer:
         self.app.router.add_post(
             "/api/enterprise/connectors/credentials/{credential_id}/revoke",
             self.handle_enterprise_connector_credential_revoke,
+        )
+        self.app.router.add_get(
+            "/api/backends/catalogue", self.handle_backend_catalogue
         )
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/v1/capabilities", self.handle_v1_capabilities)
@@ -3547,6 +3554,44 @@ class WorkbenchApiServer:
                     "policy_rule_id": execution.gate.policy_rule_id,
                     "approval_request_id": execution.gate.approval_request_id,
                 },
+            }
+        )
+
+    async def handle_backend_catalogue(self, request):
+        del request
+        public_fields = (
+            "label",
+            "models",
+            "default_model",
+            "efforts",
+            "model_efforts",
+            "default_effort",
+            "allow_custom_models",
+            "privacy_levels",
+        )
+        backends = {}
+        for engine, registry_entry in BACKEND_REGISTRY.items():
+            if not is_selectable_backend(engine):
+                continue
+            entry = {"engine": engine}
+            for field in public_fields:
+                if field in registry_entry:
+                    value = registry_entry[field]
+                    if isinstance(value, list):
+                        value = list(value)
+                    elif isinstance(value, dict):
+                        value = {
+                            str(key): list(item) if isinstance(item, list) else item
+                            for key, item in value.items()
+                        }
+                    entry[field] = value
+            backends[engine] = entry
+        return web.json_response(
+            {
+                "ok": True,
+                "schema_version": 1,
+                "source": "hashi_backend_registry",
+                "backends": backends,
             }
         )
 
