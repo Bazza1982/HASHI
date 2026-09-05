@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 
 import yaml
+import pytest
 
 from orchestrator.config import ConfigManager
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -341,6 +342,21 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
         path.write_text(content, encoding="utf-8")
     subprocess.run(["git", "init", "-q", source], check=True)
     subprocess.run(["git", "-C", source, "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            source,
+            "-c",
+            "user.name=Portable Test",
+            "-c",
+            "user.email=portable@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
 
     untracked = (
         source / "orchestrator" / "local-state.json",
@@ -358,6 +374,13 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
     assert not (destination / "adapters" / "codex_cli.py").exists()
     for path in untracked:
         assert not (destination / path.relative_to(source)).exists()
+
+    builder.require_clean_tracked_worktree(source, label="fixture")
+    (source / "orchestrator" / "tracked.py").write_text(
+        "TRACKED = False\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="uncommitted tracked changes"):
+        builder.require_clean_tracked_worktree(source, label="fixture")
 
 
 def test_portable_dependency_lock_keeps_requested_compact_capabilities():

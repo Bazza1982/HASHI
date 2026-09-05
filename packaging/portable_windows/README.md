@@ -65,3 +65,5 @@ unit is recommended for the target drive.
 Only Git-tracked files from the explicit source allowlist enter `app/hashi`.
 Untracked development state, logs, local secrets, and generated workflow runs
 cannot leak into a portable image even when the source worktree is dirty.
+Tracked HASHI and Workbench inputs must be clean, and both revisions are checked
+again before publication so the recorded build identity matches its contents.

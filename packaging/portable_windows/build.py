@@ -505,6 +505,24 @@ def git_revision(root: Path) -> str:
     return result.stdout.strip()
 
 
+def require_clean_tracked_worktree(root: Path, *, label: str) -> None:
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+        cwd=root,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        raise RuntimeError(f"could not inspect {label} worktree: {detail}")
+    if result.stdout.strip():
+        raise RuntimeError(
+            f"{label} has uncommitted tracked changes; build from a clean worktree"
+        )
+
+
 def configure_data(
     image_root: Path, source_secrets: Path, *, allow_missing_key: bool
 ) -> None:
@@ -894,6 +912,11 @@ def validate_image(image_root: Path) -> None:
 
 
 def build(args: argparse.Namespace) -> Path:
+    workbench_root = args.workbench_root.resolve()
+    require_clean_tracked_worktree(HASHI_ROOT, label="HASHI source")
+    require_clean_tracked_worktree(workbench_root, label="Workbench source")
+    hashi_revision = git_revision(HASHI_ROOT)
+    expected_workbench_revision = git_revision(workbench_root)
     output = args.output.resolve()
     if output.exists():
         marker = output / ".hashi-portable-bundle"
@@ -926,12 +949,12 @@ def build(args: argparse.Namespace) -> Path:
         install_ffmpeg(runtime_bin, licenses, args.cache)
         install_tesseract(app_hashi, licenses, args.cache, build_temp)
         workbench_revision = build_workbench(
-            args.workbench_root.resolve(),
+            workbench_root,
             app_workbench,
             build_temp,
             skip_build=args.skip_workbench_build,
         )
-        copy_workbench_licenses(args.workbench_root.resolve(), licenses)
+        copy_workbench_licenses(workbench_root, licenses)
         configure_data(
             staging,
             args.secrets.resolve(),
@@ -955,7 +978,7 @@ def build(args: argparse.Namespace) -> Path:
             "schema_version": 1,
             "product": "HASHI Portable Windows x64",
             "built_at_utc": datetime.now(timezone.utc).isoformat(),
-            "hashi_revision": git_revision(HASHI_ROOT),
+            "hashi_revision": hashi_revision,
             "workbench_revision": workbench_revision,
             "python_version": PYTHON_VERSION,
             "node_version": NODE_VERSION,
@@ -985,6 +1008,7 @@ def build(args: argparse.Namespace) -> Path:
                 "verified_legacy_cache_cleanup": True,
                 "verified_shutdown_quiescence": True,
                 "git_tracked_source_only": True,
+                "clean_tracked_inputs_required": True,
             },
             "local_cache_bundle_id": local_cache_manifest["bundle_id"],
             "local_cache_install_bytes": local_cache_manifest["install_bytes"],
@@ -1026,6 +1050,15 @@ def build(args: argparse.Namespace) -> Path:
                 f"{allocated_size:,} bytes with 32 KiB clusters, exceeding hard limit "
                 f"{MAX_IMAGE_BYTES:,}"
             )
+        require_clean_tracked_worktree(HASHI_ROOT, label="HASHI source")
+        require_clean_tracked_worktree(workbench_root, label="Workbench source")
+        if git_revision(HASHI_ROOT) != hashi_revision:
+            raise RuntimeError("HASHI revision changed while the image was building")
+        if (
+            workbench_revision != expected_workbench_revision
+            or git_revision(workbench_root) != expected_workbench_revision
+        ):
+            raise RuntimeError("Workbench revision changed while the image was building")
         staging.replace(output)
         status(
             f"complete: {output} ({final_size:,} logical bytes; "
