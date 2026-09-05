@@ -1,9 +1,11 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from orchestrator import runtime_remote
+from orchestrator import runtime_pending, runtime_remote
+from orchestrator.agent_move.package import AgentMoveError
 
 
 class _Query:
@@ -28,6 +30,7 @@ def _runtime(tmp_path):
         _load_instances=lambda: {"hashi2": {"display_name": "HASHI2"}},
         _do_move=None,
         _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
+        _send_text=lambda chat_id, text, **kwargs: _reply(replies, text, kwargs),
         replies=replies,
     )
 
@@ -39,9 +42,14 @@ async def _reply(replies, text, kwargs):
 def test_load_instances_reads_first_available_file(tmp_path):
     missing = tmp_path / "missing.json"
     path = tmp_path / "instances.json"
-    path.write_text(json.dumps({"instances": {"hashi2": {"display_name": "HASHI2"}}}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"instances": {"hashi2": {"display_name": "HASHI2"}}}),
+        encoding="utf-8",
+    )
 
-    assert runtime_remote.load_instances([missing, path]) == {"hashi2": {"display_name": "HASHI2"}}
+    assert runtime_remote.load_instances([missing, path]) == {
+        "hashi2": {"display_name": "HASHI2"}
+    }
 
 
 @pytest.mark.asyncio
@@ -57,8 +65,35 @@ async def test_move_show_agent_picker_lists_agents(tmp_path):
     assert "<b>MOVE AGENT</b>" in runtime.replies[-1]["text"]
     assert "HASHI_TEST" in runtime.replies[-1]["text"]
     assert "Select the exact agent" in runtime.replies[-1]["text"]
-    buttons = [button for row in runtime.replies[-1]["reply_markup"].inline_keyboard for button in row]
-    assert [button.callback_data for button in buttons] == ["move:agent:zelda", "move:agent:akane"]
+    buttons = [
+        button
+        for row in runtime.replies[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert [button.callback_data for button in buttons] == [
+        "move:agent:zelda",
+        "move:agent:akane",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_move_picker_uses_bounded_callback_reference_for_long_agent_id(tmp_path):
+    long_name = "a" * 100
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"agents": [{"name": long_name}]}),
+        encoding="utf-8",
+    )
+    runtime = _runtime(tmp_path)
+
+    await runtime_remote.move_show_agent_picker(runtime, SimpleNamespace(), {})
+
+    button = runtime.replies[-1]["reply_markup"].inline_keyboard[0][0]
+    assert len(button.callback_data.encode("utf-8")) <= 64
+    assert button.callback_data.startswith("move:ref:")
+    update = SimpleNamespace(callback_query=_Query(button.callback_data))
+    await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
+    target_button = update.callback_query.edits[-1]["reply_markup"].inline_keyboard[0][0]
+    assert len(target_button.callback_data.encode("utf-8")) <= 64
 
 
 @pytest.mark.asyncio
@@ -84,13 +119,13 @@ async def test_move_show_options_edits_callback_message(tmp_path):
 
     await runtime_remote.move_show_options(runtime, update, "zelda", "hashi2")
 
-    assert "Choose the transfer mode" in update.callback_query.edits[-1]["text"]
+    assert "Safe move transfers identity" in update.callback_query.edits[-1]["text"]
     callbacks = [
         button.callback_data
         for row in update.callback_query.edits[-1]["reply_markup"].inline_keyboard
         for button in row
     ]
-    assert "move:exec:zelda:hashi2:plain" in callbacks
+    assert "move:exec:zelda:hashi2:move" in callbacks
     assert "move:cancel" in callbacks
 
 
@@ -141,11 +176,159 @@ async def test_handle_move_callback_exec_invokes_runtime_do_move(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_remote_list_reports_unavailable_when_refresh_and_cache_both_fail(tmp_path, mock_fetch_remote_peers_none):
+async def test_handle_move_callback_commit_runs_two_phase_cutover(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    result = {
+        "status": "moved_pending_reboots",
+        "agent_id": "zelda",
+        "target_instance": "HASHI2",
+        "source_instance": "HASHI_TEST",
+        "reboot_order": ["HASHI_TEST", "HASHI2"],
+    }
+
+    def _confirm(root, instances, package_id):
+        assert root == tmp_path
+        assert instances == {"hashi2": {"display_name": "HASHI2"}}
+        assert package_id == "12345678-abcd"
+        return result
+
+    monkeypatch.setattr(
+        runtime_remote,
+        "get_outbound_move",
+        lambda *args, **kwargs: {
+            "agent_id": "zelda",
+            "target_instance": "HASHI2",
+        },
+    )
+    monkeypatch.setattr(runtime_remote, "confirm_outbound_move", _confirm)
+    update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
+
+    await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
+
+    assert "AGENT MOVE COMMITTED" in update.callback_query.edits[-1]["text"]
+    assert (
+        "No reboot was started automatically" in update.callback_query.edits[-1]["text"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_move_callback_failure_keeps_recovery_actions(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+
+    def _fail(*args, **kwargs):
+        raise AgentMoveError("target response uncertain")
+
+    monkeypatch.setattr(
+        runtime_remote,
+        "get_outbound_move",
+        lambda *args, **kwargs: {
+            "agent_id": "zelda",
+            "target_instance": "HASHI2",
+        },
+    )
+    monkeypatch.setattr(runtime_remote, "confirm_outbound_move", _fail)
+    update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
+
+    await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
+
+    last = update.callback_query.edits[-1]
+    assert "target response uncertain" in last["text"]
+    callbacks = [
+        button.callback_data
+        for row in last["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert callbacks == [
+        "move:commit:12345678-abcd",
+        "move:abort:12345678-abcd",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_move_callback_rechecks_agent_busy_before_cutover(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    selected = SimpleNamespace(name="zelda", _backend_busy=lambda: True)
+    runtime.orchestrator = SimpleNamespace(runtimes=[selected])
+    monkeypatch.setattr(runtime_pending, "delayed_count", AsyncMock(return_value=0))
+    monkeypatch.setattr(
+        runtime_remote,
+        "get_outbound_move",
+        lambda *args, **kwargs: {
+            "agent_id": "zelda",
+            "target_instance": "HASHI2",
+        },
+    )
+
+    def _unexpected_confirm(*args, **kwargs):
+        raise AssertionError("busy Agent must not reach cutover")
+
+    monkeypatch.setattr(runtime_remote, "confirm_outbound_move", _unexpected_confirm)
+    update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
+
+    await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
+
+    assert selected._agent_move_quiesced is False
+    assert "busy" in update.callback_query.edits[-1]["text"]
+    assert update.callback_query.edits[-1]["reply_markup"] is not None
+
+
+@pytest.mark.asyncio
+async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime.orchestrator = SimpleNamespace(runtimes=[])
+    monkeypatch.setattr(runtime_pending, "delayed_count", AsyncMock(return_value=0))
+    calls = []
+
+    def _preview(root, instances, agent_id, target, *, source_instance):
+        calls.append((root, instances, agent_id, target, source_instance))
+        return {
+            "agent_id": agent_id,
+            "target_instance": "HASHI2",
+            "source_environment": "wsl",
+            "target_environment": "windows",
+            "package_bytes": 1024,
+            "workspace_files": 5,
+            "schedule_count": 1,
+        }
+
+    monkeypatch.setattr(runtime_remote, "preview_outbound_move", _preview)
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99))
+
+    await runtime_remote.do_move(
+        runtime,
+        update,
+        "zelda",
+        "hashi2",
+        {"hashi2": {"display_name": "HASHI2"}},
+        dry_run=True,
+    )
+
+    assert calls and calls[0][2:] == ("zelda", "hashi2", "HASHI_TEST")
+    assert (
+        "Source and target configuration were not changed"
+        in runtime.replies[-1]["text"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_list_reports_unavailable_when_refresh_and_cache_both_fail(
+    tmp_path, mock_fetch_remote_peers_none
+):
     replies = []
     runtime = SimpleNamespace(
         _is_authorized_user=lambda user_id: True,
-        _remote_config_snapshot=lambda: {"root": tmp_path, "port": 8767, "use_tls": False, "backend": "lan"},
+        _remote_config_snapshot=lambda: {
+            "root": tmp_path,
+            "port": 8767,
+            "use_tls": False,
+            "backend": "lan",
+        },
         _remote_process=None,
         _fetch_remote_json=mock_fetch_remote_peers_none,
         _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
@@ -179,8 +362,14 @@ async def test_remote_status_includes_peer_list(tmp_path, monkeypatch):
                     "ok": True,
                     "instance": {"instance_id": "HASHI2"},
                     "peers": [
-                        {"instance_id": "HASHI9", "properties": {"handshake_state": "handshake_accepted"}},
-                        {"instance_id": "MSI", "properties": {"handshake_state": "handshake_timed_out"}},
+                        {
+                            "instance_id": "HASHI9",
+                            "properties": {"handshake_state": "handshake_accepted"},
+                        },
+                        {
+                            "instance_id": "MSI",
+                            "properties": {"handshake_state": "handshake_timed_out"},
+                        },
                     ],
                 },
                 "http://127.0.0.1:8767/health",
@@ -199,17 +388,33 @@ async def test_remote_status_includes_peer_list(tmp_path, monkeypatch):
             )
         return None, None
 
-    monkeypatch.setattr(runtime_remote.remote_lifecycle, "load_settings", lambda root: SimpleNamespace(enabled=True, supervised=True, disabled_path=root / ".disabled"))
-    monkeypatch.setattr(runtime_remote.remote_lifecycle, "read_disabled_state", lambda root: None)
+    monkeypatch.setattr(
+        runtime_remote.remote_lifecycle,
+        "load_settings",
+        lambda root: SimpleNamespace(
+            enabled=True, supervised=True, disabled_path=root / ".disabled"
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_remote.remote_lifecycle, "read_disabled_state", lambda root: None
+    )
 
     runtime = SimpleNamespace(
         _is_authorized_user=lambda user_id: True,
-        _remote_config_snapshot=lambda: {"root": tmp_path, "port": 8767, "use_tls": False, "backend": "lan"},
+        _remote_config_snapshot=lambda: {
+            "root": tmp_path,
+            "port": 8767,
+            "use_tls": False,
+            "backend": "lan",
+        },
         _remote_process=None,
         _fetch_remote_json=_fetch_remote_json,
         _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
         _remote_peer_presence=lambda peer: (
-            0 if str((peer.get("properties") or {}).get("handshake_state")) == "handshake_accepted" else 3,
+            0
+            if str((peer.get("properties") or {}).get("handshake_state"))
+            == "handshake_accepted"
+            else 3,
             "",
             "",
         ),

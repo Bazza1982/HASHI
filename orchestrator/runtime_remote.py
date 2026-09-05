@@ -1,18 +1,89 @@
 from __future__ import annotations
 
-import json
 import asyncio
 import html
-import subprocess
-import sys
+import json
+import secrets
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.command_ui import back_label, card_title, status_label
-from orchestrator import remote_lifecycle, runtime_pending, ui_language
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from orchestrator import remote_lifecycle, runtime_pending, ui_language
+from orchestrator.agent_move.coordinator import (
+    cancel_outbound_move,
+    confirm_outbound_move,
+    get_outbound_move,
+    prepare_outbound_move,
+    preview_outbound_move,
+)
+from orchestrator.agent_move.package import AgentMoveError
+from orchestrator.agent_move.source_guard import source_move_guard_state
+from orchestrator.command_ui import back_label, card_title, status_label
+
+_TELEGRAM_CALLBACK_DATA_BYTES = 64
+_MOVE_CALLBACK_CONTEXT_LIMIT = 128
+
+
+def _move_callback_data(runtime: Any, raw: str) -> str:
+    """Keep long Agent IDs out of Telegram's 64-byte callback field."""
+
+    if len(raw.encode("utf-8")) <= _TELEGRAM_CALLBACK_DATA_BYTES:
+        return raw
+    contexts = getattr(runtime, "_move_callback_contexts", None)
+    if not isinstance(contexts, dict):
+        contexts = {}
+        setattr(runtime, "_move_callback_contexts", contexts)
+    token = secrets.token_hex(8)
+    contexts[token] = raw
+    while len(contexts) > _MOVE_CALLBACK_CONTEXT_LIMIT:
+        contexts.pop(next(iter(contexts)))
+    return f"move:ref:{token}"
+
+
+def _resolve_move_callback_data(runtime: Any, raw: str) -> str | None:
+    if not raw.startswith("move:ref:"):
+        return raw
+    token = raw.removeprefix("move:ref:")
+    contexts = getattr(runtime, "_move_callback_contexts", None)
+    if not isinstance(contexts, dict):
+        return None
+    value = contexts.get(token)
+    return str(value) if value else None
+
+
+def _find_agent_runtime(runtime: Any, agent_id: str) -> Any | None:
+    return next(
+        (
+            candidate
+            for candidate in getattr(
+                getattr(runtime, "orchestrator", None), "runtimes", []
+            )
+            if getattr(candidate, "name", None) == agent_id
+        ),
+        None,
+    )
+
+
+def _move_recovery_markup(package_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("remote.move.retry_recovery"),
+                    callback_data=f"move:commit:{package_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("remote.move.reconcile_cancel"),
+                    callback_data=f"move:abort:{package_id}",
+                )
+            ],
+        ]
+    )
 
 
 def load_instances(candidates: list[Path] | None = None) -> dict:
@@ -37,7 +108,13 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
         with open(Path(root) / "agents.json", encoding="utf-8") as f:
             data = json.load(f)
         agents = data if isinstance(data, list) else data.get("agents", [])
-        agent_names = [ag.get("name") or ag.get("id", "?") for ag in agents if ag.get("name")]
+        agent_names = [
+            ag.get("name") or ag.get("id")
+            for ag in agents
+            if (ag.get("name") or ag.get("id"))
+            and ag.get("is_active", True) is not False
+            and ag.get("transfer_state") != "moved_out_pending_reboot"
+        ]
     except Exception:
         agent_names = []
 
@@ -45,7 +122,15 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
         await runtime._reply_text(update, ui_language.tr("remote.move.no_agents"))
         return
 
-    rows = [[InlineKeyboardButton(f"🤖 {name}", callback_data=f"move:agent:{name}")] for name in agent_names]
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"🤖 {name}",
+                callback_data=_move_callback_data(runtime, f"move:agent:{name}"),
+            )
+        ]
+        for name in agent_names
+    ]
     markup = InlineKeyboardMarkup(rows)
     instance_id = str(
         getattr(getattr(runtime, "global_config", None), "instance_id", None) or "HASHI"
@@ -64,9 +149,28 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
 async def move_show_target_picker(runtime: Any, update: Any, agent_id: str, instances: dict) -> None:
     """Step 2: pick target instance."""
     rows = []
+    current_instance = str(
+        getattr(getattr(runtime, "global_config", None), "instance_id", None) or "HASHI"
+    ).upper()
     for name, inst in instances.items():
+        instance_id = str(inst.get("instance_id") or name).upper()
+        if instance_id == current_instance or inst.get("active") is False:
+            continue
         label = inst.get("display_name", name)
-        rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"📦 {label}",
+                    callback_data=_move_callback_data(
+                        runtime,
+                        f"move:target:{agent_id}:{name}",
+                    ),
+                )
+            ]
+        )
+    if not rows:
+        await runtime._reply_text(update, ui_language.tr("remote.move.no_targets"))
+        return
     markup = InlineKeyboardMarkup(rows)
     await runtime._reply_text(
         update,
@@ -82,12 +186,26 @@ async def move_show_options(runtime: Any, update: Any, agent_id: str, target: st
     """Step 3: show move options."""
     markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(ui_language.tr("remote.move.button.encrypted"), callback_data=f"move:exec:{agent_id}:{target}:enc"),
-            InlineKeyboardButton(ui_language.tr("remote.move.button.plain"), callback_data=f"move:exec:{agent_id}:{target}:plain"),
+            InlineKeyboardButton(
+                ui_language.tr("remote.move.button.safe_move"),
+                callback_data=_move_callback_data(
+                    runtime, f"move:exec:{agent_id}:{target}:move"
+                ),
+            ),
+            InlineKeyboardButton(
+                ui_language.tr("remote.move.button.copy"),
+                callback_data=_move_callback_data(
+                    runtime, f"move:exec:{agent_id}:{target}:keep"
+                ),
+            ),
         ],
         [
-            InlineKeyboardButton(ui_language.tr("remote.move.button.copy"), callback_data=f"move:exec:{agent_id}:{target}:keep"),
-            InlineKeyboardButton(ui_language.tr("remote.move.button.sync"), callback_data=f"move:exec:{agent_id}:{target}:sync"),
+            InlineKeyboardButton(
+                ui_language.tr("remote.move.button.preview"),
+                callback_data=_move_callback_data(
+                    runtime, f"move:exec:{agent_id}:{target}:dry"
+                ),
+            ),
         ],
         [InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")],
     ])
@@ -95,7 +213,7 @@ async def move_show_options(runtime: Any, update: Any, agent_id: str, target: st
         f"{card_title('📦', 'Move agent')}\n\n"
         f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
         f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
-        f"{ui_language.tr('remote.move.choose_destructive')}",
+        f"{ui_language.tr('remote.move.choose_safe')}",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -114,6 +232,14 @@ async def do_move(
 ) -> None:
     chat_id = update.effective_chat.id
 
+    if sync:
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr("remote.move.sync_retired"),
+            parse_mode="HTML",
+        )
+        return
+
     delayed = await runtime_pending.delayed_count(runtime, agent_name=agent_id)
     if delayed:
         await runtime._send_text(
@@ -124,49 +250,190 @@ async def do_move(
         )
         return
 
-    await runtime._send_text(chat_id, f"⏳ Moving <code>{agent_id}</code> → <b>{target}</b>…", parse_mode="HTML")
+    target_entry = instances.get(target)
+    if target_entry is None:
+        target_entry = next(
+            (
+                value
+                for key, value in instances.items()
+                if str(key).upper() == str(target).upper()
+                or str((value or {}).get("instance_id") or "").upper()
+                == str(target).upper()
+            ),
+            None,
+        )
+    if target_entry is None:
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr(
+                "remote.move.unknown_target", target=html.escape(str(target))
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    selected_runtime = _find_agent_runtime(runtime, agent_id)
+    busy_check = getattr(selected_runtime, "_backend_busy", None)
+    if callable(busy_check) and busy_check():
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr("remote.move.agent_busy", agent=html.escape(agent_id)),
+            parse_mode="HTML",
+        )
+        return
+
+    operation = "preview" if dry_run else "prepare"
+    await runtime._send_text(
+        chat_id,
+        ui_language.tr(
+            f"remote.move.{operation}_started",
+            agent=html.escape(agent_id),
+            target=html.escape(target),
+        ),
+        parse_mode="HTML",
+    )
 
     global_config = getattr(runtime, "global_config", None)
     project_root = Path(
         getattr(global_config, "project_root", None) or Path(__file__).parent.parent
     )
     source_instance = str(getattr(global_config, "instance_id", None) or "HASHI")
-    script = project_root / "scripts" / "move_agent.py"
-    if not script.exists():
-        await runtime._send_text(chat_id, "Error: move_agent.py not found.")
-        return
-
-    cmd = [
-        sys.executable,
-        str(script),
-        agent_id,
-        target,
-        "--source-instance",
-        source_instance,
-    ]
-    if keep_source:
-        cmd.append("--keep-source")
-    if sync:
-        cmd.append("--sync")
-    if dry_run:
-        cmd.append("--dry-run")
-
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root)),
+        if dry_run:
+            result = await asyncio.to_thread(
+                preview_outbound_move,
+                project_root,
+                instances,
+                agent_id,
+                target,
+                source_instance=source_instance,
+            )
+            await runtime._send_text(
+                chat_id,
+                _render_move_preview(result),
+                parse_mode="HTML",
+            )
+            return
+
+        result = await asyncio.to_thread(
+            prepare_outbound_move,
+            project_root,
+            instances,
+            agent_id,
+            target,
+            source_instance=source_instance,
+            keep_source=keep_source,
         )
-        output = (result.stdout + result.stderr).strip()
-        if len(output) > 3000:
-            output = output[:3000] + "\n…[truncated]"
-        status = "✅" if result.returncode == 0 else "❌"
+        package_id = str(result["package_id"])
+        confirmation_key = "remote.move.confirm_copy" if keep_source else "remote.move.confirm_move"
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr(confirmation_key),
+                        callback_data=f"move:commit:{package_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr("remote.move.cancel_prepared"),
+                        callback_data=f"move:abort:{package_id}",
+                    )
+                ],
+            ]
+        )
         await runtime._send_text(
             chat_id,
-            f"{status} <b>{html.escape(ui_language.tr('remote.migration_result'))}：</b>\n<pre>{output}</pre>",
+            _render_move_prepared(result),
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+    except (AgentMoveError, OSError) as exc:
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr("remote.move.failed", error=html.escape(str(exc))),
             parse_mode="HTML",
         )
-    except Exception as exc:
-        await runtime._send_text(chat_id, f"Error running migration: {exc}")
+
+
+def _render_move_preview(result: dict[str, Any]) -> str:
+    cross_platform = result.get("source_environment") != result.get("target_environment")
+    lines = [
+        card_title("🔎", "Agent move preview"),
+        "",
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(result.get('agent_id')))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(str(result.get('target_instance')))}</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.package_size'))}</b> · <code>{int(result.get('package_bytes') or 0):,} B</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.workspace_files'))}</b> · <code>{int(result.get('workspace_files') or 0)}</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.excluded_paths'))}</b> · <code>{int(result.get('excluded_count') or 0)}</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.schedules'))}</b> · <code>{int(result.get('schedule_count') or 0)}</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.platform'))}</b> · <code>{html.escape(str(result.get('source_environment')))} → {html.escape(str(result.get('target_environment')))}</code>",
+        "",
+        ui_language.tr("remote.move.preview_clean"),
+    ]
+    if cross_platform:
+        lines.append(ui_language.tr("remote.move.cross_platform"))
+    lines.extend(_render_move_review_notes(result))
+    return "\n".join(lines)
+
+
+def _render_move_prepared(result: dict[str, Any]) -> str:
+    credentials = result.get("credential_status") or {}
+    missing = list(credentials.get("missing_keys") or [])
+    lines = [
+        card_title("🛡️", "Agent move prepared"),
+        "",
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(result.get('agent_id')))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(str(result.get('target_instance')))}</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.package_id'))}</b> · <code>{html.escape(str(result.get('package_id')))}</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.workspace_files'))}</b> · <code>{int(result.get('workspace_files') or 0)}</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.excluded_paths'))}</b> · <code>{int(result.get('excluded_count') or 0)}</code>",
+        f"<b>{html.escape(ui_language.tr('remote.move.schedules'))}</b> · <code>{int(result.get('schedule_count') or 0)}</code>",
+        "",
+        ui_language.tr("remote.move.prepared_safe"),
+    ]
+    if missing:
+        lines.append(
+            ui_language.tr(
+                "remote.move.credentials_missing",
+                keys=html.escape(", ".join(str(item) for item in missing)),
+            )
+        )
+    lines.extend(_render_move_review_notes(result))
+    return "\n".join(lines)
+
+
+def _render_move_review_notes(result: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    rebind = list(result.get("target_rebind_required") or [])
+    if rebind:
+        lines.append(
+            ui_language.tr(
+                "remote.move.target_rebind",
+                items=html.escape(", ".join(str(item) for item in rebind)),
+            )
+        )
+    warnings = [str(item) for item in result.get("warnings") or [] if str(item)]
+    if warnings:
+        lines.append(ui_language.tr("remote.move.review_notes"))
+        lines.extend(f"  • {html.escape(item)}" for item in warnings[:8])
+    return lines
+
+
+def _render_move_complete(result: dict[str, Any]) -> str:
+    if result.get("status") == "copied_inactive":
+        return (
+            f"{card_title('✅', 'Agent copied inactive')}\n\n"
+            f"{ui_language.tr('remote.move.copy_complete', agent=html.escape(str(result.get('agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
+        )
+    order = list(result.get("reboot_order") or [])
+    source = html.escape(str(order[0] if order else result.get("source_instance") or "source"))
+    target = html.escape(str(order[1] if len(order) > 1 else result.get("target_instance") or "target"))
+    return (
+        f"{card_title('✅', 'Agent move committed')}\n\n"
+        f"{ui_language.tr('remote.move.move_complete', agent=html.escape(str(result.get('agent_id'))), target=html.escape(str(result.get('target_instance'))))}\n\n"
+        f"{ui_language.tr('remote.move.reboot_order', source=source, target=target, agent=html.escape(str(result.get('agent_id'))))}"
+    )
 
 
 def render_remote_peer_lines(
@@ -225,7 +492,10 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         return
     await query.answer()
 
-    data = query.data or ""
+    data = _resolve_move_callback_data(runtime, query.data or "")
+    if data is None:
+        await query.edit_message_text(ui_language.tr("remote.move.selection_expired"))
+        return
     parts = data.split(":", 3)
 
     if len(parts) < 2:
@@ -241,9 +511,27 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         agent_id = parts[2]
         instances = runtime._load_instances()
         rows = []
+        current_instance = str(
+            getattr(getattr(runtime, "global_config", None), "instance_id", None) or "HASHI"
+        ).upper()
         for name, inst in instances.items():
+            if str(inst.get("instance_id") or name).upper() == current_instance or inst.get("active") is False:
+                continue
             label = inst.get("display_name", name)
-            rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"📦 {label}",
+                        callback_data=_move_callback_data(
+                            runtime,
+                            f"move:target:{agent_id}:{name}",
+                        ),
+                    )
+                ]
+            )
+        if not rows:
+            await query.edit_message_text(ui_language.tr("remote.move.no_targets"))
+            return
         rows.append([InlineKeyboardButton(back_label(), callback_data="move:cancel")])
         markup = InlineKeyboardMarkup(rows)
         await query.edit_message_text(
@@ -260,12 +548,26 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         target = parts[3]
         markup = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(ui_language.tr("remote.move.button.plain"), callback_data=f"move:exec:{agent_id}:{target}:plain"),
-                InlineKeyboardButton(ui_language.tr("remote.move.button.copy"), callback_data=f"move:exec:{agent_id}:{target}:keep"),
+                InlineKeyboardButton(
+                    ui_language.tr("remote.move.button.safe_move"),
+                    callback_data=_move_callback_data(
+                        runtime, f"move:exec:{agent_id}:{target}:move"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    ui_language.tr("remote.move.button.copy"),
+                    callback_data=_move_callback_data(
+                        runtime, f"move:exec:{agent_id}:{target}:keep"
+                    ),
+                ),
             ],
             [
-                InlineKeyboardButton(ui_language.tr("remote.move.button.sync"), callback_data=f"move:exec:{agent_id}:{target}:sync"),
-                InlineKeyboardButton(ui_language.tr("remote.move.button.preview"), callback_data=f"move:exec:{agent_id}:{target}:dry"),
+                InlineKeyboardButton(
+                    ui_language.tr("remote.move.button.preview"),
+                    callback_data=_move_callback_data(
+                        runtime, f"move:exec:{agent_id}:{target}:dry"
+                    ),
+                ),
             ],
             [InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")],
         ])
@@ -273,7 +575,7 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
             f"{card_title('📦', 'Move agent')}\n\n"
             f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
             f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
-            f"{ui_language.tr('remote.move.choose_preview')}",
+            f"{ui_language.tr('remote.move.choose_safe')}",
             parse_mode="HTML",
             reply_markup=markup,
         )
@@ -290,6 +592,93 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         dry = mode == "dry"
         instances = runtime._load_instances()
         await runtime._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry)
+        return
+
+    if action in {"commit", "abort"} and len(parts) >= 3:
+        package_id = parts[2]
+        global_config = getattr(runtime, "global_config", None)
+        project_root = Path(
+            getattr(global_config, "project_root", None) or Path(__file__).parent.parent
+        )
+        instances = runtime._load_instances()
+        await query.edit_message_text(
+            ui_language.tr(
+                "remote.move.committing" if action == "commit" else "remote.move.cancelling"
+            ),
+            parse_mode="HTML",
+        )
+        selected_runtime = None
+        try:
+            outbound = await asyncio.to_thread(
+                get_outbound_move,
+                project_root,
+                package_id,
+            )
+            agent_id = str(outbound.get("agent_id") or "")
+            target_instance = str(outbound.get("target_instance") or "")
+            selected_runtime = _find_agent_runtime(runtime, agent_id)
+            if selected_runtime is not None:
+                selected_runtime._agent_move_quiesced = True
+                selected_runtime._agent_move_target_instance = target_instance
+
+            if action == "commit":
+                delayed = await runtime_pending.delayed_count(
+                    runtime,
+                    agent_name=agent_id,
+                )
+                busy_check = getattr(selected_runtime, "_backend_busy", None)
+                if delayed or (callable(busy_check) and busy_check()):
+                    if selected_runtime is not None:
+                        selected_runtime._agent_move_quiesced = False
+                    await query.edit_message_text(
+                        ui_language.tr(
+                            "remote.move.agent_busy",
+                            agent=html.escape(agent_id),
+                        ),
+                        parse_mode="HTML",
+                        reply_markup=_move_recovery_markup(package_id),
+                    )
+                    return
+            if action == "commit":
+                result = await asyncio.to_thread(
+                    confirm_outbound_move,
+                    project_root,
+                    instances,
+                    package_id,
+                )
+                await query.edit_message_text(
+                    _render_move_complete(result),
+                    parse_mode="HTML",
+                )
+                if (
+                    selected_runtime is not None
+                    and result.get("status") == "copied_inactive"
+                ):
+                    selected_runtime._agent_move_quiesced = False
+            else:
+                await asyncio.to_thread(
+                    cancel_outbound_move,
+                    project_root,
+                    instances,
+                    package_id,
+                )
+                await query.edit_message_text(
+                    ui_language.tr("remote.move.prepared_cancelled"),
+                    parse_mode="HTML",
+                )
+                if selected_runtime is not None:
+                    selected_runtime._agent_move_quiesced = False
+        except (AgentMoveError, OSError) as exc:
+            if selected_runtime is not None and source_move_guard_state(
+                project_root, str(getattr(selected_runtime, "name", "") or "")
+            ) is None:
+                selected_runtime._agent_move_quiesced = False
+            await query.edit_message_text(
+                f"{ui_language.tr('remote.move.failed', error=html.escape(str(exc)))}\n\n"
+                f"{ui_language.tr('remote.move.recovery_hint')}",
+                parse_mode="HTML",
+                reply_markup=_move_recovery_markup(package_id),
+            )
 
 
 async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:

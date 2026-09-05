@@ -6,12 +6,12 @@ import json
 import os
 import secrets
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 from urllib.parse import parse_qsl, urlencode
 
-
 AUTH_SCHEME = "hashi-shared-hmac-v1"
+RESPONSE_AUTH_SCHEME = "hashi-shared-response-v1"
 HEADER_AUTH_SCHEME = "X-Hashi-Auth-Scheme"
 HEADER_TIMESTAMP = "X-Hashi-Timestamp"
 HEADER_NONCE = "X-Hashi-Nonce"
@@ -35,7 +35,7 @@ def load_shared_token(hashi_root: Path | str | None) -> str | None:
 
     try:
         data = json.loads(secrets_path.read_text(encoding="utf-8-sig"))
-    except Exception:
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
 
     token = str((data or {}).get("hashi_remote_shared_token") or "").strip()
@@ -44,6 +44,53 @@ def load_shared_token(hashi_root: Path | str | None) -> str | None:
 
 def canonical_payload_hash(body_bytes: bytes) -> str:
     return hashlib.sha256(body_bytes).hexdigest()
+
+
+def build_response_auth(
+    *,
+    shared_token: str,
+    request_nonce: str,
+    payload: Mapping[str, object],
+) -> dict[str, str]:
+    """Bind one JSON response to the authenticated request nonce."""
+
+    canonical = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hmac.new(
+        shared_token.encode("utf-8"),
+        request_nonce.encode("utf-8") + b"\n" + canonical,
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "scheme": RESPONSE_AUTH_SCHEME,
+        "request_nonce": request_nonce,
+        "digest": digest,
+    }
+
+
+def verify_response_auth(
+    *,
+    shared_token: str,
+    request_nonce: str,
+    payload: Mapping[str, object],
+    response_auth: Mapping[str, object] | None,
+) -> bool:
+    if not isinstance(response_auth, Mapping):
+        return False
+    if response_auth.get("scheme") != RESPONSE_AUTH_SCHEME:
+        return False
+    if str(response_auth.get("request_nonce") or "") != request_nonce:
+        return False
+    expected = build_response_auth(
+        shared_token=shared_token,
+        request_nonce=request_nonce,
+        payload=payload,
+    )["digest"]
+    return hmac.compare_digest(expected, str(response_auth.get("digest") or ""))
 
 
 def canonical_request_target(path: str, query: str | None = None) -> str:
@@ -163,7 +210,7 @@ def verify_auth_headers(
 
     try:
         timestamp = int(timestamp_raw)
-    except Exception:
+    except (TypeError, ValueError):
         return False, "auth_failed", None
 
     current_time = float(time.time() if now is None else now)

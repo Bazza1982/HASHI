@@ -32,11 +32,12 @@ import uvicorn
 # Add parent to path if running as script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from orchestrator.agent_move.package import AGENT_MOVE_CAPABILITY
 from orchestrator.remote_lifecycle import read_disabled_state
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from orchestrator.stable_port_allocator import (
-    PortAllocationError,
     SERVICE_HASHI_REMOTE,
+    PortAllocationError,
     StablePortAllocator,
 )
 from remote.api.server import create_app
@@ -44,14 +45,22 @@ from remote.live_endpoints import remove_live_endpoint, write_live_endpoint
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery, build_local_network_profile
 from remote.peer.registry import PeerRegistry
-from remote.port_selection import DEFAULT_PORT
 from remote.peer.tailscale import TailscaleDiscovery
-from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, build_default_capabilities
-from remote.runtime_identity import remove_runtime_claim, validate_launch_context, write_runtime_claim
+from remote.port_selection import DEFAULT_PORT
+from remote.protocol_manager import (
+    PROTOCOL_VERSION,
+    ProtocolManager,
+    build_default_capabilities,
+)
+from remote.runtime_identity import (
+    remove_runtime_claim,
+    validate_launch_context,
+    write_runtime_claim,
+)
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import load_shared_token
 from remote.security.tls import load_or_generate_cert
-from remote.terminal.executor import TerminalExecutor, AuthLevel
+from remote.terminal.executor import AuthLevel, TerminalExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +361,11 @@ class HashiRemoteApplication:
         local_capabilities = build_default_capabilities(
             rescue_start_enabled=terminal_executor.allows_level(AuthLevel.L3_RESTART)
         )
-        for capability in ("file_transfer_hmac_v1", "message_attachments_v1"):
+        for capability in (
+            "file_transfer_hmac_v1",
+            "message_attachments_v1",
+            AGENT_MOVE_CAPABILITY,
+        ):
             if capability not in local_capabilities:
                 local_capabilities.append(capability)
         instance_info["remote_supervisor"] = {

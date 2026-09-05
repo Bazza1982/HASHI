@@ -811,6 +811,35 @@ class FlexibleAgentRuntime:
             )
             return None
         operational_prompt = clean_prompt or "Respond to the attached voice message."
+        from orchestrator.agent_move.source_guard import source_move_guard_state
+
+        project_root = getattr(self.global_config, "project_root", None)
+        if getattr(self, "_agent_move_quiesced", False):
+            move_guard = {
+                "status": "cutover_quiesce",
+                "target_instance": str(
+                    getattr(self, "_agent_move_target_instance", "") or ""
+                ),
+            }
+        else:
+            move_guard = (
+                source_move_guard_state(project_root, self.name)
+                if project_root is not None
+                else None
+            )
+        if move_guard is not None:
+            if deliver_to_telegram and not silent:
+                await self._send_text(
+                    chat_id,
+                    ui_language.tr(
+                        "remote.move.source_guard",
+                        target=html.escape(
+                            str(move_guard.get("target_instance") or "target")
+                        ),
+                    ),
+                    parse_mode="HTML",
+                )
+            return None
         request_id = self.next_request_id()
         session, accepted, session_owner, session_surface, session_channel_key = (
             runtime_session.accept_request(
@@ -3333,12 +3362,22 @@ class FlexibleAgentRuntime:
         if args and args[0].lower() == "list":
             lines = [f"<b>{html.escape(ui_language.tr('move.known_instances'))}:</b>"]
             for name, inst in instances.items():
-                root = inst.get("root") or f"({ui_language.tr('move.auto')})"
-                lines.append(f"  • <code>{name}</code> — {inst.get('display_name', '')}  <i>{root}</i>")
+                capabilities = set(inst.get("capabilities") or [])
+                receiver = (
+                    ui_language.tr("move.receiver_ready")
+                    if "agent_move_receive_v1" in capabilities
+                    else ui_language.tr("move.receiver_probe")
+                )
+                platform_name = inst.get("environment_kind") or inst.get("platform") or ui_language.tr("common.unknown")
+                lines.append(
+                    f"  • <code>{html.escape(str(name))}</code> — "
+                    f"{html.escape(str(inst.get('display_name', '')))} · "
+                    f"<code>{html.escape(str(platform_name))}</code> · {html.escape(receiver)}"
+                )
             await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
 
-        # /move <agent> <target> [--keep-source] [--sync] [--dry-run]
+        # /move <agent> <target> [--keep-source] [--dry-run]
         if len(args) >= 2:
             agent_id = args[0]
             target = args[1]
