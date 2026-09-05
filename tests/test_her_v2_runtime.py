@@ -2002,7 +2002,7 @@ async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_planning_and_e
 
 
 @pytest.mark.asyncio
-async def test_enabled_task_state_is_shared_and_projected_across_lifecycle_stages(
+async def test_mandatory_task_state_is_shared_and_projected_across_lifecycle_stages(
     tmp_path,
 ):
     real_goal = "Implement and verify the evidence-aware feature."
@@ -2029,7 +2029,7 @@ async def test_enabled_task_state_is_shared_and_projected_across_lifecycle_stage
     result = await _runtime(
         tmp_path,
         provider,
-        config=_config(cognitive_control_enabled=True),
+        config=_config(),
     ).run_turn("Implement the feature", "request-shared-task-state", effort="medium")
 
     lifecycle_requests = [

@@ -1648,6 +1648,24 @@ class _CognitiveControlToolRegistry:
         checker = getattr(self._base, "is_read_only", None)
         return bool(checker(tool_name)) if callable(checker) else False
 
+    def _control_allows(self, tool_name: str) -> bool:
+        """Return only the cognitive boundary's admission decision.
+
+        Underlying permission and cadence registries must still receive an
+        ordinary call so they can return and audit their own typed denial or
+        compulsory-Replan boundary. Cognitive control must never impersonate
+        those independent authorities merely because their ``is_allowed``
+        result is false.
+        """
+
+        name = str(tool_name or "")
+        if self.controller.awaiting_decision:
+            return name == COGNITIVE_DECISION_TOOL
+        if self.controller.final_response_required:
+            return False
+        allowed = self._active_tool_allowlist()
+        return allowed is None or name in allowed
+
     def evaluate_admission(
         self, tool_name: str, arguments: dict, tool_call_id: str = ""
     ):
@@ -1838,7 +1856,7 @@ class _CognitiveControlToolRegistry:
                 },
             )
 
-        if not self.is_allowed(name):
+        if not self._control_allows(name):
             payload = self.controller.interrupt_payload()
             return self._result(
                 tool_call_id=tool_call_id,
@@ -2223,8 +2241,19 @@ class HashiStageProvider(StageProvider):
         runtime_context: Any = None,
         usage_observer: Callable[[PerCallUsageLineItem], None] | None = None,
         default_recovery_kind: str = "none",
-        cognitive_control_enabled: bool = False,
+        **removed_options: Any,
     ) -> None:
+        # One-generation hot-reload membrane: an already-running HER adapter
+        # from before the mandatory-control migration still supplies the
+        # retired keyword. It is deliberately absent from this constructor's
+        # declared options and can never affect behaviour. Fresh configuration
+        # rejects the field in HERv2Config; any other unknown option is fatal.
+        unknown_options = set(removed_options).difference(
+            {"cognitive_control_enabled"}
+        )
+        if unknown_options:
+            names = ", ".join(sorted(unknown_options))
+            raise TypeError(f"unexpected HashiStageProvider option(s): {names}")
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
         self.on_stream_event = on_stream_event
@@ -2235,7 +2264,6 @@ class HashiStageProvider(StageProvider):
         self.runtime_context = runtime_context
         self.usage_observer = usage_observer
         self.default_recovery_kind = str(default_recovery_kind or "none")
-        self.cognitive_control_enabled = bool(cognitive_control_enabled)
         self._active_backend_lock = threading.RLock()
         self._active_backends: dict[int, Any] = {}
         self._persona_invocation_serial = 0
@@ -3132,16 +3160,15 @@ class HashiStageProvider(StageProvider):
                     bound_plan_id=str(request.plan_id or ""),
                     enforce_plan_binding=request.role.startswith("sub_agent:"),
                 )
-            if self.cognitive_control_enabled:
-                cognitive_registry = _CognitiveControlToolRegistry(
-                    selected_registry,
-                    request,
-                    audit_log=self.audit_log,
-                    provider=profile.engine,
-                    model=profile.model,
-                )
-                lifecycle_task_state = cognitive_registry.task_state
-                selected_registry = cognitive_registry
+            cognitive_registry = _CognitiveControlToolRegistry(
+                selected_registry,
+                request,
+                audit_log=self.audit_log,
+                provider=profile.engine,
+                model=profile.model,
+            )
+            lifecycle_task_state = cognitive_registry.task_state
+            selected_registry = cognitive_registry
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
             backend.tool_registry = selected_registry
@@ -3838,7 +3865,7 @@ class HashiStageProvider(StageProvider):
                     else:
                         stage_prompt = f"{environment_contract}\n\n{stage_prompt}"
 
-            if self.cognitive_control_enabled and lifecycle_task_state is not None:
+            if lifecycle_task_state is not None:
                 contracts = []
                 if cognitive_registry is not None:
                     contracts.append(cognitive_system_contract())

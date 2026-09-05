@@ -3439,7 +3439,9 @@ async def test_policy_denial_returns_before_due_replan_gates_next_admission():
                 )
             return SimpleNamespace(
                 tool_call_id=tool_call_id,
-                output="allowed",
+                # This test exercises the compulsory Replan cadence rather
+                # than a no-new-information cycle, so each read is distinct.
+                output=f"allowed:{tool_call_id}",
                 is_error=False,
             )
 

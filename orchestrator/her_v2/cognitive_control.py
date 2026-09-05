@@ -21,7 +21,7 @@ from typing import Any
 from .task_state import HERTaskState
 
 COGNITIVE_DECISION_TOOL = "hashi_cognitive_decision"
-COGNITIVE_CONTROL_VERSION = 3
+COGNITIVE_CONTROL_VERSION = 4
 _CYCLE_REPETITIONS = 3
 _PROGRESS_STALL_THRESHOLD = 3
 _MAX_CYCLE_PERIOD = 12
@@ -712,7 +712,7 @@ class StageCognitiveController:
 
 
 def cognitive_system_contract() -> str:
-    """Return the common contract installed for every enabled tool stage."""
+    """Return the mandatory contract installed for every HER v2 tool stage."""
 
     return """## HASHI tool-boundary cognitive control
 

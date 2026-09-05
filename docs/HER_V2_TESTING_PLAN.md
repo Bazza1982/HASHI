@@ -939,7 +939,10 @@ Tests must prove that false progress cannot keep a stalled turn alive indefinite
 
 ### 10.1.1 Semantic cognitive-control boundary
 
-Deterministic tests must cover the shared boundary in Direct, Strategy/Triage,
+Deterministic tests must first prove that cognitive control is an unconditional
+HER v2 Engine invariant: no constructor, runtime configuration, Agent setting,
+mode, stage, or provider can disable it, and every legacy switch field is
+rejected. The tests must then cover the shared boundary in Direct, Strategy/Triage,
 Planning, Execution, Replanning, Review, and delegated tool contexts. At a
 minimum they must prove:
 

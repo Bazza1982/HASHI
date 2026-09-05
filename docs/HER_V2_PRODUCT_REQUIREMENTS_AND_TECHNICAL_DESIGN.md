@@ -146,12 +146,15 @@ to this section before implementation or supporting tests are added.
 
 #### 3.2.2 Lifecycle-wide cognitive control
 
-Every tool-enabled HER v2 stage may use the same provider-neutral cognitive
+Every tool-enabled HER v2 stage must use the same provider-neutral cognitive
 control. This includes Direct, tool-enabled Strategy/Triage, Planning,
-Execution, Replanning, Review, and delegated execution. It is not a Planning
-special case and it is not a tool-round ceiling.
+Execution, Replanning, Review, and delegated execution. The mechanism is a
+permanent Engine safety invariant for every Agent: it has no enable/disable
+configuration, rollout gate, Agent override, mode override, or provider
+override. Legacy switch fields are rejected. It is not a Planning special case
+and it is not a tool-round ceiling.
 
-When enabled, one compact `TaskState` is shared by every stage in the Turn. It
+One compact `TaskState` is always shared by every stage in the Turn. It
 contains the resolved goal, stable completion-criterion IDs, evidence-bound
 facts, open/resolved questions, focus, discarded paths, blockers, and an
 optional research working model. It is a projection of task conclusions, not a
@@ -195,6 +198,9 @@ Agent's underlying permissions, launch another stage, or fork the provider
 thread. It makes a decision boundary explicit inside the existing continuous
 tool conversation and retains normal `/stop`, cancellation, audit, and
 lifecycle authority.
+
+This permanent decision is recorded in
+[HER v2 Mandatory Cognitive Control Decision](HER_V2_MANDATORY_COGNITIVE_CONTROL_DECISION.md).
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 

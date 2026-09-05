@@ -349,12 +349,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             effort=effort_value,
             ledger=ledger,
             control=control,
-            task_state=(
-                HERTaskState(
-                    goal=extract_authoritative_current_request(prompt) or prompt
-                )
-                if self.config.cognitive_control_enabled
-                else None
+            # Cognitive control is a permanent HER v2 safety invariant, not an
+            # Agent/configuration capability. Every Turn therefore owns one
+            # lifecycle-wide TaskState before any stage is invoked.
+            task_state=HERTaskState(
+                goal=extract_authoritative_current_request(prompt) or prompt
             ),
             request_content=normalized_request_content,
             attachment_manifest=manifest,

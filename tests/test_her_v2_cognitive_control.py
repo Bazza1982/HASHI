@@ -1,3 +1,4 @@
+import inspect
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -220,6 +221,89 @@ def test_a_b_c_d_e_cycle_is_detected_in_every_tool_stage(stage):
     assert interrupt.cycle_repetitions == 3
     assert interrupt.cycle_tools == _TOOLS
     assert controller.awaiting_decision is True
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        Stage.DIRECT,
+        Stage.TRIAGE,
+        Stage.PLANNING,
+        Stage.EXECUTION,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+    ],
+)
+@pytest.mark.asyncio
+async def test_stage_provider_mandatorily_installs_cognitive_control(stage):
+    class Backend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={}, name="agent1", system_md=None)
+            self.capabilities = SimpleNamespace(supports_tool_use=True)
+            self.tool_registry = None
+            self.sys_prompt = "configured agent persona"
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, prompt, request_id, **kwargs):
+            del prompt, request_id, kwargs
+            definitions = self.tool_registry.get_tool_definitions()
+            assert definitions
+            for definition in definitions:
+                parameters = definition["function"]["parameters"]
+                assert HASHI_TASK_DELTA_ARGUMENT in parameters["required"]
+            assert "HASHI tool-boundary cognitive control" in self.sys_prompt
+            assert "HASHI persistent TaskState" in self.sys_prompt
+            return BackendResponse(text="stage complete", duration_ms=1)
+
+        async def shutdown(self):
+            return None
+
+    class Manager:
+        privacy_level = 1
+
+        def __init__(self):
+            self.backend = None
+
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == ("openrouter-api", "configured/model")
+            self.backend = Backend()
+            return self.backend
+
+    manager = Manager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_Registry(("probe_a",)),
+    )
+
+    response = await provider.invoke(
+        ProviderProfile("premium", "openrouter-api", "configured/model"),
+        _request(stage),
+    )
+
+    assert response.cognitive_control["version"] == 4
+    assert response.cognitive_control["stage"] == stage.value
+    assert response.cognitive_control["mode"] == "completed"
+
+
+def test_stage_provider_has_no_cognitive_control_disable_switch():
+    signature = inspect.signature(HashiStageProvider)
+    assert "cognitive_control_enabled" not in signature.parameters
+
+    # An older in-memory adapter may supply the retired keyword during the
+    # first live hot reload. Its value is inert and creates no provider state.
+    provider = HashiStageProvider(
+        backend_manager=SimpleNamespace(),
+        cognitive_control_enabled=False,
+    )
+    assert not hasattr(provider, "cognitive_control_enabled")
+
+    with pytest.raises(TypeError, match="unexpected HashiStageProvider option"):
+        HashiStageProvider(
+            backend_manager=SimpleNamespace(),
+            unrelated_option=False,
+        )
 
 
 def test_same_actions_with_changing_results_are_not_a_dead_cycle():
@@ -775,7 +859,6 @@ async def test_stage_provider_installs_control_and_exports_typed_state():
     provider = HashiStageProvider(
         backend_manager=manager,
         tool_registry=base,
-        cognitive_control_enabled=True,
     )
 
     response = await provider.invoke(
@@ -836,7 +919,6 @@ async def test_tool_free_stage_receives_same_task_state_without_control_tool():
     provider = HashiStageProvider(
         backend_manager=manager,
         tool_registry=_Registry(),
-        cognitive_control_enabled=True,
     )
     request = replace(
         _request(Stage.TRIAGE, task_state=task_state),

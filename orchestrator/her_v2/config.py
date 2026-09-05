@@ -73,6 +73,12 @@ REMOVED_HER_V2_PROFILE_LIMIT_FIELDS = frozenset(
     REMOVED_HER_V2_LIMIT_FIELDS
 )
 
+REMOVED_HER_V2_SAFETY_SWITCH_FIELDS = frozenset(
+    {
+        "cognitive_control_enabled",
+    }
+)
+
 
 def _reject_removed_limits(
     raw: Mapping[str, Any],
@@ -103,6 +109,17 @@ def _reject_removed_limits(
         "liveness detector, one typed fresh-connection provider recovery, and the "
         "explicitly designed Reviewed remediation boundary; legacy generic ceilings "
         "must not be applied to Execution, Replanning, or Assured Review."
+    )
+
+
+def _reject_removed_safety_switches(raw: Mapping[str, Any]) -> None:
+    found = REMOVED_HER_V2_SAFETY_SWITCH_FIELDS.intersection(raw)
+    if not found:
+        return
+    raise HERv2ConfigurationError(
+        "her_v2 contains removed safety switch field(s): "
+        f"{', '.join(sorted(found))}. Cognitive control is permanently active "
+        "for every HER v2 Agent and cannot be configured or disabled."
     )
 
 
@@ -198,9 +215,6 @@ class HERv2Config:
     # Capability gates. EffortPolicy owns which stage receives each surface.
     strategy_tools_enabled: bool = True
     planning_tools_enabled: bool = True
-    # Semantic no-new-information cycles enter a typed model decision boundary
-    # instead of relying on an arbitrary tool/call ceiling.
-    cognitive_control_enabled: bool = False
     shadow_mode: bool = False
     # Control-plane revisions are snapshotted once per Turn. They are not
     # provider reasoning controls and never mutate an in-flight runtime.
@@ -287,6 +301,7 @@ class HERv2Config:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> HERv2Config:
+        _reject_removed_safety_switches(raw)
         _reject_removed_limits(
             raw,
             fields=REMOVED_HER_V2_LIMIT_FIELDS,
@@ -629,10 +644,6 @@ class HERv2Config:
             planning_tools_enabled=_strict_bool(
                 raw.get("planning_tools_enabled", True),
                 "planning_tools_enabled",
-            ),
-            cognitive_control_enabled=_strict_bool(
-                raw.get("cognitive_control_enabled", False),
-                "cognitive_control_enabled",
             ),
             shadow_mode=_strict_bool(raw.get("shadow_mode", False), "shadow_mode"),
             routing_revision=max(1, int(raw.get("routing_revision") or 1)),
