@@ -207,6 +207,11 @@ def test_portable_full_local_install_is_admin_atomic_verified_and_idempotent():
     assert "Get-Sha256" in installer
     assert "SHA256SUMS.txt" in installer
     assert "Assert-StaticManifestCoverage" in installer
+    assert "$destinationHash = Get-Sha256 -Path $destination" in installer
+    assert "$isMutableData -or $relative -ieq 'SHA256SUMS.txt'" in installer
+    assert "$sourceHash = Get-Sha256 -Path ([string]$record.Source)" in installer
+    assert "$destinationHash -ne [string]$manifest[$relative]" in installer
+    assert "A USB program file failed SHA-256 verification" not in installer
     assert "C:\\.HASHI-Portable.installing." in installer
     assert "Move-Item -LiteralPath $script:StageRoot -Destination $script:InstallRoot" in installer
     assert ".hashi-local-install.json" in installer
@@ -326,6 +331,18 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
     assert "MB of $totalMiB MB" in installer
     assert "$verifyIndex of $($records.Count)" in installer
     assert "HASHI Setup / HASHI 安装" in installer
+    for line in (
+        "HASHI Portable",
+        "Professional Agentic AI System",
+        "Powered by HER-V2 - Flexible with CLI backends",
+        "Designed by Barry Li",
+    ):
+        assert line in installer
+    assert "ConvertTo-WriteProgressText" in installer
+    assert "$progressChinese = ConvertTo-WriteProgressText -Text $Chinese" in installer
+    assert '-Status "$English / $progressChinese"' in installer
+    assert '-Status "$English / $Chinese"' not in installer
+    assert "-Chinese \"[$bounded%] $Chinese\"" in installer
     assert "Installation log:" in installer
     assert "安装日志：" in installer
 

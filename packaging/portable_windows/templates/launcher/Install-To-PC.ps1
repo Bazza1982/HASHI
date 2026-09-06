@@ -30,6 +30,28 @@ $script:ShortcutNames = @(
     'Start HASHI Workbench.lnk'
 )
 
+function Write-InstallerHeader {
+    Write-Host 'HASHI Portable' -ForegroundColor Cyan
+    Write-Host 'Professional Agentic AI System' -ForegroundColor White
+    Write-Host 'Powered by HER-V2 - Flexible with CLI backends' -ForegroundColor White
+    Write-Host 'Designed by Barry Li' -ForegroundColor White
+    Write-Host ''
+}
+
+function ConvertTo-WriteProgressText {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    # Legacy Windows PowerShell progress rendering can advance CJK glyphs by
+    # one buffer cell even when the console font paints them across two.  A
+    # half-width space supplies the missing cell.  Keep this compensation
+    # strictly inside Write-Progress so logs and ordinary messages stay clean.
+    return [regex]::Replace(
+        $Text,
+        '[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF01-\uFF60\uFFE0-\uFFE6]',
+        '$0 '
+    )
+}
+
 function Write-BilingualMessage {
     param(
         [string]$English,
@@ -53,9 +75,11 @@ function Write-InstallProgress {
         [switch]$ForceConsole
     )
     $bounded = [Math]::Max(0, [Math]::Min(100, $Percent))
+    $progressActivity = ConvertTo-WriteProgressText -Text 'HASHI Setup / HASHI 安装'
+    $progressChinese = ConvertTo-WriteProgressText -Text $Chinese
     Write-Progress `
-        -Activity 'HASHI Setup / HASHI 安装' `
-        -Status "$English / $Chinese" `
+        -Activity $progressActivity `
+        -Status "$English / $progressChinese" `
         -PercentComplete $bounded
     if ($ForceConsole -or $bounded -ge ($script:LastConsolePercent + 5) -or $bounded -eq 100) {
         Write-BilingualMessage `
@@ -424,6 +448,7 @@ function Remove-NewInstallationSafely {
 
 try {
     Remove-Item -LiteralPath $script:InstallLog -Force -ErrorAction SilentlyContinue
+    Write-InstallerHeader
     if (-not (Test-IsAdministrator)) {
         throw 'Administrator permission is required to install HASHI.'
     }
@@ -518,16 +543,15 @@ try {
         if ([long](Get-Item -LiteralPath $destination).Length -ne [long]$record.Length) {
             throw "A copied file has the wrong size: $relative"
         }
-        $sourceHash = Get-Sha256 -Path ([string]$record.Source)
-        if (
-            -not $relative.StartsWith('data\', [StringComparison]::OrdinalIgnoreCase) -and
-            $relative -ine 'SHA256SUMS.txt' -and
-            $sourceHash -ne [string]$manifest[$relative]
-        ) {
-            throw "A USB program file failed SHA-256 verification: $relative"
-        }
-        if ((Get-Sha256 -Path $destination) -ne $sourceHash) {
-            throw "A local file failed SHA-256 verification: $relative"
+        $destinationHash = Get-Sha256 -Path $destination
+        $isMutableData = $relative.StartsWith('data\', [StringComparison]::OrdinalIgnoreCase)
+        if ($isMutableData -or $relative -ieq 'SHA256SUMS.txt') {
+            $sourceHash = Get-Sha256 -Path ([string]$record.Source)
+            if ($destinationHash -ne $sourceHash) {
+                throw "A local file failed SHA-256 verification: $relative"
+            }
+        } elseif ($destinationHash -ne [string]$manifest[$relative]) {
+            throw "A copied program file failed SHA-256 verification: $relative"
         }
         $verifiedBytes += [long]$record.Length
         $fraction = if ($totalBytes -gt 0) { [double]$verifiedBytes / [double]$totalBytes } else { 1.0 }
