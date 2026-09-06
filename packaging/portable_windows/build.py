@@ -711,6 +711,8 @@ def validate_image(image_root: Path) -> None:
         "data/portable-instance.json",
         "app/hashi/main.py",
         "app/hashi/tui.py",
+        "app/hashi/tui/assets/sounds/soft_chat_send.wav",
+        "app/hashi/tui/assets/sounds/soft_chat_receive.wav",
         "app/hashi/exp/loader.py",
         "app/hashi/veritas/__init__.py",
         "app/workbench/server.mjs",
@@ -863,6 +865,8 @@ def build(args: argparse.Namespace) -> Path:
                 "clean_tracked_inputs_required": True,
                 "local_workbench_observability": True,
                 "local_remote_route_cache": True,
+                "soft_chat_message_sounds": True,
+                "windows_native_only": True,
             },
         }
         final_size = 0

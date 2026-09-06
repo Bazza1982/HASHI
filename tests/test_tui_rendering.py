@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import wave
 from io import StringIO
+from pathlib import Path
 
 from rich.console import Console
 
@@ -46,20 +49,49 @@ def test_user_chat_message_keeps_rich_markup_literal():
     assert "[bold red]literal[/]" in output
 
 
-def test_message_sounds_use_distinct_windows_aliases(monkeypatch):
-    played: list[str] = []
+def test_message_sounds_use_distinct_soft_chat_files(monkeypatch):
+    played: list[Path] = []
     monkeypatch.setattr(sounds.sys, "platform", "win32")
-    monkeypatch.setattr(sounds, "_play_windows_alias", played.append)
+    monkeypatch.setattr(sounds, "_play_windows_file", played.append)
 
     assert sounds.play_message_sound("sent") is True
     assert sounds.play_message_sound("received") is True
-    assert played == ["SystemQuestion", "SystemAsterisk"]
+    assert [path.name for path in played] == [
+        "soft_chat_send.wav",
+        "soft_chat_receive.wav",
+    ]
+
+
+def test_soft_chat_assets_are_small_distinct_pcm_waves():
+    properties = {}
+    digests = set()
+    for event, path in sounds.MESSAGE_SOUND_FILES.items():
+        payload = path.read_bytes()
+        digests.add(hashlib.sha256(payload).hexdigest())
+        assert len(payload) < 20_000
+        with wave.open(str(path), "rb") as audio:
+            properties[event] = {
+                "channels": audio.getnchannels(),
+                "sample_width": audio.getsampwidth(),
+                "sample_rate": audio.getframerate(),
+                "duration": audio.getnframes() / audio.getframerate(),
+            }
+
+    assert len(digests) == 2
+    assert properties["sent"]["channels"] == 1
+    assert properties["sent"]["sample_width"] == 2
+    assert properties["sent"]["sample_rate"] == 44_100
+    assert 0.07 <= properties["sent"]["duration"] <= 0.10
+    assert properties["received"]["channels"] == 1
+    assert properties["received"]["sample_width"] == 2
+    assert properties["received"]["sample_rate"] == 44_100
+    assert 0.17 <= properties["received"]["duration"] <= 0.21
 
 
 def test_message_sounds_can_be_disabled(monkeypatch):
-    played: list[str] = []
+    played: list[Path] = []
     monkeypatch.setattr(sounds.sys, "platform", "win32")
-    monkeypatch.setattr(sounds, "_play_windows_alias", played.append)
+    monkeypatch.setattr(sounds, "_play_windows_file", played.append)
     monkeypatch.setenv("HASHI_TUI_SOUNDS", "off")
 
     assert sounds.play_message_sound("sent") is False
