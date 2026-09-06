@@ -24,6 +24,25 @@ PYTHON_VERSION = "3.12.10"
 NODE_VERSION = "22.23.2"
 PAIRING_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
 
+USER_LAUNCHER_FILES = (
+    "安装_HASHI_到本机.bat",
+    "启动_HASHI_聊天界面.bat",
+    "启动_HASHI_工作台.bat",
+    "停止_HASHI.bat",
+    "诊断_HASHI.bat",
+    "从本机卸载_HASHI.bat",
+)
+README_FILENAME = "请先阅读_HASHI使用说明.txt"
+LEGACY_USER_FILES = (
+    "Install_HASHI_On_This_PC.bat",
+    "Start_HASHI_TUI.bat",
+    "Start_HASHI_Workbench.bat",
+    "Stop_HASHI.bat",
+    "Diagnose_HASHI.bat",
+    "Uninstall_HASHI_From_This_PC.bat",
+    "PORTABLE_README.txt",
+)
+
 HERE = Path(__file__).resolve().parent
 HASHI_ROOT = HERE.parents[1]
 TEMPLATES = HERE / "templates"
@@ -596,18 +615,10 @@ def configure_data(
 
 
 def copy_launchers(image_root: Path) -> None:
-    for name in (
-        "Start_HASHI_TUI.bat",
-        "Start_HASHI_Workbench.bat",
-        "Install_HASHI_On_This_PC.bat",
-        "Uninstall_HASHI_From_This_PC.bat",
-        "Stop_HASHI.bat",
-        "Diagnose_HASHI.bat",
-        "PORTABLE_README.txt",
-    ):
+    for name in (*USER_LAUNCHER_FILES, README_FILENAME):
         source = TEMPLATES / name
         destination = image_root / name
-        if name == "PORTABLE_README.txt":
+        if name == README_FILENAME:
             destination.write_text(
                 source.read_text(encoding="utf-8-sig"), encoding="utf-8-sig"
             )
@@ -719,8 +730,8 @@ def validate_image(image_root: Path) -> None:
         "app/workbench/ui/index.html",
         "app/hashi/voice_models/piper/zh_CN-huayan-medium.onnx",
         "app/hashi/hashi_assets/ocr/bin/windows-x86_64/tesseract.exe",
-        "Install_HASHI_On_This_PC.bat",
-        "Uninstall_HASHI_From_This_PC.bat",
+        *USER_LAUNCHER_FILES,
+        README_FILENAME,
         "launcher/Install-To-PC.ps1",
         "launcher/Bootstrap-Elevated.ps1",
         "launcher/Elevated-Entry.ps1",
@@ -735,6 +746,13 @@ def validate_image(image_root: Path) -> None:
     ]
     if missing:
         raise RuntimeError(f"portable image is incomplete: {missing}")
+    present_legacy = [
+        relative for relative in LEGACY_USER_FILES if (image_root / relative).exists()
+    ]
+    if present_legacy:
+        raise RuntimeError(
+            f"legacy English user-facing files are present: {present_legacy}"
+        )
     obsolete = (
         "install/local-cache-manifest.json",
         "install/local-cache-small-files.zip",
@@ -867,6 +885,7 @@ def build(args: argparse.Namespace) -> Path:
                 "local_remote_route_cache": True,
                 "soft_chat_message_sounds": True,
                 "windows_native_only": True,
+                "chinese_user_facing_files": True,
             },
         }
         final_size = 0

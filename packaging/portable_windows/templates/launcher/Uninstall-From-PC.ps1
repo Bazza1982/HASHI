@@ -18,6 +18,9 @@ try {
 $script:SourceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $script:InstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
 $script:ShortcutNames = @(
+    '启动 HASHI（聊天界面）.lnk',
+    '启动 HASHI（工作台）.lnk',
+    '停止 HASHI.lnk',
     'Start HASHI.lnk',
     'Stop HASHI.lnk',
     'Start HASHI Workbench.lnk'
@@ -168,7 +171,7 @@ try {
         $script:InstallRoot.TrimEnd('\'),
         [System.StringComparison]::OrdinalIgnoreCase
     )) {
-        throw 'Run Uninstall_HASHI_From_This_PC.bat from the original USB drive so the local folder can be removed safely.'
+        throw 'Run 从本机卸载_HASHI.bat from the original USB drive so the local folder can be removed safely.'
     }
     $sourceInstanceId = Get-PortableInstanceId -Root $script:SourceRoot
     if (-not (Assert-OwnedLocalInstallation -SourceInstanceId $sourceInstanceId)) {

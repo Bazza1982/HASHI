@@ -215,9 +215,16 @@ def test_portable_full_local_install_is_admin_atomic_verified_and_idempotent():
     assert "HASHI is already installed. No files were copied." in installer
     assert "exit 10" in installer
     assert "CreateShortcut" in installer
-    assert "Start HASHI.lnk" in installer
-    assert "Stop HASHI.lnk" in installer
-    assert "Start HASHI Workbench.lnk" in installer
+    assert "启动 HASHI（聊天界面）.lnk" in installer
+    assert "启动 HASHI（工作台）.lnk" in installer
+    assert "停止 HASHI.lnk" in installer
+    assert "Get-InstalledLauncherPath" in installer
+    assert "Start_HASHI_TUI.bat" in installer
+    assert "Start_HASHI_Workbench.bat" in installer
+    assert "Stop_HASHI.bat" in installer
+    assert installer.index("Remove-DesktopShortcuts") < installer.index(
+        "$shell = New-Object -ComObject WScript.Shell"
+    )
     assert "CommonApplicationData" not in installer
     assert "CurrentVersion\\Uninstall" not in installer
 
@@ -294,7 +301,7 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
     elevated_entry = (TEMPLATES / "launcher" / "Elevated-Entry.ps1").read_text(
         encoding="utf-8"
     )
-    install_batch = (TEMPLATES / "Install_HASHI_On_This_PC.bat").read_text(
+    install_batch = (TEMPLATES / "安装_HASHI_到本机.bat").read_text(
         encoding="utf-8"
     )
 
@@ -343,25 +350,32 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
     ):
         assert internal_wording not in user_visible
 
-    for name in (
-        "Start_HASHI_TUI.bat",
-        "Start_HASHI_Workbench.bat",
-        "Install_HASHI_On_This_PC.bat",
-        "Uninstall_HASHI_From_This_PC.bat",
-        "Stop_HASHI.bat",
-        "Diagnose_HASHI.bat",
-    ):
+    for name in builder.USER_LAUNCHER_FILES:
         assert "chcp 65001" in (TEMPLATES / name).read_text(encoding="utf-8")
 
     builder.copy_launchers(tmp_path)
     for script in (tmp_path / "launcher").glob("*.ps1"):
         assert script.read_bytes().startswith(b"\xef\xbb\xbf")
 
-    readme_path = tmp_path / "PORTABLE_README.txt"
+    readme_path = tmp_path / builder.README_FILENAME
     assert readme_path.read_bytes().startswith(b"\xef\xbb\xbf")
     readme = readme_path.read_text(encoding="utf-8-sig")
-    assert "Quick start / 快速开始" in readme
-    assert "If setup cannot complete / 如果安装无法完成" in readme
+    assert "第一次使用" in readme
+    assert "桌面会出现三个中文快捷方式" in readme
+    assert "安装_HASHI_到本机.bat" in readme
+    assert "从本机卸载_HASHI.bat" in readme
+    assert "不需要经过 WSL" in readme or "不会经过 WSL" in readme
+
+    assert set(builder.USER_LAUNCHER_FILES) == {
+        "安装_HASHI_到本机.bat",
+        "启动_HASHI_聊天界面.bat",
+        "启动_HASHI_工作台.bat",
+        "停止_HASHI.bat",
+        "诊断_HASHI.bat",
+        "从本机卸载_HASHI.bat",
+    }
+    for legacy_name in builder.LEGACY_USER_FILES:
+        assert not (tmp_path / legacy_name).exists()
 
 
 def test_builder_has_one_expanded_bundle_without_split_runtime_payload():
@@ -461,14 +475,8 @@ def test_portable_dependency_lock_keeps_requested_compact_capabilities():
 
 
 def test_portable_launchers_are_drive_relative_and_gateway_stays_disabled():
-    for name in (
-        "Start_HASHI_TUI.bat",
-        "Start_HASHI_Workbench.bat",
-        "Install_HASHI_On_This_PC.bat",
-        "Uninstall_HASHI_From_This_PC.bat",
-        "Stop_HASHI.bat",
-        "Diagnose_HASHI.bat",
-    ):
+    builder = _load_builder()
+    for name in builder.USER_LAUNCHER_FILES:
         source = (TEMPLATES / name).read_text(encoding="utf-8")
         assert "%~dp0" in source
         assert "E:\\" not in source
@@ -506,3 +514,4 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
     assert "app/hashi/tui/assets/sounds/soft_chat_receive.wav" in builder_source
     assert '"soft_chat_message_sounds": True' in builder_source
     assert '"windows_native_only": True' in builder_source
+    assert '"chinese_user_facing_files": True' in builder_source

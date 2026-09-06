@@ -206,8 +206,8 @@ try {
                 -ForegroundColor Red
         } else {
             Write-BilingualMessage `
-                -English 'HASHI is not validly installed on this PC. Run Install_HASHI_On_This_PC.bat from this USB.' `
-                -Chinese '这台电脑上没有有效的 HASHI 安装。请从此 USB 运行 Install_HASHI_On_This_PC.bat。' `
+                -English 'HASHI is not validly installed on this PC. Run 安装_HASHI_到本机.bat from this USB.' `
+                -Chinese '这台电脑上没有有效的 HASHI 安装。请从此 USB 运行 安装_HASHI_到本机.bat。' `
                 -ForegroundColor Red
         }
         Wait-ForDismissKey

@@ -110,7 +110,7 @@ function Initialize-LocalInstallation {
         $script:ExpectedInstallRoot.TrimEnd('\'),
         [System.StringComparison]::OrdinalIgnoreCase
     )) {
-        throw 'HASHI must be installed before it can run. Use Install_HASHI_On_This_PC.bat on the USB drive.'
+        throw 'HASHI must be installed before it can run. Use 安装_HASHI_到本机.bat on the USB drive.'
     }
     if (-not (Test-Path -LiteralPath $script:PortableRoot -PathType Container)) {
         throw 'The HASHI installation folder is missing.'
@@ -180,8 +180,8 @@ function Write-LauncherFailureHelp {
         -Chinese "日志位置：$script:DataRoot\logs" `
         -ForegroundColor Yellow
     Write-BilingualMessage `
-        -English 'Run Diagnose_HASHI.bat for a guided system check.' `
-        -Chinese '请运行 Diagnose_HASHI.bat 进行引导式系统检查。' `
+        -English 'Run 诊断_HASHI.bat for a guided system check.' `
+        -Chinese '请运行 诊断_HASHI.bat 进行引导式系统检查。' `
         -ForegroundColor Yellow
 }
 
@@ -520,7 +520,7 @@ function Start-HASHIBackend {
     }
     $unverifiedBackends = @(Get-UnverifiedOwnedBackendProcesses)
     if ($unverifiedBackends.Count -gt 0) {
-        throw 'A local HASHI backend is running without a valid endpoint record. Run Stop HASHI, then start again.'
+        throw 'A local HASHI backend is running without a valid endpoint record. Run 停止 HASHI, then start again.'
     }
     Remove-Item -LiteralPath $script:EndpointPath, $script:HashiPidPath -Force -ErrorAction SilentlyContinue
 

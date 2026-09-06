@@ -11,7 +11,7 @@ try {
         -ForegroundColor Green
     & (Join-Path $script:PythonRoot 'python.exe') (Join-Path $script:HashiRoot 'tui.py')
     # Once the backend was verified and the interactive TUI opened, a later
-    # exit (including Stop HASHI closing it) is not a startup failure.
+    # exit (including 停止 HASHI closing it) is not a startup failure.
     $tuiExitCode = $LASTEXITCODE
     if ($tuiExitCode -ne 0 -and $null -ne (Get-VerifiedLocalEndpoint)) {
         exit $tuiExitCode

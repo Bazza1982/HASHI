@@ -22,6 +22,9 @@ $script:ActivatedThisRun = $false
 $script:InstallLog = Join-Path $env:TEMP 'HASHI-Portable-install.log'
 $script:LastConsolePercent = -10
 $script:ShortcutNames = @(
+    '启动 HASHI（聊天界面）.lnk',
+    '启动 HASHI（工作台）.lnk',
+    '停止 HASHI.lnk',
     'Start HASHI.lnk',
     'Stop HASHI.lnk',
     'Start HASHI Workbench.lnk'
@@ -169,13 +172,29 @@ function Test-ExistingLocalInstallation {
         'app\hashi\tui.py',
         'app\workbench\server.mjs',
         'data\agents.json',
-        'data\secrets.json',
-        'Start_HASHI_TUI.bat',
-        'Stop_HASHI.bat'
+        'data\secrets.json'
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $script:InstallRoot $relative) -PathType Leaf)) {
             throw "The existing HASHI installation is incomplete: $relative"
         }
+    }
+    foreach ($launcher in @(
+        [PSCustomObject]@{
+            Chinese = '启动_HASHI_聊天界面.bat'
+            Legacy = 'Start_HASHI_TUI.bat'
+        },
+        [PSCustomObject]@{
+            Chinese = '启动_HASHI_工作台.bat'
+            Legacy = 'Start_HASHI_Workbench.bat'
+        },
+        [PSCustomObject]@{
+            Chinese = '停止_HASHI.bat'
+            Legacy = 'Stop_HASHI.bat'
+        }
+    )) {
+        $null = Get-InstalledLauncherPath `
+            -ChineseName ([string]$launcher.Chinese) `
+            -LegacyName ([string]$launcher.Legacy)
     }
     return $true
 }
@@ -324,26 +343,50 @@ function New-DesktopShortcut {
     }
 }
 
+function Get-InstalledLauncherPath {
+    param(
+        [string]$ChineseName,
+        [string]$LegacyName
+    )
+    foreach ($name in @($ChineseName, $LegacyName)) {
+        $candidate = Join-Path $script:InstallRoot $name
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    throw "The existing HASHI installation is incomplete: $ChineseName"
+}
+
 function Install-DesktopShortcuts {
     if (-not (Test-Path -LiteralPath $DesktopPath -PathType Container)) {
         throw "The desktop folder is unavailable: $DesktopPath"
     }
+    $tuiLauncher = Get-InstalledLauncherPath `
+        -ChineseName '启动_HASHI_聊天界面.bat' `
+        -LegacyName 'Start_HASHI_TUI.bat'
+    $workbenchLauncher = Get-InstalledLauncherPath `
+        -ChineseName '启动_HASHI_工作台.bat' `
+        -LegacyName 'Start_HASHI_Workbench.bat'
+    $stopLauncher = Get-InstalledLauncherPath `
+        -ChineseName '停止_HASHI.bat' `
+        -LegacyName 'Stop_HASHI.bat'
+    Remove-DesktopShortcuts
     $shell = New-Object -ComObject WScript.Shell
     New-DesktopShortcut `
         -Shell $shell `
-        -Name 'Start HASHI.lnk' `
-        -Target (Join-Path $script:InstallRoot 'Start_HASHI_TUI.bat') `
-        -Description 'Start HASHI Portable terminal interface'
+        -Name '启动 HASHI（聊天界面）.lnk' `
+        -Target $tuiLauncher `
+        -Description '启动 HASHI 并打开聊天终端界面'
     New-DesktopShortcut `
         -Shell $shell `
-        -Name 'Stop HASHI.lnk' `
-        -Target (Join-Path $script:InstallRoot 'Stop_HASHI.bat') `
-        -Description 'Stop HASHI Portable'
+        -Name '启动 HASHI（工作台）.lnk' `
+        -Target $workbenchLauncher `
+        -Description '启动 HASHI 并打开完整工作台'
     New-DesktopShortcut `
         -Shell $shell `
-        -Name 'Start HASHI Workbench.lnk' `
-        -Target (Join-Path $script:InstallRoot 'Start_HASHI_Workbench.bat') `
-        -Description 'Start HASHI Portable Workbench'
+        -Name '停止 HASHI.lnk' `
+        -Target $stopLauncher `
+        -Description '安全停止 HASHI 及其专用工作台浏览器'
 }
 
 function Remove-DesktopShortcuts {

@@ -4,8 +4,9 @@ This builder produces an allowlisted, self-contained Windows installation
 bundle for a USB drive whose total capacity is 957,000,000 bytes. It does not
 write to or format a USB device.
 
-The USB is installation and transfer media, not the runtime disk. The user
-runs `Install_HASHI_On_This_PC.bat`, approves Windows administrator access, and
+The USB is installation and transfer media, not the runtime disk. Its visible
+root launchers and end-user guide use clear Simplified Chinese names. The user
+runs `安装_HASHI_到本机.bat`, approves Windows administrator access, and
 the installer copies and verifies the complete bundle—including program,
 private Python/Node runtimes, configuration, secrets, and current user data—to:
 
@@ -22,15 +23,16 @@ exists, no files are copied; the desktop shortcuts are repaired and the local
 installation is launched. An invalid, incomplete, linked, or differently owned
 destination fails closed.
 
-The installer creates three Windows shortcuts on the invoking user's desktop:
-`Start HASHI`, `Stop HASHI`, and `Start HASHI Workbench`. Each shortcut targets
-the corresponding batch launcher inside the local installation, so it cannot
-become stale after the USB is removed. First installation reports real copy and
-verification percentages. After success, the same elevated visible window
-shows “Press any key to launch HASHI / 按任意键启动 HASHI” and opens the default
-TUI without another menu. HASHI and all child runtime processes inherit the
-administrator token. Installation success and subsequent startup failure are
-reported independently.
+The installer creates three Chinese Windows shortcuts on the invoking user's
+desktop: `启动 HASHI（聊天界面）`, `启动 HASHI（工作台）`, and `停止 HASHI`.
+Each shortcut targets the corresponding batch launcher inside the local
+installation, so it cannot become stale after the USB is removed. Legacy
+English shortcuts are removed during repair and uninstall. First installation
+reports real copy and verification percentages. After success, the same
+elevated visible window shows “Press any key to launch HASHI / 按任意键启动
+HASHI” and opens the default TUI without another menu. HASHI and all child
+runtime processes inherit the administrator token. Installation success and
+subsequent startup failure are reported independently.
 
 Local API discovery is strict. HASHI always binds its Backend API to
 `127.0.0.1`, prefers the configured port, and asks Windows for a free port if
@@ -43,7 +45,7 @@ record; they do not scan adapters, guess WSL gateways, or fall back to a
 to the record. Logs are always resolved from the local copy at
 `data\logs\bridge.log`.
 
-`Uninstall_HASHI_From_This_PC.bat` must be run from the original matching USB.
+`从本机卸载_HASHI.bat` must be run from the original matching USB.
 It requests confirmation, stops only processes whose executable or dedicated
 browser profile belongs to the validated local installation, removes the three
 known shortcuts, and deletes only the exact marked local directory. A marker,
