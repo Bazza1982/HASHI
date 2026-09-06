@@ -29,7 +29,11 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from tui.app import HASHITuiApp
-from tui.instances import load_launch_instance, local_workbench_urls
+from tui.instances import (
+    load_launch_instance,
+    load_local_endpoint,
+    local_workbench_urls,
+)
 
 
 def _get_bridge_home() -> Path:
@@ -39,7 +43,19 @@ def _get_bridge_home() -> Path:
 
 def _get_workbench_urls() -> tuple[str, list[str], str]:
     """Resolve this repository's identity and local Workbench candidates."""
-    instance_id, port = load_launch_instance(_get_bridge_home())
+    bridge_home = _get_bridge_home()
+    endpoint_setting = str(os.environ.get("HASHI_LOCAL_ENDPOINT_FILE") or "").strip()
+    if endpoint_setting:
+        instance_id, port = load_local_endpoint(bridge_home, Path(endpoint_setting))
+        endpoint_url = local_workbench_urls(port)[0]
+        configured = str(os.environ.get("HASHI_WORKBENCH_URL") or "").strip().rstrip("/")
+        if configured and configured != endpoint_url:
+            raise RuntimeError(
+                "HASHI_WORKBENCH_URL does not match the verified local endpoint"
+            )
+        return instance_id, [endpoint_url], endpoint_url
+
+    instance_id, port = load_launch_instance(bridge_home)
     urls = local_workbench_urls(port)
     configured = str(os.environ.get("HASHI_WORKBENCH_URL") or "").strip().rstrip("/")
     if configured:

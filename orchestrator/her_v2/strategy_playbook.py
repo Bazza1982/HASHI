@@ -39,6 +39,37 @@ class StrategyPlaybookSnapshot:
             "cards": [copy.deepcopy(dict(card)) for card in self.cards],
         }
 
+    def selection_payload(self) -> Mapping[str, Any]:
+        """Return the bounded index needed to select cards during Strategy.
+
+        Full card bodies are resolved locally after selection and supplied to
+        downstream stages. Re-sending every card's complete implementation
+        text to the classifier made a one-line Portable chat unnecessarily
+        large and slow.
+        """
+
+        selection_fields = (
+            "id",
+            "version",
+            "title",
+            "use_when",
+            "avoid_when",
+            "topology",
+            "tools",
+        )
+        return {
+            "playbook_version": self.playbook_version,
+            "sha256": self.sha256,
+            "cards": [
+                {
+                    field: copy.deepcopy(card[field])
+                    for field in selection_fields
+                    if field in card
+                }
+                for card in self.cards
+            ],
+        }
+
     def render(self) -> str:
         return json.dumps(
             self.prompt_payload(), ensure_ascii=False, indent=2, sort_keys=True

@@ -1,51 +1,65 @@
 # HASHI Portable Windows x64
 
-This builder produces an allowlisted, self-contained Windows directory image
-for a USB drive whose total capacity is 957,000,000 bytes. It does not write to
-or format a USB device.
+This builder produces an allowlisted, self-contained Windows installation
+bundle for a USB drive whose total capacity is 957,000,000 bytes. It does not
+write to or format a USB device.
 
-The generated image also provides a machine-level local runtime layer.
-The first TUI or Workbench start requests administrator approval, expands a
-compact small-file payload, streams the remaining large files, precompiles
-Python bytecode, verifies every installed source file, and atomically activates
-the runtime under Windows ProgramData. The user sees bilingual English/zh-CN
-guidance, four plain-language stages, real percentage/byte/file progress, and a
-short notice when a stage may take several minutes. The private Python and Node
-runtimes are never installed globally and the system PATH is not changed.
+The USB is installation and transfer media, not the runtime disk. The user
+runs `Install_HASHI_On_This_PC.bat`, approves Windows administrator access, and
+the installer copies and verifies the complete bundle—including program,
+private Python/Node runtimes, configuration, secrets, and current user data—to:
 
-Only immutable program/runtime files enter the local runtime directory. API
-keys, Sessions, Workspace, configuration, browser profile, and all other user
-data remain on the USB. If setup fails, HASHI does not launch from an incomplete
-installation; the original non-elevated launcher offers Retry or Exit and points
-to the setup log. A complete expanded program copy remains available for
-explicitly selected USB execution and backward-compatible images. The generated
-root includes explicit install/uninstall launchers, and the runtime also
-registers a removable entry in Windows Installed Apps. Every generated USB has
-a random 128-bit portable-instance identity. Its ProgramData directory,
-ownership marker, running processes, and Installed Apps key are all scoped to
-that identity. The uninstaller always requires matching identity and ownership
-markers, cross-checks bundle and Windows registration metadata when present,
-and fails closed on any mismatch; it never recursively deletes the shared
-product root or another portable instance's directory. During an upgrade from
-the earlier shared-cache layout, setup removes the obsolete cache and its
-unsafe shared uninstall entry only after its marker, bundle, source volume,
-required files, directory shape, and Windows registration all match the current
-USB. An unknown or ambiguous legacy layout stops setup without deleting it.
-`Stop_HASHI.bat` closes this instance's runtime, TUI launcher, and dedicated
-browser-profile processes, and reports safe ejection only after they are gone.
-When local acceleration is active, disposable Workbench diagnostic logs use the
-instance-scoped host directory so synchronous log writes cannot stall a slow
-USB. The host-specific Remote live-route cache uses the same instance-scoped
-host storage so LAN handshakes cannot block Remote while the removable drive is
-busy. USB execution fallback keeps using USB storage, and uninstalling an
-instance removes its host-only derived state. Authoritative data remains on the
-USB.
+```text
+C:\HASHI-Portable\
+```
+
+Copying uses a unique staging directory on `C:`. The installer verifies the
+static program image against `SHA256SUMS.txt`, verifies mutable `data` files
+against their live USB sources, writes an identity-bound ownership marker, and
+only then atomically moves the staging directory into place. It never
+overwrites an existing directory. If a valid matching installation already
+exists, no files are copied; the desktop shortcuts are repaired and the local
+installation is launched. An invalid, incomplete, linked, or differently owned
+destination fails closed.
+
+The installer creates three Windows shortcuts on the invoking user's desktop:
+`Start HASHI`, `Stop HASHI`, and `Start HASHI Workbench`. Each shortcut targets
+the corresponding batch launcher inside the local installation, so it cannot
+become stale after the USB is removed. First installation reports real copy and
+verification percentages. After success, the same elevated visible window
+shows “Press any key to launch HASHI / 按任意键启动 HASHI” and opens the default
+TUI without another menu. HASHI and all child runtime processes inherit the
+administrator token. Installation success and subsequent startup failure are
+reported independently.
+
+Local API discovery is strict. HASHI always binds its Backend API to
+`127.0.0.1`, prefers the configured port, and asks Windows for a free port if
+that port is occupied. Once health and instance identity are verified, the
+launcher atomically writes PID, process start time, actual API port, Portable
+identity, HASHI instance identity, build identity, and a random launch nonce to
+`data\state\local-endpoint.json`. TUI, Workbench, Diagnose, and Stop use that
+record; they do not scan adapters, guess WSL gateways, or fall back to a
+`172.x` address. Workbench's browser UI port is selected the same way and added
+to the record. Logs are always resolved from the local copy at
+`data\logs\bridge.log`.
+
+`Uninstall_HASHI_From_This_PC.bat` must be run from the original matching USB.
+It requests confirmation, stops only processes whose executable or dedicated
+browser profile belongs to the validated local installation, removes the three
+known shortcuts, and deletes only the exact marked local directory. A marker,
+Portable identity, build identity, target path, or reparse-point mismatch stops
+the uninstall without deletion. Uninstall permanently deletes the local
+conversations, settings, logs, and plaintext API keys; it does not alter the
+USB bundle.
 
 The image contains HER v2, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the complete browser
 Workbench, Remote/LAN/HChat, Scheduler, Nagare, Superloops, browser/desktop
 tools, Tesseract OCR, FFmpeg, Edge TTS, and one Chinese Piper voice. It uses the
-host Edge or Chrome and does not bundle Electron or Chromium.
+host Edge or Chrome and does not bundle Electron or Chromium. There is no CLI
+Engine, local LLM, semantic vector runtime, system Python/Node installation,
+global PATH change, Windows service, registry installation, or ProgramData
+runtime cache.
 
 Remote discovery remains visible on the LAN. Pairing is approved in one click,
 then protected operations require the issued bearer token, which expires after
@@ -59,18 +73,18 @@ python3 packaging/portable_windows/build.py
 
 The source `secrets.json` must contain `deepseek_api_key`. Only the DeepSeek,
 optional DashScope/OpenRouter, and Remote shared credentials are copied. Secret
-values are never printed. The generated Workbench admin token is unique to the
-image.
+values are never printed. The generated Workbench admin token and 128-bit
+Portable identity are unique to the image.
 
 The build fails closed if the result exceeds 957,000,000 bytes or if a CLI
 Engine adaptor/package manager is present. Every downloaded asset is pinned by
 SHA-256, Python dependencies are hash locked, and `SHA256SUMS.txt` covers the
-expanded image. Capacity is checked conservatively using 32 KiB allocation
-units (including directory overhead); NTFS with its default 4 KiB allocation
-unit is recommended for the target drive.
+fresh image. Because `data` is intentionally mutable after publication, the PC
+installer uses static manifest hashes for non-data files and live source/dest
+hash comparison for `data`. Capacity is checked conservatively using 32 KiB
+allocation units; NTFS with its default 4 KiB allocation unit is recommended.
 
 Only Git-tracked files from the explicit source allowlist enter `app/hashi`.
 Untracked development state, logs, local secrets, and generated workflow runs
-cannot leak into a portable image even when the source worktree is dirty.
-Tracked HASHI and Workbench inputs must be clean, and both revisions are checked
-again before publication so the recorded build identity matches its contents.
+cannot leak into a newly built image. Tracked HASHI and Workbench inputs must be
+clean, and both revisions are checked again before publication.

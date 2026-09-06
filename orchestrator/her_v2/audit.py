@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
+from orchestrator.storage_profile import flush_projection
+
 
 class AuditPersistenceError(RuntimeError):
     """Raised when neither the primary log nor approved fallback is durable."""
@@ -87,8 +89,7 @@ class JsonlAuditWriter:
         line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
         with self._lock, self.path.open("a", encoding="utf-8") as handle:
             handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
+            flush_projection(handle)
         self.path.chmod(0o600)
         return f"hashi-log:{self.path.name}:{record['event_id']}"
 

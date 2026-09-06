@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.storage_profile import removable_storage_profile
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -43,6 +45,42 @@ def _array(value: str | bytes | None) -> list[Any]:
 
 def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _binding_workzone_identity(
+    value: object,
+    *,
+    hashi_conversation_id: object,
+    context_generation: object,
+) -> str:
+    """Return a relocation-stable identity for HASHI-managed Session workspaces.
+
+    A Session workspace lives below the instance data root, so its absolute
+    path legitimately changes when a portable instance is copied from a USB
+    drive to a local disk.  The conversation id and context generation are
+    already authoritative parts of the HER binding; use those logical values
+    for this one managed path shape while retaining exact matching for every
+    ordinary user/workzone path.
+    """
+
+    raw = str(value or "")
+    conversation_id = str(hashi_conversation_id or "")
+    try:
+        generation = max(1, int(context_generation))
+    except (TypeError, ValueError):
+        return raw
+    parts = [part for part in raw.replace("\\", "/").rstrip("/").split("/") if part]
+    expected_tail = [
+        "state",
+        "session_workspaces",
+        conversation_id,
+        f"generation_{generation}",
+    ]
+    if len(parts) >= len(expected_tail) and [
+        part.casefold() for part in parts[-len(expected_tail) :]
+    ] == [part.casefold() for part in expected_tail]:
+        return f"hashi-session-workspace:{conversation_id}:generation:{generation}"
+    return raw
 
 
 def _resource_key(resource: Mapping[str, Any]) -> str:
@@ -96,6 +134,8 @@ class HerSessionStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
+        if removable_storage_profile():
+            connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
     @contextmanager
@@ -112,6 +152,8 @@ class HerSessionStore:
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
+            if removable_storage_profile():
+                connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS her_sessions (
@@ -408,13 +450,23 @@ class HerSessionStore:
         context_generation: int,
         workzone_identity: str,
     ) -> None:
+        expected_workzone = _binding_workzone_identity(
+            workzone_identity,
+            hashi_conversation_id=hashi_conversation_id,
+            context_generation=context_generation,
+        )
+        observed_workzone = _binding_workzone_identity(
+            row["workzone_identity"],
+            hashi_conversation_id=row["hashi_conversation_id"],
+            context_generation=row["context_generation"],
+        )
         expected = (
             str(instance_id).casefold(),
             str(agent_id).casefold(),
             str(owner_id),
             str(hashi_conversation_id),
             int(context_generation),
-            str(workzone_identity),
+            expected_workzone,
         )
         observed = (
             str(row["instance_id"]).casefold(),
@@ -422,7 +474,7 @@ class HerSessionStore:
             str(row["owner_id"]),
             str(row["hashi_conversation_id"]),
             int(row["context_generation"]),
-            str(row["workzone_identity"]),
+            observed_workzone,
         )
         if observed != expected:
             raise HerSessionStoreError(

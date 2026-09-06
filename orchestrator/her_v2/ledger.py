@@ -17,6 +17,7 @@ from .models import (
     TERMINAL_STATES,
     TriageClassification,
 )
+from orchestrator.storage_profile import flush_projection
 
 
 class LedgerInvariantError(RuntimeError):
@@ -218,8 +219,7 @@ class LedgerStore:
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
+                flush_projection(handle)
             os.chmod(temporary, 0o600)
             os.replace(temporary, target)
         finally:

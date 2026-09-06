@@ -9,6 +9,8 @@ import random
 import sys
 from pathlib import Path
 
+from rich.console import Group
+from rich.markdown import Markdown
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
@@ -17,7 +19,7 @@ from textual.containers import Vertical
 from textual.widgets import Input, RichLog, Static
 
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
-from tui.api_client import TuiApiClient
+from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
 from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
 from tui.onboarding import (
@@ -27,6 +29,7 @@ from tui.onboarding import (
     verify_openrouter,
     write_config,
 )
+from tui.sounds import play_message_sound
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,25 @@ STARTUP_POEM = [
 def markup(text: str) -> Text:
     """Render Rich markup explicitly before writing into RichLog."""
     return Text.from_markup(text)
+
+
+def chat_message_renderable(role: str, prefix: str, body: str) -> Group:
+    """Build one safe chat entry, rendering assistant content as Markdown."""
+
+    header = Text()
+    if str(role).strip().casefold() == "assistant":
+        header.append(f"{prefix}:", style="bold #63ffd9")
+        content = Markdown(
+            str(body),
+            code_theme="monokai",
+            hyperlinks=True,
+        )
+    else:
+        header.append(f"{prefix}:", style="bold #71b7ff")
+        # User input is literal text.  In particular, square brackets must not
+        # be interpreted as Rich markup tags.
+        content = Text(str(body))
+    return Group(header, content)
 
 
 # ── Widgets ─────────────────────────────────────────────────────────────────
@@ -638,7 +660,6 @@ class HASHITuiApp(App):
 
     @work()
     async def _launch_bridge_task(self):
-        log = self.query_one("#log-panel", LogPanel)
         self._attached_log_path = self._resolve_attach_log_path()
 
         # If API is already up (HASHI already running), just attach — don't start a new process
@@ -651,6 +672,15 @@ class HASHITuiApp(App):
             await self._load_agents(client=self.api, generation=self._connection_generation)
             self._start_polling()
             self._update_status_bar()
+            return
+
+        attach_only = str(os.environ.get("HASHI_TUI_ATTACH_ONLY") or "").strip().casefold()
+        if attach_only in {"1", "true", "yes", "on"}:
+            self._write_log_line(
+                f"[TUI] Waiting for the launched {self.launch_instance_id} local API."
+            )
+            self._start_attached_log_follow()
+            await self._wait_for_api()
             return
 
         self._write_log_line("[TUI] Starting HASHI main process...")
@@ -695,6 +725,7 @@ class HASHITuiApp(App):
 
     def _resolve_attach_log_path(self) -> Path | None:
         for candidate in (
+            self.bridge_home / "logs" / "bridge.log",
             self.bridge_home / "bridge_launch.log",
             self.bridge_home / "logs" / "bridge_launch.log",
             self.bridge_home / "bin" / "bridge_launch.log",
@@ -754,13 +785,13 @@ class HASHITuiApp(App):
         for attempt in range(60):
             if await self.api.health():
                 self.gateway_ok = True
-                self._write_log_line("[TUI] API Gateway connected.")
+                self._write_log_line("[TUI] Local HASHI API connected.")
                 await self._load_agents(client=self.api, generation=self._connection_generation)
                 self._start_polling()
                 self._update_status_bar()
                 return
             await asyncio.sleep(1)
-        self._write_log_line("[TUI] Warning: API Gateway not reachable after 60s. Chat disabled.")
+        self._write_log_line("[TUI] Warning: local HASHI API not reachable after 60s. Chat disabled.")
         self._update_status_bar()
 
     async def _load_agents(
@@ -846,9 +877,9 @@ class HASHITuiApp(App):
             prefix = source
 
         if role == "user":
-            chat.write(markup(f"[bold #71b7ff]You:[/] {text}"))
+            chat.write(chat_message_renderable("user", "You", text))
         elif role == "assistant":
-            chat.write(markup(f"[bold #63ffd9]{prefix}:[/] {text}"))
+            chat.write(chat_message_renderable("assistant", prefix, text))
 
     @work()
     async def _load_initial_transcript(
@@ -899,9 +930,13 @@ class HASHITuiApp(App):
                         if generation != self._connection_generation or client is not self.api:
                             logger.debug("Discarded stale TUI poll result: agent=%s generation=%s", agent, generation)
                             break
+                        received = False
                         for msg in messages:
                             if msg.get("role") == "assistant":
                                 self._render_transcript_message(msg)
+                                received = True
+                        if received:
+                            play_message_sound("received")
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -954,14 +989,15 @@ class HASHITuiApp(App):
         # Everything else → send to agent
         if not self.gateway_ok:
             chat = self.query_one("#chat-history", ChatHistory)
-            chat.write(markup("[#ff7a7a]API Gateway not connected. Chat unavailable.[/]"))
+            chat.write(markup("[#ff7a7a]Local HASHI API not connected. Chat unavailable.[/]"))
             return
 
         chat = self.query_one("#chat-history", ChatHistory)
-        chat.write(markup(f"[bold cyan]You:[/] {normalized}"))
+        chat.write(chat_message_renderable("user", "You", normalized))
 
         if self.current_agent_display == "ALL":
             # Broadcast to all active agents
+            play_message_sound("sent")
             self._send_broadcast(normalized, self.api, self._connection_generation)
             return
 
@@ -969,6 +1005,7 @@ class HASHITuiApp(App):
             chat.write(markup("[yellow]No agent selected. Use /to <name> first.[/]"))
             return
         else:
+            play_message_sound("sent")
             self._send_message(normalized, self.current_agent, self.api, self._connection_generation)
 
     @work()
@@ -985,7 +1022,40 @@ class HASHITuiApp(App):
             return
         if not result.get("ok", True) and "error" in result:
             chat = self.query_one("#chat-history", ChatHistory)
-            chat.write(markup(f"[red]Error ({agent}): {result['error']}[/]"))
+            chat.write(Text(f"Error ({agent}): {result['error']}", style="red"))
+            return
+
+        session_id = str(result.get("session_id") or "").strip()
+        run_id = str(result.get("run_id") or "").strip()
+        if not session_id or not run_id or client.proxied:
+            return
+
+        while generation == self._connection_generation and client is self.api:
+            status = await client.run_info(session_id, run_id)
+            if generation != self._connection_generation or client is not self.api:
+                return
+            if not status.get("ok"):
+                logger.warning(
+                    "TUI could not track submitted Run: agent=%s session=%s run=%s error=%s",
+                    agent,
+                    session_id,
+                    run_id,
+                    status.get("error"),
+                )
+                return
+            run = status.get("run")
+            state = (
+                str(run.get("state") or "").strip().casefold()
+                if isinstance(run, dict)
+                else ""
+            )
+            if state in TUI_TERMINAL_RUN_STATES:
+                failure = run_failure_text(status)
+                if failure:
+                    chat = self.query_one("#chat-history", ChatHistory)
+                    chat.write(Text(f"Request failed ({agent}): {failure}", style="red"))
+                return
+            await asyncio.sleep(0.5)
 
     @work()
     async def _send_broadcast(

@@ -5,8 +5,13 @@ import json
 import pytest
 from aiohttp import web
 
-from tui.api_client import TuiApiClient
-from tui.instances import InstanceResolver, load_launch_instance
+from tui.api_client import TuiApiClient, run_failure_text
+from tui.instances import (
+    InstanceResolver,
+    load_launch_instance,
+    load_local_endpoint,
+    local_workbench_urls,
+)
 
 
 def test_load_launch_instance_accepts_bom_and_uses_repository_config(tmp_path):
@@ -16,6 +21,52 @@ def test_load_launch_instance_accepts_bom_and_uses_repository_config(tmp_path):
     )
 
     assert load_launch_instance(tmp_path) == ("HASHI9", 19999)
+
+
+def test_launch_instance_uses_only_authoritative_loopback_route():
+    assert local_workbench_urls(18800) == ["http://127.0.0.1:18800"]
+
+
+def test_portable_local_endpoint_requires_matching_identity_and_loopback(tmp_path):
+    (tmp_path / "agents.json").write_text(
+        json.dumps(
+            {
+                "global": {
+                    "instance_id": "HASHI-PORTABLE",
+                    "workbench_port": 18800,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "portable-instance.json").write_text(
+        json.dumps({"portable_instance_id": "b" * 32}),
+        encoding="utf-8",
+    )
+    endpoint = tmp_path / "state" / "local-endpoint.json"
+    endpoint.parent.mkdir()
+    endpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "product": "HASHI Portable Local Endpoint",
+                "instance_id": "HASHI-PORTABLE",
+                "portable_instance_id": "b" * 32,
+                "api_host": "127.0.0.1",
+                "api_port": 49152,
+                "launch_nonce": "a" * 32,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_local_endpoint(tmp_path, endpoint) == ("HASHI-PORTABLE", 49152)
+
+    value = json.loads(endpoint.read_text(encoding="utf-8"))
+    value["api_host"] = "172.21.0.1"
+    endpoint.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError, match="loopback"):
+        load_local_endpoint(tmp_path, endpoint)
 
 
 @pytest.mark.asyncio
@@ -133,3 +184,39 @@ async def test_transcript_poll_waits_for_initial_history_offset(monkeypatch):
         "GET",
         "/api/transcript/portable/poll?offset=4",
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_tui_reads_durable_run_status(monkeypatch):
+    client = TuiApiClient()
+    requests = []
+
+    async def fake_request(method, path, **_kwargs):
+        requests.append((method, path))
+        return {
+            "ok": True,
+            "run": {
+                "state": "failed",
+                "error_code": "session_binding_conflict",
+                "error_text": "The Session binding changed.",
+            },
+        }
+
+    monkeypatch.setattr(client, "_direct_request", fake_request)
+
+    result = await client.run_info("session with spaces", "run/one")
+
+    assert requests == [
+        (
+            "GET",
+            "/api/v1/sessions/session%20with%20spaces/runs/run%2Fone",
+        )
+    ]
+    assert run_failure_text(result) == (
+        "session_binding_conflict: The Session binding changed."
+    )
+
+
+def test_tui_run_failure_text_ignores_non_failed_runs():
+    assert run_failure_text({"run": {"state": "running"}}) == ""
+    assert run_failure_text({"run": {"state": "completed"}}) == ""

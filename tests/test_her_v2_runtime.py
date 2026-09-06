@@ -885,6 +885,8 @@ async def test_native_audio_direct_disables_tools_in_request_and_audit(tmp_path)
     assert started["payload"]["allow_tools"] is False
     assert started["payload"]["allow_side_effects"] is False
     assert started["payload"]["retry_invariants"]["allow_tools"] is False
+    assert "context" not in started["payload"]
+    assert started["payload"]["context_summary"]["sha256"].startswith("sha256:")
 
 
 @pytest.mark.asyncio

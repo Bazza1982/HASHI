@@ -5145,6 +5145,7 @@ class WorkbenchApiServer:
                     return web.json_response(slash_result, status=status)
                 request_id = await runtime.enqueue_api_text(
                     text,
+                    deliver_to_telegram=False,
                     request_metadata=session_metadata,
                     idempotency_key=base_idempotency_key,
                 )
@@ -5227,6 +5228,7 @@ class WorkbenchApiServer:
         request_id = await runtime.enqueue_api_text(
             text,
             source=str(payload.get("source") or "api"),
+            deliver_to_telegram=False,
             request_metadata=session_metadata,
             idempotency_key=str(payload.get("idempotency_key") or "").strip() or None,
         )

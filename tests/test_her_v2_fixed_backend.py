@@ -55,6 +55,7 @@ def _prepare(
     resources=None,
     revoked_resource_ids=(),
     conversation_id: str = "hashi-conversation-1",
+    workzone_identity: str = "workzone-a",
 ):
     return coordinator.prepare_transport(
         session_id="her-session-1",
@@ -68,7 +69,7 @@ def _prepare(
         owner_id="owner-1",
         hashi_conversation_id=conversation_id,
         context_generation=1,
-        workzone_identity="workzone-a",
+        workzone_identity=workzone_identity,
         revoked_resource_ids=revoked_resource_ids,
     )
 
@@ -158,6 +159,60 @@ def test_fixed_session_rejects_cross_conversation_binding(tmp_path):
         request_id="turn-2",
         message="Leak history",
         conversation_id="different-conversation",
+    )
+
+    with pytest.raises(HerFixedProtocolError) as caught:
+        coordinator.accept(hostile_transport)
+    assert caught.value.code == "session_binding_conflict"
+
+
+def test_fixed_session_accepts_relocated_managed_session_workspace(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    conversation_id = "hashi-conversation-1"
+    old_workspace = (
+        rf"E:\data\state\session_workspaces\{conversation_id}\generation_1"
+    )
+    local_workspace = (
+        rf"C:\HASHI-Portable\data\state\session_workspaces\{conversation_id}"
+        r"\generation_1"
+    )
+    transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-1",
+        message="Before relocation",
+        workzone_identity=old_workspace,
+    )
+    turn = coordinator.accept(transport)
+    coordinator.complete(turn, assistant_text="Relocation is safe")
+
+    relocated, _audit = _prepare(
+        coordinator,
+        request_id="turn-2",
+        message="After relocation",
+        workzone_identity=local_workspace,
+    )
+
+    accepted = coordinator.accept(relocated)
+    assert "Before relocation" in accepted.materialized_prompt
+    assert "After relocation" in accepted.materialized_prompt
+
+
+def test_fixed_session_still_rejects_unrelated_workzone_change(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-1",
+        message="First",
+        workzone_identity="workzone-a",
+    )
+    turn = coordinator.accept(transport)
+    coordinator.complete(turn, assistant_text="Done")
+
+    hostile_transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-2",
+        message="Cross the boundary",
+        workzone_identity="workzone-b",
     )
 
     with pytest.raises(HerFixedProtocolError) as caught:

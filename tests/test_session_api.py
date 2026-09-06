@@ -95,11 +95,13 @@ class _Runtime:
         _text,
         source="api",
         *,
+        deliver_to_telegram=True,
         request_metadata,
         idempotency_key=None,
     ):
         del source
         del idempotency_key
+        assert deliver_to_telegram is False
         self.api_request_metadata.append(dict(request_metadata))
         return f"req-api-{len(self.api_request_metadata)}"
 

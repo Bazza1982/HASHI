@@ -60,6 +60,21 @@ _CLASSIFICATION_ANCHOR_RE = re.compile(
 )
 
 
+def _audit_context_summary(context: Mapping[str, Any]) -> Mapping[str, Any]:
+    encoded = json.dumps(
+        context,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=repr,
+    ).encode("utf-8")
+    return {
+        "keys": sorted(str(key) for key in context),
+        "bytes": len(encoded),
+        "sha256": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+    }
+
+
 def _measure_stage_runtime(method):
     """Record one logical stage interval without affecting its outcome.
 
@@ -398,7 +413,7 @@ class RuntimeInvocationMixin:
                     "provider_retry_count": provider_retry_count,
                     "retry_invariant_hash": retry_invariant_hash,
                     "retry_invariants": invariant_payload,
-                    "context": attempt_context,
+                    "context_summary": _audit_context_summary(attempt_context),
                 },
             )
             state.ledger.add_log_ref(start_ref)

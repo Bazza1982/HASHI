@@ -1,37 +1,23 @@
+[CmdletBinding()]
+param([switch]$Uninstalling)
+
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
-Initialize-PortableEnvironment
-$config = Get-PortableConfig
-$secrets = Get-PortableSecrets
-$port = [int]$config.global.workbench_port
-
-function Test-PathInsidePortableRoot {
-    param(
-        [string]$Candidate,
-        [string]$Root
-    )
-    if (-not $Candidate -or -not $Root) { return $false }
-    try {
-        $candidatePath = [System.IO.Path]::GetFullPath($Candidate)
-        $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
-        return $candidatePath.StartsWith(
-            $rootPath,
-            [System.StringComparison]::OrdinalIgnoreCase
-        )
-    } catch {
-        return $false
-    }
+if (-not (Test-IsAdministrator)) {
+    Write-BilingualMessage `
+        -English 'Administrator permission is required to stop HASHI.' `
+        -Chinese '停止 HASHI 需要管理员权限。' `
+        -ForegroundColor Red
+    exit 1
 }
+
+Initialize-PortableEnvironment
+$secrets = Get-PortableSecrets
+$endpoint = Get-VerifiedLocalEndpoint
 
 function Get-PortableOwnedProcesses {
     $browserProfile = [System.IO.Path]::GetFullPath(
         (Join-Path $script:DataRoot 'browser-profile')
-    )
-    $launcherPaths = @(
-        (Join-Path $script:PortableRoot 'Start_HASHI_TUI.bat'),
-        (Join-Path $script:PortableRoot 'Start_HASHI_Workbench.bat'),
-        (Join-Path $PSScriptRoot 'Start-TUI.ps1'),
-        (Join-Path $PSScriptRoot 'Start-Workbench.ps1')
     )
     $owned = @()
     foreach ($candidate in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
@@ -42,10 +28,9 @@ function Get-PortableOwnedProcesses {
 
         $name = ([string]$candidate.Name).ToLowerInvariant()
         $commandLine = [string]$candidate.CommandLine
-        $runtimeOwned = (
-            (Test-PathInsidePortableRoot -Candidate ([string]$candidate.ExecutablePath) -Root $script:PortableRoot) -or
-            (Test-PathInsidePortableRoot -Candidate ([string]$candidate.ExecutablePath) -Root $script:LocalCacheRoot)
-        )
+        $runtimeOwned = Test-PathInsideRoot `
+            -Candidate ([string]$candidate.ExecutablePath) `
+            -Root $script:PortableRoot
         $browserOwned = (
             $name -in @('msedge.exe', 'chrome.exe') -and
             $commandLine.IndexOf(
@@ -53,40 +38,29 @@ function Get-PortableOwnedProcesses {
                 [System.StringComparison]::OrdinalIgnoreCase
             ) -ge 0
         )
-        $launcherOwned = $false
-        if ($name -in @('cmd.exe', 'powershell.exe', 'pwsh.exe')) {
-            foreach ($launcherPath in $launcherPaths) {
-                if ($commandLine.IndexOf(
-                    $launcherPath,
-                    [System.StringComparison]::OrdinalIgnoreCase
-                ) -ge 0) {
-                    $launcherOwned = $true
-                    break
-                }
-            }
-        }
-        if ($runtimeOwned -or $browserOwned -or $launcherOwned) {
-            $owned += $candidate
-        }
+        if ($runtimeOwned -or $browserOwned) { $owned += $candidate }
     }
     return @($owned)
 }
 
-try {
-    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/admin/shutdown" -Headers @{ 'X-Workbench-Token' = [string]$secrets.workbench_admin_token } -ContentType 'application/json' -Body '{"reason":"portable-stop"}' -TimeoutSec 5 | Out-Null
-} catch {
-    Write-BilingualMessage `
-        -English 'HASHI was already stopped or did not answer.' `
-        -Chinese 'HASHI 已停止或没有响应。' `
-        -ForegroundColor Yellow
-}
-
-$hashiProcess = Get-LiveProcessFromPidFile -Path $script:HashiPidPath
-$ownedProcessIds = @(
-    Get-PortableOwnedProcesses | ForEach-Object { [int]$_.ProcessId }
-)
-if ($null -ne $hashiProcess -and $hashiProcess.Id -in $ownedProcessIds) {
-    try { Wait-Process -Id $hashiProcess.Id -Timeout 35 -ErrorAction Stop } catch { Stop-Process -Id $hashiProcess.Id -Force -ErrorAction SilentlyContinue }
+if ($null -ne $endpoint) {
+    $backend = Get-OwnedProcess -ProcessId ([int]$endpoint.backend_pid)
+    if ($null -ne $backend) {
+        try {
+            Invoke-RestMethod `
+                -Method Post `
+                -Uri "http://127.0.0.1:$([int]$endpoint.api_port)/api/admin/shutdown" `
+                -Headers @{ 'X-Workbench-Token' = [string]$secrets.workbench_admin_token } `
+                -ContentType 'application/json' `
+                -Body '{"reason":"portable-local-stop"}' `
+                -TimeoutSec 5 | Out-Null
+        } catch {}
+        try {
+            Wait-Process -Id $backend.Id -Timeout 35 -ErrorAction Stop
+        } catch {
+            Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 foreach ($ownedProcess in @(Get-PortableOwnedProcesses)) {
@@ -109,15 +83,20 @@ if ($remaining.Count -gt 0) {
         "$($_.Name) (PID $($_.ProcessId))"
     }) -join ', '
     Write-BilingualMessage `
-        -English "HASHI could not fully stop these processes: $remainingText. Do not eject the USB drive; close them and run Stop_HASHI.bat again." `
-        -Chinese "HASHI 无法完全停止以下进程：$remainingText。请勿拔出 USB；关闭这些进程后再次运行 Stop_HASHI.bat。" `
+        -English "HASHI could not fully stop these processes: $remainingText." `
+        -Chinese "HASHI 无法完全停止以下进程：$remainingText。" `
         -ForegroundColor Red
     exit 1
 }
 
-Remove-Item -LiteralPath $script:HashiPidPath, $script:WorkbenchPidPath -Force -ErrorAction SilentlyContinue
-Write-BilingualMessage `
-    -English 'HASHI Portable has stopped. It is now safe to eject the USB drive.' `
-    -Chinese 'HASHI Portable 已停止，现在可以安全弹出 USB。' `
-    -ForegroundColor Green
+Remove-Item `
+    -LiteralPath $script:EndpointPath, $script:HashiPidPath, $script:WorkbenchPidPath `
+    -Force `
+    -ErrorAction SilentlyContinue
+if (-not $Uninstalling) {
+    Write-BilingualMessage `
+        -English 'HASHI has stopped.' `
+        -Chinese 'HASHI 已停止。' `
+        -ForegroundColor Green
+}
 exit 0

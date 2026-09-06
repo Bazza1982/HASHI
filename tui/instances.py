@@ -21,10 +21,10 @@ from orchestrator.runtime_defaults import (
     DEFAULT_WORKBENCH_PORT,
 )
 from remote.live_endpoints import live_endpoints_path
-from remote.local_http import local_http_hosts
 
 logger = logging.getLogger(__name__)
 TUI_PROXY_CAPABILITY = "tui_proxy_v1"
+LOCAL_ENDPOINT_PRODUCT = "HASHI Portable Local Endpoint"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -48,14 +48,66 @@ def load_launch_instance(bridge_home: Path) -> tuple[str, int]:
     return instance_id, workbench_port
 
 
+def load_local_endpoint(
+    bridge_home: Path,
+    endpoint_path: Path,
+) -> tuple[str, int]:
+    """Load the identity-bound loopback endpoint written by the launcher.
+
+    Portable launchers opt into this contract explicitly. An invalid record is
+    rejected instead of falling back to guessed interface addresses. Process
+    ownership and health are verified by the elevated launcher before the TUI
+    starts; this reader independently verifies route and instance identity.
+    """
+    bridge_home = Path(bridge_home).resolve()
+    endpoint_path = Path(endpoint_path).resolve()
+    expected_endpoint_path = (bridge_home / "state" / "local-endpoint.json").resolve()
+    if endpoint_path != expected_endpoint_path:
+        raise ValueError("local HASHI endpoint path is outside this installation")
+    expected_instance_id, _configured_port = load_launch_instance(bridge_home)
+    portable_identity = _read_json(bridge_home / "portable-instance.json")
+    expected_portable_id = str(
+        portable_identity.get("portable_instance_id") or ""
+    ).strip().lower()
+    endpoint = _read_json(endpoint_path)
+    try:
+        schema_version = int(endpoint.get("schema_version") or 0)
+        product = str(endpoint.get("product") or "")
+        instance_id = str(endpoint.get("instance_id") or "").strip().upper()
+        api_host = str(endpoint.get("api_host") or "").strip()
+        api_port = int(endpoint.get("api_port") or 0)
+        launch_nonce = str(endpoint.get("launch_nonce") or "").strip().lower()
+        portable_id = str(endpoint.get("portable_instance_id") or "").strip().lower()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("local HASHI endpoint has invalid field types") from exc
+    if schema_version != 1 or product != LOCAL_ENDPOINT_PRODUCT:
+        raise ValueError("local HASHI endpoint has an unsupported identity")
+    if instance_id != expected_instance_id:
+        raise ValueError("local HASHI endpoint belongs to another instance")
+    if (
+        len(expected_portable_id) != 32
+        or any(character not in "0123456789abcdef" for character in expected_portable_id)
+        or portable_id != expected_portable_id
+    ):
+        raise ValueError("local HASHI endpoint belongs to another portable installation")
+    if api_host != "127.0.0.1" or not 1 <= api_port <= 65535:
+        raise ValueError("local HASHI endpoint is not a valid loopback route")
+    if len(launch_nonce) != 32 or any(
+        character not in "0123456789abcdef" for character in launch_nonce
+    ):
+        raise ValueError("local HASHI endpoint launch token is invalid")
+    return instance_id, api_port
+
+
 def local_workbench_urls(workbench_port: int) -> list[str]:
-    """Build local-only Workbench candidates, including WSL host aliases."""
-    urls: list[str] = []
-    for host in (*local_http_hosts(), "localhost", "127.0.0.1"):
-        url = f"http://{host}:{int(workbench_port)}"
-        if url not in urls:
-            urls.append(url)
-    return urls
+    """Return the one authoritative route to this launch instance.
+
+    A launch-instance TUI must never probe interface or WSL gateway addresses:
+    those can belong to another process and can make a local timeout surface as an
+    unrelated ``172.x`` connection error. Peers remain reachable through the
+    authenticated Hashi Remote proxy.
+    """
+    return [f"http://127.0.0.1:{int(workbench_port)}"]
 
 
 @dataclass(frozen=True)
@@ -126,13 +178,7 @@ class InstanceResolver:
         return ports
 
     def _remote_candidates(self) -> list[str]:
-        candidates: list[str] = []
-        for port in self._remote_ports():
-            for host in (*local_http_hosts(), "localhost", "127.0.0.1"):
-                url = f"http://{host}:{port}"
-                if url not in candidates:
-                    candidates.append(url)
-        return candidates
+        return [f"http://127.0.0.1:{port}" for port in self._remote_ports()]
 
     async def _find_local_remote(self) -> str | None:
         candidates = []

@@ -856,9 +856,29 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
 
         playbook = load_strategy_playbook()
+
+        def capability_index(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+            indexed: list[dict[str, Any]] = []
+            for item in items:
+                function = item.get("function")
+                function = function if isinstance(function, Mapping) else {}
+                name = str(function.get("name") or item.get("name") or "").strip()
+                if not name:
+                    continue
+                description = str(
+                    function.get("description") or item.get("description") or ""
+                ).strip()
+                row: dict[str, Any] = {"name": name}
+                if description:
+                    row["description"] = description[:500]
+                if "hashi_read_only" in item:
+                    row["hashi_read_only"] = item.get("hashi_read_only") is True
+                indexed.append(row)
+            return indexed
+
         execution_capabilities = {
-            "tools": [dict(item) for item in self._execution_tool_catalogue()],
-            "skills": [dict(item) for item in self.skills_catalogue],
+            "tools": capability_index(self._execution_tool_catalogue()),
+            "skills": capability_index(self.skills_catalogue),
             "allow_side_effects": not self.config.shadow_mode,
         }
         request_resources = {
@@ -902,7 +922,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 role_override="strategist",
                 context={
                     "habit_catalogue": list(state.habit_catalogue),
-                    "strategy_cards": playbook.prompt_payload(),
+                    "strategy_cards": playbook.selection_payload(),
                     "execution_capabilities": execution_capabilities,
                     "request_resources": request_resources,
                 },

@@ -1,8 +1,11 @@
+[CmdletBinding()]
+param([switch]$FailureHandledByEntry)
+
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
 try {
     $health = Start-HASHIBackend
-    Start-WorkbenchServer
+    $workbenchPort = Start-WorkbenchServer
     $browser = Find-SystemBrowser
     if (-not $browser) {
         throw 'Microsoft Edge or Google Chrome was not found on this PC.'
@@ -14,7 +17,7 @@ try {
         -Chinese 'HASHI 已就绪。正在打开 Workbench……' `
         -ForegroundColor Green
     Start-Process -FilePath $browser -ArgumentList @(
-        '--app=http://127.0.0.1:18888',
+        "--app=http://127.0.0.1:$workbenchPort",
         ("--user-data-dir=" + (Quote-ProcessArgument $profile)),
         '--no-first-run',
         '--no-default-browser-check'
@@ -25,6 +28,8 @@ try {
         -ForegroundColor Green
     exit 0
 } catch {
-    Write-LauncherFailureHelp -EnglishAction "Workbench could not start: $($_.Exception.Message)"
+    if (-not $FailureHandledByEntry) {
+        Write-LauncherFailureHelp -EnglishAction "Workbench could not start: $($_.Exception.Message)"
+    }
     exit 1
 }
