@@ -258,8 +258,15 @@ class UniversalOrchestrator:
             f"dependencies={self.runtime_fingerprint.dependency_digest}"
         )
 
+        # Fixed CLI backends build their HASHI MCP descriptor while the
+        # Function Worker initializes.  Publish the Core-owned Workbench
+        # endpoint first so every Worker receives a live, instance-scoped
+        # service route in its bootstrap topology.
+        await self.service_manager.start_workbench_api(global_cfg, secrets)
+
         startup_ok, wa_cfg = await self.startup_manager.start_initial_agents(global_cfg, agent_configs, secrets)
         if not startup_ok:
+            await self.service_manager.stop_workbench_api()
             return
 
         main_logger.info("Universal Orchestrator is online. Awaiting messages.")

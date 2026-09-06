@@ -123,6 +123,8 @@ class ServiceManager:
         }
 
     async def start_workbench_api(self, global_cfg, secrets):
+        if self.kernel.workbench_api is not None:
+            return
         try:
             server_cls = self._workbench_api_server_cls()
             self.kernel.workbench_api = server_cls(
@@ -131,9 +133,9 @@ class ServiceManager:
                 self.kernel.runtimes,
                 secrets=secrets,
                 orchestrator=self.kernel,
-                # HASHI3 starts and reconciles each isolated Worker before
-                # Core services.  A second instance-wide sweep here could
-                # interrupt a request already accepted by a live Worker.
+                # Each isolated Worker reconciles its own Runs before
+                # activation.  An instance-wide sweep here could interrupt a
+                # request already accepted by a live Worker.
                 reconcile_session_runs=False,
             )
             await self.kernel.workbench_api.start()

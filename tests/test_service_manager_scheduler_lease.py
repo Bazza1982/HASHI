@@ -122,6 +122,29 @@ async def test_start_workbench_api_constructs_the_core_service(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_start_workbench_api_is_idempotent(tmp_path, monkeypatch):
+    existing = SimpleNamespace(bind_host="127.0.0.1", bound_port=18804)
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(config_path=tmp_path / "agents.json"),
+        runtimes=[],
+        workbench_api=existing,
+    )
+    manager = ServiceManager(kernel)
+
+    def unexpected_server_lookup():
+        raise AssertionError("an existing Core service must not be replaced")
+
+    monkeypatch.setattr(manager, "_workbench_api_server_cls", unexpected_server_lookup)
+
+    await manager.start_workbench_api(
+        SimpleNamespace(workbench_port=18804),
+        {},
+    )
+
+    assert kernel.workbench_api is existing
+
+
+@pytest.mark.asyncio
 async def test_start_workbench_rolls_back_bound_server_if_endpoint_publish_fails(
     tmp_path,
     monkeypatch,
