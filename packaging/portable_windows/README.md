@@ -61,6 +61,11 @@ Engine, local LLM, semantic vector runtime, system Python/Node installation,
 global PATH change, Windows service, registry installation, or ProgramData
 runtime cache.
 
+The launched runtime is Windows-native-only: its isolated process environment
+includes the system Windows PowerShell directory explicitly, while Bash/WSL
+shell selection and direct WSL launcher execution are blocked. A missing native
+Windows executor therefore fails visibly instead of crossing into WSL.
+
 Remote discovery remains visible on the LAN. Pairing is approved in one click,
 then protected operations require the issued bearer token, which expires after
 seven days; the LAN itself is not treated as authenticated.

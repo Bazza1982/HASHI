@@ -9,18 +9,23 @@ from __future__ import annotations
 import asyncio
 import base64
 import locale
+import ntpath
 import os
 import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
-
+from typing import Any
 
 UTF8_ENCODING = "utf-8"
 SUPPORTED_SHELLS = ("bash", "powershell", "cmd")
+WINDOWS_NATIVE_ONLY_ENV = "HASHI_WINDOWS_NATIVE_ONLY"
+_WINDOWS_POSIX_BRIDGE_EXECUTABLES = frozenset(
+    {"bash", "bash.exe", "wsl", "wsl.exe", "wslconfig", "wslconfig.exe"}
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,19 @@ def runtime_platform_name() -> str:
 
 def default_shell_name() -> str:
     return "powershell" if os.name == "nt" else "bash"
+
+
+def windows_native_only() -> bool:
+    """Return whether this process must stay out of Windows POSIX bridges."""
+
+    value = str(os.environ.get(WINDOWS_NATIVE_ONLY_ENV) or "").strip().casefold()
+    return os.name == "nt" and value in {"1", "true", "yes", "on"}
+
+
+def _is_windows_posix_bridge_executable(executable: str) -> bool:
+    return ntpath.basename(str(executable).strip()).casefold() in (
+        _WINDOWS_POSIX_BRIDGE_EXECUTABLES
+    )
 
 
 def _which(candidates: Sequence[str]) -> str | None:
@@ -132,6 +150,10 @@ def resolve_shell_invocation(
         raise ValueError(
             f"unsupported shell {requested_shell!r}; expected one of "
             f"{', '.join(SUPPORTED_SHELLS)}"
+        )
+    if shell == "bash" and windows_native_only():
+        raise PermissionError(
+            "Bash is disabled by the Windows native-only execution policy"
         )
 
     if shell == "powershell":
@@ -222,6 +244,11 @@ def resolve_argv_invocation(argv: Sequence[str]) -> ArgvInvocation:
     if not values or not values[0]:
         raise ValueError("argv requires a non-empty executable")
     requested = values[0]
+    if windows_native_only() and _is_windows_posix_bridge_executable(requested):
+        raise PermissionError(
+            "WSL and POSIX bridge executables are disabled by the Windows "
+            "native-only execution policy"
+        )
     if os.name != "nt":
         return ArgvInvocation(
             argv=values,
@@ -418,13 +445,13 @@ def execution_environment_descriptor(cwd: str | Path | None = None) -> dict[str,
     try:
         shell_invocation = resolve_shell_invocation("", default_shell)
         shell_executable = shell_invocation.executable
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, PermissionError, ValueError):
         shell_executable = ""
     available_shells = []
     for shell in SUPPORTED_SHELLS:
         try:
             resolve_shell_invocation("", shell)
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, PermissionError, ValueError):
             continue
         available_shells.append(shell)
     return {
@@ -436,6 +463,7 @@ def execution_environment_descriptor(cwd: str | Path | None = None) -> dict[str,
         "path_separator": os.sep,
         "text_encoding": UTF8_ENCODING,
         "python_executable": str(Path(sys.executable).resolve()),
+        "windows_native_only": windows_native_only(),
         "shell_tool": {
             "name": "shell",
             "legacy_alias": "bash",
