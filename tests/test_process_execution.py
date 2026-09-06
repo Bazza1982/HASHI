@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator import process_execution
 from orchestrator.background_jobs import BackgroundJobManager
 from orchestrator.canonical_audit import CanonicalAuditStore
 from orchestrator.process_execution import (
@@ -22,7 +23,6 @@ from orchestrator.workzone import resolve_workzone_input
 from tools.builtins import BuiltinExecutionResult, execute_shell
 from tools.her_verification import execute_verification_run
 from tools.registry import ToolRegistry
-
 
 RAW_AUDIT_AUTHORITY = {
     "allow_raw_audit": True,
@@ -85,6 +85,30 @@ def test_registry_exposes_shell_but_accepts_persisted_bash_calls(tmp_path):
 def test_process_liveness_probe_does_not_signal_the_current_process():
     assert process_is_alive(os.getpid()) is True
     assert process_is_alive(2_147_483_647) is False
+
+
+def test_windows_native_only_policy_blocks_posix_bridge_launchers(monkeypatch):
+    monkeypatch.setattr(process_execution, "windows_native_only", lambda: True)
+
+    with pytest.raises(PermissionError, match="Bash is disabled"):
+        process_execution.resolve_shell_invocation("pwd", "bash")
+
+    for executable in (
+        "bash.exe",
+        "wsl.exe",
+        r"C:\Windows\System32\bash.exe",
+        r"C:\Windows\System32\wsl.exe",
+    ):
+        with pytest.raises(PermissionError, match="native-only"):
+            resolve_argv_invocation((executable, "--version"))
+
+
+def test_windows_native_only_policy_does_not_block_native_executables(monkeypatch):
+    monkeypatch.setattr(process_execution, "windows_native_only", lambda: True)
+
+    invocation = resolve_argv_invocation((sys.executable, "--version"))
+
+    assert invocation.requested_executable == sys.executable
 
 
 @pytest.mark.asyncio

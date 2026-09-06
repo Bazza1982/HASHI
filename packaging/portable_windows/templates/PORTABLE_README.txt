@@ -129,6 +129,7 @@ Runtime profile / 运行配置
   registry installation, or system PATH change is needed.
   支持 Windows 10/11 x64；无需全局安装 Python/Node、Git、npm、pip 或 WSL，
   不创建 Windows 服务，不写入安装注册表，也不修改系统 PATH。
+  运行时只使用原生 Windows 执行环境；Bash/WSL 回退已被禁止。
 
 - HER v2 is the only top-level Engine. Official DeepSeek is the default
   Provider; Qwen/DashScope is configurable. TUI and Workbench share the same

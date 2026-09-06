@@ -209,6 +209,7 @@ function Initialize-PortableEnvironment {
     $env:HASHI_REMOTE_LIVE_ENDPOINTS_PATH = Join-Path $script:DataRoot 'state\remote_live_endpoints.json'
     $env:HASHI_PORTABLE_ROOT = $script:PortableRoot
     $env:HASHI_PORTABLE_EXECUTION_MODE = 'local-install'
+    $env:HASHI_WINDOWS_NATIVE_ONLY = '1'
     Remove-Item Env:HASHI_PORTABLE_STORAGE_PROFILE -ErrorAction SilentlyContinue
     $env:HASHI_LOCAL_ENDPOINT_FILE = $script:EndpointPath
     $env:HASHI_TUI_ENABLE_API_GATEWAY = '0'
@@ -222,7 +223,8 @@ function Initialize-PortableEnvironment {
     $env:TESSDATA_PREFIX = $env:HASHI_OCR_MODEL_ROOT
     $env:TEMP = Join-Path $script:DataRoot 'tmp'
     $env:TMP = $env:TEMP
-    $env:PATH = "$script:PythonRoot;$script:BinRoot;$env:SystemRoot\System32;$env:SystemRoot"
+    $powerShellRoot = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'
+    $env:PATH = "$script:PythonRoot;$script:BinRoot;$powerShellRoot;$env:SystemRoot\System32;$env:SystemRoot"
     $hostRoots = @(
         Get-PSDrive -PSProvider FileSystem |
             ForEach-Object { $_.Root } |

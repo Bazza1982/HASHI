@@ -129,6 +129,8 @@ def test_portable_launcher_reports_real_startup_milestones_not_elapsed_time():
     assert "HASHI_WORKBENCH_URL = \"http://127.0.0.1:$port\"" in common
     assert "HASHI_PORTABLE_STORAGE_PROFILE = 'removable'" not in common
     assert "HASHI_PORTABLE_EXECUTION_MODE = 'local-install'" in common
+    assert "HASHI_WINDOWS_NATIVE_ONLY = '1'" in common
+    assert "System32\\WindowsPowerShell\\v1.0" in common
 
 
 def test_portable_launcher_uses_identity_bound_loopback_with_dynamic_ports():
@@ -500,3 +502,7 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
 
     builder_source = (PORTABLE / "build.py").read_text(encoding="utf-8")
     assert "createRequire(import.meta.url)" in builder_source
+    assert "app/hashi/tui/assets/sounds/soft_chat_send.wav" in builder_source
+    assert "app/hashi/tui/assets/sounds/soft_chat_receive.wav" in builder_source
+    assert '"soft_chat_message_sounds": True' in builder_source
+    assert '"windows_native_only": True' in builder_source
