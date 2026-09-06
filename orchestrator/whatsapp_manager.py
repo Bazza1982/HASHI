@@ -86,7 +86,6 @@ class WhatsAppManager:
             try:
                 await asyncio.wait_for(self.kernel.whatsapp.shutdown(), timeout=5.0)
             except Exception as e:
-                self.kernel.whatsapp = None
                 main_logger.warning("WhatsApp shutdown warning: %s", e)
                 return False, f"WhatsApp shutdown warning: {e}"
 

@@ -7,13 +7,14 @@ import hashlib
 import json
 import os
 import tempfile
-import threading
 from collections import Counter, deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from orchestrator.process_resources import path_lock as process_path_lock
 
 FORMAT = "her-v2-wip-journal-v2"
 LEGACY_FORMAT = "her-v2-wip-journal-v1"
@@ -32,17 +33,6 @@ MAX_CONTEXT_CHARS = 12_000
 MAX_STRING_CHARS = 800
 MAX_CONTENT_EXCERPT_CHARS = 1_200
 _CAPSULE_BUDGET_CHARS = MAX_CONTEXT_CHARS - 512
-
-_existing_locks_guard = globals().get("_LOCKS_GUARD")
-_LOCKS_GUARD = (
-    _existing_locks_guard
-    if isinstance(_existing_locks_guard, type(threading.Lock()))
-    else threading.Lock()
-)
-_existing_path_locks = globals().get("_PATH_LOCKS")
-_PATH_LOCKS: dict[str, threading.RLock] = (
-    _existing_path_locks if isinstance(_existing_path_locks, dict) else {}
-)
 
 _DROP_PAYLOAD_KEYS = {
     "attachment_manifest",
@@ -84,10 +74,8 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _path_lock(path: Path) -> threading.RLock:
-    key = str(Path(path).resolve())
-    with _LOCKS_GUARD:
-        return _PATH_LOCKS.setdefault(key, threading.RLock())
+def _path_lock(path: Path):
+    return process_path_lock(path)
 
 
 def _sha256_bytes(value: bytes) -> str:

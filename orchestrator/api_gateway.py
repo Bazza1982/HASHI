@@ -25,7 +25,6 @@ import json
 import logging
 import os
 import re
-import socket
 import time
 import uuid
 from pathlib import Path
@@ -57,6 +56,7 @@ from orchestrator.multimodal_contract import (
     contains_persistent_inline_media,
     resolve_input_capability,
 )
+from orchestrator.service_endpoints import select_service_bind_host
 from adapters.stream_events import (
     HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
     KIND_PROVIDER_ACTIVITY,
@@ -71,9 +71,8 @@ logger = logging.getLogger("BridgeU.APIGateway")
 SESSION_TTL_SEC = 1800  # 30 minutes
 MAX_EXTERNAL_TOOLS = 128
 MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
-# Keep the server boundary bootstrappable from a live generation that predates
-# the shared multimodal constants. Contract tests pin these values together;
-# once that first hot reload succeeds, the dependency ordering is also current.
+# Request limits are part of stable Core API ingress. Changing them is a Core
+# migration; an Agent Function Worker reboot does not replace this service.
 MAX_INLINE_MEDIA_BYTES = 50 * 1024 * 1024
 API_GATEWAY_MAX_REQUEST_BYTES = 256 * 1024 * 1024
 API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0
@@ -1157,6 +1156,10 @@ class APIGatewayServer:
         self.bind_host = self._select_bind_host()
         self._site = web.TCPSite(self._runner, self.bind_host, self.port)
         await self._site.start()
+        sockets = tuple(
+            getattr(getattr(self._site, "_server", None), "sockets", ()) or ()
+        )
+        self.bound_port = int(sockets[0].getsockname()[1]) if sockets else int(self.port)
         self.enabled = True
         self._accepting_requests = True
         self._observe(
@@ -1442,24 +1445,9 @@ class APIGatewayServer:
         self.default_model = normalized
 
     def _select_bind_host(self) -> str:
-        configured = str(getattr(self.global_config, "api_host", "") or "127.0.0.1").strip()
-        if configured not in {"127.0.0.1", "localhost"}:
-            return configured
-        for candidate in ("10.255.255.254",):
-            if self._host_can_bind(candidate):
-                return candidate
-        return "127.0.0.1"
-
-    @staticmethod
-    def _host_can_bind(host: str) -> bool:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.bind((host, 0))
-            return True
-        except OSError:
-            return False
-        finally:
-            sock.close()
+        return select_service_bind_host(
+            getattr(self.global_config, "api_host", None)
+        )
 
     # ── Route: GET /v1/models ─────────────────────────────────────────────────
 

@@ -66,7 +66,7 @@ place until Lily acknowledges import.
 
 ## Minimal Dependencies
 
-- Python 3.10+
+- CPython 3.12.13 (approved HASHI Core runtime)
 - Python standard library only for the package entry itself
 - Optional: existing HASHI `scripts.wiki.fetcher` privacy helpers are reused
   when available; otherwise the script falls back to conservative local checks.

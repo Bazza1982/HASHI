@@ -1,0 +1,48 @@
+{
+  "last_id": 2,
+  "artefacts": [
+    {
+      "artefact_id": "art_001",
+      "name": "Test artefact",
+      "type": "file",
+      "project": "Barry PhD",
+      "linked_projects": [
+        "Barry PhD"
+      ],
+      "path": "/home/lily/projects/hashi2/docs/MINATO_README.md",
+      "kasumi_id": null,
+      "kasumi_module": null,
+      "nagare_step": null,
+      "linked_nagare_steps": [],
+      "shimanto_phase": null,
+      "linked_shimanto_phases": [
+        "TESTPHAS",
+        "READ"
+      ],
+      "note": "MCP test",
+      "linked_at": "2026-04-05T12:52:19.785654+00:00",
+      "created_at": "2026-04-05T12:49:27.432682+00:00",
+      "updated_at": "2026-04-05T12:52:19.785654+00:00"
+    },
+    {
+      "artefact_id": "art_002",
+      "name": "Test doc",
+      "type": "file",
+      "project": "Barry PhD",
+      "linked_projects": [
+        "Barry PhD"
+      ],
+      "path": "/home/lily/projects/hashi2/docs/README.md",
+      "kasumi_id": null,
+      "kasumi_module": null,
+      "nagare_step": null,
+      "linked_nagare_steps": [],
+      "shimanto_phase": null,
+      "linked_shimanto_phases": [],
+      "note": "",
+      "linked_at": "2026-04-05T12:52:19.736905+00:00",
+      "created_at": "2026-04-05T12:52:19.736905+00:00",
+      "updated_at": "2026-04-05T12:52:19.736905+00:00"
+    }
+  ]
+}

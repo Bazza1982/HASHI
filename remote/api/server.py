@@ -501,7 +501,11 @@ def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout:
 
 def _peer_is_tui_trusted(instance_id: str) -> tuple[bool, str, Any]:
     """Require a live, mutually handshaken peer with TUI proxy support."""
-    peer = _peer_registry.get_peer(str(instance_id or "").upper()) if _peer_registry else None
+    peer = (
+        _peer_registry.get_peer(str(instance_id or "").upper())
+        if _peer_registry
+        else None
+    )
     if peer is None:
         return False, "peer_not_found", None
     properties = dict(getattr(peer, "properties", None) or {})
@@ -511,7 +515,10 @@ def _peer_is_tui_trusted(instance_id: str) -> tuple[bool, str, Any]:
     live_status = str(properties.get("live_status") or "unknown").strip().lower()
     if live_status in {"offline", "unknown"}:
         return False, f"peer_{live_status}", peer
-    capabilities = {str(item).strip() for item in (getattr(peer, "capabilities", None) or [])}
+    capabilities = {
+        str(item).strip()
+        for item in (getattr(peer, "capabilities", None) or [])
+    }
     if "tui_proxy_v1" not in capabilities:
         return False, "tui_proxy_unsupported", peer
     return True, "ok", peer
@@ -536,7 +543,11 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
     return True, "ok"
 
 
-def _local_workbench_tui_request(payload: ProtocolTuiRequest, *, timeout: int = 15) -> tuple[int, dict[str, Any]]:
+def _local_workbench_tui_request(
+    payload: ProtocolTuiRequest,
+    *,
+    timeout: int = 15,
+) -> tuple[int, dict[str, Any]]:
     """Execute one allowlisted TUI operation against this instance's Workbench."""
     operation = str(payload.operation or "").strip().lower()
     agent = str(payload.agent or "").strip()
@@ -548,22 +559,39 @@ def _local_workbench_tui_request(payload: ProtocolTuiRequest, *, timeout: int = 
     elif operation == "chat":
         path = "/api/chat"
         method = "POST"
-        body_bytes = json.dumps({"agent": agent, "text": str(payload.text or "")}).encode("utf-8")
+        body_bytes = json.dumps(
+            {"agent": agent, "text": str(payload.text or "")}
+        ).encode("utf-8")
     elif operation == "transcript_recent":
         path = f"/api/transcript/{quote(agent, safe='')}?limit={int(payload.limit)}"
     elif operation == "transcript_poll":
-        path = f"/api/transcript/{quote(agent, safe='')}/poll?offset={int(payload.offset)}"
+        path = (
+            f"/api/transcript/{quote(agent, safe='')}/poll?offset="
+            f"{int(payload.offset)}"
+        )
 
     last_error: Exception | None = None
     for host in local_http_hosts():
         url = local_http_url(_workbench_port, path, host=host)
-        headers = {"Content-Type": "application/json"} if body_bytes is not None else {}
-        request = urllib_request.Request(url, data=body_bytes, headers=headers, method=method)
+        headers = (
+            {"Content-Type": "application/json"}
+            if body_bytes is not None
+            else {}
+        )
+        request = urllib_request.Request(
+            url,
+            data=body_bytes,
+            headers=headers,
+            method=method,
+        )
         try:
             with urllib_request.urlopen(request, timeout=timeout) as response:
                 raw = response.read(TUI_PROXY_MAX_RESPONSE_BYTES + 1)
                 if len(raw) > TUI_PROXY_MAX_RESPONSE_BYTES:
-                    return 502, {"ok": False, "error": "workbench_response_too_large"}
+                    return 502, {
+                        "ok": False,
+                        "error": "workbench_response_too_large",
+                    }
                 result = json.loads(raw.decode("utf-8"))
                 if not isinstance(result, dict):
                     return 502, {"ok": False, "error": "invalid_workbench_response"}
@@ -574,17 +602,28 @@ def _local_workbench_tui_request(payload: ProtocolTuiRequest, *, timeout: int = 
                 result = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, ValueError):
                 result = {"ok": False, "error": f"Workbench HTTP {exc.code}"}
-            return int(exc.code), result if isinstance(result, dict) else {"ok": False, "error": str(result)}
+            if not isinstance(result, dict):
+                result = {"ok": False, "error": str(result)}
+            return int(exc.code), result
         except (URLError, OSError, ValueError) as exc:
             last_error = exc
             logger.debug(
-                "TUI proxy local Workbench candidate failed: operation=%s url=%s error=%s",
+                "TUI proxy local Workbench candidate failed: "
+                "operation=%s url=%s error=%s",
                 operation,
                 url,
                 exc,
             )
-    logger.warning("TUI proxy local Workbench unavailable: operation=%s error=%s", operation, last_error)
-    return 503, {"ok": False, "error": "local_workbench_unreachable", "detail": str(last_error or "no route")}
+    logger.warning(
+        "TUI proxy local Workbench unavailable: operation=%s error=%s",
+        operation,
+        last_error,
+    )
+    return 503, {
+        "ok": False,
+        "error": "local_workbench_unreachable",
+        "detail": str(last_error or "no route"),
+    }
 
 
 def _process_exists(pid: int) -> bool:
@@ -838,7 +877,9 @@ def _workbench_health_url() -> str:
 
 
 def _workbench_gateway_timeout() -> float:
-    raw = str(os.getenv("HASHI_WORKBENCH_GATEWAY_TIMEOUT_SECONDS") or "30").strip()
+    raw = str(
+        os.getenv("HASHI_WORKBENCH_GATEWAY_TIMEOUT_SECONDS") or "30"
+    ).strip()
     try:
         return max(1.0, min(float(raw), 120.0))
     except (TypeError, ValueError):
@@ -846,7 +887,8 @@ def _workbench_gateway_timeout() -> float:
 
 
 def _workbench_admin_token() -> str:
-    """Return the local-only Workbench admin token without exposing it remotely."""
+    """Return the local Workbench token without exposing it remotely."""
+
     if not _control_hashi_root:
         return ""
     secrets_path = Path(_control_hashi_root) / "secrets.json"
@@ -888,14 +930,14 @@ def _forward_workbench_gateway_request(
     }
     admin_token = _workbench_admin_token()
     if admin_token:
-        # The shared-token gateway terminates remote authentication. The
-        # existing local admin token is injected only on the loopback hop.
+        # Remote authentication terminates at this gateway. The local admin
+        # token is injected only on the loopback Workbench hop.
         headers["X-Workbench-Token"] = admin_token
 
     last_error: Exception | None = None
     for host in local_http_hosts():
         url = local_http_url(_workbench_port, upstream_path, host=host)
-        request_data = body_bytes if normalized_method not in {"GET"} else None
+        request_data = body_bytes if normalized_method != "GET" else None
         upstream = urllib_request.Request(
             url,
             data=request_data,
@@ -903,7 +945,10 @@ def _forward_workbench_gateway_request(
             method=normalized_method,
         )
         try:
-            with urllib_request.urlopen(upstream, timeout=_workbench_gateway_timeout()) as response:
+            with urllib_request.urlopen(
+                upstream,
+                timeout=_workbench_gateway_timeout(),
+            ) as response:
                 response_headers = {
                     name.lower(): value
                     for name, value in response.headers.items()
@@ -945,13 +990,15 @@ def _request_workbench_reboot(
         raise ValueError("agent must be a configured HASHI Agent name")
     if normalized_mode != "min":
         raise ValueError("out-of-process reboot control supports mode=min only")
-    body = json.dumps({"command": "/reboot min"}).encode("utf-8")
+    body = json.dumps(
+        {"agent": normalized_agent, "command": "/reboot min"}
+    ).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     admin_token = _workbench_admin_token()
     if admin_token:
         headers["X-Workbench-Token"] = admin_token
     last_error: Exception | None = None
-    path = f"/api/agents/{quote(normalized_agent, safe='')}/command"
+    path = "/api/admin/command"
     for host in local_http_hosts():
         req = urllib_request.Request(
             local_http_url(_workbench_port, path, host=host),
@@ -2110,207 +2157,6 @@ def create_app(
             "reason": reason_meta["reason"],
         }
 
-    # ── Agent move receiver v1 ───────────────────────────────
-
-    @app.get("/agent-move/v1/capabilities")
-    async def agent_move_capabilities(request: Request):
-        ok, reason, authenticated_instance = verify_protocol_request(
-            request,
-            body_bytes=b"",
-        )
-        if not ok:
-            return JSONResponse(
-                status_code=401,
-                content={"ok": False, "error": "Agent move authentication failed", "code": reason},
-            )
-        if not _hashi_root:
-            return _agent_move_response(
-                request,
-                status_code=503,
-                content={"ok": False, "error": "HASHI root is unavailable"},
-            )
-        try:
-            result = await asyncio.to_thread(receiver_capabilities, Path(_hashi_root))
-        except AgentMoveError as exc:
-            return _agent_move_response(
-                request,
-                status_code=503,
-                content={"ok": False, "error": str(exc)},
-            )
-        result["instance_id"] = str(
-            _instance_info.get("instance_id") or result.get("instance_id") or "HASHI"
-        ).upper()
-        result["authenticated_instance"] = authenticated_instance
-        result["authenticated_response_proof"] = True
-        return _agent_move_response(request, result)
-
-    @app.post("/agent-move/v1/stage")
-    async def agent_move_stage(request: Request, payload: AgentMoveStagePayload):
-        body_bytes = await request.body()
-        ok, reason, authenticated_instance = verify_protocol_request(
-            request,
-            body_bytes=body_bytes,
-            from_instance=payload.from_instance,
-        )
-        if not ok:
-            return JSONResponse(
-                status_code=401,
-                content={"ok": False, "error": "Agent move authentication failed", "code": reason},
-            )
-        if not _hashi_root:
-            return _agent_move_response(
-                request,
-                status_code=503,
-                content={"ok": False, "error": "HASHI root is unavailable"},
-            )
-        max_envelope_bytes = MAX_PACKAGE_BYTES + ENVELOPE_OVERHEAD_BYTES
-        if len(payload.package_b64) > ((max_envelope_bytes + 2) // 3) * 4 + 4:
-            return _agent_move_response(
-                request,
-                status_code=413,
-                content={"ok": False, "error": "Agent move package exceeds the receiver size limit"},
-            )
-        try:
-            envelope = base64.b64decode(payload.package_b64, validate=True)
-        except (ValueError, binascii.Error):
-            return _agent_move_response(
-                request,
-                status_code=400,
-                content={"ok": False, "error": "Agent move package_b64 is invalid"},
-            )
-        if payload.encryption != ENVELOPE_SCHEME:
-            return _agent_move_response(
-                request,
-                status_code=400,
-                content={"ok": False, "error": "Encrypted Agent move transport is required"},
-            )
-        try:
-            package_bytes = await asyncio.to_thread(
-                decrypt_package_transport,
-                envelope,
-                shared_token=load_shared_token(Path(_hashi_root)) or "",
-                source_instance=authenticated_instance or payload.from_instance,
-                target_instance=str(_instance_info.get("instance_id") or ""),
-                package_sha256=payload.sha256,
-            )
-            result = await asyncio.to_thread(
-                stage_agent_move,
-                Path(_hashi_root),
-                package_bytes,
-                expected_sha256=payload.sha256,
-                source_instance=authenticated_instance or payload.from_instance,
-                target_instance=str(_instance_info.get("instance_id") or "HASHI"),
-                secret_passphrase=load_shared_token(Path(_hashi_root)),
-            )
-            return _agent_move_response(request, result)
-        except AgentMoveError as exc:
-            status_code = 409 if "already" in str(exc).lower() else 400
-            return _agent_move_response(
-                request,
-                status_code=status_code,
-                content={"ok": False, "error": str(exc)},
-            )
-
-    async def _agent_move_action(
-        request: Request,
-        payload: AgentMoveActionPayload,
-        action,
-    ):
-        body_bytes = await request.body()
-        ok, reason, authenticated_instance = verify_protocol_request(
-            request,
-            body_bytes=body_bytes,
-            from_instance=payload.from_instance,
-        )
-        if not ok:
-            return JSONResponse(
-                status_code=401,
-                content={"ok": False, "error": "Agent move authentication failed", "code": reason},
-            )
-        if not _hashi_root:
-            return _agent_move_response(
-                request,
-                status_code=503,
-                content={"ok": False, "error": "HASHI root is unavailable"},
-            )
-        try:
-            current = await asyncio.to_thread(
-                get_agent_move_status,
-                Path(_hashi_root),
-                payload.package_id,
-            )
-            if str(current.get("source_instance") or "").upper() != str(
-                authenticated_instance or payload.from_instance
-            ).upper():
-                return _agent_move_response(
-                    request,
-                    status_code=403,
-                    content={"ok": False, "error": "Agent move belongs to another source instance"},
-                )
-            kwargs = {}
-            if action is commit_agent_move:
-                kwargs["secret_passphrase"] = load_shared_token(Path(_hashi_root))
-            result = await asyncio.to_thread(
-                action,
-                Path(_hashi_root),
-                payload.package_id,
-                **kwargs,
-            )
-            return _agent_move_response(request, result)
-        except AgentMoveError as exc:
-            return _agent_move_response(
-                request,
-                status_code=409,
-                content={"ok": False, "error": str(exc)},
-            )
-
-    @app.post("/agent-move/v1/commit")
-    async def agent_move_commit(request: Request, payload: AgentMoveActionPayload):
-        return await _agent_move_action(request, payload, commit_agent_move)
-
-    @app.post("/agent-move/v1/activate")
-    async def agent_move_activate(request: Request, payload: AgentMoveActionPayload):
-        return await _agent_move_action(request, payload, activate_agent_move)
-
-    @app.post("/agent-move/v1/rollback")
-    async def agent_move_rollback(request: Request, payload: AgentMoveActionPayload):
-        return await _agent_move_action(request, payload, rollback_agent_move)
-
-    @app.get("/agent-move/v1/status/{package_id}")
-    async def agent_move_status(request: Request, package_id: str):
-        ok, reason, authenticated_instance = verify_protocol_request(
-            request,
-            body_bytes=b"",
-        )
-        if not ok:
-            return JSONResponse(
-                status_code=401,
-                content={"ok": False, "error": "Agent move authentication failed", "code": reason},
-            )
-        if not _hashi_root:
-            return _agent_move_response(
-                request,
-                status_code=503,
-                content={"ok": False, "error": "HASHI root is unavailable"},
-            )
-        try:
-            result = await asyncio.to_thread(get_agent_move_status, Path(_hashi_root), package_id)
-        except AgentMoveError as exc:
-            return _agent_move_response(
-                request,
-                status_code=404,
-                content={"ok": False, "error": str(exc)},
-            )
-        if str(result.get("source_instance") or "").upper() != str(
-            authenticated_instance or ""
-        ).upper():
-            return _agent_move_response(
-                request,
-                status_code=403,
-                content={"ok": False, "error": "Agent move belongs to another source instance"},
-            )
-        return _agent_move_response(request, result)
-
     # ── File push ────────────────────────────────────────────
 
     @app.post("/files/push")
@@ -2453,5 +2299,240 @@ def create_app(
     async def pair_reject(client_id: str, client_id_auth: str = Depends(verify_token)):
         ok = _pairing_manager.reject_request(client_id)
         return {"ok": ok}
+
+    # ── Agent move receiver v1 ───────────────────────────────
+
+    @app.get("/agent-move/v1/capabilities")
+    async def agent_move_capabilities(request: Request):
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=b"",
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent move authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            result = await asyncio.to_thread(receiver_capabilities, Path(_hashi_root))
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": str(exc)},
+            )
+        result["instance_id"] = str(
+            _instance_info.get("instance_id")
+            or result.get("instance_id")
+            or "HASHI"
+        ).upper()
+        result["authenticated_instance"] = authenticated_instance
+        result["authenticated_response_proof"] = True
+        return _agent_move_response(request, result)
+
+    @app.post("/agent-move/v1/stage")
+    async def agent_move_stage(request: Request, payload: AgentMoveStagePayload):
+        body_bytes = await request.body()
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent move authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        max_envelope_bytes = MAX_PACKAGE_BYTES + ENVELOPE_OVERHEAD_BYTES
+        if len(payload.package_b64) > ((max_envelope_bytes + 2) // 3) * 4 + 4:
+            return _agent_move_response(
+                request,
+                status_code=413,
+                content={
+                    "ok": False,
+                    "error": "Agent move package exceeds the receiver size limit",
+                },
+            )
+        try:
+            envelope = base64.b64decode(payload.package_b64, validate=True)
+        except (ValueError, binascii.Error):
+            return _agent_move_response(
+                request,
+                status_code=400,
+                content={"ok": False, "error": "Agent move package_b64 is invalid"},
+            )
+        if payload.encryption != ENVELOPE_SCHEME:
+            return _agent_move_response(
+                request,
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "Encrypted Agent move transport is required",
+                },
+            )
+        try:
+            package_bytes = await asyncio.to_thread(
+                decrypt_package_transport,
+                envelope,
+                shared_token=load_shared_token(Path(_hashi_root)) or "",
+                source_instance=authenticated_instance or payload.from_instance,
+                target_instance=str(_instance_info.get("instance_id") or ""),
+                package_sha256=payload.sha256,
+            )
+            result = await asyncio.to_thread(
+                stage_agent_move,
+                Path(_hashi_root),
+                package_bytes,
+                expected_sha256=payload.sha256,
+                source_instance=authenticated_instance or payload.from_instance,
+                target_instance=str(_instance_info.get("instance_id") or "HASHI"),
+                secret_passphrase=load_shared_token(Path(_hashi_root)),
+            )
+            return _agent_move_response(request, result)
+        except AgentMoveError as exc:
+            status_code = 409 if "already" in str(exc).lower() else 400
+            return _agent_move_response(
+                request,
+                status_code=status_code,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    async def _agent_move_action(
+        request: Request,
+        payload: AgentMoveActionPayload,
+        action,
+    ):
+        body_bytes = await request.body()
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent move authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            current = await asyncio.to_thread(
+                get_agent_move_status,
+                Path(_hashi_root),
+                payload.package_id,
+            )
+            if str(current.get("source_instance") or "").upper() != str(
+                authenticated_instance or payload.from_instance
+            ).upper():
+                return _agent_move_response(
+                    request,
+                    status_code=403,
+                    content={
+                        "ok": False,
+                        "error": "Agent move belongs to another source instance",
+                    },
+                )
+            kwargs = {}
+            if action is commit_agent_move:
+                kwargs["secret_passphrase"] = load_shared_token(Path(_hashi_root))
+            result = await asyncio.to_thread(
+                action,
+                Path(_hashi_root),
+                payload.package_id,
+                **kwargs,
+            )
+            return _agent_move_response(request, result)
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=409,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    @app.post("/agent-move/v1/commit")
+    async def agent_move_commit(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, commit_agent_move)
+
+    @app.post("/agent-move/v1/activate")
+    async def agent_move_activate(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, activate_agent_move)
+
+    @app.post("/agent-move/v1/rollback")
+    async def agent_move_rollback(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, rollback_agent_move)
+
+    @app.get("/agent-move/v1/status/{package_id}")
+    async def agent_move_status(request: Request, package_id: str):
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=b"",
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent move authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            result = await asyncio.to_thread(
+                get_agent_move_status,
+                Path(_hashi_root),
+                package_id,
+            )
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=404,
+                content={"ok": False, "error": str(exc)},
+            )
+        if str(result.get("source_instance") or "").upper() != str(
+            authenticated_instance or ""
+        ).upper():
+            return _agent_move_response(
+                request,
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": "Agent move belongs to another source instance",
+                },
+            )
+        return _agent_move_response(request, result)
 
     return app

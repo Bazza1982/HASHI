@@ -1,11 +1,14 @@
 # HASHI System Architecture
 
-| Field | Value |
-|---|---|
-| Status | **Level 0 authoritative architecture** |
-| Effective date | 2026-09-01 |
-| Scope | The complete HASHI program, its built-in clients, and every future HASHI development |
-| Governing rule | Every lower-level design, plan, implementation, test, and user-facing description must conform to this document |
+The canonical architecture and engineering guideline is
+[`docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md`](docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
+The normative Python/ABI and transactional function-generation decision is
+[`docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`](docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md).
+The current HASHI3 implementation and promotion boundary is
+[`docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
+The accepted HASHI3 Browser/Computer Worker, cross-WSL/Windows discovery, lease,
+and silent-background-runtime target is
+[`docs/HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md`](docs/HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md).
 
 ## 1. Purpose and authority
 
@@ -245,112 +248,24 @@ confused.
 ## 6. Control and data flow
 
 ```text
-User
-  -> Frontend Connector
-  -> PAO: Conversation Session + Message + Run + Engine binding
-  -> PCM: authoritative full snapshot or delta projection
-  -> Engine Adapter
-       -> HER v2 Engine Session, when HER is selected
-            -> Model Provider Adapter(s)
-       -> another Engine Provider, when selected
-  -> typed activity/result Events
-  -> PAO delivery coordination
-  -> Frontend Connector
-  -> User
+stable process core
+    -> stable per-Agent route handles
+        -> isolated, verified Function Worker generations
+        -> local platform adoption
+            -> local instance configuration
 ```
 
-The dependency direction is intentional:
+Changes should be local, derived from a single fact owner, and replaceable with
+`/reboot` when they are functional. Python, dependencies, Core sources and
+protocol/API versions require a planned Core migration. In-process module
+reload is forbidden. Contributor workflow and required checks are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-- Connectors request and project PAO state; they do not own it.
-- PAO requests PCM projections; it does not reconstruct PCM privately.
-- Engines consume typed PAO and PCM contracts; they do not become the owner of
-  the outer Conversation Session.
-- Model Provider adapters serve Engines; they never become Engine or Session
-  authority.
-
-## 7. Cross-module decisions
-
-### 7.1 Commands are entry points, not owners
-
-A slash command is a user interface into one or more module contracts. Its file
-location does not determine architectural ownership.
-
-- `/new`, `/fresh`, `/sessions`, `/use`, `/current`, `/archive`, and `/fork`
-  are PAO Conversation Session controls.
-- `/workzone` mutates PAO-owned Session state; PCM projects the enabled result.
-- `/handoff` is a PAO continuity operation whose content is assembled by PCM.
-- `/clear` coordinates PAO cleanup, media cleanup, and Engine Session reset; it
-  is not a PCM-only command.
-- HER-specific effort, Habit, and Meditation controls configure HER through a
-  Connector/PAO entry point without transferring HER ownership to that entry
-  point.
-
-### 7.2 Tools and Skills
-
-PCM describes authorised availability in the request envelope. PAO owns the
-HASHI capability registry, permission and execution boundary. HER v2 decides
-when to request a permitted Tool during a HER Turn and preserves its Engine
-evidence, but cannot grant itself a capability PAO did not provide.
-
-### 7.3 Project and workflow vocabulary
-
-Nagare and Superloop are PAO orchestration capabilities. Minato and Shimanto
-currently provide a lightweight project/phase vocabulary, context envelope,
-registry, and logging integration. They are not yet a full orchestration Engine
-and must not be documented as equivalent to Nagare or Superloop.
-
-## 8. Current implementation alignment
-
-The architecture is normative even where physical code boundaries are still
-transitional. Current known alignment debt includes:
-
-- PAO functionality is distributed across the orchestrator, Session, Nagare,
-  Superloop, Jobs, HChat, and Remote implementations rather than a single PAO
-  package.
-- Some registries and commands still use `backend` for both Engine Providers
-  and Model Provider adapters. New work must use the qualified concepts even
-  when preserving an old identifier for compatibility.
-- The built-in TUI is the permanent HASHI reference terminal client, but its
-  current chat path uses the basic Backend API rather than the complete
-  Persistent Session API v1 surface.
-- Some Frontend Connector implementation currently depends directly on
-  Telegram types and should move toward transport-neutral contracts over time.
-- Retired Workbench names remain in compatibility identifiers. They must not
-  be presented as an active frontend.
-- Minato/Shimanto are deliberately lightweight at present.
-
-These are migration constraints, not permission to create more conceptual
-duplication.
-
-## 9. Rules for future development
-
-Every new feature or material change must answer:
-
-1. Which one functional module owns the policy and authoritative state?
-2. Which engineering layer contains the implementation?
-3. Which public typed contract crosses a module boundary?
-4. Is `Provider`, `Session`, `Engine`, or `backend` qualified clearly?
-5. Does the change duplicate an existing source of truth?
-6. Can it be adopted through the hot-change contract, or does it truly require
-   a Core change?
-7. Does a frontend remain a projection rather than a second state authority?
-8. Does an Engine remain separate from its Model Provider?
-9. Are current implementation, target design, and historical evidence labelled
-   separately?
-
-A feature that cannot answer these questions must not be treated as
-architecturally complete.
-
-## 10. Subordinate architecture documents
-
-- [HASHI Layered Runtime Boundaries](docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md)
-- [HASHI Slim Core Architecture](docs/HASHI_SLIM_CORE_ARCHITECTURE.md)
-- [HASHI PCM System Design](docs/HASHI_PCM_SYSTEM_DESIGN.md)
-- [HASHI PAO System Design](docs/HASHI_PAO_SYSTEM_DESIGN.md)
-- [Fixed and Flex Working Modes](docs/FIXED_FLEX_WORKING_MODES.md)
-- [HER v2 Product Requirements and Technical Design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
-- [HASHI Frontend Connector Architecture](docs/HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)
-- [HASHI Persistent Multi-Session Frontend Design](docs/HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md)
-
-Contributor workflow and required checks are defined in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Core-owned Telegram and Workbench ingress sends slash control through the
+versioned Function Worker RPC. Each Worker also owns a dedicated out-of-band
+provider-interrupt lane, so stop, steer, focus, and retry can terminate active
+CLI work before normal event-loop cleanup. Session Workzone slots publish only
+their exact enabled roots to backends and tools; implementations must not widen
+multiple roots to their common parent. HASHI Remote rescue remains a separately
+deployed `L3_RESTART` sidecar, and its local hot-reboot hop must use the
+token-protected Workbench admin command endpoint.

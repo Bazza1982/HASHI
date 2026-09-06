@@ -17,14 +17,14 @@ cd hashi
 
 **Using pip:**
 ```bash
-pip install -r requirements.txt
+pip install -r constraints/standard-py312.lock
 ```
 
 **Or create a virtual environment (recommended):**
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r constraints/standard-py312.lock
 ```
 
 ### Step 3: Run Onboarding
@@ -68,7 +68,7 @@ Private command modules are not part of the HASHI repository. Each module should
 export either `COMMANDS = [...]` or `get_commands() -> list[RuntimeCommand]`.
 Inline callbacks can be exported as `CALLBACKS = [...]` or
 `get_callbacks() -> list[RuntimeCallback]`. After changing private command files,
-restart the target agent with `/reboot min` or cold-restart HASHI.
+restart the target agent with `/reboot min`.
 
 ---
 
@@ -90,7 +90,7 @@ npm install -g hashi-bridge
 
 This will:
 - Install the `hashi` and `hashi-onboard` commands globally
-- Check for Python 3.10+ and pip
+- Enforce the approved HASHI CPython 3.12.13 Core and locked dependencies
 - Prompt you to install Python dependencies
 
 **Note:** The npm package is a lightweight wrapper that requires Python to be installed separately.
@@ -108,7 +108,7 @@ hashi --help         # Show help
 ## Prerequisites
 
 ### Required
-- **Python 3.10 or higher**
+- **CPython 3.12.13** (approved Core; source compatibility is 3.12)
 - **pip** (Python package installer)
 
 ### AI Backend (at least one)
@@ -129,7 +129,8 @@ After installation, verify that HASHI is set up correctly:
 
 ```bash
 # Check Python version
-python --version  # Should be 3.10 or higher
+python --version  # Must be the approved CPython 3.12.13
+python scripts/check_runtime_contract.py
 
 # Check if dependencies are installed
 pip show python-telegram-bot httpx aiohttp pillow

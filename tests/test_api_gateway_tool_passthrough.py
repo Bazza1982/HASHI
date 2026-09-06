@@ -955,8 +955,8 @@ async def test_gateway_pool_passes_xai_static_and_refresh_credentials(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
-    tmp_path, monkeypatch
+async def test_core_gateway_shutdown_drains_active_tool_request_before_adapter_shutdown(
+    tmp_path,
 ):
     events = []
     request_started = asyncio.Event()
@@ -978,28 +978,8 @@ async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
     adapter = _BlockingAdapter()
     server = _server(tmp_path, adapter)
     server._pool = _DrainingPool(adapter)
-    kernel = SimpleNamespace(
-        paths=SimpleNamespace(
-            bridge_home=tmp_path,
-            workspaces_root=tmp_path / "workspaces",
-        ),
-        global_cfg=server.global_config,
-        secrets={},
-        api_gateway=server,
-        enable_api_gateway=True,
-    )
+    kernel = SimpleNamespace(api_gateway=server)
     manager = ServiceManager(kernel)
-    monkeypatch.setattr(
-        manager,
-        "_load_api_gateway_state",
-        lambda: {"enabled": True, "default_model": "gpt-5.5"},
-    )
-
-    async def start_reloaded_gateway(_global_cfg, _secrets):
-        events.append("reloaded_gateway_started")
-        kernel.api_gateway = SimpleNamespace(bind_host="127.0.0.1")
-
-    monkeypatch.setattr(manager, "start_api_gateway", start_reloaded_gateway)
 
     body = {
         "model": "gpt-5.5",
@@ -1017,7 +997,7 @@ async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
         )
         await asyncio.wait_for(request_started.wait(), timeout=1)
 
-        reboot_refresh = asyncio.create_task(manager.restart_api_gateway())
+        core_shutdown = asyncio.create_task(manager.stop_api_gateway())
         await asyncio.wait_for(wait_until_draining(), timeout=1)
 
         rejected = await client.post("/v1/chat/completions", json=body)
@@ -1030,13 +1010,12 @@ async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
         release_request.set()
         completed = await active_request
         assert completed.status == 200
-        await reboot_refresh
+        assert await core_shutdown is True
 
     assert events == [
         "request_started",
         "request_finished",
         "adapter_pool_shutdown",
-        "reloaded_gateway_started",
     ]
 
 

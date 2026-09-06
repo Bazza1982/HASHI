@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import json
@@ -51,13 +50,21 @@ def test_gateway_context_is_owner_only_and_reconstructs_registry(tmp_path):
 
 
 def test_gateway_context_uses_running_workbench_bind_host(tmp_path):
-    global_config = SimpleNamespace(api_host="127.0.0.1", workbench_port=18800)
-    server = SimpleNamespace(
-        bind_host="10.255.255.254",
-        global_config=global_config,
+    global_config = SimpleNamespace(
+        instance_id="HASHI3",
+        api_host="127.0.0.1",
+        workbench_port=18800,
     )
     runtime = SimpleNamespace(
-        orchestrator=SimpleNamespace(workbench_api=server),
+        orchestrator=SimpleNamespace(
+            resolve_service_endpoint=lambda service, expected_instance=None: {
+                "service": service,
+                "instance_id": expected_instance,
+                "host": "172.29.144.7",
+                "port": 18847,
+                "base_url": "http://172.29.144.7:18847",
+            }
+        ),
     )
     registry = ToolRegistry(
         allowed_tools=["background_job_list"],
@@ -68,7 +75,7 @@ def test_gateway_context_uses_running_workbench_bind_host(tmp_path):
     )
 
     base_url = live_workbench_api_base_url(registry, global_config)
-    assert base_url == "http://10.255.255.254:18800"
+    assert base_url == "http://172.29.144.7:18847"
 
     context_path = tmp_path / "live-workbench-context.json"
     write_gateway_context(
@@ -82,6 +89,31 @@ def test_gateway_context_uses_running_workbench_bind_host(tmp_path):
     assert loaded.workbench_api_base_url == base_url
     assert rebuilt.audit_context["workbench_api_base_url"] == base_url
     assert "_runtime" not in loaded.audit
+
+
+def test_gateway_context_rejects_cross_instance_workbench_endpoint(tmp_path):
+    global_config = SimpleNamespace(instance_id="HASHI3")
+
+    def reject(_service, *, expected_instance=None):
+        raise ValueError(
+            f"cross-instance Workbench endpoint: expected={expected_instance} received=HASHI1"
+        )
+
+    registry = ToolRegistry(
+        allowed_tools=["background_job_list"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "momo",
+            "_runtime": SimpleNamespace(
+                orchestrator=SimpleNamespace(resolve_service_endpoint=reject)
+            ),
+        },
+    )
+
+    with pytest.raises(ValueError, match="cross-instance"):
+        live_workbench_api_base_url(registry, global_config)
 
 
 def test_gateway_namespaces_hashi_filesystem_and_hides_unqualified_authorities(tmp_path):

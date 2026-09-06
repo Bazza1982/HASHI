@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import sys
 import types
 from pathlib import Path
@@ -22,7 +23,7 @@ sys.modules.setdefault(
     types.SimpleNamespace(_run=_unused_windows_mcp),
 )
 
-from tools.windows_helper import backends
+from tools.windows_helper import backends  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -181,3 +182,153 @@ async def test_helper_key_falls_back_to_usecomputer_when_native_key_fails(monkey
 
     assert "Pressed 'ctrl+s'" in result
     assert "helper-native" not in result
+
+
+@pytest.mark.asyncio
+async def test_persistent_info_uses_native_state_without_child_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("persistent worker must not launch a child process")
+
+    monkeypatch.setattr(backends, "_run", forbidden)
+    monkeypatch.setattr(backends, "_run_usecomputer", forbidden)
+    monkeypatch.setattr(backends, "_mcp_text", forbidden)
+    monkeypatch.setattr(backends.win32, "get_cursor_position", lambda: {"x": 12, "y": 34})
+    monkeypatch.setattr(
+        backends.win32,
+        "get_display_info",
+        lambda: {"count": 1, "virtual_screen": {"width": 1920, "height": 1080}},
+    )
+    monkeypatch.setattr(backends.win32, "list_windows", lambda: [])
+    monkeypatch.setattr(backends.win32, "get_input_state", lambda: {"ok": True})
+
+    result = json.loads(
+        await backends.execute_action(
+            "info",
+            {"provider": "usecomputer", "_persistent_worker": True},
+        )
+    )
+
+    assert result["provider"] == "helper-native"
+    assert result["mouse_position"] == {"x": 12, "y": 34}
+    assert result["displays"]["count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "arguments", "native_name"),
+    [
+        ("mouse_move", {"x": 1, "y": 2}, "move_mouse"),
+        ("click", {"x": 1, "y": 2}, "click_mouse"),
+        (
+            "drag",
+            {"from_x": 1, "from_y": 2, "to_x": 3, "to_y": 4},
+            "drag_mouse",
+        ),
+        ("type", {"text": "safe"}, "type_text"),
+        ("key", {"key": "ctrl+s"}, "press_key_combo"),
+        ("scroll", {"direction": "down", "amount": 1}, "scroll_mouse"),
+    ],
+)
+async def test_persistent_native_failure_never_falls_back_to_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    arguments: dict,
+    native_name: str,
+) -> None:
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("persistent worker must not launch a child process")
+
+    def native_failure(*_args, **_kwargs):
+        raise PermissionError("native call rejected")
+
+    monkeypatch.setattr(backends, "_run", forbidden)
+    monkeypatch.setattr(backends, "_run_usecomputer", forbidden)
+    monkeypatch.setattr(backends, "_mcp_text", forbidden)
+    monkeypatch.setattr(backends.win32, "reset_input_state", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(backends.win32, native_name, native_failure)
+
+    with pytest.raises(RuntimeError, match=rf"native {action} failed"):
+        await backends.execute_action(
+            action,
+            {
+                **arguments,
+                "provider": "usecomputer",
+                "_persistent_worker": True,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_persistent_screenshot_failure_never_falls_back_to_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("persistent worker must not launch a child process")
+
+    monkeypatch.setattr(backends, "_run", forbidden)
+    monkeypatch.setattr(backends, "_run_usecomputer", forbidden)
+    monkeypatch.setattr(backends, "_mcp_text", forbidden)
+    monkeypatch.setattr(
+        backends.ImageGrab,
+        "grab",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("capture rejected")),
+    )
+
+    with pytest.raises(RuntimeError, match="native screenshot failed"):
+        await backends.execute_action(
+            "screenshot",
+            {"provider": "usecomputer", "_persistent_worker": True},
+        )
+
+
+@pytest.mark.asyncio
+async def test_fifty_persistent_actions_create_no_cli_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("persistent worker must not launch a child process")
+
+    class FakeImage:
+        def save(self, path: Path, *, format: str) -> None:
+            assert format == "PNG"
+            Path(path).write_bytes(b"fake-png")
+
+    monkeypatch.setattr(backends, "_run", forbidden)
+    monkeypatch.setattr(backends, "_run_usecomputer", forbidden)
+    monkeypatch.setattr(backends, "_mcp_text", forbidden)
+    monkeypatch.setattr(backends, "run_windows_mcp", forbidden)
+    monkeypatch.setattr(backends.ImageGrab, "grab", lambda **_kwargs: FakeImage())
+    monkeypatch.setattr(backends.win32, "reset_input_state", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(backends.win32, "move_mouse", lambda x, y: {"x": x, "y": y})
+    monkeypatch.setattr(backends.win32, "click_mouse", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(backends.win32, "press_key_combo", lambda _key: {})
+    monkeypatch.setattr(backends.win32, "list_windows", lambda: [])
+
+    calls = []
+    for index in range(10):
+        calls.extend(
+            [
+                ("screenshot", {}),
+                ("mouse_move", {"x": index, "y": index + 1}),
+                ("click", {"x": index, "y": index + 1}),
+                ("key", {"key": "escape"}),
+                ("window_list", {}),
+            ]
+        )
+
+    results = [
+        await backends.execute_action(
+            action,
+            {
+                **arguments,
+                "provider": "usecomputer",
+                "_persistent_worker": True,
+            },
+        )
+        for action, arguments in calls
+    ]
+
+    assert len(results) == 50
+    assert all("Error:" not in result for result in results)

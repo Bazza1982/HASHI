@@ -27,6 +27,10 @@ from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
+from orchestrator.service_endpoints import (
+    ServiceEndpointError,
+    load_service_endpoint,
+)
 from remote.routing import build_route_candidates, same_machine_hint, validate_same_host_port_conflicts
 from remote.local_http import local_http_hosts, local_http_url
 from remote.live_endpoints import read_live_endpoints
@@ -157,6 +161,9 @@ class ProtocolManager:
             "updated_at": 0,
         }
         self._core_health_cache: tuple[float, bool] = (0.0, False)
+        self._workbench_identity_cache: dict[
+            tuple[str, int], tuple[float, bool]
+        ] = {}
 
     def get_protocol_status(self) -> dict:
         peers = []
@@ -222,20 +229,97 @@ class ProtocolManager:
         cached_at, cached_value = getattr(self, "_core_health_cache", (0.0, False))
         if now - cached_at <= 5:
             return cached_value
-        port = int(
-            (getattr(self, "_instance_info", {}) or {}).get("workbench_port")
-            or getattr(self, "_workbench_port", DEFAULT_WORKBENCH_PORT)
-            or DEFAULT_WORKBENCH_PORT
+        ok = any(
+            self._probe_local_workbench(host, port, timeout=0.4)
+            for host, port in self._local_workbench_routes()
         )
-        ok = False
-        for host in local_http_hosts():
-            try:
-                with urllib_request.urlopen(local_http_url(port, "/api/health", host=host), timeout=0.4) as resp:
-                    ok = 200 <= int(getattr(resp, "status", 200)) < 300
-                    break
-            except Exception:
-                continue
         self._core_health_cache = (now, ok)
+        return ok
+
+    def _local_workbench_routes(self) -> list[tuple[str, int]]:
+        """Resolve the current local Workbench receipt before config fallback."""
+
+        routes: list[tuple[str, int]] = []
+
+        def add(host: Any, port: Any) -> None:
+            text = str(host or "").strip()
+            try:
+                number = int(port or 0)
+            except (TypeError, ValueError):
+                return
+            route = (text, number)
+            if text and 1 <= number <= 65535 and route not in routes:
+                routes.append(route)
+
+        instance_id = str(
+            (getattr(self, "_instance_info", {}) or {}).get("instance_id") or ""
+        ).strip().upper()
+        root = getattr(self, "_hashi_root", None)
+        if instance_id and root is not None:
+            try:
+                endpoint = load_service_endpoint(
+                    Path(root) / "state" / "service_endpoints.json",
+                    "workbench",
+                    expected_instance=instance_id,
+                )
+                add(endpoint.host, endpoint.port)
+                for host in local_http_hosts():
+                    add(host, endpoint.port)
+            except (ServiceEndpointError, TypeError, ValueError):
+                pass
+        try:
+            configured_port = int(
+                (getattr(self, "_instance_info", {}) or {}).get("workbench_port")
+                or getattr(self, "_workbench_port", DEFAULT_WORKBENCH_PORT)
+                or DEFAULT_WORKBENCH_PORT
+            )
+        except (TypeError, ValueError):
+            configured_port = DEFAULT_WORKBENCH_PORT
+        for host in local_http_hosts():
+            add(host, configured_port)
+        return routes
+
+    def _probe_local_workbench(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float = 0.6,
+    ) -> bool:
+        """Require the exact local instance identity, not merely an open port."""
+
+        key = (str(host), int(port))
+        now = time.monotonic()
+        cache = getattr(self, "_workbench_identity_cache", {})
+        cached = cache.get(key)
+        if cached is not None and now - cached[0] <= 1.0:
+            return cached[1]
+        expected = str(
+            (getattr(self, "_instance_info", {}) or {}).get("instance_id") or ""
+        ).strip().upper()
+        ok = False
+        if expected:
+            try:
+                health = self._get_json(
+                    local_http_url(port, "/api/health", host=host),
+                    timeout=timeout,
+                )
+                actual = str(health.get("instance_id") or "").strip().upper()
+                endpoint = health.get("workbench_endpoint")
+                endpoint_owner = (
+                    str(endpoint.get("instance_id") or "").strip().upper()
+                    if isinstance(endpoint, dict)
+                    else actual
+                )
+                ok = (
+                    health.get("ok") is True
+                    and actual == expected
+                    and endpoint_owner == expected
+                )
+            except Exception:
+                ok = False
+        cache[key] = (now, ok)
+        self._workbench_identity_cache = cache
         return ok
 
     def _agent_snapshot_version(self, agents_path: Path, raw: bytes) -> str:
@@ -730,7 +814,6 @@ class ProtocolManager:
                             break
                         # If a fallback host worked, re-register peer with the working host
                         if host != peer.host:
-                            from remote.peer.base import PeerInfo
                             updated = dataclasses.replace(peer, host=host)
                             updated.properties = {
                                 key: value
@@ -926,7 +1009,15 @@ class ProtocolManager:
 
         prompt_text = self._render_remote_message_prompt(from_agent, from_instance, payload.get("body") or {})
         start_offset = await self._get_transcript_offset(to_agent)
-        request_id = await self._enqueue_local_prompt(to_agent, prompt_text)
+        request_id = await self._enqueue_local_prompt(
+            to_agent,
+            prompt_text,
+            exchange_kind="message",
+            message_id=message_id,
+            conversation_id=conversation_id,
+            from_instance=from_instance,
+            from_agent=from_agent,
+        )
         if not request_id:
             return 502, self._error_payload("local_enqueue_failed", "Workbench enqueue failed", retryable=True, payload=payload)
 
@@ -1018,7 +1109,15 @@ class ProtocolManager:
         if to_agent not in local_agents:
             return 404, self._error_payload("target_agent_unavailable", f"Reply target '{to_agent}' is unavailable", retryable=True, payload=payload)
         prompt_text = self._render_remote_reply_prompt(from_agent, from_instance, body)
-        request_id = await self._enqueue_local_prompt(to_agent, prompt_text)
+        request_id = await self._enqueue_local_prompt(
+            to_agent,
+            prompt_text,
+            exchange_kind="reply",
+            message_id=message_id,
+            conversation_id=conversation_id,
+            from_instance=from_instance,
+            from_agent=from_agent,
+        )
         if not request_id:
             return 502, self._error_payload("local_enqueue_failed", "Failed to inject reply into local agent", retryable=True, payload=payload)
         now = int(time.time())
@@ -1060,17 +1159,59 @@ class ProtocolManager:
 
     def _render_remote_message_prompt(self, from_agent: str, from_instance: str, body: dict) -> str:
         text = str((body or {}).get("text") or "").strip()
-        return f"System exchange message from {from_agent}@{from_instance}:\n{text}"
+        return (
+            f"System exchange message from {from_agent}@{from_instance}:\n{text}\n\n"
+            "Protocol rule: respond once in your normal assistant response. "
+            "Do not send Hchat, protocol messages, acknowledgements, or a "
+            "separate reply; the protocol returns this response automatically."
+        )
 
     def _render_remote_reply_prompt(self, from_agent: str, from_instance: str, body: dict) -> str:
         text = str((body or {}).get("text") or "").strip()
-        return f"System exchange reply from {from_agent}@{from_instance}:\n{text}"
+        return (
+            f"System exchange reply from {from_agent}@{from_instance}:\n{text}\n\n"
+            "Terminal protocol notice: do not reply, acknowledge, confirm, or "
+            "send any Hchat/protocol message. This reply closes the exchange."
+        )
 
-    async def _enqueue_local_prompt(self, agent_name: str, text: str) -> str | None:
-        payload = {"agent": agent_name, "text": text}
+    async def _enqueue_local_prompt(
+        self,
+        agent_name: str,
+        text: str,
+        *,
+        exchange_kind: str,
+        message_id: str,
+        conversation_id: str,
+        from_instance: str,
+        from_agent: str,
+    ) -> str | None:
+        terminal = exchange_kind == "reply"
+        request_metadata = {
+            "system_exchange": True,
+            "system_exchange_kind": exchange_kind,
+            "system_exchange_terminal": terminal,
+            "protocol_message_id": message_id,
+            "protocol_conversation_id": conversation_id,
+            "protocol_from_instance": from_instance,
+            "protocol_from_agent": from_agent,
+        }
+        if terminal:
+            # A reply is presentation-only.  Freezing the tool catalogue at
+            # the Workbench boundary prevents a model-generated ACK/Hchat
+            # from starting a new cross-instance conversation.
+            request_metadata["tool_allowlist"] = []
+        payload = {
+            "agent": agent_name,
+            "text": text,
+            "source": f"protocol:{exchange_kind}",
+            "request_metadata": request_metadata,
+            "idempotency_key": f"protocol:{exchange_kind}:{message_id}",
+        }
         last_exc = None
-        for host in local_http_hosts():
-            url = local_http_url(self._workbench_port, "/api/chat", host=host)
+        for host, port in self._local_workbench_routes():
+            if not self._probe_local_workbench(host, port):
+                continue
+            url = local_http_url(port, "/api/chat", host=host)
             try:
                 result = await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -1085,8 +1226,10 @@ class ProtocolManager:
         return None
 
     async def _get_transcript_offset(self, agent_name: str) -> int:
-        for host in local_http_hosts():
-            url = local_http_url(self._workbench_port, f"/api/transcript/{agent_name}?limit=1", host=host)
+        for host, port in self._local_workbench_routes():
+            if not self._probe_local_workbench(host, port):
+                continue
+            url = local_http_url(port, f"/api/transcript/{agent_name}?limit=1", host=host)
             try:
                 result = await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -1099,8 +1242,10 @@ class ProtocolManager:
 
     async def _poll_transcript(self, agent_name: str, offset: int) -> dict:
         last_exc = None
-        for host in local_http_hosts():
-            url = local_http_url(self._workbench_port, f"/api/transcript/{agent_name}/poll?offset={offset}", host=host)
+        for host, port in self._local_workbench_routes():
+            if not self._probe_local_workbench(host, port):
+                continue
+            url = local_http_url(port, f"/api/transcript/{agent_name}/poll?offset={offset}", host=host)
             try:
                 return await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -1369,7 +1514,6 @@ class ProtocolManager:
         return [candidate.host for candidate in self._route_candidates_for_entry(entry)]
 
     def _candidate_hosts_for_peer(self, peer) -> list[str]:
-        entry = self._load_instances().get(str(peer.instance_id or "").lower(), {})
         candidates = self._route_candidates_for_peer(peer) if peer is not None else []
         return [candidate.host for candidate in candidates]
 

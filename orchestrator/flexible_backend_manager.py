@@ -65,6 +65,8 @@ from orchestrator.workspace_state import WorkspaceStateStore
 from orchestrator import workzone as workzone_module
 
 HER_HABIT_MEDITATION_STATE_KEY = "her_habit_meditation"
+AGENT_MODE_POLICY_VERSION_STATE_KEY = "agent_mode_policy_version"
+CURRENT_AGENT_MODE_POLICY_VERSION = 1
 
 
 def _additional_access_roots_from_environment() -> tuple[Path, ...]:
@@ -1511,11 +1513,6 @@ class FlexibleBackendManager:
                 state,
                 workspace_dir=adapter_cfg.workspace_dir,
             )
-            access_roots = tuple(
-                dict.fromkeys(
-                    [*access_roots, *_additional_access_roots_from_environment()]
-                )
-            )
             # Per-tool options (e.g. bash.timeout_max, file_write.max_file_size_kb)
             tool_options = {k: v for k, v in tools_cfg.items()
                             if k != "allowed"}
@@ -1785,7 +1782,28 @@ class FlexibleBackendManager:
         request_metadata = request_meta.get("request_metadata")
         context.pop("memory_search_authorization", None)
         context.pop("request_tool_allowlist", None)
+        for key in (
+            "system_exchange",
+            "system_exchange_kind",
+            "system_exchange_terminal",
+            "protocol_message_id",
+            "protocol_conversation_id",
+            "protocol_from_instance",
+            "protocol_from_agent",
+        ):
+            context.pop(key, None)
         if isinstance(request_metadata, dict):
+            for key in (
+                "system_exchange",
+                "system_exchange_kind",
+                "system_exchange_terminal",
+                "protocol_message_id",
+                "protocol_conversation_id",
+                "protocol_from_instance",
+                "protocol_from_agent",
+            ):
+                if key in request_metadata:
+                    context[key] = request_metadata[key]
             raw_allowlist = request_metadata.get("tool_allowlist")
             if isinstance(raw_allowlist, list):
                 context["request_tool_allowlist"] = sorted(

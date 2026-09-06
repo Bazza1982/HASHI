@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from adapters.hashi_api import HashiApiAdapter
+from adapters.hashi_api import HashiApiAdapter, HashiApiEndpointError
 from adapters.openrouter_api import ProviderCallObserverError, _APIResult
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
@@ -85,6 +85,91 @@ def test_hashi_api_is_registered_with_concrete_models():
         "xhigh",
         "max",
     ]
+
+
+def test_hashi_api_refreshes_stale_config_from_core_service_topology(tmp_path):
+    class Facade:
+        base_url = None
+
+        def resolve_service_endpoint(self, service, *, expected_instance=None):
+            assert service == "api_gateway"
+            assert expected_instance == "HASHI3"
+            if self.base_url is None:
+                raise RuntimeError("live service endpoint is unavailable: api_gateway")
+            return {
+                "instance_id": "HASHI3",
+                "base_url": self.base_url,
+            }
+
+    facade = Facade()
+    config = SimpleNamespace(
+        name="arale",
+        model="gpt-5.6-luna",
+        workspace_dir=tmp_path,
+        system_md=None,
+        extra={"base_url": "http://10.255.255.254:18805/v1"},
+        _hashi_runtime=SimpleNamespace(orchestrator=facade),
+    )
+    global_config = SimpleNamespace(instance_id="HASHI3", her_providers={})
+    adapter = HashiApiAdapter(config, global_config)
+
+    assert adapter.hashi_url == "http://10.255.255.254:18805/v1/chat/completions"
+    assert adapter.hashi_route_source == "configured_fallback"
+
+    facade.base_url = "http://127.0.0.1:18805"
+
+    assert adapter._refresh_hashi_url() == (
+        "http://127.0.0.1:18805/v1/chat/completions"
+    )
+    assert adapter.hashi_route_source == "core_service_topology"
+
+
+def test_hashi_api_explicit_route_wins_over_local_topology(tmp_path):
+    facade = SimpleNamespace(
+        resolve_service_endpoint=lambda *_args, **_kwargs: {
+            "base_url": "http://127.0.0.1:18805"
+        }
+    )
+    config = SimpleNamespace(
+        name="arale",
+        model="gpt-5.6-luna",
+        workspace_dir=tmp_path,
+        system_md=None,
+        extra={"hashi_api_url": "https://gateway.example/v1"},
+        _hashi_runtime=SimpleNamespace(orchestrator=facade),
+    )
+    adapter = HashiApiAdapter(
+        config,
+        SimpleNamespace(instance_id="HASHI3", her_providers={}),
+    )
+
+    assert adapter.hashi_url == "https://gateway.example/v1/chat/completions"
+    assert adapter.hashi_route_source == "explicit_hashi_api_url"
+
+
+def test_hashi_api_rejects_cross_instance_topology(tmp_path):
+    def reject(*_args, **_kwargs):
+        raise RuntimeError(
+            "cross-instance endpoint publication rejected: "
+            "expected=HASHI3 received=HASHI2"
+        )
+
+    config = SimpleNamespace(
+        name="arale",
+        model="gpt-5.6-luna",
+        workspace_dir=tmp_path,
+        system_md=None,
+        extra={"base_url": "http://127.0.0.1:18805/v1"},
+        _hashi_runtime=SimpleNamespace(
+            orchestrator=SimpleNamespace(resolve_service_endpoint=reject)
+        ),
+    )
+
+    with pytest.raises(HashiApiEndpointError, match="for this instance"):
+        HashiApiAdapter(
+            config,
+            SimpleNamespace(instance_id="HASHI3", her_providers={}),
+        )
 
 
 @pytest.mark.parametrize(

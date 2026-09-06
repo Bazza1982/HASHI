@@ -1,14 +1,16 @@
 from __future__ import annotations
-import sys
+
+import asyncio
 import os
 import signal
-import time
-import asyncio
 import subprocess
+import sys
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from adapters.stream_events import StreamCallback
 from adapters.timeout_policy import (
@@ -392,7 +394,7 @@ class BaseBackend(ABC):
         )
         if activity_monotonic > 0:
             return max(0.0, time.monotonic() - activity_monotonic)
-        # Compatibility for a backend instance created before a minimal hot reload.
+        # Compatibility with persisted diagnostics from older releases.
         activity_wall = float(getattr(self, "last_activity_at", 0.0) or 0.0)
         if activity_wall > 0:
             return max(0.0, time.time() - activity_wall)
@@ -495,11 +497,9 @@ class BaseBackend(ABC):
     def interrupt_nowait(self, reason: str = "USER_STOP") -> bool:
         """Synchronously terminate active CLI children from a control thread.
 
-        This deliberately performs no asyncio work.  It is the emergency half
-        of cancellation: the owning event loop still performs normal task
-        cancellation and ``shutdown()``, while a congested loop cannot prevent
-        HASHI from terminating an isolated provider process group immediately.
-        API-only backends have no local process and therefore return ``False``.
+        This performs no asyncio work. The owning event loop still performs
+        normal task cancellation and shutdown; API-only backends have no local
+        process and therefore return ``False``.
         """
 
         candidates: list[Any] = []

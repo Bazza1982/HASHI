@@ -97,11 +97,11 @@ configuration, transition, migration, and regression contract.
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
-- `/reboot [min|max|number|help]` — preflight and hot-reload Python code,
-  rebuild managers, restart the exact selected lifecycle scope, and
-  warm-recreate the Backend API/gateway/scheduler/watchers; `min` and numbered
-  targets are never widened or rejected because a valid class interface
-  changed, while the process lock and live WhatsApp transport remain intact
+- `/reboot [min|max|number|help]` — qualify an immutable Function generation,
+  prepare isolated candidate Worker processes, drain the exact selected Agent
+  scope, and atomically switch its stable route handles; `min` and numbered
+  targets are never widened, while the Core PID, process lock, Workbench/API
+  ingress, scheduler, shared services, and unselected Agents remain intact
 - `/rebuild` — one-version compatibility notice for the retired native HER build workflow; performs no build, reload, or restart
 - Alias: `/usercomputer`
 

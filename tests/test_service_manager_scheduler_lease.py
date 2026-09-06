@@ -1,12 +1,18 @@
 import asyncio
 import json
+import logging
+import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from adapters.base import BaseBackend
-from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService, KubernetesApiLeaseClient
+from orchestrator.enterprise import (
+    EnterpriseLeaseStore,
+    IdentityService,
+    KubernetesApiLeaseClient,
+)
 from orchestrator.service_manager import ServiceManager
 
 
@@ -28,26 +34,39 @@ def test_api_gateway_state_uses_canonical_config_after_legacy_migration(tmp_path
         json.dumps({"enabled": True, "default_model": "grok-4.5"}),
         encoding="utf-8",
     )
-
     state = manager._load_api_gateway_state()
-
     assert state["enabled"] is True
     assert state["default_model"] == "grok-4.5"
     assert manager._api_gateway_state_path() == tmp_path / "state" / "api_gateway_config.json"
 
     manager._save_api_gateway_state(enabled=False)
-
     canonical = json.loads(manager._api_gateway_state_path().read_text(encoding="utf-8"))
     legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
     assert canonical["enabled"] is False
     assert legacy["enabled"] is True
 
 
+def test_core_service_manager_exposes_no_function_generation_refresh_api(tmp_path):
+    manager = _manager(tmp_path)
+    obsolete = {
+        "refresh_hot_services",
+        "restart_scheduler",
+        "restart_workbench_api",
+        "restart_api_gateway",
+        "restart_whatsapp_transport",
+        "restart_delivery_health_watcher",
+        "restart_background_jobs",
+        "assert_hot_services_healthy",
+        "repair_workbench_api_if_needed",
+    }
+    assert not (obsolete & set(dir(manager)))
+
+
 @pytest.mark.asyncio
-async def test_start_workbench_api_uses_reloaded_module_class(tmp_path, monkeypatch):
+async def test_start_workbench_api_constructs_the_core_service(tmp_path, monkeypatch):
     created = []
 
-    class _ReloadedWorkbenchApiServer:
+    class _WorkbenchApiServer:
         def __init__(
             self,
             config_path,
@@ -59,22 +78,25 @@ async def test_start_workbench_api_uses_reloaded_module_class(tmp_path, monkeypa
             reconcile_session_runs=True,
         ):
             created.append(
-                {
-                    "config_path": config_path,
-                    "global_cfg": global_cfg,
-                    "runtimes": runtimes,
-                    "secrets": secrets,
-                    "orchestrator": orchestrator,
-                    "reconcile_session_runs": reconcile_session_runs,
-                }
+                (
+                    config_path,
+                    global_cfg,
+                    runtimes,
+                    secrets,
+                    orchestrator,
+                    reconcile_session_runs,
+                )
             )
             self.bind_host = "127.0.0.1"
 
         async def start(self):
-            created[-1]["started"] = True
+            created.append("started")
 
-    fake_module = SimpleNamespace(WorkbenchApiServer=_ReloadedWorkbenchApiServer)
-    monkeypatch.setitem(sys.modules, "orchestrator.workbench_api", fake_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "orchestrator.workbench_api",
+        SimpleNamespace(WorkbenchApiServer=_WorkbenchApiServer),
+    )
     global_cfg = SimpleNamespace(workbench_port=18800)
     kernel = SimpleNamespace(
         paths=SimpleNamespace(config_path=tmp_path / "config.yaml"),
@@ -85,332 +107,175 @@ async def test_start_workbench_api_uses_reloaded_module_class(tmp_path, monkeypa
 
     await manager.start_workbench_api(global_cfg, {"token": "secret"})
 
-    assert isinstance(kernel.workbench_api, _ReloadedWorkbenchApiServer)
+    assert isinstance(kernel.workbench_api, _WorkbenchApiServer)
     assert created == [
-        {
-            "config_path": tmp_path / "config.yaml",
-            "global_cfg": global_cfg,
-            "runtimes": kernel.runtimes,
-            "secrets": {"token": "secret"},
-            "orchestrator": kernel,
-            "reconcile_session_runs": True,
-            "started": True,
-        }
+        (
+            tmp_path / "config.yaml",
+            global_cfg,
+            kernel.runtimes,
+            {"token": "secret"},
+            kernel,
+            False,
+        ),
+        "started",
     ]
 
 
 @pytest.mark.asyncio
-async def test_restart_workbench_api_skips_process_start_run_reconciliation(
+async def test_start_workbench_api_is_idempotent(tmp_path, monkeypatch):
+    existing = SimpleNamespace(bind_host="127.0.0.1", bound_port=18804)
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(config_path=tmp_path / "agents.json"),
+        runtimes=[],
+        workbench_api=existing,
+    )
+    manager = ServiceManager(kernel)
+
+    def unexpected_server_lookup():
+        raise AssertionError("an existing Core service must not be replaced")
+
+    monkeypatch.setattr(manager, "_workbench_api_server_cls", unexpected_server_lookup)
+
+    await manager.start_workbench_api(
+        SimpleNamespace(workbench_port=18804),
+        {},
+    )
+
+    assert kernel.workbench_api is existing
+
+
+@pytest.mark.asyncio
+async def test_start_workbench_rolls_back_bound_server_if_endpoint_publish_fails(
     tmp_path,
     monkeypatch,
 ):
-    created = []
+    events = []
 
-    class _ReloadedWorkbenchApiServer:
-        def __init__(
-            self,
-            _config_path,
-            _global_cfg,
-            _runtimes,
-            *,
-            secrets=None,
-            orchestrator=None,
-            reconcile_session_runs=True,
-        ):
-            created.append(
-                {
-                    "secrets": secrets,
-                    "orchestrator": orchestrator,
-                    "reconcile_session_runs": reconcile_session_runs,
-                }
-            )
+    class _WorkbenchApiServer:
+        def __init__(self, *_args, **_kwargs):
             self.bind_host = "127.0.0.1"
+            self.bound_port = 24567
 
         async def start(self):
-            created[-1]["started"] = True
+            events.append("started")
 
-    kernel = SimpleNamespace(
-        paths=SimpleNamespace(config_path=tmp_path / "agents.json"),
-        runtimes=[SimpleNamespace(name="zhaojun")],
-        global_cfg=SimpleNamespace(workbench_port=18800),
-        secrets={"token": "secret"},
-        workbench_api=object(),
-    )
-    manager = ServiceManager(kernel)
+        async def shutdown(self):
+            events.append("shutdown")
+
+    class _Registry:
+        def publish(self, *_args, **_kwargs):
+            raise RuntimeError("publication failed")
+
+        def unpublish(self, service):
+            events.append(f"unpublished:{service}")
+
+    broker = SimpleNamespace(stop=lambda: events.append("broker-stopped"))
     monkeypatch.setitem(
         sys.modules,
         "orchestrator.workbench_api",
-        SimpleNamespace(WorkbenchApiServer=_ReloadedWorkbenchApiServer),
+        SimpleNamespace(WorkbenchApiServer=_WorkbenchApiServer),
+    )
+    global_cfg = SimpleNamespace(instance_id="HASHI3", workbench_port=18804)
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(
+            config_path=tmp_path / "agents.json",
+            instance_id="HASHI3",
+        ),
+        runtimes=[],
+        workbench_api=None,
+        endpoint_registry=_Registry(),
+        capability_broker=broker,
     )
 
-    async def stop_workbench_api(*, timeout):
-        assert timeout == 2.0
-        kernel.workbench_api = None
+    await ServiceManager(kernel).start_workbench_api(global_cfg, {})
 
-    monkeypatch.setattr(manager, "stop_workbench_api", stop_workbench_api)
-
-    await manager.restart_workbench_api()
-
-    assert created == [
-        {
-            "secrets": {"token": "secret"},
-            "orchestrator": kernel,
-            "reconcile_session_runs": False,
-            "started": True,
-        }
-    ]
-
-
-@pytest.mark.asyncio
-async def test_restart_scheduler_recreates_workbench_before_scheduler(tmp_path, monkeypatch):
-    events = []
-    manager = _manager(tmp_path)
-    manager.kernel.global_cfg = SimpleNamespace(
-        authorized_id=123,
-        enterprise_scheduler_lease_enabled=False,
-    )
-    manager.kernel.secrets = {"workbench_admin_token": "secret"}
-    manager.kernel.runtimes = []
-    manager.kernel.skill_manager = object()
-    manager.kernel.workbench_api = object()
-    manager.kernel.delivery_health_task = None
-    manager.kernel.background_job_manager = None
-
-    async def fake_restart_workbench_api():
-        events.append("workbench")
-
-    async def fake_restart_api_gateway():
-        events.append("api_gateway")
-
-    async def fake_stop_scheduler():
-        events.append("stop_scheduler")
-        manager.kernel.scheduler_task = None
-        manager.kernel.scheduler = None
-
-    async def fake_restart_delivery_health_watcher():
-        events.append("delivery")
-
-    async def fake_restart_background_jobs():
-        events.append("background")
-
-    class _Scheduler:
-        def __init__(self, *args, **kwargs):
-            events.append("scheduler_init")
-
-        async def run(self):
-            await asyncio.Event().wait()
-
-    monkeypatch.setattr(manager, "restart_workbench_api", fake_restart_workbench_api)
-    monkeypatch.setattr(manager, "restart_api_gateway", fake_restart_api_gateway)
-    monkeypatch.setattr(manager, "stop_scheduler", fake_stop_scheduler)
-    monkeypatch.setattr(manager, "restart_delivery_health_watcher", fake_restart_delivery_health_watcher)
-    monkeypatch.setattr(manager, "restart_background_jobs", fake_restart_background_jobs)
-    monkeypatch.setitem(sys.modules, "orchestrator.scheduler", SimpleNamespace(TaskScheduler=_Scheduler))
-
-    await manager.restart_scheduler()
-
+    assert kernel.workbench_api is None
     assert events == [
-        "workbench",
-        "api_gateway",
-        "stop_scheduler",
-        "scheduler_init",
-        "delivery",
-        "background",
+        "started",
+        "broker-stopped",
+        "unpublished:workbench",
+        "shutdown",
     ]
-    manager.kernel.scheduler_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await manager.kernel.scheduler_task
 
 
 @pytest.mark.asyncio
-async def test_restart_api_gateway_recreates_enabled_gateway_from_reloaded_module(tmp_path, monkeypatch):
+async def test_start_workbench_publishes_actual_port_then_starts_broker(
+    tmp_path,
+    monkeypatch,
+):
     events = []
+    published_endpoint = SimpleNamespace(port=24567)
 
-    class _OldGateway:
-        async def stop(self):
-            events.append("old_stop")
-
-    class _ReloadedGateway:
-        def __init__(self, global_cfg, secrets, workspace_root, default_model=None):
-            events.append(("new_init", global_cfg, secrets, workspace_root, default_model))
-            self.bind_host = "127.0.0.1"
+    class _WorkbenchApiServer:
+        def __init__(self, *_args, **_kwargs):
+            self.bind_host = "172.29.144.7"
+            self.bound_port = 24567
 
         async def start(self):
-            events.append("new_start")
+            events.append("started")
 
-    global_cfg = SimpleNamespace(api_gateway_port=18803)
-    kernel = SimpleNamespace(
-        paths=SimpleNamespace(
-            bridge_home=tmp_path,
-            workspaces_root=tmp_path / "workspaces",
-        ),
-        global_cfg=global_cfg,
-        secrets={"xai_api_key": "secret"},
-        api_gateway=_OldGateway(),
-        enable_api_gateway=True,
-    )
-    manager = ServiceManager(kernel)
+    class _Registry:
+        def publish(self, service, **kwargs):
+            events.append((service, kwargs))
+            return published_endpoint
+
+    class _Broker:
+        def start(self, endpoint):
+            events.append(("broker", endpoint))
+
     monkeypatch.setitem(
         sys.modules,
-        "orchestrator.api_gateway",
-        SimpleNamespace(APIGatewayServer=_ReloadedGateway),
+        "orchestrator.workbench_api",
+        SimpleNamespace(WorkbenchApiServer=_WorkbenchApiServer),
     )
-    monkeypatch.setattr(
-        manager,
-        "_load_api_gateway_state",
-        lambda: {"enabled": True, "default_model": "grok-4.3"},
-    )
-
-    await manager.restart_api_gateway()
-
-    assert isinstance(kernel.api_gateway, _ReloadedGateway)
-    assert events == [
-        "old_stop",
-        (
-            "new_init",
-            global_cfg,
-            {"xai_api_key": "secret"},
-            tmp_path / "workspaces",
-            "grok-4.3",
-        ),
-        "new_start",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_restart_api_gateway_aborts_replacement_when_old_gateway_cannot_stop(
-    tmp_path, monkeypatch
-):
-    events = []
-
-    class _OldGateway:
-        async def stop(self):
-            events.append("old_stop_failed")
-            raise RuntimeError("unsafe to continue")
-
-    old_gateway = _OldGateway()
+    global_cfg = SimpleNamespace(instance_id="HASHI3", workbench_port=18804)
     kernel = SimpleNamespace(
         paths=SimpleNamespace(
-            bridge_home=tmp_path,
-            workspaces_root=tmp_path / "workspaces",
+            config_path=tmp_path / "agents.json",
+            instance_id="HASHI3",
         ),
-        global_cfg=SimpleNamespace(api_gateway_port=18803),
-        secrets={},
-        api_gateway=old_gateway,
-        enable_api_gateway=True,
-    )
-    manager = ServiceManager(kernel)
-    monkeypatch.setattr(
-        manager,
-        "_load_api_gateway_state",
-        lambda: {"enabled": True, "default_model": "gpt-5.5"},
+        runtimes=[],
+        workbench_api=None,
+        endpoint_registry=_Registry(),
+        capability_broker=_Broker(),
     )
 
-    async def unexpected_start(*_args, **_kwargs):
-        events.append("replacement_started")
+    await ServiceManager(kernel).start_workbench_api(global_cfg, {})
 
-    monkeypatch.setattr(manager, "start_api_gateway", unexpected_start)
-
-    await manager.restart_api_gateway()
-
-    assert kernel.api_gateway is old_gateway
-    assert events == ["old_stop_failed"]
+    assert events[0] == "started"
+    assert events[1] == (
+        "workbench",
+        {
+            "instance_id": "HASHI3",
+            "host": "172.29.144.7",
+            "port": 24567,
+            "metadata": {"pid": os.getpid()},
+        },
+    )
+    assert events[2] == ("broker", published_endpoint)
 
 
 @pytest.mark.asyncio
-async def test_api_gateway_first_adoption_drains_legacy_transport_before_old_stop(
-    tmp_path,
-):
+async def test_stop_api_gateway_uses_the_stable_core_shutdown_contract(tmp_path):
     events = []
 
-    class _LegacySite:
-        async def stop(self):
-            events.append("legacy_site_stopped")
-
-    class _LegacyRunner:
-        def __init__(self):
-            self._shutdown_timeout = 60.0
-
-        async def cleanup(self):
-            events.append(("legacy_runner_drained", self._shutdown_timeout))
-
-    class _LegacyGateway:
-        def __init__(self):
-            self._site = _LegacySite()
-            self._runner = _LegacyRunner()
+    class _Gateway:
+        shutdown_budget_sec = 0.2
 
         async def stop(self):
-            assert self._site is None
-            assert self._runner is None
-            events.append("legacy_adapter_pool_stopped")
+            events.append("stopped")
 
-    gateway = _LegacyGateway()
-    kernel = SimpleNamespace(api_gateway=gateway)
+    kernel = SimpleNamespace(api_gateway=_Gateway())
     manager = ServiceManager(kernel)
 
-    await manager.stop_api_gateway()
-
+    assert await manager.stop_api_gateway(timeout=0.1) is True
+    assert events == ["stopped"]
     assert kernel.api_gateway is None
-    assert events == [
-        "legacy_site_stopped",
-        ("legacy_runner_drained", 10.0),
-        "legacy_adapter_pool_stopped",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_api_gateway_first_adoption_installs_kill_guard_before_legacy_drain(
-    tmp_path,
-):
-    events = []
-
-    class _LegacyAdapter:
-        async def force_kill_process_tree(self, *_args, **_kwargs):
-            events.append("unsafe_legacy_kill")
-
-    adapter = _LegacyAdapter()
-
-    class _LegacySite:
-        async def stop(self):
-            events.append("legacy_site_stopped")
-
-    class _LegacyRunner:
-        def __init__(self):
-            self._shutdown_timeout = 60.0
-
-        async def cleanup(self):
-            assert (
-                adapter.force_kill_process_tree.__func__
-                is BaseBackend.force_kill_process_tree
-            )
-            events.append("legacy_runner_drained_with_guard")
-
-    class _LegacyGateway:
-        def __init__(self):
-            self._site = _LegacySite()
-            self._runner = _LegacyRunner()
-            self._pool = SimpleNamespace(_adapters={"codex-cli": adapter})
-
-        async def stop(self):
-            events.append("legacy_adapter_pool_stopped")
-
-    kernel = SimpleNamespace(api_gateway=_LegacyGateway())
-    manager = ServiceManager(kernel)
-
-    await manager.stop_api_gateway()
-
-    assert kernel.api_gateway is None
-    assert events == [
-        "legacy_site_stopped",
-        "legacy_runner_drained_with_guard",
-        "legacy_adapter_pool_stopped",
-    ]
 
 
 def test_scheduler_enterprise_lease_kwargs_disabled_by_default(tmp_path):
     manager = _manager(tmp_path)
     global_cfg = SimpleNamespace(enterprise_scheduler_lease_enabled=False)
-
     assert manager._scheduler_enterprise_lease_kwargs(global_cfg) == {}
 
 
@@ -459,7 +324,7 @@ def test_scheduler_enterprise_lease_kwargs_uses_bridge_home_default_db(tmp_path)
 
     assert kwargs["enterprise_lease_name"] == "superloop-scheduler"
     assert kwargs["enterprise_lease_holder"].startswith("HASHI1:")
-    assert kwargs["enterprise_lease_store"].store.db_path == db_path
+    assert Path(kwargs["enterprise_lease_store"].store.db_path) == db_path
 
 
 def test_scheduler_enterprise_lease_kwargs_skips_unsupported_database_url(tmp_path):
@@ -468,7 +333,6 @@ def test_scheduler_enterprise_lease_kwargs_skips_unsupported_database_url(tmp_pa
         enterprise_scheduler_lease_enabled=True,
         enterprise_database_url="postgresql://hashi@example.invalid/hashi",
     )
-
     assert manager._scheduler_enterprise_lease_kwargs(global_cfg) == {}
 
 
@@ -482,8 +346,7 @@ def test_scheduler_enterprise_lease_kwargs_skips_unsupported_database_url(tmp_pa
 )
 def test_scheduler_enterprise_database_path_resolution(tmp_path, raw_url, expected):
     manager = _manager(tmp_path)
-
-    assert str(manager._resolve_enterprise_database_path(raw_url)) == expected
+    assert manager._resolve_enterprise_database_path(raw_url) == Path(expected)
 
 
 def test_scheduler_enterprise_lease_kwargs_passes_postgres_pool_options(tmp_path, monkeypatch):
@@ -587,14 +450,17 @@ def test_scheduler_enterprise_lease_kwargs_rejects_unknown_backend(tmp_path):
         enterprise_scheduler_lease_enabled=True,
         enterprise_scheduler_lease_backend="zookeeper",
     )
-
     assert manager._scheduler_enterprise_lease_kwargs(global_cfg) == {}
 
 
 @pytest.mark.asyncio
-async def test_stop_scheduler_closes_enterprise_lease_store(tmp_path):
+async def test_stop_scheduler_closes_enterprise_lease_store_without_false_timeout_warning(
+    tmp_path,
+    caplog,
+):
     manager = _manager(tmp_path)
     closed = {"value": False}
+    caplog.set_level(logging.INFO, logger="BridgeU.Bridge")
 
     class _Store:
         def close(self):
@@ -611,3 +477,5 @@ async def test_stop_scheduler_closes_enterprise_lease_store(tmp_path):
     assert closed["value"] is True
     assert manager.kernel.scheduler is None
     assert manager.kernel.scheduler_task is None
+    assert "Scheduler task stopped after cancellation" in caplog.text
+    assert "did not stop within" not in caplog.text

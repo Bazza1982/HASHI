@@ -4,14 +4,13 @@ import json
 import logging
 import os
 import re
-import sys
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.path_presentation import display_user_path
 from orchestrator.process_execution import is_wsl
-
 
 STATE_FILENAME = "workzone.json"
 WORKZONE_SLOT_IDS = ("main",) + tuple(str(number) for number in range(1, 10))
@@ -172,25 +171,14 @@ def primary_workzone_path(state: Mapping[str, Any] | None) -> Path | None:
 
 
 def display_workzone_path(path: str | Path) -> str:
-    """Render a copyable Windows Explorer path when running under WSL."""
+    """Render a Workzone using the instance-wide user path policy."""
 
     resolved = Path(path).expanduser()
     try:
         resolved = resolved.resolve()
     except (OSError, RuntimeError):
         pass
-    text = str(resolved)
-    match = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", text)
-    if match:
-        drive = match.group(1).upper()
-        tail = (match.group(2) or "").replace("/", "\\")
-        return f"{drive}:\\{tail}" if tail else f"{drive}:\\"
-    distro = str(os.environ.get("WSL_DISTRO_NAME") or "").strip()
-    if distro and text.startswith("/"):
-        return rf"\\wsl.localhost\{distro}\{text.lstrip('/').replace('/', chr(92))}"
-    if sys.platform.startswith("win"):
-        return text.replace("/", "\\")
-    return text
+    return display_user_path(resolved)
 
 
 def save_workzone(workspace_dir: Path, zone: Path, source: str = "telegram") -> None:

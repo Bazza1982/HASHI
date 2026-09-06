@@ -8,6 +8,7 @@ from uuid import uuid4
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator.runtime_delivery import format_backend_error_for_user
 from orchestrator import ui_language
+from orchestrator.service_endpoints import ServiceEndpointError
 
 
 def persist_transfer_state(runtime: Any) -> None:
@@ -111,23 +112,103 @@ def strip_transfer_accept_prefix(item: QueuedRequest, text: str) -> str:
     return stripped
 
 
-def resolve_bridge_handoff_endpoint(runtime: Any, target_instance: str, mode: str) -> tuple[str, str]:
+def _render_http_endpoint(host: str, port: int, path: str) -> str:
+    normalized_host = str(host or "").strip().strip("[]")
+    if not normalized_host or normalized_host in {"0.0.0.0", "::"}:
+        raise ValueError("instance has no connectable Workbench host")
+    rendered = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+    return f"http://{rendered}:{int(port)}{path}"
+
+
+def _local_workbench_endpoint(runtime: Any, current_instance: str) -> tuple[str, int]:
+    orchestrator = getattr(runtime, "orchestrator", None)
+    resolver = getattr(orchestrator, "resolve_service_endpoint", None)
+    if callable(resolver):
+        endpoint = resolver("workbench", expected_instance=current_instance)
+        return str(endpoint["host"]), int(endpoint["port"])
+    registry = getattr(orchestrator, "endpoint_registry", None)
+    if registry is not None:
+        endpoint = registry.resolve(
+            "workbench",
+            expected_instance=current_instance,
+        )
+        return endpoint.host, endpoint.port
+    raise ServiceEndpointError(
+        "live Workbench endpoint is unavailable from the runtime capability context"
+    )
+
+
+def resolve_bridge_handoff_endpoint(
+    runtime: Any,
+    target_instance: str,
+    mode: str,
+) -> tuple[str, str]:
     action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
     normalized_target = runtime._normalize_instance_name(target_instance)
     current_instance = runtime._normalize_instance_name(runtime._detect_instance_name())
+    local_host, local_port = _local_workbench_endpoint(runtime, current_instance)
     if normalized_target == current_instance:
-        return current_instance, f"http://127.0.0.1:{runtime.global_config.workbench_port}/api/bridge/{action}"
+        return current_instance, _render_http_endpoint(
+            local_host,
+            local_port,
+            f"/api/bridge/{action}",
+        )
 
     instances = runtime._load_instances()
     for name, inst in instances.items():
         if runtime._normalize_instance_name(name) != normalized_target:
             continue
-        host = str(inst.get("api_host") or "127.0.0.1").strip() or "127.0.0.1"
+        declared_instance = runtime._normalize_instance_name(
+            inst.get("instance_id") or name
+        )
+        if declared_instance != normalized_target:
+            raise ValueError(
+                "cross-instance Workbench route rejected: "
+                f"target={normalized_target} discovered={declared_instance}"
+            )
+        host = str(
+            inst.get("workbench_host")
+            or inst.get("api_host")
+            or inst.get("host")
+            or ""
+        ).strip()
         port = inst.get("workbench_port")
         if not port:
             raise ValueError(f"instance {normalized_target} has no workbench_port configured")
-        return normalized_target, f"http://{host}:{int(port)}/api/bridge/{action}"
+        if host.casefold() == local_host.casefold() and int(port) == local_port:
+            raise ValueError(
+                "cross-instance Workbench route rejected: target resolves to the "
+                "local instance endpoint"
+            )
+        return normalized_target, _render_http_endpoint(
+            host,
+            int(port),
+            f"/api/bridge/{action}",
+        )
     raise ValueError(f"unknown instance: {target_instance}")
+
+
+def handoff_health_endpoint(handoff_endpoint: str) -> str:
+    marker = "/api/bridge/"
+    if marker not in str(handoff_endpoint):
+        raise ValueError("invalid Workbench handoff endpoint")
+    return str(handoff_endpoint).split(marker, 1)[0] + "/api/health"
+
+
+def verify_handoff_instance_identity(
+    health_payload: Any,
+    *,
+    expected_instance: str,
+) -> None:
+    if not isinstance(health_payload, dict):
+        raise ValueError("Workbench health response is not an object")
+    received = str(health_payload.get("instance_id") or "").strip().upper()
+    expected = str(expected_instance or "").strip().upper()
+    if not received or received != expected:
+        raise ValueError(
+            "cross-instance Workbench identity check failed: "
+            f"expected={expected or '<missing>'} received={received or '<missing>'}"
+        )
 
 
 def build_handoff_payload(

@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Final, Iterable, Mapping
 from uuid import uuid4
 
+from orchestrator.file_permissions import tighten_fd_permissions
+
 
 AUDIT_SCHEMA_VERSION: Final = 1
 DEFAULT_ARTIFACT_THRESHOLD: Final = 64 * 1024
@@ -55,8 +57,7 @@ def _tighten_permissions(path: Path, mode: int) -> None:
 
 
 def _tighten_fd_permissions(fd: int, mode: int) -> None:
-    if os.name != "nt" and hasattr(os, "fchmod"):
-        os.fchmod(fd, mode)
+    tighten_fd_permissions(fd, mode)
 
 
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
@@ -461,7 +462,7 @@ class CanonicalAuditStore:
                     event = {
                         "schema_version": AUDIT_SCHEMA_VERSION,
                         "event_id": event_id,
-                        "event_type": str(record.get("event_type") or "unknown"),
+                        "event_type": str(record.get("event_type") or ""),
                         "recorded_at": str(
                             record.get("recorded_at")
                             or datetime.now(timezone.utc).isoformat()
@@ -506,7 +507,6 @@ class CanonicalAuditStore:
         if not content:
             return
         with self.events_path.open("ab") as handle:
-            _tighten_permissions(self.events_path, 0o600)
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())

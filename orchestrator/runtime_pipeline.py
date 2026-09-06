@@ -35,6 +35,7 @@ from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
     is_memory_plus_enabled,
 )
+from orchestrator.path_presentation import normalize_user_visible_paths
 from orchestrator.runtime_common import (
     _md_to_html,
     _print_final_response,
@@ -137,9 +138,7 @@ class _CanonicalStreamAuditBatch:
     def __init__(self, runtime: Any, request_id: str):
         self.runtime = runtime
         self.request_id = str(request_id)
-        self.store = getattr(runtime, "canonical_audit_buffer", None) or getattr(
-            runtime, "canonical_audit", None
-        )
+        self.store = getattr(runtime, "canonical_audit", None)
         self._records: list[dict[str, Any]] = []
         self._pending_chars = 0
         self._started_monotonic: float | None = None
@@ -250,20 +249,7 @@ class _CanonicalStreamAuditBatch:
 
     def flush(self, *, reason: str) -> int:
         self._require_healthy()
-        if self.store is None:
-            return 0
-        durable_boundary = str(reason).startswith(
-            (
-                "provider_request_end",
-                "capacity_recovery_request_end",
-                "detached_provider_request_end",
-                "her_stage_end",
-            )
-        )
-        if not self._records:
-            barrier = getattr(self.store, "flush", None)
-            if durable_boundary and callable(barrier):
-                barrier()
+        if not self._records or self.store is None:
             return 0
         records = list(self._records)
         if self._flush_handle is not None:
@@ -326,9 +312,6 @@ class _CanonicalStreamAuditBatch:
                         request_id=self.request_id,
                         provenance=record.get("provenance"),
                     )
-            barrier = getattr(self.store, "flush", None)
-            if durable_boundary and callable(barrier):
-                barrier()
         except Exception as exc:
             self._failure = exc
             self.runtime.error_logger.error(
@@ -544,10 +527,10 @@ def _store_context_compaction_warnings(
 def request_context_warning_fields(runtime, request_id: str) -> dict[str, Any]:
     meta = request_meta_for(runtime, request_id)
     result: dict[str, Any] = {}
-    for field in ("context_compaction_warnings", "wip_recovery_warnings"):
-        warnings = meta.get(field)
+    for warning_field in ("context_compaction_warnings", "wip_recovery_warnings"):
+        warnings = meta.get(warning_field)
         if isinstance(warnings, list) and warnings:
-            result[field] = list(warnings)
+            result[warning_field] = list(warnings)
     return result
 
 
@@ -865,10 +848,9 @@ def _resolve_session_scope(item) -> str:
             and task_id
             and trigger in {"scheduled", "manual", "recovery"}
         ):
-            # Scheduled prompt work is a standalone invocation. Sharing the
-            # ordinary Session timeline lets the immediately preceding job
-            # masquerade as context for the next job, even though the new job
-            # prompt is the authoritative request.
+            # A typed scheduler invocation is a standalone request.  Sharing
+            # the ordinary chat timeline would let a preceding job masquerade
+            # as context for the current authoritative task prompt.
             return SESSION_SCOPE_ISOLATED
     return SESSION_SCOPE_PERSISTENT
 
@@ -1861,7 +1843,7 @@ async def answer_preview_loop(
     assurance_status_kinds = {KIND_REVIEW, KIND_TESTING, KIND_VALIDATION}
 
     def _preview_text() -> str:
-        text = "".join(chunks).strip()
+        text = normalize_user_visible_paths("".join(chunks).strip())
         if len(text) > max_chars:
             text = "...\n" + text[-max_chars:]
         elapsed = max(0, int(loop.time() - started))
@@ -1957,7 +1939,7 @@ async def answer_preview_loop(
             elif kind in status_kinds and summary and (
                 not chunks or kind in assurance_status_kinds
             ):
-                latest_status = summary[:240]
+                latest_status = normalize_user_visible_paths(summary)[:240]
                 latest_status_visible_with_text = kind in assurance_status_kinds
                 dirty = True
         except asyncio.TimeoutError:
@@ -2076,7 +2058,9 @@ def wrap_her_persona_stream(
                     purpose=purpose,
                 )
             )
-        raw_text = str(getattr(event, "summary", "") or "").strip()
+        raw_text = normalize_user_visible_paths(
+            str(getattr(event, "summary", "") or "").strip()
+        )
         if has_audio and reply_policy == "audio_only":
             raw_text = ""
         if not raw_text and audio_task is None:
@@ -2217,7 +2201,9 @@ def wrap_her_persona_stream(
                 )
                 provisional_messages.pop(target_event_id, None)
                 return True
-            raw_text = str(getattr(event, "summary", "") or "").strip()
+            raw_text = normalize_user_visible_paths(
+                str(getattr(event, "summary", "") or "").strip()
+            )
             if not raw_text:
                 return False
             if resolution == "commentary" and not raw_text.startswith("💬"):
@@ -3000,6 +2986,7 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         response.stream_metadata = metadata
         display_text = fallback
         visible_text = fallback
+    visible_text = normalize_user_visible_paths(visible_text)
     has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
     if not visible_text.strip() and not has_typed_audio:
         return SuccessfulResponse(
@@ -3864,6 +3851,7 @@ async def handle_success_delivery(
             response_text = cos_result["response"]
         else:
             cos_handled = True
+    response_text = normalize_user_visible_paths(response_text)
     _print_final_response(runtime.name, response_text)
     her_delivery = _her_v2_delivery_metadata(response)
     delivered_at_initial_resolution = bool(

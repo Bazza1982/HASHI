@@ -8,13 +8,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import httpx
+
+from orchestrator.process_resources import named_lock
+from orchestrator.process_resources import path_lock as process_path_lock
 
 logger = logging.getLogger("Backend.HashiXaiOAuth")
 
@@ -57,9 +60,7 @@ class DeviceCodeSession:
     scopes: str
 
 
-_cache_lock = threading.Lock()
-_file_locks: dict[str, threading.Lock] = {}
-_file_locks_guard = threading.Lock()
+_cache_lock = named_lock("hashi-xai-oauth-cache")
 _memory_cache: dict[str, Any] = {
     "access_token": "",
     "expires_at": 0.0,
@@ -68,14 +69,8 @@ _memory_cache: dict[str, Any] = {
 }
 
 
-def _file_lock_for(path: Path) -> threading.Lock:
-    key = str(path.resolve()) if path.exists() or path.parent.exists() else str(path)
-    with _file_locks_guard:
-        lock = _file_locks.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _file_locks[key] = lock
-        return lock
+def _file_lock_for(path: Path):
+    return process_path_lock(path)
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:

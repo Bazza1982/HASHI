@@ -66,6 +66,86 @@ async def test_personal_health_keeps_legacy_shape_without_enterprise_block(tmp_p
     assert "enterprise" not in payload
 
 
+@pytest.mark.asyncio
+async def test_health_exposes_runtime_contract_and_active_generation(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    runtime = SimpleNamespace(
+        runtime_id="cpython-3.12/core-2/function-2/worker-1/cpython-312/x86_64",
+        python="3.12.13",
+        platform_abi="cpython-312-x86_64-linux-gnu",
+        core_api=2,
+        function_api=2,
+        worker_model="per-agent-process",
+        worker_protocol=1,
+        generation_schema=2,
+        dependency_digest="sha256:" + "a" * 64,
+        core_source_digest="sha256:" + "b" * 64,
+    )
+    worker = SimpleNamespace(
+        name="agent1",
+        startup_success=True,
+        is_function_worker_proxy=True,
+        worker_pid=2468,
+        generation_id="sha256:" + "c" * 64,
+        metadata={"worker_phase": "ACTIVE", "worker_accepting": True},
+        client=SimpleNamespace(process=SimpleNamespace(is_alive=lambda: True)),
+    )
+    server.orchestrator = SimpleNamespace(
+        instance_id="HASHI3",
+        api_gateway=None,
+        runtime_fingerprint=runtime,
+        runtimes=[worker],
+        function_workers=SimpleNamespace(
+            telegram_ingress_snapshot=lambda _name: {
+                "running": True,
+                "connected": True,
+                "offset": 99,
+            }
+        ),
+        function_generation={
+            "generation_id": "sha256:" + "c" * 64,
+            "worker_model": "per-agent-process",
+            "worker_protocol": 1,
+        },
+    )
+
+    response = await server.handle_health(_FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["runtime"] == {
+        "id": runtime.runtime_id,
+        "python": "3.12.13",
+        "platform_abi": "cpython-312-x86_64-linux-gnu",
+        "core_api": 2,
+        "function_api": 2,
+        "worker_model": "per-agent-process",
+        "worker_protocol": 1,
+        "generation_schema": 2,
+        "dependency_digest": "sha256:" + "a" * 64,
+        "core_source_digest": "sha256:" + "b" * 64,
+    }
+    assert payload["function_generation"] == {
+        "generation_id": "sha256:" + "c" * 64,
+        "worker_model": "per-agent-process",
+        "worker_protocol": 1,
+    }
+    assert payload["function_workers"] == [
+        {
+            "agent": "agent1",
+            "pid": 2468,
+            "generation_id": "sha256:" + "c" * 64,
+            "phase": "ACTIVE",
+            "accepting": True,
+            "alive": True,
+            "telegram_ingress": {
+                "running": True,
+                "connected": True,
+                "offset": 99,
+            },
+        }
+    ]
+
+
 def test_whatsapp_channel_health_uses_transport_connection_state(tmp_path):
     server = _server(tmp_path, profile="personal")
     transport = SimpleNamespace(

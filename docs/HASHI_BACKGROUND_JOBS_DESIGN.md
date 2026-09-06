@@ -72,9 +72,11 @@ GET  /api/background-jobs/{job_id}/tail
 POST /api/background-jobs/{job_id}/cancel
 ```
 
-- Backend API job starts accept both shell strings and argv arrays.
-- `/reboot` hot reload recreates the Backend API service so changed route
-  handlers are loaded without requiring a full process restart.
+- Workbench job starts accept both shell strings and argv arrays.
+- Workbench API and `BackgroundJobManager` are stable Core services and retain
+  identity through `/reboot`. Agent-facing background-job commands cross the
+  versioned Function Worker RPC facade; functional changes are adopted by
+  replacing the selected Agent Worker.
 - Terminal success/failure notifications can be delivered back to the user.
 - Terminal success/failure can also enqueue a one-shot
   `background-job-event` to the responsible agent. The event includes the

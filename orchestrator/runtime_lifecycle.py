@@ -236,23 +236,31 @@ async def shutdown(runtime: Any) -> None:
         )
 
     if runtime.startup_success:
-        for label, action, timeout_s in (
-            (
+        telegram_steps = []
+        if getattr(runtime.app.updater, "running", False):
+            telegram_steps.append(
+                (
                 "telegram-updater",
                 runtime.app.updater.stop,
                 RUNTIME_TELEGRAM_UPDATER_SHUTDOWN_TIMEOUT_SECONDS,
-            ),
-            (
+                )
+            )
+        if getattr(runtime.app, "running", False):
+            telegram_steps.append(
+                (
                 "telegram-app-stop",
                 runtime.app.stop,
                 RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
-            ),
+                )
+            )
+        telegram_steps.append(
             (
                 "telegram-app-shutdown",
                 runtime.app.shutdown,
                 RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
-            ),
-        ):
+            )
+        )
+        for label, action, timeout_s in telegram_steps:
             clean = (
                 await _run_shutdown_step(
                     runtime,

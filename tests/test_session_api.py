@@ -93,14 +93,15 @@ class _Runtime:
     async def enqueue_api_text(
         self,
         _text,
+        source="api",
         *,
         request_metadata,
         idempotency_key=None,
     ):
+        del source
         del idempotency_key
         self.api_request_metadata.append(dict(request_metadata))
         return f"req-api-{len(self.api_request_metadata)}"
-
 
 def _server(
     tmp_path: Path,
@@ -278,7 +279,7 @@ def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
     ]
 
 
-def test_workbench_warm_refresh_preserves_runs_owned_by_live_agents(tmp_path):
+def test_workbench_service_refresh_preserves_runs_owned_by_live_workers(tmp_path):
     server, _runtime = _server(tmp_path)
     session = server.session_store.ensure_default_session(
         owner_id="user:7", agent_id="lily"
@@ -287,14 +288,14 @@ def test_workbench_warm_refresh_preserves_runs_owned_by_live_agents(tmp_path):
         session_id=session["session_id"],
         owner_id="user:7",
         agent_id="lily",
-        request_id="req-live-during-api-refresh",
-        text="still executing in a live runtime",
+        request_id="req-live-during-service-refresh",
+        text="still executing in a live Function Worker",
         source="test",
-        idempotency_key="live-during-api-refresh",
+        idempotency_key="live-during-service-refresh",
     )
     server.session_store.mark_request_running(
         accepted.request_id,
-        worker_id="live-runtime",
+        worker_id="function-worker-live",
     )
 
     refreshed, _runtime = _server(tmp_path, reconcile_session_runs=False)

@@ -336,14 +336,13 @@ def _provider_http_failure_diagnostics(error: Exception) -> dict[str, Any]:
     """Preserve the complete HTTP request/response evidence for local audit."""
 
     diagnostics: dict[str, Any] = {}
-    response = getattr(error, "response", None)
+    try:
+        response = getattr(error, "response", None)
+    except RuntimeError:
+        response = None
     try:
         request = getattr(error, "request", None)
     except RuntimeError:
-        # httpx exposes ``RequestError.request`` as a property that raises
-        # until a request has been attached (for example on a synthetic
-        # RemoteProtocolError).  Missing diagnostics must not replace the
-        # original provider failure with this accessor error.
         request = None
     if not isinstance(request, httpx.Request) and isinstance(response, httpx.Response):
         try:

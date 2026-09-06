@@ -1,7 +1,8 @@
 """HASHI API adapter — HASHI's own OpenAI-compatible gateway backend.
 
-Endpoint: ``http://10.255.255.254:18801/v1/chat/completions`` (configurable via
-``global.her_providers.providers.hashi.base_url``).
+The local endpoint is resolved from the Core-published service topology.  A
+configured provider URL remains a startup fallback or an explicit remote route,
+but it cannot override a healthy endpoint published by this HASHI instance.
 
 Differences from OpenRouter:
   - No API key required (the gateway authenticates at the bind/transport layer).
@@ -25,6 +26,7 @@ from datetime import datetime, timezone
 from itertools import count
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -57,7 +59,7 @@ from orchestrator.multimodal_contract import (
 )
 from orchestrator.pcm import load_pcm_document
 
-_DEFAULT_HASHI_API_BASE_URL = "http://10.255.255.254:18801/v1"
+_DEFAULT_HASHI_API_BASE_URL = "http://127.0.0.1:18801/v1"
 _HASHI_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max"}
 )
@@ -78,6 +80,10 @@ _SENSITIVE_HTTP_HEADERS = frozenset(
 
 class HashiApiTransportAuditError(RuntimeError):
     """The local HASHI transport could not durably record an HTTP boundary."""
+
+
+class HashiApiEndpointError(RuntimeError):
+    """The Core-published HASHI gateway route violated its identity contract."""
 
 
 def _audit_headers(headers: Mapping[str, Any]) -> dict[str, str]:
@@ -114,6 +120,21 @@ def _body_evidence(payload: bytes) -> dict[str, Any]:
     }
 
 
+def _configured_default_base_url(global_config: Any) -> str:
+    host = str(getattr(global_config, "api_host", None) or "127.0.0.1").strip()
+    if host in {"", "0.0.0.0", "localhost"}:
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = int(getattr(global_config, "api_gateway_port", None) or 18801)
+    except (TypeError, ValueError):
+        port = 18801
+    if not 1 <= port <= 65535:
+        port = 18801
+    return f"http://{host}:{port}/v1"
+
+
 def _provider_base_url(global_config: Any) -> str:
     """Resolve the HASHI gateway base URL from the global provider profile."""
     her = getattr(global_config, "her_providers", None) or {}
@@ -124,7 +145,55 @@ def _provider_base_url(global_config: Any) -> str:
             base = str(profile.get("base_url") or "").strip().rstrip("/")
             if base:
                 return base
-    return _DEFAULT_HASHI_API_BASE_URL
+    return _configured_default_base_url(global_config) or _DEFAULT_HASHI_API_BASE_URL
+
+
+def _normalize_gateway_base_url(value: Any, *, append_v1: bool = False) -> str:
+    base = str(value or "").strip().rstrip("/")
+    parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HashiApiEndpointError("HASHI API gateway URL must be an HTTP endpoint")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise HashiApiEndpointError(
+            "HASHI API gateway URL must not contain credentials, query, or fragment"
+        )
+    if append_v1 and parsed.path.rstrip("/") in {"", "/"}:
+        base += "/v1"
+    return base
+
+
+def _runtime_gateway_base_url(agent_config: Any, global_config: Any) -> str | None:
+    """Resolve this instance's live Gateway route from the Worker topology."""
+
+    runtime = getattr(agent_config, "_hashi_runtime", None)
+    orchestrator = getattr(runtime, "orchestrator", None)
+    if orchestrator is None:
+        return None
+    expected_instance = str(
+        getattr(global_config, "instance_id", None) or "HASHI"
+    ).strip()
+    resolver = getattr(orchestrator, "resolve_service_endpoint", None)
+    registry = getattr(orchestrator, "endpoint_registry", None)
+    if not callable(resolver) and registry is not None:
+        resolver = getattr(registry, "resolve", None)
+    if not callable(resolver):
+        return None
+    try:
+        endpoint = resolver("api_gateway", expected_instance=expected_instance)
+    except Exception as exc:  # topology implementations share no exception identity
+        message = str(exc).casefold()
+        if "cross-instance" in message or (
+            "expected=" in message and "received=" in message
+        ):
+            raise HashiApiEndpointError(
+                "Core rejected the HASHI API gateway route for this instance"
+            ) from exc
+        return None
+    if isinstance(endpoint, Mapping):
+        base_url = endpoint.get("base_url")
+    else:
+        base_url = getattr(endpoint, "base_url", None)
+    return _normalize_gateway_base_url(base_url, append_v1=True)
 
 
 class HashiApiAdapter(OpenRouterAdapter):
@@ -171,12 +240,19 @@ class HashiApiAdapter(OpenRouterAdapter):
         self.logger = logging.getLogger(f"Backend.HashiApi.{self.config.name}")
         extra = getattr(self.config, "extra", None) or {}
         self.effort = str(extra.get("effort") or "medium").strip().casefold()
-        configured = str(
-            extra.get("hashi_api_url")
-            or extra.get("base_url")
-            or _provider_base_url(global_config)
-        ).strip().rstrip("/")
-        self.hashi_url = f"{configured}/chat/completions"
+        explicit = str(extra.get("hashi_api_url") or "").strip()
+        self._explicit_hashi_base_url = (
+            _normalize_gateway_base_url(explicit, append_v1=True)
+            if explicit
+            else None
+        )
+        self._configured_hashi_base_url = _normalize_gateway_base_url(
+            extra.get("base_url") or _provider_base_url(global_config),
+            append_v1=True,
+        )
+        self.hashi_route_source = ""
+        self.hashi_url = ""
+        self._refresh_hashi_url()
         configured_audit_path = str(
             extra.get("hashi_api_transport_log") or ""
         ).strip()
@@ -219,6 +295,7 @@ class HashiApiAdapter(OpenRouterAdapter):
             "provider_call": str(provider_call or ""),
             "streaming": bool(streaming),
             "gateway_url": self.hashi_url,
+            "gateway_route_source": self.hashi_route_source,
         }
         if request is not None:
             request_content = bytes(request.content)
@@ -275,6 +352,8 @@ class HashiApiAdapter(OpenRouterAdapter):
     ) -> tuple[httpx.Request, list[str]]:
         """Build first, then persist the exact bytes before network activity."""
 
+        self._refresh_hashi_url()
+
         request = self.client.build_request(
             "POST",
             self.hashi_url,
@@ -291,6 +370,32 @@ class HashiApiAdapter(OpenRouterAdapter):
             request=request,
         )
         return request, [ref]
+
+    def _refresh_hashi_url(self) -> str:
+        """Refresh a local route immediately before each physical HTTP call."""
+
+        if self._explicit_hashi_base_url:
+            base_url = self._explicit_hashi_base_url
+            route_source = "explicit_hashi_api_url"
+        else:
+            live_base_url = _runtime_gateway_base_url(self.config, self.global_config)
+            if live_base_url:
+                base_url = live_base_url
+                route_source = "core_service_topology"
+            else:
+                base_url = self._configured_hashi_base_url
+                route_source = "configured_fallback"
+        resolved = f"{base_url}/chat/completions"
+        previous = self.hashi_url
+        self.hashi_url = resolved
+        self.hashi_route_source = route_source
+        if previous and previous != resolved:
+            self._trace(
+                "HASHI API route refreshed: source=%s endpoint=%s",
+                route_source,
+                resolved,
+            )
+        return resolved
 
     def _hashi_reasoning_effort(self) -> str:
         """Resolve provider reasoning without losing HER's request-time override."""

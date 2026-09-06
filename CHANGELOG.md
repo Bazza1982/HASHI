@@ -18,6 +18,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-platform device control (HASHI3 only)** — implemented separate
+  Browser Control and Computer Control Workers behind shared capability
+  discovery, authorization, audit, and lease/handoff contracts. The WSL Core
+  dynamically publishes its current Windows host-gateway candidates; a
+  persistent windowless Computer Worker selects a bindable route, registers an
+  ephemeral endpoint, survives Core restart, and never falls back to a
+  per-action shell/CLI process. Browser installation is instance-scoped. The
+  logged-in Chrome extension and disruptive/external canaries remain open, and
+  no promotion to HASHI1/HASHI2 is claimed.
+- **Stable Core runtime and per-Agent Function Workers (HASHI3 pilot)** — made
+  CPython 3.12.13 the enforced Core runtime; added executable, ABI,
+  architecture, dependency, policy, Core-source and API/protocol
+  fingerprinting; aligned launchers, CI, containers and portable builders; and
+  established a locked standard dependency generation. `/reboot` no longer
+  mutates live module objects or rebuilds Core Managers/services. It verifies
+  an immutable function artifact, prepares an isolated process for every
+  selected Agent, drains stable route handles and publishes all new Worker
+  pointers atomically. Candidate failure resumes the previous Workers; an
+  unexpected Worker exit recovers from its last immutable generation without
+  restarting Core. HASHI3 passed controlled cold adoption, targeted live
+  cutover, same-generation crash recovery, cold/hot artifact consistency,
+  dynamic endpoint publication, and WSL-Core restart with the Windows Worker
+  retaining its PID. The 2026-09-05 closeout records remaining external gates.
+- **HASHI3 runtime-alignment completion** — isolated typed Scheduler turns and
+  dynamically injected its read-back endpoint; converged orphaned Session Runs
+  per Agent after Worker replacement; bound HChat to one Direct caller Session;
+  made `/say` select only confirmed delivery on that route; preserved complete
+  HASHI API request/response/SSE and Codex terminal-event failure evidence;
+  fixed pre-turn Compact accounting and legacy policy migration; applied
+  `/verbose`, `/think`, and `/commentary` to active turns; expanded `/meter`,
+  `/model`, Native Voice fail-closed checks, and Telegram flood recovery; and
+  introduced revisioned Session Workzone slots `main` plus `1`–`9` with exact
+  access roots. Core-owned command ingress now reaches a dedicated per-Worker
+  provider-interrupt lane through versioned RPC. Authenticated HASHI Remote
+  source can request `/reboot min` through the protected Workbench admin
+  endpoint and audit a hard-restart fallback; live Remote deployment remains an
+  explicit operator gate.
 - **HER v2 Fast/Low Strategy experiment (HASHI3)** — upgraded the compatible
   Triage wire stage to a tool-capable Strategist backed by a versioned external
   38-card Playbook and schema v3. Low effort now passes only the selected Card
@@ -167,14 +204,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Agent-restart Session convergence** — Agent stop/start lifecycle boundaries
-  now terminalize only that Agent's orphaned queued/running Runs as
-  `interrupted`, including the first hot reload that adopts the fix. The
-  warm Backend API replacement no longer repeats the process-start instance
-  sweep and interrupt Runs owned by other live Agents. The Activity API
-  recovers the terminal durable projection after the replacement Runtime loses
-  its in-memory stream, so Session clients no longer wait forever on work whose
-  executor was destroyed.
 - **Reasoning-stream canonical audit hot path** — lossless provider stream
   evidence now commits in bounded 200 ms / 8 KiB groups with one lock, chain-tail
   read, append, flush, and `fsync`. Each raw delta retains its own sequence,

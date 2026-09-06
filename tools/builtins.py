@@ -7,6 +7,7 @@ All file operations are sandboxed to access_root.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import os
@@ -33,7 +34,11 @@ from tools.workbench_client import request_workbench_json, workbench_endpoint
 # ---------------------------------------------------------------------------
 
 def _access_roots(value: Path | Sequence[Path]) -> tuple[Path, ...]:
-    raw_roots = value if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Path)) else (value,)
+    raw_roots = (
+        value
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Path))
+        else (value,)
+    )
     roots: list[Path] = []
     for raw in raw_roots:
         root = Path(raw).expanduser().resolve()
@@ -964,6 +969,8 @@ async def execute_background_job_status(args: dict, audit_context: dict | None =
             return "Error: HASHI BackgroundJob API returned an invalid job record"
         return json.dumps(_job_summary(record), ensure_ascii=False, indent=2)
     record = manager.get(job_id)
+    if inspect.isawaitable(record):
+        record = await record
     if record is None:
         return f"Error: background job not found: {job_id}"
     return json.dumps(_job_summary(record), ensure_ascii=False, indent=2)
@@ -993,6 +1000,8 @@ async def execute_background_job_tail(args: dict, audit_context: dict | None = N
         return text or "(no output yet)"
     try:
         text = manager.tail(job_id, stream=stream, lines=max(1, lines))
+        if inspect.isawaitable(text):
+            text = await text
     except KeyError:
         return f"Error: background job not found: {job_id}"
     return text or "(no output yet)"
@@ -1049,6 +1058,8 @@ async def execute_background_job_list(args: dict, audit_context: dict | None = N
             indent=2,
         )
     records = manager.list(agent=str(agent) if agent else None, limit=bounded_limit)
+    if inspect.isawaitable(records):
+        records = await records
     return json.dumps([_job_summary(record) for record in records], ensure_ascii=False, indent=2)
 
 

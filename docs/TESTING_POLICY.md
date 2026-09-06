@@ -97,9 +97,31 @@ in `pyproject.toml`:
 python -m pytest -q
 ```
 
-Run it for shared registries, configuration, hot reload, lifecycle, gateway,
-or central runtime boundaries. The target is at most 30 seconds on the HASHI1
-development machine. It is not a full-suite alias.
+Run it for shared registries, configuration, Function Workers, lifecycle,
+gateway, or central runtime boundaries. The target is at most 90 seconds on
+the HASHI3 development pilot. The deterministic Core gate may use mocked
+process clients; the real isolated Worker probe is an explicit integration
+check because it initializes an actual backend. Bare pytest is not a full-suite
+alias.
+
+For Python, ABI, dependency, Core-source, or `/reboot` changes, the owning
+minimum is:
+
+```bash
+python -m pytest -q \
+  tests/test_runtime_contract.py \
+  tests/test_function_generation.py \
+  tests/test_function_worker_protocol.py \
+  tests/test_function_worker_supervisor.py \
+  tests/test_reboot_manager.py
+```
+
+Old tests that assert `importlib.reload()` progress, rebuilt Manager objects,
+warm-service recreation, or a repair shim between mixed class generations are
+invalid: those implementations are forbidden. Replacement tests assert that
+candidate rejection does not gate an active Worker, target selection is exact,
+multi-Agent pointer publication is atomic, Core services retain identity, and
+Worker crash recovery uses the same immutable artifact.
 
 ### 5. Offline product suite
 
@@ -144,6 +166,7 @@ python -m pytest -q tests -m live
 | Leaf module | owning node or module | a public contract changed |
 | Adapter/provider | adapter module plus registry/binding consumer | shared response or delivery contract changed |
 | Shared runtime/registry | focused test plus core gate | ownership spans otherwise unrelated components |
+| Python/Core/Function Worker | runtime contract, generation, JSON protocol, supervisor, reboot rollback, then Core gate | any fingerprint, IPC, or lifecycle boundary changed |
 | Deployment asset | native parser, renderer, or dedicated workflow | preparing a deployment release |
 | Test config/fixture | core gate plus offline product suite | always, because collection semantics changed |
 | Live system | focused offline proof first | then only the explicitly authorized canary |

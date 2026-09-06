@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
 from tools.smart_tools import SmartToolRuntime
@@ -372,6 +373,13 @@ class ToolRegistry:
                 is_error=True,
                 details={"control_disposition": "denied"},
             )
+        denial = self._check_system_exchange_loop_gate(
+            tool_name,
+            arguments,
+            tool_call_id=tool_call_id,
+        )
+        if denial is not None:
+            return denial
         denial = self._check_enterprise_path_gate(
             tool_name, arguments, tool_call_id=tool_call_id
         )
@@ -394,6 +402,61 @@ class ToolRegistry:
             return denial
         return None
 
+    def _check_system_exchange_loop_gate(
+        self,
+        tool_name: str,
+        arguments: dict,
+        *,
+        tool_call_id: str,
+    ) -> ToolResult | None:
+        context = self._effective_audit_context()
+        if context.get("system_exchange") is not True:
+            return None
+        blocked = False
+        if tool_name in {"bash", "shell", "background_job_start"}:
+            command = str((arguments or {}).get("command") or "").casefold()
+            blocked = any(
+                marker in command
+                for marker in (
+                    "hchat_send",
+                    "send_hchat",
+                    "protocol_send",
+                    "/hchat",
+                    "/protocol/message",
+                    "/protocol/message-with-attachments",
+                    "/protocol/outbound",
+                    "/api/chat",
+                    "/api/bridge/hchat-exchange",
+                )
+            )
+        elif tool_name == "http_request":
+            url = str((arguments or {}).get("url") or "").casefold()
+            blocked = any(
+                marker in url
+                for marker in (
+                    "/hchat",
+                    "/protocol/message",
+                    "/protocol/message-with-attachments",
+                    "/protocol/outbound",
+                    "/api/chat",
+                    "/api/bridge/hchat-exchange",
+                )
+            )
+        if not blocked:
+            return None
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=(
+                "Error: cross-instance reply egress is blocked for a System "
+                "exchange; respond normally and let the protocol return it once"
+            ),
+            is_error=True,
+            details={
+                "control_disposition": "denied",
+                "reason": "system_exchange_loop_guard",
+            },
+        )
+
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = "") -> ToolResult:
         """
         Execute a tool call with permission checking.
@@ -415,7 +478,11 @@ class ToolRegistry:
             return admission_denial
 
         try:
-            dispatched = await self._dispatch(tool_name, arguments)
+            dispatched = await self._dispatch(
+                tool_name,
+                arguments,
+                tool_call_id=effective_call_id,
+            )
         except asyncio.CancelledError as exc:
             details = dict(getattr(exc, "hashi_tool_details", {}) or {})
             cleanup = dict(details.get("foreground_cleanup") or {})
@@ -771,7 +838,53 @@ class ToolRegistry:
         except Exception:
             return None
 
-    async def _dispatch(self, tool_name: str, arguments: dict) -> str | StructuredToolOutput:
+    def _function_worker_capability_facade(self) -> Any | None:
+        """Return the narrow Worker-to-Core facade, never a live Core object."""
+
+        runtime = self._effective_audit_context().get("_runtime")
+        orchestrator = getattr(runtime, "orchestrator", None)
+        if not bool(getattr(orchestrator, "is_function_worker_facade", False)):
+            return None
+        invoke = getattr(orchestrator, "invoke_capability", None)
+        return orchestrator if callable(invoke) else None
+
+    async def _dispatch_device_capability(
+        self,
+        facade: Any,
+        capability_kind: str,
+        action: str,
+        arguments: dict,
+        *,
+        tool_call_id: str,
+    ) -> str:
+        context = self._effective_audit_context()
+        task_id = str(
+            context.get("task_id")
+            or context.get("request_id")
+            or tool_call_id
+            or f"tool-{uuid4().hex}"
+        )
+        payload = dict(arguments)
+        payload["_authorized_roots"] = [str(self.access_root)]
+        result = await facade.invoke_capability(
+            capability_kind,
+            action,
+            payload,
+            task_id=task_id,
+            request_id=tool_call_id or None,
+            authorization="tool_registry",
+        )
+        if isinstance(result, str):
+            return result
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+    async def _dispatch(
+        self,
+        tool_name: str,
+        arguments: dict,
+        *,
+        tool_call_id: str = "",
+    ) -> str | StructuredToolOutput:
         from tools.builtins import (
             execute_bash,
             execute_shell,
@@ -988,6 +1101,23 @@ class ToolRegistry:
 
         if tool_name.startswith("browser_"):
             from tools.browser_extension_bridge import project_browser_audit_metadata
+            browser_args = dict(arguments)
+            browser_args["_audit"] = project_browser_audit_metadata(
+                self._effective_audit_context()
+            )
+            capability_facade = self._function_worker_capability_facade()
+            if capability_facade is not None:
+                action = {
+                    "browser_get_media_state": "media_state",
+                    "browser_play": "media_play",
+                }.get(tool_name, tool_name.removeprefix("browser_"))
+                return await self._dispatch_device_capability(
+                    capability_facade,
+                    "browser_control",
+                    action,
+                    browser_args,
+                    tool_call_id=tool_call_id,
+                )
             from tools.browser import (
                 execute_browser_screenshot,
                 execute_browser_get_text,
@@ -1035,10 +1165,6 @@ class ToolRegistry:
                 "browser_open_play_verify": execute_browser_open_play_verify,
             }
             if tool_name in _browser_dispatch:
-                browser_args = dict(arguments)
-                browser_args["_audit"] = project_browser_audit_metadata(
-                    self._effective_audit_context()
-                )
                 return await _browser_dispatch[tool_name](browser_args)
             return f"Error: unknown browser tool '{tool_name}'"
 
@@ -1070,6 +1196,16 @@ class ToolRegistry:
             return f"Error: unknown desktop tool '{tool_name}'"
 
         if tool_name.startswith("windows_"):
+            capability_facade = self._function_worker_capability_facade()
+            if capability_facade is not None:
+                action = tool_name.removeprefix("windows_")
+                return await self._dispatch_device_capability(
+                    capability_facade,
+                    "computer_control",
+                    action,
+                    arguments,
+                    tool_call_id=tool_call_id,
+                )
             from tools.windows_use import (
                 execute_windows_screenshot,
                 execute_windows_mouse_move,

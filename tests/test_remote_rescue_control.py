@@ -6,7 +6,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from remote.api.server import create_app
+from remote.api.server import _request_workbench_reboot, create_app
 from remote.local_http import local_http_url
 from remote.protocol_manager import ProtocolManager, build_default_capabilities
 from remote.security.pairing import PairingManager
@@ -354,6 +354,54 @@ def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
     record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
     assert record["operation"] == "restart"
     assert record["outcome"] == "restart_launched"
+
+
+def test_request_workbench_reboot_uses_authenticated_admin_endpoint(monkeypatch):
+    captured = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read():
+            return b'{"ok":true,"action":"reboot_min"}'
+
+    def urlopen(request, *, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["headers"] = {
+            key.casefold(): value for key, value in request.header_items()
+        }
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(
+        "remote.api.server.local_http_hosts", lambda: ["127.0.0.1"]
+    )
+    monkeypatch.setattr(
+        "remote.api.server._workbench_admin_token", lambda: "admin-secret"
+    )
+    monkeypatch.setattr("remote.api.server.urllib_request.urlopen", urlopen)
+
+    status, payload = _request_workbench_reboot(
+        agent="zhaojun", mode="min", timeout=2.5
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert captured["url"].endswith("/api/admin/command")
+    assert captured["body"] == {
+        "agent": "zhaojun",
+        "command": "/reboot min",
+    }
+    assert captured["headers"]["x-workbench-token"] == "admin-secret"
+    assert captured["timeout"] == 2.5
 
 
 def test_hashi_rescue_reboot_prefers_hot_reboot_without_fallback(

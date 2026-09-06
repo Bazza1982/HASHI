@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402 - dependency stubs must be installed before runtime imports.
+
 import json
 import re
 import sys

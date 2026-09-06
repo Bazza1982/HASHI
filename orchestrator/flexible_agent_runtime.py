@@ -114,6 +114,7 @@ from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.pcm import load_pcm_document
+from orchestrator.path_presentation import normalize_user_visible_paths
 from orchestrator.post_turn_observer import (
     PostTurnObserver,
     PreTurnContextProvider,
@@ -1837,14 +1838,12 @@ class FlexibleAgentRuntime:
         request_id: str,
         force: bool = False,
     ) -> bool | None:
-        """Send a voice reply.
+        """Send voice and preserve Telegram's ambiguous timeout outcome.
 
-        ``True`` means Telegram acknowledged delivery, ``False`` means the
-        synthesis/send failed, and ``None`` means Telegram timed out after the
-        request may already have arrived.  The ambiguous case must not be
-        retried because that can duplicate the voice message.
+        ``True`` is an acknowledged delivery, ``False`` is a hard failure,
+        and ``None`` means Telegram may have accepted the upload before the
+        acknowledgement timed out.  That last case must never be retried.
         """
-
         # Guard: skip if Telegram not connected
         if not self.telegram_connected:
             return False
@@ -3527,6 +3526,17 @@ class FlexibleAgentRuntime:
                 sock_connect=10,
             )
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                health_endpoint = runtime_transfer.handoff_health_endpoint(endpoint)
+                async with session.get(health_endpoint) as health_response:
+                    health = await health_response.json()
+                    if health_response.status >= 400:
+                        raise RuntimeError(
+                            str(health.get("error") or f"HTTP {health_response.status}")
+                        )
+                    runtime_transfer.verify_handoff_instance_identity(
+                        health,
+                        expected_instance=target_instance,
+                    )
                 async with session.post(endpoint, json=package) as response:
                     body = await response.json()
                     if response.status >= 400 or not body.get("ok"):
@@ -3640,6 +3650,10 @@ class FlexibleAgentRuntime:
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
             return {"answered": False, "response": None, "reason": "no_orchestrator"}
+
+        routed_query = getattr(orchestrator, "query_chief_of_staff", None)
+        if callable(routed_query):
+            return await routed_query(self.name, question)
 
         lily_runtime = None
         for rt in getattr(orchestrator, "runtimes", []):
@@ -3784,10 +3798,27 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
+        capability_status = None
+        capability_reader = getattr(
+            getattr(self, "orchestrator", None),
+            "refresh_capability_status",
+            None,
+        )
+        if callable(capability_reader):
+            try:
+                capability_status = await capability_reader()
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to refresh Computer Control capability status: %s",
+                    exc,
+                )
         if not args:
             await self._reply_text(
                 update,
-                get_usecomputer_status(self.sys_prompt_manager),
+                get_usecomputer_status(
+                    self.sys_prompt_manager,
+                    capability_status=capability_status,
+                ),
                 parse_mode="HTML",
             )
             return
@@ -3802,7 +3833,10 @@ class FlexibleAgentRuntime:
         if sub == "status":
             await self._reply_text(
                 update,
-                get_usecomputer_status(self.sys_prompt_manager),
+                get_usecomputer_status(
+                    self.sys_prompt_manager,
+                    capability_status=capability_status,
+                ),
                 parse_mode="HTML",
             )
             return
@@ -3845,14 +3879,34 @@ class FlexibleAgentRuntime:
                 except Exception as e:
                     self.logger.warning("Failed to refresh secrets for /browser status: %s", e)
             active_backend = getattr(self.config, "active_backend", None)
-            try:
-                from tools.browser_extension_bridge import healthcheck as browser_bridge_healthcheck
+            capability_reader = getattr(
+                getattr(self, "orchestrator", None),
+                "refresh_capability_status",
+                None,
+            )
+            if callable(capability_reader):
+                try:
+                    capability_status = await capability_reader()
+                    extension_bridge_configured = any(
+                        isinstance(item, dict)
+                        and item.get("capability_kind") == "browser_control"
+                        for item in capability_status.get("capabilities") or []
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        "Failed to refresh Browser Control capability status: %s",
+                        e,
+                    )
+                    extension_bridge_configured = False
+            else:
+                try:
+                    from tools.browser_extension_bridge import healthcheck as browser_bridge_healthcheck
 
-                bridge_health = await asyncio.to_thread(browser_bridge_healthcheck, timeout_s=2.0)
-                extension_bridge_configured = bool(bridge_health.get("connected"))
-            except Exception as e:
-                self.logger.warning("Failed to probe browser extension bridge for /browser status: %s", e)
-                extension_bridge_configured = False
+                    bridge_health = await asyncio.to_thread(browser_bridge_healthcheck, timeout_s=2.0)
+                    extension_bridge_configured = bool(bridge_health.get("connected"))
+                except Exception as e:
+                    self.logger.warning("Failed to probe browser extension bridge for /browser status: %s", e)
+                    extension_bridge_configured = False
             await self._reply_text(
                 update,
                 get_browser_status_text(
@@ -5629,10 +5683,9 @@ class FlexibleAgentRuntime:
             broadcast_targets = directory.resolve_group(group_name, exclude_self=self.name)
             broadcast_label = ui_language.tr("hchat.label.group", name=group_name)
 
-        # HChat prompts are internal Bridge requests, but they are continuations
-        # of the Conversation in which /hchat was invoked.  Preserve that exact
-        # Session/channel route instead of letting the bridge:* source fall back
-        # to the Agent's default Session.
+        # HChat is an internal Bridge request, but it continues the exact
+        # Conversation where /hchat was invoked.  Preserve that Session and
+        # channel instead of falling back to the Agent's default route.
         hchat_chat_id, hchat_request_metadata, hchat_deliver_to_telegram = (
             runtime_session.request_route_for_update(self, update)
         )
@@ -5693,12 +5746,9 @@ class FlexibleAgentRuntime:
                 f"just report the reply content to the user. Do NOT send another hchat message back — "
                 f"the conversation ends there."
             )
-
-        # A valid /hchat invocation already selects and authorises one clear
-        # action.  Queue it without a user-visible preflight message; HER v2
-        # applies its request-scoped Direct policy and other Engines already
-        # run their ordinary single agent turn.  Only the terminal delivery
-        # report (or a deterministic validation error above) reaches the user.
+        # The command already authorises one clear action.  Queue it without a
+        # second user-visible preflight reply; only its final delivery report
+        # (or a deterministic validation error above) is presented.
         await self.enqueue_api_text(
             self_prompt,
             source="bridge:hchat",
@@ -5781,6 +5831,7 @@ class FlexibleAgentRuntime:
             if result.success
             else f"[hchat] Delivery failed to {result.target}: {result.error or 'unknown error'}"
         )
+        visible_text = normalize_user_visible_paths(visible_text)
         if result.success:
             self._mark_success()
         else:
@@ -9814,21 +9865,20 @@ class FlexibleAgentRuntime:
 
     @staticmethod
     def _is_visible_assistant_entry(entry: dict, *, core: bool) -> bool:
-        """Return True for a real, speakable assistant reply entry.
+        """Return whether a transcript row is a real, speakable reply."""
 
-        Thinking traces are excluded regardless of file: ``role == "thinking"``,
-        ``source == "think"``, or 💭-prefixed text.
-        """
         if entry.get("role") == "thinking" or entry.get("source") == "think":
             return False
-        text = (entry.get("text") or entry.get("visible_text") or "")
+        text = entry.get("text") or entry.get("visible_text") or ""
         if isinstance(text, str) and text.startswith("💭"):
             return False
         if core:
             return entry.get("role") == "assistant_core" and bool(
                 (entry.get("visible_text") or entry.get("text") or "").strip()
             )
-        return entry.get("role") == "assistant" and bool((entry.get("text") or "").strip())
+        return entry.get("role") == "assistant" and bool(
+            (entry.get("text") or "").strip()
+        )
 
     @staticmethod
     def _is_legacy_interactive_reply_source(entry: dict) -> bool:
@@ -9871,17 +9921,17 @@ class FlexibleAgentRuntime:
         )
 
     def _load_last_visible_assistant_text(
-        self, update: Update | None = None
+        self,
+        update: Update | None = None,
     ) -> str | None:
-        """Return the latest visible assistant reply for /say.
+        """Return the newest reply confirmed on the current /say route.
 
-        The authoritative path is the newest response with a successful
-        transport receipt in the current Session and channel.  Before the
-        first post-upgrade delivery outcome exists, use a compatibility scan
-        of legacy transcripts while excluding scheduler, API, Bridge/HChat,
-        and background sources.  Once delivery tracking starts for the route,
-        failed or ambiguous sends never fall back to an unconfirmed record.
+        Before delivery-aware Session receipts exist, a bounded compatibility
+        scan accepts only interactive legacy transcript sources.  Once receipt
+        tracking starts on a route, a failed or ambiguous delivery fails closed
+        instead of speaking an unconfirmed or cross-channel response.
         """
+
         session_store_available = getattr(self, "session_store", None) is not None
         if update is not None and session_store_available:
             try:
@@ -9893,10 +9943,6 @@ class FlexibleAgentRuntime:
                 if tracking_started:
                     return None
             except Exception as exc:
-                # A live Session lookup failure must fail closed: falling back
-                # to a pre-transport transcript could speak an undelivered or
-                # cross-channel response.  Only runtimes with no Session store
-                # at all use the compatibility path below.
                 logger = getattr(self, "error_logger", None)
                 if logger is not None:
                     logger.warning(
@@ -9910,8 +9956,8 @@ class FlexibleAgentRuntime:
             core_path = getattr(self, "core_transcript_log_path", None)
             if core_path is not None and core_path.exists():
                 last_core = None
-                with core_path.open("r", encoding="utf-8") as f:
-                    for line in f:
+                with core_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
                         line = line.strip()
                         if not line:
                             continue
@@ -9925,7 +9971,11 @@ class FlexibleAgentRuntime:
                         ):
                             last_core = entry
                 if last_core is not None:
-                    text = last_core.get("visible_text") or last_core.get("text") or ""
+                    text = (
+                        last_core.get("visible_text")
+                        or last_core.get("text")
+                        or ""
+                    )
                     if text.strip():
                         return text
         except Exception:
@@ -9935,8 +9985,8 @@ class FlexibleAgentRuntime:
             path = getattr(self, "transcript_log_path", None)
             if path is not None and path.exists():
                 last_text = None
-                with path.open("r", encoding="utf-8") as f:
-                    for line in f:
+                with path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
                         line = line.strip()
                         if not line:
                             continue
@@ -10368,6 +10418,7 @@ class FlexibleAgentRuntime:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                visible_text = normalize_user_visible_paths(visible_text)
                 receipt_text = visible_text
                 runtime_retry.clear_completed_interrupted_task(self, item)
                 safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
@@ -10705,15 +10756,15 @@ class FlexibleAgentRuntime:
                     completion_path="background",
                     error_type=receipt_error_type,
                 )
-            runtime_session.record_assistant_delivery(
-                self,
-                item,
-                delivered=receipt_delivered,
-                assistant_text=receipt_text,
-                transport="telegram",
-                completion_path="background",
-                disposition=receipt_disposition,
-            )
+                runtime_session.record_assistant_delivery(
+                    self,
+                    item,
+                    delivered=receipt_delivered,
+                    assistant_text=receipt_text,
+                    transport="telegram",
+                    completion_path="background",
+                    disposition=receipt_disposition,
+                )
             runtime_cross_session.record_turn_result(
                 self, item, assistant_text=receipt_text, response=receipt_response,
                 error=receipt_error, delivered=receipt_delivered, completion_path="background",

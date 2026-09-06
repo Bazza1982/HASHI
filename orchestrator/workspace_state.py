@@ -3,20 +3,14 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
-
-# importlib.reload() reuses the module dictionary. Preserve live locks so a
-# /reboot cannot split concurrent state writers across old and new lock maps.
-_LOCKS_GUARD = globals().get("_LOCKS_GUARD") or threading.Lock()
-_LOCKS: dict[str, threading.RLock] = globals().get("_LOCKS") or {}
+from orchestrator.process_resources import path_lock as process_path_lock
 
 
 def _path_lock(path: Path) -> threading.RLock:
-    key = str(path.resolve())
-    with _LOCKS_GUARD:
-        return _LOCKS.setdefault(key, threading.RLock())
+    return process_path_lock(path)
 
 
 class WorkspaceStateStore:

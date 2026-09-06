@@ -86,11 +86,7 @@ Each HASHI agent has a native workspace configured during setup. By default, the
 
 #### Workzones
 
-Workzones give an Agent access to, and focus on, one or more project folders.
-PAO's HASHI Conversation Session owns ten independent slots: `main` plus `1`
-through `9`. PCM projects the enabled, validated slots into Context but does
-not own or mutate their state. `/workzone` without a number addresses `main`;
-`/workzone 1` through `/workzone 9` address attached roots.
+Workzones give an agent access to, and focus on, one or more project folders. Each Session owns ten independent slots: `main` plus `1` through `9`. `/workzone` without a number addresses `main`; `/workzone 1` through `/workzone 9` address attached roots.
 
   - An enabled `main` slot becomes the effective working directory and first inspection location.
 
@@ -98,7 +94,7 @@ not own or mutate their state. `/workzone` without a number addresses `main`;
 
   - Each slot may be enabled, disabled, replaced, reloaded or deleted independently. Reload revalidates and rebinds the saved directory; it does not clear it. Delete removes only the slot configuration and never deletes filesystem content.
 
-  - Active available directories may be passed to native CLI Engines through repeated `--add-dir` or `--include-directories` arguments, according to Engine support.
+  - Active available directories may be passed to native CLIs through repeated `--add-dir` or `--include-directories` arguments, according to backend support.
 
   - The HASHI Tool Registry receives the exact active roots. Multiple roots are not widened to their common parent.
 
@@ -106,16 +102,11 @@ not own or mutate their state. `/workzone` without a number addresses `main`;
 
 |                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Important** Workzone is primarily a focus and default execution location mechanism, not a security boundary by itself. Access restrictions are enforced jointly by the active Engine Provider and HASHI. Native Engine sandboxes and permission modes remain applicable, while the PAO-owned HASHI Tool Registry and Tool Gateway enforce configured Tool permissions, exact `access_roots` and other admission controls. Workzone does not override or weaken any of these controls. |
+| **Important** Workzone is primarily a focus and default execution location mechanism, not a security boundary by itself. Access restrictions are enforced jointly by the active backend and HASHI. Native backend sandboxes and permission modes remain applicable, while the HASHI Tool Registry and Tool Gateway enforce configured tool permissions, exact `access_roots` and other admission controls. Workzone does not override or weaken any of these controls. |
 
 When at least one slot is enabled, HASHI emits one protected `working_environment.workzones` runtime-context section. It lists only enabled slots, marks `main` as primary and numbered slots as attached, and treats every path and label as data rather than instructions. Disabled slots are retained in Session state but omitted from PCM.
 
-When all Workzones are off, PCM does not generate a WORKZONES Context section.
-PAO restores the Engine and Tool Registry working directory to the Agent home
-workspace and uses its normal default access root. The Agent home workspace is
-therefore a normal task folder when no Workzone is active; the instruction to
-reserve it for memory, identity, logs and workspace-state work applies only
-while one or more Workzones are active.
+When all Workzones are off, HASHI does not generate a WORKZONES prompt section. The runtime restores the backend and Tool Registry working directory to the Agent home workspace and uses its normal default access root. The Agent home workspace is therefore a normal task folder when no Workzone is active; the instruction to reserve it for memory, identity, logs and workspace-state work applies only while one or more Workzones are active.
 
 #### High-permission or “YOLO” mode
 

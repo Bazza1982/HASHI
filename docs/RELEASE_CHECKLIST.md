@@ -5,6 +5,11 @@
 - Testing scope follows `docs/TESTING_POLICY.md`; focused, core, offline
   product, contract, platform, and live results are reported separately.
 - Static compile: `python3 -m py_compile main.py orchestrator/*.py`
+- Runtime contract:
+  - `python scripts/check_runtime_contract.py --json`
+  - CPython is the approved 3.12.13 patch and packaging, container, CI and portable builders agree
+  - standard dependencies install from `constraints/standard-py312.lock`
+  - `python -m pytest -q tests/test_runtime_contract.py tests/test_function_generation.py tests/test_reboot_manager.py`
 - Core gate: `python -m pytest -q`
 - Offline product suite for the release candidate: `python -m pytest -q tests -m "not contract and not live and not platform"`
 - Relevant contract and platform scopes are run and reported separately; live
@@ -28,12 +33,18 @@
     and returns, with no implicit `max` and no targeted-interface rejection
   - verify malformed `min`/number requests are rejected before preflight and
     never fall back to all running Agents
-  - no function change or failed reload directs the operator to a cold process restart
+  - no function change or failed generation directs the operator to a cold process restart
   - verify agents return to `ONLINE`
   - verify Backend API, enabled API Gateway, scheduler, delivery watcher, and
     background jobs are recreated and healthy
-  - introduce a syntax error in a disposable fixture and verify preflight
-    rejects `/reboot` without stopping live agents
+  - introduce a syntax/import/contract error in a disposable candidate and
+    verify the isolated staging worker rejects `/reboot` without stopping live
+    agents or changing the active generation ID
+  - change a disposable source after probe and verify the commit-time digest
+    check restores the previous generation
+  - verify the staging receipt uses another PID and exactly matches Core's
+    executable, platform ABI, dependency digest, protected-Core digest and API levels
+  - perform two successful `/reboot min` operations under the same Core PID
   - scan bridge logs for post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, and `LOCAL MODE`
 - Slim core docs:
   - `docs/HASHI_SLIM_CORE_ARCHITECTURE.md` reflects current manager boundaries

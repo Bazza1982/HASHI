@@ -7,6 +7,7 @@ import sys
 from contextlib import suppress
 from pathlib import Path
 
+from orchestrator.process_resources import async_named_lock
 from orchestrator.process_execution import (
     decode_process_output,
     process_group_kwargs,
@@ -23,9 +24,6 @@ AUTOMATION_SCRIPTS = {
 LEGACY_AUTOMATION_SCRIPTS = {
     "remote-guard": Path("skills/remote_guard/remote_guard.py"),
 }
-_AUTOMATION_LOCKS: dict[str, asyncio.Lock] = {}
-
-
 def canonical_automation_id(value: str) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
@@ -80,7 +78,7 @@ async def run_automation(
 
     resolved_workspace = workspace_dir.resolve()
     lock_key = f"{resolved_workspace}::{canonical_id}"
-    lock = _AUTOMATION_LOCKS.setdefault(lock_key, asyncio.Lock())
+    lock = async_named_lock(f"automation:{lock_key}")
     if lock.locked():
         return False, f"Automation '{canonical_id}' is already running."
 

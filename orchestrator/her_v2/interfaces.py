@@ -428,7 +428,7 @@ class TurnControl:
         return self._thread_stop_event.is_set() or self.stop_event.is_set()
 
     def stop(self, reason: str) -> None:
-        """Request cancellation safely from either the runtime or control thread."""
+        """Request cancellation safely from either runtime or control thread."""
 
         with self._thread_lock:
             self.reason = str(reason or "USER_STOP")
@@ -446,8 +446,6 @@ class TurnControl:
         try:
             owner_loop.call_soon_threadsafe(self._apply_stop)
         except RuntimeError:
-            # The thread-safe event remains authoritative when the owner loop
-            # is already closing.
             return
 
     def _apply_stop(self) -> None:

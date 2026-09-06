@@ -72,6 +72,7 @@ GET  /control/hashi/status
 GET  /control/hashi/logs?name=start|audit|supervisor&tail=120
 POST /control/hashi/start
 POST /control/hashi/restart
+POST /control/hashi/reboot
 GET  /control/hashi/restarts/{restart_id}
 ```
 
@@ -133,6 +134,13 @@ outcome, status state, and error text when available.
 single restart id. Restart ids are validated before file lookup to avoid path
 traversal.
 
+`/control/hashi/reboot` accepts one validated Agent name and `mode=min`. It
+first requests the ordinary per-Agent hot reboot through Workbench's
+token-protected `/api/admin/command` endpoint. If Workbench is unreachable and
+the caller permits fallback, Remote launches the fixed hard-restart path and
+records that escalation in the rescue audit. A rejected hot reboot is returned
+as a failure and is not silently upgraded to a hard restart.
+
 `reason` contract for v1:
 
 - stored as a single sanitized line
@@ -188,6 +196,8 @@ Upgraded Remotes advertise rescue support through protocol capabilities:
   `L3_RESTART`.
 - `rescue_restart`: restart endpoint exists and this Remote is configured with
   `L3_RESTART`.
+- `rescue_reboot`: supervised per-Agent hot reboot exists and this Remote is
+  configured with `L3_RESTART`.
 
 Older Remotes will not advertise these capabilities and may return `404` for
 the rescue endpoints. Client tools must treat that as "unsupported", not as a
@@ -228,6 +238,9 @@ curl -X POST http://<host>:<remote-port>/control/hashi/start \
 curl -X POST http://<host>:<remote-port>/control/hashi/restart \
   -H 'Content-Type: application/json' \
   -d '{"reason":"operator hard restart"}'
+curl -X POST http://<host>:<remote-port>/control/hashi/reboot \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"agent1","mode":"min","reason":"supervised hot reboot"}'
 ```
 
 Then poll `/control/hashi/status` until `hashi_running` is true. After HASHI is
@@ -285,6 +298,9 @@ Remote remains `L2_WRITE`.
   shell.
 - Treat `/control/hashi/restart` as a destructive cold-restart operation. It
   must be scoped to the intended HASHI instance and audited.
+- Prefer `/control/hashi/reboot` for a healthy Core. It is Agent-scoped,
+  authenticated at both Remote and Workbench, and falls back to a cold restart
+  only when Workbench is unreachable and fallback was explicitly allowed.
 - Prefer `bridge_ctl.ps1` on HASHI9 Windows because it follows the native
   bridge lifecycle more reliably than ad-hoc process creation.
 - Use `/control/hashi/logs?name=audit` first when checking who initiated a

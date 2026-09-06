@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from orchestrator.post_turn_observer import PreTurnContextProvider, TurnContextRequest
+from orchestrator.process_resources import path_lock as process_path_lock
 from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 from orchestrator.workspace_state import WorkspaceStateStore
 
@@ -41,7 +43,6 @@ _TODAY_LIMITS = {
 _ITEM_MAX_CHARS = 240
 _OBJECTIVE_MAX_CHARS = 320
 _INDEX_MAX_DAYS = 90
-_PROCESS_STORE_LOCK = threading.RLock()
 
 
 def _lock_file(handle) -> None:
@@ -59,7 +60,7 @@ def _memory_plus_store_lock(workspace_dir: Path):
     """Serialize read-modify-write operations across threads and local processes."""
     lock_path = workspace_dir / "memory" / ".memory_plus.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with _PROCESS_STORE_LOCK:
+    with process_path_lock(lock_path):
         with lock_path.open("a+", encoding="utf-8") as handle:
             _lock_file(handle)
             try:

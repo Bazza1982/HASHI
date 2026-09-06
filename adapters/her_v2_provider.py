@@ -2292,12 +2292,7 @@ class HashiStageProvider(StageProvider):
             self._active_backends.pop(id(backend), None)
 
     def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
-        """Interrupt active provider subprocesses from the control thread.
-
-        API operations are cancelled by ``TurnControl`` on their owning loop;
-        CLI process groups can additionally be terminated here without waiting
-        for that potentially congested loop to run another coroutine.
-        """
+        """Interrupt active provider subprocesses from the control thread."""
 
         with self._active_backend_lock:
             active = tuple(self._active_backends.values())
@@ -4381,8 +4376,8 @@ class HashiStageProvider(StageProvider):
                 label=f"{profile.engine}/{profile.model} invocation failed",
             ) from exc
         finally:
-            self._untrack_active_backend(backend)
             try:
+                self._untrack_active_backend(backend)
                 await backend.shutdown()
             finally:
                 flush_audit = getattr(

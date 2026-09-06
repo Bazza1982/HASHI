@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402 - dependency stubs must be installed before runtime imports.
+
 import json
 import sys
 import types
@@ -187,7 +189,7 @@ async def test_send_voice_reply_reports_telegram_timeout_as_unknown(tmp_path):
     ogg_path = tmp_path / "reply.ogg"
     ogg_path.write_bytes(b"ogg")
 
-    class VoiceManager:
+    class TestVoiceManager:
         async def synthesize_reply(self, *args, **kwargs):
             return VoiceAsset(
                 provider="test",
@@ -204,7 +206,7 @@ async def test_send_voice_reply_reports_telegram_timeout_as_unknown(tmp_path):
     warnings = []
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.telegram_connected = True
-    runtime.voice_manager = VoiceManager()
+    runtime.voice_manager = TestVoiceManager()
     runtime.name = "zelda"
     runtime.app = SimpleNamespace(bot=Bot())
     runtime.telegram_logger = SimpleNamespace(

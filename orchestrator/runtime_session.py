@@ -519,14 +519,7 @@ def telegram_delivery_state_for_update(
     runtime: Any,
     update: Any,
 ) -> tuple[str | None, bool]:
-    """Return delivery state for the Telegram chat targeted by ``/say``.
-
-    Local/API command dispatch uses a Workbench control surface, but ``/say``
-    still sends to ``effective_chat.id`` through Telegram.  Resolve the target
-    Telegram binding rather than the command's ingress surface so local
-    administration retains the same behavior without mixing API responses
-    into the spoken-reply history.
-    """
+    """Return confirmed assistant delivery state for the target Telegram chat."""
 
     (
         update_surface,

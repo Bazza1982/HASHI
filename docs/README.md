@@ -22,6 +22,13 @@ engineering layers—and governs every lower-level design in this directory.
 > for its merged implementation baseline, verification evidence, known limits,
 > and GitHub push boundary. It is not current architecture authority.
 >
+> **HASHI3 runtime pilot:** the runtime-alignment generation, isolated Function
+> Worker, and Windows Computer Worker are live-adopted on HASHI3. See
+> [HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md)
+> for exact offline/live evidence, Session Workzones, provider interruption,
+> installed components, and the logged-in Browser, Remote deployment, plus
+> external/disruptive canaries that remain explicitly open.
+>
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
 ---
@@ -66,14 +73,13 @@ line.
 ## Active (keep these current)
 
 ### Core references
-- [../ARCHITECTURE.md](../ARCHITECTURE.md) — Level 0 authoritative HASHI architecture: functional modules, engineering layers, terminology, Session authority, and future-development rules
-- [HASHI_PAO_SYSTEM_DESIGN.md](HASHI_PAO_SYSTEM_DESIGN.md) — authoritative PAO ownership of Agents, Conversation Sessions, Engine binding, Tools, workflows, Jobs, and cross-agent orchestration
-- [HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) — authoritative built-in TUI, messaging, API, compatible-client, and retired-Workbench boundary
-- [MULTI_SESSION_FRONTEND_INSERTION_PLAN.md](MULTI_SESSION_FRONTEND_INSERTION_PLAN.md) — generic frontend responsibilities, capability and size gates, rollback points, and black-box qualification boundary
-- [HASHI_COMMAND_UI_STYLE_GUIDE.md](HASHI_COMMAND_UI_STYLE_GUIDE.md) — display contract for slash commands, Telegram cards, help text, and inline buttons
-- [HASHI_NATIVE_AUDIO_CHAT_DESIGN.md](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md) — implemented and qualified Model-Provider- and terminal-neutral native audio input/output, HER routing, Safe Voice, fallback, retention, and generic frontend Events
-- [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative Engine-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval, and projection
-- [HER_V2_WIP_JOURNAL.md](HER_V2_WIP_JOURNAL.md) — legacy/shadow transient unfinished-work projection retained during canonical recovery validation; not current recovery authority
+- [HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md) — current HASHI3 live runtime/device-control receipts, completed gates, installed Browser/Computer components, and remaining operator-dependent canaries
+- [HASHI3_FUNCTION_WORKER_PAUSE_CHECKPOINT_2026-09-04.md](HASHI3_FUNCTION_WORKER_PAUSE_CHECKPOINT_2026-09-04.md) — superseded historical safe-pause snapshot retained for audit continuity
+- [HASHI_PYTHON_RUNTIME_COMPATIBILITY.md](HASHI_PYTHON_RUNTIME_COMPATIBILITY.md) — normative CPython 3.12.13 Core, per-Agent Function Worker, immutable generation, JSON IPC, rollback, recovery, test and migration contract
+- [HASHI_NATIVE_AUDIO_CHAT_DESIGN.md](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md) — implemented and qualified provider- and terminal-neutral native audio input/output, HER routing, Safe Voice, fallback, retention, and generic frontend Events
+- [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative target design for backend-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval and migration
+- [CODEX_FAILURE_CONTRACT.md](CODEX_FAILURE_CONTRACT.md) — terminal status, event evidence, typed failure, and side-effect-safe retry contract for Codex CLI execution
+- [HER_V2_WIP_JOURNAL.md](HER_V2_WIP_JOURNAL.md) — crash-safe transient unfinished-work context, clear/preserve rules, and lifecycle audit evidence
 - [TELEGRAM_NOTIFICATION_MODES.md](TELEGRAM_NOTIFICATION_MODES.md) — `/notify on|quiet|off`, final/error notification policy, persistence, and Telegram sound/vibration boundary
 - [HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md) — client-neutral persistent Session, Run, Message and Event architecture for agentic frontends
 - [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted assertion migration and minimum 24-contract backend-neutral PCM verification gate
@@ -93,9 +99,10 @@ line.
 - [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md) — Enterprise AAI phase plan, `0.1 Alpha` cut line, tickets, dependencies, and migration matrix
 - [HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md](HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md) — Enterprise AAI `0.1 Alpha` readiness decision, evidence, deferred work, and completion boundary
 - [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) — Enterprise `0.1 Alpha` deployment skeleton and current limits
-- [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md) — v3.2 slim core architecture and hot manager rebuild contract
-- [HASHI_LAYERED_RUNTIME_BOUNDARIES.md](HASHI_LAYERED_RUNTIME_BOUNDARIES.md) — four-layer HASHI boundary: protected core, hot-reloadable functions, platform config, and instance config
-- [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — implementation plan and acceptance record for the slim core migration
+- [HASHI_SLIM_CORE_ARCHITECTURE.md](HASHI_SLIM_CORE_ARCHITECTURE.md) — stable Core, per-Agent Worker, route gate, transaction and crash-recovery architecture
+- [HASHI_LAYERED_RUNTIME_BOUNDARIES.md](HASHI_LAYERED_RUNTIME_BOUNDARIES.md) — four-layer boundary: protected Core, replaceable Function Workers, platform config, and instance config
+- [HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md) — implemented HASHI3 Browser/Computer Worker design, unified capability leases, WSL/Windows discovery, live Computer acceptance, and remaining Browser/disruptive gates
+- [HASHI_CORE_SLIMMING_PLAN.md](HASHI_CORE_SLIMMING_PLAN.md) — historical v3.2 migration record; superseded for current `/reboot` behavior
 - [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — historical v3.2 wrapper-mode design and acceptance record; the mode is retired in v4
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
 - [CODEX_API_TOOL_CALL_BRIDGE.md](CODEX_API_TOOL_CALL_BRIDGE.md) — Codex app-server bridge for caller-owned OpenAI function tools, structured history, isolation, and Agent usage contract

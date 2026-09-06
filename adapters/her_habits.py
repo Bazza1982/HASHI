@@ -11,7 +11,6 @@ import json
 import os
 import re
 import tempfile
-import threading
 import unicodedata
 import uuid
 from collections import Counter
@@ -22,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.her_json_repair import render_json_repair_input
+from orchestrator.file_permissions import tighten_fd_permissions
+from orchestrator.process_resources import path_lock as process_path_lock
 
 HABIT_FORMAT = "her-habit-v1"
 MEDITATION_JOB_FORMAT = "her-habit-meditation-job-v1"
@@ -98,7 +99,6 @@ _STOPWORDS = {
     "you",
     "your",
 }
-_HABIT_AUDIT_LOCK = threading.Lock()
 
 
 class MeditationValidationError(ValueError):
@@ -369,7 +369,7 @@ def append_habit_audit(
         **{str(key): _audit_safe(value) for key, value in fields.items()},
     }
     line = json.dumps(record, ensure_ascii=False, sort_keys=True)
-    with _HABIT_AUDIT_LOCK:
+    with process_path_lock(path):
         with path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
     return path
@@ -434,7 +434,7 @@ def _atomic_write_json(destination: Path, payload: Mapping[str, Any]) -> None:
         dir=destination.parent,
     )
     try:
-        os.fchmod(fd, 0o600)
+        tighten_fd_permissions(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(dict(payload), handle, ensure_ascii=False, indent=2)
             handle.write("\n")
@@ -547,7 +547,7 @@ class HERHabitStore:
                 if not isinstance(payload, Mapping):
                     raise TypeError("habit file must contain an object")
                 habits.append(HERHabit.from_payload(payload))
-            except Exception as exc:  # noqa: BLE001 - one bad habit must not block HER
+            except Exception as exc:
                 if self.logger is not None:
                     self.logger.warning("Ignoring invalid HER habit file %s: %s", path, exc)
         return habits
@@ -787,7 +787,7 @@ class HERHabitStore:
                     action_baseline=dict(baseline_entry or {}),
                     context=dict(audit_context or {}),
                 )
-            except Exception as exc:  # noqa: BLE001 - audit cannot corrupt the write
+            except Exception as exc:
                 if self.logger is not None:
                     self.logger.warning(
                         "HER Habit audit append failed: operation=%s error=%s",
@@ -967,7 +967,7 @@ class HERHabitStore:
                 after=updated.to_payload(),
                 context=dict(audit_context or {}),
             )
-        except Exception as exc:  # noqa: BLE001 - audit cannot undo a committed flag
+        except Exception as exc:
             if self.logger is not None:
                 self.logger.warning(
                     "HER Habit protection audit append failed: habit=%s error=%s",
@@ -1370,7 +1370,7 @@ class HERMeditationJournal:
         for path in sorted(self.root.glob("*.json")):
             try:
                 payload = self._read(path.stem)
-            except Exception as exc:  # noqa: BLE001 - one corrupt job must not block HER
+            except Exception as exc:
                 if self.logger is not None:
                     self.logger.warning(
                         "Ignoring invalid HER Meditation job %s: %s",
@@ -1390,7 +1390,7 @@ class HERMeditationJournal:
         for path in sorted(self.root.glob("*.json")):
             try:
                 payload = self._read(path.stem)
-            except Exception as exc:  # noqa: BLE001 - one corrupt job must not block recovery
+            except Exception as exc:
                 if self.logger is not None:
                     self.logger.warning(
                         "Ignoring invalid HER Meditation recovery job %s: %s",
@@ -1510,7 +1510,7 @@ class HERMeditationJournal:
                 changes=payload["changes"],
                 notification=notification,
             )
-        except Exception as exc:  # noqa: BLE001 - journal completion is authoritative
+        except Exception as exc:
             if self.logger is not None:
                 self.logger.warning(
                     "HER Habit completion audit append failed: job=%s error=%s",
@@ -1607,7 +1607,7 @@ class HERMeditationJournal:
         for path in sorted(self.root.glob("*.json")):
             try:
                 payload = self._read(path.stem)
-            except Exception as exc:  # noqa: BLE001 - one corrupt job must not block delivery
+            except Exception as exc:
                 if self.logger is not None:
                     self.logger.warning(
                         "Ignoring invalid HER Meditation meter job %s: %s",
@@ -1709,7 +1709,7 @@ class HERMeditationJournal:
         for path in sorted(self.root.glob("*.json")):
             try:
                 payload = self._read(path.stem)
-            except Exception as exc:  # noqa: BLE001 - one corrupt job must not block delivery
+            except Exception as exc:
                 if self.logger is not None:
                     self.logger.warning(
                         "Ignoring invalid HER Habit notification job %s: %s",

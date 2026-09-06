@@ -11,6 +11,7 @@ from typing import Any
 
 from tools.gateway.context import live_workbench_api_base_url, write_gateway_context
 from tools.gateway.mcp_stdio import exposed_tool_name
+from orchestrator.file_permissions import tighten_fd_permissions
 
 
 SERVER_NAME = "hashi_tools"
@@ -66,7 +67,7 @@ def write_claude_mcp_config(adapter: Any, descriptor: dict[str, Any]) -> Path:
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(fd, 0o600)
+        tighten_fd_permissions(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")

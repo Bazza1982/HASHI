@@ -72,7 +72,11 @@ def create_app(log_dir: Path) -> FastAPI:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("HASHI_WINDOWS_HELPER_PORT", "47831")))
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("HASHI_WINDOWS_HELPER_PORT", "0")),
+    )
     parser.add_argument("--log-dir", default=str(Path(os.environ.get("LOCALAPPDATA", ".")) / "HASHI" / "windows_helper" / "logs"))
     args = parser.parse_args()
     uvicorn.run(create_app(Path(args.log_dir)), host=args.host, port=args.port, log_level="warning")

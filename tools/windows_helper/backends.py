@@ -118,6 +118,11 @@ def _helper_screenshot_response(data: bytes, provider: str, save_path: str = "",
 
 async def execute_action(action: str, args: dict) -> str:
     provider = _resolve_provider(args.get("provider"), action)
+    native_only = bool(args.get("_persistent_worker"))
+    if native_only and provider != "usecomputer":
+        raise RuntimeError(
+            "persistent Computer Control Worker only permits its native provider"
+        )
     if action == "whatsapp_call_probe":
         result = probe_whatsapp_call(
             auto_answer=bool(args.get("auto_answer", False)),
@@ -180,19 +185,11 @@ async def execute_action(action: str, args: dict) -> str:
         return f"Sent close request to window id={target.get('id')} title={target.get('title', '')}"
 
     if action == "info":
-        uc = find_usecomputer()
-        displays = mouse = None
-        if uc:
-            rc, out, _ = await _run([uc, "display", "list", "--json"])
-            displays = json.loads(out) if rc == 0 and out else None
-            rc, out, _ = await _run([uc, "mouse", "position", "--json"])
-            mouse = json.loads(out) if rc == 0 and out else None
         return json.dumps(
             {
-                "provider": "helper",
-                "usecomputer_path": uc,
-                "mouse_position": mouse,
-                "displays": displays,
+                "provider": "helper-native",
+                "mouse_position": win32.get_cursor_position(),
+                "displays": win32.get_display_info(),
                 "windows": win32.list_windows() if args.get("include_windows", True) else None,
                 "input_state": win32.get_input_state(),
             },
@@ -211,8 +208,9 @@ async def execute_action(action: str, args: dict) -> str:
                 pos = win32.move_mouse(x, y)
                 win32.reset_input_state()
                 return f"Mouse moved to ({pos['x']}, {pos['y']}) on Windows host via helper-native"
-            except Exception:
-                pass
+            except Exception as exc:
+                if native_only:
+                    raise RuntimeError(f"native mouse_move failed: {exc}") from exc
         if provider == "windows-mcp":
             text = await _mcp_text("Move", {"loc": [x, y]})
             win32.reset_input_state()
@@ -232,8 +230,9 @@ async def execute_action(action: str, args: dict) -> str:
                 win32.click_mouse(x, y, button=button, count=count)
                 win32.reset_input_state(release_mouse=False)
                 return f"Clicked ({x}, {y}) button={button} count={count} on Windows host via helper-native"
-            except Exception:
-                pass
+            except Exception as exc:
+                if native_only:
+                    raise RuntimeError(f"native click failed: {exc}") from exc
         if provider == "windows-mcp":
             text = await _mcp_text("Click", {"loc": [x, y], "button": button, "clicks": count})
             win32.reset_input_state()
@@ -264,8 +263,9 @@ async def execute_action(action: str, args: dict) -> str:
                 )
                 win32.reset_input_state(release_mouse=False)
                 return f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y}) button={button} on Windows host via helper-native"
-            except Exception:
-                pass
+            except Exception as exc:
+                if native_only:
+                    raise RuntimeError(f"native drag failed: {exc}") from exc
         cmd = ["drag", _quote_point(from_x, from_y), _quote_point(to_x, to_y)]
         if curve_x is not None and curve_y is not None:
             cmd.append(_quote_point(int(curve_x), int(curve_y)))
@@ -295,8 +295,9 @@ async def execute_action(action: str, args: dict) -> str:
                 win32.reset_input_state(release_mouse=False)
                 typed_method = typed.get("method", "sendinput")
                 return f"Typed {typed['text_length']} chars on Windows host via helper-native ({typed_method})"
-            except Exception:
-                pass
+            except Exception as exc:
+                if native_only:
+                    raise RuntimeError(f"native type failed: {exc}") from exc
         if provider == "windows-mcp":
             x = args.get("x")
             y = args.get("y")
@@ -317,8 +318,9 @@ async def execute_action(action: str, args: dict) -> str:
                 win32.press_key_combo(key)
                 win32.reset_input_state()
                 return f"Pressed '{key}' on Windows host via helper-native"
-            except Exception:
-                pass
+            except Exception as exc:
+                if native_only:
+                    raise RuntimeError(f"native key failed: {exc}") from exc
         if provider == "windows-mcp":
             text = await _mcp_text("Shortcut", {"shortcut": key})
             win32.reset_input_state()
@@ -338,8 +340,9 @@ async def execute_action(action: str, args: dict) -> str:
                 win32.scroll_mouse(direction=direction, amount=amount, horizontal=horizontal)
                 win32.reset_input_state()
                 return f"Scrolled {direction} x{amount} on Windows host via helper-native"
-            except Exception:
-                pass
+            except Exception as exc:
+                if native_only:
+                    raise RuntimeError(f"native scroll failed: {exc}") from exc
         if provider == "windows-mcp":
             payload = {
                 "direction": direction,
@@ -371,8 +374,9 @@ async def execute_action(action: str, args: dict) -> str:
                 finally:
                     tmp.unlink(missing_ok=True)
                 return _helper_screenshot_response(data, "helper-native", save_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                if native_only:
+                    raise RuntimeError(f"native screenshot failed: {exc}") from exc
         if provider == "windows-mcp":
             payload = {}
             if args.get("display") is not None:

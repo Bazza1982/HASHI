@@ -265,29 +265,18 @@ async def test_tick_recovery_retries_recovery_due_after_transient_error(tmp_path
         global_cfg=SimpleNamespace(project_root=tmp_path),
     )
     source.orchestrator = orchestrator
-    path = tmp_path / "state" / "telegram_delivery_health.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "agents": {
-                    "zelda": {
-                        "token_key": "telegram:zelda",
-                        "status": "blocked",
-                        "blocked_until": "2000-01-01T00:00:00+00:00",
-                        "retry_after_s": 5,
-                        "incident_id": "tg-zelda-test",
-                        "per_chat": {
-                            "321": {
-                                "first_warned_at": "2000-01-01T00:00:00+00:00"
-                            }
-                        },
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "blocked",
+            "blocked_until": "2000-01-01T00:00:00+00:00",
+            "retry_after_s": 5,
+            "incident_id": "tg-zelda-test",
+            "per_chat": {
+                "321": {"first_warned_at": "2000-01-01T00:00:00+00:00"}
+            },
+        },
     )
 
     await failover._tick_recovery(orchestrator)
@@ -353,26 +342,16 @@ async def test_recovery_due_never_suppresses_normal_delivery(tmp_path):
     orchestrator = SimpleNamespace(runtimes=[source, fail], raw_config={})
     source.orchestrator = orchestrator
     fail.orchestrator = orchestrator
-    path = tmp_path / "state" / "telegram_delivery_health.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "agents": {
-                    "zelda": {
-                        "token_key": "telegram:zelda",
-                        "status": "recovery_due",
-                        "blocked_until": "2000-01-01T00:00:05+00:00",
-                        "retry_after_s": 5,
-                        "incident_id": "tg-zelda-test",
-                        "active_failover_agent": "lily",
-                        "per_chat": {},
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
+    _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_due",
+            "blocked_until": "2000-01-01T00:00:05+00:00",
+            "retry_after_s": 5,
+            "incident_id": "tg-zelda-test",
+            "active_failover_agent": "lily",
+        },
     )
 
     blocked = await failover.handle_blocked_send(

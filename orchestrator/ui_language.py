@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 import os
 import string
-import threading
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 from uuid import uuid4
 
+from orchestrator.process_resources import named_lock
 
 DEFAULT_LOCALE = "en"
 SUPPORTED_LOCALES = ("en", "zh-CN")
@@ -37,7 +38,7 @@ _ACTIVE_LOCALE: ContextVar[str] = ContextVar(
     "hashi_ui_locale",
     default=DEFAULT_LOCALE,
 )
-_PREFERENCES_LOCK = globals().get("_PREFERENCES_LOCK") or threading.RLock()
+_PREFERENCES_LOCK = named_lock("ui-language-preferences")
 
 
 @dataclass(frozen=True)

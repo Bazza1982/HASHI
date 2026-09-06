@@ -18,7 +18,16 @@ def _runtime(tmp_path):
         _normalize_instance_name=lambda value: str(value or "").upper(),
         _load_instances=lambda: {},
         _persist_transfer_state=None,
-        global_config=SimpleNamespace(workbench_port=8765),
+        global_config=SimpleNamespace(instance_id="HASHI1", workbench_port=8765),
+        orchestrator=SimpleNamespace(
+            resolve_service_endpoint=lambda service, expected_instance=None: {
+                "service": service,
+                "instance_id": expected_instance,
+                "host": "172.29.144.7",
+                "port": 8765,
+                "base_url": "http://172.29.144.7:8765",
+            }
+        ),
         handoff_builder=None,
         name="zelda",
         workspace_dir=tmp_path / "workspace",
@@ -116,16 +125,51 @@ def test_resolve_bridge_handoff_endpoint_handles_local_and_remote(tmp_path):
 
     assert runtime_transfer.resolve_bridge_handoff_endpoint(runtime, "hashi1", "transfer") == (
         "HASHI1",
-        "http://127.0.0.1:8765/api/bridge/transfer",
+        "http://172.29.144.7:8765/api/bridge/transfer",
     )
 
     runtime._load_instances = lambda: {
-        "hashi2": {"api_host": "10.0.0.2", "workbench_port": 9000},
+        "hashi2": {
+            "instance_id": "HASHI2",
+            "api_host": "10.0.0.2",
+            "workbench_port": 9000,
+        },
     }
     assert runtime_transfer.resolve_bridge_handoff_endpoint(runtime, "HASHI2", "fork") == (
         "HASHI2",
         "http://10.0.0.2:9000/api/bridge/fork",
     )
+
+
+def test_resolve_bridge_handoff_rejects_cross_instance_endpoint_alias(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._load_instances = lambda: {
+        "hashi2": {
+            "instance_id": "HASHI2",
+            "api_host": "172.29.144.7",
+            "workbench_port": 8765,
+        },
+    }
+
+    with pytest.raises(ValueError, match="local instance endpoint"):
+        runtime_transfer.resolve_bridge_handoff_endpoint(
+            runtime,
+            "HASHI2",
+            "transfer",
+        )
+
+
+def test_handoff_health_identity_must_match_target_instance():
+    runtime_transfer.verify_handoff_instance_identity(
+        {"instance_id": "HASHI3"},
+        expected_instance="hashi3",
+    )
+
+    with pytest.raises(ValueError, match="identity check failed"):
+        runtime_transfer.verify_handoff_instance_identity(
+            {"instance_id": "HASHI1"},
+            expected_instance="HASHI3",
+        )
 
 
 def test_build_handoff_payload_adds_runtime_metadata(tmp_path):

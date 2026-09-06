@@ -3,6 +3,7 @@ import copy
 import html
 import json
 import importlib.util
+import os
 import shutil
 import sys
 from datetime import datetime
@@ -23,7 +24,11 @@ def _default_tts_provider() -> str:
 
 
 class VoiceManager:
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    PROJECT_ROOT = Path(
+        os.environ.get("HASHI_SOURCE_ROOT")
+        or os.environ.get("BRIDGE_HOME")
+        or Path(__file__).resolve().parent.parent
+    ).resolve()
     PIPER_MODEL_DIR = PROJECT_ROOT / "voice_models" / "piper"
     VOICE_PREVIEW_VERSION = "v1"
     VOICE_PREVIEW_RENDERERS = ("native", "tts")

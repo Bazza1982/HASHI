@@ -54,7 +54,6 @@ class GrokCLIAdapter(BaseBackend):
         self.current_proc = None
         self._active_read_tasks: list[asyncio.Task] = []
         self.cmd_base = getattr(self.global_config, "grok_cmd", "grok")
-        self.access_root = str(self.config.resolve_access_root())
         self._session_id: str | None = None
         self._session_mode: bool = bool((self.config.extra or {}).get("session_mode", False))
         requested_effort = self._extra_str("effort", self.DEFAULT_REASONING_EFFORT).lower()

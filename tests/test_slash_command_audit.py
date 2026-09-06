@@ -7,13 +7,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.admin_local_testing import execute_local_command
+from orchestrator.admin_local_testing import (
+    execute_local_command,
+    try_execute_slash_command_text,
+)
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
     active_slash_command_audit_session,
     append_audit_record,
     build_audit_record,
     default_audit_path,
+    looks_like_slash_command,
+    parse_inline_callback_command,
+    parse_slash_command_text,
     redact_args,
 )
 
@@ -224,14 +230,6 @@ async def test_execute_local_command_writes_failed_unknown_audit(tmp_path):
     rows = _read_jsonl(default_audit_path(tmp_path))
     assert rows[0]["status"] == "failed"
     assert "unknown command" in (rows[0]["error"] or "")
-
-from orchestrator.admin_local_testing import try_execute_slash_command_text
-from orchestrator.slash_command_audit import (
-    looks_like_slash_command,
-    parse_inline_callback_command,
-    parse_slash_command_text,
-)
-
 
 def test_looks_like_and_parse_slash_command_text():
     assert looks_like_slash_command("/status full") is True

@@ -237,7 +237,7 @@ async def _shutdown_active_backend(runtime: Any) -> str:
 
 
 async def _interrupt_active_backend(runtime: Any, *, reason: str) -> str:
-    """Issue the out-of-band signal first, then perform orderly loop cleanup."""
+    """Issue the independent process signal before orderly loop cleanup."""
 
     lane = getattr(runtime, "control_lane", None)
     if lane is not None:

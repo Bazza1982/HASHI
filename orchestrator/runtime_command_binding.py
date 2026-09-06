@@ -225,6 +225,20 @@ async def sync_user_command_menus(
         candidates = [runtime]
     failures = 0
     for candidate in candidates:
+        remote_setter = getattr(candidate, "set_command_menu", None)
+        if callable(remote_setter) and not hasattr(candidate, "app"):
+            try:
+                await remote_setter(chat_id=numeric_chat_id, locale=locale)
+            except Exception as exc:
+                failures += 1
+                logger.warning(
+                    "Could not refresh %s command menu for chat %s on %s: %s",
+                    locale,
+                    numeric_chat_id,
+                    getattr(candidate, "name", "unknown"),
+                    exc,
+                )
+            continue
         bot = getattr(getattr(candidate, "app", None), "bot", None)
         if bot is None or not getattr(candidate, "telegram_connected", True):
             continue

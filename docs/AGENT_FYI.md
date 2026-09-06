@@ -110,13 +110,13 @@ when ambiguous.
 - `/recall [count]`: remove requests still waiting in this agent's READY or FUTURE queue without interrupting the current task. With no count, remove both layers completely. The optional count may be any positive whole number and selects the newest requests across both layers by creation time. If `n` exceeds the combined queue length, all waiting requests are removed without error. Retained READY requests keep their original FIFO order. It does not restart the backend or affect cron, heartbeat, nudge, or other `/jobs` work. This command is separate from the hidden legacy recall-state compatibility setting. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).
 - `/privacy [0-5]`: show the privacy menu and active-backend compatibility details, or request a level directly. Level 0 disables the privacy framework; Level 1 is the default provider-trust mode with no local redaction. Levels 2–5 remain visible as reserved framework states and cannot be activated until their promised controls are installed and verified. Lowering the active level requires explicit confirmation.
 - `/start`: start another stopped agent.
-- `/reboot`: hot restart agents with live Python code reload. Modes:
-  - `/reboot` — restart all running agents (same selection), picks up code + config changes.
-  - `/reboot min` — reload current code/config and restart only this bot; it is
-    never promoted to all bots or blocked merely because a class interface
-    changed.
-  - `/reboot max` — restart all active agents.
-  - `/reboot [number]` — reload current code/config and restart exactly that agent.
+- `/reboot`: transactionally switch Agent Function Workers. Modes:
+  - `/reboot` — replace all currently running Agent Workers with one verified
+    immutable generation.
+  - `/reboot min` — replace only this Agent's Worker; other Agents and Core
+    services keep their existing objects and generation.
+  - `/reboot max` — replace all active Agent Workers.
+  - `/reboot [number]` — replace exactly that configured/running Agent Worker.
   - `/reboot help` — list modes and show all agents with numbers.
 - `/rebuild`: one-version compatibility notice for the retired native HER build workflow. It performs no build, reload, restart, or status lookup. Use `/reboot` to adopt HASHI Python updates.
 - `/terminate`: shut down this agent.

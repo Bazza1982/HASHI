@@ -12,29 +12,14 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator.audio_assets import (
+    DEFAULT_RETENTION_SECONDS,
+    MIN_RETENTION_SECONDS,
     AudioAssetError,
     AudioAssetNotFound,
     AudioAssetStore,
-    DEFAULT_RETENTION_SECONDS,
-    MIN_RETENTION_SECONDS,
     normalize_audio_format,
 )
 from orchestrator.multimodal_contract import contains_persistent_inline_media
-
-# ``importlib.reload`` reuses the module dictionary.  Preserve the class and
-# exception identities already held by live runtimes; the handoff at the end
-# of this module installs the newly defined implementation onto those objects.
-_PRE_RELOAD_SESSION_STORE_CLASS = globals().get("SessionStore")
-_PRE_RELOAD_SESSION_ERROR_CLASSES = {
-    name: globals().get(name)
-    for name in (
-        "SessionStoreError",
-        "SessionNotFound",
-        "SessionConflict",
-        "IdempotencyConflict",
-        "StaleFencingToken",
-    )
-}
 
 TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "stopped", "superseded", "interrupted"}
@@ -1420,14 +1405,7 @@ class SessionStore:
         completion_path: str,
         disposition: str = "",
     ) -> dict[str, Any] | None:
-        """Persist one final-response delivery outcome for a Session Run.
-
-        Run completion only proves that the backend produced an assistant
-        message.  Commands such as ``/say`` need the stricter fact that the
-        visible final response reached its intended channel.  The route is
-        part of the receipt because one Session may be bound to multiple
-        surfaces or chats.
-        """
+        """Persist one final-response delivery outcome for a Session Run."""
 
         normalized_surface = str(surface or "").strip().lower()
         normalized_channel = str(channel_key or "").strip()
@@ -1440,10 +1418,12 @@ class SessionStore:
                 """
                 SELECT r.*, m.text AS canonical_assistant_text
                 FROM runs AS r
+                JOIN sessions AS s ON s.session_id = r.session_id
                 JOIN messages AS m ON m.message_id = r.final_message_id
                 WHERE r.request_id = ? AND r.state = 'completed'
+                  AND s.instance_id = ?
                 """,
-                (str(request_id),),
+                (str(request_id), self.instance_id),
             ).fetchone()
             if run is None:
                 return None
@@ -1477,10 +1457,6 @@ class SessionStore:
                 "disposition": str(disposition or "").strip(),
             }
             if delivered_text and delivered_text != canonical_text:
-                # CoS and other presentation paths can replace the persisted
-                # backend text at delivery time.  Store only that exceptional
-                # override; ordinary receipts continue referencing the
-                # canonical assistant Message without duplicating its text.
                 detail["text_override"] = delivered_text
             return self._append_event(
                 connection,
@@ -1519,7 +1495,8 @@ class SessionStore:
                 FROM run_events AS e
                 JOIN runs AS r ON r.run_id = e.run_id
                 JOIN messages AS m ON m.message_id = r.final_message_id
-                WHERE e.session_id = ?
+                JOIN sessions AS s ON s.session_id = e.session_id
+                WHERE e.session_id = ? AND s.instance_id = ?
                   AND e.kind = 'assistant.delivery.outcome'
                   AND e.status = 'delivered'
                   AND e.phase = ?
@@ -1528,7 +1505,7 @@ class SessionStore:
                   AND m.visibility = 'visible'
                 ORDER BY e.sequence DESC
                 """,
-                (str(session_id), route_phase),
+                (str(session_id), self.instance_id, route_phase),
             ).fetchall()
         for row in rows:
             detail = _json_object(row["detail_json"])
@@ -1555,12 +1532,14 @@ class SessionStore:
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT 1 FROM run_events
-                WHERE session_id = ? AND kind = 'assistant.delivery.outcome'
-                  AND phase = ?
+                SELECT 1 FROM run_events AS e
+                JOIN sessions AS s ON s.session_id = e.session_id
+                WHERE e.session_id = ? AND s.instance_id = ?
+                  AND e.kind = 'assistant.delivery.outcome'
+                  AND e.phase = ?
                 LIMIT 1
                 """,
-                (str(session_id), route_phase),
+                (str(session_id), self.instance_id, route_phase),
             ).fetchone()
         return row is not None
 
@@ -2778,13 +2757,13 @@ class SessionStore:
         its user Message and evidence, and appends one durable terminal Event.
         A later user continuation is a new child Run with a new idempotency key.
 
-        Process startup reconciles the whole instance.  Agent lifecycle restart
-        passes ``agent_id`` so one restarted executor cannot interrupt Runs that
-        still belong to another live Agent in the same HASHI process.
+        Process startup reconciles the whole instance.  Per-Agent Function
+        Worker startup and recovery pass ``agent_id`` so one executor cannot
+        interrupt Runs that still belong to another live Agent.
         """
 
         now = _utc_now()
-        target_agent_id = str(agent_id or "").strip() or None
+        target_agent_id = str(agent_id or "").strip().lower() or None
         reconciled_ids: list[str] = []
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -4059,47 +4038,6 @@ class SessionStore:
         return path
 
 
-def _handoff_reloaded_session_store_class(
-    previous_class: type | None,
-    current_class: type,
-) -> type:
-    """Install reloaded behavior without invalidating live store instances."""
-
-    if not isinstance(previous_class, type) or previous_class is current_class:
-        return current_class
-
-    protected = {"__dict__", "__module__", "__qualname__", "__weakref__"}
-    previous_names = set(vars(previous_class))
-    current_namespace = vars(current_class)
-    for name in previous_names - set(current_namespace):
-        if name in protected:
-            continue
-        try:
-            delattr(previous_class, name)
-        except (AttributeError, TypeError):
-            pass
-    for name, value in current_namespace.items():
-        if name in protected:
-            continue
-        setattr(previous_class, name, value)
-    return previous_class
-
-
-# Exception identity matters to consumers that catch these classes directly.
-# Restore the live identities first, then hand the complete new SessionStore
-# implementation onto the live class.  A cold import has no previous classes
-# and simply keeps the definitions above.
-for _error_name, _previous_error_class in _PRE_RELOAD_SESSION_ERROR_CLASSES.items():
-    globals()[_error_name] = _handoff_reloaded_session_store_class(
-        _previous_error_class,
-        globals()[_error_name],
-    )
-SessionStore = _handoff_reloaded_session_store_class(
-    _PRE_RELOAD_SESSION_STORE_CLASS,
-    SessionStore,
-)
-
-
 __all__ = [
     "TERMINAL_RUN_STATES",
     "AcceptedRun",
@@ -4108,4 +4046,5 @@ __all__ = [
     "SessionNotFound",
     "SessionStore",
     "SessionStoreError",
+    "StaleFencingToken",
 ]

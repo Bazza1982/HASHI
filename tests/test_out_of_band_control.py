@@ -22,7 +22,7 @@ async def test_agent_control_lane_interrupts_on_dedicated_thread():
             return 1
 
     runtime = SimpleNamespace(
-        name="zhaojun",
+        name="worker-agent",
         backend_manager=SimpleNamespace(current_backend=Backend()),
     )
     lane = AgentControlLane(runtime)

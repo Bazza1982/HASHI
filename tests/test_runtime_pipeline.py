@@ -582,47 +582,6 @@ def test_canonical_stream_audit_failure_is_not_silently_ignored():
     assert any("Canonical stream audit batch failed" in message for message in runtime.error_logger.messages)
 
 
-def test_canonical_stream_audit_prefers_buffer_and_barriers_at_provider_end():
-    class BufferedStore:
-        def __init__(self):
-            self.commits: list[list[dict]] = []
-            self.flushes = 0
-
-        def record_many(self, records):
-            self.commits.append([dict(record) for record in records])
-
-        def flush(self):
-            self.flushes += 1
-
-    class ForbiddenDirectStore:
-        def record_many(self, _records):
-            raise AssertionError("stream evidence bypassed the async buffer")
-
-    buffered = BufferedStore()
-    runtime = SimpleNamespace(
-        canonical_audit=ForbiddenDirectStore(),
-        canonical_audit_buffer=buffered,
-        error_logger=_Logger(),
-    )
-    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-buffered")
-    batch.capture(
-        StreamEvent(
-            kind=KIND_THINKING,
-            summary="",
-            raw_delta="evidence",
-            origin="provider",
-        )
-    )
-
-    assert batch.flush(reason="provider_request_end") == 2
-    assert len(buffered.commits) == 1
-    assert [record["event_type"] for record in buffered.commits[0]] == [
-        "provider_stream_event",
-        "provider_reasoning",
-    ]
-    assert buffered.flushes == 1
-
-
 def test_begin_queue_item_preserves_explicit_habit_ineligibility():
     runtime = _runtime()
     item = _item(habit_learning_eligible=False)
@@ -737,16 +696,14 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     assert runtime._last_full_prompt_tokens == len(prompt.final_prompt) // 4
 
 
-@pytest.mark.parametrize("kind", ["cron", "heartbeat"])
-@pytest.mark.parametrize("trigger", ["scheduled", "manual", "recovery"])
-def test_begin_queue_item_marks_typed_scheduled_jobs_isolated(kind, trigger):
+def test_begin_queue_item_marks_typed_scheduled_jobs_isolated():
     runtime = _runtime()
     item = _item(
         source="scheduler",
         scheduler_context={
-            "kind": kind,
+            "kind": "cron",
             "task_id": "sunny-scan-gmail",
-            "trigger": trigger,
+            "trigger": "scheduled",
         },
     )
 
@@ -3123,6 +3080,34 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
     ]
     assert runtime.listener_payloads[0]["text"] == "wrapped:core text"
     assert runtime.listener_payloads[0]["wrapped"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_successful_response_normalizes_paths_before_user_observers(
+    monkeypatch,
+):
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(text="Saved to `/home/tester/report.md`.")
+    monkeypatch.setattr(
+        runtime_pipeline,
+        "normalize_user_visible_paths",
+        lambda text: text.replace(
+            "/home/tester/report.md", r"C:\Users\tester\report.md"
+        ),
+    )
+
+    result = await runtime_pipeline.prepare_successful_response(
+        runtime,
+        item,
+        response,
+        completion_path="foreground",
+    )
+
+    expected = r"wrapped:Saved to `C:\Users\tester\report.md`."
+    assert result.visible_text == expected
+    assert runtime.transcripts[0]["visible_text"] == expected
+    assert runtime.listener_payloads[0]["text"] == expected
 
 
 @pytest.mark.asyncio

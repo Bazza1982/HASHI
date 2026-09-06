@@ -58,6 +58,9 @@ def test_execution_environment_contract_is_explicit_and_platform_honest() -> Non
     assert "runtime-supplied facts" in rendered
     assert '"runtime_platform": "windows_native"' in rendered
     assert '"default_shell": "powershell"' in rendered
+    assert '"user_facing_path_style": "windows_explorer"' in rendered
+    assert '"execution_path_style": "windows"' in rendered
+    assert "Use `execution_path_style`" in rendered
     assert "legacy `bash` alias always means real Bash and never CMD" in rendered
     assert "PowerShell, CMD, and POSIX syntax separate" in rendered
 

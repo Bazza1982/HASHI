@@ -12,12 +12,12 @@ from typing import Any
 from telegram.error import RetryAfter
 
 from orchestrator import telegram_stream_policy
+from orchestrator.process_resources import async_path_lock
 
 DEFAULT_FAILOVER_AGENT = "lin_yueru"
 DEFAULT_WARNING_REMINDER_SECONDS = 600
 DEFAULT_WATCHER_POLL_SECONDS = 60
 
-_HEALTH_STATE_LOCK = asyncio.Lock()
 logger = logging.getLogger("BridgeU.TelegramDeliveryFailover")
 
 
@@ -47,16 +47,16 @@ def _record_has_active_block(
 ) -> bool:
     """Return whether Telegram's authoritative RetryAfter window is active.
 
-    ``recovery_due`` tracks a pending recovery notice.  It must never suppress
-    ordinary Telegram business after the server-provided wait has elapsed.
+    ``recovery_due`` means a recovery notice remains pending.  It must not
+    suppress ordinary Telegram traffic once the server-provided delay ends.
     """
+
     if str(record.get("status") or "") != "blocked":
         return False
     blocked_until = _parse_iso(record.get("blocked_until"))
     if blocked_until is None:
-        # A malformed active incident has no safe release deadline.  Keep the
-        # conservative legacy behaviour until another RetryAfter or operator
-        # repair supplies one.
+        # Preserve fail-closed behaviour for malformed legacy incidents that
+        # do not provide a safe release deadline.
         return True
     current = now or _now()
     if blocked_until.tzinfo is None:
@@ -65,7 +65,8 @@ def _record_has_active_block(
 
 
 def retry_after_seconds(exc: Any) -> int:
-    """Normalize python-telegram-bot RetryAfter values without under-waiting."""
+    """Normalize RetryAfter values without rounding a fractional wait down."""
+
     value = getattr(exc, "retry_after", 0) or 0
     if isinstance(value, timedelta):
         return max(0, ceil(value.total_seconds()))
@@ -335,8 +336,8 @@ def _warn_text(
         f"Delivery warning from {instance_id}:",
         "",
         (
-            f"{source_agent} generated a response, but Telegram delivery recovery is still pending "
-            "after the earlier flood limit expired."
+            f"{source_agent} generated a response, but Telegram delivery recovery "
+            "is still pending after the earlier flood limit expired."
             if recovery_due
             else f"{source_agent} generated a response, but Telegram delivery is flood-limited."
         ),
@@ -368,6 +369,9 @@ def _recovery_text(source_agent: str) -> str:
 
 
 async def _send_direct(runtime: Any, *, chat_id: int, text: str) -> None:
+    if getattr(runtime, "is_function_worker_proxy", False):
+        await runtime._send_text(chat_id, text)
+        return
     await runtime.app.bot.send_message(chat_id=chat_id, text=text)
 
 
@@ -381,7 +385,7 @@ async def _prepare_warning(
 ) -> tuple[Any, str] | None:
     if chat_id is None:
         return None
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(source_runtime)):
         path = delivery_state_path(source_runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
@@ -432,7 +436,7 @@ async def _record_warning_result(
     success: bool,
     error: Exception | None = None,
 ) -> None:
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(source_runtime)):
         path = delivery_state_path(source_runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
@@ -540,7 +544,7 @@ async def handle_blocked_send(
 ) -> bool:
     response_path = None
     blocked_record = None
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(runtime)):
         path = delivery_state_path(runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
@@ -609,7 +613,7 @@ async def handle_retry_after(
     incident_id = f"tg-{runtime_name}-{now.strftime('%Y%m%dT%H%M%S%f')}"
     response_path = None
     saved_record: dict[str, Any]
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(runtime)):
         path = delivery_state_path(runtime)
         state = _load_health_state_sync(path)
         record = _agent_record(state, runtime)
@@ -674,7 +678,7 @@ async def delivery_health_watcher(kernel: Any) -> None:
 
 async def _tick_recovery(kernel: Any) -> None:
     notices: list[tuple[str, Any, int, str | None]] = []
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(kernel)):
         path = delivery_state_path(kernel)
         state = _load_health_state_sync(path)
         changed = False
@@ -682,6 +686,8 @@ async def _tick_recovery(kernel: Any) -> None:
         for agent_name, record in (state.get("agents") or {}).items():
             status = str(record.get("status") or "")
             if status not in {"blocked", "recovery_due"}:
+                continue
+            if status == "blocked" and _record_has_active_block(record):
                 continue
             if status == "blocked":
                 if _record_has_active_block(record):
@@ -717,7 +723,9 @@ async def _tick_recovery(kernel: Any) -> None:
             _save_health_state_sync(path, state)
     if not notices:
         return
-    results: list[tuple[str, int, str | None, str, int | None, Exception | None]] = []
+    results: list[
+        tuple[str, int, str | None, str, int | None, Exception | None]
+    ] = []
     for agent_name, runtime, chat_id, incident_id in notices:
         try:
             await _send_direct(runtime, chat_id=chat_id, text=_recovery_text(agent_name))
@@ -729,7 +737,7 @@ async def _tick_recovery(kernel: Any) -> None:
             )
         except Exception as exc:
             results.append((agent_name, chat_id, incident_id, "error", None, exc))
-    async with _HEALTH_STATE_LOCK:
+    async with async_path_lock(delivery_state_path(kernel)):
         path = delivery_state_path(kernel)
         state = _load_health_state_sync(path)
         changed = False
@@ -744,7 +752,10 @@ async def _tick_recovery(kernel: Any) -> None:
                     incident_id,
                 )
                 continue
-            if str(record.get("status") or "") == "blocked" and _record_has_active_block(record):
+            if (
+                str(record.get("status") or "") == "blocked"
+                and _record_has_active_block(record)
+            ):
                 logger.info(
                     "Ignoring Telegram recovery result after a new active block "
                     "agent=%s incident_id=%s",
@@ -765,7 +776,8 @@ async def _tick_recovery(kernel: Any) -> None:
                 record["retry_after_s"] = retry_after_s
                 record["blocked_until"] = _iso(_now() + timedelta(seconds=max(int(retry_after_s or 0), 1)))
                 logger.warning(
-                    "Telegram delivery recovery flood-limited agent=%s chat_id=%s retry_after_s=%s",
+                    "Telegram delivery recovery flood-limited agent=%s "
+                    "chat_id=%s retry_after_s=%s",
                     agent_name,
                     chat_id,
                     retry_after_s,
@@ -777,7 +789,8 @@ async def _tick_recovery(kernel: Any) -> None:
                 record["recovery_failed"] = True
                 record["last_recovery_error"] = f"{type(error).__name__}: {error}"
                 logger.warning(
-                    "Telegram delivery recovery notice failed; will retry agent=%s chat_id=%s error=%s: %s",
+                    "Telegram delivery recovery notice failed; will retry "
+                    "agent=%s chat_id=%s error=%s: %s",
                     agent_name,
                     chat_id,
                     type(error).__name__,

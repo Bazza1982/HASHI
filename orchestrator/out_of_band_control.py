@@ -1,8 +1,8 @@
 """Independent Agent control lane for provider interruption.
 
-The Telegram/runtime event loop owns orderly cleanup.  This module owns only
-the minimal synchronous emergency signal so /stop, /steer, /focus, and /retry
-can terminate local provider processes even while that loop is congested.
+The runtime event loop owns orderly cleanup. This module owns only the minimal
+synchronous emergency signal so stop, steer, focus, and retry can terminate
+local provider processes even while ordinary provider traffic is congested.
 """
 
 from __future__ import annotations
@@ -77,10 +77,16 @@ class AgentControlLane:
             try:
                 backend = self._active_backend()
                 interrupt = getattr(backend, "interrupt_nowait", None)
-                count = int(interrupt(request.reason) or 0) if callable(interrupt) else 0
+                count = (
+                    int(interrupt(request.reason) or 0)
+                    if callable(interrupt)
+                    else 0
+                )
                 result = ControlLaneResult(
                     reason=request.reason,
-                    backend=type(backend).__name__ if backend is not None else "none",
+                    backend=(
+                        type(backend).__name__ if backend is not None else "none"
+                    ),
                     interrupted=count,
                     worker_thread_id=threading.get_ident(),
                 )

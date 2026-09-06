@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+# ruff: noqa: E402 - direct execution bootstraps the repository import path.
+
 import argparse
 import asyncio
 import hashlib

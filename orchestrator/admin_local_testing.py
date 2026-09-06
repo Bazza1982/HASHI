@@ -134,6 +134,10 @@ def _format_slash_command_line(command_name: str, args: list[str]) -> str:
 
 
 def supported_commands(runtime) -> list[str]:
+    if getattr(runtime, "is_function_worker_proxy", False):
+        provider = getattr(runtime, "supported_commands", None)
+        if callable(provider):
+            return sorted(set(str(item) for item in provider()))
     names = [binding.name for binding in COMMAND_BINDINGS]
     supported = []
     for name in names:
@@ -169,6 +173,13 @@ async def try_execute_slash_command_text(
 ) -> dict[str, Any] | None:
     if not looks_like_slash_command(text):
         return None
+    if getattr(runtime, "is_function_worker_proxy", False):
+        return await runtime.execute_slash_command(
+            text,
+            source_channel=source_channel,
+            chat_id=chat_id,
+            session_metadata=session_metadata,
+        )
     command_name, args = parse_slash_command_text(text)
     if not is_supported_slash_command(runtime, command_name):
         return None
@@ -214,6 +225,21 @@ async def execute_local_command(
     source_channel: str = "workbench_api",
     session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if getattr(runtime, "is_function_worker_proxy", False):
+        result = await runtime.execute_slash_command(
+            command_line,
+            source_channel=source_channel,
+            chat_id=chat_id,
+            session_metadata=session_metadata,
+        )
+        if result is not None:
+            return result
+        command_name, _args = _split_command(command_line)
+        return {
+            "ok": False,
+            "error": f"unknown command: {command_name or '(empty)'}",
+            "supported_commands": supported_commands(runtime),
+        }
     command_name, args = _split_command(command_line)
     local_chat_id = (
         chat_id if chat_id is not None else runtime.global_config.authorized_id
