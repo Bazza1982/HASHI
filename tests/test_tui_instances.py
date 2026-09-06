@@ -6,7 +6,12 @@ import pytest
 from aiohttp import web
 
 from tui.api_client import TuiApiClient
-from tui.instances import InstanceResolver, load_launch_instance, local_workbench_urls
+from tui.instances import (
+    InstanceResolver,
+    load_launch_instance,
+    load_local_endpoint,
+    local_workbench_urls,
+)
 
 
 def test_load_launch_instance_accepts_bom_and_uses_repository_config(tmp_path):
@@ -20,6 +25,48 @@ def test_load_launch_instance_accepts_bom_and_uses_repository_config(tmp_path):
 
 def test_launch_instance_uses_only_authoritative_loopback_route():
     assert local_workbench_urls(18800) == ["http://127.0.0.1:18800"]
+
+
+def test_portable_local_endpoint_requires_matching_identity_and_loopback(tmp_path):
+    (tmp_path / "agents.json").write_text(
+        json.dumps(
+            {
+                "global": {
+                    "instance_id": "HASHI-PORTABLE",
+                    "workbench_port": 18800,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "portable-instance.json").write_text(
+        json.dumps({"portable_instance_id": "b" * 32}),
+        encoding="utf-8",
+    )
+    endpoint = tmp_path / "state" / "local-endpoint.json"
+    endpoint.parent.mkdir()
+    endpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "product": "HASHI Portable Local Endpoint",
+                "instance_id": "HASHI-PORTABLE",
+                "portable_instance_id": "b" * 32,
+                "api_host": "127.0.0.1",
+                "api_port": 49152,
+                "launch_nonce": "a" * 32,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_local_endpoint(tmp_path, endpoint) == ("HASHI-PORTABLE", 49152)
+
+    value = json.loads(endpoint.read_text(encoding="utf-8"))
+    value["api_host"] = "172.21.0.1"
+    endpoint.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError, match="loopback"):
+        load_local_endpoint(tmp_path, endpoint)
 
 
 @pytest.mark.asyncio

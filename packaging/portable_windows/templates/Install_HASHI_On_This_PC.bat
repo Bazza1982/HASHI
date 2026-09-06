@@ -1,5 +1,5 @@
 @echo off
 chcp 65001 >nul
 setlocal
-start "" powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0launcher\Bootstrap-Elevated.ps1" -Surface TUI -ForceSetup
+start "" powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0launcher\Bootstrap-Elevated.ps1" -Action Install -Surface TUI
 exit /b 0

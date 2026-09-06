@@ -9,55 +9,24 @@ try {
     $Host.UI.RawUI.WindowTitle = 'HASHI Portable'
 } catch {}
 
+$script:ExpectedInstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
 $script:PortableRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$script:UsbAppRoot = Join-Path $script:PortableRoot 'app'
-$script:UsbPythonRoot = Join-Path $script:PortableRoot 'runtime\python'
-$script:UsbNodeRoot = Join-Path $script:PortableRoot 'runtime\node'
-$script:UsbBinRoot = Join-Path $script:PortableRoot 'runtime\bin'
-$script:AppRoot = $script:UsbAppRoot
+$script:AppRoot = Join-Path $script:PortableRoot 'app'
 $script:HashiRoot = Join-Path $script:AppRoot 'hashi'
 $script:WorkbenchRoot = Join-Path $script:AppRoot 'workbench'
 $script:DataRoot = Join-Path $script:PortableRoot 'data'
+$script:PythonRoot = Join-Path $script:PortableRoot 'runtime\python'
+$script:NodeRoot = Join-Path $script:PortableRoot 'runtime\node'
+$script:BinRoot = Join-Path $script:PortableRoot 'runtime\bin'
 $script:PortableIdentityPath = Join-Path $script:DataRoot 'portable-instance.json'
-$script:PythonRoot = $script:UsbPythonRoot
-$script:NodeRoot = $script:UsbNodeRoot
-$script:BinRoot = $script:UsbBinRoot
-$script:ExecutionMode = 'usb'
-$script:LocalCacheManifestPath = Join-Path $script:PortableRoot 'install\local-cache-manifest.json'
-$script:LocalProductRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HASHI Portable'
-$script:PortableInstanceId = ''
-$script:LocalInstanceRoot = ''
-$script:LocalCacheRoot = ''
-$script:LocalCacheInstallAttempted = $false
+$script:InstallMarkerPath = Join-Path $script:PortableRoot '.hashi-local-install.json'
 $script:LauncherStateRoot = Join-Path $script:DataRoot 'state\launcher'
+$script:EndpointPath = Join-Path $script:DataRoot 'state\local-endpoint.json'
 $script:HashiPidPath = Join-Path $script:LauncherStateRoot 'hashi.pid'
 $script:WorkbenchPidPath = Join-Path $script:LauncherStateRoot 'workbench.pid'
 $script:HashiStartupTimeoutSeconds = 1800
 $script:WorkbenchStartupTimeoutSeconds = 300
-
-function Initialize-PortableInstanceIdentity {
-    if (-not (Test-Path -LiteralPath $script:PortableIdentityPath -PathType Leaf)) {
-        throw "Portable instance identity is missing: $script:PortableIdentityPath"
-    }
-    try {
-        $identity = Get-Content -LiteralPath $script:PortableIdentityPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    } catch {
-        throw "Portable instance identity is unreadable: $($_.Exception.Message)"
-    }
-    $instanceId = [string]$identity.portable_instance_id
-    if (
-        [int]$identity.schema_version -ne 1 -or
-        [string]$identity.product -ne 'HASHI Portable Windows x64' -or
-        $instanceId -notmatch '^[0-9a-f]{32}$'
-    ) {
-        throw 'Portable instance identity is invalid.'
-    }
-    $script:PortableInstanceId = $instanceId
-    $script:LocalInstanceRoot = Join-Path $script:LocalProductRoot ("Instances\$instanceId")
-    $script:LocalCacheRoot = Join-Path $script:LocalInstanceRoot 'Cache'
-}
-
-Initialize-PortableInstanceIdentity
+$script:PortableInstanceId = ''
 
 function Write-BilingualMessage {
     param(
@@ -77,20 +46,127 @@ function Test-IsAdministrator {
     )
 }
 
-function Read-SetupRetryChoice {
-    while ($true) {
-        try {
-            $choice = (Read-Host '[R] Retry / 重试    [X] Exit / 退出').Trim()
-        } catch {
-            return $false
-        }
-        if ($choice -match '^(?i:r|retry)$' -or $choice -eq '重试') { return $true }
-        if ($choice -match '^(?i:x|exit)$' -or $choice -eq '退出') { return $false }
-        Write-BilingualMessage `
-            -English 'Please enter R to retry or X to exit.' `
-            -Chinese '请输入 R 重试，或输入 X 退出。' `
-            -ForegroundColor Yellow
+function Test-PathInsideRoot {
+    param(
+        [string]$Candidate,
+        [string]$Root
+    )
+    if (-not $Candidate -or -not $Root) { return $false }
+    try {
+        $candidatePath = [System.IO.Path]::GetFullPath($Candidate)
+        $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+        return $candidatePath.StartsWith(
+            $rootPath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    } catch {
+        return $false
     }
+}
+
+function Get-Sha256 {
+    param([string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Read-JsonObject {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    try {
+        return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Write-Utf8JsonAtomic {
+    param(
+        [string]$Path,
+        [object]$Value
+    )
+    $directory = [System.IO.Path]::GetDirectoryName($Path)
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    $temporary = Join-Path $directory ('.' + [System.IO.Path]::GetFileName($Path) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $backup = Join-Path $directory ('.' + [System.IO.Path]::GetFileName($Path) + '.' + [Guid]::NewGuid().ToString('N') + '.bak')
+    $json = ($Value | ConvertTo-Json -Depth 100) + [Environment]::NewLine
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    try {
+        [System.IO.File]::WriteAllText($temporary, $json, $encoding)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [System.IO.File]::Replace($temporary, $Path, $backup, $true)
+            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+        } else {
+            [System.IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Initialize-LocalInstallation {
+    if (-not [string]::Equals(
+        $script:PortableRoot.TrimEnd('\'),
+        $script:ExpectedInstallRoot.TrimEnd('\'),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'HASHI must be installed before it can run. Use Install_HASHI_On_This_PC.bat on the USB drive.'
+    }
+    if (-not (Test-Path -LiteralPath $script:PortableRoot -PathType Container)) {
+        throw 'The HASHI installation folder is missing.'
+    }
+    $rootItem = Get-Item -LiteralPath $script:PortableRoot -Force
+    if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The HASHI installation folder cannot be a link or reparse point.'
+    }
+
+    $marker = Read-JsonObject -Path $script:InstallMarkerPath
+    $identity = Read-JsonObject -Path $script:PortableIdentityPath
+    if ($null -eq $marker -or $null -eq $identity) {
+        throw 'The HASHI local installation marker is missing or unreadable.'
+    }
+    $instanceId = [string]$identity.portable_instance_id
+    if (
+        [int]$identity.schema_version -ne 1 -or
+        [string]$identity.product -ne 'HASHI Portable Windows x64' -or
+        $instanceId -notmatch '^[0-9a-f]{32}$'
+    ) {
+        throw 'The HASHI portable identity is invalid.'
+    }
+    $markedRoot = [System.IO.Path]::GetFullPath([string]$marker.install_root)
+    if (
+        [int]$marker.schema_version -ne 1 -or
+        [string]$marker.product -ne 'HASHI Portable Local Installation' -or
+        [string]$marker.portable_instance_id -ne $instanceId -or
+        -not [string]::Equals(
+            $markedRoot.TrimEnd('\'),
+            $script:ExpectedInstallRoot.TrimEnd('\'),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        throw 'The HASHI local installation marker is invalid.'
+    }
+    $buildInfo = Join-Path $script:PortableRoot 'BUILD_INFO.json'
+    if (
+        -not (Test-Path -LiteralPath $buildInfo -PathType Leaf) -or
+        [string]$marker.bundle_id -ne (Get-Sha256 -Path $buildInfo)
+    ) {
+        throw 'The HASHI local installation build identity does not match its marker.'
+    }
+    foreach ($required in @(
+        (Join-Path $script:PythonRoot 'python.exe'),
+        (Join-Path $script:NodeRoot 'node.exe'),
+        (Join-Path $script:HashiRoot 'main.py'),
+        (Join-Path $script:HashiRoot 'tui.py'),
+        (Join-Path $script:WorkbenchRoot 'server.mjs'),
+        (Join-Path $script:DataRoot 'agents.json'),
+        (Join-Path $script:DataRoot 'secrets.json')
+    )) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "The HASHI local installation is incomplete: $required"
+        }
+    }
+    $script:PortableInstanceId = $instanceId
 }
 
 function Write-LauncherFailureHelp {
@@ -110,204 +186,15 @@ function Write-LauncherFailureHelp {
 }
 
 function Get-PortableConfig {
-    return Get-Content -LiteralPath (Join-Path $script:DataRoot 'agents.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $config = Read-JsonObject -Path (Join-Path $script:DataRoot 'agents.json')
+    if ($null -eq $config) { throw 'The HASHI configuration is unreadable.' }
+    return $config
 }
 
 function Get-PortableSecrets {
-    return Get-Content -LiteralPath (Join-Path $script:DataRoot 'secrets.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-}
-
-function Set-PortableExecutionRoots {
-    param(
-        [string]$Root,
-        [string]$Mode
-    )
-    $script:AppRoot = Join-Path $Root 'app'
-    $script:HashiRoot = Join-Path $script:AppRoot 'hashi'
-    $script:WorkbenchRoot = Join-Path $script:AppRoot 'workbench'
-    $script:PythonRoot = Join-Path $Root 'runtime\python'
-    $script:NodeRoot = Join-Path $Root 'runtime\node'
-    $script:BinRoot = Join-Path $Root 'runtime\bin'
-    $script:ExecutionMode = $Mode
-}
-
-function Use-UsbExecutionRoots {
-    Set-PortableExecutionRoots -Root $script:PortableRoot -Mode 'usb'
-}
-
-function Get-LocalCacheManifest {
-    if (-not (Test-Path -LiteralPath $script:LocalCacheManifestPath -PathType Leaf)) {
-        return $null
-    }
-    try {
-        $manifest = Get-Content -LiteralPath $script:LocalCacheManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $bundleId = [string]$manifest.bundle_id
-        $cacheKey = [string]$manifest.cache_key
-        if ($bundleId -notmatch '^[0-9a-f]{64}$' -or $cacheKey -ne $bundleId.Substring(0, 20)) {
-            return $null
-        }
-        return $manifest
-    } catch {
-        return $null
-    }
-}
-
-function Get-LocalCacheCandidateRoot {
-    param([object]$Manifest)
-    if ($null -eq $Manifest) { return $null }
-    return Join-Path $script:LocalCacheRoot ([string]$Manifest.cache_key)
-}
-
-function Test-LocalCacheReady {
-    param(
-        [string]$Root,
-        [object]$Manifest
-    )
-    if (-not $Root -or $null -eq $Manifest) { return $false }
-    $markerPath = Join-Path $Root '.hashi-local-cache.json'
-    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $false }
-    try {
-        $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ([string]$marker.portable_instance_id -ne $script:PortableInstanceId) { return $false }
-        if ([string]$marker.bundle_id -ne [string]$Manifest.bundle_id) { return $false }
-        foreach ($relativeValue in @($Manifest.required_files)) {
-            $relative = ([string]$relativeValue).Replace('/', '\')
-            if ([IO.Path]::IsPathRooted($relative) -or $relative.Contains('..')) { return $false }
-            if (-not (Test-Path -LiteralPath (Join-Path $Root $relative) -PathType Leaf)) {
-                return $false
-            }
-        }
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Use-ExistingLocalCache {
-    $manifest = Get-LocalCacheManifest
-    if ($null -eq $manifest) {
-        Use-UsbExecutionRoots
-        return $false
-    }
-    $candidate = Get-LocalCacheCandidateRoot -Manifest $manifest
-    if (-not (Test-LocalCacheReady -Root $candidate -Manifest $manifest)) {
-        Use-UsbExecutionRoots
-        return $false
-    }
-    Set-PortableExecutionRoots -Root $candidate -Mode 'local-cache'
-    return $true
-}
-
-function Ensure-LocalAccelerationCache {
-    if (Use-ExistingLocalCache) { return $true }
-    if ([string]$env:HASHI_PORTABLE_SKIP_LOCAL_CACHE -eq '1') {
-        Write-BilingualMessage `
-            -English 'Local runtime installation was explicitly skipped; HASHI will run from the USB drive.' `
-            -Chinese '已明确跳过本机运行组件安装；HASHI 将直接从 USB 运行。' `
-            -ForegroundColor Yellow
-        return $false
-    }
-    if ($script:LocalCacheInstallAttempted) { return $false }
-    $script:LocalCacheInstallAttempted = $true
-    if ($null -eq (Get-LocalCacheManifest)) {
-        Write-BilingualMessage `
-            -English 'This USB has no local runtime installer; HASHI will run from the USB drive.' `
-            -Chinese '此 USB 不包含本机运行组件安装包；HASHI 将直接从 USB 运行。' `
-            -ForegroundColor Yellow
-        return $false
-    }
-
-    $installer = Join-Path $PSScriptRoot 'Install-LocalCache.ps1'
-    if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
-        Write-BilingualMessage `
-            -English 'The local runtime installer is missing; HASHI will run from the USB drive.' `
-            -Chinese '本机运行组件安装程序缺失；HASHI 将直接从 USB 运行。' `
-            -ForegroundColor Yellow
-        return $false
-    }
-
-    $isUpdate = $false
-    if (Test-Path -LiteralPath $script:LocalCacheRoot -PathType Container) {
-        $isUpdate = $null -ne (Get-ChildItem -LiteralPath $script:LocalCacheRoot -Directory -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
-    }
-    if ($isUpdate) {
-        Write-BilingualMessage `
-            -English 'Updating HASHI runtime' `
-            -Chinese '正在更新 HASHI 运行组件' `
-            -ForegroundColor Cyan
-        Write-BilingualMessage `
-            -English 'HASHI needs to update its local runtime files on this PC.' `
-            -Chinese 'HASHI 需要更新这台电脑上的本机运行组件。' `
-            -ForegroundColor Gray
-    } else {
-        Write-BilingualMessage `
-            -English 'Preparing HASHI for first use' `
-            -Chinese '正在为首次使用准备 HASHI' `
-            -ForegroundColor Cyan
-        Write-BilingualMessage `
-            -English 'HASHI needs to install local runtime files on this PC.' `
-            -Chinese 'HASHI 需要在这台电脑上安装本机运行组件。' `
-            -ForegroundColor Gray
-    }
-    Write-BilingualMessage `
-        -English 'Your conversations, settings, and other personal data will remain on the USB drive.' `
-        -Chinese '您的对话、设置和其他个人数据仍会保留在 USB 中。' `
-        -ForegroundColor Green
-    Write-BilingualMessage `
-        -English 'Administrator permission is active. Keep the USB drive connected until setup is complete.' `
-        -Chinese '管理员权限已生效。安装完成前请勿拔出 USB。' `
-        -ForegroundColor Yellow
-
-    $powerShell = Join-Path $PSHOME 'powershell.exe'
-    $arguments = @(
-        '-NoLogo',
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        $installer
-    )
-    while ($true) {
-        $failureDetail = $null
-        try {
-            if (-not (Test-IsAdministrator)) {
-                throw 'Administrator privileges are required before setup can start.'
-            }
-            & $powerShell @arguments
-            $installerExitCode = $LASTEXITCODE
-            if ($installerExitCode -eq 0 -and (Use-ExistingLocalCache)) {
-                Write-BilingualMessage `
-                    -English 'Setup complete.' `
-                    -Chinese '安装完成。' `
-                    -ForegroundColor Green
-                return $true
-            }
-            if ($installerExitCode -eq 0) {
-                $failureDetail = 'The installed runtime did not pass its readiness check.'
-            } else {
-                $failureDetail = "Setup exited with code $installerExitCode."
-            }
-        } catch {
-            $failureDetail = $_.Exception.Message
-        }
-
-        Use-UsbExecutionRoots
-        Write-BilingualMessage `
-            -English "Setup did not complete: $failureDetail" `
-            -Chinese "安装未完成：$failureDetail" `
-            -ForegroundColor Red
-        Write-BilingualMessage `
-            -English "Setup log: $script:DataRoot\logs\hashi-setup.log" `
-            -Chinese "安装日志：$script:DataRoot\logs\hashi-setup.log" `
-            -ForegroundColor Yellow
-        Write-BilingualMessage `
-            -English 'Correct the reported problem, then retry. HASHI will not start from an incomplete installation.' `
-            -Chinese '请修正上述问题后重试。安装未完成时，HASHI 不会启动。' `
-            -ForegroundColor Yellow
-        if (-not (Read-SetupRetryChoice)) {
-            throw 'Setup was not completed. HASHI was not started.'
-        }
-    }
+    $secrets = Read-JsonObject -Path (Join-Path $script:DataRoot 'secrets.json')
+    if ($null -eq $secrets) { throw 'The HASHI secrets file is unreadable.' }
+    return $secrets
 }
 
 function Initialize-PortableEnvironment {
@@ -319,20 +206,11 @@ function Initialize-PortableEnvironment {
     $env:HASHI_REMOTE_ROOT = $script:DataRoot
     $env:HASHI_REMOTE_CONTROL_ROOT = $script:HashiRoot
     $env:HASHI_REMOTE_STATE_DIR = Join-Path $script:DataRoot 'state\remote'
-    $remoteLiveEndpointsPath = Join-Path $script:DataRoot 'state\remote_live_endpoints.json'
-    if ($script:ExecutionMode -eq 'local-cache') {
-        try {
-            $remoteDerivedStateRoot = Join-Path $script:LocalInstanceRoot 'State'
-            New-Item -ItemType Directory -Force -Path $remoteDerivedStateRoot -ErrorAction Stop | Out-Null
-            $remoteLiveEndpointsPath = Join-Path $remoteDerivedStateRoot 'remote_live_endpoints.json'
-        } catch {
-            $remoteLiveEndpointsPath = Join-Path $script:DataRoot 'state\remote_live_endpoints.json'
-        }
-    }
-    $env:HASHI_REMOTE_LIVE_ENDPOINTS_PATH = $remoteLiveEndpointsPath
-    $env:HASHI_PORTABLE_USB_ROOT = $script:PortableRoot
-    $env:HASHI_PORTABLE_EXECUTION_MODE = $script:ExecutionMode
-    $env:HASHI_PORTABLE_STORAGE_PROFILE = 'removable'
+    $env:HASHI_REMOTE_LIVE_ENDPOINTS_PATH = Join-Path $script:DataRoot 'state\remote_live_endpoints.json'
+    $env:HASHI_PORTABLE_ROOT = $script:PortableRoot
+    $env:HASHI_PORTABLE_EXECUTION_MODE = 'local-install'
+    Remove-Item Env:HASHI_PORTABLE_STORAGE_PROFILE -ErrorAction SilentlyContinue
+    $env:HASHI_LOCAL_ENDPOINT_FILE = $script:EndpointPath
     $env:HASHI_TUI_ENABLE_API_GATEWAY = '0'
     $env:HASHI_TUI_ATTACH_ONLY = '1'
     $env:PYTHONUTF8 = '1'
@@ -402,9 +280,7 @@ function Get-HASHIStartupStage {
     )
     $matched = $null
     foreach ($stage in $stages) {
-        if ($text -match [Regex]::Escape([string]$stage.Pattern)) {
-            $matched = $stage
-        }
+        if ($text -match [Regex]::Escape([string]$stage.Pattern)) { $matched = $stage }
     }
     return $matched
 }
@@ -431,15 +307,198 @@ function Get-Health {
     }
 }
 
-function Get-LiveProcessFromPidFile {
-    param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+function Get-OwnedProcess {
+    param([int]$ProcessId)
+    if ($ProcessId -le 0) { return $null }
     try {
-        $processId = [int](Get-Content -LiteralPath $Path -Raw).Trim()
-        return Get-Process -Id $processId -ErrorAction Stop
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        $candidate = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        if (-not (Test-PathInsideRoot -Candidate ([string]$candidate.ExecutablePath) -Root $script:PortableRoot)) {
+            return $null
+        }
+        return $process
     } catch {
         return $null
     }
+}
+
+function Get-UnverifiedOwnedBackendProcesses {
+    $mainPath = [System.IO.Path]::GetFullPath((Join-Path $script:HashiRoot 'main.py'))
+    $dataPath = [System.IO.Path]::GetFullPath($script:DataRoot)
+    $matches = @()
+    foreach ($candidate in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+        $executable = [string]$candidate.ExecutablePath
+        $commandLine = [string]$candidate.CommandLine
+        if (
+            (Test-PathInsideRoot -Candidate $executable -Root $script:PortableRoot) -and
+            $commandLine.IndexOf($mainPath, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $commandLine.IndexOf($dataPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        ) {
+            $matches += $candidate
+        }
+    }
+    return @($matches)
+}
+
+function Read-LocalEndpoint {
+    $endpoint = Read-JsonObject -Path $script:EndpointPath
+    if ($null -eq $endpoint) { return $null }
+    try {
+        $config = Get-PortableConfig
+        $marker = Read-JsonObject -Path $script:InstallMarkerPath
+        $markedRoot = [System.IO.Path]::GetFullPath([string]$endpoint.install_root)
+        $apiPort = [int]$endpoint.api_port
+        if (
+            $null -eq $marker -or
+            [int]$endpoint.schema_version -ne 1 -or
+            [string]$endpoint.product -ne 'HASHI Portable Local Endpoint' -or
+            [string]$endpoint.portable_instance_id -ne $script:PortableInstanceId -or
+            [string]$endpoint.instance_id -ne [string]$config.global.instance_id -or
+            [string]$endpoint.build_id -ne [string]$marker.bundle_id -or
+            [string]$endpoint.api_host -ne '127.0.0.1' -or
+            $apiPort -lt 1 -or $apiPort -gt 65535 -or
+            -not [string]::Equals(
+                $markedRoot.TrimEnd('\'),
+                $script:PortableRoot.TrimEnd('\'),
+                [System.StringComparison]::OrdinalIgnoreCase
+            ) -or
+            [string]$endpoint.launch_nonce -notmatch '^[0-9a-f]{32}$'
+        ) {
+            return $null
+        }
+        return $endpoint
+    } catch {
+        return $null
+    }
+}
+
+function Get-VerifiedLocalEndpoint {
+    $endpoint = Read-LocalEndpoint
+    if ($null -eq $endpoint) { return $null }
+    $process = Get-OwnedProcess -ProcessId ([int]$endpoint.backend_pid)
+    if ($null -eq $process) { return $null }
+    try {
+        $process.Refresh()
+        if ([long]$endpoint.backend_start_ticks -ne [long]$process.StartTime.ToUniversalTime().Ticks) {
+            return $null
+        }
+    } catch {
+        return $null
+    }
+    $health = Get-Health -Port ([int]$endpoint.api_port)
+    if (
+        $null -eq $health -or
+        [string]$health.instance_id -ne [string]$endpoint.instance_id -or
+        [int]$health.workbench_port -ne [int]$endpoint.api_port
+    ) {
+        return $null
+    }
+    return $endpoint
+}
+
+function Test-LoopbackPortAvailable {
+    param([int]$Port)
+    if ($Port -lt 1024 -or $Port -gt 65535) { return $false }
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Loopback,
+            $Port
+        )
+        $listener.Start()
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $listener) { try { $listener.Stop() } catch {} }
+    }
+}
+
+function Get-FreeLoopbackPort {
+    param(
+        [int]$PreferredPort,
+        [int[]]$ReservedPorts = @()
+    )
+    if (
+        $PreferredPort -notin $ReservedPorts -and
+        (Test-LoopbackPortAvailable -Port $PreferredPort)
+    ) {
+        return $PreferredPort
+    }
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Loopback,
+            0
+        )
+        try {
+            $listener.Start()
+            $candidate = [int]$listener.LocalEndpoint.Port
+        } finally {
+            $listener.Stop()
+        }
+        if ($candidate -notin $ReservedPorts -and $candidate -ge 1024) {
+            return $candidate
+        }
+    }
+    throw 'Windows could not allocate a free local TCP port for HASHI.'
+}
+
+function Set-LocalApiPort {
+    param([int]$Port)
+    $configPath = Join-Path $script:DataRoot 'agents.json'
+    $config = Get-PortableConfig
+    $config.global.api_host = '127.0.0.1'
+    $config.global.workbench_port = $Port
+    Write-Utf8JsonAtomic -Path $configPath -Value $config
+}
+
+function Write-BackendEndpoint {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$ApiPort,
+        [string]$LaunchNonce
+    )
+    $config = Get-PortableConfig
+    $marker = Read-JsonObject -Path $script:InstallMarkerPath
+    $Process.Refresh()
+    $record = [ordered]@{
+        schema_version = 1
+        product = 'HASHI Portable Local Endpoint'
+        portable_instance_id = $script:PortableInstanceId
+        instance_id = [string]$config.global.instance_id
+        install_root = $script:PortableRoot
+        build_id = [string]$marker.bundle_id
+        api_host = '127.0.0.1'
+        api_port = $ApiPort
+        backend_pid = $Process.Id
+        backend_start_ticks = $Process.StartTime.ToUniversalTime().Ticks
+        launch_nonce = $LaunchNonce
+        workbench_ui_port = 0
+        workbench_pid = 0
+        workbench_start_ticks = 0
+        written_at_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    Write-Utf8JsonAtomic -Path $script:EndpointPath -Value $record
+    return [PSCustomObject]$record
+}
+
+function Update-WorkbenchEndpoint {
+    param(
+        [int]$Port,
+        [System.Diagnostics.Process]$Process
+    )
+    $endpoint = Get-VerifiedLocalEndpoint
+    if ($null -eq $endpoint) { throw 'The verified local HASHI endpoint disappeared.' }
+    $values = [ordered]@{}
+    foreach ($property in $endpoint.PSObject.Properties) {
+        $values[$property.Name] = $property.Value
+    }
+    $Process.Refresh()
+    $values['workbench_ui_port'] = $Port
+    $values['workbench_pid'] = $Process.Id
+    $values['workbench_start_ticks'] = $Process.StartTime.ToUniversalTime().Ticks
+    $values['written_at_utc'] = [DateTime]::UtcNow.ToString('o')
+    Write-Utf8JsonAtomic -Path $script:EndpointPath -Value $values
 }
 
 function Quote-ProcessArgument {
@@ -451,23 +510,28 @@ function Start-HASHIBackend {
     if (-not (Test-IsAdministrator)) {
         throw 'HASHI Portable must be started with administrator privileges.'
     }
-    [void](Ensure-LocalAccelerationCache)
     Initialize-PortableEnvironment
-    $config = Get-PortableConfig
-    $port = [int]$config.global.workbench_port
-    $env:HASHI_WORKBENCH_URL = "http://127.0.0.1:$port"
-    $health = Get-Health -Port $port
-    if ($null -ne $health) {
-        if ([string]$health.instance_id -ne [string]$config.global.instance_id) {
-            throw "Port $port belongs to another HASHI instance ($($health.instance_id))."
-        }
-        return $health
+    $existing = Get-VerifiedLocalEndpoint
+    if ($null -ne $existing) {
+        $env:HASHI_WORKBENCH_URL = "http://127.0.0.1:$([int]$existing.api_port)"
+        return $existing
     }
+    $unverifiedBackends = @(Get-UnverifiedOwnedBackendProcesses)
+    if ($unverifiedBackends.Count -gt 0) {
+        throw 'A local HASHI backend is running without a valid endpoint record. Run Stop HASHI, then start again.'
+    }
+    Remove-Item -LiteralPath $script:EndpointPath, $script:HashiPidPath -Force -ErrorAction SilentlyContinue
+
+    $config = Get-PortableConfig
+    $preferredPort = [int]$config.global.workbench_port
+    $port = Get-FreeLoopbackPort -PreferredPort $preferredPort
+    Set-LocalApiPort -Port $port
+    $env:HASHI_WORKBENCH_URL = "http://127.0.0.1:$port"
 
     $python = Join-Path $script:PythonRoot 'python.exe'
     $main = Join-Path $script:HashiRoot 'main.py'
-    if (-not (Test-Path -LiteralPath $python)) { throw "Portable Python is missing: $python" }
-    if (-not (Test-Path -LiteralPath $main)) { throw "HASHI entry point is missing: $main" }
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Portable Python is missing: $python" }
+    if (-not (Test-Path -LiteralPath $main -PathType Leaf)) { throw "HASHI entry point is missing: $main" }
 
     $stdout = Join-Path $script:DataRoot 'logs\hashi-console.log'
     $stderr = Join-Path $script:DataRoot 'logs\hashi-console-error.log'
@@ -483,8 +547,8 @@ function Start-HASHIBackend {
         -Chinese '正在启动 HASHI……' `
         -ForegroundColor Cyan
     Write-BilingualMessage `
-        -English 'This may take a few minutes. Keep this window open and leave the USB connected.' `
-        -Chinese '这可能需要几分钟。请保持此窗口开启，并勿拔出 USB。' `
+        -English 'This may take a few minutes. Keep this window open.' `
+        -Chinese '这可能需要几分钟，请保持此窗口开启。' `
         -ForegroundColor Yellow
     $bridgeLog = Join-Path $script:DataRoot 'logs\bridge.log'
     $bridgeLogOffset = if (Test-Path -LiteralPath $bridgeLog -PathType Leaf) {
@@ -495,29 +559,37 @@ function Start-HASHIBackend {
     Write-StartupStage `
         -Component 'HASHI' `
         -Percent 5 `
-        -English 'Launching the Portable process' `
-        -Chinese '正在启动 Portable 进程'
+        -English 'Launching the local process' `
+        -Chinese '正在启动本机进程'
     $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $script:DataRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Set-Content -LiteralPath $script:HashiPidPath -Value $process.Id -Encoding ASCII
 
-    $startedAt = Get-Date
-    $deadline = $startedAt.AddSeconds($script:HashiStartupTimeoutSeconds)
+    $deadline = (Get-Date).AddSeconds($script:HashiStartupTimeoutSeconds)
     $lastStagePercent = 5
     do {
         Start-Sleep -Milliseconds 500
         $process.Refresh()
         if ($process.HasExited) {
+            Remove-Item -LiteralPath $script:HashiPidPath -Force -ErrorAction SilentlyContinue
             $tail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 25) -join [Environment]::NewLine } else { '' }
             throw "HASHI exited during startup (code $($process.ExitCode)).`n$tail"
         }
         $health = Get-Health -Port $port
-        if ($null -ne $health -and [string]$health.instance_id -eq [string]$config.global.instance_id) {
+        if ($null -ne $health) {
+            if ([string]$health.instance_id -ne [string]$config.global.instance_id) {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $script:HashiPidPath -Force -ErrorAction SilentlyContinue
+                throw 'The selected local port was taken by another process during startup.'
+            }
             Write-StartupStage `
                 -Component 'HASHI' `
                 -Percent 100 `
                 -English 'Local API is ready' `
                 -Chinese '本机 API 已就绪'
-            return $health
+            return Write-BackendEndpoint `
+                -Process $process `
+                -ApiPort $port `
+                -LaunchNonce ([Guid]::NewGuid().ToString('N'))
         }
         $stage = Get-HASHIStartupStage -LogPath $bridgeLog -LogOffset $bridgeLogOffset
         if ($null -ne $stage -and [int]$stage.Percent -gt $lastStagePercent) {
@@ -530,29 +602,44 @@ function Start-HASHIBackend {
         }
     } while ((Get-Date) -lt $deadline)
 
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:HashiPidPath -Force -ErrorAction SilentlyContinue
     $stdoutTail = if (Test-Path -LiteralPath $stdout) { (Get-Content -LiteralPath $stdout -Tail 25) -join [Environment]::NewLine } else { '' }
     $stderrTail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 25) -join [Environment]::NewLine } else { '' }
-    throw "HASHI did not become healthy on port $port within $script:HashiStartupTimeoutSeconds seconds.`nRecent output:`n$stdoutTail`n$stderrTail"
+    throw "HASHI did not become healthy on the selected local port within $script:HashiStartupTimeoutSeconds seconds.`nRecent output:`n$stdoutTail`n$stderrTail"
 }
 
 function Start-WorkbenchServer {
-    [void](Ensure-LocalAccelerationCache)
     Initialize-PortableEnvironment
-    $config = Get-PortableConfig
-    $secrets = Get-PortableSecrets
-    $port = 18888
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/" -TimeoutSec 2
-        if ($response.StatusCode -eq 200) { return }
-    } catch {}
+    $endpoint = Get-VerifiedLocalEndpoint
+    if ($null -eq $endpoint) { throw 'HASHI local API is not available.' }
 
+    $existingPort = [int]$endpoint.workbench_ui_port
+    $existingProcess = Get-OwnedProcess -ProcessId ([int]$endpoint.workbench_pid)
+    if ($existingPort -gt 0 -and $null -ne $existingProcess) {
+        try {
+            $existingProcess.Refresh()
+            if (
+                [long]$endpoint.workbench_start_ticks -eq [long]$existingProcess.StartTime.ToUniversalTime().Ticks -and
+                (Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$existingPort/" -TimeoutSec 2).StatusCode -eq 200
+            ) {
+                return $existingPort
+            }
+        } catch {}
+    }
+    if ($null -ne $existingProcess) {
+        Stop-Process -Id $existingProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    $port = Get-FreeLoopbackPort -PreferredPort 18888 -ReservedPorts @([int]$endpoint.api_port)
+    $secrets = Get-PortableSecrets
     $node = Join-Path $script:NodeRoot 'node.exe'
     $server = Join-Path $script:WorkbenchRoot 'server.mjs'
-    if (-not (Test-Path -LiteralPath $node)) { throw "Portable Node is missing: $node" }
-    if (-not (Test-Path -LiteralPath $server)) { throw "Workbench server is missing: $server" }
+    if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw "Portable Node is missing: $node" }
+    if (-not (Test-Path -LiteralPath $server -PathType Leaf)) { throw "Workbench server is missing: $server" }
 
     $env:PORT = [string]$port
-    $env:BRIDGE_U_API = "http://127.0.0.1:$([int]$config.global.workbench_port)"
+    $env:BRIDGE_U_API = "http://127.0.0.1:$([int]$endpoint.api_port)"
     $env:BRIDGE_U_ADMIN_TOKEN = [string]$secrets.workbench_admin_token
     $env:HASHI_WORKBENCH_UI_DIR = Join-Path $script:WorkbenchRoot 'ui'
     $env:HASHI_WORKBENCH_KASUMI_APP_DIR = Join-Path $script:WorkbenchRoot 'kasumi-app'
@@ -562,11 +649,7 @@ function Start-WorkbenchServer {
     $env:HASHI_WORKBENCH_REPOSITORY_ROOT = $script:HashiRoot
     $env:HASHI_WORKBENCH_AGENTS_JSON = Join-Path $script:DataRoot 'agents.json'
     $env:HASHI_WORKBENCH_PYTHON = Join-Path $script:PythonRoot 'python.exe'
-    if ($script:ExecutionMode -eq 'local-cache') {
-        $observabilityRoot = Join-Path $script:LocalInstanceRoot 'Logs\workbench'
-    } else {
-        $observabilityRoot = Join-Path $script:DataRoot 'logs\workbench-observability'
-    }
+    $observabilityRoot = Join-Path $script:DataRoot 'logs\workbench-observability'
     New-Item -ItemType Directory -Force -Path $observabilityRoot | Out-Null
     $env:HASHI_WORKBENCH_OBSERVABILITY_DIR = $observabilityRoot
 
@@ -584,40 +667,57 @@ function Start-WorkbenchServer {
     $process = Start-Process -FilePath $node -ArgumentList (Quote-ProcessArgument $server) -WorkingDirectory $script:WorkbenchRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Set-Content -LiteralPath $script:WorkbenchPidPath -Value $process.Id -Encoding ASCII
 
-    $startedAt = Get-Date
-    $deadline = $startedAt.AddSeconds($script:WorkbenchStartupTimeoutSeconds)
+    $deadline = (Get-Date).AddSeconds($script:WorkbenchStartupTimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 400
+        $process.Refresh()
         if ($process.HasExited) {
+            Remove-Item -LiteralPath $script:WorkbenchPidPath -Force -ErrorAction SilentlyContinue
             $tail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 25) -join [Environment]::NewLine } else { '' }
             throw "Workbench exited during startup (code $($process.ExitCode)).`n$tail"
         }
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/" -TimeoutSec 2
             if ($response.StatusCode -eq 200) {
+                Update-WorkbenchEndpoint -Port $port -Process $process
                 Write-StartupStage `
                     -Component 'Workbench' `
                     -Percent 100 `
                     -English 'Local interface is ready' `
                     -Chinese '本机界面已就绪'
-                return
+                return $port
             }
         } catch {}
     } while ((Get-Date) -lt $deadline)
-    throw "Workbench did not become healthy on port $port within $script:WorkbenchStartupTimeoutSeconds seconds."
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:WorkbenchPidPath -Force -ErrorAction SilentlyContinue
+    throw "Workbench did not become healthy on the selected local port within $script:WorkbenchStartupTimeoutSeconds seconds."
 }
 
 function Find-SystemBrowser {
-    $candidates = @(
-        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
-        (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\Application\msedge.exe'),
-        (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe')
-    )
+    $candidates = @()
+    if (${env:ProgramFiles(x86)}) {
+        $candidates += Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'
+    }
+    if ($env:ProgramFiles) {
+        $candidates += Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'
+    }
+    if ($env:LOCALAPPDATA) {
+        $candidates += Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\Application\msedge.exe'
+    }
+    if ($env:ProgramFiles) {
+        $candidates += Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $candidates += Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'
+    }
+    if ($env:LOCALAPPDATA) {
+        $candidates += Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe'
+    }
     foreach ($candidate in $candidates) {
-        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     }
     return $null
 }
+
+Initialize-LocalInstallation

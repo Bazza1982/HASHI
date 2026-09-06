@@ -23,19 +23,6 @@ CAPACITY_CHECK_CLUSTER_BYTES = 32 * 1024
 PYTHON_VERSION = "3.12.10"
 NODE_VERSION = "22.23.2"
 PAIRING_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
-LOCAL_CACHE_ARCHIVE_MAX_FILE_BYTES = 512 * 1024
-LOCAL_CACHE_INSTALL_RESERVE_BYTES = 512 * 1024 * 1024
-LOCAL_CACHE_MANIFEST = "local-cache-manifest.json"
-LOCAL_CACHE_PAYLOAD = "local-cache-small-files.zip"
-LOCAL_CACHE_REQUIRED_FILES = (
-    "runtime/python/python.exe",
-    "runtime/node/node.exe",
-    "runtime/bin/ffmpeg.exe",
-    "app/hashi/main.py",
-    "app/hashi/tui.py",
-    "app/workbench/server.mjs",
-    "app/workbench/ui/index.html",
-)
 
 HERE = Path(__file__).resolve().parent
 HASHI_ROOT = HERE.parents[1]
@@ -637,112 +624,6 @@ def copy_launchers(image_root: Path) -> None:
         script.write_text(source, encoding="utf-8-sig")
 
 
-def create_local_cache_payload(image_root: Path) -> dict:
-    """Create a compact installer payload while retaining expanded USB fallback.
-
-    Thousands of small Python and Workbench files are expensive to read from a
-    low-end flash drive.  They are duplicated into one ZIP for sequential
-    installation reads.  Large files remain direct-copy inputs so the payload
-    costs little additional USB capacity.
-    """
-
-    install_dir = image_root / "install"
-    remove_path(install_dir)
-    install_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = install_dir / LOCAL_CACHE_PAYLOAD
-    records: list[dict] = []
-    bundle_digest = hashlib.sha256()
-    archive_bytes = 0
-    archive_files = 0
-    direct_bytes = 0
-    direct_files = 0
-
-    source_files = sorted(
-        path
-        for root_name in ("app", "runtime")
-        for path in (image_root / root_name).rglob("*")
-        if path.is_file()
-    )
-    status(
-        "create local acceleration payload from "
-        f"{len(source_files):,} app/runtime files"
-    )
-    with zipfile.ZipFile(
-        archive_path,
-        "w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=9,
-        allowZip64=True,
-        strict_timestamps=False,
-    ) as archive:
-        for path in source_files:
-            relative = path.relative_to(image_root).as_posix()
-            size = path.stat().st_size
-            digest = sha256_file(path)
-            delivery = (
-                "archive" if size < LOCAL_CACHE_ARCHIVE_MAX_FILE_BYTES else "direct"
-            )
-            record = {
-                "path": relative,
-                "size": size,
-                "sha256": digest,
-                "delivery": delivery,
-            }
-            records.append(record)
-            bundle_digest.update(f"{relative}\0{size}\0{digest}\n".encode("utf-8"))
-            if delivery == "archive":
-                archive.write(path, arcname=relative)
-                archive_bytes += size
-                archive_files += 1
-            else:
-                direct_bytes += size
-                direct_files += 1
-
-    bundle_id = bundle_digest.hexdigest()
-    manifest = {
-        "schema_version": 1,
-        "product": "HASHI Portable Local Acceleration Cache",
-        "bundle_id": bundle_id,
-        "cache_key": bundle_id[:20],
-        "install_scope": "machine",
-        "administrator_required": True,
-        "authoritative_data": "usb:data",
-        "expanded_usb_fallback": True,
-        "install_bytes": archive_bytes + direct_bytes,
-        "minimum_free_bytes": (
-            archive_bytes + direct_bytes + LOCAL_CACHE_INSTALL_RESERVE_BYTES
-        ),
-        "archive": {
-            "path": f"install/{LOCAL_CACHE_PAYLOAD}",
-            "sha256": sha256_file(archive_path),
-            "compressed_bytes": archive_path.stat().st_size,
-            "uncompressed_bytes": archive_bytes,
-            "file_count": archive_files,
-            "maximum_source_file_bytes": LOCAL_CACHE_ARCHIVE_MAX_FILE_BYTES,
-        },
-        "direct": {
-            "bytes": direct_bytes,
-            "file_count": direct_files,
-        },
-        "bytecode_roots": [
-            "app/hashi",
-            "runtime/python/Lib/site-packages",
-        ],
-        "required_files": list(LOCAL_CACHE_REQUIRED_FILES),
-        "files": records,
-    }
-    (install_dir / LOCAL_CACHE_MANIFEST).write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    status(
-        "local acceleration payload: "
-        f"{archive_files:,} small files -> {archive_path.stat().st_size:,} bytes; "
-        f"{direct_files:,} large files stay direct-copy"
-    )
-    return manifest
-
-
 def tree_size(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
@@ -836,105 +717,49 @@ def validate_image(image_root: Path) -> None:
         "app/workbench/ui/index.html",
         "app/hashi/voice_models/piper/zh_CN-huayan-medium.onnx",
         "app/hashi/hashi_assets/ocr/bin/windows-x86_64/tesseract.exe",
-        f"install/{LOCAL_CACHE_MANIFEST}",
-        f"install/{LOCAL_CACHE_PAYLOAD}",
         "Install_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
-        "launcher/Install-LocalCache.ps1",
+        "launcher/Install-To-PC.ps1",
         "launcher/Bootstrap-Elevated.ps1",
         "launcher/Elevated-Entry.ps1",
-        "launcher/Uninstall-LocalCache.ps1",
-        "launcher/Compile-LocalCache.py",
+        "launcher/Uninstall-From-PC.ps1",
+        "launcher/Common.ps1",
+        "launcher/Start-TUI.ps1",
+        "launcher/Start-Workbench.ps1",
+        "launcher/Stop-HASHI.ps1",
     )
     missing = [
         relative for relative in required if not (image_root / relative).is_file()
     ]
     if missing:
         raise RuntimeError(f"portable image is incomplete: {missing}")
-
-    cache_manifest = json.loads(
-        (image_root / "install" / LOCAL_CACHE_MANIFEST).read_text(encoding="utf-8")
+    obsolete = (
+        "install/local-cache-manifest.json",
+        "install/local-cache-small-files.zip",
+        "launcher/Install-LocalCache.ps1",
+        "launcher/Uninstall-LocalCache.ps1",
+        "launcher/Compile-LocalCache.py",
     )
-    if cache_manifest.get("install_scope") != "machine":
-        raise RuntimeError("portable local acceleration cache must be machine scoped")
-    if not cache_manifest.get("administrator_required"):
+    present_obsolete = [
+        relative for relative in obsolete if (image_root / relative).exists()
+    ]
+    if present_obsolete:
         raise RuntimeError(
-            "portable local acceleration install must require administrator"
+            f"obsolete split-runtime installer files are present: {present_obsolete}"
         )
-    if not cache_manifest.get("expanded_usb_fallback"):
-        raise RuntimeError(
-            "portable local acceleration must retain expanded USB fallback"
-        )
-    if cache_manifest.get("authoritative_data") != "usb:data":
-        raise RuntimeError("portable local cache must not own authoritative user data")
-    records = cache_manifest.get("files", [])
-    delivery = {record.get("delivery") for record in records}
-    if delivery != {"archive", "direct"}:
-        raise RuntimeError(
-            "portable local cache must contain archive and direct-copy inputs"
-        )
-    record_paths = [str(record.get("path") or "") for record in records]
-    if len(record_paths) != len(set(record_paths)):
-        raise RuntimeError("portable local cache manifest contains duplicate paths")
-    actual_paths = {
-        path.relative_to(image_root).as_posix()
-        for root_name in ("app", "runtime")
-        for path in (image_root / root_name).rglob("*")
-        if path.is_file()
-    }
-    if set(record_paths) != actual_paths:
-        raise RuntimeError(
-            "portable local cache manifest does not cover app/runtime exactly"
-        )
-    digest = hashlib.sha256()
-    archive_records = []
-    direct_records = []
-    for record in records:
-        relative = str(record["path"])
-        source = image_root / relative
-        size = source.stat().st_size
-        actual_hash = sha256_file(source)
-        if size != record.get("size") or actual_hash != record.get("sha256"):
-            raise RuntimeError(
-                f"portable local cache record is inconsistent: {relative}"
-            )
-        digest.update(f"{relative}\0{size}\0{actual_hash}\n".encode("utf-8"))
-        (archive_records if record["delivery"] == "archive" else direct_records).append(
-            record
-        )
-    if digest.hexdigest() != cache_manifest.get("bundle_id"):
-        raise RuntimeError("portable local cache bundle identity is inconsistent")
-    if cache_manifest.get("cache_key") != digest.hexdigest()[:20]:
-        raise RuntimeError("portable local cache key is inconsistent")
-    archive = cache_manifest.get("archive") or {}
-    archive_path = image_root / str(archive.get("path") or "")
-    if sha256_file(archive_path) != archive.get("sha256"):
-        raise RuntimeError("portable local cache archive hash is inconsistent")
-    with zipfile.ZipFile(archive_path) as package:
-        if package.testzip() is not None:
-            raise RuntimeError("portable local cache archive failed its CRC check")
-        archive_names = {
-            item.filename for item in package.infolist() if not item.is_dir()
-        }
-    if archive_names != {str(record["path"]) for record in archive_records}:
-        raise RuntimeError("portable local cache archive contents are inconsistent")
-    if archive.get("file_count") != len(archive_records):
-        raise RuntimeError("portable local cache archive file count is inconsistent")
-    if archive.get("uncompressed_bytes") != sum(
-        int(record["size"]) for record in archive_records
-    ):
-        raise RuntimeError("portable local cache archive byte count is inconsistent")
-    direct = cache_manifest.get("direct") or {}
-    if direct.get("file_count") != len(direct_records):
-        raise RuntimeError("portable local cache direct-copy count is inconsistent")
-    if direct.get("bytes") != sum(int(record["size"]) for record in direct_records):
-        raise RuntimeError("portable local cache direct-copy bytes are inconsistent")
-    if cache_manifest.get("install_bytes") != sum(
-        int(record["size"]) for record in records
-    ):
-        raise RuntimeError("portable local cache install size is inconsistent")
-    if not set(LOCAL_CACHE_REQUIRED_FILES).issubset(actual_paths):
-        raise RuntimeError("portable local cache required-file list is inconsistent")
+
+    common = (image_root / "launcher" / "Common.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    installer = (image_root / "launcher" / "Install-To-PC.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    if "C:\\HASHI-Portable" not in common or "C:\\HASHI-Portable" not in installer:
+        raise RuntimeError("portable launchers do not target the required local root")
+    if "HASHI Portable Local Endpoint" not in common:
+        raise RuntimeError("portable launcher has no trusted local endpoint contract")
+    if "HASHI_PORTABLE_STORAGE_PROFILE = 'removable'" in common:
+        raise RuntimeError("local HASHI execution still enables removable storage mode")
 
 
 def build(args: argparse.Namespace) -> Path:
@@ -987,7 +812,6 @@ def build(args: argparse.Namespace) -> Path:
             allow_missing_key=args.allow_missing_deepseek_key,
         )
         copy_launchers(staging)
-        local_cache_manifest = create_local_cache_payload(staging)
         validate_image(staging)
 
         categories = {
@@ -995,7 +819,6 @@ def build(args: argparse.Namespace) -> Path:
             for name in (
                 "app",
                 "runtime",
-                "install",
                 "data",
                 "THIRD_PARTY_LICENSES",
             )
@@ -1028,21 +851,19 @@ def build(args: argparse.Namespace) -> Path:
                 "piper_chinese_tts": True,
                 "ffmpeg": True,
                 "playwright_without_browser": True,
-                "administrator_local_acceleration": True,
-                "expanded_usb_fallback": True,
-                "instance_scoped_host_uninstall": True,
-                "verified_legacy_cache_cleanup": True,
+                "administrator_local_execution": True,
+                "complete_local_copy": True,
+                "usb_execution": False,
+                "fixed_loopback_dynamic_port": True,
+                "identity_bound_local_endpoint": True,
+                "safe_owned_local_uninstall": True,
+                "desktop_shortcuts": True,
                 "verified_shutdown_quiescence": True,
                 "git_tracked_source_only": True,
                 "clean_tracked_inputs_required": True,
                 "local_workbench_observability": True,
                 "local_remote_route_cache": True,
             },
-            "local_cache_bundle_id": local_cache_manifest["bundle_id"],
-            "local_cache_install_bytes": local_cache_manifest["install_bytes"],
-            "local_cache_payload_bytes": local_cache_manifest["archive"][
-                "compressed_bytes"
-            ],
         }
         final_size = 0
         for _attempt in range(5):

@@ -5,23 +5,10 @@ Write-BilingualMessage `
     -English 'HASHI Portable system check' `
     -Chinese 'HASHI Portable 系统检查' `
     -ForegroundColor Cyan
-[void](Use-ExistingLocalCache)
-if ($script:ExecutionMode -eq 'local-cache') {
-    Write-BilingualMessage `
-        -English "[OK] Verified local runtime: $script:AppRoot" `
-        -Chinese "[正常] 已验证本机运行组件：$script:AppRoot" `
-        -ForegroundColor Green
-} elseif ($null -ne (Get-LocalCacheManifest)) {
-    Write-BilingualMessage `
-        -English '[ACTION] The local runtime is not installed for this USB build. Start TUI or Workbench to run setup.' `
-        -Chinese '[建议操作] 此 USB 版本尚未安装本机运行组件。请启动 TUI 或 Workbench 进行安装。' `
-        -ForegroundColor Yellow
-} else {
-    Write-BilingualMessage `
-        -English '[INFO] This image has no local runtime installer and will run directly from the USB.' `
-        -Chinese '[信息] 此版本不包含本机运行组件安装包，将直接从 USB 运行。' `
-        -ForegroundColor Yellow
-}
+Write-BilingualMessage `
+    -English "Local installation: $script:PortableRoot" `
+    -Chinese "本机安装位置：$script:PortableRoot" `
+    -ForegroundColor Gray
 
 $required = @(
     (Join-Path $script:PythonRoot 'python.exe'),
@@ -36,11 +23,10 @@ $required = @(
     (Join-Path $script:HashiRoot 'voice_models\piper\zh_CN-huayan-medium.onnx'),
     (Join-Path $script:HashiRoot 'hashi_assets\ocr\bin\windows-x86_64\tesseract.exe'),
     (Join-Path $script:HashiRoot 'hashi_assets\ocr\tessdata_fast-87416418657359cb625c412a48b6e1d6d41c29bd\eng.traineddata'),
-    (Join-Path $script:PortableRoot 'install\local-cache-manifest.json'),
-    (Join-Path $script:PortableRoot 'install\local-cache-small-files.zip')
+    $script:InstallMarkerPath
 )
 foreach ($path in $required) {
-    if (Test-Path -LiteralPath $path) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
         Write-Host "[OK / 正常] $path" -ForegroundColor Green
     } else {
         Write-Host "[MISSING / 缺失] $path" -ForegroundColor Red
@@ -54,13 +40,13 @@ try {
     Set-Content -LiteralPath $probe -Value 'ok' -Encoding ASCII
     Remove-Item -LiteralPath $probe -Force
     Write-BilingualMessage `
-        -English '[OK] USB data directory is writable.' `
-        -Chinese '[正常] USB 数据目录可以写入。' `
+        -English '[OK] Local data directory is writable.' `
+        -Chinese '[正常] 本机数据目录可以写入。' `
         -ForegroundColor Green
 } catch {
     Write-BilingualMessage `
-        -English '[FAILED] USB data directory is not writable.' `
-        -Chinese '[失败] USB 数据目录无法写入。' `
+        -English '[FAILED] Local data directory is not writable.' `
+        -Chinese '[失败] 本机数据目录无法写入。' `
         -ForegroundColor Red
     $failed = $true
 }
@@ -68,9 +54,7 @@ try {
 try {
     Initialize-PortableEnvironment
     & (Join-Path $script:PythonRoot 'python.exe') -c "import aiohttp, cryptography, fastapi, PIL, playwright, psutil, pymupdf, telegram, textual, yaml, zeroconf" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Python exited with code $LASTEXITCODE."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "Python exited with code $LASTEXITCODE." }
     Write-BilingualMessage `
         -English '[OK] Python runtime and required modules loaded successfully.' `
         -Chinese '[正常] Python 运行环境及必要模块已成功加载。' `
@@ -83,13 +67,18 @@ try {
     $failed = $true
 }
 
-$config = Get-PortableConfig
-$health = Get-Health -Port ([int]$config.global.workbench_port)
-if ($null -ne $health) {
+$endpoint = Get-VerifiedLocalEndpoint
+if ($null -ne $endpoint) {
     Write-BilingualMessage `
-        -English '[OK] HASHI is running and responding.' `
-        -Chinese '[正常] HASHI 正在运行并能正常响应。' `
+        -English "[OK] HASHI is responding at 127.0.0.1:$([int]$endpoint.api_port)." `
+        -Chinese "[正常] HASHI 正在 127.0.0.1:$([int]$endpoint.api_port) 正常响应。" `
         -ForegroundColor Green
+} elseif (Test-Path -LiteralPath $script:EndpointPath -PathType Leaf) {
+    Write-BilingualMessage `
+        -English '[FAILED] The saved local endpoint is stale or does not belong to this installation.' `
+        -Chinese '[失败] 已保存的本机端点已失效，或不属于此安装。' `
+        -ForegroundColor Red
+    $failed = $true
 } else {
     Write-BilingualMessage `
         -English '[INFO] HASHI is not currently running.' `
@@ -98,26 +87,19 @@ if ($null -ne $health) {
 }
 
 try {
-    $driveRoot = [IO.Path]::GetPathRoot($script:PortableRoot)
-    if ($driveRoot -match '^[A-Za-z]:\\$') {
-        $drive = [IO.DriveInfo]::new($driveRoot)
-        $freeMiB = [Math]::Round(([double]$drive.AvailableFreeSpace / 1MB), 1)
-        Write-BilingualMessage `
-            -English "USB free space: $freeMiB MB" `
-            -Chinese "USB 可用空间：$freeMiB MB" `
-            -ForegroundColor Gray
-    } else {
-        Write-BilingualMessage `
-            -English '[INFO] Free-space reporting is unavailable for this test path.' `
-            -Chinese '[信息] 当前测试路径无法报告可用空间。' `
-            -ForegroundColor Yellow
-    }
+    $drive = [System.IO.DriveInfo]::new('C:\')
+    $freeMiB = [Math]::Round(([double]$drive.AvailableFreeSpace / 1MB), 1)
+    Write-BilingualMessage `
+        -English "Local free space: $freeMiB MB" `
+        -Chinese "本机可用空间：$freeMiB MB" `
+        -ForegroundColor Gray
 } catch {
     Write-BilingualMessage `
-        -English '[INFO] USB free-space reporting was unavailable.' `
-        -Chinese '[信息] 无法读取 USB 可用空间。' `
+        -English '[INFO] Local free-space reporting was unavailable.' `
+        -Chinese '[信息] 无法读取本机可用空间。' `
         -ForegroundColor Yellow
 }
+
 if ($failed) {
     Write-BilingualMessage `
         -English 'One or more checks failed. Correct the items marked FAILED/MISSING, then retry the launcher.' `

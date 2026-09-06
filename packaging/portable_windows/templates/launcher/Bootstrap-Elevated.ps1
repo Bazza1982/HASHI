@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
+    [ValidateSet('Install', 'Start', 'Stop', 'Diagnose', 'Uninstall')]
+    [string]$Action = 'Start',
     [ValidateSet('TUI', 'Workbench')]
-    [string]$Surface = 'TUI',
-    [switch]$ForceSetup
+    [string]$Surface = 'TUI'
 )
 
 Set-StrictMode -Version Latest
@@ -18,6 +19,8 @@ try {
     if (-not (Test-Path -LiteralPath $entry -PathType Leaf)) {
         throw 'Elevated entry point is missing.'
     }
+    $desktopPath = [Environment]::GetFolderPath('Desktop')
+    if (-not $desktopPath) { throw 'The current user desktop path is unavailable.' }
     $arguments = @(
         '-NoLogo',
         '-NoProfile',
@@ -25,10 +28,13 @@ try {
         'Bypass',
         '-File',
         (Quote-BootstrapArgument $entry),
+        '-Action',
+        $Action,
         '-Surface',
-        $Surface
+        $Surface,
+        '-DesktopPath',
+        (Quote-BootstrapArgument $desktopPath)
     )
-    if ($ForceSetup) { $arguments += '-ForceSetup' }
     Start-Process `
         -FilePath (Join-Path $PSHOME 'powershell.exe') `
         -Verb RunAs `
@@ -37,7 +43,7 @@ try {
     try {
         $shell = New-Object -ComObject WScript.Shell
         [void]$shell.Popup(
-            "HASHI startup failed.`nHASHI 启动失败。",
+            "HASHI operation failed.`nHASHI 操作失败。",
             0,
             'HASHI Portable',
             16
