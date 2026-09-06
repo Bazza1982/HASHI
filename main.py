@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +67,16 @@ class UniversalOrchestrator:
             "generation_id": "bootstrap",
             "module_count": 0,
             "runtime_id": RUNTIME_FINGERPRINT.runtime_id,
+        }
+        self._startup_started_monotonic = time.monotonic()
+        self.startup_status = {
+            "phase": "core_bootstrap",
+            "ready": False,
+            "completed": 0,
+            "ready_agents": 0,
+            "total": 0,
+            "percent": 0,
+            "elapsed_seconds": 0.0,
         }
         self.function_workers = FunctionWorkerSupervisor(self)
         install_core_manager_bundle(
@@ -211,8 +222,18 @@ class UniversalOrchestrator:
     ) -> tuple[list, list[tuple[str, str]]]:
         return self.backend_preflight.partition_agents_by_availability(agent_configs, engine_status)
 
-    async def start_agent(self, agent_name: str) -> tuple[bool, str]:
-        return await self.agent_lifecycle.start_agent(agent_name)
+    async def start_agent(
+        self,
+        agent_name: str,
+        *,
+        generation=None,
+        generation_root: Path | None = None,
+    ) -> tuple[bool, str]:
+        return await self.agent_lifecycle.start_agent(
+            agent_name,
+            generation=generation,
+            generation_root=generation_root,
+        )
 
     async def stop_agent(self, agent_name: str, reason: str = "manual-stop") -> tuple[bool, str]:
         return await self.agent_lifecycle.stop_agent(agent_name, reason)
@@ -269,8 +290,9 @@ class UniversalOrchestrator:
             await self.service_manager.stop_workbench_api()
             return
 
-        main_logger.info("Universal Orchestrator is online. Awaiting messages.")
-
+        startup_status = dict(getattr(self, "startup_status", {}) or {})
+        startup_status.update({"phase": "starting_services", "percent": 90})
+        self.startup_status = startup_status
         await self.service_manager.start_runtime_services(global_cfg, secrets)
 
         try:
@@ -281,6 +303,38 @@ class UniversalOrchestrator:
             ok, message = await self.start_whatsapp_transport(persist_enabled=False)
             if not ok:
                 main_logger.warning(message)
+
+        startup_status = dict(getattr(self, "startup_status", {}) or {})
+        failed_agents = int(startup_status.get("failed_agents") or 0)
+        startup_status.update(
+            {
+                "phase": "ready" if failed_agents == 0 else "degraded",
+                "ready": True,
+                "services_ready": True,
+                "percent": 100,
+                "elapsed_seconds": round(
+                    time.monotonic()
+                    - getattr(self, "_startup_started_monotonic", time.monotonic()),
+                    1,
+                ),
+            }
+        )
+        self.startup_status = startup_status
+        bridge_logger.info(
+            "Startup complete: %s/%s ready (overall=%s%%), failed=%s, elapsed=%.1fs",
+            startup_status.get("ready_agents", 0),
+            startup_status.get("total", 0),
+            startup_status.get("percent", 100),
+            failed_agents,
+            startup_status["elapsed_seconds"],
+        )
+        main_logger.info(
+            "Universal Orchestrator is online. Awaiting messages. "
+            "Startup complete: %s/%s agents ready in %.1fs.",
+            startup_status.get("ready_agents", 0),
+            startup_status.get("total", 0),
+            startup_status["elapsed_seconds"],
+        )
 
         # --- Main event loop: supports hot restart ---
         while True:

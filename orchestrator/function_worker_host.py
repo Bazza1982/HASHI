@@ -25,7 +25,7 @@ from orchestrator.function_generation import (
     FUNCTION_GENERATION_SCHEMA_VERSION,
     SourceManifest,
     candidate_import_guard,
-    verify_source_manifest,
+    verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_protocol import (
     FUNCTION_WORKER_PROTOCOL_VERSION,
@@ -787,13 +787,19 @@ class FunctionWorkerHost:
                 "Function generation schema implementation does not match Core policy"
             )
         self._install_generation_import_paths()
-        verify_source_manifest(self.manifest, code_root=self.generation_root)
+        verify_qualified_manifest_bytes(
+            self.manifest,
+            code_root=self.generation_root,
+        )
 
         with candidate_import_guard():
             for entry in self.manifest.entries:
                 importlib.import_module(entry.module)
             validate_function_contract()
-        verify_source_manifest(self.manifest, code_root=self.generation_root)
+        verify_qualified_manifest_bytes(
+            self.manifest,
+            code_root=self.generation_root,
+        )
 
         from orchestrator.config import ConfigManager
         from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime

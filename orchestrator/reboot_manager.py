@@ -88,6 +88,15 @@ class RebootManager:
             self.kernel.function_workers.qualify_generation
         )
         self.kernel.function_workers.remember_generation(generation)
+        prepare_generation = getattr(
+            self.kernel.function_workers,
+            "prepare_generation",
+            None,
+        )
+        if callable(prepare_generation):
+            generation, generation_root = await prepare_generation(generation)
+        else:
+            generation_root = None
         bridge_logger.info(
             "Function generation verified before cutover: generation=%s "
             "modules=%s probe_pid=%s runtime=%s",
@@ -96,9 +105,18 @@ class RebootManager:
             generation.receipt.probe_pid,
             generation.receipt.runtime.runtime_id,
         )
+        def _prepare(name: str):
+            if generation_root is None:
+                return self.kernel.function_workers.prepare_worker(name, generation)
+            return self.kernel.function_workers.prepare_worker(
+                name,
+                generation,
+                generation_root=generation_root,
+            )
+
         tasks = {
             name: asyncio.create_task(
-                self.kernel.function_workers.prepare_worker(name, generation),
+                _prepare(name),
                 name=f"prepare-function-worker:{name}",
             )
             for name in targets
@@ -212,8 +230,13 @@ class RebootManager:
 
             # The source and Core contract are checked after every old Worker
             # is quiescent and immediately before candidates can receive work.
-            for candidate in candidates.values():
-                candidate.generation.verify(self.kernel.runtime_fingerprint)
+            generation = next(iter(candidates.values())).generation
+            verify = getattr(
+                generation,
+                "verify_qualified_source",
+                generation.verify,
+            )
+            await asyncio.to_thread(verify, self.kernel.runtime_fingerprint)
 
             activation_results = await asyncio.gather(
                 *(

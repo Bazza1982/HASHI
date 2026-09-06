@@ -55,9 +55,6 @@ _FW_KANJI = list("橋木喬水火山空海時光風雷電影鉄道城夢力波�
 _FW_ALL   = _FW_KANA + _FW_KANJI
 _ASCII_SCRAMBLE = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#$%&*+-=<>")
 
-_ANIM_BUDGET = 14.0   # total seconds before we give up waiting for agents
-
-
 def _glyph_profile() -> str:
     profile = os.environ.get("BRIDGE_BANNER_GLYPH_PROFILE", "full").strip().lower()
     if profile in {"latin", "latin-safe", "wsl-safe", "no-cjk"}:
@@ -128,6 +125,7 @@ def _show_ascii_startup_banner(
     skipped_agents: list | None = None,
     logo_only: bool = False,
     inactive_agents: list | None = None,
+    startup_progress: dict | None = None,
 ) -> None:
     print()
     print("  BRIDGE-U-F")
@@ -154,11 +152,29 @@ def _show_ascii_startup_banner(
             print(f"    x {name}: {reason}")
 
     if boot_state is not None:
-        deadline = time.time() + _ANIM_BUDGET
-        while time.time() < deadline:
-            if all(state in ("online", "local", "failed") for state in boot_state.values()):
-                break
+        last_line = ""
+        while not all(
+            state in ("online", "local", "failed")
+            for state in boot_state.values()
+        ):
+            progress = startup_progress or {}
+            completed = int(progress.get("completed") or 0)
+            total = int(progress.get("total") or len(agent_names))
+            percent = int(progress.get("percent") or 0)
+            agent_percent = int(progress.get("agent_percent") or 0)
+            elapsed = float(progress.get("elapsed_seconds") or 0.0)
+            phase = str(progress.get("phase") or "starting").replace("_", " ")
+            line = (
+                f"  startup {percent}% | agents {completed}/{total} "
+                f"({agent_percent}%) | "
+                f"{phase} | {elapsed:.1f}s"
+            )
+            if line != last_line:
+                _write(f"\r\033[K{line}")
+                last_line = line
             time.sleep(0.12)
+        if last_line:
+            _write("\r\033[K")
 
         print()
         for name in agent_names:
@@ -265,6 +281,7 @@ def show_startup_banner(
     logo_only: bool = False,
     inactive_agents: list | None = None,
     boot_reason: dict | None = None,
+    startup_progress: dict | None = None,
 ) -> None:
     """
     HASHI startup animation.
@@ -297,13 +314,13 @@ def show_startup_banner(
             skipped_agents=skipped_agents,
             logo_only=logo_only,
             inactive_agents=inactive_agents,
+            startup_progress=startup_progress,
         )
         return
 
     size       = shutil.get_terminal_size((80, 24))
     rows       = max(size.lines, 8)
     STATUS_ROW = rows - 1
-    anim_start = time.time()
     live       = boot_state is not None
     full_glyphs = _full_glyphs_enabled()
     symbols = _glyph_symbols()
@@ -313,6 +330,12 @@ def show_startup_banner(
     # ── live status bar helpers ───────────────────────────────────────────────
 
     def _bar() -> str:
+        progress = startup_progress or {}
+        completed = int(progress.get("completed") or 0)
+        total = int(progress.get("total") or len(agent_names))
+        percent = int(progress.get("percent") or 0)
+        elapsed = float(progress.get("elapsed_seconds") or 0.0)
+        phase = str(progress.get("phase") or "starting").replace("_", " ")
         parts = []
         for n in agent_names:
             s = boot_state.get(n, "pending")
@@ -321,7 +344,11 @@ def show_startup_banner(
             elif s == "connecting": parts.append(f"{_c(75)}{n} {symbols['connecting']}{_R}")
             elif s == "failed":     parts.append(f"{_c(203)}{n} {symbols['failed']}{_R}")
             else:                   parts.append(f"{_c(238)}{n}{_R}")
-        return "  " + "  ".join(parts)
+        aggregate = (
+            f"startup {percent}% · agents {completed}/{total} · "
+            f"{phase} · {elapsed:.1f}s"
+        )
+        return f"  {_c(75)}{aggregate}{_R}  |  " + "  ".join(parts)
 
     def _refresh():
         if not live:
@@ -543,10 +570,10 @@ def show_startup_banner(
 
         # ── Phase 4 : agent results ───────────────────────────────────────────
         if live:
-            deadline = anim_start + _ANIM_BUDGET
-            while time.time() < deadline:
-                if all(v in ("online", "local", "failed") for v in boot_state.values()):
-                    break
+            while not all(
+                value in ("online", "local", "failed")
+                for value in boot_state.values()
+            ):
                 _sleep(0.12)
 
             _clear_bar()
@@ -570,6 +597,23 @@ def show_startup_banner(
                 print(f"  {_c(238)}{symbols['inactive']}  {n}{_R}")
                 sys.stdout.flush()
                 time.sleep(0.02)
+
+            ready_count = sum(
+                state in ("online", "local") for state in boot_state.values()
+            )
+            failed_count = sum(
+                state == "failed" for state in boot_state.values()
+            )
+            elapsed = float(
+                (startup_progress or {}).get("elapsed_seconds") or 0.0
+            )
+            print()
+            print(
+                f"  {_c(108)}agents {len(agent_names)}/{len(agent_names)} "
+                f"(100%){_R}  {_c(244)}ready={ready_count} "
+                f"failed={failed_count} elapsed={elapsed:.1f}s · "
+                f"services starting{_R}"
+            )
         else:
             _simple_resolve(f"loading agents{symbols['ellipsis']}",
                             f"{len(agent_names)} agents queued", _c(108), secs=0.7)

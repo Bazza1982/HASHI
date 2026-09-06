@@ -204,6 +204,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Function Worker cold-start latency and readiness truth** — qualifies and
+  materializes one immutable Function generation per startup instead of
+  rebuilding the same 268-module dependency graph for every Agent; unchanged
+  cold restarts reuse the persisted isolated-probe receipt only after exact
+  source, asset, Core runtime, ABI, dependency, and artifact checks. Up to eight
+  Workers now prepare concurrently. The terminal and Workbench health endpoint
+  expose phase, overall percentage, Agent completion, failures, and elapsed
+  time continuously, and readiness reaches 100% only after Core services and
+  optional transports have started.
 - **Reasoning-stream canonical audit hot path** — lossless provider stream
   evidence now commits in bounded 200 ms / 8 KiB groups with one lock, chain-tail
   read, append, flush, and `fsync`. Each raw delta retains its own sequence,

@@ -158,3 +158,33 @@ def test_whatsapp_channel_health_uses_transport_connection_state(tmp_path):
 
     transport.is_connected = lambda: True
     assert server._is_whatsapp_available() is True
+
+
+@pytest.mark.asyncio
+async def test_health_distinguishes_core_liveness_from_complete_startup(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    server.orchestrator = SimpleNamespace(
+        instance_id="HASHI3",
+        api_gateway=None,
+        runtimes=[],
+        startup_status={
+            "phase": "starting_workers",
+            "ready": False,
+            "completed": 2,
+            "ready_agents": 2,
+            "total": 6,
+            "agent_percent": 33,
+            "percent": 40,
+            "elapsed_seconds": 8.4,
+        },
+    )
+
+    response = await server.handle_health(_FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert payload["ready"] is False
+    assert payload["status"] == "starting_workers"
+    assert payload["startup"]["completed"] == 2
+    assert payload["startup"]["total"] == 6
+    assert payload["startup"]["percent"] == 40

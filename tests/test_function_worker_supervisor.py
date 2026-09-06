@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,15 +9,20 @@ import pytest
 
 from orchestrator.function_generation import (
     CandidateProbeReceipt,
+    SourceEntry,
     VerifiedFunctionGeneration,
+    build_source_manifest_from_entries,
     build_source_manifest,
+    verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_protocol import FunctionWorkerDisconnected
 from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
     FunctionWorkerError,
     FunctionWorkerSupervisor,
+    load_qualified_generation_cache,
     materialize_generation_artifact,
+    persist_qualified_generation_cache,
     verify_generation_artifact,
 )
 from orchestrator.function_worker_host import FunctionWorkerHost
@@ -368,6 +374,96 @@ def test_generation_artifact_tamper_is_rejected_before_worker_spawn(tmp_path):
 
     with pytest.raises(Exception, match="source or asset changed"):
         verify_generation_artifact(artifact, generation)
+
+
+def test_qualified_byte_verification_does_not_rebuild_dependency_graph(
+    tmp_path,
+    monkeypatch,
+):
+    generation = _verified_generation(tmp_path / "source")
+
+    monkeypatch.setattr(
+        "orchestrator.function_generation.build_source_manifest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("qualified bytes must not rebuild the AST graph")
+        ),
+    )
+
+    verify_qualified_manifest_bytes(
+        generation.manifest,
+        code_root=generation.code_root,
+    )
+
+
+def test_qualified_byte_verification_rejects_new_asset(tmp_path):
+    generation = _verified_generation(tmp_path / "source")
+    added = generation.code_root / "orchestrator" / "assets" / "unqualified.txt"
+    added.write_text("not in the accepted manifest", encoding="utf-8")
+
+    with pytest.raises(Exception, match="source or asset changed"):
+        verify_qualified_manifest_bytes(
+            generation.manifest,
+            code_root=generation.code_root,
+        )
+
+
+def test_qualified_byte_verification_rejects_parent_traversal(tmp_path):
+    escaped = tmp_path / "escaped.py"
+    escaped.write_text("VALUE = 1\n", encoding="utf-8")
+    manifest = build_source_manifest_from_entries(
+        [
+            SourceEntry(
+                module="orchestrator.escaped",
+                relative_path="../escaped.py",
+                sha256=hashlib.sha256(escaped.read_bytes()).hexdigest(),
+            )
+        ]
+    )
+    root = tmp_path / "root"
+    root.mkdir()
+
+    with pytest.raises(Exception, match="source or asset changed"):
+        verify_qualified_manifest_bytes(manifest, code_root=root)
+
+
+def test_qualified_generation_cache_round_trip_and_tamper_rejection(
+    tmp_path,
+    monkeypatch,
+):
+    source_root = tmp_path / "source"
+    bridge_home = tmp_path / "bridge"
+    generation = _verified_generation(source_root)
+    artifact = materialize_generation_artifact(bridge_home, generation)
+    persist_qualified_generation_cache(bridge_home, generation, artifact)
+    monkeypatch.setattr(
+        VerifiedFunctionGeneration,
+        "verify_qualified_source",
+        lambda self, expected_runtime: None,
+    )
+
+    loaded = load_qualified_generation_cache(
+        bridge_home,
+        source_root,
+        object(),
+    )
+
+    assert loaded is not None
+    loaded_generation, loaded_artifact = loaded
+    assert loaded_generation.manifest == generation.manifest
+    assert loaded_artifact == artifact
+
+    source = artifact / "orchestrator" / "worker_demo.py"
+    source.chmod(0o644)
+    source.write_text("VALUE = 999\n", encoding="utf-8")
+
+    assert (
+        load_qualified_generation_cache(
+            bridge_home,
+            source_root,
+            object(),
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
