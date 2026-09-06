@@ -41,7 +41,7 @@ def test_portable_profile_has_one_her_engine_and_configurable_regional_providers
         json.dumps(
             {
                 "authorized_telegram_id": 0,
-                "portable": "WORKBENCH_ONLY_NO_TOKEN",
+                "agent": "WORKBENCH_ONLY_NO_TOKEN",
                 "deepseek_api_key": "test-key",
                 "dashscope_api_key": "test-qwen-key",
             }
@@ -55,7 +55,13 @@ def test_portable_profile_has_one_her_engine_and_configurable_regional_providers
         bridge_home=tmp_path,
     ).load()
     manager = FlexibleBackendManager(agent, global_config, secrets)
+    [profile] = json.loads((tmp_path / "agents.json").read_text())["agents"]
 
+    assert agent.name == "agent"
+    assert profile["display_name"] == "智能体"
+    assert profile["emoji"] == "🤖"
+    assert profile["telegram_token_key"] == "agent"
+    assert secrets["agent"] == "WORKBENCH_ONLY_NO_TOKEN"
     assert agent.active_backend == "her-v2"
     assert agent.default_mode == "fixed"
     assert agent.access_scope == "drive"
@@ -469,6 +475,9 @@ def test_portable_launchers_are_drive_relative_and_gateway_stays_disabled():
     assert "$env:BRIDGE_HOME = $script:DataRoot" in common
     assert "$env:HASHI_REMOTE_ROOT = $script:DataRoot" in common
     assert "$env:HASHI_OCR_MODEL_ROOT" in common
+    assert "'--agents'" in common
+    assert "'agent'" in common
+    assert "'portable'" not in common
 
 
 def test_builder_enforces_capacity_and_prunes_cli_adaptors():

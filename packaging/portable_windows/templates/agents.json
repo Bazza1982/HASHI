@@ -77,12 +77,12 @@
   },
   "agents": [
     {
-      "name": "portable",
-      "display_name": "HASHI Portable",
-      "emoji": "🪼",
+      "name": "agent",
+      "display_name": "智能体",
+      "emoji": "🤖",
       "type": "flex",
       "workspace_dir": "@home/workspaces/portable",
-      "telegram_token_key": "portable",
+      "telegram_token_key": "agent",
       "is_active": true,
       "active_backend": "her-v2",
       "default_mode": "fixed",

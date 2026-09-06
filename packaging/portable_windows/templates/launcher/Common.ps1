@@ -540,7 +540,7 @@ function Start-HASHIBackend {
         '--bridge-home',
         (Quote-ProcessArgument $script:DataRoot),
         '--agents',
-        'portable'
+        'agent'
     )
     Write-BilingualMessage `
         -English 'Starting HASHI...' `

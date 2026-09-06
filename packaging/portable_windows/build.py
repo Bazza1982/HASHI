@@ -580,7 +580,7 @@ def configure_data(
     remote_token = str(source.get("hashi_remote_shared_token") or "").strip()
     portable_secrets = {
         "authorized_telegram_id": 0,
-        "portable": "WORKBENCH_ONLY_NO_TOKEN",
+        "agent": "WORKBENCH_ONLY_NO_TOKEN",
         "deepseek_api_key": deepseek_key,
         "workbench_admin_token": secrets_module.token_urlsafe(32),
         "hashi_remote_shared_token": remote_token or secrets_module.token_urlsafe(48),
