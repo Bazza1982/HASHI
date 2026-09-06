@@ -143,7 +143,7 @@ def test_ready_status_uses_live_worker_ingress_and_service_endpoints(capsys):
         "  agent1    ONLINE | Telegram CONNECTED\n"
         "\n"
         "Services\n"
-        "  Backend API  http://127.0.0.1:18804\n"
+        "  Workbench    http://127.0.0.1:18804\n"
         "  API Gateway  http://127.0.0.1:18805\n"
         "\n"
     )

@@ -10,7 +10,7 @@ Sequence
                           each line decrypts left→right into block art
   Phase 2.5 — poem:       logo possession → kanji evaporate → poem crystallises
                           to the right of the logo
-  Phase 3 — status table: agents · backend api · api gateway · whatsapp
+  Phase 3 — status table: agents · workbench · api gateway · whatsapp
   Phase 4 — agent results: waits for any stragglers, then prints ✓/✗ per agent
 """
 
@@ -395,7 +395,7 @@ def _show_ascii_startup_banner(
         return
 
     _line(f"  agents      {len(agent_names)} active")
-    _line(f"  backend api :{workbench_port}" if workbench_port else "  backend api disabled")
+    _line(f"  workbench   :{workbench_port}" if workbench_port else "  workbench   disabled")
     _line(f"  api gateway {'enabled' if api_gateway_enabled else 'disabled'}")
     _line(f"  whatsapp    {'enabled' if wa_enabled else 'disabled'}")
 
@@ -544,6 +544,29 @@ def _simple_resolve(
     _write(f"\r  {col}{symbols['online']}{_R}  {col}{done:<44}{_R}\n")
 
 
+def _timed_refresh(
+    seconds: float,
+    refresh,
+    *,
+    tick: float = 0.08,
+) -> None:
+    """Refresh during a delay without ever passing a negative sleep value."""
+
+    end = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        refresh()
+        # A Windows console frame may take longer than the remaining delay.
+        # Re-check after output instead of assuming time stayed positive.
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(max(0.001, tick), remaining))
+    refresh()
+
+
 # ── main entry point ──────────────────────────────────────────────────────────
 
 def _show_animated_startup_banner(
@@ -567,7 +590,7 @@ def _show_animated_startup_banner(
                              {name: "pending"|"connecting"|"online"|"failed"}
                              When supplied, a live status bar tracks each agent.
                              When None, simple spinners are used instead.
-        workbench_port:      Backend API port (compatibility parameter name), else None
+        workbench_port:      port if Workbench is active, else None
         wa_enabled:          whether WhatsApp transport is enabled
         api_gateway_enabled: whether the API gateway is enabled
         skipped_agents:      [(name, reason)] for agents that couldn't start
@@ -616,11 +639,7 @@ def _show_animated_startup_banner(
         _write(f"\033[s\033[{STATUS_ROW};1H\033[2K{_bar()}\033[u")
 
     def _sleep(secs: float, tick: float = 0.08):
-        end = time.time() + secs
-        while time.time() < end:
-            _refresh()
-            time.sleep(min(tick, end - time.time()))
-        _refresh()
+        _timed_refresh(secs, _refresh, tick=tick)
 
     def _clear_bar():
         _write(f"\033[s\033[{STATUS_ROW};1H\033[2K\033[u")
@@ -812,7 +831,7 @@ def _show_animated_startup_banner(
 
         row("agents",
             f"{len(agent_names)} active", _c(108))
-        row("backend api",
+        row("workbench",
             f":{workbench_port}" if workbench_port else "disabled",
             _c(108) if workbench_port else _c(238))
         row("api gateway",
@@ -882,8 +901,8 @@ def _show_animated_startup_banner(
                             f"{len(agent_names)} agents queued", _c(108), secs=0.7,
                             full_glyphs=full_glyphs)
             if workbench_port:
-                _simple_resolve(f"backend api{symbols['ellipsis']}",
-                                f"backend api :{workbench_port}", _c(108), secs=0.4,
+                _simple_resolve(f"workbench{symbols['ellipsis']}",
+                                f"workbench :{workbench_port}", _c(108), secs=0.4,
                                 full_glyphs=full_glyphs)
             if wa_enabled:
                 _simple_resolve(f"whatsapp transport{symbols['ellipsis']}",

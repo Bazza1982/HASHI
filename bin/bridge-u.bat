@@ -118,7 +118,7 @@ goto launch
 cls
 call :print_banner "HASHI BOOT" "Professional Agentic AI System"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Agents           !C_RESET! !C_TEXT!!START_LABEL!!C_RESET!
-echo !C_RAIL!^|!C_RESET! !C_LABEL!Backend API      !C_RESET! !C_OK!enabled!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!enabled!C_RESET!
 if "!API_GATEWAY_LAUNCH!"=="1" (
     echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!enabled ^(port 18801^)!C_RESET!
 ) else (
@@ -201,7 +201,7 @@ if "!API_GATEWAY_LAUNCH!"=="1" set "API_GATEWAY_LABEL=ON"
 call :print_banner "HASHI LAUNCHER" "Powered by HER-V2 - Flexible with CLI backends"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
-echo !C_RAIL!^|!C_RESET! !C_LABEL!Backend API      !C_RESET! !C_OK!enabled!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!enabled!C_RESET!
 if "!API_GATEWAY_LABEL!"=="ON" (
     echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!ON!C_RESET!
 ) else (

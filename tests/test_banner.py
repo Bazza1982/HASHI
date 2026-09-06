@@ -34,7 +34,7 @@ def test_static_startup_summary_matches_operator_contract(capsys) -> None:
         ],
         services=[
             ServiceBannerStatus(
-                name="Backend API",
+                name="Workbench",
                 url="http://127.0.0.1:18804",
             ),
             ServiceBannerStatus(
@@ -57,7 +57,7 @@ def test_static_startup_summary_matches_operator_contract(capsys) -> None:
         "  agent1    ONLINE | Telegram CONNECTED\n"
         "\n"
         "Services\n"
-        "  Backend API  http://127.0.0.1:18804\n"
+        "  Workbench    http://127.0.0.1:18804\n"
         "  API Gateway  http://127.0.0.1:18805\n"
         "\n"
     )
@@ -272,3 +272,18 @@ def test_animation_render_failure_is_diagnosed_without_payload(
     diagnostic = terminal_console.output_diagnostic_path().read_text(encoding="utf-8")
     assert '"purpose": "startup_animation"' in diagnostic
     assert "PRIVATE-ANIMATION-PAYLOAD" not in diagnostic
+
+
+def test_animation_refresh_never_sleeps_with_expired_windows_frame(
+    monkeypatch,
+) -> None:
+    clock = iter((0.0, 0.5, 1.1))
+    refreshes = []
+    sleeps = []
+    monkeypatch.setattr(banner.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(banner.time, "sleep", lambda value: sleeps.append(value))
+
+    banner._timed_refresh(1.0, lambda: refreshes.append(True))
+
+    assert refreshes == [True, True]
+    assert sleeps == []

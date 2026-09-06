@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [options]"
             echo "Options:"
             echo "  --resume-last       Automatically resume last selected agents"
-            echo "  --api-gateway, -a   Enable API gateway (default: backend API port + 1)"
+            echo "  --api-gateway, -a   Enable API gateway (default: Workbench port + 1)"
             echo "  --agents NAME       Start specific agent(s)"
             echo "  --dry-run           Show what would be done"
             echo "  --help, -h          Show this help"
@@ -236,7 +236,7 @@ render_menu() {
     # ── Services ──
     echo -e "${C_RAIL}│${C_RESET} ${C_ACCENT}Services${C_RESET}"
     
-    echo -e "${C_RAIL}│${C_RESET}   Backend API     ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
+    echo -e "${C_RAIL}│${C_RESET}   Workbench       ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
     
     if [[ "$api_label" == "ON" ]]; then
         echo -e "${C_RAIL}│${C_RESET}   API Gateway     ${C_OK}ON${C_RESET} (:${API_GATEWAY_PORT})"
@@ -556,7 +556,7 @@ launch() {
     
     echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Agents           ${C_RESET} ${C_TEXT}${start_label}${C_RESET}"
     
-    echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Backend API      ${C_RESET} ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
+    echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Workbench        ${C_RESET} ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
     
     if [[ "$API_GATEWAY_LAUNCH" == "1" ]]; then
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_OK}enabled${C_RESET} (:${API_GATEWAY_PORT})"

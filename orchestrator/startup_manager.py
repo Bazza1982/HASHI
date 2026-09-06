@@ -789,7 +789,7 @@ class StartupManager:
         except Exception:
             services = {}
         for key, label in (
-            ("workbench", "Backend API"),
+            ("workbench", "Workbench"),
             ("api_gateway", "API Gateway"),
         ):
             endpoint = dict(services.get(key) or {})
