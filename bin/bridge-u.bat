@@ -3,8 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
-set "BRIDGE_FORCE_ASCII_BANNER=1"
-title Bridge-U-F Launcher
+title HASHI Launcher
 
 rem This script lives under <repo>\bin\. We want BRIDGE_CODE_ROOT to be the repo root,
 rem not the bin folder, otherwise agents.json will be looked up in the wrong place.
@@ -117,7 +116,7 @@ goto launch
 
 :launch
 cls
-call :print_banner "BRIDGE-U-F BOOT" "Multi-backend orchestrator launch"
+call :print_banner "HASHI BOOT" "Professional Agentic AI System"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Agents           !C_RESET! !C_TEXT!!START_LABEL!!C_RESET!
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Backend API      !C_RESET! !C_OK!enabled!C_RESET!
 if "!API_GATEWAY_LAUNCH!"=="1" (
@@ -199,7 +198,7 @@ exit /b 0
 cls
 set "API_GATEWAY_LABEL=OFF"
 if "!API_GATEWAY_LAUNCH!"=="1" set "API_GATEWAY_LABEL=ON"
-call :print_banner "BRIDGE-U-F LAUNCHER" "Universal multi-agent bridge"
+call :print_banner "HASHI LAUNCHER" "Powered by HER-V2 - Flexible with CLI backends"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Backend API      !C_RESET! !C_OK!enabled!C_RESET!

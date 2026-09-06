@@ -97,6 +97,49 @@ class StartupManager:
     def __init__(self, kernel, console_handler):
         self.kernel = kernel
         self.console_handler = console_handler
+        self._startup_header_shown = False
+        self._startup_animation_completed = False
+
+    def _presentation_identity(self, global_cfg=None) -> tuple[str, object]:
+        paths = getattr(self.kernel, "paths", None)
+        config = global_cfg or getattr(self.kernel, "global_cfg", None) or getattr(
+            self.kernel,
+            "global_config",
+            None,
+        )
+        instance_name = (
+            getattr(config, "instance_id", None)
+            or getattr(paths, "instance_id", None)
+            or "HASHI"
+        )
+        instance_path = (
+            getattr(paths, "bridge_home", None)
+            or getattr(config, "bridge_home", None)
+            or getattr(config, "project_root", None)
+            or "-"
+        )
+        return str(instance_name), instance_path
+
+    def _show_startup_header(
+        self,
+        global_cfg=None,
+        *,
+        include_branding: bool = True,
+        styled: bool = False,
+    ) -> None:
+        if self._startup_header_shown:
+            return
+        from orchestrator.banner import show_startup_header
+
+        instance_name, instance_path = self._presentation_identity(global_cfg)
+        show_startup_header(
+            instance_name=instance_name,
+            instance_path=instance_path,
+            audit_root=instance_path if instance_path != "-" else None,
+            include_branding=include_branding,
+            styled=styled,
+        )
+        self._startup_header_shown = True
 
     async def start_initial_agents(self, global_cfg, agent_configs, secrets) -> tuple[bool, dict]:
         selected_configs = [
@@ -135,6 +178,7 @@ class StartupManager:
         await self._ensure_remote_lifecycle(global_cfg)
 
         if not initial_agent_names:
+            self._show_startup_header(global_cfg)
             print("\n" + "=" * 64)
             print("  CRITICAL ERROR: No agents can start.")
             print("  Reason: All backend engines (Gemini, Claude, etc.) are unavailable.")
@@ -330,6 +374,10 @@ class StartupManager:
             "issues": list(previous_status.get("issues") or ()),
             "notices": list(previous_status.get("notices") or ()),
             "remote": previous_status.get("remote"),
+            "agent_order": list(initial_agent_names),
+            "agent_states": dict(boot_state),
+            "agent_reasons": {},
+            "skipped_agents": list(skipped),
         }
         started = getattr(self.kernel, "_startup_started_monotonic", time.monotonic())
         total = len(initial_agent_names)
@@ -356,6 +404,8 @@ class StartupManager:
             )
             snapshot = {
                 **startup_progress,
+                "agent_states": dict(boot_state),
+                "agent_reasons": dict(boot_reason),
                 "completed": completed,
                 "ready_agents": ready_agents,
                 "local_agents": sum(
@@ -497,26 +547,32 @@ class StartupManager:
             name="boot-progress-heartbeat",
         )
 
-        from orchestrator.banner import show_startup_banner
+        from orchestrator.banner import StartupAnimationResult, show_startup_banner
 
-        def _run_banner():
-            show_startup_banner(
+        _, instance_path = self._presentation_identity(global_cfg)
+
+        def _run_banner() -> StartupAnimationResult:
+            return show_startup_banner(
                 agent_names=initial_agent_names,
                 boot_state=boot_state,
                 workbench_port=global_cfg.workbench_port,
                 wa_enabled=bool(wa_cfg.get("enabled")),
                 api_gateway_enabled=self.kernel.enable_api_gateway,
                 skipped_agents=skipped,
+                logo_only=True,
                 inactive_agents=inactive_agent_names,
                 boot_reason=boot_reason,
                 startup_progress=startup_progress,
+                audit_root=instance_path if instance_path != "-" else None,
+                fallback_to_static=False,
             )
 
         mute = AnimMute()
         if self.console_handler is not None:
             self.console_handler.addFilter(mute)
+
         try:
-            await asyncio.gather(
+            results = await asyncio.gather(
                 asyncio.get_running_loop().run_in_executor(None, _run_banner),
                 *startup_tasks,
                 return_exceptions=True,
@@ -526,6 +582,25 @@ class StartupManager:
             await asyncio.gather(progress_heartbeat, return_exceptions=True)
             if self.console_handler is not None:
                 self.console_handler.removeFilter(mute)
+
+        animation_result = results[0]
+        self._startup_animation_completed = bool(
+            isinstance(animation_result, StartupAnimationResult)
+            and animation_result.completed
+        )
+        if isinstance(animation_result, BaseException):
+            from orchestrator.terminal_console import record_output_exception
+
+            record_output_exception(
+                purpose="startup_animation",
+                sink="animation_executor",
+                error=animation_result,
+            )
+        self._show_startup_header(
+            global_cfg,
+            include_branding=not self._startup_animation_completed,
+            styled=self._startup_animation_completed,
+        )
 
         issues = list(startup_progress.get("issues") or ())
 
@@ -627,3 +702,106 @@ class StartupManager:
                     main_logger.error(message)
             except Exception as e:
                 main_logger.error("Unexpected error reading startup task result: %s", e)
+
+    @staticmethod
+    def _runtime_is_online(handle, startup_state: str) -> bool:
+        if handle is None:
+            return False
+        metadata = dict(getattr(handle, "metadata", {}) or {})
+        client = getattr(handle, "client", None)
+        process = getattr(client, "process", None)
+        alive = True
+        is_alive = getattr(process, "is_alive", None)
+        if callable(is_alive):
+            try:
+                alive = bool(is_alive())
+            except Exception:
+                alive = False
+        if bool(getattr(client, "closed", False)):
+            alive = False
+        if getattr(handle, "_offline_error", None):
+            alive = False
+
+        phase = str(metadata.get("worker_phase") or "").upper()
+        accepting = metadata.get("worker_accepting")
+        backend_ready = bool(getattr(handle, "backend_ready", True))
+        if phase or accepting is not None:
+            return (
+                alive
+                and backend_ready
+                and phase == "ACTIVE"
+                and bool(accepting)
+            )
+        return alive and startup_state in {"online", "local"}
+
+    def show_startup_status(self) -> None:
+        """Render verified Worker, Telegram ingress, and live service state."""
+
+        from orchestrator.banner import (
+            AgentBannerStatus,
+            ServiceBannerStatus,
+            show_startup_status,
+        )
+
+        startup = dict(getattr(self.kernel, "startup_status", {}) or {})
+        states = dict(startup.get("agent_states") or {})
+        agent_order = [str(name) for name in startup.get("agent_order") or ()]
+        runtime_map = dict(self.kernel._runtime_map())
+        for name in runtime_map:
+            if name not in agent_order:
+                agent_order.append(name)
+
+        workers = getattr(self.kernel, "function_workers", None)
+        ingress_snapshot = getattr(workers, "telegram_ingress_snapshot", None)
+        agent_rows = []
+        for name in agent_order:
+            handle = runtime_map.get(name)
+            startup_state = str(states.get(name) or "").casefold()
+            online = self._runtime_is_online(handle, startup_state)
+            telegram_connected: bool | None = None
+            if handle is not None:
+                telegram_connected = bool(
+                    getattr(handle, "telegram_connected", False)
+                )
+                if callable(ingress_snapshot):
+                    try:
+                        ingress = dict(ingress_snapshot(name) or {})
+                    except Exception:
+                        ingress = {}
+                    telegram_connected = bool(
+                        telegram_connected
+                        and ingress.get("running")
+                        and ingress.get("connected")
+                    )
+            agent_rows.append(
+                AgentBannerStatus(
+                    name=name,
+                    state="ONLINE" if online else "FAILED",
+                    telegram_connected=telegram_connected,
+                )
+            )
+
+        service_rows = []
+        registry = getattr(self.kernel, "endpoint_registry", None)
+        snapshot = getattr(registry, "snapshot", None)
+        try:
+            services = dict((snapshot() if callable(snapshot) else {}).get("services") or {})
+        except Exception:
+            services = {}
+        for key, label in (
+            ("workbench", "Backend API"),
+            ("api_gateway", "API Gateway"),
+        ):
+            endpoint = dict(services.get(key) or {})
+            url = str(endpoint.get("base_url") or "").strip()
+            if url:
+                service_rows.append(ServiceBannerStatus(name=label, url=url))
+
+        instance_name, instance_path = self._presentation_identity()
+        show_startup_status(
+            agents=agent_rows,
+            services=service_rows,
+            instance_name=instance_name,
+            audit_root=instance_path if instance_path != "-" else None,
+            styled=self._startup_animation_completed,
+        )

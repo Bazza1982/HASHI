@@ -8,8 +8,8 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
-from orchestrator.pathing import BridgePaths
 from orchestrator import terminal_console
+from orchestrator.pathing import BridgePaths
 
 C_RESET = "\033[0m"
 C_MUTED = "\033[38;5;242m"
@@ -87,15 +87,8 @@ class ConsoleOutputFilter(logging.Filter):
         "httpcore",
     )
     _ALLOW_INFO_FRAGMENTS = (
-        "Process bootstrap:",
         "Configured ",
         "Local command extension compatibility:",
-        "Universal Orchestrator is online.",
-        "Startup complete:",
-        "Backend API listening on",
-        "Workbench API listening on",
-        "API Gateway listening on",
-        "API Gateway disabled",
         "API Gateway failed to start",
         "Shutdown requested",
         "Shutdown already requested",
@@ -115,6 +108,15 @@ class ConsoleOutputFilter(logging.Filter):
         "Restart requested",
         "Hot restart:",
         "Hot restart complete.",
+    )
+    _DEBUG_INFO_FRAGMENTS = (
+        "Process bootstrap:",
+        "HASHI is online.",
+        "Universal Orchestrator is online.",
+        "Startup complete:",
+        "Workbench API listening on",
+        "API Gateway listening on",
+        "API Gateway disabled",
     )
     _CONTENT_RISK_PREFIXES = (
         "Backend.",
@@ -138,6 +140,9 @@ class ConsoleOutputFilter(logging.Filter):
         msg = record.getMessage()
         name = record.name
         allowed_lifecycle = any(frag in msg for frag in self._ALLOW_INFO_FRAGMENTS)
+        debug_lifecycle = any(
+            frag in msg for frag in self._DEBUG_INFO_FRAGMENTS
+        )
         level = terminal_console.get_level()
 
         # Raw is the historical terminal: warning/error records plus the same
@@ -147,8 +152,8 @@ class ConsoleOutputFilter(logging.Filter):
                 return True
             for prefix in self._SUPPRESS_INFO_PREFIXES:
                 if name.startswith(prefix):
-                    return allowed_lifecycle
-            return allowed_lifecycle
+                    return allowed_lifecycle or debug_lifecycle
+            return allowed_lifecycle or debug_lifecycle
 
         requested_detail = str(getattr(record, "terminal_detail", "") or "")
         if bool(getattr(record, "terminal_safe", False)):
@@ -165,6 +170,8 @@ class ConsoleOutputFilter(logging.Filter):
         # production level, including those emitted by runtime loggers.
         if allowed_lifecycle:
             return True
+        if debug_lifecycle:
+            return level == terminal_console.LEVEL_DEBUG
 
         # Runtime/provider logs may contain prompts, completions, reasoning,
         # command arguments, or provider error bodies.  They remain complete

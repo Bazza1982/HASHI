@@ -357,6 +357,23 @@ class UniversalOrchestrator:
             }
         )
         self.startup_status = startup_status
+        show_startup_status = getattr(
+            self.startup_manager,
+            "show_startup_status",
+            None,
+        )
+        if callable(show_startup_status):
+            try:
+                show_startup_status()
+            except Exception as exc:
+                # Presentation must never decide whether Core is available.
+                from orchestrator.terminal_console import record_output_exception
+
+                record_output_exception(
+                    purpose="startup_status",
+                    sink="startup_status_renderer",
+                    error=exc,
+                )
         bridge_logger.info(
             "Startup complete: status=%s agents=%s/%s ready (overall=%s%%), "
             "failed=%s issues=%s elapsed=%.1fs",
@@ -369,7 +386,7 @@ class UniversalOrchestrator:
             startup_status["elapsed_seconds"],
         )
         main_logger.info(
-            "Universal Orchestrator is online. Awaiting messages. "
+            "HASHI is online. Awaiting messages. "
             "Startup complete: status=%s, %s/%s agents ready in %.1fs.",
             startup_status["phase"],
             startup_status.get("ready_agents", 0),

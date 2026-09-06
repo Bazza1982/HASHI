@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator.banner import StartupAnimationResult
 from orchestrator.startup_manager import StartupManager
 
 
@@ -24,10 +25,17 @@ class _FunctionWorkers:
         await asyncio.sleep(0)
         return self.generation, self.generation_root
 
+    def telegram_ingress_snapshot(self, _name):
+        return {"running": True, "connected": True}
+
 
 class _Kernel:
     def __init__(self) -> None:
         self.function_workers = _FunctionWorkers()
+        self.paths = SimpleNamespace(
+            instance_id="HASHI3",
+            bridge_home=Path(r"C:\Users\thene\projects\HASHI3"),
+        )
         self.enable_api_gateway = True
         self._startup_started_monotonic = time.monotonic()
         self.startup_status = {}
@@ -51,9 +59,22 @@ async def test_initial_startup_prepares_once_runs_small_fleet_in_one_wave(monkey
     manager = StartupManager(kernel, handler)
     names = [f"agent-{index}" for index in range(6)]
     info_messages = []
+    animation_calls = []
     monkeypatch.setattr(
         "orchestrator.startup_manager.bridge_logger.info",
         lambda message, *args: info_messages.append(message % args if args else message),
+    )
+    monkeypatch.setattr(
+        "orchestrator.banner.show_startup_banner",
+        lambda *args, **kwargs: (
+            animation_calls.append((args, kwargs))
+            or StartupAnimationResult(
+                completed=True,
+                attempted=True,
+                reason="interactive_ansi_terminal",
+                sink="stdout",
+            )
+        ),
     )
 
     await manager._run_startup_banner(
@@ -77,8 +98,54 @@ async def test_initial_startup_prepares_once_runs_small_fleet_in_one_wave(monkey
     assert kernel.startup_status["ready_agents"] == 6
     assert kernel.startup_status["agent_percent"] == 100
     assert kernel.startup_status["percent"] == 90
+    assert len(animation_calls) == 1
+    assert animation_calls[0][1]["logo_only"] is True
+    assert animation_calls[0][1]["fallback_to_static"] is False
+    assert manager._startup_animation_completed is True
     assert not any(
         message.startswith("Startup progress:") for message in info_messages
+    )
+
+
+def test_ready_status_uses_live_worker_ingress_and_service_endpoints(capsys):
+    class Process:
+        @staticmethod
+        def is_alive():
+            return True
+
+    handle = SimpleNamespace(
+        name="agent1",
+        metadata={"worker_phase": "ACTIVE", "worker_accepting": True},
+        client=SimpleNamespace(process=Process(), closed=False),
+        backend_ready=True,
+        telegram_connected=True,
+        _offline_error=None,
+    )
+    kernel = _Kernel()
+    kernel.startup_status = {
+        "agent_order": ["agent1"],
+        "agent_states": {"agent1": "online"},
+    }
+    kernel._runtime_map = lambda: {"agent1": handle}
+    kernel.endpoint_registry = SimpleNamespace(
+        snapshot=lambda: {
+            "services": {
+                "workbench": {"base_url": "http://127.0.0.1:18804"},
+                "api_gateway": {"base_url": "http://127.0.0.1:18805"},
+            }
+        }
+    )
+
+    StartupManager(kernel, logging.NullHandler()).show_startup_status()
+
+    assert capsys.readouterr().out == (
+        "Agents\n"
+        "  agent1    ONLINE | Telegram CONNECTED\n"
+        "\n"
+        "Services\n"
+        "  Backend API  http://127.0.0.1:18804\n"
+        "  API Gateway  http://127.0.0.1:18805\n"
+        "\n"
     )
 
 

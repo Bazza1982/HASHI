@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import logging
 from types import SimpleNamespace
 
@@ -295,6 +297,146 @@ def test_console_filter_keeps_risky_logs_outside_raw(tmp_path) -> None:
     assert filter_.filter(
         _record("FlexRuntime.sunny", logging.ERROR, "provider body PRIVATE")
     )
+
+
+def test_startup_diagnostics_are_visible_only_in_debug_or_raw(tmp_path) -> None:
+    filter_ = ConsoleOutputFilter()
+    record = _record(
+        "BridgeU.Orchestrator",
+        logging.INFO,
+        "Process bootstrap: pid=42 code_root=example",
+    )
+
+    for level in ("quiet", "activity"):
+        _set_level(tmp_path, level)
+        assert not filter_.filter(record)
+
+    for level in ("debug", "raw"):
+        terminal_console.set_level(level)
+        assert filter_.filter(record)
+
+
+def test_windows_console_handle_is_preferred(monkeypatch, tmp_path) -> None:
+    terminal_console.configure(tmp_path)
+    writes = []
+    fallback = io.StringIO()
+    monkeypatch.setattr(terminal_console, "_should_use_windows_console", lambda: True)
+    monkeypatch.setattr(
+        terminal_console,
+        "_write_windows_console",
+        lambda payload: writes.append(payload),
+    )
+    monkeypatch.setattr(terminal_console.sys, "stderr", fallback)
+
+    result = terminal_console.safe_print("HASHI banner", purpose="startup_banner")
+
+    assert result.success is True
+    assert result.sink == "windows_console"
+    assert result.failures == ()
+    assert writes == ["HASHI banner\n"]
+    assert fallback.getvalue() == ""
+    assert not terminal_console.output_diagnostic_path().exists()
+
+
+def test_animation_capability_rejects_only_noninteractive_output(monkeypatch) -> None:
+    monkeypatch.setattr(terminal_console, "_stream_is_tty", lambda _stream: False)
+
+    result = terminal_console.prepare_terminal_animation()
+
+    assert result.supported is False
+    assert result.reason == "stdout_not_interactive"
+
+
+def test_windows_animation_capability_enables_virtual_terminal(monkeypatch) -> None:
+    enabled = []
+    monkeypatch.setattr(terminal_console, "_stream_is_tty", lambda _stream: True)
+    monkeypatch.setattr(terminal_console.os, "name", "nt")
+    monkeypatch.setattr(
+        terminal_console,
+        "_enable_windows_virtual_terminal_processing",
+        lambda: enabled.append(True),
+    )
+
+    result = terminal_console.prepare_terminal_animation()
+
+    assert enabled == [True]
+    assert result.supported is True
+    assert result.reason == "windows_console_virtual_terminal"
+    assert result.sink == "windows_console"
+
+
+def test_windows_console_failure_falls_back_to_stderr_and_is_logged(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    terminal_console.configure(tmp_path)
+    fallback = io.StringIO()
+    monkeypatch.setattr(terminal_console, "_should_use_windows_console", lambda: True)
+
+    def fail_console(_payload):
+        raise OSError(6, "PRIVATE-CONSOLE-DETAIL")
+
+    monkeypatch.setattr(terminal_console, "_write_windows_console", fail_console)
+    monkeypatch.setattr(terminal_console.sys, "stderr", fallback)
+
+    result = terminal_console.safe_print(
+        "VISIBLE-BANNER-SECRET",
+        purpose="startup_banner_header",
+    )
+
+    assert result.success is True
+    assert result.sink == "stderr"
+    assert fallback.getvalue() == "VISIBLE-BANNER-SECRET\n"
+    record = json.loads(
+        terminal_console.output_diagnostic_path().read_text(encoding="utf-8")
+    )
+    assert record["event"] == "terminal_output_failure"
+    assert record["purpose"] == "startup_banner_header"
+    assert record["delivered"] is True
+    assert record["final_sink"] == "stderr"
+    assert record["attempts"] == [
+        {
+            "errno": 6,
+            "error_type": "OSError",
+            "sink": "windows_console",
+            "winerror": None,
+        }
+    ]
+    encoded = json.dumps(record)
+    assert "VISIBLE-BANNER-SECRET" not in encoded
+    assert "PRIVATE-CONSOLE-DETAIL" not in encoded
+
+
+def test_total_output_failure_is_durable_and_contains_no_payload(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class BrokenStream:
+        encoding = "utf-8"
+
+        def write(self, _value):
+            raise OSError(5, "PRIVATE-STREAM-DETAIL")
+
+        def flush(self):
+            raise OSError(5, "PRIVATE-STREAM-DETAIL")
+
+    terminal_console.configure(tmp_path)
+    monkeypatch.setattr(terminal_console, "_should_use_windows_console", lambda: False)
+    monkeypatch.setattr(terminal_console.sys, "stdout", BrokenStream())
+    monkeypatch.setattr(terminal_console.sys, "stderr", BrokenStream())
+
+    result = terminal_console.safe_print(
+        "DO-NOT-LOG-THIS-PAYLOAD",
+        purpose="startup_banner_status",
+    )
+
+    assert result.success is False
+    assert result.sink is None
+    assert len(result.failures) == 4
+    diagnostic = terminal_console.output_diagnostic_path().read_text(encoding="utf-8")
+    assert "startup_banner_status" in diagnostic
+    assert "DO-NOT-LOG-THIS-PAYLOAD" not in diagnostic
+    assert "PRIVATE-STREAM-DETAIL" not in diagnostic
 
 
 def test_runtime_startup_refresh_replaces_only_console_filter(monkeypatch) -> None:
