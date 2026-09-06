@@ -5,7 +5,7 @@ import json
 import pytest
 from aiohttp import web
 
-from tui.api_client import TuiApiClient
+from tui.api_client import TuiApiClient, run_failure_text
 from tui.instances import (
     InstanceResolver,
     load_launch_instance,
@@ -184,3 +184,39 @@ async def test_transcript_poll_waits_for_initial_history_offset(monkeypatch):
         "GET",
         "/api/transcript/portable/poll?offset=4",
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_tui_reads_durable_run_status(monkeypatch):
+    client = TuiApiClient()
+    requests = []
+
+    async def fake_request(method, path, **_kwargs):
+        requests.append((method, path))
+        return {
+            "ok": True,
+            "run": {
+                "state": "failed",
+                "error_code": "session_binding_conflict",
+                "error_text": "The Session binding changed.",
+            },
+        }
+
+    monkeypatch.setattr(client, "_direct_request", fake_request)
+
+    result = await client.run_info("session with spaces", "run/one")
+
+    assert requests == [
+        (
+            "GET",
+            "/api/v1/sessions/session%20with%20spaces/runs/run%2Fone",
+        )
+    ]
+    assert run_failure_text(result) == (
+        "session_binding_conflict: The Session binding changed."
+    )
+
+
+def test_tui_run_failure_text_ignores_non_failed_runs():
+    assert run_failure_text({"run": {"state": "running"}}) == ""
+    assert run_failure_text({"run": {"state": "completed"}}) == ""

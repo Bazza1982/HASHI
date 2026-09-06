@@ -11,6 +11,25 @@ from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 
 logger = logging.getLogger(__name__)
 
+TUI_TERMINAL_RUN_STATES = frozenset(
+    {"completed", "failed", "stopped", "superseded", "interrupted"}
+)
+
+
+def run_failure_text(payload: dict) -> str:
+    """Return a user-visible terminal failure, or an empty string."""
+
+    run = payload.get("run")
+    if not isinstance(run, dict):
+        return ""
+    state = str(run.get("state") or "").strip().casefold()
+    if state not in TUI_TERMINAL_RUN_STATES or state == "completed":
+        return ""
+    error = str(run.get("error_text") or "").strip()
+    code = str(run.get("error_code") or "").strip()
+    detail = error or code or state or "Request failed"
+    return f"{code}: {detail}" if code and error and code not in error else detail
+
 
 class TuiApiClient:
     """Talk to one Workbench while keeping transcript offsets instance-local.
@@ -193,6 +212,23 @@ class TuiApiClient:
             "/api/chat",
             json_body={"agent": agent, "text": text},
             timeout=25,
+        )
+
+    async def run_info(self, session_id: str, run_id: str) -> dict:
+        """Read the durable status of one directly submitted Session Run."""
+
+        if self.proxied:
+            return {
+                "ok": False,
+                "error": "Run status is unavailable through this Remote proxy.",
+                "error_code": "run_status_proxy_unavailable",
+            }
+        encoded_session = quote(str(session_id), safe="")
+        encoded_run = quote(str(run_id), safe="")
+        return await self._direct_request(
+            "GET",
+            f"/api/v1/sessions/{encoded_session}/runs/{encoded_run}",
+            timeout=5,
         )
 
     async def poll_transcript(self, agent: str) -> list[dict]:

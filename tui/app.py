@@ -17,7 +17,7 @@ from textual.containers import Vertical
 from textual.widgets import Input, RichLog, Static
 
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
-from tui.api_client import TuiApiClient
+from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
 from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
 from tui.onboarding import (
@@ -994,7 +994,40 @@ class HASHITuiApp(App):
             return
         if not result.get("ok", True) and "error" in result:
             chat = self.query_one("#chat-history", ChatHistory)
-            chat.write(markup(f"[red]Error ({agent}): {result['error']}[/]"))
+            chat.write(Text(f"Error ({agent}): {result['error']}", style="red"))
+            return
+
+        session_id = str(result.get("session_id") or "").strip()
+        run_id = str(result.get("run_id") or "").strip()
+        if not session_id or not run_id or client.proxied:
+            return
+
+        while generation == self._connection_generation and client is self.api:
+            status = await client.run_info(session_id, run_id)
+            if generation != self._connection_generation or client is not self.api:
+                return
+            if not status.get("ok"):
+                logger.warning(
+                    "TUI could not track submitted Run: agent=%s session=%s run=%s error=%s",
+                    agent,
+                    session_id,
+                    run_id,
+                    status.get("error"),
+                )
+                return
+            run = status.get("run")
+            state = (
+                str(run.get("state") or "").strip().casefold()
+                if isinstance(run, dict)
+                else ""
+            )
+            if state in TUI_TERMINAL_RUN_STATES:
+                failure = run_failure_text(status)
+                if failure:
+                    chat = self.query_one("#chat-history", ChatHistory)
+                    chat.write(Text(f"Request failed ({agent}): {failure}", style="red"))
+                return
+            await asyncio.sleep(0.5)
 
     @work()
     async def _send_broadcast(
