@@ -3,13 +3,19 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import time
 
 from orchestrator.bootstrap_logging import AnimMute
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
 
-INITIAL_AGENT_STARTUP_CONCURRENCY = 2
+# Worker startup is dominated by isolated imports and backend I/O.  A limit of
+# two serialized six configured Agents into three avoidable waves.  Eight is a
+# bounded default for larger installations while allowing common 4-8 Agent
+# instances to prepare in one wave.
+INITIAL_AGENT_STARTUP_CONCURRENCY = 8
+STARTUP_PROGRESS_HEARTBEAT_SECONDS = 5.0
 
 
 class StartupManager:
@@ -110,19 +116,121 @@ class StartupManager:
     async def _run_startup_banner(self, initial_agent_names, global_cfg, wa_cfg, skipped, inactive_agent_names):
         boot_state = {name: "pending" for name in initial_agent_names}
         boot_reason = {}
+        startup_progress = {
+            "phase": "qualifying_generation",
+            "ready": False,
+            "services_ready": False,
+            "generation_id": None,
+        }
+        started = getattr(self.kernel, "_startup_started_monotonic", time.monotonic())
+        total = len(initial_agent_names)
+
+        def _publish_progress(*, log: bool = True) -> None:
+            ready_agents = sum(
+                state in {"online", "local"} for state in boot_state.values()
+            )
+            failed_agents = sum(
+                state == "failed" for state in boot_state.values()
+            )
+            completed = ready_agents + failed_agents
+            agent_percent = round((completed / total) * 100) if total else 100
+            generation_ready = bool(startup_progress.get("generation_id"))
+            overall_percent = min(
+                90,
+                (15 if generation_ready else 5)
+                + round(75 * (completed / total if total else 1.0)),
+            )
+            snapshot = {
+                **startup_progress,
+                "completed": completed,
+                "ready_agents": ready_agents,
+                "failed_agents": failed_agents,
+                "connecting_agents": sum(
+                    state == "connecting" for state in boot_state.values()
+                ),
+                "pending_agents": sum(
+                    state == "pending" for state in boot_state.values()
+                ),
+                "total": total,
+                "agent_percent": agent_percent,
+                "percent": overall_percent,
+                "elapsed_seconds": round(time.monotonic() - started, 1),
+            }
+            startup_progress.update(snapshot)
+            self.kernel.startup_status = dict(snapshot)
+            if log:
+                bridge_logger.info(
+                    "Startup progress: phase=%s overall=%s%% agents=%s/%s (%s%%) "
+                    "ready=%s failed=%s connecting=%s pending=%s elapsed=%.1fs",
+                    snapshot["phase"],
+                    snapshot["percent"],
+                    completed,
+                    total,
+                    agent_percent,
+                    ready_agents,
+                    failed_agents,
+                    snapshot["connecting_agents"],
+                    snapshot["pending_agents"],
+                    snapshot["elapsed_seconds"],
+                )
+
+        async def _prepare_initial_generation():
+            _publish_progress()
+            prepare = getattr(self.kernel.function_workers, "prepare_generation", None)
+            if not callable(prepare):
+                startup_progress["phase"] = "starting_workers"
+                _publish_progress()
+                return None, None
+            generation, generation_root = await prepare()
+            startup_progress.update(
+                {
+                    "phase": "starting_workers",
+                    "generation_id": generation.manifest.generation_id,
+                }
+            )
+            _publish_progress()
+            return generation, generation_root
+
+        prepared_generation_task = asyncio.create_task(
+            _prepare_initial_generation(),
+            name="boot-function-generation",
+        )
         startup_limit = max(1, min(INITIAL_AGENT_STARTUP_CONCURRENCY, len(initial_agent_names) or 1))
         startup_sem = asyncio.Semaphore(startup_limit)
 
         async def _start_initial_agent(agent_name: str):
+            try:
+                generation, generation_root = await asyncio.shield(
+                    prepared_generation_task
+                )
+            except Exception as e:
+                boot_state[agent_name] = "failed"
+                boot_reason[agent_name] = f"{type(e).__name__}: {e}"
+                _publish_progress()
+                bridge_logger.error(
+                    "%s: pending -> failed (generation: %s)",
+                    agent_name,
+                    e,
+                )
+                return agent_name, (False, str(e))
             async with startup_sem:
                 boot_state[agent_name] = "connecting"
                 bridge_logger.info("%s: pending -> connecting", agent_name)
+                _publish_progress()
                 try:
-                    ok, msg = await self.kernel.start_agent(agent_name)
+                    if generation is None:
+                        ok, msg = await self.kernel.start_agent(agent_name)
+                    else:
+                        ok, msg = await self.kernel.start_agent(
+                            agent_name,
+                            generation=generation,
+                            generation_root=generation_root,
+                        )
                 except Exception as e:
                     main_logger.exception("Unexpected startup error for '%s': %s", agent_name, e)
                     boot_state[agent_name] = "failed"
                     boot_reason[agent_name] = f"{type(e).__name__}: {e}"
+                    _publish_progress()
                     bridge_logger.error("%s: connecting -> failed (exception: %s)", agent_name, e)
                     return agent_name, (False, str(e))
                 if ok:
@@ -135,12 +243,27 @@ class StartupManager:
                     boot_state[agent_name] = "failed"
                     boot_reason[agent_name] = msg
                     bridge_logger.error("%s: connecting -> failed (%s)", agent_name, msg)
+                _publish_progress()
                 return agent_name, (ok, msg)
+
+        async def _progress_heartbeat() -> None:
+            while True:
+                await asyncio.sleep(STARTUP_PROGRESS_HEARTBEAT_SECONDS)
+                if all(
+                    state in {"online", "local", "failed"}
+                    for state in boot_state.values()
+                ):
+                    return
+                _publish_progress()
 
         startup_tasks = [
             asyncio.create_task(_start_initial_agent(name), name=f"boot-{name}")
             for name in initial_agent_names
         ]
+        progress_heartbeat = asyncio.create_task(
+            _progress_heartbeat(),
+            name="boot-progress-heartbeat",
+        )
 
         from orchestrator.banner import show_startup_banner
 
@@ -154,10 +277,12 @@ class StartupManager:
                 skipped_agents=skipped,
                 inactive_agents=inactive_agent_names,
                 boot_reason=boot_reason,
+                startup_progress=startup_progress,
             )
 
         mute = AnimMute()
-        self.console_handler.addFilter(mute)
+        if self.console_handler is not None:
+            self.console_handler.addFilter(mute)
         try:
             await asyncio.gather(
                 asyncio.get_running_loop().run_in_executor(None, _run_banner),
@@ -165,7 +290,17 @@ class StartupManager:
                 return_exceptions=True,
             )
         finally:
-            self.console_handler.removeFilter(mute)
+            progress_heartbeat.cancel()
+            await asyncio.gather(progress_heartbeat, return_exceptions=True)
+            if self.console_handler is not None:
+                self.console_handler.removeFilter(mute)
+
+        startup_progress["phase"] = (
+            "agents_ready"
+            if all(state in {"online", "local"} for state in boot_state.values())
+            else "agents_degraded"
+        )
+        _publish_progress()
 
         if skipped:
             for name, reason in skipped:

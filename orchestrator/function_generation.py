@@ -32,7 +32,7 @@ import threading
 import traceback
 from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
@@ -174,6 +174,23 @@ class VerifiedFunctionGeneration:
         compare_runtime_fingerprints(expected_runtime, live_runtime)
         compare_runtime_fingerprints(self.receipt.runtime, live_runtime)
         verify_source_manifest(self.manifest, code_root=self.code_root)
+
+    def verify_qualified_source(self, expected_runtime: RuntimeFingerprint) -> None:
+        """Revalidate exact bytes already accepted by the isolated probe.
+
+        ``verify()`` rebuilds and recompiles the complete static dependency
+        closure.  That work is required while qualifying a *new* generation,
+        but repeating it for every Worker adds no evidence once the probe has
+        accepted this immutable manifest.  At that point an exact source and
+        asset byte comparison, plus the unchanged Core runtime fingerprint,
+        proves that the qualified generation is still the one being used.
+        """
+
+        policy = load_runtime_policy(self.code_root)
+        live_runtime = current_runtime_fingerprint(policy, code_root=self.code_root)
+        compare_runtime_fingerprints(expected_runtime, live_runtime)
+        compare_runtime_fingerprints(self.receipt.runtime, live_runtime)
+        verify_qualified_manifest_bytes(self.manifest, code_root=self.code_root)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -518,6 +535,65 @@ def verify_source_manifest(manifest: SourceManifest, *, code_root: Path) -> None
             "Candidate source or asset changed after verification; "
             "no Function Worker was committed"
         )
+
+
+def _verified_manifest_path(code_root: Path, relative_path: str) -> Path:
+    root = Path(code_root).resolve()
+    relative = PurePosixPath(str(relative_path))
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or "\\" in str(relative_path)
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise FunctionGenerationError(
+            f"Function manifest path escapes its generation root: {relative_path}"
+        )
+    candidate = root.joinpath(*relative.parts)
+    if not candidate.is_file() or candidate.is_symlink():
+        raise FunctionGenerationError(
+            f"Function manifest file is missing or unsafe: {relative_path}"
+        )
+    return candidate
+
+
+def verify_qualified_manifest_bytes(
+    manifest: SourceManifest,
+    *,
+    code_root: Path,
+) -> None:
+    """Verify an already-qualified generation without rebuilding its AST graph.
+
+    Every source byte that could have changed the dependency closure is hashed.
+    Assets are rediscovered as a set so additions, removals, executable-bit
+    changes, and content changes are also rejected.  This is deliberately only
+    for manifests carrying a prior isolated-probe receipt; initial generation
+    qualification continues to use :func:`verify_source_manifest`.
+    """
+
+    root = Path(code_root).resolve()
+    try:
+        parent_paths = {
+            parent
+            for item in (*manifest.entries, *manifest.assets)
+            for relative in (PurePosixPath(item.relative_path),)
+            for parent in relative.parents
+            if parent.parts
+        }
+        for relative in parent_paths:
+            if root.joinpath(*relative.parts).is_symlink():
+                raise FunctionGenerationError(str(relative))
+        for entry in manifest.entries:
+            source = _verified_manifest_path(root, entry.relative_path)
+            if hashlib.sha256(source.read_bytes()).hexdigest() != entry.sha256:
+                raise FunctionGenerationError(entry.relative_path)
+        if _asset_entries(root) != manifest.assets:
+            raise FunctionGenerationError("asset set")
+    except (FunctionGenerationError, OSError) as exc:
+        raise FunctionGenerationError(
+            "Candidate source or asset changed after verification; "
+            "no Function Worker was committed"
+        ) from exc
 
 
 @contextlib.contextmanager

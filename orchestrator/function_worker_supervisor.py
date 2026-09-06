@@ -24,7 +24,7 @@ from orchestrator.function_generation import (
     SourceManifest,
     VerifiedFunctionGeneration,
     probe_function_generation,
-    verify_source_manifest,
+    verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_bootstrap import run_function_worker_process
 from orchestrator.function_worker_protocol import (
@@ -43,6 +43,7 @@ WORKER_REQUEST_TIMEOUT_SECONDS = 180.0
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 WORKER_DRAIN_TIMEOUT_SECONDS = 120.0
 WORKER_RECOVERY_ATTEMPTS = 3
+QUALIFIED_GENERATION_CACHE_SCHEMA_VERSION = 1
 
 
 class FunctionWorkerError(RuntimeError):
@@ -103,7 +104,7 @@ def verify_generation_artifact(
         raise FunctionWorkerError(
             f"Function generation artifact manifest mismatch: {root}"
         )
-    verify_source_manifest(generation.manifest, code_root=root)
+    verify_qualified_manifest_bytes(generation.manifest, code_root=root)
 
 
 def materialize_generation_artifact(
@@ -178,6 +179,84 @@ def materialize_generation_artifact(
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def _qualified_generation_cache_path(bridge_home: Path) -> Path:
+    return (
+        Path(bridge_home).resolve()
+        / "state"
+        / "function_generations"
+        / "qualified-generation.json"
+    )
+
+
+def persist_qualified_generation_cache(
+    bridge_home: Path,
+    generation: VerifiedFunctionGeneration,
+    artifact: Path,
+) -> None:
+    """Persist the isolated-probe receipt for unchanged cold restarts."""
+
+    cache_path = _qualified_generation_cache_path(bridge_home)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": QUALIFIED_GENERATION_CACHE_SCHEMA_VERSION,
+        "saved_at": datetime.now().astimezone().isoformat(),
+        "artifact_slug": Path(artifact).resolve().name,
+        "generation": generation.to_dict(),
+    }
+    temporary = cache_path.with_name(
+        f".{cache_path.name}.staging-{os.getpid()}-{uuid4().hex[:8]}"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(cache_path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def load_qualified_generation_cache(
+    bridge_home: Path,
+    code_root: Path,
+    expected_runtime: Any,
+) -> tuple[VerifiedFunctionGeneration, Path] | None:
+    """Load a prior probe receipt only when runtime and every byte still match."""
+
+    cache_path = _qualified_generation_cache_path(bridge_home)
+    if not cache_path.is_file():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if (
+            int(payload.get("schema_version", -1))
+            != QUALIFIED_GENERATION_CACHE_SCHEMA_VERSION
+        ):
+            return None
+        generation_value = dict(payload["generation"])
+        # A repository may be moved or promoted to another instance without
+        # changing the qualified bytes.  The current source root is authority.
+        generation_value["code_root"] = str(Path(code_root).resolve())
+        generation = generation_from_dict(generation_value)
+        slug = generation.manifest.generation_id.removeprefix("sha256:")
+        if str(payload.get("artifact_slug") or "") != slug:
+            return None
+        artifact = cache_path.parent / slug
+        generation.verify_qualified_source(expected_runtime)
+        verify_generation_artifact(artifact, generation)
+        return generation, artifact
+    except Exception as exc:
+        bridge_logger.info(
+            "Qualified generation cache rejected; running isolated probe: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None
 
 
 class _RemoteVoiceManagerView:
@@ -925,6 +1004,7 @@ class FunctionWorkerSupervisor:
         self._qualification_lock = asyncio.Lock()
         self._artifact_lock = asyncio.Lock()
         self._cached_generation: VerifiedFunctionGeneration | None = None
+        self._cached_artifact: tuple[str, Path] | None = None
         self._telegram_ingress: dict[str, CoreTelegramIngress] = {}
 
     def qualify_generation(self) -> VerifiedFunctionGeneration:
@@ -935,17 +1015,83 @@ class FunctionWorkerSupervisor:
             cached = self._cached_generation
             if cached is not None:
                 try:
-                    cached.verify(self.kernel.runtime_fingerprint)
+                    cached.verify_qualified_source(self.kernel.runtime_fingerprint)
                 except Exception:
                     self._cached_generation = None
+                    self._cached_artifact = None
                 else:
                     return cached
+            disk_cached = await asyncio.to_thread(
+                load_qualified_generation_cache,
+                self.kernel.paths.bridge_home,
+                self.kernel.paths.code_root,
+                self.kernel.runtime_fingerprint,
+            )
+            if disk_cached is not None:
+                generation, artifact = disk_cached
+                self._cached_generation = generation
+                self._cached_artifact = (
+                    generation.manifest.generation_id,
+                    artifact,
+                )
+                bridge_logger.info(
+                    "Reused qualified Function generation: generation=%s "
+                    "modules=%s artifact=%s",
+                    generation.manifest.generation_id,
+                    len(generation.manifest.entries),
+                    artifact,
+                )
+                return generation
             generation = await asyncio.to_thread(self.qualify_generation)
             self._cached_generation = generation
+            self._cached_artifact = None
             return generation
 
     def remember_generation(self, generation: VerifiedFunctionGeneration) -> None:
+        if (
+            self._cached_generation is None
+            or self._cached_generation.manifest.generation_id
+            != generation.manifest.generation_id
+        ):
+            self._cached_artifact = None
         self._cached_generation = generation
+
+    async def prepare_generation(
+        self,
+        generation: VerifiedFunctionGeneration | None = None,
+    ) -> tuple[VerifiedFunctionGeneration, Path]:
+        """Qualify and materialize one generation for any number of Workers."""
+
+        if generation is None:
+            generation = await self.qualified_generation()
+        else:
+            await asyncio.to_thread(
+                generation.verify_qualified_source,
+                self.kernel.runtime_fingerprint,
+            )
+        generation_id = generation.manifest.generation_id
+        async with self._artifact_lock:
+            cached = self._cached_artifact
+            if (
+                cached is not None
+                and cached[0] == generation_id
+                and cached[1].exists()
+            ):
+                artifact = cached[1]
+            else:
+                artifact = await asyncio.to_thread(
+                    materialize_generation_artifact,
+                    self.kernel.paths.bridge_home,
+                    generation,
+                )
+                self._cached_artifact = (generation_id, artifact)
+            await asyncio.to_thread(
+                persist_qualified_generation_cache,
+                self.kernel.paths.bridge_home,
+                generation,
+                artifact,
+            )
+        return generation, artifact
 
     async def reconcile_interrupted_session_runs(
         self,
@@ -1130,18 +1276,14 @@ class FunctionWorkerSupervisor:
         *,
         generation_root: Path | None = None,
     ) -> FunctionWorkerClient:
-        generation = generation or await self.qualified_generation()
-        generation.verify(self.kernel.runtime_fingerprint)
         if generation_root is None:
-            async with self._artifact_lock:
-                artifact = await asyncio.to_thread(
-                    materialize_generation_artifact,
-                    self.kernel.paths.bridge_home,
-                    generation,
-                )
+            generation, artifact = await self.prepare_generation(generation)
         else:
+            if generation is None:
+                raise FunctionWorkerError(
+                    "A reused Function Worker artifact requires its generation receipt"
+                )
             artifact = generation_root
-        verify_generation_artifact(artifact, generation)
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
         nonce = uuid4().hex
@@ -1177,7 +1319,6 @@ class FunctionWorkerSupervisor:
         client.start()
         try:
             await client.wait_ready()
-            generation.verify(self.kernel.runtime_fingerprint)
         except Exception:
             await client.shutdown(force=True)
             self._candidates.discard(client)
@@ -1202,8 +1343,14 @@ class FunctionWorkerSupervisor:
         self,
         agent_name: str,
         generation: VerifiedFunctionGeneration | None = None,
+        *,
+        generation_root: Path | None = None,
     ) -> AgentRuntimeHandle:
-        client = await self.prepare_worker(agent_name, generation)
+        client = await self.prepare_worker(
+            agent_name,
+            generation,
+            generation_root=generation_root,
+        )
         try:
             metadata = await self.activate_new_worker(client)
         except Exception:
@@ -1227,7 +1374,10 @@ class FunctionWorkerSupervisor:
                 timeout=float(drain_timeout) + 10.0,
             )
             old_quiesced = True
-            candidate.generation.verify(self.kernel.runtime_fingerprint)
+            await asyncio.to_thread(
+                candidate.generation.verify_qualified_source,
+                self.kernel.runtime_fingerprint,
+            )
             metadata = await self.activate_new_worker(candidate)
             await handle.commit_cutover(candidate, metadata)
             return old, metadata

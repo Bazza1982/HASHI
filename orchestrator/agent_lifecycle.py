@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from orchestrator.bootstrap_logging import C_RESET, C_STOP
 from orchestrator.function_worker_supervisor import (
@@ -20,7 +21,13 @@ class AgentLifecycleManager:
     def __init__(self, kernel):
         self.kernel = kernel
 
-    async def start_agent(self, agent_name: str) -> tuple[bool, str]:
+    async def start_agent(
+        self,
+        agent_name: str,
+        *,
+        generation=None,
+        generation_root: Path | None = None,
+    ) -> tuple[bool, str]:
         current_task = asyncio.current_task()
         if current_task is None:
             raise RuntimeError("start_agent() must run inside an asyncio task.")
@@ -52,9 +59,16 @@ class AgentLifecycleManager:
                         return False, f"Agent '{agent_name}' is not configured."
 
                 try:
-                    handle = await self.kernel.function_workers.create_active_handle(
-                        agent_name
-                    )
+                    if generation is None and generation_root is None:
+                        handle = await self.kernel.function_workers.create_active_handle(
+                            agent_name
+                        )
+                    else:
+                        handle = await self.kernel.function_workers.create_active_handle(
+                            agent_name,
+                            generation,
+                            generation_root=generation_root,
+                        )
                 except Exception as exc:
                     message = (
                         f"Failed to initialize Function Worker for '{agent_name}': "

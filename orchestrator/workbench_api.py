@@ -6261,6 +6261,16 @@ class WorkbenchApiServer:
             ),
             "agents": running_agents,
         }
+        startup = dict(getattr(orchestrator, "startup_status", {}) or {})
+        if startup:
+            payload["ready"] = bool(startup.get("ready", False))
+            payload["status"] = str(startup.get("phase") or "starting")
+            payload["startup"] = startup
+        else:
+            # Compatibility for embedded/test kernels that predate the
+            # explicit startup lifecycle contract.
+            payload["ready"] = True
+            payload["status"] = "ready"
         runtime = getattr(orchestrator, "runtime_fingerprint", None)
         if runtime is not None:
             payload["runtime"] = {
