@@ -13,7 +13,7 @@ from typing import Any
 from orchestrator.command_specs import SENSITIVE_COMMAND_NAMES
 from orchestrator.process_resources import path_lock as process_path_lock
 
-# `pswd` is provided by an optional private command package rather than the
+# `pswd` is provided by an optional local command extension rather than the
 # built-in registry, so it remains an explicit external sensitivity rule.
 _SENSITIVE_COMMANDS = SENSITIVE_COMMAND_NAMES | {"pswd"}
 _SECRET_PATTERN = re.compile(

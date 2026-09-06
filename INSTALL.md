@@ -58,7 +58,7 @@ Or from the repository root on any platform:
 python main.py
 ```
 
-### Optional: Private Commands
+### Optional: Local Command Extensions
 
 Local-only custom slash commands can be placed in:
 
@@ -66,10 +66,10 @@ Local-only custom slash commands can be placed in:
 ~/.hashi/private_commands/*.py
 ```
 
-Private command modules are not part of the HASHI repository. Each module should
+Local command extensions are not part of the HASHI repository. Each module should
 export either `COMMANDS = [...]` or `get_commands() -> list[RuntimeCommand]`.
 Inline callbacks can be exported as `CALLBACKS = [...]` or
-`get_callbacks() -> list[RuntimeCallback]`. After changing private command files,
+`get_callbacks() -> list[RuntimeCallback]`. After changing local command extension files,
 restart the target agent with `/reboot min`.
 
 ---

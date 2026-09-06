@@ -63,8 +63,7 @@ async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
         await _reply(
             runtime,
             update,
-            f"⚠️ <b>{ui_language.tr('wiki.unavailable')}</b> "
-            f"{ui_language.tr('wiki.not_configured')}",
+            f"ℹ️ {ui_language.tr('wiki.not_configured')}",
         )
         return
 

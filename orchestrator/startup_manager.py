@@ -306,13 +306,13 @@ class StartupManager:
             else ""
         )
         message = (
-            "Private command compatibility: ignored "
+            "Local command extension compatibility: ignored "
             f"{len(notices)} protected override(s): {affected}.\n"
             "Cause: those command names are protected because HASHI Core already provides them.\n"
             "Impact: the HASHI Core commands remain active; startup can continue."
             f"{callback_result}\n"
-            "System response: the private overrides were not loaded.\n"
-            "Action: none is required unless the private modules still contain behavior you need; update or remove them only after checking other HASHI instances."
+            "System response: the local command extension overrides were not loaded.\n"
+            "Action: none is required unless those local command extensions still contain behavior you need; update or remove them only after checking other HASHI instances."
         )
         main_logger.info(message)
         bridge_logger.info(message)

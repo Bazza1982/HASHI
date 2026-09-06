@@ -609,7 +609,7 @@ def test_wiki_prompt_is_generic_and_contains_no_private_deployment_data():
 
 
 @pytest.mark.asyncio
-async def test_wiki_core_command_fails_clearly_without_provider_or_capability():
+async def test_wiki_core_command_reports_unconfigured_provider_as_information():
     replies = []
 
     async def reply(_update, text, **_kwargs):
@@ -625,7 +625,8 @@ async def test_wiki_core_command_fails_clearly_without_provider_or_capability():
         effective_chat=SimpleNamespace(id=2),
     )
     await wiki_command(runtime, update, SimpleNamespace(args=["question"]))
-    assert "Wiki unavailable" in replies[-1]
+    assert replies[-1] == "ℹ️ This HASHI instance has no configured Wiki provider."
+    assert "Wiki unavailable" not in replies[-1]
 
 
 @pytest.mark.asyncio

@@ -54,8 +54,8 @@ Put advanced text syntax last, or show it only after invalid input.
 - A command hidden or disabled by policy is shown separately and never presented
   as available.
 - Machine-specific commands live in `~/.hashi/private_commands/*.py`; do not add
-  their handlers or metadata to the public static binding tables. Private
-  modules still follow this display contract when they render menus or notices.
+  their handlers or metadata to the public static binding tables. Local command
+  extensions still follow this display contract when they render menus or notices.
 
 ## 5. Required menu content
 
@@ -158,6 +158,6 @@ navigation labels, and information order wherever they expose the same menu.
 Stale callbacks from retired modes must resolve to a compatibility notice rather
 than reopening their former configuration surfaces.
 
-Private commands are outside this migration inventory because they are installed
+Local command extensions are outside this migration inventory because they are installed
 per machine. HASHI2's local `/oll` command follows the same card structure but
 is not part of the public repository or public static command registry.

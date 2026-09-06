@@ -221,6 +221,7 @@ def test_command_registry_notices_are_deduplicated_across_workers(caplog):
         if record.name == "BridgeU.Orchestrator"
     ]
     assert len(messages) == 1
+    assert messages[0].startswith("Local command extension compatibility:")
     assert "ignored 2 protected override(s)" in messages[0]
     assert "/queue (queue_buttons.py)" in messages[0]
     assert "/wiki (wiki.py)" in messages[0]

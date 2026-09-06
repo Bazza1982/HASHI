@@ -1402,9 +1402,9 @@ curl http://127.0.0.1:<local-remote-port>/peers
 
 ## Configuration Files
 
-### Private Commands
+### Local Command Extensions
 
-Custom slash-command modules can live outside the repository at:
+Machine-local slash-command extensions can live outside the repository at:
 
 ```text
 ~/.hashi/private_commands/*.py
@@ -1413,15 +1413,15 @@ Custom slash-command modules can live outside the repository at:
 Each module may expose `COMMANDS = [...]` or `get_commands() -> list[RuntimeCommand]`.
 For inline button handlers, expose `CALLBACKS = [...]` or
 `get_callbacks() -> list[RuntimeCallback]`. HASHI loads these modules when
-runtime handlers are bound; after adding or editing a private command, run
+runtime handlers are bound; after adding or editing a local command extension, run
 `/reboot min` for the target agent or cold-restart HASHI.
 
-Private commands are intentionally not registered in the public
+Local command extensions are intentionally not registered in the public
 `COMMAND_BINDINGS` or `BOT_COMMAND_BINDINGS` tables. Their implementation and
 picker metadata come from the local module, so publishing the HASHI repository
 does not publish machine-specific operator commands.
 
-On HASHI2, OLL Browser Gateway control is installed locally as the private
+On HASHI2, OLL Browser Gateway control is installed as the local
 `/oll [on|off|status]` command. Password lookup uses `/pswd`; the misspelled
 duplicate alias `/paswd` has been removed.
 
