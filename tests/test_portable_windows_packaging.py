@@ -219,6 +219,15 @@ def test_portable_full_local_install_is_admin_atomic_verified_and_idempotent():
     assert "启动 HASHI（工作台）.lnk" in installer
     assert "停止 HASHI.lnk" in installer
     assert "Get-InstalledLauncherPath" in installer
+    assert "$shortcut.Arguments = $Arguments" in installer
+    assert "Join-Path $PSHOME 'powershell.exe'" in installer
+    assert "launcher\\Bootstrap-Elevated.ps1" in installer
+    assert "$Shell.CreateShortcut($temporary)" in installer
+    assert "[IO.File]::Move($temporary, $path)" in installer
+    assert "$Shell.CreateShortcut($path)" not in installer
+    assert "-Action Start -Surface TUI" in installer
+    assert "-Action Start -Surface Workbench" in installer
+    assert "-Action Stop -Surface TUI" in installer
     assert "Start_HASHI_TUI.bat" in installer
     assert "Start_HASHI_Workbench.bat" in installer
     assert "Stop_HASHI.bat" in installer

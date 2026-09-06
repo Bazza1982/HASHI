@@ -172,7 +172,8 @@ function Test-ExistingLocalInstallation {
         'app\hashi\tui.py',
         'app\workbench\server.mjs',
         'data\agents.json',
-        'data\secrets.json'
+        'data\secrets.json',
+        'launcher\Bootstrap-Elevated.ps1'
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $script:InstallRoot $relative) -PathType Leaf)) {
             throw "The existing HASHI installation is incomplete: $relative"
@@ -329,15 +330,26 @@ function New-DesktopShortcut {
         [object]$Shell,
         [string]$Name,
         [string]$Target,
+        [string]$Arguments,
         [string]$Description
     )
     $path = Join-Path $DesktopPath $Name
-    $shortcut = $Shell.CreateShortcut($path)
-    $shortcut.TargetPath = $Target
-    $shortcut.WorkingDirectory = $script:InstallRoot
-    $shortcut.Description = $Description
-    $shortcut.WindowStyle = 1
-    $shortcut.Save()
+    $temporary = Join-Path $DesktopPath ('.hashi-shortcut-' + [Guid]::NewGuid().ToString('N') + '.lnk')
+    try {
+        $shortcut = $Shell.CreateShortcut($temporary)
+        $shortcut.TargetPath = $Target
+        $shortcut.Arguments = $Arguments
+        $shortcut.WorkingDirectory = $script:InstallRoot
+        $shortcut.Description = $Description
+        $shortcut.WindowStyle = 1
+        $shortcut.Save()
+        if (-not (Test-Path -LiteralPath $temporary -PathType Leaf)) {
+            throw "Desktop shortcut staging failed: $temporary"
+        }
+        [IO.File]::Move($temporary, $path)
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Desktop shortcut was not created: $path"
     }
@@ -361,32 +373,35 @@ function Install-DesktopShortcuts {
     if (-not (Test-Path -LiteralPath $DesktopPath -PathType Container)) {
         throw "The desktop folder is unavailable: $DesktopPath"
     }
-    $tuiLauncher = Get-InstalledLauncherPath `
-        -ChineseName '启动_HASHI_聊天界面.bat' `
-        -LegacyName 'Start_HASHI_TUI.bat'
-    $workbenchLauncher = Get-InstalledLauncherPath `
-        -ChineseName '启动_HASHI_工作台.bat' `
-        -LegacyName 'Start_HASHI_Workbench.bat'
-    $stopLauncher = Get-InstalledLauncherPath `
-        -ChineseName '停止_HASHI.bat' `
-        -LegacyName 'Stop_HASHI.bat'
+    $powershell = Join-Path $PSHOME 'powershell.exe'
+    $bootstrap = Join-Path $script:InstallRoot 'launcher\Bootstrap-Elevated.ps1'
+    if (-not (Test-Path -LiteralPath $powershell -PathType Leaf)) {
+        throw "Windows PowerShell is unavailable: $powershell"
+    }
+    if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
+        throw "The installed HASHI launcher is missing: $bootstrap"
+    }
+    $baseArguments = '-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $bootstrap + '"'
     Remove-DesktopShortcuts
     $shell = New-Object -ComObject WScript.Shell
     New-DesktopShortcut `
         -Shell $shell `
         -Name '启动 HASHI（聊天界面）.lnk' `
-        -Target $tuiLauncher `
-        -Description '启动 HASHI 并打开聊天终端界面'
+        -Target $powershell `
+        -Arguments ($baseArguments + ' -Action Start -Surface TUI') `
+        -Description 'HASHI'
     New-DesktopShortcut `
         -Shell $shell `
         -Name '启动 HASHI（工作台）.lnk' `
-        -Target $workbenchLauncher `
-        -Description '启动 HASHI 并打开完整工作台'
+        -Target $powershell `
+        -Arguments ($baseArguments + ' -Action Start -Surface Workbench') `
+        -Description 'HASHI'
     New-DesktopShortcut `
         -Shell $shell `
         -Name '停止 HASHI.lnk' `
-        -Target $stopLauncher `
-        -Description '安全停止 HASHI 及其专用工作台浏览器'
+        -Target $powershell `
+        -Arguments ($baseArguments + ' -Action Stop -Surface TUI') `
+        -Description 'HASHI'
 }
 
 function Remove-DesktopShortcuts {
