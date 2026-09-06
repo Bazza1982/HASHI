@@ -20,6 +20,7 @@ from orchestrator.audio_assets import (
     normalize_audio_format,
 )
 from orchestrator.multimodal_contract import contains_persistent_inline_media
+from orchestrator.storage_profile import removable_storage_profile
 
 # ``importlib.reload`` reuses the module dictionary.  Preserve the class and
 # exception identities already held by live runtimes; the handoff at the end
@@ -132,6 +133,8 @@ class SessionStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
+        if removable_storage_profile():
+            connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
     def _initialize(self) -> None:

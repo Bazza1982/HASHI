@@ -21,7 +21,6 @@ from orchestrator.runtime_defaults import (
     DEFAULT_WORKBENCH_PORT,
 )
 from remote.live_endpoints import live_endpoints_path
-from remote.local_http import local_http_hosts
 
 logger = logging.getLogger(__name__)
 TUI_PROXY_CAPABILITY = "tui_proxy_v1"
@@ -49,13 +48,14 @@ def load_launch_instance(bridge_home: Path) -> tuple[str, int]:
 
 
 def local_workbench_urls(workbench_port: int) -> list[str]:
-    """Build local-only Workbench candidates, including WSL host aliases."""
-    urls: list[str] = []
-    for host in (*local_http_hosts(), "localhost", "127.0.0.1"):
-        url = f"http://{host}:{int(workbench_port)}"
-        if url not in urls:
-            urls.append(url)
-    return urls
+    """Return the one authoritative route to this launch instance.
+
+    A launch-instance TUI must never probe interface or WSL gateway addresses:
+    those can belong to another process and can make a local timeout surface as an
+    unrelated ``172.x`` connection error. Peers remain reachable through the
+    authenticated Hashi Remote proxy.
+    """
+    return [f"http://127.0.0.1:{int(workbench_port)}"]
 
 
 @dataclass(frozen=True)
@@ -126,13 +126,7 @@ class InstanceResolver:
         return ports
 
     def _remote_candidates(self) -> list[str]:
-        candidates: list[str] = []
-        for port in self._remote_ports():
-            for host in (*local_http_hosts(), "localhost", "127.0.0.1"):
-                url = f"http://{host}:{port}"
-                if url not in candidates:
-                    candidates.append(url)
-        return candidates
+        return [f"http://127.0.0.1:{port}" for port in self._remote_ports()]
 
     async def _find_local_remote(self) -> str | None:
         candidates = []

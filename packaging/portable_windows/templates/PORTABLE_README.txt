@@ -17,13 +17,16 @@ Quick start / 快速开始
      Starts HASHI and opens the full Workbench in Microsoft Edge or Chrome.
      启动 HASHI，并在 Microsoft Edge 或 Chrome 中打开完整 Workbench。
 
-3. On first use on each PC, Windows asks for administrator permission. Select
-   Yes and keep the USB connected. Setup shows its current stage, real
+3. Windows asks for administrator permission on every launch so HASHI itself
+   runs as administrator. Select Yes and keep the USB connected. On first use,
+   setup shows its current stage, real
    percentage, copied data volume, and verification file count. When setup is
-   complete, the selected TUI or Workbench opens automatically.
-   在每台电脑上首次使用时，Windows 会请求管理员权限。请选择“是”，并保持
-   USB 连接。安装窗口会显示当前阶段、真实百分比、已复制容量和验证文件数。
-   安装完成后，所选的 TUI 或 Workbench 会自动打开，无需再次双击。
+   complete, press any key in that same window to launch the selected default
+   interface. No second selection menu appears.
+   每次启动时 Windows 都会请求管理员权限，因此 HASHI 本身也以管理员身份
+   运行。请选择“是”，并保持 USB 连接。首次使用时，安装窗口会显示当前阶段、
+   真实百分比、已复制容量和验证文件数。安装完成后，在同一窗口按任意键即可
+   启动预设界面，不会再出现第二个选择菜单。
 
    When upgrading from an older HASHI Portable, setup removes its obsolete
    shared local runtime only after verifying that it belongs to this USB and
@@ -75,9 +78,10 @@ Your data / 您的数据
 If setup cannot complete / 如果安装无法完成
 ------------------------------------------------
 - HASHI will show the reason and will not start from an incomplete installation.
-  You can choose Retry or Exit in the original launcher window.
-  HASHI 会显示失败原因，并且不会从未完成的安装启动。您可在原启动窗口中选择
-  “重试”或“退出”。
+  If installation succeeds but launch fails, setup remains successful and only
+  the launch failure is reported.
+  HASHI 会显示安装失败原因，且不会从未完成的安装启动。如果安装已经成功但
+  随后的启动失败，安装状态仍保持成功，并且只报告启动失败。
 
 - Setup diagnostics are saved in data\logs\hashi-setup.log. You can also run
   Diagnose_HASHI.bat for a guided system check. Setup never moves or deletes
@@ -102,6 +106,13 @@ Runtime profile / 运行配置
   enabled. There is no local LLM or offline generation.
   LAN Remote 一键配对有效期为七天。已启用宿主机全盘访问；不包含本地 LLM，
   也不支持离线生成。
+
+- Local TUI always connects to this Portable instance through 127.0.0.1 and
+  follows data\logs\bridge.log. Startup displays real component stages and
+  percentages rather than only reporting elapsed time.
+  本机 TUI 始终通过 127.0.0.1 连接当前 Portable 实例，并读取
+  data\logs\bridge.log。启动时显示真实组件阶段和百分比，而不是只报告
+  已经过的时间。
 
 - Included: Tesseract OCR, Chinese Piper TTS, Edge TTS, FFmpeg, browser/desktop
   tools, multi-Agent orchestration, Nagare, Superloops, and Scheduler.

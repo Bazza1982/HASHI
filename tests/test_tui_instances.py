@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 
 from tui.api_client import TuiApiClient
-from tui.instances import InstanceResolver, load_launch_instance
+from tui.instances import InstanceResolver, load_launch_instance, local_workbench_urls
 
 
 def test_load_launch_instance_accepts_bom_and_uses_repository_config(tmp_path):
@@ -16,6 +16,10 @@ def test_load_launch_instance_accepts_bom_and_uses_repository_config(tmp_path):
     )
 
     assert load_launch_instance(tmp_path) == ("HASHI9", 19999)
+
+
+def test_launch_instance_uses_only_authoritative_loopback_route():
+    assert local_workbench_urls(18800) == ["http://127.0.0.1:18800"]
 
 
 @pytest.mark.asyncio

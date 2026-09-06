@@ -638,7 +638,6 @@ class HASHITuiApp(App):
 
     @work()
     async def _launch_bridge_task(self):
-        log = self.query_one("#log-panel", LogPanel)
         self._attached_log_path = self._resolve_attach_log_path()
 
         # If API is already up (HASHI already running), just attach — don't start a new process
@@ -651,6 +650,15 @@ class HASHITuiApp(App):
             await self._load_agents(client=self.api, generation=self._connection_generation)
             self._start_polling()
             self._update_status_bar()
+            return
+
+        attach_only = str(os.environ.get("HASHI_TUI_ATTACH_ONLY") or "").strip().casefold()
+        if attach_only in {"1", "true", "yes", "on"}:
+            self._write_log_line(
+                f"[TUI] Waiting for the launched {self.launch_instance_id} local API."
+            )
+            self._start_attached_log_follow()
+            await self._wait_for_api()
             return
 
         self._write_log_line("[TUI] Starting HASHI main process...")
@@ -695,6 +703,7 @@ class HASHITuiApp(App):
 
     def _resolve_attach_log_path(self) -> Path | None:
         for candidate in (
+            self.bridge_home / "logs" / "bridge.log",
             self.bridge_home / "bridge_launch.log",
             self.bridge_home / "logs" / "bridge_launch.log",
             self.bridge_home / "bin" / "bridge_launch.log",
@@ -754,13 +763,13 @@ class HASHITuiApp(App):
         for attempt in range(60):
             if await self.api.health():
                 self.gateway_ok = True
-                self._write_log_line("[TUI] API Gateway connected.")
+                self._write_log_line("[TUI] Local HASHI API connected.")
                 await self._load_agents(client=self.api, generation=self._connection_generation)
                 self._start_polling()
                 self._update_status_bar()
                 return
             await asyncio.sleep(1)
-        self._write_log_line("[TUI] Warning: API Gateway not reachable after 60s. Chat disabled.")
+        self._write_log_line("[TUI] Warning: local HASHI API not reachable after 60s. Chat disabled.")
         self._update_status_bar()
 
     async def _load_agents(
@@ -954,7 +963,7 @@ class HASHITuiApp(App):
         # Everything else → send to agent
         if not self.gateway_ok:
             chat = self.query_one("#chat-history", ChatHistory)
-            chat.write(markup("[#ff7a7a]API Gateway not connected. Chat unavailable.[/]"))
+            chat.write(markup("[#ff7a7a]Local HASHI API not connected. Chat unavailable.[/]"))
             return
 
         chat = self.query_one("#chat-history", ChatHistory)

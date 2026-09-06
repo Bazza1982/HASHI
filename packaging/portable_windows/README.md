@@ -4,20 +4,25 @@ This builder produces an allowlisted, self-contained Windows directory image
 for a USB drive whose total capacity is 957,000,000 bytes. It does not write to
 or format a USB device.
 
-The generated image also provides a machine-level local runtime layer.
-The first TUI or Workbench start requests administrator approval, expands a
-compact small-file payload, streams the remaining large files, precompiles
-Python bytecode, verifies every installed source file, and atomically activates
-the runtime under Windows ProgramData. The user sees bilingual English/zh-CN
-guidance, four plain-language stages, real percentage/byte/file progress, and a
-short notice when a stage may take several minutes. The private Python and Node
-runtimes are never installed globally and the system PATH is not changed.
+The generated image also provides a machine-level local runtime layer. Every
+TUI or Workbench launch requests administrator approval. A hidden bootstrap
+hands control to one visible elevated window, which expands a compact
+small-file payload, streams the remaining large files, precompiles Python
+bytecode, verifies every installed source file, and atomically activates the
+runtime under Windows ProgramData. After successful first installation, that
+same elevated window asks for one keypress and then launches the selected
+interface and HASHI backend with its inherited administrator token. The user
+sees bilingual English/zh-CN guidance, four plain-language stages, real
+percentage/byte/file progress, and a short notice when a stage may take several
+minutes. The private Python and Node runtimes are never installed globally and
+the system PATH is not changed.
 
 Only immutable program/runtime files enter the local runtime directory. API
 keys, Sessions, Workspace, configuration, browser profile, and all other user
 data remain on the USB. If setup fails, HASHI does not launch from an incomplete
-installation; the original non-elevated launcher offers Retry or Exit and points
-to the setup log. A complete expanded program copy remains available for
+installation. Installation status and subsequent launch status are independent,
+so a launch failure cannot relabel a completed installation as failed. A
+complete expanded program copy remains available for
 explicitly selected USB execution and backward-compatible images. The generated
 root includes explicit install/uninstall launchers, and the runtime also
 registers a removable entry in Windows Installed Apps. Every generated USB has
@@ -40,6 +45,15 @@ host storage so LAN handshakes cannot block Remote while the removable drive is
 busy. USB execution fallback keeps using USB storage, and uninstalling an
 instance removes its host-only derived state. Authoritative data remains on the
 USB.
+
+Runtime startup reports real milestones from the current bridge log (core,
+agent configuration, Remote, HER v2, local surfaces, and API readiness) instead
+of elapsed-time reassurance. The launch TUI is pinned to its own `127.0.0.1`
+Workbench API and follows `data\logs\bridge.log`; LAN peers remain reachable
+only through the authenticated Remote proxy. The removable-storage profile
+retains canonical SQLite state while avoiding redundant per-projection device
+barriers and oversized Strategy/audit payloads that can freeze a slow
+USB-backed API loop.
 
 The image contains HER v2, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the complete browser

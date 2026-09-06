@@ -105,29 +105,6 @@ function Initialize-InstancePaths {
     $script:UninstallRegistryPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HASHIPortable-$instanceId"
 }
 
-function Start-ElevatedInstaller {
-    $powerShell = Join-Path $PSHOME 'powershell.exe'
-    $arguments = @(
-        '-NoLogo',
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        (Quote-ProcessArgument $PSCommandPath)
-    )
-    if ($PauseOnError) { $arguments += '-PauseOnError' }
-    try {
-        $process = Start-Process -FilePath $powerShell -Verb RunAs -ArgumentList $arguments -Wait -PassThru
-        exit $process.ExitCode
-    } catch {
-        Write-BilingualSetupMessage `
-            -English "Administrator approval was cancelled or failed: $($_.Exception.Message)" `
-            -Chinese "管理员授权已取消或失败：$($_.Exception.Message)" `
-            -ForegroundColor Yellow
-        exit 1
-    }
-}
-
 function Convert-ManifestRelativePath {
     param([string]$Value)
     $relative = ([string]$Value).Trim().Replace('/', '\')
@@ -501,7 +478,11 @@ try {
 }
 
 if (-not (Test-IsAdministrator)) {
-    Start-ElevatedInstaller
+    Write-BilingualSetupMessage `
+        -English 'Setup requires administrator privileges. Use Install_HASHI_On_This_PC.bat.' `
+        -Chinese '安装需要管理员权限。请使用 Install_HASHI_On_This_PC.bat。' `
+        -ForegroundColor Red
+    exit 1
 }
 
 $stage = $null

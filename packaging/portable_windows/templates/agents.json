@@ -104,6 +104,10 @@
             "shadow_mode": false,
             "user_idle_timeout_s": 300,
             "audit_failure_terminal": "ERROR",
+            "stage_reasoning": {
+              "immediate_response": "none",
+              "triage": "none"
+            },
             "profiles": {
               "lightweight": {
                 "engine": "deepseek-api",

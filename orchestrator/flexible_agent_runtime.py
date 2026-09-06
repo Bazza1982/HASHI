@@ -842,7 +842,8 @@ class FlexibleAgentRuntime:
             return None
         request_id = self.next_request_id()
         session, accepted, session_owner, session_surface, session_channel_key = (
-            runtime_session.accept_request(
+            await asyncio.to_thread(
+                runtime_session.accept_request,
                 self,
                 request_id=request_id,
                 chat_id=chat_id,
@@ -868,6 +869,18 @@ class FlexibleAgentRuntime:
                 "voice_origin",
                 request_content_is_voice_origin(normalized_request_content),
             )
+        session_workspace, workzone_snapshot = await asyncio.gather(
+            asyncio.to_thread(
+                self.session_store.session_workspace,
+                session["session_id"],
+                int(session["context_generation"]),
+            ),
+            asyncio.to_thread(
+                runtime_session.session_workzone_state,
+                self,
+                session_id=session["session_id"],
+            ),
+        )
         metadata.update(
             {
                 "hashi_session_id": session["session_id"],
@@ -877,17 +890,11 @@ class FlexibleAgentRuntime:
                 "owner_id": session_owner,
                 "session_surface": session_surface,
                 "session_channel_key": session_channel_key,
-                "session_workspace": str(
-                    self.session_store.session_workspace(
-                        session["session_id"], int(session["context_generation"])
-                    )
-                ),
+                "session_workspace": str(session_workspace),
                 # Freeze the working-environment topology at admission so the
                 # provider prompt, CLI flags and HASHI Tool Registry cannot
                 # observe different Workzone revisions for one request.
-                "workzone_snapshot": runtime_session.session_workzone_state(
-                    self, session_id=session["session_id"]
-                ),
+                "workzone_snapshot": workzone_snapshot,
             }
         )
         item = runtime_common.QueuedRequest(
@@ -949,7 +956,12 @@ class FlexibleAgentRuntime:
     async def _notify_request_listeners(self, request_id: str, payload: dict):
         # Commit the canonical Session terminal state before any transport or
         # in-memory listener observes the result.
-        runtime_session.finish_request_from_listener(self, request_id, payload)
+        await asyncio.to_thread(
+            runtime_session.finish_request_from_listener,
+            self,
+            request_id,
+            payload,
+        )
         await runtime_media.finish_native_voice_transcript_path(
             self, request_id, payload
         )

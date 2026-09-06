@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.storage_profile import flush_projection, removable_storage_profile
+
 FORMAT = "her-v2-wip-journal-v2"
 LEGACY_FORMAT = "her-v2-wip-journal-v1"
 CAPSULE_FORMAT = "hashi-her-v2-wip-recovery-capsule-v1"
@@ -238,6 +240,8 @@ class WIPJournal:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self._lock = _path_lock(self.path)
+        with self._lock:
+            self._record_count = len(self._read_records_unlocked())
 
     def _read_records_unlocked(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -387,16 +391,31 @@ class WIPJournal:
             with os.fdopen(descriptor, "wb") as handle:
                 for row in encoded_rows:
                     handle.write(row)
-                handle.flush()
-                os.fsync(handle.fileno())
+                flush_projection(handle)
             os.chmod(temporary, 0o600)
             os.replace(temporary, self.path)
+            self._record_count = len(encoded_rows)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
 
     def _append(self, record: Mapping[str, Any]) -> None:
         with self._lock:
+            encoded = _json_bytes(record) + b"\n"
+            current_size = self.path.stat().st_size if self.path.exists() else 0
+            if (
+                removable_storage_profile()
+                and len(encoded) <= MAX_RECORD_BYTES
+                and self._record_count < MAX_RECORDS
+                and current_size + len(encoded) <= MAX_FILE_BYTES
+            ):
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("ab") as handle:
+                    handle.write(encoded)
+                    flush_projection(handle)
+                os.chmod(self.path, 0o600)
+                self._record_count += 1
+                return
             records = self._read_records_unlocked()
             records.append(dict(record))
             self._rewrite_unlocked(records)

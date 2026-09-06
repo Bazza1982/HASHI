@@ -841,6 +841,8 @@ def validate_image(image_root: Path) -> None:
         "Install_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
         "launcher/Install-LocalCache.ps1",
+        "launcher/Bootstrap-Elevated.ps1",
+        "launcher/Elevated-Entry.ps1",
         "launcher/Uninstall-LocalCache.ps1",
         "launcher/Compile-LocalCache.py",
     )

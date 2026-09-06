@@ -86,6 +86,17 @@ def test_portable_remote_is_one_click_with_seven_day_tokens():
     }
 
 
+def test_portable_her_keeps_execution_reasoning_but_makes_front_door_stages_fast():
+    config = json.loads((TEMPLATES / "agents.json").read_text(encoding="utf-8"))
+    her = config["agents"][0]["allowed_backends"][0]["her_v2"]
+
+    assert her["profiles"]["lightweight"]["reasoning"] == "high"
+    assert her["stage_reasoning"] == {
+        "immediate_response": "none",
+        "triage": "none",
+    }
+
+
 def test_portable_launcher_explicitly_grants_all_host_filesystem_drives():
     common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
 
@@ -93,22 +104,27 @@ def test_portable_launcher_explicitly_grants_all_host_filesystem_drives():
     assert "HASHI_ADDITIONAL_ACCESS_ROOTS" in common
 
 
-def test_portable_launcher_allows_slow_usb_cold_start_and_reports_progress():
+def test_portable_launcher_reports_real_startup_milestones_not_elapsed_time():
     common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
 
     assert "$script:HashiStartupTimeoutSeconds = 1800" in common
     assert "$script:WorkbenchStartupTimeoutSeconds = 300" in common
     assert "This may take a few minutes" in common
-    assert "HASHI is still starting normally" in common
-    assert "HASHI 仍在正常启动" in common
-    assert "Workbench is still starting normally" in common
-    assert "Workbench 仍在正常启动" in common
+    assert "Get-HASHIStartupStage" in common
+    assert "starting backend initialization" in common
+    assert "Initializing HER v2" in common
+    assert "Backend API listening on" in common
+    assert "Local API is ready" in common
+    assert "HASHI is still starting normally" not in common
+    assert "仍在正常启动" not in common
     assert "AddSeconds(75)" not in common
     assert "AddSeconds(45)" not in common
     assert "HASHI_WORKBENCH_OBSERVABILITY_DIR" in common
     assert "HASHI_REMOTE_LIVE_ENDPOINTS_PATH" in common
     assert "LocalInstanceRoot 'State'" in common
     assert "LocalInstanceRoot 'Logs\\workbench'" in common
+    assert "HASHI_WORKBENCH_URL = \"http://127.0.0.1:$port\"" in common
+    assert "HASHI_PORTABLE_STORAGE_PROFILE = 'removable'" in common
 
 
 def test_portable_stop_closes_owned_runtime_and_browser_before_safe_eject():
@@ -133,13 +149,25 @@ def test_portable_local_acceleration_is_admin_atomic_progressive_and_optional():
     installer = (TEMPLATES / "launcher" / "Install-LocalCache.ps1").read_text(
         encoding="utf-8"
     )
+    bootstrap = (TEMPLATES / "launcher" / "Bootstrap-Elevated.ps1").read_text(
+        encoding="utf-8"
+    )
+    elevated_entry = (TEMPLATES / "launcher" / "Elevated-Entry.ps1").read_text(
+        encoding="utf-8"
+    )
     uninstaller = (TEMPLATES / "launcher" / "Uninstall-LocalCache.ps1").read_text(
         encoding="utf-8"
     )
 
     assert "Ensure-LocalAccelerationCache" in common
     assert "CommonApplicationData" in common
-    assert "-Verb RunAs" in common
+    assert "-Verb RunAs" in bootstrap
+    assert "-Wait" not in bootstrap
+    assert "Test-IsAdministrator" in common
+    assert "must be started with administrator privileges" in common
+    assert "Install-LocalCache.ps1" in elevated_entry
+    assert "Start-TUI.ps1" in elevated_entry
+    assert "-FailureHandledByEntry" in elevated_entry
     assert "HASHI_PORTABLE_SKIP_LOCAL_CACHE" in common
     assert "Read-SetupRetryChoice" in common
     assert "HASHI will not start from an incomplete installation" in common
@@ -228,13 +256,19 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
     diagnose = (TEMPLATES / "launcher" / "Diagnose-HASHI.ps1").read_text(
         encoding="utf-8"
     )
+    elevated_entry = (TEMPLATES / "launcher" / "Elevated-Entry.ps1").read_text(
+        encoding="utf-8"
+    )
+    install_batch = (TEMPLATES / "Install_HASHI_On_This_PC.bat").read_text(
+        encoding="utf-8"
+    )
 
     assert "Preparing HASHI for first use" in common
     assert "正在为首次使用准备 HASHI" in common
     assert "Updating HASHI runtime" in common
     assert "正在更新 HASHI 运行组件" in common
-    assert "When Windows asks for permission, select Yes" in common
-    assert "Windows 请求权限时，请选择“是”" in common
+    assert "Administrator permission is active" in common
+    assert "管理员权限已生效" in common
     assert "Your conversations, settings, and other personal data" in common
     assert "您的对话、设置和其他个人数据" in common
     assert "[R] Retry / 重试" in common
@@ -264,6 +298,13 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
     assert "All required checks passed" in diagnose
     assert "所有必要检查均已通过" in diagnose
     assert "Start-HASHIBackend" not in installer
+    assert "Press any key to launch HASHI." in elevated_entry
+    assert "按任意键启动 HASHI。" in elevated_entry
+    assert elevated_entry.count("HASHI startup failed.") == 2
+    assert "choice /c" not in install_batch.lower()
+    assert "pause" not in install_batch.lower()
+    assert "Bootstrap-Elevated.ps1" in install_batch
+    assert "-Surface TUI -ForceSetup" in install_batch
 
     user_visible = f"{common}\n{installer}"
     for internal_wording in (

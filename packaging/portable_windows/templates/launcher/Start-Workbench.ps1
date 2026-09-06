@@ -1,3 +1,6 @@
+[CmdletBinding()]
+param([switch]$FailureHandledByEntry)
+
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
 try {
@@ -25,6 +28,8 @@ try {
         -ForegroundColor Green
     exit 0
 } catch {
-    Write-LauncherFailureHelp -EnglishAction "Workbench could not start: $($_.Exception.Message)"
+    if (-not $FailureHandledByEntry) {
+        Write-LauncherFailureHelp -EnglishAction "Workbench could not start: $($_.Exception.Message)"
+    }
     exit 1
 }

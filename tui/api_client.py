@@ -67,7 +67,8 @@ class TuiApiClient:
         timeout: float = 10,
     ) -> dict:
         ordered_bases = [self.base, *(base for base in self._bases if base != self.base)]
-        last_error: Exception | None = None
+        first_error: Exception | None = None
+        first_error_base = ordered_bases[0]
         for base in ordered_bases:
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
@@ -82,10 +83,21 @@ class TuiApiClient:
                     self.base = base
                 return data
             except (aiohttp.ClientError, TimeoutError) as exc:
-                last_error = exc
+                if first_error is None:
+                    first_error = exc
+                    first_error_base = base
                 logger.debug("TUI Workbench route unavailable: url=%s%s error=%s", base, path, exc)
-        logger.warning("TUI Workbench request failed: path=%s error=%s", path, last_error)
-        return {"ok": False, "error": str(last_error or "Workbench unavailable")}
+        logger.warning(
+            "TUI Workbench request failed: url=%s path=%s error=%s",
+            first_error_base,
+            path,
+            first_error,
+        )
+        return {
+            "ok": False,
+            "error": f"Cannot connect to local HASHI at {first_error_base}: "
+            f"{first_error or 'Workbench unavailable'}",
+        }
 
     async def _proxy_request(
         self,

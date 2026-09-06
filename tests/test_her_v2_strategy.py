@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from orchestrator.her_v2.interfaces import StructuredOutputError
@@ -135,3 +137,14 @@ def test_strategy_system_prompt_receives_full_playbook_capabilities_and_resource
     assert '"execution_brief"' in prompt
     assert "$strategy_cards" not in prompt
     assert "$schema_v3" not in prompt
+
+
+def test_strategy_playbook_selection_payload_is_bounded_and_keeps_every_card() -> None:
+    playbook = load_strategy_playbook()
+    full = json.dumps(playbook.prompt_payload(), ensure_ascii=False)
+    selection = playbook.selection_payload()
+    encoded_selection = json.dumps(selection, ensure_ascii=False)
+
+    assert [card["id"] for card in selection["cards"]] == list(playbook.card_ids)
+    assert all("content" not in card for card in selection["cards"])
+    assert len(encoded_selection) < len(full) // 2

@@ -33,7 +33,6 @@ $script:LauncherStateRoot = Join-Path $script:DataRoot 'state\launcher'
 $script:HashiPidPath = Join-Path $script:LauncherStateRoot 'hashi.pid'
 $script:WorkbenchPidPath = Join-Path $script:LauncherStateRoot 'workbench.pid'
 $script:HashiStartupTimeoutSeconds = 1800
-$script:HashiStartupProgressSeconds = 15
 $script:WorkbenchStartupTimeoutSeconds = 300
 
 function Initialize-PortableInstanceIdentity {
@@ -68,6 +67,14 @@ function Write-BilingualMessage {
     )
     Write-Host $English -ForegroundColor $ForegroundColor
     Write-Host $Chinese -ForegroundColor $ForegroundColor
+}
+
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
 }
 
 function Read-SetupRetryChoice {
@@ -247,8 +254,8 @@ function Ensure-LocalAccelerationCache {
         -Chinese '您的对话、设置和其他个人数据仍会保留在 USB 中。' `
         -ForegroundColor Green
     Write-BilingualMessage `
-        -English 'When Windows asks for permission, select Yes. Keep the USB drive connected until setup is complete.' `
-        -Chinese 'Windows 请求权限时，请选择“是”。安装完成前请勿拔出 USB。' `
+        -English 'Administrator permission is active. Keep the USB drive connected until setup is complete.' `
+        -Chinese '管理员权限已生效。安装完成前请勿拔出 USB。' `
         -ForegroundColor Yellow
 
     $powerShell = Join-Path $PSHOME 'powershell.exe'
@@ -258,23 +265,27 @@ function Ensure-LocalAccelerationCache {
         '-ExecutionPolicy',
         'Bypass',
         '-File',
-        (Quote-ProcessArgument $installer)
+        $installer
     )
     while ($true) {
         $failureDetail = $null
         try {
-            $process = Start-Process -FilePath $powerShell -Verb RunAs -ArgumentList $arguments -Wait -PassThru
-            if ($process.ExitCode -eq 0 -and (Use-ExistingLocalCache)) {
+            if (-not (Test-IsAdministrator)) {
+                throw 'Administrator privileges are required before setup can start.'
+            }
+            & $powerShell @arguments
+            $installerExitCode = $LASTEXITCODE
+            if ($installerExitCode -eq 0 -and (Use-ExistingLocalCache)) {
                 Write-BilingualMessage `
                     -English 'Setup complete.' `
                     -Chinese '安装完成。' `
                     -ForegroundColor Green
                 return $true
             }
-            if ($process.ExitCode -eq 0) {
+            if ($installerExitCode -eq 0) {
                 $failureDetail = 'The installed runtime did not pass its readiness check.'
             } else {
-                $failureDetail = "Setup exited with code $($process.ExitCode)."
+                $failureDetail = "Setup exited with code $installerExitCode."
             }
         } catch {
             $failureDetail = $_.Exception.Message
@@ -321,7 +332,9 @@ function Initialize-PortableEnvironment {
     $env:HASHI_REMOTE_LIVE_ENDPOINTS_PATH = $remoteLiveEndpointsPath
     $env:HASHI_PORTABLE_USB_ROOT = $script:PortableRoot
     $env:HASHI_PORTABLE_EXECUTION_MODE = $script:ExecutionMode
+    $env:HASHI_PORTABLE_STORAGE_PROFILE = 'removable'
     $env:HASHI_TUI_ENABLE_API_GATEWAY = '0'
+    $env:HASHI_TUI_ATTACH_ONLY = '1'
     $env:PYTHONUTF8 = '1'
     $env:PYTHONIOENCODING = 'utf-8'
     $env:PYTHONNOUSERSITE = '1'
@@ -342,6 +355,71 @@ function Initialize-PortableEnvironment {
         [System.IO.Path]::PathSeparator,
         $hostRoots
     )
+}
+
+function Read-LogTextSince {
+    param(
+        [string]$Path,
+        [long]$Offset
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite
+        )
+        if ($Offset -lt 0 -or $Offset -gt $stream.Length) { $Offset = 0 }
+        [void]$stream.Seek($Offset, [System.IO.SeekOrigin]::Begin)
+        $reader = New-Object System.IO.StreamReader($stream, [Text.Encoding]::UTF8, $true)
+        return $reader.ReadToEnd()
+    } catch {
+        return ''
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        elseif ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Get-HASHIStartupStage {
+    param(
+        [string]$LogPath,
+        [long]$LogOffset
+    )
+    $text = Read-LogTextSince -Path $LogPath -Offset $LogOffset
+    if (-not $text) { return $null }
+    $stages = @(
+        [PSCustomObject]@{ Percent = 12; Pattern = '=== Bridge starting ==='; English = 'Loading HASHI core'; Chinese = '正在加载 HASHI 核心' },
+        [PSCustomObject]@{ Percent = 25; Pattern = 'Agents to start:'; English = 'Loading Portable agent configuration'; Chinese = '正在加载 Portable Agent 配置' },
+        [PSCustomObject]@{ Percent = 40; Pattern = 'Hashi Remote lifecycle:'; English = 'Starting local and Remote services'; Chinese = '正在启动本机与 Remote 服务' },
+        [PSCustomObject]@{ Percent = 58; Pattern = 'starting backend initialization'; English = 'Initializing HER v2'; Chinese = '正在初始化 HER v2' },
+        [PSCustomObject]@{ Percent = 76; Pattern = 'backend ready'; English = 'HER v2 is ready'; Chinese = 'HER v2 已就绪' },
+        [PSCustomObject]@{ Percent = 88; Pattern = 'starting local surfaces directly'; English = 'Starting local interfaces'; Chinese = '正在启动本机界面' },
+        [PSCustomObject]@{ Percent = 96; Pattern = 'Backend API listening on'; English = 'Verifying the local API'; Chinese = '正在验证本机 API' }
+    )
+    $matched = $null
+    foreach ($stage in $stages) {
+        if ($text -match [Regex]::Escape([string]$stage.Pattern)) {
+            $matched = $stage
+        }
+    }
+    return $matched
+}
+
+function Write-StartupStage {
+    param(
+        [string]$Component,
+        [int]$Percent,
+        [string]$English,
+        [string]$Chinese
+    )
+    Write-BilingualMessage `
+        -English "$Component [$Percent%] $English" `
+        -Chinese "$Component [$Percent%] $Chinese" `
+        -ForegroundColor Cyan
 }
 
 function Get-Health {
@@ -370,10 +448,14 @@ function Quote-ProcessArgument {
 }
 
 function Start-HASHIBackend {
+    if (-not (Test-IsAdministrator)) {
+        throw 'HASHI Portable must be started with administrator privileges.'
+    }
     [void](Ensure-LocalAccelerationCache)
     Initialize-PortableEnvironment
     $config = Get-PortableConfig
     $port = [int]$config.global.workbench_port
+    $env:HASHI_WORKBENCH_URL = "http://127.0.0.1:$port"
     $health = Get-Health -Port $port
     if ($null -ne $health) {
         if ([string]$health.instance_id -ne [string]$config.global.instance_id) {
@@ -404,12 +486,23 @@ function Start-HASHIBackend {
         -English 'This may take a few minutes. Keep this window open and leave the USB connected.' `
         -Chinese '这可能需要几分钟。请保持此窗口开启，并勿拔出 USB。' `
         -ForegroundColor Yellow
+    $bridgeLog = Join-Path $script:DataRoot 'logs\bridge.log'
+    $bridgeLogOffset = if (Test-Path -LiteralPath $bridgeLog -PathType Leaf) {
+        [long](Get-Item -LiteralPath $bridgeLog).Length
+    } else {
+        [long]0
+    }
+    Write-StartupStage `
+        -Component 'HASHI' `
+        -Percent 5 `
+        -English 'Launching the Portable process' `
+        -Chinese '正在启动 Portable 进程'
     $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $script:DataRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Set-Content -LiteralPath $script:HashiPidPath -Value $process.Id -Encoding ASCII
 
     $startedAt = Get-Date
     $deadline = $startedAt.AddSeconds($script:HashiStartupTimeoutSeconds)
-    $nextProgress = $startedAt.AddSeconds($script:HashiStartupProgressSeconds)
+    $lastStagePercent = 5
     do {
         Start-Sleep -Milliseconds 500
         $process.Refresh()
@@ -419,16 +512,21 @@ function Start-HASHIBackend {
         }
         $health = Get-Health -Port $port
         if ($null -ne $health -and [string]$health.instance_id -eq [string]$config.global.instance_id) {
+            Write-StartupStage `
+                -Component 'HASHI' `
+                -Percent 100 `
+                -English 'Local API is ready' `
+                -Chinese '本机 API 已就绪'
             return $health
         }
-        $now = Get-Date
-        if ($now -ge $nextProgress) {
-            $elapsed = [int]($now - $startedAt).TotalSeconds
-            Write-BilingualMessage `
-                -English "HASHI is still starting normally - $elapsed seconds elapsed." `
-                -Chinese "HASHI 仍在正常启动——已用时 $elapsed 秒。" `
-                -ForegroundColor Cyan
-            $nextProgress = $now.AddSeconds($script:HashiStartupProgressSeconds)
+        $stage = Get-HASHIStartupStage -LogPath $bridgeLog -LogOffset $bridgeLogOffset
+        if ($null -ne $stage -and [int]$stage.Percent -gt $lastStagePercent) {
+            Write-StartupStage `
+                -Component 'HASHI' `
+                -Percent ([int]$stage.Percent) `
+                -English ([string]$stage.English) `
+                -Chinese ([string]$stage.Chinese)
+            $lastStagePercent = [int]$stage.Percent
         }
     } while ((Get-Date) -lt $deadline)
 
@@ -478,12 +576,16 @@ function Start-WorkbenchServer {
         -English 'Starting Workbench...' `
         -Chinese '正在启动 Workbench……' `
         -ForegroundColor Cyan
+    Write-StartupStage `
+        -Component 'Workbench' `
+        -Percent 25 `
+        -English 'Launching the local interface server' `
+        -Chinese '正在启动本机界面服务'
     $process = Start-Process -FilePath $node -ArgumentList (Quote-ProcessArgument $server) -WorkingDirectory $script:WorkbenchRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Set-Content -LiteralPath $script:WorkbenchPidPath -Value $process.Id -Encoding ASCII
 
     $startedAt = Get-Date
     $deadline = $startedAt.AddSeconds($script:WorkbenchStartupTimeoutSeconds)
-    $nextProgress = $startedAt.AddSeconds($script:HashiStartupProgressSeconds)
     do {
         Start-Sleep -Milliseconds 400
         if ($process.HasExited) {
@@ -492,17 +594,15 @@ function Start-WorkbenchServer {
         }
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/" -TimeoutSec 2
-            if ($response.StatusCode -eq 200) { return }
+            if ($response.StatusCode -eq 200) {
+                Write-StartupStage `
+                    -Component 'Workbench' `
+                    -Percent 100 `
+                    -English 'Local interface is ready' `
+                    -Chinese '本机界面已就绪'
+                return
+            }
         } catch {}
-        $now = Get-Date
-        if ($now -ge $nextProgress) {
-            $elapsed = [int]($now - $startedAt).TotalSeconds
-            Write-BilingualMessage `
-                -English "Workbench is still starting normally - $elapsed seconds elapsed." `
-                -Chinese "Workbench 仍在正常启动——已用时 $elapsed 秒。" `
-                -ForegroundColor Cyan
-            $nextProgress = $now.AddSeconds($script:HashiStartupProgressSeconds)
-        }
     } while ((Get-Date) -lt $deadline)
     throw "Workbench did not become healthy on port $port within $script:WorkbenchStartupTimeoutSeconds seconds."
 }

@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.storage_profile import removable_storage_profile
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -96,6 +98,8 @@ class HerSessionStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
+        if removable_storage_profile():
+            connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
     @contextmanager
@@ -112,6 +116,8 @@ class HerSessionStore:
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
+            if removable_storage_profile():
+                connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS her_sessions (
