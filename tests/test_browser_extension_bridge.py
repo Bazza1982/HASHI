@@ -71,6 +71,7 @@ def bridge_socket(tmp_path: Path):
         server.server_close()
 
 
+@pytest.mark.platform
 @requires_unix_stream_server
 def test_send_bridge_command_roundtrip(bridge_socket: Path) -> None:
     response = send_bridge_command("get_text", {"url": "https://example.com"}, socket_path=bridge_socket)
@@ -78,6 +79,7 @@ def test_send_bridge_command_roundtrip(bridge_socket: Path) -> None:
     assert response["output"] == "echo:get_text"
 
 
+@pytest.mark.platform
 @requires_unix_stream_server
 def test_send_bridge_command_projects_runtime_audit_context(bridge_socket: Path) -> None:
     from orchestrator.config import GlobalConfig
@@ -190,6 +192,7 @@ def test_windows_pipe_branch_projects_runtime_audit_context(
     json.dumps(captured, allow_nan=False)
 
 
+@pytest.mark.platform
 @requires_unix_stream_server
 def test_healthcheck_uses_ping(bridge_socket: Path) -> None:
     response = healthcheck(socket_path=bridge_socket)
@@ -197,6 +200,7 @@ def test_healthcheck_uses_ping(bridge_socket: Path) -> None:
     assert response["response"]["output"] == "pong"
 
 
+@pytest.mark.platform
 @requires_unix_stream_server
 def test_send_bridge_command_missing_socket(tmp_path: Path) -> None:
     with pytest.raises(BrowserBridgeError):
@@ -231,6 +235,7 @@ def test_browser_bridge_auth_key_is_created_once(tmp_path: Path) -> None:
     assert second == first
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Windows named-pipe transport requires Windows")
 def test_windows_named_pipe_roundtrip_and_healthcheck(tmp_path: Path) -> None:
     endpoint = rf"\\.\pipe\hashi-browser-test-{uuid.uuid4().hex}"
@@ -284,6 +289,7 @@ def test_windows_named_pipe_roundtrip_and_healthcheck(tmp_path: Path) -> None:
     assert status["connected"] is True
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Windows named-pipe transport requires Windows")
 def test_windows_named_pipe_transports_projected_runtime_audit_context(
     tmp_path: Path,
@@ -376,6 +382,7 @@ def test_existing_session_returns_current_extension_capabilities() -> None:
     assert response["extension_meta"]["actions"][-2:] == ["media_state", "media_play"]
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Chromium Windows invocation requires Windows")
 def test_native_host_parser_accepts_chromium_invocation_arguments() -> None:
     args = build_parser().parse_args(
@@ -387,6 +394,7 @@ def test_native_host_parser_accepts_chromium_invocation_arguments() -> None:
     assert args.parent_window == "123"
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows host process requires Windows")
 def test_native_windows_host_process_serves_authenticated_pipe(tmp_path: Path) -> None:
     endpoint = rf"\\.\pipe\hashi-browser-host-test-{uuid.uuid4().hex}"
@@ -451,6 +459,7 @@ def test_native_windows_host_process_serves_authenticated_pipe(tmp_path: Path) -
     assert process.returncode == 0, stderr
 
 
+@pytest.mark.platform
 @requires_unix_stream_server
 def test_send_bridge_command_waits_for_socket(tmp_path: Path) -> None:
     socket_path = tmp_path / "late.sock"
@@ -477,6 +486,7 @@ def test_send_bridge_command_waits_for_socket(tmp_path: Path) -> None:
     assert response["ok"] is True
 
 
+@pytest.mark.platform
 @requires_unix_stream_server
 def test_send_bridge_command_does_not_unlink_existing_socket_path_on_connect_failure(tmp_path: Path) -> None:
     socket_path = tmp_path / "stale.sock"

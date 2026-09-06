@@ -313,7 +313,10 @@ async def test_ensure_windows_helper_started_uses_pythonpath_not_working_directo
     monkeypatch.setattr(
         windows_use,
         "_resolve_windows_save_path",
-        lambda path: (r"\\\\wsl.localhost\\Ubuntu-22.04\\home\\lily\\projects\\hashi", None),
+        lambda path: (
+            r"\\\\wsl.localhost\\Ubuntu-22.04\\home\\sampleuser\\projects\\hashi",
+            None,
+        ),
     )
 
     started = await windows_use._ensure_windows_helper_started()

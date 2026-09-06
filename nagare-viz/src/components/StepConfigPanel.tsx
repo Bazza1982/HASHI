@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { DraftStep } from "../lib/yamlCodec";
+import { SUPPORTED_WORKER_BACKENDS, type DraftStep } from "../lib/yamlCodec";
 
 export type WorkerInfo = {
   id: string;
@@ -14,44 +14,10 @@ type StepConfigPanelProps = {
   workers: WorkerInfo[];
   onChange: (step: DraftStep) => void;
   onWorkerChange: (workerId: string, field: "backend" | "model", value: string) => void;
-  onBatchStepChange: (field: "agent" | "timeoutSeconds", value: string | number | null) => void;
+  onBatchStepChange: (field: "agent", value: string) => void;
   onBatchPromptChange: (text: string, append: boolean) => void;
   onBatchWorkerChange: (field: "backend" | "model", value: string) => void;
 };
-
-// HASHI available backends and their models
-const BACKEND_MODELS: Record<string, string[]> = {
-  "callable": [],
-  "claude-cli": [
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-  ],
-  "openrouter-api": [
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "deepseek/deepseek-v4-pro",
-    "deepseek/deepseek-v4-flash",
-  ],
-  "deepseek-api": [
-    "deepseek-v4-pro",
-    "deepseek-v4-flash",
-  ],
-  "gemini-cli": [
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-  ],
-  "codex-cli": [
-    "codex-mini",
-  ],
-};
-
-const ALL_BACKENDS = Object.keys(BACKEND_MODELS);
 
 export function StepConfigPanel({
   selectedSteps,
@@ -82,7 +48,6 @@ export function StepConfigPanel({
     const worker = workers.find((w) => w.id === step.agent);
     const currentBackend = worker?.backend ?? "";
     const currentModel = worker?.model ?? "";
-    const availableModels = BACKEND_MODELS[currentBackend] ?? [];
 
     return (
       <section className="panel">
@@ -114,10 +79,10 @@ export function StepConfigPanel({
                 value={currentBackend}
                 onChange={(event) => onWorkerChange(worker.id, "backend", event.target.value)}
               >
-                {!ALL_BACKENDS.includes(currentBackend) && (
+                {!SUPPORTED_WORKER_BACKENDS.includes(currentBackend as (typeof SUPPORTED_WORKER_BACKENDS)[number]) && (
                   <option value={currentBackend}>{currentBackend}</option>
                 )}
-                {ALL_BACKENDS.map((b) => (
+                {SUPPORTED_WORKER_BACKENDS.map((b) => (
                   <option key={b} value={b}>{b}</option>
                 ))}
               </select>
@@ -125,18 +90,11 @@ export function StepConfigPanel({
             {currentBackend !== "callable" && (
               <label className="field">
                 <span>Model</span>
-                <select
+                <input
                   value={currentModel}
+                  placeholder="CLI default when empty"
                   onChange={(event) => onWorkerChange(worker.id, "model", event.target.value)}
-                >
-                  {currentModel && !availableModels.includes(currentModel) && (
-                    <option value={currentModel}>{currentModel} (current)</option>
-                  )}
-                  <option value="">— select model —</option>
-                  {availableModels.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
+                />
               </label>
             )}
           </>
@@ -170,21 +128,6 @@ export function StepConfigPanel({
           ))}
         </datalist>
         <label className="field">
-          <span>Timeout Seconds</span>
-          <input
-            type="number"
-            min="0"
-            value={step.timeoutSeconds ?? ""}
-            onChange={(event) =>
-              onChange({
-                ...step,
-                timeoutSeconds:
-                  event.target.value.trim().length === 0 ? null : Number(event.target.value),
-              })
-            }
-          />
-        </label>
-        <label className="field">
           <span>Prompt</span>
           <textarea
             rows={12}
@@ -208,7 +151,6 @@ export function StepConfigPanel({
   const sharedModel = uniqueModels.length === 1 ? uniqueModels[0] : "";
 
   const batchBackend = sharedBackend;
-  const availableModels = BACKEND_MODELS[batchBackend] ?? [];
 
   return (
     <section className="panel">
@@ -244,8 +186,11 @@ export function StepConfigPanel({
               value={batchBackend}
               onChange={(event) => onBatchWorkerChange("backend", event.target.value)}
             >
-              <option value="">— {uniqueBackends.length > 1 ? "mixed" : "select"} —</option>
-              {ALL_BACKENDS.map((b) => (
+              <option value="" disabled>— {uniqueBackends.length > 1 ? "mixed" : "select"} —</option>
+              {batchBackend && !SUPPORTED_WORKER_BACKENDS.includes(batchBackend as (typeof SUPPORTED_WORKER_BACKENDS)[number]) && (
+                <option value={batchBackend}>{batchBackend} (unsupported)</option>
+              )}
+              {SUPPORTED_WORKER_BACKENDS.map((b) => (
                 <option key={b} value={b}>{b}</option>
               ))}
             </select>
@@ -253,36 +198,15 @@ export function StepConfigPanel({
           {batchBackend !== "callable" && (
             <label className="field">
               <span>Model</span>
-              <select
+              <input
                 value={sharedModel}
+                placeholder={uniqueModels.length > 1 ? "mixed models" : "CLI default when empty"}
                 onChange={(event) => onBatchWorkerChange("model", event.target.value)}
-              >
-                <option value="">— {uniqueModels.length > 1 ? "mixed" : "select"} —</option>
-                {sharedModel && !availableModels.includes(sharedModel) && (
-                  <option value={sharedModel}>{sharedModel} (current)</option>
-                )}
-                {availableModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
+              />
             </label>
           )}
         </>
       )}
-
-      <label className="field">
-        <span>Timeout Seconds</span>
-        <input
-          type="number"
-          min="0"
-          placeholder="— set for all —"
-          defaultValue=""
-          onBlur={(event) => {
-            const v = event.target.value.trim();
-            if (v.length > 0) onBatchStepChange("timeoutSeconds", Number(v));
-          }}
-        />
-      </label>
 
       <div className="field" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.4rem" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>

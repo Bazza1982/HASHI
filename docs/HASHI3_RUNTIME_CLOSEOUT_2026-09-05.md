@@ -195,8 +195,8 @@ PowerShell, CLI, MCP, `uv`, npm, or per-action Python child is launched.
 ## Installed HASHI3 browser files
 
 ```text
-C:\Users\thene\AppData\Local\HASHI\browser_bridge\hashi3-8b78703a\extension
-C:\Users\thene\AppData\Local\HASHI\browser_bridge\hashi3-8b78703a\hashi_browser_bridge_host.exe
+%LOCALAPPDATA%\HASHI\browser_bridge\<instance-key>\extension
+%LOCALAPPDATA%\HASHI\browser_bridge\<instance-key>\hashi_browser_bridge_host.exe
 ```
 
 The matching uninstallers are instance-scoped and remove only the HASHI3 task,

@@ -256,7 +256,7 @@ async def test_start_workbench_publishes_actual_port_then_starts_broker(
 
 
 @pytest.mark.asyncio
-async def test_stop_api_gateway_uses_the_stable_core_shutdown_contract(tmp_path):
+async def test_stop_api_gateway_uses_the_stable_core_shutdown_contract():
     events = []
 
     class _Gateway:

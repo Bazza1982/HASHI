@@ -16,9 +16,7 @@ Data flow:
 
 import argparse
 import json
-import os
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent / "workspaces"
@@ -153,7 +151,6 @@ def backfill_agent(agent: str, dry_run: bool) -> dict:
 
         model = rec.get("model", "gpt-5.4")
         old_input = rec.get("input", 0)
-        old_output = rec.get("output", 0)
         old_cost = rec.get("cost_usd", 0.0)
 
         new_cost = calc_cost_with_cache(real_input, real_cached, real_output, model)
@@ -235,9 +232,9 @@ def main():
           f"${t['old_cost']:9.4f}  ${t['new_cost']:9.4f}  ${delta:+9.4f}")
 
     if args.dry_run:
-        print(f"\n⚠️  DRY RUN — no files modified. Run with --apply to execute.")
+        print("\n⚠️  DRY RUN — no files modified. Run with --apply to execute.")
     else:
-        print(f"\n✅ Backfill applied. Backups saved as *.jsonl.bak")
+        print("\n✅ Backfill applied. Backups saved as *.jsonl.bak")
 
 
 if __name__ == "__main__":

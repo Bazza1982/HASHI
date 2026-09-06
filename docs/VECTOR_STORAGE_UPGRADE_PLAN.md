@@ -66,7 +66,7 @@ optimum-cli export onnx \
 
 ```bash
 # On Windows side:
-# C:\Users\thene\.cache\bge-m3-onnx-npu\bge-m3-int8.onnx  (~543MB)
+# %USERPROFILE%\.cache\bge-m3-onnx-npu\bge-m3-int8.onnx  (~543MB)
 
 # Copy to HASHI2 Linux machine via scp or shared drive
 scp /path/to/bge-m3-int8.onnx hashi2:/opt/hashi/models/bge-m3-int8/model.onnx

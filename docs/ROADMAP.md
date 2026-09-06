@@ -232,15 +232,15 @@ Design and acceptance record:
 
 ### Background Jobs
 
-Status: **planned / design accepted with revisions**.
+Status: **local Phase 1 implemented; remote and enterprise hardening pending**.
 
-Background Jobs will become HASHI's durable, session-aware execution primitive
-for long-running operating-system work. It is planned as a future function-layer
-upgrade, not a core rewrite and not a scheduler shortcut.
+Background Jobs is HASHI's durable, session-aware execution primitive for
+long-running operating-system work. The current function-layer implementation
+is not a core rewrite and is not a scheduler shortcut.
 
-The design goal is to let agents and operators start long-running local or
-remote jobs, receive a durable job id immediately, monitor stdout/stderr, cancel
-safely, and receive completion notifications without blocking the conversation.
+Agents and operators can start long-running local jobs, receive a durable job id
+immediately, monitor stdout/stderr, cancel safely, and receive completion
+notifications without blocking the conversation.
 
 Key product boundaries:
 
@@ -253,17 +253,21 @@ Key product boundaries:
 - **Not generic `bash` with longer timeout** — jobs need durable state, bounded
   logs, ownership, cancellation, recovery, and audit.
 
-Planned implementation shape:
+Implemented local shape:
 
 - Layer 2 `BackgroundJobManager` as a function-layer service with a minimal
   kernel handle.
 - SQLite-backed local job store for Phase 1.
 - Per-agent partitions with cross-agent admin visibility.
 - Explicit `/reboot` and full-restart recovery semantics.
-- Backend read-only job APIs early, alongside a thin `/bg` Telegram adapter.
-- Remote support later through `background_jobs_v1`, using the target
+- Backend job APIs, `/bg` commands, and Agent-facing start/status/tail/cancel/list
+  tools.
+
+Remaining roadmap:
+
+- Remote support through `background_jobs_v1`, using the target
   instance's policy and durable notification retry.
-- Enterprise hardening later for project scoping, approval, audit, retention,
+- Enterprise hardening for project scoping, approval, audit, retention,
   quotas, and SIEM/webhook export.
 
 This capability supports the broader HASHI AAI direction by turning HASHI from a

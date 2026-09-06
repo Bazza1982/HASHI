@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -370,7 +371,7 @@ async def test_backend_error_exposes_actionable_typed_context_in_chinese(tmp_pat
 
 @pytest.mark.asyncio
 async def test_send_long_message_skips_retry_after_without_raising(tmp_path):
-    runtime = _runtime(tmp_path, bot_error=RetryAfter(123))
+    runtime = _runtime(tmp_path, bot_error=RetryAfter(timedelta(seconds=123)))
 
     _elapsed, chunks = await runtime_delivery.send_long_message(
         runtime,

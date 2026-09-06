@@ -21,7 +21,7 @@ from orchestrator.terminal_console import TerminalAnimationCapability
 def test_static_startup_summary_matches_operator_contract(capsys) -> None:
     show_startup_header(
         instance_name="HASHI3",
-        instance_path=r"C:\Users\thene\projects\HASHI3",
+        instance_path=r"C:\Users\sampleuser\projects\HASHI3",
         platform_name="windows_native",
     )
     show_startup_status(
@@ -51,7 +51,7 @@ def test_static_startup_summary_matches_operator_contract(capsys) -> None:
         "Designed by Barry Li\n"
         "\n"
         "Instance    HASHI3\n"
-        "Location    C:\\Users\\thene\\projects\\HASHI3\n"
+        "Location    C:\\Users\\sampleuser\\projects\\HASHI3\n"
         "\n"
         "Agents\n"
         "  agent1    ONLINE | Telegram CONNECTED\n"
@@ -66,7 +66,7 @@ def test_static_startup_summary_matches_operator_contract(capsys) -> None:
 def test_static_header_uses_wsl_explorer_location(capsys) -> None:
     show_startup_header(
         instance_name="HASHI2",
-        instance_path="/home/lily/projects/hashi2",
+        instance_path="/home/user/projects/hashi2",
         platform_name="windows_wsl",
         distro_name="Ubuntu-22.04",
     )
@@ -74,7 +74,7 @@ def test_static_header_uses_wsl_explorer_location(capsys) -> None:
     output = capsys.readouterr().out
     assert (
         "Location    "
-        r"\\wsl.localhost\Ubuntu-22.04\home\lily\projects\hashi2"
+        r"\\wsl.localhost\Ubuntu-22.04\home\user\projects\hashi2"
     ) in output
 
 

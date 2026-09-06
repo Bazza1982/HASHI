@@ -85,6 +85,21 @@ _INTERNAL_TOOL_WORKSPACE_FIELD = "hashi_tool_workspace"
 _TRUSTED_TOOL_WORKSPACE_FIELD = "_hashi_internal_tool_workspace"
 _GATEWAY_REQUEST_ID_FIELD = "hashi_gateway_request_id"
 _GATEWAY_VALIDATION_STAGE_FIELD = "hashi_gateway_validation_stage"
+_REQUEST_KEY_FACTORY = getattr(web, "RequestKey", None)
+_GATEWAY_REQUEST_CONTEXT_KEYS = (
+    {
+        _GATEWAY_REQUEST_ID_FIELD: _REQUEST_KEY_FACTORY(
+            _GATEWAY_REQUEST_ID_FIELD,
+            str,
+        ),
+        _GATEWAY_VALIDATION_STAGE_FIELD: _REQUEST_KEY_FACTORY(
+            _GATEWAY_VALIDATION_STAGE_FIELD,
+            str,
+        ),
+    }
+    if _REQUEST_KEY_FACTORY is not None
+    else {}
+)
 _SENSITIVE_HTTP_HEADERS = frozenset(
     {
         "authorization",
@@ -1049,15 +1064,17 @@ class APIGatewayServer:
 
     @staticmethod
     def _set_request_context(request: Any, key: str, value: Any) -> None:
+        storage_key = _GATEWAY_REQUEST_CONTEXT_KEYS.get(key, key)
         try:
-            request[key] = value
+            request[storage_key] = value
         except (TypeError, AttributeError):
             setattr(request, f"_{key}", value)
 
     @staticmethod
     def _request_context(request: Any, key: str, default: Any = None) -> Any:
+        storage_key = _GATEWAY_REQUEST_CONTEXT_KEYS.get(key, key)
         try:
-            return request.get(key, default)
+            return request.get(storage_key, default)
         except (TypeError, AttributeError):
             return getattr(request, f"_{key}", default)
 

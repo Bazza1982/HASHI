@@ -36,7 +36,9 @@ In short:
   orchestrator that organizations can inspect, self-host, extend, and govern.
 
 Key principles:
-- **No Token Storage** — CLI backends use local authentication; no OAuth tokens stored
+- **Owner-Controlled Credentials** — CLI backends keep their own local
+  authentication; API keys and optional OAuth state remain local, gitignored,
+  and under the operator's control
 - **Multi-Agent, Shared Sessions** — Chat with multiple specialized agents through Telegram, WhatsApp, TUI, or an authenticated external client
 - **Self-Improving HER Agents** — optional, adapter-owned Habit planning and post-run Meditation in HER
 - **Open Source And Self-Hostable** — The control plane is designed to be
@@ -82,7 +84,11 @@ Throughout the codebase, you'll see references to **`bridge-u-f`** — this was 
 
 ## Quick Technical Overview
 
-HASHI is a **universal multi-agent orchestration platform** that runs entirely locally by default. It routes user requests to AI backends through a flexible adapter system, eliminating the need to store sensitive OAuth tokens. HASHI AAI extends that foundation into a governed enterprise control plane while preserving the same personal/local default path.
+HASHI is a **universal multi-agent orchestration platform** that runs locally
+by default. It routes user requests to AI backends through a flexible adapter
+system. CLI authentication, API keys, and optional OAuth state remain local to
+the operator. HASHI AAI extends that foundation into a governed enterprise
+control plane while preserving the same personal/local default path.
 
 **Top-level functional modules:**
 - **PCM** — authoritative Persona, Context, and Memory assembly and projection
@@ -112,11 +118,12 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
   chat models, plus xAI image and video routes
 
 **What makes HASHI different:**
-1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
+1. **Local Credential Ownership** — CLI backends own their authentication;
+   configured API keys and optional OAuth state stay local and gitignored
 2. **Provider-Neutral Runtime** — PAO is agnostic to Engine/Harness Providers;
    HER v2 is agnostic to internal Model Providers such as OpenRouter and DeepSeek
 3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
-4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
+4. **Nagare Flow System** — Describe a task in natural language; Nagare designs and executes a review-gated multi-agent workflow with evidence-backed evaluation
 5. **Self-Improving HER Agents** — Optional `Planning → Execution → Meditation → Write` learning with agent-local files
 6. **SafeVoice** — Voice messages are transcribed and shown for confirmation before execution, preventing accidental commands
 7. **Context Recovery** — `/handoff` command instantly restores project context after compression
@@ -134,7 +141,9 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 14. **Browser Route Dashboard** — `/browser` selects the right internet path: HASHI headless browser, CLI-native browsing, Brave Search, or the logged-in Chrome extension bridge
 15. **Hashi Remote File Transfer** — move release artifacts, EXP packs, and other files directly between HASHI instances
 16. **Evidence-Aware Lifecycle Control** — durable task state and receipts help long-running work recover direction and prove completion
-17. **Pack & Go** — Build a self-contained USB for Windows or macOS; recipients just plug in and double-click
+17. **Pack & Go** — Build a verified Windows portable installer or a
+    self-contained Apple Silicon macOS USB image for straightforward offline
+    handoff
 18. **Managed Background Jobs** — `/bg` starts long OS/process tasks without
    blocking chat, records status and logs, notifies on terminal outcomes, and
    can wake the responsible agent after completion to report or decide the next
@@ -252,7 +261,10 @@ HASHI 2.x proved that local agents could execute tools, browse, switch backends,
   primary `main` root plus slots `1` through `9`. Backends and tools receive
   those exact roots rather than an inferred common parent, and stale menu or
   path replies are rejected by revision.
-- **From scripts to a local work platform:** Workbench, API Gateway, Workzone helpers, Nagare, Minato, and the EXP corpus now give HASHI a stronger operating surface for research, writing, office automation, and cross-device work.
+- **From scripts to a local work platform:** the Backend API, API Gateway,
+  Workzone helpers, Nagare, Minato, and the EXP corpus give HASHI a stronger
+  operating surface for research, writing, office automation, and cross-device
+  work. The former Workbench UI is retired.
 
 ---
 
@@ -398,26 +410,32 @@ npm test
 npm run build
 ```
 
-### Pack & Go — USB Zero-Install (Recommended for sharing)
+### Pack & Go — Portable handoff
 
-Run HASHI on any Windows or macOS machine straight from a USB drive — no Python installation, no `pip install`, nothing to set up on the target machine.
+Build a self-contained image without requiring a global Python or Node.js
+installation on the recipient's machine.
 
-**Windows:**
-```
-# On your machine (with internet):
-windows\prepare_usb.bat           # builds USB with approved portable Python + locked deps
+**Windows (x64):**
 
-# First time on any Windows PC:
-windows\TUI_onboarding.bat        # first-run setup + chat
-
-# Subsequent launches:
-windows\start_tui.bat             # normal TUI chat
-```
-
-**macOS:**
 ```bash
-# On your Mac (with internet):
-bash mac/prepare_usb.sh           # builds USB with portable Python + all deps
+# From the repository root on a connected build machine:
+python packaging/portable_windows/build.py
+```
+
+Copy the generated directory to the USB. On the target PC, double-click
+`Install_HASHI_On_This_PC.bat`, approve the administrator prompt, and launch
+HASHI from the installed desktop shortcut. The installer verifies the image,
+copies it to `C:\HASHI-Portable`, and never overwrites an existing directory.
+The retired Workbench frontend and Node server are not included. See the
+[Portable Windows guide](packaging/portable_windows/README.md) for the exact
+security and uninstall contract.
+
+**macOS (Apple Silicon portable image):**
+```bash
+# From a clean Git checkout on a connected Mac:
+bash mac/prepare_usb.sh /Volumes/MyUSB
+# Builds /Volumes/MyUSB/HASHI from committed files only, verifies the pinned
+# portable Python archive, and refuses to overwrite an existing image.
 
 # On any Mac:
 # Double-click mac/start_tui.command in Finder
@@ -555,9 +573,9 @@ hashi/
 ├── tui_onboarding.py          # First-run TUI setup
 ├── scripts/                   # Utility scripts
 │   ├── token_audit.py         # Token usage analysis
-│   ├── generate_agent_behavior_audit.py  # Agent behavior report
-│   ├── wiki_organise.py       # Obsidian wiki data prep
-│   └── consolidate_memory.py  # Memory consolidation
+│   ├── check_runtime_contract.py  # Approved Python/dependency contract
+│   ├── exp_assets.py          # EXP asset validation and packaging
+│   └── resolve_instance_runtime.py  # Multi-instance runtime paths
 ├── workspaces/                # Agent working directories (gitignored)
 ├── memory/                    # Agent memory files (gitignored)
 ├── state/                     # Runtime state (gitignored)
@@ -1220,18 +1238,22 @@ HASHI tracks token consumption across all backends:
 
 | Capability | How It Works |
 |-----------|-------------|
-| **Meta-Workflow** | Describe a task in natural language → Nagare designs a complete workflow |
-| **Cross-Vendor Evaluation** | Claude writes → GPT reviews. No model evaluates its own output |
-| **Pre-Flight System** | All human decisions collected upfront; workflow runs uninterrupted |
+| **Meta-Workflow** | Describe a task in natural language → Nagare designs a review-gated workflow bundle |
+| **Independent Review** | Authoring and review use distinct worker roles; evidence gates fail closed |
+| **Pre-Flight + HITL** | Known inputs are collected upfront; explicit wait steps pause safely for later decisions |
 | **DAG Orchestration** | Steps execute in dependency order with parallel execution |
-| **Debug Agent** | Auto-recovers from failures (3 attempts) before human escalation |
-| **Evaluation KB** | Every run feeds lessons back — workflows improve over time |
-| **Crash Recovery** | Atomic state persistence, resume at exact failure point |
+| **Verified Recovery** | Debug guidance is schema-checked; repeated or unsafe recovery fails closed |
+| **Evaluation KB** | Evidence templates record validated outcomes without fabricating benchmark history |
+| **Durable State** | Atomic state and event records support inspection and explicit live-process pause/resume |
 
 **Quick Start:**
 ```bash
 python -m nagare.cli --help
 ```
+
+Run state defaults to `flow/runs/` below the current directory. Use
+`--runs-root` to place state elsewhere and `--repo-root` to select the trusted
+root used to resolve relative `agent_md` paths.
 
 > Full technical reference: [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md)
 
@@ -1280,8 +1302,8 @@ When a peer is discovered, Hashi Remote performs a mutual handshake before any m
 - Revalidates every 30 seconds to confirm continued liveness; state transitions: `handshake_pending → handshake_in_progress → handshake_accepted`
 - Authenticates `/protocol/handshake` and `/protocol/message` with `hashi-shared-hmac-v1` when a shared token is configured
 - Missing shared token starts Remote in `discovery-only` mode: peers can be seen, but trusted protocol messaging, full peer details, file transfer, and rescue controls are unavailable
-- Peers that advertise `tui_proxy_v1` may carry the TUI's restricted
-  Workbench operations after both registries report `handshake_accepted`.
+- Peers that advertise `tui_proxy_v1` may carry the TUI's restricted Backend
+  API operations after both registries report `handshake_accepted`.
   Remote online status by itself is not sufficient.
 
 #### Peer Liveness
@@ -1322,9 +1344,9 @@ Direct agent-to-agent messaging over Hashi Remote (`/protocol/message`):
 - Shared-token HMAC for trusted protocol traffic; configure `HASHI_REMOTE_SHARED_TOKEN` or `secrets.json` key `hashi_remote_shared_token`
 - Public `/health`, `/peers`, and `/protocol/status` responses are redacted unless the caller is loopback or authenticated
 - Cross-instance TUI access never exposes or directly connects to a peer's
-  Workbench port. The local-only `/tui/proxy` endpoint forwards an allowlisted
-  operation through HMAC-authenticated `/protocol/tui`; arbitrary Workbench
-  paths are not accepted.
+  Backend API port. The local-only `/tui/proxy` endpoint forwards an
+  allowlisted operation through HMAC-authenticated `/protocol/tui`; arbitrary
+  Backend API paths are not accepted.
 - Pairing-based client authentication remains available for non-protocol endpoints; LAN mode is off by default for protocol trust
 - Auth-gated terminal execution delegation (`/terminal/exec`)
 - Full audit logging for all inbound hchat and remote operations
@@ -1337,8 +1359,8 @@ rather than only through `/remote on`. The fixed rescue protocol exposes
 `POST /control/hashi/start`, `/restart`, and `/reboot`; mutating rescue is
 blocked unless Remote is launched with `max_terminal_level=L3_RESTART`.
 `/reboot` requests a target Agent's ordinary `/reboot min` through the
-token-protected Workbench admin endpoint and uses the audited hard-restart
-fallback only when Workbench is unreachable. See
+token-protected Backend API admin endpoint and uses the audited hard-restart
+fallback only when the Backend API is unreachable. See
 [`docs/HASHI_REMOTE_RESCUE_PROTOCOL.md`](docs/HASHI_REMOTE_RESCUE_PROTOCOL.md).
 
 For rollout and rollback notes, see

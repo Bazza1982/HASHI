@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 Ollama API adapter — local model backend via Ollama's OpenAI-compatible API.
 
@@ -9,27 +8,25 @@ Differences from OpenRouter:
   - Models are local Ollama models (e.g. gemma4:26b, qwen3:32b)
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import time
 from itertools import count
 from pathlib import Path
-from typing import Optional
 
-import httpx
-
+from adapters.base import BackendCapabilities, BackendResponse
 from adapters.openrouter_api import (
     OpenRouterAdapter,
     _APIResult,
     _assistant_content_text,
     _message_structured_data,
 )
-from adapters.base import BackendCapabilities, BackendResponse
 from adapters.stream_events import (
     KIND_TEXT_DELTA,
     KIND_THINKING,
-    StreamCallback,
     StreamEvent,
 )
 from orchestrator.pcm import load_pcm_document

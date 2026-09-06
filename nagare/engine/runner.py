@@ -18,9 +18,11 @@ from typing import Optional
 import yaml
 
 from nagare.engine.artifacts import ArtifactStore
+from nagare.engine.preflight import PreFlightCollector
 from nagare.engine.state import TaskState
 from nagare.handlers.subprocess_handler import SubprocessStepHandler
 from nagare.logging.events import RunEventLogger
+from nagare.paths import validate_path_component
 from nagare.protocols.evaluator import Evaluator, NullEvaluator
 from nagare.protocols.notifier import Notifier, NullNotifier
 from nagare.protocols.step_handler import StepHandler
@@ -41,8 +43,6 @@ class StepStatus:
 
 class WorkflowStatus:
     CREATED = "created"
-    PRE_FLIGHT = "pre_flight"
-    CONFIRMED = "confirmed"
     RUNNING = "running"
     PAUSED = "paused"
     COMPLETED = "completed"
@@ -70,7 +70,10 @@ class FlowRunner:
         self.workflow_path = Path(workflow_path)
         self.repo_root = Path(repo_root or Path.cwd())
         self.runs_root = Path(runs_root)
-        self.run_id = run_id or self._generate_run_id()
+        self.run_id = validate_path_component(
+            run_id or self._generate_run_id(),
+            label="run_id",
+        )
         self.trace_id = str(uuid.uuid4())
         self.logger = self._setup_logger()
         self.event_logger = RunEventLogger(
@@ -107,8 +110,12 @@ class FlowRunner:
         self.artifacts = ArtifactStore(self.run_id, runs_root=self.runs_root)
         self._paused = False
         self._aborted = False
-        self._pre_flight_data: dict = {}
+        pre_flight_defaults = self.workflow.get("pre_flight", {}).get("defaults", {})
+        if not isinstance(pre_flight_defaults, dict):
+            raise ValueError("pre_flight.defaults must be a mapping")
+        self._pre_flight_data: dict = dict(pre_flight_defaults)
         self._step_results: dict = {}  # step_id → result dict (for skip_if evaluation)
+        self._recovery_history: dict[str, list[dict]] = {}
         self.notifier = notifier or NullNotifier()
         self.evaluator = evaluator or NullEvaluator()
         self.step_handler = step_handler or SubprocessStepHandler(
@@ -142,17 +149,43 @@ class FlowRunner:
 
     def set_pre_flight_data(self, data: dict):
         """设置 pre-flight 收集到的用户输入数据"""
-        self._pre_flight_data = data
-        self.logger.info(f"[PreFlight] 已设置 {len(data)} 个输入字段")
+        if not isinstance(data, dict):
+            raise ValueError("Pre-flight data must be a mapping")
+        defaults = self.workflow.get("pre_flight", {}).get("defaults", {})
+        self._pre_flight_data = {**defaults, **data}
+        self.logger.info(f"[PreFlight] 已设置 {len(self._pre_flight_data)} 个输入字段")
         self.event_logger.emit(
             "run.preflight.completed",
             component="engine.runner",
             message="Pre-flight data collected",
-            data={"field_count": len(data)},
+            data={"field_count": len(self._pre_flight_data)},
         )
 
     def start(self) -> dict:
         """启动工作流"""
+        try:
+            self._pre_flight_data = PreFlightCollector(
+                self.workflow,
+                prefill=self._pre_flight_data,
+                silent=True,
+            ).run()
+        except ValueError as exc:
+            error = str(exc)
+            self.state.set_workflow_status(WorkflowStatus.FAILED)
+            self._emit_event(
+                "run.failed",
+                "Workflow pre-flight validation failed",
+                {"field_count": len(self._pre_flight_data)},
+                error_code="preflight_invalid",
+                error_message=error,
+            )
+            return {
+                "success": False,
+                "error": error,
+                "error_type": "preflight_invalid",
+                "run_id": self.run_id,
+            }
+
         self.logger.info(f"[FlowRunner] 启动工作流: {self.workflow['workflow']['id']}, run_id={self.run_id}")
         self.state.set_workflow_status(WorkflowStatus.RUNNING)
         self.event_logger.emit(
@@ -169,9 +202,23 @@ class FlowRunner:
             result = self._execute_dag()
             if result["success"]:
                 self.state.set_workflow_status(WorkflowStatus.COMPLETED)
-                self.logger.info(f"[FlowRunner] 工作流完成 ✅")
+                self.logger.info("[FlowRunner] 工作流完成 ✅")
                 self._emit_event("run.completed", "Workflow run completed", result)
                 self._notify_human(f"🎉 工作流完成 ✅ | 全部 {total_steps} 步成功")
+            elif result.get("error_type") == "cancelled" or self._aborted:
+                already_reported = self._aborted
+                self._aborted = True
+                self.state.set_workflow_status(WorkflowStatus.ABORTED)
+                self.logger.warning("[FlowRunner] 工作流已停止")
+                if not already_reported:
+                    self._emit_event(
+                        "run.cancelled",
+                        "Workflow run cancelled",
+                        result,
+                        error_code="cancelled",
+                        error_message=result.get("error"),
+                    )
+                self._notify_human(f"🛑 工作流已停止。\n原因: {result.get('error', '已授权停止')}")
             else:
                 self.state.set_workflow_status(WorkflowStatus.FAILED)
                 self.logger.error(f"[FlowRunner] 工作流失败 ❌: {result.get('error')}")
@@ -199,7 +246,7 @@ class FlowRunner:
             return result
 
         except Exception as e:
-            self.logger.exception(f"[FlowRunner] 未预期错误")
+            self.logger.exception("[FlowRunner] 未预期错误")
             self.state.set_workflow_status(WorkflowStatus.FAILED)
             self._emit_event(
                 "run.failed",
@@ -266,9 +313,9 @@ class FlowRunner:
                 reason = self._stop_signal.read_text(encoding="utf-8").strip()
             except Exception:
                 pass
-            self.logger.error(f"[Signal] 🛑 收到紧急停止信号" + (f": {reason}" if reason else ""))
+            self.logger.error("[Signal] 🛑 收到紧急停止信号" + (f": {reason}" if reason else ""))
             self._emit_event("run.cancelled", "Workflow aborted by signal", {"reason": reason or None})
-            self._notify_human(f"🛑 工作流已紧急停止。" + (f"\n原因: {reason}" if reason else ""))
+            self._notify_human("🛑 工作流已紧急停止。" + (f"\n原因: {reason}" if reason else ""))
             return "stopped"
 
         # 暂停：等待信号文件被删除
@@ -280,9 +327,9 @@ class FlowRunner:
                 reason = self._pause_signal.read_text(encoding="utf-8").strip()
             except Exception:
                 pass
-            self.logger.info(f"[Signal] ⏸️ 收到暂停信号" + (f": {reason}" if reason else ""))
+            self.logger.info("[Signal] ⏸️ 收到暂停信号" + (f": {reason}" if reason else ""))
             self._emit_event("run.paused", "Workflow paused by signal", {"reason": reason or None})
-            self._notify_human(f"⏸️ 工作流已暂停，等待恢复。删除 _pause 文件或调用 resume() 恢复。" + (f"\n原因: {reason}" if reason else ""))
+            self._notify_human("⏸️ 工作流已暂停，等待恢复。删除 _pause 文件或调用 resume() 恢复。" + (f"\n原因: {reason}" if reason else ""))
 
             while self._pause_signal.exists() and not self._stop_signal.exists():
                 time.sleep(2)
@@ -363,6 +410,14 @@ class FlowRunner:
 
         # 自动暂停
         self._pause_signal.write_text(f"等待 human 回答来自 {step['id']} 的问题", encoding="utf-8")
+        reason = f"step {step['id']} requested {len(questions)} clarification question(s)"
+        self.state.record_human_intervention(reason, step_id=step["id"])
+        self._emit_event(
+            "step.waiting_human",
+            "Step is waiting for human clarification",
+            {"question_count": len(questions), "reason": reason},
+            step_id=step["id"],
+        )
         self.logger.info(
             f"[WaitForHuman] 已暂停，等待 human 回答 {len(questions)} 个问题（无绝对时限）"
         )
@@ -502,7 +557,6 @@ class FlowRunner:
     def _execute_dag(self) -> dict:
         """解析 DAG，按依赖顺序执行所有步骤"""
         steps = self.workflow.get("steps", [])
-        step_map = {s["id"]: s for s in steps}
         total = len(steps)
         completed = set()
         failed = set()
@@ -518,14 +572,14 @@ class FlowRunner:
         while True:
             # 检查外部信号（停止/暂停）
             if self._check_signals() == "stopped":
-                return {"success": False, "error": "工作流已被紧急停止", "run_id": self.run_id}
+                return self._cancelled_result()
 
             # 暂停解除后，检查是否有待读取的 human 回答
             if self._pending_human_response:
                 self._read_human_response()
 
             if self._aborted:
-                return {"success": False, "error": "工作流已被终止", "run_id": self.run_id}
+                return self._cancelled_result("工作流已被终止")
 
             # 找出所有可执行的步骤（依赖已完成且自身未执行）
             ready = []
@@ -564,6 +618,12 @@ class FlowRunner:
                 if self._should_skip(step):
                     self.logger.info(f"[Step] 跳过: {step['id']} (skip_if 条件满足)")
                     self.state.set_step_status(step["id"], StepStatus.SKIPPED)
+                    self._emit_event(
+                        "step.skipped",
+                        "Step skipped because its condition matched",
+                        {"step_id": step["id"], "condition": step.get("skip_if")},
+                        step_id=step["id"],
+                    )
                     self._step_results[step["id"]] = {"success": True, "skipped": True}
                     completed.add(step["id"])
                     self._notify_step_event(step, "⏭️ 跳过", "skip_if 条件满足")
@@ -575,12 +635,12 @@ class FlowRunner:
                     self.logger.info(f"[FlowRunner] 步骤间等待 {inter_step_wait}s（可在此期间暂停/停止）")
                     for _ in range(inter_step_wait):
                         if self._check_signals() == "stopped":
-                            return {"success": False, "error": "工作流已被紧急停止", "run_id": self.run_id}
+                            return self._cancelled_result()
                         time.sleep(1)
 
                 # 步骤执行前最终检查信号
                 if self._check_signals() == "stopped":
-                    return {"success": False, "error": "工作流已被紧急停止", "run_id": self.run_id}
+                    return self._cancelled_result()
 
                 self._notify_step_event(step, "🔄 开始", step.get("name", ""))
                 result = self._execute_step(step)
@@ -599,7 +659,16 @@ class FlowRunner:
                     self._notify_step_event(step, "❌ 失败", f"[{error_type}] {error_msg}")
 
                     # 基础设施故障（非任务级别）→ debug agent 无法修复，直接通知 human
-                    if error_type in ("unexpected", "cli_error", "cli_not_found", "exception"):
+                    if error_type == "cancelled" and self._stop_signal.exists():
+                        return self._cancelled_result()
+
+                    if error_type in (
+                        "unexpected",
+                        "cli_error",
+                        "cli_not_found",
+                        "unsupported_backend",
+                        "exception",
+                    ):
                         self._notify_human(
                             f"🚨 基础设施故障 | {step['id']}\n"
                             f"类型: {error_type}\n"
@@ -623,12 +692,26 @@ class FlowRunner:
                             self._escalate_to_orchestrator(step, result)
                             return {
                                 "success": False,
-                                "error": f"步骤 {step['id']} 失败且 Debug Agent 明确无法恢复",
+                                "error": (
+                                    f"步骤 {step['id']} 失败且无法恢复: "
+                                    f"{result.get('error', 'unknown error')}"
+                                ),
+                                "error_type": result.get("error_type", "unknown"),
                                 "run_id": self.run_id,
                             }
 
                         failed.discard(step["id"])
                         self._notify_step_event(step, "🔧 Debug 恢复成功", "重新执行中...")
+                        next_attempt = (
+                            self.state.get_full_status()["steps"][step["id"]].get("attempt", 0)
+                            + 1
+                        )
+                        self._emit_event(
+                            "step.retrying",
+                            "Step is retrying after verified Debug recovery",
+                            {"step_id": step["id"], "attempt": next_attempt},
+                            step_id=step["id"],
+                        )
                         result = self._execute_step(step)
                         self._step_results[step["id"]] = result
                         if result["success"]:
@@ -654,6 +737,7 @@ class FlowRunner:
                             "unexpected",
                             "cli_error",
                             "cli_not_found",
+                            "unsupported_backend",
                             "exception",
                         }:
                             self._escalate_to_orchestrator(step, result)
@@ -667,18 +751,14 @@ class FlowRunner:
                                 "run_id": self.run_id,
                             }
                         if self._check_signals() == "stopped":
-                            return {
-                                "success": False,
-                                "error": "工作流已被紧急停止",
-                                "run_id": self.run_id,
-                            }
+                            return self._cancelled_result()
 
             # 并行执行
             elif parallel_steps:
                 step_names = ", ".join(s["id"] for s in parallel_steps)
                 self._notify_human(f"🔄 并行执行 {len(parallel_steps)} 个步骤: {step_names}")
                 results = self._execute_parallel(parallel_steps)
-                for step, result in zip(parallel_steps, results):
+                for index, (step, result) in enumerate(zip(parallel_steps, results)):
                     self._step_results[step["id"]] = result
                     if result["success"]:
                         completed.add(step["id"])
@@ -686,9 +766,70 @@ class FlowRunner:
                         total = len(steps)
                         self._notify_step_event(step, f"✅ 完成 ({done}/{total})", step.get("name", ""), result=result)
                     else:
-                        failed.add(step["id"])
+                        error_type = result.get("error_type", "unknown")
                         error_msg = str(result.get("error", ""))[:200]
-                        self._notify_step_event(step, "❌ 失败", error_msg)
+                        self._notify_step_event(
+                            step,
+                            "❌ 失败",
+                            f"[{error_type}] {error_msg}",
+                        )
+
+                        if error_type == "cancelled" and self._stop_signal.exists():
+                            return self._cancelled_result()
+
+                        infrastructure_errors = {
+                            "unexpected",
+                            "cli_error",
+                            "cli_not_found",
+                            "unsupported_backend",
+                            "exception",
+                        }
+                        while error_type not in infrastructure_errors:
+                            if self._check_signals() == "stopped":
+                                return self._cancelled_result()
+                            if not self._handle_failure(step, result):
+                                break
+                            self._notify_step_event(
+                                step,
+                                "🔧 Debug 恢复成功",
+                                "重新执行中...",
+                            )
+                            next_attempt = (
+                                self.state.get_full_status()["steps"][step["id"]].get(
+                                    "attempt", 0
+                                )
+                                + 1
+                            )
+                            self._emit_event(
+                                "step.retrying",
+                                "Step is retrying after verified Debug recovery",
+                                {"step_id": step["id"], "attempt": next_attempt},
+                                step_id=step["id"],
+                            )
+                            result = self._execute_step(step)
+                            results[index] = result
+                            self._step_results[step["id"]] = result
+                            if result["success"]:
+                                completed.add(step["id"])
+                                done = len(completed)
+                                self._notify_step_event(
+                                    step,
+                                    f"✅ 恢复后成功 ({done}/{total})",
+                                    step.get("name", ""),
+                                    result=result,
+                                )
+                                self._handle_wait_for_human(step, result)
+                                break
+                            error_type = result.get("error_type", "unknown")
+                            error_msg = str(result.get("error", ""))[:200]
+                            self._notify_step_event(
+                                step,
+                                "❌ 恢复后仍失败",
+                                f"[{error_type}] {error_msg}",
+                            )
+
+                        if not result["success"]:
+                            failed.add(step["id"])
 
                 # If any parallel step failed, escalate and return
                 if failed.intersection(s["id"] for s in parallel_steps):
@@ -730,9 +871,54 @@ class FlowRunner:
             duration = time.time() - start_time
 
             if result["status"] == "completed":
+                contract_error = self._validate_declared_artifacts(step, result)
+                if contract_error:
+                    self.state.set_step_status(step_id, StepStatus.FAILED, error=contract_error)
+                    self._emit_event(
+                        "step.failed",
+                        "Step output contract failed",
+                        {"step_id": step_id, "agent_id": agent_id},
+                        step_id=step_id,
+                        error_code="artifact_contract",
+                        error_message=contract_error,
+                        duration_ms=duration * 1000,
+                    )
+                    return {
+                        "success": False,
+                        "step_id": step_id,
+                        "error": contract_error,
+                        "error_type": "artifact_contract",
+                        "result": result,
+                    }
+
                 # 注册工件
                 for artifact_key, artifact_path in result.get("artifacts_produced", {}).items():
-                    self.artifacts.register(artifact_key, artifact_path)
+                    self.artifacts.register(
+                        artifact_key,
+                        artifact_path,
+                        step_id=step_id,
+                        required=True,
+                    )
+
+                gate_error = self._evaluate_quality_gate(step)
+                if gate_error:
+                    self.state.set_step_status(step_id, StepStatus.FAILED, error=gate_error)
+                    self._emit_event(
+                        "step.failed",
+                        "Step quality gate failed",
+                        {"step_id": step_id, "agent_id": agent_id},
+                        step_id=step_id,
+                        error_code="quality_gate_fail",
+                        error_message=gate_error,
+                        duration_ms=duration * 1000,
+                    )
+                    return {
+                        "success": False,
+                        "step_id": step_id,
+                        "error": gate_error,
+                        "error_type": "quality_gate_fail",
+                        "result": result,
+                    }
 
                 self.state.set_step_status(
                     step_id,
@@ -794,6 +980,137 @@ class FlowRunner:
             self.logger.exception(f"[Step] 异常: {step_id}")
             return {"success": False, "step_id": step_id, "error": str(e), "error_type": "exception"}
 
+    @staticmethod
+    def _validate_declared_artifacts(step: dict, result: dict) -> str | None:
+        """Fail closed when a completed worker omits or fabricates declared outputs."""
+        produced = result.get("artifacts_produced")
+        if not isinstance(produced, dict):
+            return "artifacts_produced must be a mapping"
+
+        declared = step.get("output", {}).get("artifacts", []) or []
+        required_keys = {
+            spec.get("key")
+            for spec in declared
+            if isinstance(spec, dict) and spec.get("required", True)
+        }
+        missing_keys = sorted(key for key in required_keys if key not in produced)
+        if missing_keys:
+            return f"Worker omitted declared artifact(s): {missing_keys}"
+
+        declared_by_key = {
+            spec["key"]: spec
+            for spec in declared
+            if isinstance(spec, dict) and isinstance(spec.get("key"), str)
+        }
+        declared_keys = set(declared_by_key)
+        undeclared_keys = sorted(str(key) for key in produced if key not in declared_keys)
+        if undeclared_keys:
+            return f"Worker reported undeclared artifact(s): {undeclared_keys}"
+
+        invalid_paths: list[str] = []
+        invalid_types: list[str] = []
+        for key, value in produced.items():
+            paths = value if isinstance(value, list) else [value]
+            if not paths or not all(isinstance(path, str) for path in paths):
+                invalid_paths.append(str(key))
+                continue
+            resolved_paths = [Path(path) for path in paths]
+            if any(not path.exists() for path in resolved_paths):
+                invalid_paths.append(str(key))
+                continue
+
+            artifact_type = declared_by_key[key].get("type")
+            if artifact_type == "directory":
+                if not isinstance(value, list) and not resolved_paths[0].is_dir():
+                    invalid_types.append(f"{key} (expected directory)")
+            elif any(not path.is_file() for path in resolved_paths):
+                invalid_types.append(f"{key} (expected file)")
+                continue
+
+            if artifact_type == "json":
+                try:
+                    for path in resolved_paths:
+                        json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    invalid_types.append(f"{key} (invalid JSON)")
+            elif artifact_type in {"text", "markdown"}:
+                try:
+                    for path in resolved_paths:
+                        path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    invalid_types.append(f"{key} (not UTF-8 text)")
+        if invalid_paths:
+            return f"Worker reported missing or invalid artifact path(s): {sorted(invalid_paths)}"
+        if invalid_types:
+            return f"Worker artifact type validation failed: {sorted(invalid_types)}"
+        return None
+
+    def _evaluate_quality_gate(self, step: dict) -> str | None:
+        """Evaluate the documented dotted-path comparison subset for automatic gates."""
+        gate = step.get("quality_gate")
+        if not gate:
+            return None
+        if gate.get("type", "auto") != "auto":
+            return "Only automatic quality gates are supported by the Nagare runner"
+
+        criteria = gate.get("criteria") or []
+        if not isinstance(criteria, list) or not criteria:
+            return "Automatic quality_gate must declare at least one criterion"
+
+        context: dict = {}
+        artifact_index = self.artifacts.list_all()
+        context["artifacts"] = {
+            key: {"exists": Path(entry.get("path", "")).exists(), "path": entry.get("path")}
+            for key, entry in artifact_index.items()
+        }
+        for key, entry in artifact_index.items():
+            path = Path(entry.get("path", ""))
+            if path.is_file() and path.suffix.lower() == ".json":
+                try:
+                    context[key] = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    return f"Quality gate could not read JSON artifact '{key}': {exc}"
+
+        failures: list[str] = []
+        for criterion in criteria:
+            try:
+                if not self._evaluate_criterion(str(criterion), context):
+                    failures.append(str(criterion))
+            except (KeyError, TypeError, ValueError) as exc:
+                failures.append(f"{criterion} ({exc})")
+        if failures:
+            return "Quality gate failed: " + "; ".join(failures)
+        return None
+
+    @staticmethod
+    def _evaluate_criterion(expression: str, context: dict) -> bool:
+        match = re.fullmatch(
+            r"\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)"
+            r"\s*(==|!=|>=|<=|>|<|in)\s*(.+?)\s*",
+            expression,
+        )
+        if match is None:
+            raise ValueError("unsupported criterion syntax")
+
+        path, operator, raw_expected = match.groups()
+        actual = context
+        for part in path.split("."):
+            if not isinstance(actual, dict) or part not in actual:
+                raise KeyError(f"unresolved path: {path}")
+            actual = actual[part]
+        expected = yaml.safe_load(raw_expected)
+
+        operations = {
+            "==": lambda: actual == expected,
+            "!=": lambda: actual != expected,
+            ">=": lambda: actual >= expected,
+            "<=": lambda: actual <= expected,
+            ">": lambda: actual > expected,
+            "<": lambda: actual < expected,
+            "in": lambda: actual in expected,
+        }
+        return bool(operations[operator]())
+
     def _execute_parallel(self, steps: list) -> list:
         """并行执行多个步骤"""
         results = [None] * len(steps)
@@ -839,19 +1156,61 @@ class FlowRunner:
             step_id=step["id"],
         )
 
-        # 调用 Debug Agent
+        history = self._recovery_history.setdefault(step["id"], [])
+        failed_step = {
+            "step_id": step["id"],
+            "error": failure_result.get("error"),
+            "error_type": failure_result.get("error_type"),
+            "step_definition": step,
+        }
         debug_message = {
-            "task": "debug_and_recover",
-            "failed_step": {
+            "msg_type": "task_assign",
+            "task_id": f"task-{uuid.uuid4().hex}",
+            "workflow_id": self.workflow["workflow"]["id"],
+            "run_id": self.run_id,
+            "from": "orchestrator",
+            "to": debug_agent,
+            "worker_workspace": str(
+                self.runs_root / self.run_id / "workers" / debug_agent
+            ),
+            "payload": {
                 "step_id": step["id"],
-                "error": failure_result.get("error"),
-                "step_definition": step,
+                "prompt": (
+                    "Diagnose the failed workflow step, perform a materially changed "
+                    "recovery action, verify it, and return the Debug Agent JSON contract.\n\n"
+                    f"Failure evidence:\n{json.dumps(failed_step, ensure_ascii=False, indent=2)}\n\n"
+                    "Previous recovery attempts:\n"
+                    f"{json.dumps(history, ensure_ascii=False, indent=2)}"
+                ),
+                "input_artifacts": self._resolve_input_artifacts(step),
+                "output_spec": [],
+                "params": {
+                    "failed_step": failed_step,
+                    "previous_recovery_attempts": list(history),
+                },
             },
-            "workflow_path": str(self.workflow_path)
+            "ts": utc_now(),
         }
 
         result = self._send_task_via_hchat(debug_agent, debug_message)
-        recovered = result.get("status") == "recovered"
+        validation_error = self._validate_recovery_result(result, history)
+        recovered = validation_error is None
+        if recovered:
+            history.append(
+                {
+                    "diagnosis": result["diagnosis"].strip(),
+                    "evidence": list(result["evidence"]),
+                    "fix_applied": result["fix_applied"].strip(),
+                    "changes_made": list(result.get("changes_made", [])),
+                }
+            )
+        elif result.get("status") == "recovered":
+            result = {
+                **result,
+                "status": "failed",
+                "error_type": "invalid_recovery_output",
+                "error_message": validation_error,
+            }
 
         self._emit_event(
             "handler.invoke.completed" if recovered else "handler.invoke.failed",
@@ -868,8 +1227,44 @@ class FlowRunner:
 
         return recovered
 
+    @staticmethod
+    def _validate_recovery_result(result: dict, history: list[dict]) -> str | None:
+        """Require auditable evidence and reject an exact repeated recovery action."""
+        if result.get("status") != "recovered":
+            return "Debug Agent did not report a recovered status"
+
+        diagnosis = result.get("diagnosis")
+        evidence = result.get("evidence")
+        fix_applied = result.get("fix_applied")
+        changes_made = result.get("changes_made", [])
+        if not isinstance(diagnosis, str) or not diagnosis.strip():
+            return "Recovered Debug result must include a non-empty diagnosis"
+        if not isinstance(evidence, list) or not evidence or not all(
+            isinstance(item, str) and item.strip() for item in evidence
+        ):
+            return "Recovered Debug result must include a non-empty evidence list"
+        if not isinstance(fix_applied, str) or not fix_applied.strip():
+            return "Recovered Debug result must include a non-empty fix_applied"
+        if not isinstance(changes_made, list) or not all(
+            isinstance(item, str) and item.strip() for item in changes_made
+        ):
+            return "Recovered Debug result changes_made must be a list of non-empty strings"
+
+        signature = {
+            "diagnosis": diagnosis.strip(),
+            "evidence": list(evidence),
+            "fix_applied": fix_applied.strip(),
+            "changes_made": list(changes_made),
+        }
+        if signature in history:
+            return "Debug Agent repeated an already attempted recovery action"
+        return None
+
     def _run_evaluator(self):
         """同步运行 Evaluator（工作流结束后立即评估，确保评分写入磁盘）"""
+        if self.workflow.get("evaluation", {}).get("enabled", True) is False:
+            self.logger.info("[Evaluator] 工作流已禁用运行后评估")
+            return
         try:
             report = self.evaluator.evaluate_run(self.run_id)
             if not report:
@@ -907,34 +1302,43 @@ class FlowRunner:
             self.logger.warning(f"[Candidate] 运行失败，已删除 candidate: {self._candidate_path.name}")
             self._notify_via_hchat(
                 self.workflow.get("agents", {}).get("orchestrator", {}).get("human_interface", "akane"),
-                f"❌ Candidate 工作流运行失败，已自动回退到上一版本。"
+                "❌ Candidate 工作流运行失败，已自动回退到上一版本。"
             )
 
     def _escalate_to_orchestrator(self, step: dict, failure_result: dict):
         """向 Orchestrator 上报无法恢复的失败"""
         orchestrator_id = self.workflow.get("agents", {}).get("orchestrator", {}).get("id", "akane")
         error_handling = self.workflow.get("error_handling", {})
-        msg_template = error_handling.get("on_unrecoverable", {}).get(
+        unrecoverable = error_handling.get("on_unrecoverable", {})
+        action = unrecoverable.get("action", "notify_orchestrator")
+        configured_target = unrecoverable.get("target")
+        if action == "notify_human_interface":
+            target_id = configured_target or self._human_interface or orchestrator_id
+        else:
+            target_id = configured_target or orchestrator_id
+        msg_template = unrecoverable.get(
             "message",
             "工作流步骤失败且无法继续恢复：{failed_step_id} — {error}"
         )
         error_msg = str(failure_result.get("error", ""))
         message = msg_template.replace("{failed_step_id}", step["id"]).replace("{error}", error_msg)
 
-        self.logger.warning(f"[Escalate] 向 {orchestrator_id} 上报: {message}")
+        self.logger.warning(f"[Escalate] 向 {target_id} 上报: {message}")
         self._emit_event(
-            "run.failed",
+            "run.escalated",
             "Failure escalated to orchestrator",
             {
                 "step_id": step["id"],
                 "orchestrator_id": orchestrator_id,
+                "target_agent_id": target_id,
+                "action": action,
                 "message": message,
             },
             step_id=step["id"],
             error_code=failure_result.get("error_type"),
             error_message=error_msg,
         )
-        self._notify_via_hchat(orchestrator_id, f"⚠️ Flow Runner 上报失败\n{message}")
+        self._notify_via_hchat(target_id, f"⚠️ Flow Runner 上报失败\n{message}")
 
     # =========================================================================
     # HChat 通信
@@ -987,19 +1391,29 @@ class FlowRunner:
         return None
 
     def _build_task_message(self, step: dict) -> dict:
-        """构建符合 agent.schema.yaml 的任务消息"""
+        """构建符合 Nagare StepHandler 协议的任务消息"""
         return {
             "msg_type": "task_assign",
-            "task_id": f"step-{step['id']}-{self.run_id}",
+            "task_id": f"task-{uuid.uuid4().hex}",
             "workflow_id": self.workflow["workflow"]["id"],
             "run_id": self.run_id,
             "from": "orchestrator",
             "to": step["agent"],
+            "worker_workspace": str(
+                self.runs_root / self.run_id / "workers" / step["agent"]
+            ),
             "payload": {
                 "step_id": step["id"],
-                "prompt": step.get("prompt", ""),
+                "prompt": self._substitute(step.get("prompt", "")),
                 "input_artifacts": self._resolve_input_artifacts(step),
-                "output_spec": step.get("output", {}).get("artifacts", []),
+                "output_spec": [
+                    {
+                        **artifact,
+                        "path": self._substitute(artifact.get("path", "")),
+                    }
+                    for artifact in step.get("output", {}).get("artifacts", [])
+                    if isinstance(artifact, dict)
+                ],
                 "params": self._resolve_params(step)
             },
             "ts": utc_now()
@@ -1019,10 +1433,13 @@ class FlowRunner:
         params = step.get("input", {}).get("params", {})
         return {k: self._substitute(v) for k, v in params.items()}
 
-    def _substitute(self, value) -> str:
-        """替换字符串中的变量占位符"""
+    def _substitute(self, value):
+        """替换变量占位符；完整 pre-flight 引用保留结构化映射。"""
         if not isinstance(value, str):
             return value
+        if value == "{pre_flight}":
+            return dict(self._pre_flight_data)
+
         def replacer(match):
             var_path = match.group(1)
             parts = var_path.split(".", 1)
@@ -1075,20 +1492,296 @@ class FlowRunner:
             self.logger.info(f"[FlowRunner] 发现 candidate 文件: {candidate_path}，优先加载")
             self._using_candidate = True
             self._candidate_path = candidate_path
-            return load_workflow_file(candidate_path).data
+            document = load_workflow_file(candidate_path)
+            self._validate_workflow_contract(document.data, document.graph_validation)
+            return document.data
         self._using_candidate = False
         self._candidate_path = None
-        return load_workflow_file(self.workflow_path).data
+        document = load_workflow_file(self.workflow_path)
+        self._validate_workflow_contract(document.data, document.graph_validation)
+        return document.data
 
     def _generate_run_id(self) -> str:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         wf_id = "unknown"
         try:
             data = load_workflow_file(self.workflow_path).data
-            wf_id = data.get("workflow", {}).get("id", "unknown")
+            wf_id = validate_path_component(
+                data.get("workflow", {}).get("id", "unknown"),
+                label="workflow.id",
+            )
         except Exception:
-            pass
-        return f"run-{wf_id}-{ts}"
+            wf_id = "invalid-workflow"
+        return f"run-{wf_id}-{ts}-{uuid.uuid4().hex[:8]}"
+
+    def _cancelled_result(self, error: str = "工作流已被紧急停止") -> dict:
+        return {
+            "success": False,
+            "error": error,
+            "error_type": "cancelled",
+            "run_id": self.run_id,
+        }
+
+    def _validate_workflow_contract(self, workflow: dict, graph_validation) -> None:
+        """Reject unsafe or silently ignored workflow constructs before execution."""
+        problems: list[str] = []
+        metadata = workflow.get("workflow")
+        if not isinstance(metadata, dict):
+            problems.append("missing workflow mapping")
+        else:
+            try:
+                validate_path_component(metadata.get("id"), label="workflow.id")
+            except ValueError as exc:
+                problems.append(str(exc))
+            if not isinstance(metadata.get("name"), str) or not metadata.get("name"):
+                problems.append("workflow.name must be a non-empty string")
+            version = metadata.get("version")
+            if not isinstance(version, str) or re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
+                problems.append("workflow.version must use numeric MAJOR.MINOR.PATCH format")
+
+        if not graph_validation.is_valid:
+            problems.append(f"invalid DAG: {graph_validation}")
+
+        agents = workflow.get("agents")
+        if not isinstance(agents, dict):
+            problems.append("missing agents mapping")
+            agents = {}
+        orchestrator = agents.get("orchestrator")
+        if not isinstance(orchestrator, dict):
+            problems.append("agents.orchestrator must be a mapping")
+        else:
+            try:
+                validate_path_component(orchestrator.get("id"), label="orchestrator.id")
+            except ValueError as exc:
+                problems.append(str(exc))
+        workers = agents.get("workers", []) or []
+        if not isinstance(workers, list):
+            problems.append("agents.workers must be a list")
+            workers = []
+        worker_ids: set[str] = set()
+        for worker in workers:
+            if not isinstance(worker, dict):
+                problems.append("worker entries must be mappings")
+                continue
+            worker_id = worker.get("id")
+            try:
+                validate_path_component(worker_id, label="worker.id")
+            except ValueError as exc:
+                problems.append(str(exc))
+                continue
+            if worker_id in worker_ids:
+                problems.append(f"duplicate worker id: {worker_id}")
+            worker_ids.add(worker_id)
+            if worker.get("backend") not in {"claude-cli", "codex-cli", "callable"}:
+                problems.append(
+                    f"worker {worker_id} has unsupported backend: {worker.get('backend')}"
+                )
+            if worker.get("backend") != "callable" and not isinstance(
+                worker.get("agent_md"), str
+            ):
+                problems.append(f"worker {worker_id} must declare agent_md")
+            if not isinstance(worker.get("role"), str) or not worker.get("role"):
+                problems.append(f"worker {worker_id} must declare a non-empty role")
+            model = worker.get("model")
+            if model is not None and (not isinstance(model, str) or not model):
+                problems.append(f"worker {worker_id} model must be a non-empty string")
+            ignored_worker_fields = sorted(
+                {"workspace", "controllable_by"}.intersection(worker)
+            )
+            if ignored_worker_fields:
+                problems.append(
+                    f"worker {worker_id} uses ignored fields: {ignored_worker_fields}"
+                )
+
+        steps = workflow.get("steps")
+        if not isinstance(steps, list):
+            problems.append("steps must be a list")
+            steps = []
+        elif not steps:
+            problems.append("steps must contain at least one executable step")
+
+        artifact_keys: set[str] = set()
+        artifact_producers: dict[str, str] = {}
+        step_dependencies: dict[str, set[str]] = {}
+        artifact_references: list[tuple[str, str]] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                problems.append("step entries must be mappings")
+                continue
+            step_id = step.get("id")
+            try:
+                validate_path_component(step_id, label="step.id")
+            except ValueError as exc:
+                problems.append(str(exc))
+                continue
+            if step.get("agent") not in worker_ids:
+                problems.append(f"step {step_id} references unknown worker: {step.get('agent')}")
+            strategy = step.get("strategy", "sequential")
+            if strategy not in {"sequential", "parallel"}:
+                problems.append(f"step {step_id} has unsupported strategy: {strategy}")
+            if step.get("wait_for_human") and strategy == "parallel":
+                problems.append(f"step {step_id} cannot combine wait_for_human with parallel")
+            if not isinstance(step.get("prompt"), str):
+                problems.append(f"step {step_id} must declare a string prompt")
+            if not isinstance(step.get("name"), str) or not step.get("name"):
+                problems.append(f"step {step_id} must declare a non-empty name")
+            for boolean_field in ("notify", "wait_for_human"):
+                if boolean_field in step and not isinstance(step[boolean_field], bool):
+                    problems.append(f"step {step_id} {boolean_field} must be boolean")
+            if "skip_if" in step and not isinstance(step["skip_if"], str):
+                problems.append(f"step {step_id} skip_if must be a string")
+
+            depends = step.get("depends", []) or []
+            if not isinstance(depends, list) or not all(
+                isinstance(value, str) for value in depends
+            ):
+                problems.append(f"step {step_id} depends must be a list of step ids")
+                depends = []
+            step_dependencies[step_id] = set(depends)
+
+            input_block = step.get("input", {}) or {}
+            if not isinstance(input_block, dict):
+                problems.append(f"step {step_id} input must be a mapping")
+                input_block = {}
+            references = input_block.get("from_artifacts", []) or []
+            if not isinstance(references, list):
+                problems.append(f"step {step_id} input.from_artifacts must be a list")
+            elif not all(isinstance(value, str) for value in references):
+                problems.append(
+                    f"step {step_id} input.from_artifacts must contain only artifact keys"
+                )
+            else:
+                artifact_references.extend(
+                    (step_id, value) for value in references
+                )
+            if "params" in input_block and not isinstance(input_block["params"], dict):
+                problems.append(f"step {step_id} input.params must be a mapping")
+
+            output_block = step.get("output", {}) or {}
+            if not isinstance(output_block, dict):
+                problems.append(f"step {step_id} output must be a mapping")
+                output_block = {}
+            declared = output_block.get("artifacts", []) or []
+            if not isinstance(declared, list):
+                problems.append(f"step {step_id} output.artifacts must be a list")
+                continue
+            for artifact in declared:
+                if not isinstance(artifact, dict):
+                    problems.append(f"step {step_id} artifact entries must be mappings")
+                    continue
+                key = artifact.get("key")
+                try:
+                    validate_path_component(key, label="artifact key")
+                except ValueError as exc:
+                    problems.append(f"step {step_id}: {exc}")
+                    continue
+                if key in artifact_keys:
+                    problems.append(f"duplicate artifact key: {key}")
+                artifact_keys.add(key)
+                artifact_producers[key] = step_id
+                if not isinstance(artifact.get("path"), str) or not artifact.get("path"):
+                    problems.append(f"step {step_id} artifact {key} must declare a path")
+                artifact_type = artifact.get("type")
+                if artifact_type not in {
+                    "json",
+                    "file",
+                    "directory",
+                    "text",
+                    "markdown",
+                    "binary",
+                }:
+                    problems.append(
+                        f"step {step_id} artifact {key} has unsupported type: {artifact_type}"
+                    )
+                if "required" in artifact and not isinstance(artifact["required"], bool):
+                    problems.append(
+                        f"step {step_id} artifact {key} required must be boolean"
+                    )
+
+            quality_gate = step.get("quality_gate")
+            if quality_gate is not None:
+                if not isinstance(quality_gate, dict):
+                    problems.append(f"step {step_id} quality_gate must be a mapping")
+                elif quality_gate.get("type", "auto") != "auto":
+                    problems.append(f"step {step_id} quality_gate supports only type auto")
+                else:
+                    criteria = quality_gate.get("criteria")
+                    if not isinstance(criteria, list) or not criteria or not all(
+                        isinstance(criterion, str) and criterion.strip()
+                        for criterion in criteria
+                    ):
+                        problems.append(
+                            f"step {step_id} quality_gate.criteria must be a non-empty list of strings"
+                        )
+
+        def ancestors(step_id: str) -> set[str]:
+            found: set[str] = set()
+            pending = list(step_dependencies.get(step_id, set()))
+            while pending:
+                dependency = pending.pop()
+                if dependency in found:
+                    continue
+                found.add(dependency)
+                pending.extend(step_dependencies.get(dependency, set()))
+            return found
+
+        for step_id, artifact_key in artifact_references:
+            producer = artifact_producers.get(artifact_key)
+            if producer is None:
+                problems.append(
+                    f"step {step_id} references undeclared artifact: {artifact_key}"
+                )
+            elif producer not in ancestors(step_id):
+                problems.append(
+                    f"step {step_id} references artifact {artifact_key} without depending "
+                    f"on producer {producer}"
+                )
+
+        error_handling = workflow.get("error_handling", {}) or {}
+        if not isinstance(error_handling, dict):
+            problems.append("error_handling must be a mapping")
+        else:
+            debug_agent = error_handling.get("debug_agent")
+            if debug_agent is not None and debug_agent not in worker_ids:
+                problems.append(f"error_handling references unknown debug agent: {debug_agent}")
+            unrecoverable = error_handling.get("on_unrecoverable", {}) or {}
+            if not isinstance(unrecoverable, dict):
+                problems.append("error_handling.on_unrecoverable must be a mapping")
+            elif unrecoverable.get("action", "notify_orchestrator") not in {
+                "notify_human_interface",
+                "notify_orchestrator",
+                "abort",
+            }:
+                problems.append(
+                    "error_handling.on_unrecoverable.action is unsupported: "
+                    f"{unrecoverable.get('action')}"
+                )
+
+        retired = {
+            "auto_apply",
+            "improvement_threshold",
+            "max_attempts",
+            "max_retries",
+            "max_total_attempts",
+            "on_max_exceeded",
+            "retry_strategy",
+            "timeout_seconds",
+            "wait_for_human_timeout_seconds",
+        }
+
+        def walk(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in retired:
+                        problems.append(f"retired workflow field: {key}")
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(workflow)
+        if problems:
+            raise ValueError("Invalid Nagare workflow contract: " + "; ".join(problems))
 
     def _setup_logger(self) -> logging.Logger:
         log_dir = self.runs_root / self.run_id / "logs"

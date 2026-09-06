@@ -13,7 +13,6 @@ To add a new backend, subclass PeerDiscovery and implement advertise/discover/st
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 INVALID_INSTANCE_IDS = {"UNKNOWN"}

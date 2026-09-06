@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 Local voice-to-text transcription using faster-whisper.
 
@@ -15,10 +14,11 @@ Model is loaded lazily on first transcription and kept in memory for
 subsequent calls.
 """
 
-import logging
+from __future__ import annotations
+
 import asyncio
+import logging
 from pathlib import Path
-from functools import lru_cache
 
 logger = logging.getLogger("VoiceTranscriber")
 

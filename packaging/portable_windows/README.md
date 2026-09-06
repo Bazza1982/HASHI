@@ -7,7 +7,7 @@ write to or format a USB device.
 The USB is installation and transfer media, not the runtime disk. The user
 runs `Install_HASHI_On_This_PC.bat`, approves Windows administrator access, and
 the installer copies and verifies the complete bundle—including program,
-private Python/Node runtimes, configuration, secrets, and current user data—to:
+private Python runtime, configuration, secrets, and current user data—to:
 
 ```text
 C:\HASHI-Portable\
@@ -22,8 +22,8 @@ exists, no files are copied; the desktop shortcuts are repaired and the local
 installation is launched. An invalid, incomplete, linked, or differently owned
 destination fails closed.
 
-The installer creates three Windows shortcuts on the invoking user's desktop:
-`Start HASHI`, `Stop HASHI`, and `Start HASHI Workbench`. Each shortcut targets
+The installer creates two Windows shortcuts on the invoking user's desktop:
+`Start HASHI` and `Stop HASHI`. Each shortcut targets
 the corresponding batch launcher inside the local installation, so it cannot
 become stale after the USB is removed. First installation reports real copy and
 verification percentages. After success, the same elevated visible window
@@ -37,15 +37,14 @@ Local API discovery is strict. HASHI always binds its Backend API to
 that port is occupied. Once health and instance identity are verified, the
 launcher atomically writes PID, process start time, actual API port, Portable
 identity, HASHI instance identity, build identity, and a random launch nonce to
-`data\state\local-endpoint.json`. TUI, Workbench, Diagnose, and Stop use that
+`data\state\local-endpoint.json`. TUI, Diagnose, and Stop use that
 record; they do not scan adapters, guess WSL gateways, or fall back to a
-`172.x` address. Workbench's browser UI port is selected the same way and added
-to the record. Logs are always resolved from the local copy at
+`172.x` address. Logs are always resolved from the local copy at
 `data\logs\bridge.log`.
 
 `Uninstall_HASHI_From_This_PC.bat` must be run from the original matching USB.
 It requests confirmation, stops only processes whose executable or dedicated
-browser profile belongs to the validated local installation, removes the three
+browser profile belongs to the validated local installation, removes the two
 known shortcuts, and deletes only the exact marked local directory. A marker,
 Portable identity, build identity, target path, or reparse-point mismatch stops
 the uninstall without deletion. Uninstall permanently deletes the local
@@ -53,13 +52,13 @@ conversations, settings, logs, and plaintext API keys; it does not alter the
 USB bundle.
 
 The image contains HER v2, official DeepSeek defaults, configurable Qwen via
-the official DashScope OpenAI-compatible endpoint, TUI, the complete browser
-Workbench, Remote/LAN/HChat, Scheduler, Nagare, Superloops, browser/desktop
+the official DashScope OpenAI-compatible endpoint, TUI, the HASHI Backend API,
+Remote/LAN/HChat, Scheduler, Nagare, Superloops, browser/desktop
 tools, Tesseract OCR, FFmpeg, Edge TTS, and one Chinese Piper voice. It uses the
 host Edge or Chrome and does not bundle Electron or Chromium. There is no CLI
-Engine, local LLM, semantic vector runtime, system Python/Node installation,
+Engine, local LLM, semantic vector runtime, system Python or Node installation,
 global PATH change, Windows service, registry installation, or ProgramData
-runtime cache.
+runtime cache. The retired Workbench frontend and Node server are not included.
 
 The launched runtime is Windows-native-only: its isolated process environment
 includes the system Windows PowerShell directory explicitly, while Bash/WSL
@@ -78,8 +77,8 @@ python3 packaging/portable_windows/build.py
 
 The source `secrets.json` must contain `deepseek_api_key`. Only the DeepSeek,
 optional DashScope/OpenRouter, and Remote shared credentials are copied. Secret
-values are never printed. The generated Workbench admin token and 128-bit
-Portable identity are unique to the image.
+values are never printed. The generated Backend API admin token (stored under
+its compatibility key) and 128-bit Portable identity are unique to the image.
 
 The build fails closed if the result exceeds 957,000,000 bytes or if a CLI
 Engine adaptor/package manager is present. Every downloaded asset is pinned by
@@ -90,6 +89,7 @@ hash comparison for `data`. Capacity is checked conservatively using 32 KiB
 allocation units; NTFS with its default 4 KiB allocation unit is recommended.
 
 Only Git-tracked files from the explicit source allowlist enter `app/hashi`.
-Untracked development state, logs, local secrets, and generated workflow runs
-cannot leak into a newly built image. Tracked HASHI and Workbench inputs must be
-clean, and both revisions are checked again before publication.
+Untracked development state, logs, local secrets, project-private workflows,
+instance-local Skills, and generated workflow runs cannot leak into a newly
+built image. The tracked HASHI input must be clean, and its revision is checked
+again before publication.

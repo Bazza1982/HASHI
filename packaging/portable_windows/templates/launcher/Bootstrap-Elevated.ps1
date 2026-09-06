@@ -1,8 +1,8 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet('Install', 'Start', 'Stop', 'Diagnose', 'Uninstall')]
     [string]$Action = 'Start',
-    [ValidateSet('TUI', 'Workbench')]
+    [ValidateSet('TUI')]
     [string]$Surface = 'TUI'
 )
 

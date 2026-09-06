@@ -13,6 +13,7 @@ import yaml
 
 from orchestrator.config import ConfigManager
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.runtime_contract import load_runtime_policy
 
 ROOT = Path(__file__).resolve().parents[1]
 PORTABLE = ROOT / "packaging" / "portable_windows"
@@ -28,6 +29,21 @@ def _load_builder():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_portable_builder_uses_the_canonical_python_runtime_distribution():
+    builder = _load_builder()
+    policy = load_runtime_policy(ROOT)
+    python_asset = builder.ASSETS["python"]
+
+    assert builder.PYTHON_VERSION == policy.python_text
+    assert builder.PYTHON_BUILD_DATE == policy.portable_build_date
+    assert "astral-sh/python-build-standalone" in python_asset.url
+    assert policy.python_text in python_asset.filename
+    assert policy.portable_build_date in python_asset.filename
+    assert python_asset.filename.endswith("install_only_stripped.tar.gz")
+    assert "python.org/ftp/python" not in python_asset.url
+    assert "node" not in builder.ASSETS
 
 
 def test_portable_profile_has_one_her_engine_and_configurable_regional_providers(
@@ -113,7 +129,6 @@ def test_portable_launcher_reports_real_startup_milestones_not_elapsed_time():
     common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
 
     assert "$script:HashiStartupTimeoutSeconds = 1800" in common
-    assert "$script:WorkbenchStartupTimeoutSeconds = 300" in common
     assert "This may take a few minutes" in common
     assert "Get-HASHIStartupStage" in common
     assert "starting backend initialization" in common
@@ -124,7 +139,6 @@ def test_portable_launcher_reports_real_startup_milestones_not_elapsed_time():
     assert "仍在正常启动" not in common
     assert "AddSeconds(75)" not in common
     assert "AddSeconds(45)" not in common
-    assert "HASHI_WORKBENCH_OBSERVABILITY_DIR" in common
     assert "HASHI_REMOTE_LIVE_ENDPOINTS_PATH" in common
     assert "HASHI_WORKBENCH_URL = \"http://127.0.0.1:$port\"" in common
     assert "HASHI_PORTABLE_STORAGE_PROFILE = 'removable'" not in common
@@ -217,7 +231,7 @@ def test_portable_full_local_install_is_admin_atomic_verified_and_idempotent():
     assert "CreateShortcut" in installer
     assert "Start HASHI.lnk" in installer
     assert "Stop HASHI.lnk" in installer
-    assert "Start HASHI Workbench.lnk" in installer
+    assert "Start HASHI Workbench.lnk" not in installer
     assert "CommonApplicationData" not in installer
     assert "CurrentVersion\\Uninstall" not in installer
 
@@ -285,9 +299,6 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
         encoding="utf-8"
     )
     tui = (TEMPLATES / "launcher" / "Start-TUI.ps1").read_text(encoding="utf-8")
-    workbench = (TEMPLATES / "launcher" / "Start-Workbench.ps1").read_text(
-        encoding="utf-8"
-    )
     diagnose = (TEMPLATES / "launcher" / "Diagnose-HASHI.ps1").read_text(
         encoding="utf-8"
     )
@@ -315,8 +326,6 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
 
     assert "HASHI is ready. Opening the terminal interface" in tui
     assert "HASHI 已就绪。正在打开终端界面" in tui
-    assert "HASHI is ready. Opening Workbench" in workbench
-    assert "HASHI 已就绪。正在打开 Workbench" in workbench
     assert "HASHI Portable system check" in diagnose
     assert "HASHI Portable 系统检查" in diagnose
     assert "All required checks passed" in diagnose
@@ -327,7 +336,7 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
     assert "Installation failed." in elevated_entry
     assert "HASHI startup failed." in elevated_entry
     assert elevated_entry.index("Wait-ForLaunchKey") < elevated_entry.index(
-        "$launcherName = if"
+        "$launcherName = 'Start-TUI.ps1'"
     )
     assert "choice /c" not in install_batch.lower()
     assert "pause" not in install_batch.lower()
@@ -345,13 +354,19 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
 
     for name in (
         "Start_HASHI_TUI.bat",
-        "Start_HASHI_Workbench.bat",
         "Install_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
         "Stop_HASHI.bat",
         "Diagnose_HASHI.bat",
     ):
         assert "chcp 65001" in (TEMPLATES / name).read_text(encoding="utf-8")
+
+    source_scripts = list((TEMPLATES / "launcher").glob("*.ps1"))
+    assert source_scripts
+    assert all(
+        script.read_bytes().startswith(b"\xef\xbb\xbf")
+        for script in source_scripts
+    )
 
     builder.copy_launchers(tmp_path)
     for script in (tmp_path / "launcher").glob("*.ps1"):
@@ -391,6 +406,9 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
         "orchestrator/tracked.py": "TRACKED = True\n",
         "adapters/codex_cli.py": "must be pruned\n",
         "superloops/recordings/tracked-run/state.json": "must be ignored\n",
+        "superloops/loops/tracked-run/state.json": "must be pruned\n",
+        "flow/workflows/library/builtin.yaml": "must ship\n",
+        "skills/library-pick/SKILL.md": "must be pruned\n",
     }
     for relative, content in tracked.items():
         path = source / relative
@@ -429,6 +447,9 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
     assert (destination / "orchestrator" / "tracked.py").is_file()
     assert not (destination / "adapters" / "codex_cli.py").exists()
     assert not (destination / "superloops" / "recordings").exists()
+    assert not (destination / "superloops" / "loops").exists()
+    assert (destination / "flow/workflows/library/builtin.yaml").is_file()
+    assert not (destination / "skills" / "library-pick").exists()
     for path in untracked:
         assert not (destination / path.relative_to(source)).exists()
 
@@ -463,7 +484,6 @@ def test_portable_dependency_lock_keeps_requested_compact_capabilities():
 def test_portable_launchers_are_drive_relative_and_gateway_stays_disabled():
     for name in (
         "Start_HASHI_TUI.bat",
-        "Start_HASHI_Workbench.bat",
         "Install_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
         "Stop_HASHI.bat",
@@ -495,14 +515,44 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
         assert f"adapters/{name}_cli.py" in builder.PRUNED_SOURCE_PATHS
     for name in ("codex", "claude", "gemini"):
         assert f"skills/{name}" in builder.PRUNED_SOURCE_PATHS
+    for name in (
+        "dual_brain_context.py",
+        "generate_agent_behavior_audit.py",
+        "gitwatch.py",
+        "monitor_hashi1.py",
+        "patrol_errors.py",
+        "wiki_organise.py",
+    ):
+        assert f"scripts/{name}" in builder.PRUNED_SOURCE_PATHS
 
     remote_config = (TEMPLATES / "remote-config.yaml").read_text(encoding="utf-8")
     assert "lan_mode: false" in remote_config
     assert "pairing_auto_approve: true" in remote_config
 
     builder_source = (PORTABLE / "build.py").read_text(encoding="utf-8")
-    assert "createRequire(import.meta.url)" in builder_source
+    assert "build_workbench" not in builder_source
+    assert "--workbench-root" not in builder_source
+    assert "runtime/node" in builder_source
+    assert "app/workbench" in builder_source
     assert "app/hashi/tui/assets/sounds/soft_chat_send.wav" in builder_source
     assert "app/hashi/tui/assets/sounds/soft_chat_receive.wav" in builder_source
     assert '"soft_chat_message_sounds": True' in builder_source
     assert '"windows_native_only": True' in builder_source
+
+
+def test_portable_bundle_does_not_ship_or_launch_retired_workbench():
+    builder = _load_builder()
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+    installer = (TEMPLATES / "launcher" / "Install-To-PC.ps1").read_text(
+        encoding="utf-8"
+    )
+    readme = (PORTABLE / "README.md").read_text(encoding="utf-8")
+
+    assert not hasattr(builder, "build_workbench")
+    assert not hasattr(builder, "install_node")
+    assert not any((PORTABLE / "sharp_runtime").glob("*"))
+    assert not (TEMPLATES / "Start_HASHI_Workbench.bat").exists()
+    assert not (TEMPLATES / "launcher" / "Start-Workbench.ps1").exists()
+    assert "Start-Workbench" not in common
+    assert "Start HASHI Workbench.lnk" not in installer
+    assert "retired Workbench frontend and Node server are not included" in readme

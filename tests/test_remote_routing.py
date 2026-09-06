@@ -5,25 +5,25 @@ def test_same_host_wsl_siblings_keep_loopback_as_fallback_route():
     local = {
         "instance_id": "HASHI1",
         "platform": "wsl",
-        "host_identity": "a9max",
-        "wsl_root_from_windows": r"\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi",
+        "host_identity": "sample-host",
+        "wsl_root_from_windows": r"\\wsl$\\Ubuntu-22.04\\home\\sampleuser\\projects\\hashi",
     }
     target = {
         "instance_id": "HASHI2",
         "platform": "wsl",
-        "host_identity": "a9max",
+        "host_identity": "sample-host",
         "remote_port": 8767,
-        "lan_ip": "192.168.0.211",
-        "wsl_root_from_windows": r"\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi2",
+        "lan_ip": "192.168.50.21",
+        "wsl_root_from_windows": r"\\wsl$\\Ubuntu-22.04\\home\\sampleuser\\projects\\hashi2",
     }
 
     same_host = same_machine_hint(local_entry=local, target_entry=target)
     candidates = build_route_candidates(target_entry=target, remote_port=8767, same_host=same_host)
 
     assert same_host is True
-    assert candidates[0].host == "192.168.0.211"
+    assert candidates[0].host == "192.168.50.21"
     assert candidates[0].scope == "lan"
-    assert [candidate.host for candidate in candidates] == ["192.168.0.211", "127.0.0.1"]
+    assert [candidate.host for candidate in candidates] == ["192.168.50.21", "127.0.0.1"]
 
 
 def test_cross_host_windows_routes_over_lan_not_loopback():
@@ -42,7 +42,9 @@ def test_cross_host_windows_routes_over_lan_not_loopback():
 
 def test_wsl_unc_anchor_supports_wsl_localhost_form():
     assert (
-        wsl_unc_anchor(r"\\wsl.localhost\\Ubuntu-22.04\\home\\lily\\projects\\hashi")
+        wsl_unc_anchor(
+            r"\\wsl.localhost\\Ubuntu-22.04\\home\\sampleuser\\projects\\hashi"
+        )
         == "\\\\wsl.localhost\\ubuntu-22.04\\"
     )
 
@@ -53,13 +55,13 @@ def test_same_host_port_conflict_is_actionable():
             "hashi1": {
                 "instance_id": "HASHI1",
                 "platform": "wsl",
-                "host_identity": "a9max",
+                "host_identity": "sample-host",
                 "remote_port": 8766,
             },
             "hashi2": {
                 "instance_id": "HASHI2",
                 "platform": "wsl",
-                "host_identity": "a9max",
+                "host_identity": "sample-host",
                 "remote_port": 8766,
             },
             "intel": {
@@ -88,13 +90,13 @@ def test_same_host_port_conflict_ignores_inactive_offline_entries():
             "hashi1": {
                 "instance_id": "HASHI1",
                 "platform": "wsl",
-                "host_identity": "a9max",
+                "host_identity": "sample-host",
                 "remote_port": 8766,
             },
             "hashi9": {
                 "instance_id": "HASHI9",
                 "platform": "windows",
-                "host_identity": "a9max",
+                "host_identity": "sample-host",
                 "remote_port": 8766,
                 "active": False,
                 "live_status": "offline",

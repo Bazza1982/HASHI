@@ -42,14 +42,17 @@
 
 A Nagare workflow is a **YAML file** that declaratively describes a multi-agent task pipeline. The engine (`FlowRunner`) reads it and:
 
-1. Runs pre-flight: asks the human the configured questions once upfront
+1. Runs pre-flight: asks the configured questions before execution
 2. Builds a DAG (Directed Acyclic Graph) from step dependencies
 3. Executes steps in topological order, calling the appropriate LLM or Python callable per step
 4. Passes artifacts (files) between steps via the artifact store
-5. Handles failures automatically via the debug agent (up to N retries)
-6. Evaluates the run and records lessons for continuous improvement
+5. Routes correctable task failures through the debug agent until success, an explicit
+   unrecoverable result, infrastructure failure, or an authorized stop
+6. Evaluates the run and records evidence-backed metrics and recommendations
 
-Once pre-flight completes, the workflow runs **fully automatically** — no mid-run human input.
+Most workflows run automatically after pre-flight. A step that declares `wait_for_human: true`
+may deliberately pause after producing clarification questions; it resumes only after an answer
+or an authorized stop.
 
 ---
 
@@ -62,9 +65,9 @@ changelog/         ← version history
 pre_flight/        ← human input collection (questions, defaults, scope_notice)
 agents/            ← orchestrator + worker definitions
   orchestrator/    ← flow-runner identity and human interface
-  workers[]        ← each worker: id, role, agent_md, backend, model, workspace
+  workers[]        ← each worker: id, role, agent_md, backend, model
 steps[]            ← pipeline steps (id, name, agent, depends, prompt, input, output, ...)
-error_handling/    ← debug agent, retry strategies
+error_handling/    ← debug agent and explicit unrecoverable handling
 success_criteria/  ← tiered pass/fail definitions
 output/            ← final deliverable configuration
 evaluation/        ← metrics collection and improvement loop
@@ -96,15 +99,16 @@ workflow:
 
 ## 4. Pre-flight: Collecting Human Input
 
-The pre-flight system collects all human decisions **once, before the workflow starts**. After pre-flight, no human input is needed or accepted until the workflow finishes (or fails and escalates).
+The pre-flight system collects predictable human decisions before the workflow starts. Later
+human input is accepted only at steps that explicitly declare `wait_for_human: true` or when an
+unrecoverable failure is escalated.
 
 ### 4.1 Full Structure
 
 ```yaml
 pre_flight:
-  analyst_agent: writer_01      # Optional. Agent used for auto-scan analysis.
-  auto_scan: false              # Optional. Default: false. If true, engine pre-analyzes
-                                # the task to suggest which questions to ask.
+  analyst_agent: writer_01      # Optional authoring/host metadata; core does not invoke it.
+  auto_scan: false              # Optional authoring/host intent; core does not scan inputs.
 
   collect_from_human:           # List of questions to ask the user
     - key: topic                # Required. Variable name for {pre_flight.topic}
@@ -119,13 +123,13 @@ pre_flight:
       choices: [markdown, pdf, docx]   # Required when type: choice
       default: markdown                # Optional. Used if user skips.
 
-  scope_notice: |               # Optional. Displayed before questions. Use to set
-    This workflow produces X.   # expectations (scope, what is/isn't included).
+  scope_notice: |               # Optional UI/host metadata; the core CLI does not display it.
+    This workflow produces X.   # Hosts may use it to explain scope.
     For Y, use a different one.
 
   defaults:                     # Optional. Named defaults injected as {pre_flight.*}
     quality_threshold: "total >= 20"   # Available in step prompts like variables
-    max_retries: 3
+    review_depth: "full"
 ```
 
 ### 4.2 Question Types
@@ -137,9 +141,12 @@ pre_flight:
 
 > **Note:** Only `text` and `choice` are currently implemented in the interactive CLI. File uploads and multiselect are not yet supported.
 
-### 4.3 Pre-flight Timeout
+### 4.3 Interaction Semantics
 
-If the user doesn't respond within **300 seconds**, the engine uses defaults for `can_assume: true` questions and continues automatically. Questions without a default that remain unanswered will fail the pre-flight step.
+Interactive CLI questions wait for terminal input; silent mode uses declared defaults. A
+`wait_for_human` step has no implicit 300-second fallback: the run remains paused until the
+response file is supplied and the pause signal is cleared, or an authorized stop is issued.
+Defaults should only resolve choices that are genuinely safe to assume.
 
 ### 4.4 Prefill (Automation / CI)
 
@@ -150,7 +157,8 @@ python flow/flow_trigger.py start my-workflow \
   '{"topic": "climate change", "output_format": "markdown"}'
 ```
 
-The JSON keys must match the `key` fields in `collect_from_human`.
+Declared question keys are validated. Hosts may also include additional context keys; those values
+remain available through `{pre_flight.<key>}` substitutions.
 
 ---
 
@@ -177,10 +185,8 @@ agents:
     - id: analyst_01              # Required. Unique worker ID within this workflow.
       role: "Senior Analyst"      # Required. Human-readable role description.
       agent_md: "flow/agents/analyst/AGENT.md"  # Required. Path to system prompt file.
-      workspace: "flow/runs/{run_id}/workers/analyst_01"  # Optional. Working directory.
       backend: claude-cli         # Required. See Section 6.
-      model: claude-opus-4-6      # Required. Model identifier.
-      controllable_by: [orchestrator, human]  # Optional. Who can interrupt this worker.
+      model: claude-opus-4-6      # Optional. Omit to use the CLI's configured default.
 ```
 
 **Key fields:**
@@ -188,12 +194,14 @@ agents:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `id` | Yes | Must be unique. Used in `steps[].agent` to assign steps. |
-| `role` | Yes | Displayed in logs and notifications. Describes what this agent does. |
-| `agent_md` | Yes | Path to the AGENT.md system prompt file (relative to repo root). |
-| `workspace` | No | Working directory for the agent subprocess. `{run_id}` is substituted automatically. |
+| `role` | Yes | Validated human-readable metadata describing the worker. |
+| `agent_md` | CLI backends | Path to the AGENT.md system prompt file (relative to repo root). Callable workers may omit it. |
 | `backend` | Yes | Which execution backend to use. See Section 6. |
-| `model` | Yes | Model identifier (backend-specific format). See Section 6. |
-| `controllable_by` | No | Who can pause/stop this worker. Default: `[orchestrator]`. |
+| `model` | No | Backend-specific model ID. Omit to use the selected CLI's configured default. |
+
+Worker directories are created by the runner at
+`flow/runs/<run_id>/workers/<worker_id>`. Legacy `workspace` and `controllable_by` fields were
+never runtime controls and are rejected rather than silently ignored.
 
 ---
 
@@ -220,38 +228,8 @@ subprocess: claude --print --model claude-opus-4-6 --system-prompt <AGENT.md con
 
 The engine strips the `CLAUDECODE` environment variable before spawning to prevent session interference.
 
-**Available models (Claude):**
-
-| Model | Use when |
-|-------|----------|
-| `claude-opus-4-6` | Deep reasoning, architecture design, complex writing, analysis |
-| `claude-sonnet-4-6` | Structured output, format checking, simple writing, notifications |
-| `claude-haiku-4-5` | Fast, cheap tasks; simple classification; short summaries |
-
-**Design rule:** Use Opus for steps where judgment quality directly affects output quality. Use Sonnet/Haiku for steps that are primarily structural (formatting, merging, notifying).
-
----
-
-#### `openrouter-api`
-
-Calls any model via OpenRouter. Required for non-Claude models (GPT, Gemini, Mistral, etc.).
-
-```yaml
-- id: evaluator_01
-  backend: openrouter-api
-  model: openai/gpt-4.5-preview
-```
-
-**Why use this?** Claude cannot evaluate its own outputs objectively. For critique, independent review, and evaluation steps, using a different vendor (via OpenRouter) enforces true independence. This is architecturally enforced, not a convention.
-
-**Available models (via OpenRouter):**
-
-| Model | Use when |
-|-------|----------|
-| `openai/gpt-4.5-preview` | Independent evaluation, devil's advocate critique |
-| `openai/o4-mini` | Code execution, tool use, mathematical reasoning |
-| `google/gemini-2.5-pro` | Long-context tasks, multimodal |
-| `anthropic/claude-opus-4-6` | Claude via OpenRouter (alternative routing) |
+`model` is passed to the installed Claude CLI. Availability is determined by that CLI and the
+operator's account; Nagare intentionally does not maintain a hard-coded model allowlist.
 
 ---
 
@@ -262,12 +240,12 @@ Invokes the Codex CLI (`codex`) as a subprocess. Best for code-heavy steps with 
 ```yaml
 - id: coder_01
   backend: codex-cli
-  model: o4-mini
+  model: gpt-5.4
 ```
 
 **How it works:**
 ```
-subprocess: codex exec --model o4-mini --full-auto
+subprocess: codex exec --model gpt-5.4 --full-auto
 ```
 
 Use when the step needs to read/write files, run shell commands, or do code execution rather than just text generation.
@@ -288,38 +266,13 @@ See **Section 15** for the full callables design.
 
 ---
 
-### 6.2 Per-Step Model Override
+### 6.2 Model Selection
 
-Workers define a default model, but individual steps can override it:
+The runtime reads `backend` and `model` from the worker definition. Step-level `model` and
+`backend_extra` fields are not execution overrides in the current runner. Define a separate
+worker when a step needs another model or backend.
 
-```yaml
-steps:
-  - id: step_01
-    agent: analyst_01       # normally uses claude-opus-4-6
-    model: claude-sonnet-4-6  # override for this step only
-    ...
-```
-
-This allows one worker definition to cover a range of tasks at different cost/quality trade-offs.
-
----
-
-### 6.3 Backend Extra Options
-
-```yaml
-workers:
-  - id: worker_01
-    backend: claude-cli
-    model: claude-opus-4-6
-    backend_extra:
-      access_scope: local_only  # Restrict file system access
-```
-
-`backend_extra` is passed through to the handler and interpreted backend-specifically. Not all backends support all options.
-
----
-
-### 6.4 Multi-Model Strategy
+### 6.3 Multi-Model Strategy
 
 The recommended pattern for high-quality workflows:
 
@@ -335,10 +288,10 @@ workers:
     backend: claude-cli
     model: claude-sonnet-4-6
 
-  # Independent evaluation → different vendor (GPT)
+  # Separately configured review context → Codex CLI
   - id: evaluator_01
-    backend: openrouter-api
-    model: openai/gpt-4.5-preview
+    backend: codex-cli
+    model: gpt-5.4
 
   # Debug recovery → Sonnet (fast and capable enough)
   - id: debug_01
@@ -546,7 +499,9 @@ steps:
           type: json              # Type hint: json | text | file | binary
 ```
 
-The engine registers this artifact in the ArtifactStore after the step completes. Absolute path is stored for downstream access.
+The subprocess worker reports the relative path. After copying the verified output into the run's
+ArtifactStore, the engine passes the managed absolute path to downstream steps. Trusted in-process
+callables may return an absolute path directly.
 
 ### 9.2 Consuming Artifacts
 
@@ -571,16 +526,20 @@ When `from_artifacts` is declared, the engine makes that artifact available to t
 | `text` | Plain text file |
 | `file` | Any file type (binary or text) — engine treats as opaque |
 | `binary` | Binary data (images, PDFs, etc.) |
+| `directory` | A directory copied recursively into the artifact store |
+| `markdown` | Markdown text file |
 
 ### 9.4 Artifact Key Rules
 
-- Keys must be unique within a workflow (collision = last writer wins)
+- Keys must be unique within a workflow; duplicate producers are rejected before execution
 - Use `snake_case` for keys
 - Parallel steps must use **different artifact keys** — two parallel steps writing to the same key will have undefined behavior
 
 ### 9.5 Artifact Versioning
 
-If a step is re-run (e.g., after a failure and retry), the engine creates a new version of the artifact without deleting the old one. The artifact store maintains a history. Downstream steps always receive the latest version.
+If a step is re-run, each dispatch receives a unique task ID and keeps separate inbox/outbox/log
+receipts. The ArtifactStore replaces the stable copy for that key with the latest verified output;
+it does not retain historical artifact bytes. Downstream steps receive that latest stable copy.
 
 ---
 
@@ -599,8 +558,10 @@ error_handling:
 
 Nagare does not stop recovery because elapsed time or an attempt counter was
 exhausted. A recovered step is re-executed, and a correctable failure returns
-to the Debug Agent. The loop ends only for an explicit stop, an infrastructure
-failure, or an explicit `not recovered` result from the Debug Agent.
+to the Debug Agent with all prior recovery records. A `recovered` result must
+include a diagnosis, evidence, and an applied fix; an exact repeated recovery
+record is rejected. The loop ends for an explicit stop, an infrastructure
+failure, an invalid/repeated recovery result, or explicit `unrecoverable` status.
 
 ### 10.2 Recovery Contract
 
@@ -636,7 +597,7 @@ If Debug explicitly reports unrecoverable, on_unrecoverable.action = notify_huma
 ### 10.4 What Counts as a Failure
 
 - Step subprocess exits with non-zero status
-- Step output doesn't parse as valid JSON when JSON is expected
+- Worker response does not contain a valid structured JSON result
 - Step output doesn't include `"status": "completed"`
 - Quality gate criteria not met (see Section 11)
 
@@ -668,10 +629,15 @@ Criteria are evaluated against the step's produced JSON artifacts:
 | Pattern | Example |
 |---------|---------|
 | `artifact_key.field == value` | `final_package.status == 'ok'` |
+| `artifact_key.field != value` | `review.verdict != 'reject'` |
 | `artifact_key.field >= number` | `final_package.score >= 0.7` |
+| `artifact_key.field in [values]` | `review.grade in ['A', 'B']` |
 | `artifact_key.field == true/false` | `result.passed == true` |
 
-**Note:** Quality gates only work when the artifact `type` is `json` — the engine parses the JSON to evaluate field comparisons.
+The supported operators are `==`, `!=`, `>=`, `<=`, `>`, `<`, and `in`. The left side must be a
+dotted path into a produced `.json` artifact; arbitrary Python, function calls, arithmetic, and
+compound expressions are deliberately rejected. A malformed or unresolved criterion fails
+closed.
 
 ### 11.3 Non-Blocking Review Pattern
 
@@ -692,7 +658,10 @@ Add the quality gate only on the **final step** where the combined output is eva
 
 ## 12. Success Criteria
 
-Success criteria define what "done" means for the whole workflow. Unlike quality gates (which block individual steps), success criteria are evaluated at the end of the run.
+`success_criteria` records the workflow author's release definition for reviewers and host
+integrations. The current core runner does **not** interpret free-form or tiered success criteria.
+Put every condition that must block execution into an automatic `quality_gate`, and make the
+final producing step declare its required artifacts.
 
 ### 12.1 Simple Form
 
@@ -719,13 +688,13 @@ success_criteria:
     - "User notified of quality gaps"
 ```
 
-The engine reports which tier was achieved. The `full_success` tier drives the evaluation score.
+Tier labels are descriptive metadata unless a host adapter explicitly evaluates them.
 
 ---
 
 ## 13. Output Block
 
-Configures the final deliverable and post-completion notification.
+Describes the final deliverable for host integrations and user interfaces.
 
 ```yaml
 output:
@@ -740,34 +709,35 @@ output:
     Output: {final_paragraph}
 ```
 
-`message_template` supports artifact variable substitution. The notification is sent via HChat to the `notify_agent`.
+The core runner does not copy `destination` or render `message_template`. A producing worker must
+create the declared artifact, while a host adapter may consume this block to deliver or display
+it. Core completion notifications report run/step status only.
 
 ---
 
 ## 14. Evaluation Block
 
-Controls whether this workflow participates in the continuous improvement loop.
+Controls whether the runner invokes its configured post-run Evaluator.
 
 ```yaml
 evaluation:
   enabled: true               # Default: true. Set false to disable for test workflows.
-  metrics:
-    - total_duration          # How long the run took (seconds)
-    - design_quality_score    # Quality of the output (from quality gate scores)
-    - model_cost_estimate     # Estimated token cost
-    - error_retries           # Number of debug retries needed
-    - human_interventions     # How many times a human was needed
-  improvement_threshold: 5   # Minimum runs before KB generates improvement suggestions
-  auto_apply: false           # If true, Class A improvements are auto-applied
+  metrics:                    # Descriptive selection for authoring/host adapters
+    - total_duration
+    - error_retries
+    - human_interventions
 ```
 
-Evaluation data is stored in `flow/evaluation_kb/`. After `improvement_threshold` runs, the evaluator generates improvement proposals classified as:
+The bundled HASHI Evaluator reads persisted run events, writes an evaluation report, and may add
+evidence-backed recommendations to the local KB. It computes a fixed measured metric set; it
+does not invent quality or efficiency scores without supporting evidence. The passive evaluator
+does not edit a workflow or create a candidate.
 
-| Class | Risk | Auto-applied? |
-|-------|------|---------------|
-| **A** | Low | Yes (if `auto_apply: true`) |
-| **B** | Medium | No — requires human approval |
-| **C** | High | No — requires human approval |
+| Class | Risk | Application policy |
+|-------|------|--------------------|
+| **A** | Low | May be authored as a candidate only by an explicit authoring step |
+| **B** | Medium | Requires human approval |
+| **C** | High | Requires human approval |
 
 ---
 
@@ -792,10 +762,9 @@ agents:
   workers:
     - id: pdf_extractor
       role: "PDF Text Extractor"
-      agent_md: ""              # Unused for callables — leave empty or omit.
+      # agent_md is optional for callables.
       backend: callable         # This is what makes it a callable.
       model: ""                 # Unused — leave empty.
-      workspace: "flow/runs/{run_id}/workers/pdf_extractor"
 ```
 
 ### 15.3 Declaring a Callable Step
@@ -947,7 +916,7 @@ CallableSetupManager.request_setup()
       "Step X needs a callable. Please implement run(task_message) → dict
        and POST it to /runs/{run_id}/callables/{agent_id}"
     ↓
-Runner thread blocks (up to 300 seconds per attempt)
+Runner thread waits for code delivery or an explicit stop
     ↓
 AI agent POSTs code to the API endpoint
     → Engine exec()s the code
@@ -956,9 +925,9 @@ AI agent POSTs code to the API endpoint
     ↓
 Gate event fires → runner thread wakes and executes the callable
     ↓
-If callable fails → retry with refined request (up to MAX_RETRIES = 3)
+If callable fails → request a materially revised implementation
     ↓
-If all retries fail → escalate to human
+If the path is explicitly unrecoverable → escalate to human
 ```
 
 **Persisted callables** in `flow/callables/{agent_id}.py` are auto-loaded on subsequent runs — the AI only needs to implement each callable once.
@@ -969,16 +938,17 @@ If all retries fail → escalate to human
 
 ### 16.1 Signal Files
 
-The engine checks for signal files between steps (not during a step):
+The engine checks pause signals between steps. Subprocess workers also poll for a stop signal while
+running; in-process callables observe it only after returning:
 
 ```bash
-# Pause after current step completes
+# Pause between steps (a running worker is not interrupted)
 touch flow/runs/<run_id>/_pause
 
 # Resume from pause
 rm flow/runs/<run_id>/_pause
 
-# Stop cleanly (after current step)
+# Stop the workflow path (subprocess workers are interrupted; in-process callables return first)
 touch flow/runs/<run_id>/_stop
 ```
 
@@ -987,9 +957,7 @@ touch flow/runs/<run_id>/_stop
 ```
 CREATED
     │
-PRE_FLIGHT     ← human Q&A happens here
-    │
-CONFIRMED      ← all inputs locked
+pre-flight validation and optional CLI confirmation
     │
 RUNNING        ← steps execute
     ├── step fails → DEBUG ↔ re-execute (no fixed attempt ceiling)
@@ -1094,21 +1062,18 @@ agents:
     - id: translator_01
       role: "Expert Translator"
       agent_md: "flow/agents/analyst/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/translator_01"
       backend: claude-cli
       model: claude-opus-4-6
 
     - id: reviewer_01
       role: "Translation Reviewer"
       agent_md: "flow/agents/analyst/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/reviewer_01"
-      backend: openrouter-api          # Independent reviewer = different vendor
-      model: openai/gpt-4.5-preview
+      backend: codex-cli               # Separately configured review context
+      model: gpt-5.4
 
     - id: debug_01
       role: "Debug Agent"
       agent_md: "flow/agents/analyst/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/debug_01"
       backend: claude-cli
       model: claude-sonnet-4-6
 
@@ -1279,8 +1244,6 @@ evaluation:
     - design_quality_score
     - error_retries
     - human_interventions
-  improvement_threshold: 5
-  auto_apply: false
 ```
 
 ---
@@ -1298,7 +1261,7 @@ Before saving a new workflow, verify:
 **Workers**
 - [ ] Every `agent` in steps matches a worker `id`
 - [ ] Complex reasoning steps use Opus (not Sonnet/Haiku)
-- [ ] Evaluation / critique steps use a different vendor than the primary workers
+- [ ] Evaluation / critique steps use an independently chosen reviewer configuration when useful
 - [ ] A `debug_01` worker is defined and referenced in `error_handling`
 
 **Pre-flight**

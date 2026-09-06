@@ -14,7 +14,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
 from nagare.logging.events import RunEventLogger
 
@@ -23,6 +23,16 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_CANONICAL_EVENTS = {
+    "callable_start": "handler.invoke.started",
+    "callable_complete": "handler.invoke.completed",
+    "callable_error": "handler.invoke.failed",
+    "callable_not_found": "handler.invoke.failed",
+    "callable_setup_attempt": "handler.callable.setup_attempt",
+    "callable_setup_success": "handler.callable.setup_completed",
+    "callable_setup_bad_result": "handler.callable.setup_failed",
+}
 
 
 # Type alias for registered callables.
@@ -138,7 +148,12 @@ class CallableStepHandler:
             )
 
             event = mgr.request_setup(agent_id, task_message, attempt=attempt)
-            mgr.wait_for_setup(agent_id, event)
+            if not mgr.wait_for_setup(agent_id, event):
+                return {
+                    "status": "failed",
+                    "error_type": "cancelled",
+                    "error": "Callable setup stopped by the workflow _stop signal",
+                }
 
             fn = mgr.pop_pending_callable(agent_id)
             if fn is None:
@@ -195,7 +210,24 @@ class CallableStepHandler:
                 )
                 return {"status": "failed", "error": error_msg}
 
-            status = result.get("status", "completed")
+            status = result.get("status")
+            if status not in {"completed", "failed", "recovered", "unrecoverable"}:
+                error_msg = (
+                    "Callable result must declare status as completed, failed, "
+                    "recovered, or unrecoverable"
+                )
+                self._emit(
+                    "callable_error",
+                    agent_id=agent_id,
+                    step_id=step_id,
+                    error=error_msg,
+                    elapsed_s=round(elapsed, 3),
+                )
+                return {
+                    "status": "failed",
+                    "error_type": "invalid_worker_output",
+                    "error": error_msg,
+                }
             self._emit(
                 "callable_complete",
                 agent_id=agent_id,
@@ -222,4 +254,15 @@ class CallableStepHandler:
     def _emit(self, event_type: str, **kwargs: Any) -> None:
         if self._event_logger is None:
             return
-        self._event_logger.emit(event_type, **kwargs)
+        data = dict(kwargs)
+        step_id = data.pop("step_id", None)
+        error = data.get("error")
+        self._event_logger.emit(
+            _CANONICAL_EVENTS.get(event_type, f"handler.callable.{event_type}"),
+            component="engine.callable_handler",
+            message=event_type.replace("_", " "),
+            step_id=step_id,
+            error_code=event_type if error else None,
+            error_message=str(error) if error else None,
+            data={"callable_event": event_type, **data},
+        )

@@ -34,6 +34,7 @@ Output:
   - session: step-by-step log; any [screenshot] steps emit base64 inline
   - Errors: "Error: ..." to stdout, exit code 1
 """
+
 from __future__ import annotations
 
 import argparse
@@ -87,8 +88,9 @@ async def _run(args: argparse.Namespace) -> int:
         kwargs = {**base, "wait_ms": args.wait_ms, "full_page": args.full_page}
         result = await execute_browser_screenshot(kwargs)
         if result.startswith("Error:"):
-            print(result); return 1
-        b64 = result[len("screenshot:"):]
+            print(result)
+            return 1
+        b64 = result[len("screenshot:") :]
         if args.out:
             Path(args.out).write_bytes(base64.b64decode(b64))
             print(f"OK: screenshot saved to {args.out}")
@@ -111,21 +113,29 @@ async def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ click
     elif cmd == "click":
         if not args.selector:
-            print("Error: --selector is required for click"); return 1
+            print("Error: --selector is required for click")
+            return 1
         result = await execute_browser_click({**base, "selector": args.selector})
 
     # ------------------------------------------------------------------ fill
     elif cmd == "fill":
         if not args.selector:
-            print("Error: --selector is required for fill"); return 1
+            print("Error: --selector is required for fill")
+            return 1
         result = await execute_browser_fill(
-            {**base, "selector": args.selector, "text": args.text or "", "submit": args.submit}
+            {
+                **base,
+                "selector": args.selector,
+                "text": args.text or "",
+                "submit": args.submit,
+            }
         )
 
     # ------------------------------------------------------------------ evaluate
     elif cmd == "evaluate":
         if not args.script:
-            print("Error: --script is required for evaluate"); return 1
+            print("Error: --script is required for evaluate")
+            return 1
         result = await execute_browser_evaluate(
             {**base, "script": args.script, "wait_ms": args.wait_ms}
         )
@@ -140,20 +150,24 @@ async def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ hover
     elif cmd == "hover":
         if not args.selector:
-            print("Error: --selector is required for hover"); return 1
-        result = await execute_browser_hover({
-            **base,
-            "selector": args.selector,
-            "timeout_ms": args.timeout_ms,
-            "wait_ms": args.wait_ms,
-            "x_ratio": args.x_ratio,
-            "y_ratio": args.y_ratio,
-        })
+            print("Error: --selector is required for hover")
+            return 1
+        result = await execute_browser_hover(
+            {
+                **base,
+                "selector": args.selector,
+                "timeout_ms": args.timeout_ms,
+                "wait_ms": args.wait_ms,
+                "x_ratio": args.x_ratio,
+                "y_ratio": args.y_ratio,
+            }
+        )
 
     # ------------------------------------------------------------------ key
     elif cmd == "key":
         if not args.key:
-            print("Error: --key is required"); return 1
+            print("Error: --key is required")
+            return 1
         kwargs = {**base, "key": args.key}
         if args.selector:
             kwargs["selector"] = args.selector
@@ -162,7 +176,8 @@ async def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ select
     elif cmd == "select":
         if not args.selector:
-            print("Error: --selector is required for select"); return 1
+            print("Error: --selector is required for select")
+            return 1
         kwargs = {**base, "selector": args.selector}
         if args.value is not None:
             kwargs["value"] = args.value
@@ -171,13 +186,15 @@ async def _run(args: argparse.Namespace) -> int:
         elif args.index is not None:
             kwargs["index"] = args.index
         else:
-            print("Error: one of --value, --label, or --index is required"); return 1
+            print("Error: one of --value, --label, or --index is required")
+            return 1
         result = await execute_browser_select(kwargs)
 
     # ------------------------------------------------------------------ wait_for
     elif cmd == "wait_for":
         if not args.selector:
-            print("Error: --selector is required for wait_for"); return 1
+            print("Error: --selector is required for wait_for")
+            return 1
         result = await execute_browser_wait_for(
             {**base, "selector": args.selector, "timeout_ms": args.timeout_ms}
         )
@@ -185,9 +202,11 @@ async def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ get_attribute
     elif cmd == "get_attribute":
         if not args.selector:
-            print("Error: --selector is required"); return 1
+            print("Error: --selector is required")
+            return 1
         if not args.attribute:
-            print("Error: --attribute is required"); return 1
+            print("Error: --attribute is required")
+            return 1
         result = await execute_browser_get_attribute(
             {**base, "selector": args.selector, "attribute": args.attribute}
         )
@@ -195,7 +214,8 @@ async def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ drag
     elif cmd == "drag":
         if not args.source or not args.target:
-            print("Error: --source and --target are required for drag"); return 1
+            print("Error: --source and --target are required for drag")
+            return 1
         result = await execute_browser_drag(
             {**base, "source": args.source, "target": args.target}
         )
@@ -203,7 +223,8 @@ async def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ upload
     elif cmd == "upload":
         if not args.selector or not args.file_path:
-            print("Error: --selector and --file-path are required for upload"); return 1
+            print("Error: --selector and --file-path are required for upload")
+            return 1
         result = await execute_browser_upload(
             {**base, "selector": args.selector, "file_path": args.file_path}
         )
@@ -211,9 +232,11 @@ async def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ type_text
     elif cmd == "type_text":
         if not args.selector:
-            print("Error: --selector is required for type_text"); return 1
+            print("Error: --selector is required for type_text")
+            return 1
         if args.text is None:
-            print("Error: --text is required for type_text"); return 1
+            print("Error: --text is required for type_text")
+            return 1
         result = await execute_browser_type_text(
             {**base, "selector": args.selector, "text": args.text}
         )
@@ -221,11 +244,13 @@ async def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ session
     elif cmd == "session":
         if not args.steps:
-            print("Error: --steps (JSON array) is required for session"); return 1
+            print("Error: --steps (JSON array) is required for session")
+            return 1
         try:
             steps = json.loads(args.steps)
         except json.JSONDecodeError as e:
-            print(f"Error: --steps must be valid JSON: {e}"); return 1
+            print(f"Error: --steps must be valid JSON: {e}")
+            return 1
         kwargs = {"steps": steps}
         if args.url:
             kwargs["url"] = args.url
@@ -236,7 +261,8 @@ async def _run(args: argparse.Namespace) -> int:
         result = await execute_browser_session(kwargs)
 
     else:
-        print(f"Error: unknown command '{cmd}'"); return 1
+        print(f"Error: unknown command '{cmd}'")
+        return 1
 
     # ------------------------------------------------------------------ output
     if args.out and result and not result.startswith("Error:"):
@@ -256,10 +282,21 @@ def main() -> None:
     parser.add_argument(
         "command",
         choices=[
-            "screenshot", "get_text", "get_html",
-            "click", "fill", "type_text", "evaluate",
-            "scroll", "hover", "key", "select",
-            "wait_for", "get_attribute", "drag", "upload",
+            "screenshot",
+            "get_text",
+            "get_html",
+            "click",
+            "fill",
+            "type_text",
+            "evaluate",
+            "scroll",
+            "hover",
+            "key",
+            "select",
+            "wait_for",
+            "get_attribute",
+            "drag",
+            "upload",
             "session",
         ],
         help="Browser action to perform",
@@ -267,29 +304,55 @@ def main() -> None:
 
     # Core
     parser.add_argument("--url", default="", help="URL to navigate to")
-    parser.add_argument("--cdp-url", dest="cdp_url", default=None,
-                        help="CDP endpoint to attach to existing Chrome (e.g. http://localhost:9222)")
-    parser.add_argument("--headed", action="store_true", default=False,
-                        help="Launch a visible browser window (standalone mode only)")
-    parser.add_argument("--session-id", dest="session_id", default=None,
-                        help="Optional browser session id for isolated tab reuse")
-    parser.add_argument("--safety-mode", dest="safety_mode", default=None,
-                        help="Optional browser safety mode, e.g. read_write or read_only")
-    parser.add_argument("--agent-name", dest="agent_name", default=None,
-                        help="Optional agent identity for browser audit logs")
+    parser.add_argument(
+        "--cdp-url",
+        dest="cdp_url",
+        default=None,
+        help="CDP endpoint to attach to existing Chrome (e.g. http://localhost:9222)",
+    )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        default=False,
+        help="Launch a visible browser window (standalone mode only)",
+    )
+    parser.add_argument(
+        "--session-id",
+        dest="session_id",
+        default=None,
+        help="Optional browser session id for isolated tab reuse",
+    )
+    parser.add_argument(
+        "--safety-mode",
+        dest="safety_mode",
+        default=None,
+        help="Optional browser safety mode, e.g. read_write or read_only",
+    )
+    parser.add_argument(
+        "--agent-name",
+        dest="agent_name",
+        default=None,
+        help="Optional agent identity for browser audit logs",
+    )
     parser.add_argument("--out", default=None, help="Write output to this file path")
 
     # Content controls
     parser.add_argument("--wait-ms", dest="wait_ms", type=int, default=1500)
-    parser.add_argument("--full-page", dest="full_page", action="store_true", default=False)
+    parser.add_argument(
+        "--full-page", dest="full_page", action="store_true", default=False
+    )
     parser.add_argument("--max-length", dest="max_length", type=int, default=15000)
 
     # Element interaction
     parser.add_argument("--selector", default=None, help="CSS selector")
     parser.add_argument("--text", default=None, help="Text to fill")
-    parser.add_argument("--submit", action="store_true", default=False, help="Press Enter after fill")
+    parser.add_argument(
+        "--submit", action="store_true", default=False, help="Press Enter after fill"
+    )
     parser.add_argument("--script", default=None, help="JS to evaluate")
-    parser.add_argument("--key", default=None, help="Key to press (e.g. Enter, Tab, Control+a)")
+    parser.add_argument(
+        "--key", default=None, help="Key to press (e.g. Enter, Tab, Control+a)"
+    )
     parser.add_argument("--attribute", default=None, help="HTML attribute name")
 
     # Scroll
@@ -303,17 +366,29 @@ def main() -> None:
 
     # Wait
     parser.add_argument("--timeout-ms", dest="timeout_ms", type=int, default=10000)
-    parser.add_argument("--x-ratio", dest="x_ratio", type=float, default=0.5,
-                        help="Horizontal hover point within the element (0 to 1; default 0.5)")
-    parser.add_argument("--y-ratio", dest="y_ratio", type=float, default=0.5,
-                        help="Vertical hover point within the element (0 to 1; default 0.5)")
+    parser.add_argument(
+        "--x-ratio",
+        dest="x_ratio",
+        type=float,
+        default=0.5,
+        help="Horizontal hover point within the element (0 to 1; default 0.5)",
+    )
+    parser.add_argument(
+        "--y-ratio",
+        dest="y_ratio",
+        type=float,
+        default=0.5,
+        help="Vertical hover point within the element (0 to 1; default 0.5)",
+    )
 
     # Drag
     parser.add_argument("--source", default=None, help="CSS selector of drag source")
     parser.add_argument("--target", default=None, help="CSS selector of drop target")
 
     # Upload
-    parser.add_argument("--file-path", dest="file_path", default=None, help="Local file path to upload")
+    parser.add_argument(
+        "--file-path", dest="file_path", default=None, help="Local file path to upload"
+    )
 
     # Session
     parser.add_argument("--steps", default=None, help="JSON array of session steps")

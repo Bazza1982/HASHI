@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=65.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "hashi-bridge"
 version = "4.0.0a2"
 description = "HASHI — Universal AI Agent Orchestration Platform. Privacy-first, multi-backend, multi-agent system."
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "HASHI Team", email = "barrytianli@gmail.com"}
 ]
@@ -18,7 +19,6 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.12",
 ]
@@ -60,6 +60,10 @@ tui = [
 test = [
     "pytest>=9.0.3,<10.0.0",
     "pytest-asyncio>=0.23.0",
+    "httpx2>=2.12.0,<3.0.0",
+    "build>=1.3.0,<2.0.0",
+    "setuptools>=77.0.0",
+    "wheel>=0.45.0",
 ]
 whatsapp = [
     "neonize>=0.4.3.post0,<0.5.0",
@@ -196,3 +200,38 @@ markers = [
     "platform: requires a named operating system or platform facility",
     "real_wall_clock: deliberately crosses a historical real-time execution boundary",
 ]
+
+[tool.ruff.lint]
+# Keep the release gate focused on syntax, imports, and executable-code errors.
+# Broader style families can be adopted separately without turning historical
+# formatting preferences into release blockers.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Standalone entry points must add the checkout root before importing HASHI.
+"scripts/check_vector_upgrade.py" = ["E402"]
+"scripts/hermes_transfer.py" = ["E402"]
+"scripts/link_whatsapp.py" = ["E402"]
+"scripts/migrate_vectors.py" = ["E402"]
+"scripts/move_agent.py" = ["E402"]
+"scripts/path_portability_tool.py" = ["E402"]
+"scripts/send_whatsapp_test.py" = ["E402"]
+"tools/protocol_send.py" = ["E402"]
+"tools/remote_file_transfer.py" = ["E402"]
+"tools/run_api_gateway_sidecar.py" = ["E402"]
+"tui.py" = ["E402"]
+"tui_onboarding.py" = ["E402"]
+
+# These tests install dependency stubs before importing runtime modules.
+"tests/test_agent_runtime_job_transfer.py" = ["E402"]
+"tests/test_anatta_audit_compatibility.py" = ["E402"]
+"tests/test_audit_mode.py" = ["E402"]
+"tests/test_browser_mode.py" = ["E402"]
+"tests/test_flexible_runtime_observers.py" = ["E402"]
+"tests/test_pcm_audit_memory_wiki.py" = ["E402"]
+"tests/test_pcm_fixed_gateway.py" = ["E402"]
+"tests/test_remote_lifecycle.py" = ["E402"]
+"tests/test_usecomputer_mode.py" = ["E402"]
+
+# The Obsidian schema block is appended after the base catalog is constructed.
+"tools/schemas.py" = ["E402"]

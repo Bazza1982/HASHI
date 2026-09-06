@@ -5,6 +5,10 @@ description: Use when browsing the Minato, Shimanto, and Nagare workflow hierarc
 
 Parse the user's command and run the appropriate registry query.
 
+Resolve the HASHI repository root from `BRIDGE_PROJECT_ROOT` when it is set;
+otherwise use the current Git repository root. Never hard-code an operator's
+home directory. The examples below assume the command starts at that root.
+
 ## Commands
 
 ### /minato
@@ -12,7 +16,7 @@ List all Minato (top-level project domains).
 
 Run:
 ```bash
-cd /home/lily/projects/hashi && .venv/bin/python3 flow/flow_registry.py minato
+python flow/flow_registry.py minato
 ```
 
 ### /shimanto [minato_slug]
@@ -20,7 +24,7 @@ List all Shimanto under the named Minato.
 
 Run:
 ```bash
-cd /home/lily/projects/hashi && .venv/bin/python3 flow/flow_registry.py shimanto <minato_slug>
+python flow/flow_registry.py shimanto <minato_slug>
 ```
 
 If the user didn't provide a minato_slug, first run `/minato` to show available options and ask which one.
@@ -30,7 +34,7 @@ List all Nagare under a specific Shimanto.
 
 Run:
 ```bash
-cd /home/lily/projects/hashi && .venv/bin/python3 flow/flow_registry.py nagare <shimanto_slug> <minato_slug>
+python flow/flow_registry.py nagare <shimanto_slug> <minato_slug>
 ```
 
 ### /nagare --minato [minato_slug]   (or: /nagare [minato_slug] with no shimanto)
@@ -38,7 +42,7 @@ List all Nagare under a Minato, grouped by Shimanto.
 
 Run:
 ```bash
-cd /home/lily/projects/hashi && .venv/bin/python3 flow/flow_registry.py nagare --minato <minato_slug>
+python flow/flow_registry.py nagare --minato <minato_slug>
 ```
 
 ## Output

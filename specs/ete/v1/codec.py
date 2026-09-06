@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Optional
 
 from .ete_types import (
-    ETE_VERSION,
     KB_ALLOWED_EXTENSIONS,
     KB_MAX_BLOCK_BYTES,
     KB_MAX_FILE_BYTES,

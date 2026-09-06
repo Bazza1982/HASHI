@@ -40,7 +40,7 @@ def test_redact_args_masks_secret_patterns_and_truncates():
     assert redacted.endswith("...[truncated]")
 
 
-def test_build_audit_record_has_stable_schema(tmp_path):
+def test_build_audit_record_has_stable_schema():
     record = build_audit_record(
         agent="nana",
         command_name="status",
@@ -269,7 +269,7 @@ async def test_try_execute_slash_command_text_returns_none_for_unknown(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_wrap_callback_audits_telegram_callback(tmp_path, monkeypatch):
+async def test_wrap_callback_audits_telegram_callback(tmp_path):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
     class _MiniRuntime:

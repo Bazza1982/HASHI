@@ -189,7 +189,7 @@ Confirmed facts:
 
 - `HASHI9` and `HASHI2` are recognized as same-host
 - `HASHI1` and `HASHI2` are not consistently recognized as same-host
-- `HASHI1` has `host_identity = a9max` and `environment_kind = wsl`
+- `HASHI1` has `host_identity = sample-host` and `environment_kind = wsl`
 - `HASHI2` is also on the same physical machine
 - `same_host_loopback` is missing for `HASHI1` inside `HASHI2`’s registry state
 

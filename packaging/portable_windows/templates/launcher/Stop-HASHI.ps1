@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([switch]$Uninstalling)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
@@ -90,7 +90,7 @@ if ($remaining.Count -gt 0) {
 }
 
 Remove-Item `
-    -LiteralPath $script:EndpointPath, $script:HashiPidPath, $script:WorkbenchPidPath `
+    -LiteralPath $script:EndpointPath, $script:HashiPidPath `
     -Force `
     -ErrorAction SilentlyContinue
 if (-not $Uninstalling) {

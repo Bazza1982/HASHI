@@ -249,6 +249,7 @@ async def test_codex_intermediate_agent_message_is_full_commentary_not_reasoning
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group isolation only")
 async def test_codex_mcp_inventory_starts_in_an_isolated_session(
     tmp_path, monkeypatch
@@ -350,6 +351,7 @@ async def test_codex_mcp_inventory_fails_closed_after_bounded_timeout_retries(
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group isolation only")
 async def test_force_kill_refuses_hashi_own_process_group(
     tmp_path, monkeypatch, caplog

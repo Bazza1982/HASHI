@@ -105,6 +105,7 @@ def test_load_settings_prefers_instance_registry_port(tmp_path):
     assert settings.port == 8766
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(sys.platform == "win32", reason="systemd user-unit contract")
 def test_remote_supervisor_info_is_per_instance_and_root_bound(tmp_path, monkeypatch):
     root = tmp_path / "hashi one"
@@ -139,6 +140,7 @@ def test_remote_supervisor_info_is_per_instance_and_root_bound(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
 @pytest.mark.skipif(sys.platform == "win32", reason="systemd user-unit contract")
 async def test_control_remote_supervisor_refuses_unit_owned_by_other_root(
     tmp_path,

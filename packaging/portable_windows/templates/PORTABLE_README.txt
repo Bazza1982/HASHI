@@ -46,12 +46,8 @@ Start HASHI
   以管理员权限启动 HASHI，并打开终端界面。
 
 Stop HASHI
-  Stops this local HASHI instance and its dedicated Workbench browser.
-  停止此本机 HASHI 实例及其专用 Workbench 浏览器。
-
-Start HASHI Workbench
-  Starts elevated HASHI and opens the full Workbench in Edge or Chrome.
-  以管理员权限启动 HASHI，并在 Edge 或 Chrome 中打开完整 Workbench。
+  Stops this local HASHI instance and its owned child processes.
+  停止此本机 HASHI 实例及其所属子进程。
 
 The shortcuts point to launchers inside the local installation, not the USB.
 快捷方式指向本机安装目录内的启动文件，而不是 USB。
@@ -70,10 +66,11 @@ Local address and logs / 本机地址与日志
 -----------------------------------------
 HASHI always uses the safe loopback address 127.0.0.1. It prefers the configured
 port and automatically asks Windows for a free port when necessary. TUI and
-Workbench read the verified endpoint written by this exact HASHI process; they
-never guess a WSL/172.x address or connect to an unrelated service.
+the diagnostic tools read the verified endpoint written by this exact HASHI
+process; they never guess a WSL/172.x address or connect to an unrelated
+service.
 HASHI 始终使用安全的回环地址 127.0.0.1。它会优先使用配置端口；端口被占用时，
-会自动请 Windows 分配空闲端口。TUI 与 Workbench 只读取由这个 HASHI 进程写入
+会自动请 Windows 分配空闲端口。TUI 与诊断工具只读取由这个 HASHI 进程写入
 并通过验证的端点，绝不会猜测 WSL/172.x 地址或连接无关服务。
 
 Runtime endpoint:
@@ -88,11 +85,11 @@ C:\HASHI-Portable\data\logs\bridge.log
 
 Other USB launchers / USB 上的其他启动文件
 ------------------------------------------------
-Start_HASHI_TUI.bat and Start_HASHI_Workbench.bat open the matching installed
-local copy. They do not run HASHI from USB. Diagnose_HASHI.bat checks the local
-installation without sending a model request.
-Start_HASHI_TUI.bat 与 Start_HASHI_Workbench.bat 会打开匹配的本机安装，不会从
-USB 运行 HASHI。Diagnose_HASHI.bat 会检查本机安装，且不会发送模型请求。
+Start_HASHI_TUI.bat opens the matching installed local copy. It does not run
+HASHI from USB. Diagnose_HASHI.bat checks the local installation without
+sending a model request.
+Start_HASHI_TUI.bat 会打开匹配的本机安装，不会从 USB 运行 HASHI。
+Diagnose_HASHI.bat 会检查本机安装，且不会发送模型请求。
 
 Uninstall / 卸载
 ------------------
@@ -125,17 +122,18 @@ Installation diagnostics are saved temporarily at:
 
 Runtime profile / 运行配置
 --------------------------
-- Windows 10/11 x64. No global Python/Node, Git, npm, pip, WSL, Windows service,
+- Windows 10/11 x64. No global Python, Node, Git, npm, pip, WSL, Windows service,
   registry installation, or system PATH change is needed.
-  支持 Windows 10/11 x64；无需全局安装 Python/Node、Git、npm、pip 或 WSL，
+  支持 Windows 10/11 x64；无需全局安装 Python、Node、Git、npm、pip 或 WSL，
   不创建 Windows 服务，不写入安装注册表，也不修改系统 PATH。
   运行时只使用原生 Windows 执行环境；Bash/WSL 回退已被禁止。
 
 - HER v2 is the only top-level Engine. Official DeepSeek is the default
-  Provider; Qwen/DashScope is configurable. TUI and Workbench share the same
-  canonical conversation by default.
+  Provider; Qwen/DashScope is configurable. TUI uses the canonical HASHI
+  conversation through the Backend API. The retired Workbench is not bundled.
   HER v2 是唯一顶层 Engine；默认使用 DeepSeek 官方 API，也可配置
-  Qwen/DashScope。TUI 与 Workbench 默认共享同一条权威对话。
+  Qwen/DashScope。TUI 通过 Backend API 使用 HASHI 权威对话。已退役的
+  Workbench 不会被打包。
 
 - One-click LAN Remote pairing lasts seven days. Full host-drive access is
   enabled. There is no local LLM or offline generation.

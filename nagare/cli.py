@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -16,16 +18,37 @@ sys.path = [entry for entry in sys.path if Path(entry or ".").resolve() != SCRIP
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from nagare.engine.preflight import PreFlightCollector, load_prefill_from_file
-from nagare.engine.runner import FlowRunner
-from nagare.engine.state import TaskState
-from nagare.handlers.deterministic_handler import DeterministicStepHandler
+from nagare.engine.preflight import (  # noqa: E402
+    PreFlightCollector,
+    load_prefill_from_file,
+)
+from nagare.engine.runner import FlowRunner  # noqa: E402
+from nagare.engine.state import TaskState  # noqa: E402
+from nagare.handlers.deterministic_handler import DeterministicStepHandler  # noqa: E402
 
-RUNS_ROOT = ROOT / "flow" / "runs"
+RUNS_ROOT = Path(os.environ.get("NAGARE_RUNS_ROOT", Path.cwd() / "flow" / "runs"))
+REPO_ROOT = Path(os.environ.get("NAGARE_REPO_ROOT", Path.cwd()))
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def _runs_root(args=None) -> Path:
+    return Path(getattr(args, "runs_root", None) or RUNS_ROOT)
+
+
+def _run_dir(run_id: str, *, runs_root: Path | None = None) -> Path:
+    if _RUN_ID.fullmatch(str(run_id or "")) is None:
+        raise ValueError("Run ID contains unsupported path characters")
+    root = (runs_root or RUNS_ROOT).resolve()
+    candidate = (root / run_id).resolve()
+    if candidate.parent != root:
+        raise ValueError("Run ID must resolve directly below the runs directory")
+    return candidate
 
 
 def cmd_run(args):
     workflow_path = args.workflow
+    runs_root = _runs_root(args)
+    repo_root = Path(getattr(args, "repo_root", None) or REPO_ROOT)
 
     if not Path(workflow_path).exists():
         print(f"❌ 工作流文件不存在: {workflow_path}")
@@ -33,12 +56,12 @@ def cmd_run(args):
 
     step_handler = None
     if args.smoke_handler:
-        step_handler = DeterministicStepHandler(runs_root=RUNS_ROOT)
+        step_handler = DeterministicStepHandler(runs_root=runs_root)
 
     runner = FlowRunner(
         workflow_path,
-        runs_root=RUNS_ROOT,
-        repo_root=ROOT,
+        runs_root=runs_root,
+        repo_root=repo_root,
         step_handler=step_handler,
     )
     wf = runner.workflow
@@ -49,7 +72,11 @@ def cmd_run(args):
 
     prefill = {}
     if args.prefill:
-        prefill = load_prefill_from_file(args.prefill)
+        try:
+            prefill = load_prefill_from_file(args.prefill)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"❌ 无法读取 Pre-flight 预填充文件: {exc}")
+            raise SystemExit(2) from exc
         print(f"   预填充答案: {args.prefill} ({len(prefill)} 项)")
 
     runner.event_logger.emit(
@@ -59,7 +86,11 @@ def cmd_run(args):
         data={"prefill_path": args.prefill, "silent": args.silent},
     )
     collector = PreFlightCollector(workflow=wf, prefill=prefill, silent=args.silent)
-    pre_flight_data = collector.run()
+    try:
+        pre_flight_data = collector.run()
+    except ValueError as exc:
+        print(f"❌ Pre-flight 输入无效: {exc}")
+        raise SystemExit(2) from exc
 
     if pre_flight_data:
         runner.set_pre_flight_data(pre_flight_data)
@@ -93,7 +124,7 @@ def cmd_run(args):
         data={"silent": args.silent, "yes": args.yes},
     )
 
-    print(f"\n▶️  开始执行...\n")
+    print("\n▶️  开始执行...\n")
     result = runner.start()
 
     print()
@@ -108,7 +139,7 @@ def cmd_run(args):
             print(f"   失败步骤: {', '.join(failed)}")
 
     print(f"   Run ID: {result.get('run_id')}")
-    print(f"   日志目录: {RUNS_ROOT / str(result.get('run_id')) / 'logs'}")
+    print(f"   日志目录: {runs_root / str(result.get('run_id')) / 'logs'}")
 
     if args.output:
         output_path = Path(args.output)
@@ -120,13 +151,18 @@ def cmd_run(args):
 
 def cmd_status(args):
     run_id = args.run_id
-    runs_dir = RUNS_ROOT / run_id
+    runs_root = _runs_root(args)
+    try:
+        runs_dir = _run_dir(run_id, runs_root=runs_root)
+    except ValueError as exc:
+        print(f"❌ Run ID 无效: {exc}")
+        raise SystemExit(1) from exc
 
     if not runs_dir.exists():
         print(f"❌ Run 不存在: {run_id}")
         sys.exit(1)
 
-    state = TaskState(run_id, runs_root=RUNS_ROOT)
+    state = TaskState(run_id, runs_root=runs_root)
     status = state.get_full_status()
     snapshot = state.get_runtime_snapshot()
 
@@ -138,7 +174,7 @@ def cmd_status(args):
 
     steps = status.get("steps", {})
     if steps:
-        print(f"\n   步骤状态:")
+        print("\n   步骤状态:")
         for step_id, step_info in steps.items():
             s = step_info.get("status", "unknown")
             icon = {"completed": "✅", "failed": "❌", "running": "🔄", "pending": "⏳"}.get(s, "❓")
@@ -148,11 +184,12 @@ def cmd_status(args):
 
 
 def cmd_list(args):
-    if not RUNS_ROOT.exists():
+    runs_root = _runs_root(args)
+    if not runs_root.exists():
         print("暂无运行记录。")
         return
 
-    runs = sorted(RUNS_ROOT.iterdir(), reverse=True)
+    runs = sorted(runs_root.iterdir(), reverse=True)
     if not runs:
         print("暂无运行记录。")
         return
@@ -188,14 +225,21 @@ def cmd_list(args):
 
 def cmd_resume(args):
     run_id = args.run_id
-    print("⚠️  Resume 功能尚在开发中。")
-    print(f"   Run ID: {run_id}")
-    print(f"   当前可手动检查状态: nagare status {run_id}")
-
-
-def cmd_eval(args):
-    print("⚠️  eval 依赖宿主应用提供可选 Evaluator 适配器；nagare-core 默认不包含该实现。")
-    print(f"   Run ID: {args.run_id}")
+    runs_root = _runs_root(args)
+    try:
+        run_dir = _run_dir(run_id, runs_root=runs_root)
+    except ValueError as exc:
+        print(f"❌ Run ID 无效: {exc}")
+        raise SystemExit(1) from exc
+    if not (run_dir / "state.json").is_file():
+        print(f"❌ Run 不存在: {run_id}")
+        raise SystemExit(1)
+    pause_signal = run_dir / "_pause"
+    if pause_signal.exists():
+        pause_signal.unlink()
+        print(f"▶️ 已解除暂停信号: {run_id}")
+    else:
+        print(f"ℹ️ Run 没有暂停信号: {run_id}")
 
 
 def cmd_api(args):
@@ -219,6 +263,16 @@ def main():
     p_run.add_argument("--yes", "-y", action="store_true", help="跳过运行确认")
     p_run.add_argument("--output", "-o", help="将运行结果保存到 JSON 文件")
     p_run.add_argument(
+        "--runs-root",
+        default=str(RUNS_ROOT),
+        help="运行状态与工件目录（默认：当前目录/flow/runs）",
+    )
+    p_run.add_argument(
+        "--repo-root",
+        default=str(REPO_ROOT),
+        help="解析相对 agent_md 路径的根目录（默认：当前目录）",
+    )
+    p_run.add_argument(
         "--smoke-handler",
         action="store_true",
         help="使用确定性本地 handler 运行，用于包安装/CI 冒烟验证",
@@ -227,21 +281,20 @@ def main():
 
     p_status = sub.add_parser("status", help="查看运行状态")
     p_status.add_argument("run_id", help="Run ID")
+    p_status.add_argument("--runs-root", default=str(RUNS_ROOT), help="运行目录根路径")
     p_status.set_defaults(func=cmd_status)
 
     p_list = sub.add_parser("list", help="列出所有运行记录")
     p_list.add_argument("--limit", "-n", type=int, default=20, help="最多显示条数（默认20）")
+    p_list.add_argument("--runs-root", default=str(RUNS_ROOT), help="运行目录根路径")
     p_list.set_defaults(func=cmd_list)
-
-    p_eval = sub.add_parser("eval", help="评估指定 run 的执行质量")
-    p_eval.add_argument("run_id", help="Run ID")
-    p_eval.set_defaults(func=cmd_eval)
 
     p_resume = sub.add_parser("resume", help="恢复暂停的工作流")
     p_resume.add_argument("run_id", help="Run ID")
+    p_resume.add_argument("--runs-root", default=str(RUNS_ROOT), help="运行目录根路径")
     p_resume.set_defaults(func=cmd_resume)
 
-    p_api = sub.add_parser("api", help="启动只读运行观察 API")
+    p_api = sub.add_parser("api", help="启动仅限本机的运行控制与观察 API")
     p_api.add_argument("--host", default="127.0.0.1", help="监听地址")
     p_api.add_argument("--port", type=int, default=8787, help="监听端口")
     p_api.add_argument("--runs-root", default=str(RUNS_ROOT), help="运行目录根路径")

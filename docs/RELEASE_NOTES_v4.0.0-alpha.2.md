@@ -12,8 +12,8 @@ Enterprise AAI `v0.1.0-alpha.1` remains a historical tagged milestone whose
 governance scope and known limits are carried forward here, not a parallel
 active version.
 
-> **Architecture note (2026-09-01):** this is a historical release-candidate
-> record, subordinate to the current
+> **Architecture note (2026-09-01):** this is the release-scope record,
+> subordinate to the current
 > [HASHI System Architecture](../ARCHITECTURE.md). HER v2 is an Engine
 > (Harness) Provider selected by PAO; an unqualified Provider inside HER means a
 > Model Provider. The implemented fixed HER Engine Session control plane is now

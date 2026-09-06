@@ -1,160 +1,126 @@
 # Nagare Logging and Diagnostics Contract
 
-## Purpose
+Nagare persists structured evidence for every run. This document describes the events and snapshot
+shape emitted by the current implementation; it is not a roadmap or an aspirational event list.
 
-Logging is part of the product contract for `nagare-core` and `nagare-viz`.
-Phase 0 defines the minimum event model now so extraction and GUI work do not
-invent incompatible observability later.
+## Correlation
 
-## Goals
-
-- make a broken run diagnosable after the fact
-- correlate CLI, engine, handlers, API, and GUI activity
-- preserve enough structure for later live status views
-- keep the event names stable enough to test against fixtures
-
-## Correlation Identifiers
-
-Every event should include these identifiers where applicable:
-
-- `run_id`: immutable workflow run identifier
-- `trace_id`: correlation identifier spanning a run or API request chain
-- `request_id`: per-request identifier for API/GUI initiated operations
-- `step_id`: workflow step identifier for step-scoped events
-- `workflow_id`: workflow definition identifier when available
-- `workflow_path`: source file path or logical workflow reference
-
-## Required Event Envelope
-
-All structured events should be serializable to JSONL with this envelope:
+The canonical JSONL envelope contains:
 
 ```json
 {
-  "timestamp": "2026-04-03T12:00:00Z",
+  "timestamp": "2026-09-06T04:00:00+00:00",
   "level": "INFO",
   "component": "engine.runner",
   "event": "step.started",
-  "message": "Executing step",
-  "run_id": "run-123",
-  "trace_id": "trace-123",
-  "request_id": "req-456",
-  "workflow_id": "smoke-test",
-  "workflow_path": "tests/fixtures/smoke_test.yaml",
-  "step_id": "step_write",
-  "duration_ms": 0,
+  "message": "Step execution started",
+  "run_id": "run-example-20260906-abc12345",
+  "trace_id": "trace-id",
+  "request_id": "task-request-id",
+  "workflow_id": "example",
+  "workflow_path": "workflow.yaml",
+  "step_id": "draft",
+  "duration_ms": null,
   "error_code": null,
   "error_message": null,
   "data": {}
 }
 ```
 
-## Event Names
+- `run_id` identifies the persisted run.
+- `trace_id` correlates the run and its adapter activity.
+- `request_id` identifies one API request or worker dispatch.
+- `step_id` is the workflow step ID, never the worker-dispatch request ID.
+- Fields that do not apply remain `null`; event-specific values belong in `data`.
 
-### Run lifecycle
+## Events Emitted Today
+
+### Runner and CLI
 
 - `run.created`
-- `run.preflight.started`
+- `workflow.load.started`
+- `workflow.load.completed`
+- `run.preflight.started` (CLI path)
 - `run.preflight.completed`
-- `run.confirmed`
+- `run.confirmed` (CLI path)
 - `run.started`
 - `run.paused`
 - `run.resumed`
 - `run.completed`
 - `run.failed`
 - `run.cancelled`
+- `run.escalated`
 
-### Step lifecycle
+### Steps and handlers
 
-- `step.ready`
 - `step.started`
-- `step.waiting_human`
-- `step.resumed`
 - `step.retrying`
+- `step.waiting_human`
 - `step.completed`
 - `step.failed`
-- `step.cancelled`
 - `step.skipped`
-
-### Validation and codec
-
-- `workflow.load.started`
-- `workflow.load.completed`
-- `workflow.load.failed`
-- `workflow.validate.started`
-- `workflow.validate.completed`
-- `workflow.validate.failed`
-- `workflow.export.started`
-- `workflow.export.completed`
-- `workflow.export.blocked`
-- `workflow.fidelity.warning`
-
-### Adapter and integration
-
 - `handler.invoke.started`
 - `handler.invoke.completed`
 - `handler.invoke.failed`
-- `notifier.send.started`
-- `notifier.send.completed`
-- `notifier.send.failed`
-- `evaluator.run.started`
-- `evaluator.run.completed`
-- `evaluator.run.failed`
+- `handler.callable.setup_attempt`
+- `handler.callable.setup_completed`
+- `handler.callable.setup_failed`
 
-### API and GUI
+Subprocess and callable handlers both use `handler.invoke.*`. The subprocess handler records its
+unique task ID as `request_id` and the DAG step as `step_id`.
 
-- `api.request.started`
-- `api.request.completed`
-- `api.request.failed`
-- `gui.import.started`
-- `gui.import.completed`
-- `gui.import.failed`
-- `gui.export.started`
-- `gui.export.completed`
-- `gui.export.blocked`
-- `gui.poll.failed`
+### Local API and HASHI adapters
+
+- `api.request.completed` for successful run-inspection requests
+- `adapter.step_handler.started|completed|failed`
+- `adapter.notifier.started|completed|failed`
+- `adapter.evaluator.started|completed|failed`
+
+Names not listed here are not guaranteed to be emitted. Consumers must tolerate additional event
+names and fields, but must not depend on a roadmap-only event.
 
 ## Persistence
 
-Required persistence strategy:
+Each run owns:
 
-- per-run JSONL event stream stored alongside run artifacts
-- process log for long-lived CLI/API services
-- browser console logging in development for `nagare-viz`
+```text
+flow/runs/<run_id>/
+├── state.json
+├── events.jsonl
+├── evaluation_events.jsonl
+├── artifacts/
+├── workers/
+└── logs/flow_runner.log
+```
 
-Recommended file locations later:
+`events.jsonl` is canonical. Writes are serialized within a `RunEventLogger` instance.
+`evaluation_events.jsonl` is a compatibility projection for the HASHI evaluator and contains only
+events with a defined legacy mapping. It is not a second complete event stream.
 
-- `flow/runs/{run_id}/events.jsonl`
-- `flow/runs/{run_id}/state.json`
-- `flow/runs/{run_id}/artifacts/`
-- service-level rotating log for API processes
+Runtime data is local and may contain workflow paths, errors, artifact metadata, and model output
+previews. It is excluded from release packages and should be handled as operational data.
 
-Compatibility note:
+## Runtime Snapshot
 
-- existing `evaluation_events.jsonl` should remain readable or be mapped forward
-
-## Runtime Snapshot Shape
-
-The API and GUI will need a stable read model separate from the editor draft.
-
-Minimum runtime snapshot shape:
+`TaskState.get_runtime_snapshot()` returns an immutable read model:
 
 ```json
 {
-  "run_id": "run-123",
-  "workflow_id": "smoke-test",
+  "run_id": "run-example",
+  "workflow_id": "example",
   "workflow_version": "1.0.0",
   "status": "RUNNING",
-  "created_at": "2026-04-03T12:00:00Z",
-  "updated_at": "2026-04-03T12:05:00Z",
-  "current_steps": ["step_write"],
+  "created_at": "...",
+  "updated_at": "...",
+  "current_steps": ["draft"],
   "completed_steps": [],
   "failed_steps": [],
   "waiting_human_steps": [],
   "step_status": {
-    "step_write": {
+    "draft": {
       "status": "RUNNING",
       "attempt": 1,
-      "started_at": "2026-04-03T12:04:55Z",
+      "started_at": "...",
       "ended_at": null,
       "artifacts": {},
       "error": null
@@ -163,24 +129,19 @@ Minimum runtime snapshot shape:
 }
 ```
 
-Rules:
+`attempt` is the number of actual handler dispatches. Pending or skipped steps have attempt `0`;
+the first dispatch is `1`, and every recovery re-execution increments it. Editor drafts must never
+be presented as runtime snapshots.
 
-- snapshots are immutable views of a real run
-- editor drafts must not overwrite or masquerade as snapshots
-- GUI overlays must use run snapshot ids, not mutable node objects
+## Diagnostic Boundaries
 
-## Layer Coverage
+- A constructor failure while loading YAML can occur after `workflow.load.started` and before a
+  run state exists; callers must also retain the raised validation error.
+- Pause and stop are live-process controls, not crash recovery.
+- Callable code is trusted in-process code and cannot be pre-empted during execution.
+- Event persistence proves what Nagare observed; it does not prove semantic quality by itself.
 
-- CLI: command name, workflow path, parsed flags, created run id, fatal exit
-- Engine: state transitions, scheduler decisions, retries, pause/resume, artifact registration
-- Handler: backend name, latency, exit code, stderr/stdout summary, timeout
-- Notifier/Evaluator: downstream target, latency, success/failure, retry context
-- API: request/response status, validation failures, serialization failures, latency
-- GUI: import/export path, validation findings, fidelity warnings, polling errors
+## Verification
 
-## Phase 1 Exit Criteria Derived From This Doc
-
-- event envelope implemented in code
-- event names emitted for run and step lifecycle
-- JSONL persistence working for at least one fixture workflow
-- runtime snapshot available in a stable shape for tests
+The logging, attempt, skip, retry, handler-correlation, API, and HASHI adapter contracts are covered
+by the contract test suite under `tests/contract/`.

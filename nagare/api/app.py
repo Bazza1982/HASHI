@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import logging
 import threading
@@ -13,6 +14,20 @@ from urllib.parse import parse_qs, urlsplit
 from nagare.api.runs import RunNotFoundError, RunSnapshotService
 from nagare.logging.events import utc_now
 from nagare.protocols.notifier import Notifier, NullNotifier
+
+ALLOWED_EDITOR_ORIGINS = {
+    "http://127.0.0.1:5380",
+    "http://localhost:5380",
+}
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class NagareApiServer(ThreadingHTTPServer):
@@ -27,6 +42,11 @@ class NagareApiServer(ThreadingHTTPServer):
         ai_agent_id: str = "akane",
         log_level: int = logging.INFO,
     ) -> None:
+        if not _is_loopback_host(server_address[0]):
+            raise ValueError(
+                "Nagare API can only bind to a loopback address because its local "
+                "control endpoints can start workflows and deliver trusted callables."
+            )
         self.runs_service = RunSnapshotService(runs_root=runs_root)
         self.runs_root = Path(runs_root)
         self.repo_root = Path(repo_root) if repo_root else Path.cwd()
@@ -83,9 +103,20 @@ class NagareApiRequestHandler(BaseHTTPRequestHandler):
             )
 
     def do_OPTIONS(self) -> None:  # noqa: N802
-        """CORS preflight for POST requests."""
+        """Allow browser requests only from the loopback Nagare editor."""
+        origin = self.headers.get("Origin")
+        if origin not in ALLOWED_EDITOR_ORIGINS:
+            self._write_json(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "error": "origin_not_allowed",
+                    "message": "Nagare API browser access is limited to the local editor.",
+                },
+            )
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
@@ -93,6 +124,18 @@ class NagareApiRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         request_id = self.server.runs_service.new_request_id()
         started_at = utc_now()
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in ALLOWED_EDITOR_ORIGINS:
+            self._write_json(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "request_id": request_id,
+                    "retrieved_at": started_at,
+                    "error": "origin_not_allowed",
+                    "message": "Nagare API browser control is limited to the local editor.",
+                },
+            )
+            return
         try:
             payload = self._route_post(request_id=request_id)
             self._write_json(HTTPStatus.OK, payload)
@@ -134,6 +177,7 @@ class NagareApiRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_submit_run(self, body: dict[str, Any], *, request_id: str) -> dict[str, Any]:
         from nagare.engine.callable_setup_manager import CallableSetupManager
+        from nagare.engine.preflight import PreFlightCollector
         from nagare.engine.runner import FlowRunner
         from nagare.handlers import RoutingStepHandler, SubprocessStepHandler
 
@@ -148,6 +192,8 @@ class NagareApiRequestHandler(BaseHTTPRequestHandler):
             raise ValueError(f"Workflow file not found: {wf_path}")
 
         pre_flight_data = body.get("pre_flight", {})
+        if not isinstance(pre_flight_data, dict):
+            raise ValueError("pre_flight must be a JSON object")
 
         # Build a runner first so we get its auto-generated run_id,
         # then wrap with a routing handler that supports callable workers
@@ -158,6 +204,14 @@ class NagareApiRequestHandler(BaseHTTPRequestHandler):
             repo_root=self.server.repo_root,
         )
         run_id = runner.run_id
+
+        collected_pre_flight = PreFlightCollector(
+            workflow=runner.workflow,
+            prefill=pre_flight_data,
+            silent=True,
+        ).run()
+        if collected_pre_flight:
+            runner.set_pre_flight_data(collected_pre_flight)
 
         # One setup manager per run — drives the callable auto-setup loop.
         api_base_url = f"http://{self.server.server_address[0]}:{self.server.server_address[1]}"
@@ -196,9 +250,6 @@ class NagareApiRequestHandler(BaseHTTPRequestHandler):
             pass  # Veritas not installed — callable steps will fail at runtime with a clear error
 
         runner.step_handler = step_handler
-
-        if pre_flight_data:
-            runner.set_pre_flight_data(pre_flight_data)
 
         # Start workflow in background thread; clean up setup manager when done.
         def _run_workflow() -> None:
@@ -321,7 +372,10 @@ class NagareApiRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if origin in ALLOWED_EDITOR_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
 
@@ -354,7 +408,7 @@ def serve(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Nagare read-only API server")
+    parser = argparse.ArgumentParser(description="Nagare loopback control and inspection API")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--runs-root", default="flow/runs")

@@ -83,6 +83,7 @@ def test_workzone_rejects_file_paths(tmp_path: Path):
         raise AssertionError("file path should be rejected")
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(os.name == "nt", reason="WSL path translation contract")
 def test_workzone_accepts_windows_absolute_paths(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(workzone_module, "is_wsl", lambda: True)
@@ -109,6 +110,7 @@ def test_workzone_accepts_windows_relative_separators(tmp_path: Path):
     assert resolved == zone.resolve()
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(os.name == "nt", reason="WSL path translation contract")
 def test_workzone_accepts_windows_wsl_unc_paths(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(workzone_module, "is_wsl", lambda: True)

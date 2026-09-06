@@ -372,8 +372,8 @@ def _migration_report(
     lines = [
         "# HASHI Hermes Migration Report",
         "",
-        f"- source_runtime: hashi",
-        f"- target_runtime: hermes",
+        "- source_runtime: hashi",
+        "- target_runtime: hermes",
         f"- agent_id: {agent_id}",
         f"- display_name: {display_name}",
         f"- package_entries: {len(files)}",

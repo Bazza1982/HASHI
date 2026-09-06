@@ -1,4 +1,5 @@
-import type { WorkflowDocument } from "./yamlCodec";
+import { validateRuntimeContract, type WorkflowDocument } from "./yamlCodec";
+import { validateWorkflowGraph } from "./dagValidator";
 
 export type ValidationSeverity = "blocking" | "warning" | "info";
 
@@ -21,8 +22,10 @@ export type RecoveryNotice = {
 export function buildValidationIssues(
   document: WorkflowDocument,
   unsupportedScopesCount: number,
+  runtimeData: Record<string, unknown> = document.data,
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  const graphValidation = validateWorkflowGraph(runtimeData);
 
   issues.push({
     id: `compatibility-${document.compatibilityClass}`,
@@ -42,7 +45,18 @@ export function buildValidationIssues(
     });
   }
 
-  for (const stepId of document.graphValidation.duplicateStepIds) {
+  const runtimeProblems = validateRuntimeContract(runtimeData);
+  if (runtimeProblems.length > 0) {
+    issues.push({
+      id: "runtime-contract-invalid",
+      severity: "blocking",
+      title: "Runtime contract invalid",
+      detail: runtimeProblems.join("; "),
+      source: "parser",
+    });
+  }
+
+  for (const stepId of graphValidation.duplicateStepIds) {
     issues.push({
       id: `duplicate-${stepId}`,
       severity: "blocking",
@@ -52,7 +66,7 @@ export function buildValidationIssues(
     });
   }
 
-  for (const dependency of document.graphValidation.missingDependencies) {
+  for (const dependency of graphValidation.missingDependencies) {
     issues.push({
       id: `missing-dependency-${dependency}`,
       severity: "blocking",
@@ -62,7 +76,7 @@ export function buildValidationIssues(
     });
   }
 
-  for (const agent of document.graphValidation.missingAgents) {
+  for (const agent of graphValidation.missingAgents) {
     issues.push({
       id: `missing-agent-${agent}`,
       severity: "blocking",
@@ -72,7 +86,7 @@ export function buildValidationIssues(
     });
   }
 
-  for (const cycle of document.graphValidation.cycles) {
+  for (const cycle of graphValidation.cycles) {
     issues.push({
       id: `cycle-${cycle.join(">")}`,
       severity: "blocking",

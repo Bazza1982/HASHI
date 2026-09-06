@@ -42,7 +42,6 @@ _SCHEMA_VERSION = "1.0"
 def knowledge_block_assembler(task_message: dict) -> dict:
     payload = task_message.get("payload", {})
     run_id = task_message.get("run_id", "unknown")
-    step_id = payload.get("step_id", "assemble_knowledge_block")
     input_artifacts = payload.get("input_artifacts", {})
 
     # Load all analysis artifacts

@@ -381,9 +381,9 @@ This tier is one of the backends that `/usecomputer` may choose when Linux/X11 d
 
 **For CLI-backend agents (Claude CLI, Gemini CLI, Codex CLI)** — use `bash` directly:
 ```bash
-DISPLAY=:10 ~/projects/hashi2/tools/bin/usecomputer screenshot /tmp/shot.png --json
+DISPLAY=:10 ./tools/bin/usecomputer screenshot /tmp/shot.png --json
 DISPLAY=:10 xdotool type "hello world"
-DISPLAY=:10 ~/projects/hashi2/tools/bin/usecomputer press "ctrl+s"
+DISPLAY=:10 ./tools/bin/usecomputer press "ctrl+s"
 ```
 
 **For HER v2 or a tool-capable provider invocation** — add the `desktop` tier
@@ -407,7 +407,9 @@ DISPLAY=:10 WAYLAND_DISPLAY="" dbus-launch xfwm4 &
 **Keyboard note:** `desktop_type` uses `xdotool` for full Unicode/space/symbol support.
 Requires `xdotool` installed: `sudo apt-get install -y xdotool`
 
-**Binary:** vendored at `tools/bin/usecomputer` (MIT license, native Zig binary, no runtime deps).
+**Binary:** vendored from `usecomputer@0.1.11` at
+`tools/bin/usecomputer` (MIT license, native Zig binary, no runtime deps). See
+`THIRD_PARTY_NOTICES.md` for the exact upstream artifact and digest.
 
 ## Windows Use Tool
 

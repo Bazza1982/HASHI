@@ -95,13 +95,25 @@ async def test_api_gateway_pool_isolates_models_and_request_locks(tmp_path: Path
     assert first.config.model == "gpt-one"
     assert second.config.model == "gpt-two"
     assert len(created) == 2
-    assert pool.request_lock("codex-cli", "gpt-one") is pool.request_lock(
-        "codex-cli", "gpt-one"
-    )
-    assert pool.request_lock("codex-cli", "gpt-one") is not pool.request_lock(
-        "codex-cli", "gpt-two"
-    )
+    first_lock = pool.request_lock("codex-cli", "gpt-one")
+    same_lock = pool.request_lock("codex-cli", "gpt-one")
+    second_lock = pool.request_lock("codex-cli", "gpt-two")
+    assert first_lock is same_lock
+    assert first_lock is not second_lock
 
     await pool.shutdown()
     assert first.shutdown_called is True
     assert second.shutdown_called is True
+
+
+def test_gateway_request_context_uses_typed_aiohttp_keys_when_available():
+    from orchestrator import api_gateway
+
+    request_key_factory = getattr(api_gateway.web, "RequestKey", None)
+    if request_key_factory is None:
+        assert api_gateway._GATEWAY_REQUEST_CONTEXT_KEYS == {}
+    else:
+        assert set(api_gateway._GATEWAY_REQUEST_CONTEXT_KEYS) == {
+            api_gateway._GATEWAY_REQUEST_ID_FIELD,
+            api_gateway._GATEWAY_VALIDATION_STAGE_FIELD,
+        }

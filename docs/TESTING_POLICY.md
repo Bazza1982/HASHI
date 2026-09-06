@@ -98,10 +98,11 @@ python -m pytest -q
 ```
 
 Run it for shared registries, configuration, Function Workers, lifecycle,
-gateway, or central runtime boundaries. The target is at most 90 seconds on
-the HASHI3 development pilot. The deterministic Core gate may use mocked
-process clients; the real isolated Worker probe is an explicit integration
-check because it initializes an actual backend. Bare pytest is not a full-suite
+gateway, or central runtime boundaries. Keep it fast enough for routine local
+use; timing observations belong in dated release evidence rather than this
+cross-instance policy. The deterministic Core gate may use mocked process
+clients; the real isolated Worker probe is an explicit integration check
+because it initializes an actual backend. Bare pytest is not a full-suite
 alias.
 
 For Python, ABI, dependency, Core-source, or `/reboot` changes, the owning
@@ -126,10 +127,10 @@ Worker crash recovery uses the same immutable artifact.
 ### 5. Offline product suite
 
 The offline product suite is always explicit and excludes separately governed
-contract, live, and platform checks:
+contract, live, platform, and deliberate real-wall-clock checks:
 
 ```bash
-python -m pytest -q tests -m "not contract and not live and not platform"
+python -m pytest -q tests -m "not contract and not live and not platform and not real_wall_clock"
 ```
 
 Run it only for:

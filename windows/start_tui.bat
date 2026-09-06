@@ -5,13 +5,13 @@ setlocal
 :: ============================================================
 :: HASHI - Start TUI
 :: Auto-starts main bridge in a new window if not already running.
-:: USB mode: uses approved portable Python from \python\ if present.
-:: Fallback: uses .venv Python for local dev installs.
+:: Uses an approved private Python from \python\ when present.
+:: Falls back to .venv Python for local developer installs.
 :: Logs written to: windows\logs\tui_<timestamp>.log
 :: ============================================================
 
 set ROOT=%~dp0..
-:: USB mode: prefer portable Python, fall back to venv
+:: Prefer a private runtime, then fall back to the developer venv.
 set PYTHON_EXE=%ROOT%\python\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=%ROOT%\.venv\Scripts\python.exe
 set LOG_DIR=%~dp0logs
@@ -32,8 +32,8 @@ if not exist "%PYTHON_EXE%" (
     echo ERROR: Python not found. >> "%LOG_FILE%"
     echo.
     echo ERROR: Python not found at %PYTHON_EXE%
-    echo        On USB: run prepare_usb.bat to set up portable Python.
-    echo        On dev machine: run start_main.bat first to create .venv.
+    echo        Build the verified Portable Windows image, or create .venv
+    echo        with the approved CPython and locked dependencies.
     pause
     exit /b 1
 )

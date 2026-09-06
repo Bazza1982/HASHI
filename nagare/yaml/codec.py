@@ -1,16 +1,48 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-import re
 
 import yaml
+from yaml.constructor import ConstructorError
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that refuses silently overwritten mapping keys."""
+
+    def construct_mapping(self, node, deep=False):
+        if not isinstance(node, yaml.MappingNode):
+            return super().construct_mapping(node, deep=deep)
+        self.flatten_mapping(node)
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in mapping
+            except TypeError as exc:
+                raise ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found an unhashable key",
+                    key_node.start_mark,
+                ) from exc
+            if duplicate:
+                raise ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
 
 
 _CANONICAL_TOP_LEVEL_KEYS = {
     "workflow",
     "meta",
+    "changelog",
     "pre_flight",
     "agents",
     "steps",
@@ -73,7 +105,7 @@ def load_workflow_document(
     *,
     workflow_path: str | Path | None = None,
 ) -> WorkflowDocument:
-    parsed = yaml.safe_load(source) or {}
+    parsed = yaml.load(source, Loader=_UniqueKeySafeLoader) or {}
     if not isinstance(parsed, dict):
         raise ValueError("Workflow YAML must deserialize to a mapping at the top level.")
 
@@ -226,7 +258,7 @@ def validate_workflow_graph(workflow: dict[str, Any]) -> GraphValidationResult:
                     adjacency[step_id].append(dependency)
 
         agent_id = step.get("agent")
-        if isinstance(agent_id, str) and worker_ids and agent_id not in worker_ids:
+        if isinstance(agent_id, str) and agent_id not in worker_ids:
             missing_agents.add(f"{step_id}->{agent_id}")
 
     cycles = detect_cycles(adjacency)

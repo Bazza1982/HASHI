@@ -55,11 +55,12 @@ git diff --check
 
 Bare `python -m pytest -q` is the bounded core gate. It is appropriate after a
 shared runtime or registry change, but it does not replace the focused test.
-`python -m pytest -q tests -m "not contract and not live and not platform"` is
-the explicit offline product suite and is reserved for release candidates and
-genuinely cross-cutting changes. Running every item with `python -m pytest -q
-tests` is limited to collection or shared test-infrastructure audits. Contract,
-platform, and live checks are separate; live checks require explicit authority.
+`python -m pytest -q tests -m "not contract and not live and not platform and
+not real_wall_clock"` is the explicit offline product suite and is reserved for
+release candidates and genuinely cross-cutting changes. Running every item
+with `python -m pytest -q tests` is limited to collection or shared
+test-infrastructure audits. Contract, platform, and live checks are separate;
+live checks require explicit authority.
 
 Protected core edits require explicit authorization and focused regression
 tests. On GitHub, an authorized core pull request also needs the

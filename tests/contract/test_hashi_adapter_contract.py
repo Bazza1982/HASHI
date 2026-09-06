@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
+from flow.adapters.hashi import HASHIStepHandler
 from flow.engine.flow_runner import FlowRunner
-
+from nagare.logging.events import RunEventLogger
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNS_ROOT = ROOT / "flow" / "runs"
 SMOKE_FIXTURE = ROOT / "tests" / "fixtures" / "smoke_test.yaml"
 
 
@@ -41,7 +40,6 @@ class FixtureStepHandler:
         agent_id: str,
         task_message: dict,
         agent_md_path: str,
-        timeout_seconds: int = 600,
         backend: str = "claude-cli",
         model: str = "",
     ) -> dict:
@@ -68,7 +66,7 @@ class FixtureStepHandler:
 def test_hashi_flow_runner_uses_adapter_layer_with_correlation_logging(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(ROOT)
     run_id = "run-contract-hashi-adapter"
-    shutil.rmtree(RUNS_ROOT / run_id, ignore_errors=True)
+    runs_root = tmp_path / "runs"
 
     notifier = RecordingNotifier()
     evaluator = RecordingEvaluator()
@@ -77,7 +75,7 @@ def test_hashi_flow_runner_uses_adapter_layer_with_correlation_logging(tmp_path,
     runner = FlowRunner(
         str(SMOKE_FIXTURE),
         run_id=run_id,
-        runs_root=RUNS_ROOT,
+        runs_root=runs_root,
         repo_root=ROOT,
         step_handler=handler,
         notifier=notifier,
@@ -98,7 +96,7 @@ def test_hashi_flow_runner_uses_adapter_layer_with_correlation_logging(tmp_path,
 
     events = [
         json.loads(line)
-        for line in (RUNS_ROOT / run_id / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (runs_root / run_id / "events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     adapter_events = [event for event in events if event["event"].startswith("adapter.")]
     assert adapter_events
@@ -121,3 +119,51 @@ def test_hashi_flow_runner_uses_adapter_layer_with_correlation_logging(tmp_path,
         if event["event"].startswith("adapter.step_handler")
     }
     assert step_requests == {call["task_id"] for call in handler.calls}
+
+
+def test_hashi_adapter_treats_recovered_debug_result_as_completed_event(tmp_path) -> None:
+    class RecoveredDelegate:
+        def execute(self, **kwargs):
+            del kwargs
+            return {"status": "recovered"}
+
+    event_logger = RunEventLogger(
+        run_id="run-adapter-recovered",
+        trace_id="trace-adapter-recovered",
+        workflow_id="adapter-contract",
+        workflow_path=None,
+        runs_root=tmp_path / "runs",
+    )
+    handler = HASHIStepHandler(RecoveredDelegate(), event_logger=event_logger)
+
+    result = handler.execute(
+        agent_id="debug",
+        task_message={"task_id": "debug-task", "payload": {"step_id": "work"}},
+        agent_md_path="debug.md",
+    )
+
+    assert result["status"] == "recovered"
+    events = [
+        json.loads(line)
+        for line in event_logger.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["event"] == "adapter.step_handler.completed"
+
+
+def test_hashi_default_evaluator_uses_runner_specific_roots(tmp_path) -> None:
+    runs_root = tmp_path / "custom-runs"
+    runner = FlowRunner(
+        str(SMOKE_FIXTURE),
+        run_id="run-adapter-evaluator-root",
+        runs_root=runs_root,
+        repo_root=tmp_path,
+        step_handler=FixtureStepHandler(tmp_path),
+    )
+    runner.workflow["inter_step_wait_seconds"] = 0
+
+    result = runner.start()
+
+    assert result["success"] is True
+    report_path = runs_root / runner.run_id / "evaluation_report.json"
+    assert json.loads(report_path.read_text(encoding="utf-8"))["success"] is True
+    assert (tmp_path / "flow" / "evaluation_kb" / "workflow_scores" / "scores.jsonl").is_file()

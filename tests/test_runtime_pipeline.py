@@ -2249,7 +2249,7 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
     runtime.telegram_connected = True
     runtime.startup_success = True
     runtime.token = "token-kasumi"
-    runtime.app.bot = _Bot(send_error=RetryAfter(60))
+    runtime.app.bot = _Bot(send_error=RetryAfter(timedelta(seconds=60)))
     _set_stream_policy(runtime, placeholder=True)
 
     failover_runtime = SimpleNamespace(
@@ -2595,7 +2595,7 @@ async def test_answer_preview_disables_after_retry_after():
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
-    runtime.app.bot = _Bot(edit_error=RetryAfter(123))
+    runtime.app.bot = _Bot(edit_error=RetryAfter(timedelta(seconds=123)))
     stream_state = runtime_pipeline.StreamedAnswerState(
         request_id="req-1",
         chat_id=123,

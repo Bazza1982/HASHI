@@ -9,7 +9,7 @@ Owner: HASHI1 implementation.
 
 Source reviews:
 
-- Zhao Ling's HASHI2 proposal: `/home/lily/projects/hashi2/workspaces/zhao_ling/wrapper_agent_plan.md`
+- Historical Agent-workspace proposal: `<HASHI_ROOT>/workspaces/<agent>/wrapper_agent_plan.md`
 - Ajiao review, relayed by Zhao Ling.
 - HASHI1 local review by Zelda on 2026-05-03.
 

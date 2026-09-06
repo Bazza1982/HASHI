@@ -102,7 +102,7 @@ consolidated_memory.sqlite
              │
              ▼
       Obsidian Vault
-      /mnt/c/Users/thene/Documents/lily_hashi_wiki/
+      /mnt/c/Users/<windows-user>/Documents/hashi_wiki/
 ```
 
 Each stage is a standalone Python module with a `run(config, logger)` entry point. The orchestrator `scripts/wiki/run_pipeline.py` calls them in sequence, manages the watermark, and writes a run report. The production trigger is Lily's HASHI cron job, not system crontab and not an external API service.
@@ -398,7 +398,7 @@ Written to `workspaces/lily/wiki_index.json` after each run:
     "HASHI_Architecture": {
       "display": "HASHI Architecture",
       "local_path": "workspaces/lily/wiki_pages/Topics/HASHI_Architecture.md",
-      "vault_path": "/mnt/c/Users/thene/Documents/lily_hashi_wiki/Topics/HASHI_Architecture.md",
+      "vault_path": "/mnt/c/Users/<windows-user>/Documents/hashi_wiki/Topics/HASHI_Architecture.md",
       "last_updated": "2026-05-03",
       "memory_count": 74,
       "summary": "Current state of HASHI browser bridge, agent lifecycle management..."
@@ -728,7 +728,7 @@ Daily update cron:
   "enabled": true,
   "schedule": "5 4 * * *",
   "action": "enqueue_prompt",
-  "prompt": "每日 Wiki 增量更新任务！先确认今天 03:05 的 lily-memory-consolidation 已完成；若未完成，不得推进 wiki watermark，必须报告并停止。执行：cd /home/lily/projects/hashi && python3 scripts/wiki/run_pipeline.py --daily --weekly-if-saturday --classify --persist-classifications --discover-topics --promote-topic-candidates --full-library-novelty-scan --publish-vault --max-classify 100\\n\\n必须读取 wiki_organise_report_latest.md 后汇报：\\n- consolidation completion check\\n- 新分类 memories 数量\\n- AI topic discovery candidates/promotions\\n- full-library novelty scan status\\n- changed topic/project pages\\n- claim/evidence validation or publish gate failures\\n- low-confidence assignments\\n- UNCATEGORIZED_REVIEW clusters\\n- 失败 batches / retry 状态\\n- 周六 weekly digest 是否生成\\n- backend policy 是否确认未使用 OpenRouter/DeepSeek API\\n\\n禁止只粘 stdout；必须给出 Lily 的质量判断。"
+  "prompt": "每日 Wiki 增量更新任务！先确认今天的 memory-consolidation 已完成；若未完成，不得推进 wiki watermark，必须报告并停止。执行：cd /path/to/HASHI && python3 scripts/wiki/run_pipeline.py --daily --weekly-if-saturday --classify --persist-classifications --discover-topics --promote-topic-candidates --full-library-novelty-scan --publish-vault --max-classify 100\\n\\n必须读取 wiki_organise_report_latest.md 后汇报：\\n- consolidation completion check\\n- 新分类 memories 数量\\n- AI topic discovery candidates/promotions\\n- full-library novelty scan status\\n- changed topic/project pages\\n- claim/evidence validation or publish gate failures\\n- low-confidence assignments\\n- UNCATEGORIZED_REVIEW clusters\\n- 失败 batches / retry 状态\\n- 周六 weekly digest 是否生成\\n- backend policy 是否确认未使用 OpenRouter/DeepSeek API\\n\\n禁止只粘 stdout；必须给出质量判断。"
 }
 ```
 

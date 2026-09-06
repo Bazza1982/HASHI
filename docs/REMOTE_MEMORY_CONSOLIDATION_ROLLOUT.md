@@ -7,7 +7,7 @@ Status: implemented package baseline for `auto_vibe_code` superloop.
 Use the standalone script:
 
 ```bash
-python3 scripts/remote_memory_consolidation.py --root /home/lily/projects/hashi diagnose
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi diagnose
 ```
 
 It does not require HASHI runtime command wiring or reboot.
@@ -89,11 +89,14 @@ Create this file locally if paths differ. It must stay under `private/`.
   "accepted_store": "/path/to/hashi/private/remote_memory_accepted/accepted_records.jsonl",
   "quarantine_root": "/path/to/hashi/private/remote_memory_quarantine",
   "logs_root": "/path/to/hashi/logs",
-  "vault_root": "/mnt/c/Users/thene/Documents/lily_hashi_wiki",
+  "vault_root": "/path/to/your/wiki-vault",
   "mirror_root": "/path/to/hashi/private/remote_wiki_mirror",
   "consolidated_db": "/path/to/hashi/workspaces/lily/consolidated_memory.sqlite"
 }
 ```
+
+Relative paths in this file resolve from `--root`. Without an explicit
+`vault_root`, the script uses `<root>/wiki`.
 
 Validate installation:
 
@@ -113,9 +116,9 @@ Expected signal:
 On Lily PC:
 
 ```bash
-python3 scripts/remote_memory_consolidation.py --root /home/lily/projects/hashi import --check
-python3 scripts/remote_memory_consolidation.py --root /home/lily/projects/hashi import --dry-run
-python3 scripts/remote_memory_consolidation.py --root /home/lily/projects/hashi import
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi import --check
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi import --dry-run
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi import
 ```
 
 Accepted records are inserted into Lily's `consolidated_memory.sqlite` with:
@@ -133,9 +136,9 @@ The existing wiki pipeline then sees them as normal consolidated rows.
 Sync only generated zones:
 
 ```bash
-python3 scripts/remote_memory_consolidation.py --root /home/lily/projects/hashi sync-wiki --dry-run
-python3 scripts/remote_memory_consolidation.py --root /home/lily/projects/hashi sync-wiki --check
-python3 scripts/remote_memory_consolidation.py --root /home/lily/projects/hashi sync-wiki
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi sync-wiki --dry-run
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi sync-wiki --check
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi sync-wiki
 ```
 
 Copied zones:

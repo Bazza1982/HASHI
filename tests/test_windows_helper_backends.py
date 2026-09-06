@@ -8,22 +8,28 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.platform
-
-if not hasattr(ctypes, "WinDLL"):
-    pytest.skip("Windows helper native backend tests require ctypes.WinDLL", allow_module_level=True)
+HAS_WINDLL = hasattr(ctypes, "WinDLL")
+pytestmark = [
+    pytest.mark.platform,
+    pytest.mark.skipif(
+        not HAS_WINDLL,
+        reason="Windows helper native backend tests require ctypes.WinDLL",
+    ),
+]
 
 
 async def _unused_windows_mcp(payload: dict) -> dict:
     return {"content": []}
 
 
-sys.modules.setdefault(
-    "tools.windows_use_mcp_client",
-    types.SimpleNamespace(_run=_unused_windows_mcp),
-)
-
-from tools.windows_helper import backends  # noqa: E402
+if HAS_WINDLL:
+    sys.modules.setdefault(
+        "tools.windows_use_mcp_client",
+        types.SimpleNamespace(_run=_unused_windows_mcp),
+    )
+    from tools.windows_helper import backends  # noqa: E402
+else:
+    backends = None
 
 
 @pytest.mark.asyncio

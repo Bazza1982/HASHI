@@ -450,7 +450,10 @@ def _recipe_catalog(options: Mapping[str, Any] | None) -> dict[str, dict[str, An
             "timeout_s": 1800.0,
         },
         "pytest_offline": {
-            "description": "All offline pytest inventory excluding contract, live, and platform tests.",
+            "description": (
+                "All offline pytest inventory excluding contract, live, platform, "
+                "and deliberate real-wall-clock tests."
+            ),
             "argv": [
                 python,
                 "-m",
@@ -458,7 +461,7 @@ def _recipe_catalog(options: Mapping[str, Any] | None) -> dict[str, dict[str, An
                 "-q",
                 "tests",
                 "-m",
-                "not contract and not live and not platform",
+                "not contract and not live and not platform and not real_wall_clock",
             ],
             "timeout_s": 3600.0,
         },

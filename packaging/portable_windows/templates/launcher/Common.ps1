@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 try {
@@ -13,19 +13,15 @@ $script:ExpectedInstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
 $script:PortableRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $script:AppRoot = Join-Path $script:PortableRoot 'app'
 $script:HashiRoot = Join-Path $script:AppRoot 'hashi'
-$script:WorkbenchRoot = Join-Path $script:AppRoot 'workbench'
 $script:DataRoot = Join-Path $script:PortableRoot 'data'
 $script:PythonRoot = Join-Path $script:PortableRoot 'runtime\python'
-$script:NodeRoot = Join-Path $script:PortableRoot 'runtime\node'
 $script:BinRoot = Join-Path $script:PortableRoot 'runtime\bin'
 $script:PortableIdentityPath = Join-Path $script:DataRoot 'portable-instance.json'
 $script:InstallMarkerPath = Join-Path $script:PortableRoot '.hashi-local-install.json'
 $script:LauncherStateRoot = Join-Path $script:DataRoot 'state\launcher'
 $script:EndpointPath = Join-Path $script:DataRoot 'state\local-endpoint.json'
 $script:HashiPidPath = Join-Path $script:LauncherStateRoot 'hashi.pid'
-$script:WorkbenchPidPath = Join-Path $script:LauncherStateRoot 'workbench.pid'
 $script:HashiStartupTimeoutSeconds = 1800
-$script:WorkbenchStartupTimeoutSeconds = 300
 $script:PortableInstanceId = ''
 
 function Write-BilingualMessage {
@@ -155,10 +151,8 @@ function Initialize-LocalInstallation {
     }
     foreach ($required in @(
         (Join-Path $script:PythonRoot 'python.exe'),
-        (Join-Path $script:NodeRoot 'node.exe'),
         (Join-Path $script:HashiRoot 'main.py'),
         (Join-Path $script:HashiRoot 'tui.py'),
-        (Join-Path $script:WorkbenchRoot 'server.mjs'),
         (Join-Path $script:DataRoot 'agents.json'),
         (Join-Path $script:DataRoot 'secrets.json')
     )) {
@@ -475,32 +469,10 @@ function Write-BackendEndpoint {
         backend_pid = $Process.Id
         backend_start_ticks = $Process.StartTime.ToUniversalTime().Ticks
         launch_nonce = $LaunchNonce
-        workbench_ui_port = 0
-        workbench_pid = 0
-        workbench_start_ticks = 0
         written_at_utc = [DateTime]::UtcNow.ToString('o')
     }
     Write-Utf8JsonAtomic -Path $script:EndpointPath -Value $record
     return [PSCustomObject]$record
-}
-
-function Update-WorkbenchEndpoint {
-    param(
-        [int]$Port,
-        [System.Diagnostics.Process]$Process
-    )
-    $endpoint = Get-VerifiedLocalEndpoint
-    if ($null -eq $endpoint) { throw 'The verified local HASHI endpoint disappeared.' }
-    $values = [ordered]@{}
-    foreach ($property in $endpoint.PSObject.Properties) {
-        $values[$property.Name] = $property.Value
-    }
-    $Process.Refresh()
-    $values['workbench_ui_port'] = $Port
-    $values['workbench_pid'] = $Process.Id
-    $values['workbench_start_ticks'] = $Process.StartTime.ToUniversalTime().Ticks
-    $values['written_at_utc'] = [DateTime]::UtcNow.ToString('o')
-    Write-Utf8JsonAtomic -Path $script:EndpointPath -Value $values
 }
 
 function Quote-ProcessArgument {
@@ -609,117 +581,6 @@ function Start-HASHIBackend {
     $stdoutTail = if (Test-Path -LiteralPath $stdout) { (Get-Content -LiteralPath $stdout -Tail 25) -join [Environment]::NewLine } else { '' }
     $stderrTail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 25) -join [Environment]::NewLine } else { '' }
     throw "HASHI did not become healthy on the selected local port within $script:HashiStartupTimeoutSeconds seconds.`nRecent output:`n$stdoutTail`n$stderrTail"
-}
-
-function Start-WorkbenchServer {
-    Initialize-PortableEnvironment
-    $endpoint = Get-VerifiedLocalEndpoint
-    if ($null -eq $endpoint) { throw 'HASHI local API is not available.' }
-
-    $existingPort = [int]$endpoint.workbench_ui_port
-    $existingProcess = Get-OwnedProcess -ProcessId ([int]$endpoint.workbench_pid)
-    if ($existingPort -gt 0 -and $null -ne $existingProcess) {
-        try {
-            $existingProcess.Refresh()
-            if (
-                [long]$endpoint.workbench_start_ticks -eq [long]$existingProcess.StartTime.ToUniversalTime().Ticks -and
-                (Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$existingPort/" -TimeoutSec 2).StatusCode -eq 200
-            ) {
-                return $existingPort
-            }
-        } catch {}
-    }
-    if ($null -ne $existingProcess) {
-        Stop-Process -Id $existingProcess.Id -Force -ErrorAction SilentlyContinue
-    }
-
-    $port = Get-FreeLoopbackPort -PreferredPort 18888 -ReservedPorts @([int]$endpoint.api_port)
-    $secrets = Get-PortableSecrets
-    $node = Join-Path $script:NodeRoot 'node.exe'
-    $server = Join-Path $script:WorkbenchRoot 'server.mjs'
-    if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw "Portable Node is missing: $node" }
-    if (-not (Test-Path -LiteralPath $server -PathType Leaf)) { throw "Workbench server is missing: $server" }
-
-    $env:PORT = [string]$port
-    $env:BRIDGE_U_API = "http://127.0.0.1:$([int]$endpoint.api_port)"
-    $env:BRIDGE_U_ADMIN_TOKEN = [string]$secrets.workbench_admin_token
-    $env:HASHI_WORKBENCH_UI_DIR = Join-Path $script:WorkbenchRoot 'ui'
-    $env:HASHI_WORKBENCH_KASUMI_APP_DIR = Join-Path $script:WorkbenchRoot 'kasumi-app'
-    $env:HASHI_WORKBENCH_STATE_DIR = Join-Path $script:DataRoot 'state\workbench'
-    $env:HASHI_WORKBENCH_DATA_DIR = Join-Path $script:DataRoot 'workbench'
-    $env:HASHI_WORKBENCH_CONTENT_ROOT = $script:DataRoot
-    $env:HASHI_WORKBENCH_REPOSITORY_ROOT = $script:HashiRoot
-    $env:HASHI_WORKBENCH_AGENTS_JSON = Join-Path $script:DataRoot 'agents.json'
-    $env:HASHI_WORKBENCH_PYTHON = Join-Path $script:PythonRoot 'python.exe'
-    $observabilityRoot = Join-Path $script:DataRoot 'logs\workbench-observability'
-    New-Item -ItemType Directory -Force -Path $observabilityRoot | Out-Null
-    $env:HASHI_WORKBENCH_OBSERVABILITY_DIR = $observabilityRoot
-
-    $stdout = Join-Path $script:DataRoot 'logs\workbench-console.log'
-    $stderr = Join-Path $script:DataRoot 'logs\workbench-console-error.log'
-    Write-BilingualMessage `
-        -English 'Starting Workbench...' `
-        -Chinese '正在启动 Workbench……' `
-        -ForegroundColor Cyan
-    Write-StartupStage `
-        -Component 'Workbench' `
-        -Percent 25 `
-        -English 'Launching the local interface server' `
-        -Chinese '正在启动本机界面服务'
-    $process = Start-Process -FilePath $node -ArgumentList (Quote-ProcessArgument $server) -WorkingDirectory $script:WorkbenchRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-    Set-Content -LiteralPath $script:WorkbenchPidPath -Value $process.Id -Encoding ASCII
-
-    $deadline = (Get-Date).AddSeconds($script:WorkbenchStartupTimeoutSeconds)
-    do {
-        Start-Sleep -Milliseconds 400
-        $process.Refresh()
-        if ($process.HasExited) {
-            Remove-Item -LiteralPath $script:WorkbenchPidPath -Force -ErrorAction SilentlyContinue
-            $tail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 25) -join [Environment]::NewLine } else { '' }
-            throw "Workbench exited during startup (code $($process.ExitCode)).`n$tail"
-        }
-        try {
-            $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/" -TimeoutSec 2
-            if ($response.StatusCode -eq 200) {
-                Update-WorkbenchEndpoint -Port $port -Process $process
-                Write-StartupStage `
-                    -Component 'Workbench' `
-                    -Percent 100 `
-                    -English 'Local interface is ready' `
-                    -Chinese '本机界面已就绪'
-                return $port
-            }
-        } catch {}
-    } while ((Get-Date) -lt $deadline)
-    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $script:WorkbenchPidPath -Force -ErrorAction SilentlyContinue
-    throw "Workbench did not become healthy on the selected local port within $script:WorkbenchStartupTimeoutSeconds seconds."
-}
-
-function Find-SystemBrowser {
-    $candidates = @()
-    if (${env:ProgramFiles(x86)}) {
-        $candidates += Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'
-    }
-    if ($env:ProgramFiles) {
-        $candidates += Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'
-    }
-    if ($env:LOCALAPPDATA) {
-        $candidates += Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\Application\msedge.exe'
-    }
-    if ($env:ProgramFiles) {
-        $candidates += Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
-    }
-    if (${env:ProgramFiles(x86)}) {
-        $candidates += Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'
-    }
-    if ($env:LOCALAPPDATA) {
-        $candidates += Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe'
-    }
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
-    }
-    return $null
 }
 
 Initialize-LocalInstallation

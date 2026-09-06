@@ -1507,6 +1507,7 @@ class _SSEClient:
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
 async def test_openrouter_normalizes_ogg_once_when_exact_model_requires_wav(tmp_path):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:

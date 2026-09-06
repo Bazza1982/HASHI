@@ -1,4 +1,4 @@
-# Phase 0 fixture: explicit round-trip preservation coverage.
+# Preservation fixture: explicit round-trip coverage for unsupported fields.
 # If a future editor/export path cannot preserve these shapes, it must warn.
 
 workflow:
@@ -11,14 +11,14 @@ workflow:
 meta:
   created_by: human
   created_at: "2026-04-03T00:00:00Z"
-  source_prompt: "Phase 0 preservation fixture"
+  source_prompt: "Synthetic preservation fixture"
 
 pre_flight:
   collect_from_human: []
 
 x-team-note:
   owner: "nagare-core"
-  ticket: "PHASE0-RT-001"
+  ticket: "ROUNDTRIP-001"
 
 agents:
   orchestrator:
@@ -28,7 +28,6 @@ agents:
       role: "Writer"
       agent_md: "flow/agents/analyst/AGENT.md"
       backend: claude-cli
-      model: claude-sonnet-4-6
       x-worker-extension:
         ui_color: "amber"
 

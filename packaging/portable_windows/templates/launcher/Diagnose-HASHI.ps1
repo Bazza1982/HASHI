@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot 'Common.ps1')
+﻿. (Join-Path $PSScriptRoot 'Common.ps1')
 
 $failed = $false
 Write-BilingualMessage `
@@ -12,9 +12,7 @@ Write-BilingualMessage `
 
 $required = @(
     (Join-Path $script:PythonRoot 'python.exe'),
-    (Join-Path $script:NodeRoot 'node.exe'),
     (Join-Path $script:HashiRoot 'main.py'),
-    (Join-Path $script:WorkbenchRoot 'server.mjs'),
     (Join-Path $script:DataRoot 'agents.json'),
     (Join-Path $script:DataRoot 'secrets.json'),
     (Join-Path $script:DataRoot 'portable-instance.json'),

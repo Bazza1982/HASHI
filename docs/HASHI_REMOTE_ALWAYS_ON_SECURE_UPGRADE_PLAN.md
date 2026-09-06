@@ -436,11 +436,11 @@ Every Remote should publish a normalized local network profile:
 
 ```json
 {
-  "host_identity": "a9max",
+  "host_identity": "sample-host",
   "environment_kind": "wsl",
   "address_candidates": [
     {"host": "127.0.0.1", "scope": "same_host", "source": "loopback"},
-    {"host": "192.168.0.211", "scope": "lan", "source": "interface_scan"},
+    {"host": "192.168.50.21", "scope": "lan", "source": "interface_scan"},
     {"host": "100.64.100.6", "scope": "overlay", "source": "tailscale"}
   ]
 }

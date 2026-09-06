@@ -10,7 +10,9 @@ import secrets as secrets_module
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import tomllib
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -20,13 +22,16 @@ from pathlib import Path
 MAX_IMAGE_BYTES = 957_000_000
 TARGET_IMAGE_BYTES = 820 * 1024 * 1024
 CAPACITY_CHECK_CLUSTER_BYTES = 32 * 1024
-PYTHON_VERSION = "3.12.10"
-NODE_VERSION = "22.23.2"
 PAIRING_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
 
 HERE = Path(__file__).resolve().parent
 HASHI_ROOT = HERE.parents[1]
 TEMPLATES = HERE / "templates"
+
+with (HASHI_ROOT / "pyproject.toml").open("rb") as _policy_file:
+    _RUNTIME_POLICY = tomllib.load(_policy_file)["tool"]["hashi"]["runtime"]
+PYTHON_VERSION = str(_RUNTIME_POLICY["python"])
+PYTHON_BUILD_DATE = str(_RUNTIME_POLICY["portable-build-date"])
 
 
 @dataclass(frozen=True)
@@ -38,14 +43,13 @@ class Asset:
 
 ASSETS = {
     "python": Asset(
-        "python-3.12.10-embed-amd64.zip",
-        "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
-        "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
-    ),
-    "node": Asset(
-        "node-v22.23.2-win-x64.zip",
-        "https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip",
-        "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97",
+        f"cpython-{PYTHON_VERSION}+{PYTHON_BUILD_DATE}-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        (
+            "https://github.com/astral-sh/python-build-standalone/releases/download/"
+            f"{PYTHON_BUILD_DATE}/cpython-{PYTHON_VERSION}+{PYTHON_BUILD_DATE}"
+            "-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+        ),
+        "10b7a95b928e551fc78cac665999e1ae1f08fb738b255adb0a8d3b9c2824a9c0",
     ),
     "ffmpeg": Asset(
         "ffmpeg-9.0.1-essentials_build.zip",
@@ -125,14 +129,33 @@ PRUNED_SOURCE_PATHS = (
     "skills/claude",
     "skills/codex",
     "skills/gemini",
+    "skills/agent-audit",
+    "skills/hermes-memory-import",
+    "skills/library-pick",
     "skills/memory-consolidation",
+    "flow/evaluation_kb/improvements",
     "scripts/backfill_codex_tokens.py",
+    "scripts/check_stress_test.ps1",
     "scripts/consolidate_memory.py",
+    "scripts/dual_brain_common.py",
+    "scripts/dual_brain_context.py",
+    "scripts/generate_agent_behavior_audit.py",
+    "scripts/gitwatch.py",
+    "scripts/install_elevated_autostart.ps1",
     "scripts/link_whatsapp.py",
     "scripts/memory_to_obsidian.py",
+    "scripts/monitor_hashi1.py",
+    "scripts/nuclear_reset.py",
+    "scripts/patrol_errors.py",
     "scripts/query_memory.py",
     "scripts/remote_memory_consolidation.py",
+    "scripts/reset_dual_brain_notepads.py",
+    "scripts/run_dual_brain_turn.py",
     "scripts/send_whatsapp_test.py",
+    "scripts/start_stress_test.ps1",
+    "scripts/wiki_generate_review.py",
+    "scripts/wiki_organise.py",
+    "scripts/wiki_organise_cron.sh",
     "tools/browser_bridge_acceptance.py",
     "tools/browser_bridge_live_acceptance.py",
     "tools/browser_bridge_maturity.py",
@@ -143,7 +166,7 @@ PRUNED_SOURCE_PATHS = (
     "tools/browser_bridge_test_runner.py",
     "tools/windows_use_evaluation.py",
     "veritas/SETUP.md",
-    "veritas/test_adapters.py",
+    "superloops/loops",
 )
 IGNORED_SOURCE_NAMES = {
     ".git",
@@ -267,16 +290,21 @@ def copy_hashi_source(destination: Path) -> None:
 def extract_python(runtime_python: Path, cache: Path) -> None:
     archive = download(ASSETS["python"], cache)
     status(f"extract Python {PYTHON_VERSION}")
-    runtime_python.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive) as package:
-        package.extractall(runtime_python)
-    pth = next(runtime_python.glob("python3*._pth"), None)
-    if pth is None:
-        raise RuntimeError("embedded Python _pth file is missing")
-    pth.write_text(
-        "python312.zip\n.\nLib\\site-packages\n..\\..\\app\\hashi\nimport site\n",
-        encoding="utf-8",
+    runtime_python.parent.mkdir(parents=True, exist_ok=True)
+    if runtime_python.exists():
+        raise RuntimeError(f"Python runtime destination already exists: {runtime_python}")
+    extraction_root = Path(
+        tempfile.mkdtemp(prefix="hashi-python-extract-", dir=runtime_python.parent)
     )
+    try:
+        with tarfile.open(archive, mode="r:gz") as package:
+            package.extractall(extraction_root, filter="data")
+        extracted_python = extraction_root / "python"
+        if not (extracted_python / "python.exe").is_file():
+            raise RuntimeError("standalone Python archive is missing python/python.exe")
+        shutil.copytree(extracted_python, runtime_python)
+    finally:
+        shutil.rmtree(extraction_root, ignore_errors=True)
 
 
 def install_python_dependencies(runtime_python: Path) -> None:
@@ -353,18 +381,6 @@ def extract_selected_zip_file(archive: Path, predicate, destination: Path) -> No
                 shutil.copyfileobj(source, output)
 
 
-def install_node(runtime_node: Path, licenses: Path, cache: Path) -> None:
-    archive = download(ASSETS["node"], cache)
-    status(f"install Node {NODE_VERSION} runtime without npm/corepack")
-    runtime_node.mkdir(parents=True, exist_ok=True)
-    extract_selected_zip_file(
-        archive, lambda name: name.endswith("/node.exe"), runtime_node
-    )
-    extract_selected_zip_file(
-        archive, lambda name: name.endswith("/LICENSE"), licenses / "node"
-    )
-
-
 def install_ffmpeg(runtime_bin: Path, licenses: Path, cache: Path) -> None:
     archive = download(ASSETS["ffmpeg"], cache)
     status("install FFmpeg executable")
@@ -420,91 +436,6 @@ def install_tesseract(
         shutil.copy2(cached, model_root / name)
 
 
-def copy_workbench_licenses(workbench_root: Path, licenses: Path) -> None:
-    destination = licenses / "workbench"
-    destination.mkdir(parents=True, exist_ok=True)
-    for name in (
-        "LICENSE",
-        "LICENSE_SCOPE.md",
-        "NOTICE_WORKBENCH.md",
-        "THIRD_PARTY_NOTICES.md",
-    ):
-        source = workbench_root / name
-        if source.is_file():
-            shutil.copy2(source, destination / name)
-    for name in ("LICENSE", "NOTICE.md"):
-        source = workbench_root / "kasumi" / name
-        if source.is_file():
-            shutil.copy2(source, destination / f"kasumi-{name}")
-
-
-def build_workbench(
-    workbench_root: Path, destination: Path, build_temp: Path, *, skip_build: bool
-) -> str:
-    if not skip_build:
-        run(["npm", "run", "build"], cwd=workbench_root)
-    if not (workbench_root / "dist" / "index.html").is_file():
-        raise RuntimeError("Workbench dist/index.html is missing")
-    destination.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        workbench_root / "dist",
-        destination / "ui",
-        ignore=shutil.ignore_patterns("kasumi-app"),
-    )
-    kasumi_source = workbench_root / "public" / "kasumi-app"
-    if kasumi_source.is_dir():
-        shutil.copytree(kasumi_source, destination / "kasumi-app")
-    else:
-        shutil.copytree(
-            workbench_root / "dist" / "kasumi-app", destination / "kasumi-app"
-        )
-
-    esbuild = workbench_root / "node_modules" / "esbuild" / "bin" / "esbuild"
-    if not esbuild.is_file():
-        raise RuntimeError(
-            "Workbench esbuild dependency is missing; run npm install in the Workbench repository"
-        )
-    run(
-        [
-            str(esbuild),
-            str(workbench_root / "server" / "index.js"),
-            "--bundle",
-            "--platform=node",
-            "--format=esm",
-            "--target=node22",
-            "--external:sharp",
-            "--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
-            f"--outfile={destination / 'server.mjs'}",
-        ],
-        cwd=workbench_root,
-    )
-
-    sharp_stage = build_temp / "sharp-runtime"
-    sharp_stage.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(HERE / "sharp_runtime" / "package.json", sharp_stage / "package.json")
-    shutil.copy2(
-        HERE / "sharp_runtime" / "package-lock.json", sharp_stage / "package-lock.json"
-    )
-    run(
-        [
-            "npm",
-            "ci",
-            "--ignore-scripts",
-            "--include=optional",
-            "--no-audit",
-            "--no-fund",
-            "--os=win32",
-            "--cpu=x64",
-        ],
-        cwd=sharp_stage,
-    )
-    node_modules = sharp_stage / "node_modules"
-    for relative in ("@emnapi", "@img/sharp-wasm32", "tslib", ".package-lock.json"):
-        remove_path(node_modules / relative)
-    shutil.copytree(node_modules, destination / "node_modules")
-    return git_revision(workbench_root)
-
-
 def git_revision(root: Path) -> str:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -543,7 +474,6 @@ def configure_data(
         "media",
         "state",
         "tmp",
-        "workbench",
         "workspaces/portable",
         "remote",
         "browser-profile",
@@ -598,7 +528,6 @@ def configure_data(
 def copy_launchers(image_root: Path) -> None:
     for name in (
         "Start_HASHI_TUI.bat",
-        "Start_HASHI_Workbench.bat",
         "Install_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
         "Stop_HASHI.bat",
@@ -693,8 +622,8 @@ def validate_image(image_root: Path) -> None:
     if f"pairing_token_ttl_seconds: {PAIRING_TOKEN_TTL_SECONDS}" not in remote_config:
         raise RuntimeError("portable pairing TTL is not seven days")
     forbidden = (
-        "runtime/node/npm.cmd",
-        "runtime/node/npx.cmd",
+        "runtime/node",
+        "app/workbench",
         "runtime/python/Scripts/pip.exe",
         "app/hashi/adapters/codex_cli.py",
         "app/hashi/adapters/claude_cli.py",
@@ -706,7 +635,6 @@ def validate_image(image_root: Path) -> None:
         raise RuntimeError(f"forbidden portable components are present: {present}")
     required = (
         "runtime/python/python.exe",
-        "runtime/node/node.exe",
         "runtime/bin/ffmpeg.exe",
         "data/portable-instance.json",
         "app/hashi/main.py",
@@ -715,8 +643,6 @@ def validate_image(image_root: Path) -> None:
         "app/hashi/tui/assets/sounds/soft_chat_receive.wav",
         "app/hashi/exp/loader.py",
         "app/hashi/veritas/__init__.py",
-        "app/workbench/server.mjs",
-        "app/workbench/ui/index.html",
         "app/hashi/voice_models/piper/zh_CN-huayan-medium.onnx",
         "app/hashi/hashi_assets/ocr/bin/windows-x86_64/tesseract.exe",
         "Install_HASHI_On_This_PC.bat",
@@ -727,7 +653,6 @@ def validate_image(image_root: Path) -> None:
         "launcher/Uninstall-From-PC.ps1",
         "launcher/Common.ps1",
         "launcher/Start-TUI.ps1",
-        "launcher/Start-Workbench.ps1",
         "launcher/Stop-HASHI.ps1",
     )
     missing = [
@@ -765,11 +690,8 @@ def validate_image(image_root: Path) -> None:
 
 
 def build(args: argparse.Namespace) -> Path:
-    workbench_root = args.workbench_root.resolve()
     require_clean_tracked_worktree(HASHI_ROOT, label="HASHI source")
-    require_clean_tracked_worktree(workbench_root, label="Workbench source")
     hashi_revision = git_revision(HASHI_ROOT)
-    expected_workbench_revision = git_revision(workbench_root)
     output = args.output.resolve()
     if output.exists():
         marker = output / ".hashi-portable-bundle"
@@ -787,9 +709,7 @@ def build(args: argparse.Namespace) -> Path:
     build_temp = Path(tempfile.mkdtemp(prefix="hashi-portable-build-"))
     try:
         app_hashi = staging / "app" / "hashi"
-        app_workbench = staging / "app" / "workbench"
         runtime_python = staging / "runtime" / "python"
-        runtime_node = staging / "runtime" / "node"
         runtime_bin = staging / "runtime" / "bin"
         licenses = staging / "THIRD_PARTY_LICENSES"
         licenses.mkdir(parents=True, exist_ok=True)
@@ -798,16 +718,8 @@ def build(args: argparse.Namespace) -> Path:
         extract_python(runtime_python, args.cache)
         install_python_dependencies(runtime_python)
         install_piper(runtime_python, app_hashi, licenses, args.cache)
-        install_node(runtime_node, licenses, args.cache)
         install_ffmpeg(runtime_bin, licenses, args.cache)
         install_tesseract(app_hashi, licenses, args.cache, build_temp)
-        workbench_revision = build_workbench(
-            workbench_root,
-            app_workbench,
-            build_temp,
-            skip_build=args.skip_workbench_build,
-        )
-        copy_workbench_licenses(workbench_root, licenses)
         configure_data(
             staging,
             args.secrets.resolve(),
@@ -830,9 +742,7 @@ def build(args: argparse.Namespace) -> Path:
             "product": "HASHI Portable Windows x64",
             "built_at_utc": datetime.now(timezone.utc).isoformat(),
             "hashi_revision": hashi_revision,
-            "workbench_revision": workbench_revision,
             "python_version": PYTHON_VERSION,
-            "node_version": NODE_VERSION,
             "pairing_token_ttl_seconds": PAIRING_TOKEN_TTL_SECONDS,
             "maximum_image_bytes": MAX_IMAGE_BYTES,
             "target_image_bytes": TARGET_IMAGE_BYTES,
@@ -841,7 +751,7 @@ def build(args: argparse.Namespace) -> Path:
                 "engine": "her-v2",
                 "default_provider": "official-deepseek",
                 "configurable_qwen": True,
-                "shared_tui_workbench_conversation": True,
+                "tui_backend_api_session": True,
                 "full_host_filesystem_access": True,
                 "remote_lan_discovery": True,
                 "remote_one_click_pairing": True,
@@ -863,7 +773,7 @@ def build(args: argparse.Namespace) -> Path:
                 "verified_shutdown_quiescence": True,
                 "git_tracked_source_only": True,
                 "clean_tracked_inputs_required": True,
-                "local_workbench_observability": True,
+                "local_backend_api_observability": True,
                 "local_remote_route_cache": True,
                 "soft_chat_message_sounds": True,
                 "windows_native_only": True,
@@ -904,14 +814,8 @@ def build(args: argparse.Namespace) -> Path:
                 f"{MAX_IMAGE_BYTES:,}"
             )
         require_clean_tracked_worktree(HASHI_ROOT, label="HASHI source")
-        require_clean_tracked_worktree(workbench_root, label="Workbench source")
         if git_revision(HASHI_ROOT) != hashi_revision:
             raise RuntimeError("HASHI revision changed while the image was building")
-        if (
-            workbench_revision != expected_workbench_revision
-            or git_revision(workbench_root) != expected_workbench_revision
-        ):
-            raise RuntimeError("Workbench revision changed while the image was building")
         staging.replace(output)
         status(
             f"complete: {output} ({final_size:,} logical bytes; "
@@ -937,13 +841,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=HASHI_ROOT / "build" / "portable-cache",
     )
-    parser.add_argument(
-        "--workbench-root",
-        type=Path,
-        default=HASHI_ROOT.parent / "hashi-workbench-v2",
-    )
     parser.add_argument("--secrets", type=Path, default=HASHI_ROOT / "secrets.json")
-    parser.add_argument("--skip-workbench-build", action="store_true")
     parser.add_argument("--allow-missing-deepseek-key", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)
@@ -956,6 +854,7 @@ def main(argv: list[str] | None = None) -> int:
         OSError,
         RuntimeError,
         subprocess.CalledProcessError,
+        tarfile.TarError,
         zipfile.BadZipFile,
     ) as exc:
         print(f"[portable] ERROR: {exc}", file=sys.stderr)

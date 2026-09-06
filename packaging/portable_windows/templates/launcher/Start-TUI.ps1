@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([switch]$FailureHandledByEntry)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')

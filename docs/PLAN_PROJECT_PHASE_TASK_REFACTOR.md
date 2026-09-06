@@ -173,7 +173,7 @@ True Projects:
 6. Remove duplicate BARRY_PHD project (keep BARRY_S_PHD)
 ```
 
-Migration script location: `/home/lily/projects/AIPM/migrations/001_add_phases_table.py`
+Migration script location: `<PROJECT_ROOT>/migrations/001_add_phases_table.py`
 
 ---
 
@@ -240,7 +240,9 @@ This makes it possible to query "all Nagare runs for Phase X" by scanning run me
 
 ## 7. Artefacts / Warehouse (no DB change needed)
 
-Artefacts belong to a Phase via the filesystem, not by FK. The Phase record stores `folder_path` (real filesystem path, e.g. `/mnt/c/Users/thene/projects/UON_PhD/Barry's PhD/Reading/`).
+Artefacts belong to a Phase via the filesystem, not by FK. The Phase record
+stores `folder_path` (a real filesystem path, for example
+`/mnt/c/Users/<windows-user>/projects/research/Reading/`).
 
 KASUMI objects and temporary artefacts are written into that folder by the agent.
 No database linkage by ID is required — the folder hierarchy IS the containment.

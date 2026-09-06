@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a short memory+ auto-debug test against a HASHI Workbench agent."""
+"""Run a short memory+ auto-debug test against a HASHI Backend API agent."""
 
 from __future__ import annotations
 
@@ -70,6 +70,13 @@ def _file_size(path: Path) -> int:
         return 0
 
 
+def _read_text_if_exists(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
 def _contains_any(text: str, values: list[str]) -> bool:
     lowered = text.lower()
     return any(value.lower() in lowered for value in values if value)
@@ -129,7 +136,7 @@ def run(args: argparse.Namespace) -> int:
     notepad_path = memory_dir / "memory_plus_notepad.md"
     diagnostics_path = memory_dir / "memory_plus_diagnostics.jsonl"
     transcript_path = workspace / "transcript.jsonl"
-    report_dir = ROOT / "workspaces" / "lily" / "reports"
+    report_dir = args.report_dir or workspace / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"memory_plus_auto_debug_{args.agent}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
@@ -155,7 +162,7 @@ def run(args: argparse.Namespace) -> int:
 
     start_diag_size = _file_size(diagnostics_path)
     start_transcript_size = _file_size(transcript_path)
-    start_notepad = notepad_path.read_text(encoding="utf-8", errors="replace") if notepad_path.exists() else ""
+    start_notepad = _read_text_if_exists(notepad_path)
 
     label = args.label
     shelf = args.shelf
@@ -204,7 +211,7 @@ def run(args: argparse.Namespace) -> int:
     transcript_delta_rows = _read_jsonl_tail(transcript_path, start_transcript_size)
     thinking_delta = _thinking_rows(transcript_delta_rows)
     final_text = str(results[-1].get("text") or "")
-    notepad_after = notepad_path.read_text(encoding="utf-8", errors="replace") if notepad_path.exists() else ""
+    notepad_after = _read_text_if_exists(notepad_path)
     notepad_delta = notepad_after[len(start_notepad) :] if notepad_after.startswith(start_notepad) else notepad_after
 
     label_values = [label, *args.label_alias]
@@ -284,8 +291,14 @@ def run(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a 5-round memory+ auto-debug test.")
-    parser.add_argument("--agent", default="akane")
-    parser.add_argument("--base-url", default="http://10.255.255.254:18800")
+    parser.add_argument("--agent", default="agent1")
+    parser.add_argument("--base-url", default="http://127.0.0.1:18800")
+    parser.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+        help="Report directory (defaults to the target Agent workspace reports directory).",
+    )
     parser.add_argument("--mode", default="run", choices=["check", "run"])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--timeout-s", type=int, default=240)

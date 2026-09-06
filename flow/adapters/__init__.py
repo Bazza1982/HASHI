@@ -1,9 +1,9 @@
 """HASHI host adapters for the extracted Nagare core."""
 
 from .hashi import (
-    HChatNotifier,
     HASHIEvaluator,
     HASHIStepHandler,
+    HChatNotifier,
     ensure_hashi_evaluator,
     ensure_hashi_notifier,
     ensure_hashi_step_handler,

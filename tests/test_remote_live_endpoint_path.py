@@ -16,7 +16,7 @@ def _peer(*, port: int = 18767) -> PeerInfo:
     return PeerInfo(
         instance_id="HASHI-PORTABLE",
         display_name="HASHI Portable",
-        host="192.168.0.211",
+        host="192.168.50.21",
         port=port,
         workbench_port=18800,
         platform="windows",

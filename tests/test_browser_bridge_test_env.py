@@ -12,8 +12,8 @@ from tools.browser_bridge_test_env import (
 
 def test_normalize_windows_like_path() -> None:
     assert (
-        normalize_windows_like_path("C:/Users/thene/Desktop/HASHI_browser_bridge_recovery_extension/")
-        == "c:\\users\\thene\\desktop\\hashi_browser_bridge_recovery_extension"
+        normalize_windows_like_path("C:/Users/sampleuser/Desktop/HASHI_browser_bridge_recovery_extension/")
+        == "c:\\users\\sampleuser\\desktop\\hashi_browser_bridge_recovery_extension"
     )
 
 
@@ -25,10 +25,10 @@ def test_find_loaded_extension_id_by_extension_path(tmp_path: Path) -> None:
                 "extensions": {
                     "settings": {
                         "abc123": {
-                            "path": "C:\\Users\\thene\\Desktop\\HASHI_browser_bridge_extension",
+                            "path": "C:\\Users\\sampleuser\\Desktop\\HASHI_browser_bridge_extension",
                         },
                         "real456": {
-                            "path": "C:\\Users\\thene\\Desktop\\HASHI_browser_bridge_recovery_extension",
+                            "path": "C:\\Users\\sampleuser\\Desktop\\HASHI_browser_bridge_recovery_extension",
                         },
                     }
                 }
@@ -39,7 +39,7 @@ def test_find_loaded_extension_id_by_extension_path(tmp_path: Path) -> None:
 
     extension_id = find_loaded_extension_id(
         secure_prefs,
-        "C:/Users/thene/Desktop/HASHI_browser_bridge_recovery_extension/",
+        "C:/Users/sampleuser/Desktop/HASHI_browser_bridge_recovery_extension/",
     )
     assert extension_id == "real456"
 

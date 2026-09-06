@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from nagare.paths import validate_path_component
 from nagare.protocols.notifier import Notifier, NullNotifier
-
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class CallableSetupManager:
         ai_agent_id: str = "akane",
         api_base_url: str = "http://127.0.0.1:8787",
     ) -> None:
-        self.run_id = run_id
+        self.run_id = validate_path_component(run_id, label="run_id")
         self.runs_root = Path(runs_root)
         self.callables_root = Path(callables_root)
         self.notifier = notifier or NullNotifier()
@@ -86,6 +86,7 @@ class CallableSetupManager:
         Call this BEFORE blocking on the returned event.
         `attempt` is 1-indexed (1 = first attempt, 2 = first retry, …).
         """
+        agent_id = validate_path_component(agent_id, label="agent_id")
         event = self._get_fresh_event(agent_id)
         self._send_ai_prompt(agent_id, task_message, attempt=attempt)
         return event
@@ -96,10 +97,17 @@ class CallableSetupManager:
         event: threading.Event,
     ) -> bool:
         """
-        Block until code is delivered. Workflow cancellation remains the
-        external stop authority; elapsed wall-clock time is not one.
+        Block until code is delivered or the workflow's explicit stop signal
+        appears. Elapsed wall-clock time is not a terminal condition.
         """
-        event.wait()
+        stop_signal = self.runs_root / self.run_id / "_stop"
+        while not event.wait(timeout=0.25):
+            if stop_signal.exists():
+                logger.info(
+                    "Callable setup cancelled by workflow stop: agent_id='%s'",
+                    agent_id,
+                )
+                return False
         return True
 
     def escalate_to_human(self, agent_id: str, task_message: dict) -> None:
@@ -141,6 +149,11 @@ class CallableSetupManager:
 
         Returns {"ok": True} or {"ok": False, "error": "<reason>"}.
         """
+        try:
+            agent_id = validate_path_component(agent_id, label="agent_id")
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
         namespace: dict = {}
         try:
             compiled = compile(code, f"<callable:{agent_id}>", "exec")

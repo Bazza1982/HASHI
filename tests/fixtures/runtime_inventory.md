@@ -1,6 +1,6 @@
 # Fixture Runtime Inventory
 
-This file records the runtime behavior and artifact expectations that Phase 1+
+This file records the runtime behavior and artifact expectations that releases
 must preserve or verify.
 
 ## `smoke_test.yaml`
@@ -24,6 +24,7 @@ must preserve or verify.
   - `translation_first_half` -> `translation_first_half.md`
   - `translation_second_half` -> `translation_second_half.md`
   - downstream merge/package artifacts declared later in file
+  - `final_pdf` -> `translated_book.pdf` inside the package worker workspace
 - Important runtime expectations:
   - `translate_first_half` and `translate_second_half` remain parallel-capable
   - pre-flight defaults and choices remain intact
@@ -46,7 +47,7 @@ must preserve or verify.
 - Execution shape: high-complexity real workflow with multiple review/evaluation stages
 - Human interaction:
   - pre-flight questions
-  - `wait_for_human` step with timeout recovery
+  - `wait_for_human` step that waits until a response or explicit stop
 - Declared artifacts:
   - `task_analysis`
   - `question_set`
@@ -55,12 +56,13 @@ must preserve or verify.
   - `critique_report`
   - additional validation/evaluation/publish artifacts declared later in file
 - Important runtime expectations:
-  - `wait_for_human` and timeout semantics remain explicit
+  - `wait_for_human`, resume, and explicit-stop semantics remain explicit
   - evaluator, reviewer, critic, and debug roles remain distinguishable in logs and runtime state
   - large prompts and changelog/history blocks remain loadable
 
 ## `legacy_english_news_to_chinese_markdown.yaml`
 
+- Publication status: frozen compatibility fixture; not a published runtime workflow
 - Execution shape: legacy sequential task list, not current canonical schema
 - Human interaction: none declared in current file shape
 - Declared outputs:

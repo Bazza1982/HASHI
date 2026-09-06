@@ -491,7 +491,7 @@ Example:
   "default_mode": "normal",
   "notepad_warning_chars": 200000,
   "fyi_soft_budget_chars": 6000,
-  "wiki_root": "/mnt/c/Users/thene/Documents/lily_hashi_wiki",
+  "wiki_root": "/mnt/c/Users/<windows-user>/Documents/hashi_wiki",
   "wiki_generated_topics": "10_GENERATED_TOPICS",
   "wiki_generated_indexes": "30_GENERATED_INDEXES",
   "reset_after_successful_wiki_publish": true,

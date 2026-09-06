@@ -104,14 +104,14 @@ remote_port: 35821
 watchtower_port: null
 workbench_hosts:
   - 127.0.0.1
-  - 192.168.0.211
+  - 192.168.50.21
 bind_policy: lan_or_loopback
 advertised_routes:
   - kind: loopback
     host: 127.0.0.1
     port: 35821
   - kind: lan
-    host: 192.168.0.211
+    host: 192.168.50.21
     port: 35821
 relay_required: false
 health_probe_policy: windows_remote
@@ -350,7 +350,7 @@ Every profile-sensitive decision must produce structured logs. Minimum fields:
   "local_profile": "wsl_linux_primary",
   "peer_profile": "windows_remote_sidecar",
   "candidate_count": 3,
-  "selected_route": {"kind": "lan", "host": "192.168.0.211", "port": 35821},
+  "selected_route": {"kind": "lan", "host": "192.168.50.21", "port": 35821},
   "reason": "profile_preferred_lan_for_wsl_to_windows",
   "elapsed_ms": 41
 }

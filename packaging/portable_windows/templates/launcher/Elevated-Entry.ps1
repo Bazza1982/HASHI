@@ -1,8 +1,8 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet('Install', 'Start', 'Stop', 'Diagnose', 'Uninstall')]
     [string]$Action = 'Start',
-    [ValidateSet('TUI', 'Workbench')]
+    [ValidateSet('TUI')]
     [string]$Surface = 'TUI',
     [Parameter(Mandatory = $true)]
     [string]$DesktopPath
@@ -235,7 +235,7 @@ try {
         exit $diagnoseExitCode
     }
 
-    $launcherName = if ($Surface -eq 'Workbench') { 'Start-Workbench.ps1' } else { 'Start-TUI.ps1' }
+    $launcherName = 'Start-TUI.ps1'
     $launchExitCode = Invoke-LocalLauncher -Name $launcherName
     if ($launchExitCode -ne 0) {
         Write-BilingualMessage `

@@ -1,12 +1,12 @@
 # HASHI Flow — 书籍翻译工作流
 # 将英文书籍翻译为中文，含术语表、章节拆分、质量审核
-# 版本: 1.0.0
+# 版本: 1.2.0
 # 基于《新华人》翻译项目经验设计
 
 workflow:
   id: book-translation
   name: "书籍翻译工作流"
-  version: "1.0.0"
+  version: "1.2.0"
   description: |
     将英文书籍翻译为中文。
     自动处理：专有名词统一、章节并行翻译、质量审核、PDF 打包。
@@ -17,6 +17,17 @@ meta:
   created_at: "2026-03-26T00:00:00Z"
   improvement_count: 0
   source_prompt: "将英文书籍翻译为高质量中文，供家人阅读"
+
+changelog:
+  - version: "1.2.0"
+    date: "2026-09-06"
+    changes:
+      - "将受管工件固定在 worker workspace 内；用户指定位置仅作为额外交付副本"
+  - version: "1.1.0"
+    date: "2026-09-06"
+    changes:
+      - "将 A/B 审校评分落实为阻断式自动质量门，而非仅写在描述性成功标准中"
+      - "移除运行时不支持的固定超时与固定重试配置"
 
 # =============================================================================
 # Pre-flight：翻译前信息收集
@@ -67,51 +78,39 @@ agents:
   workers:
     - id: analyst_01
       role: "文本分析师"
-      agent_md: "flow/agents/analyst/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/analyst_01"
+      agent_md: "flow/agents/packager/AGENT.md"
       backend: claude-cli
       model: claude-sonnet-4-6
-      controllable_by: [orchestrator, human]
 
     - id: translator_01
       role: "主翻译员（前半部分）"
       agent_md: "flow/agents/translator/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/translator_01"
       backend: claude-cli
       model: claude-sonnet-4-6
-      controllable_by: [orchestrator]
 
     - id: translator_02
       role: "主翻译员（后半部分）"
       agent_md: "flow/agents/translator/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/translator_02"
       backend: claude-cli
       model: claude-sonnet-4-6
-      controllable_by: [orchestrator]
 
     - id: reviewer_01
       role: "翻译审校员"
       agent_md: "flow/agents/reviewer/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/reviewer_01"
       backend: claude-cli
       model: claude-sonnet-4-6
-      controllable_by: [orchestrator, human]
 
     - id: packager_01
       role: "PDF 打包员"
       agent_md: "flow/agents/analyst/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/packager_01"
       backend: claude-cli
       model: claude-sonnet-4-6
-      controllable_by: [orchestrator]
 
     - id: debug_01
       role: "调试代理"
       agent_md: "flow/agents/debug/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/debug_01"
       backend: claude-cli
       model: claude-sonnet-4-6
-      controllable_by: [orchestrator]
 
 # =============================================================================
 # 执行步骤
@@ -146,7 +145,6 @@ steps:
         - key: document_analysis
           path: document_analysis.json
           type: json
-    timeout_seconds: 180
 
   # 步骤 2a：翻译前半部分（与 2b 并行）
   - id: translate_first_half
@@ -180,7 +178,6 @@ steps:
         - key: translation_first_half
           path: translation_first_half.md
           type: markdown
-    timeout_seconds: 1800
 
   # 步骤 2b：翻译后半部分（与 2a 并行）
   - id: translate_second_half
@@ -210,7 +207,6 @@ steps:
         - key: translation_second_half
           path: translation_second_half.md
           type: markdown
-    timeout_seconds: 1800
 
   # 步骤 3：合并并审校
   - id: review_and_merge
@@ -247,7 +243,10 @@ steps:
         - key: review_report
           path: review_report.json
           type: json
-    timeout_seconds: 1800
+    quality_gate:
+      type: auto
+      criteria:
+        - review_report.quality_score in ['A', 'B']
 
   # 步骤 4：打包 PDF
   - id: package_pdf
@@ -262,7 +261,8 @@ steps:
       将翻译结果打包为 PDF 文件：
 
       输入文件：complete_translation.md
-      输出路径：{pre_flight.output_path}
+      受管输出文件：translated_book.pdf
+      用户交付路径：{pre_flight.output_path}
       书籍信息：[见 document_analysis.json]
 
       使用 Python weasyprint 生成 PDF：
@@ -273,15 +273,15 @@ steps:
          - 字号：12pt 正文，16pt 标题
          - 页边距：上下 2.5cm，左右 3cm
          - 页码：底部居中
-      4. 将 PDF 复制到 {pre_flight.output_path}
+      4. 先将 PDF 写为 worker workspace 内的 translated_book.pdf
+      5. 再将同一 PDF 复制到用户明确指定的 {pre_flight.output_path}
 
-      输出：pdf_path（最终 PDF 文件的绝对路径）
+      在结果 JSON 中将 final_pdf 报告为相对路径 translated_book.pdf。
     output:
       artifacts:
         - key: final_pdf
-          path: "{pre_flight.output_path}"
+          path: "translated_book.pdf"
           type: binary
-    timeout_seconds: 180
 
 # =============================================================================
 # 错误处理
@@ -289,14 +289,9 @@ steps:
 
 error_handling:
   debug_agent: debug_01
-  max_attempts: 3
-  retry_strategy:
-    attempt_1: "检查错误日志，调整 prompt 重试"
-    attempt_2: "切换到 claude-opus-4-6 重试"
-    attempt_3: "简化输出要求重试"
-  on_max_exceeded:
+  on_unrecoverable:
     action: notify_orchestrator
-    message: "书籍翻译失败（已尝试3次），步骤：{failed_step_id}，错误：{error}"
+    message: "书籍翻译步骤无法恢复：{failed_step_id}，错误：{error}"
 
 # =============================================================================
 # 成功标准
@@ -333,4 +328,3 @@ evaluation:
     - translation_quality_score
     - total_duration
     - proper_noun_consistency_rate
-  improvement_threshold: 3

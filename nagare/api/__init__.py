@@ -1,4 +1,4 @@
-"""Read-only API surface for Nagare runtime inspection."""
+"""Loopback-only Nagare runtime inspection and trusted-local control API."""
 
 from nagare.api.app import NagareApiServer, serve
 from nagare.api.runs import RunSnapshotService

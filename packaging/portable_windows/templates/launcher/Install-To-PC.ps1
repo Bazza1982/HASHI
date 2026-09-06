@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$DesktopPath
@@ -23,8 +23,7 @@ $script:InstallLog = Join-Path $env:TEMP 'HASHI-Portable-install.log'
 $script:LastConsolePercent = -10
 $script:ShortcutNames = @(
     'Start HASHI.lnk',
-    'Stop HASHI.lnk',
-    'Start HASHI Workbench.lnk'
+    'Stop HASHI.lnk'
 )
 
 function Write-BilingualMessage {
@@ -164,10 +163,8 @@ function Test-ExistingLocalInstallation {
     }
     foreach ($relative in @(
         'runtime\python\python.exe',
-        'runtime\node\node.exe',
         'app\hashi\main.py',
         'app\hashi\tui.py',
-        'app\workbench\server.mjs',
         'data\agents.json',
         'data\secrets.json',
         'Start_HASHI_TUI.bat',
@@ -339,11 +336,6 @@ function Install-DesktopShortcuts {
         -Name 'Stop HASHI.lnk' `
         -Target (Join-Path $script:InstallRoot 'Stop_HASHI.bat') `
         -Description 'Stop HASHI Portable'
-    New-DesktopShortcut `
-        -Shell $shell `
-        -Name 'Start HASHI Workbench.lnk' `
-        -Target (Join-Path $script:InstallRoot 'Start_HASHI_Workbench.bat') `
-        -Description 'Start HASHI Portable Workbench'
 }
 
 function Remove-DesktopShortcuts {

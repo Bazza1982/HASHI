@@ -500,9 +500,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Initial Telegram `/notify` preference** — introduced the earlier
   two-state `/notify [on|off]` form. The current three-state behavior is
   documented under Unreleased above.
-- **Managed `/bg` background jobs** — added a Workbench-backed BackgroundJobManager path for long OS/process work with durable job ids, status/tail/cancel APIs, bounded stdout/stderr logs, terminal success/failure notifications, and one-shot `background-job-event` routing that can wake the responsible agent to summarize the completed job.
+- **Managed `/bg` background jobs** — added a function-layer
+  `BackgroundJobManager` for long OS/process work with durable job ids,
+  status/tail/cancel APIs, bounded stdout/stderr logs, terminal success/failure
+  notifications, and one-shot `background-job-event` routing that can wake the
+  responsible agent to summarize the completed job.
 
 ### Fixed
+
+- **Final release-contract cleanup** — aligned the Portable Windows builder
+  with the canonical CPython 3.12.13 python-build-standalone artifact, expanded
+  the npm publication allowlist to include the complete imported runtime, and
+  added a real `npm pack` contract that rejects local state and generated
+  outputs.
+- **Release test truthfulness** — moved the Veritas adapter smoke into the
+  collected pytest inventory, removed its machine-specific path, made remote
+  memory idempotence independent of an unshipped local wiki pipeline, and
+  separated platform and deliberate real-wall-clock cases from the offline
+  product claim.
+- **Forward-compatible test dependencies** — opted tests into
+  python-telegram-bot's `timedelta` retry contract, added Starlette's `httpx2`
+  test client, and replaced aiohttp string request keys with typed keys.
+- **Portable remote-memory paths** — relative private configuration now resolves
+  from the selected HASHI root, and the default wiki/Veritas vaults no longer
+  embed developer-machine paths.
 
 - **Non-blocking HER planning boundary** — strict TaskFrame and independent-review
   validation no longer suppresses the primary Agent when planning exhausts its bounded

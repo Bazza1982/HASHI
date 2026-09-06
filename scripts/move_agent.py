@@ -28,6 +28,7 @@ Usage:
   # Dry run (preview only)
   python scripts/move_agent.py zelda hashi2 --dry-run
 """
+
 from __future__ import annotations
 
 import argparse
@@ -62,8 +63,8 @@ from orchestrator.agent_move.package import AgentMoveError
 
 PACKAGE_EXT = ".hashi-agent"
 INSTANCES_FILE_CANDIDATES = [
-    Path(__file__).parent.parent / "instances.json",           # same repo
-    Path.home() / ".hashi" / "instances.json",                 # user-level
+    Path(__file__).parent.parent / "instances.json",  # same repo
+    Path.home() / ".hashi" / "instances.json",  # user-level
     Path("/mnt/c/Users") / os.environ.get("USER", "user") / ".hashi" / "instances.json",
 ]
 
@@ -72,10 +73,12 @@ INSTANCES_FILE_CANDIDATES = [
 # Encryption helpers (password-based AES via cryptography.fernet)
 # ---------------------------------------------------------------------------
 
+
 def _derive_key(password: str, salt: bytes) -> bytes:
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
     from cryptography.hazmat.primitives import hashes
     import base64
+
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=480000)
     return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
@@ -83,6 +86,7 @@ def _derive_key(password: str, salt: bytes) -> bytes:
 def encrypt_data(data: bytes, password: str) -> bytes:
     """Encrypt bytes with password. Returns: 16-byte salt + fernet token."""
     from cryptography.fernet import Fernet
+
     salt = os.urandom(16)
     key = _derive_key(password, salt)
     token = Fernet(key).encrypt(data)
@@ -92,6 +96,7 @@ def encrypt_data(data: bytes, password: str) -> bytes:
 def decrypt_data(data: bytes, password: str) -> bytes:
     """Decrypt bytes with password."""
     from cryptography.fernet import Fernet
+
     salt, token = data[:16], data[16:]
     key = _derive_key(password, salt)
     return Fernet(key).decrypt(token)
@@ -100,6 +105,7 @@ def decrypt_data(data: bytes, password: str) -> bytes:
 def has_crypto() -> bool:
     try:
         import cryptography  # noqa
+
         return True
     except ImportError:
         return False
@@ -108,6 +114,7 @@ def has_crypto() -> bool:
 # ---------------------------------------------------------------------------
 # Instance registry
 # ---------------------------------------------------------------------------
+
 
 def load_instances(instances_file: Optional[Path] = None) -> dict:
     candidates = [instances_file] if instances_file else INSTANCES_FILE_CANDIDATES
@@ -148,7 +155,11 @@ def instance_root(inst: dict) -> Path:
     """Return the filesystem root of the instance, accessible from current OS."""
     platform = inst.get("platform", "wsl")
     root = inst.get("root")
-    if root is None and not inst.get("wsl_root") and not inst.get("wsl_root_from_windows"):
+    if (
+        root is None
+        and not inst.get("wsl_root")
+        and not inst.get("wsl_root_from_windows")
+    ):
         raise ValueError(
             "this instance does not publish a filesystem root; use agent-move-v1 over HASHI Remote"
         )
@@ -182,6 +193,7 @@ def _is_wsl() -> bool:
 # ---------------------------------------------------------------------------
 # Agent discovery
 # ---------------------------------------------------------------------------
+
 
 def find_agent_in_instance(agent_id: str, root: Path) -> Optional[dict]:
     """Find agent config block from agents.json."""
@@ -217,7 +229,11 @@ def get_agent_secrets(agent_id: str, root: Path) -> dict:
     # Collect keys that start with agent_id or are exactly agent_id
     result = {}
     for k, v in all_secrets.items():
-        if k == agent_id or k.startswith(f"{agent_id}_") or k.startswith(f"{agent_id}."):
+        if (
+            k == agent_id
+            or k.startswith(f"{agent_id}_")
+            or k.startswith(f"{agent_id}.")
+        ):
             result[k] = v
     return result
 
@@ -236,6 +252,7 @@ def get_workspace_dir(agent_config: dict, root: Path) -> Optional[Path]:
 # ---------------------------------------------------------------------------
 # Package: export
 # ---------------------------------------------------------------------------
+
 
 def export_agent(
     agent_id: str,
@@ -271,7 +288,9 @@ def export_agent(
     print(f"  Source:    {source_root}")
     print(f"  Package:   {pkg_path}")
     print(f"  Workspace: {workspace}")
-    print(f"  Secrets:   {len(secrets)} keys {'(encrypted)' if password else '(plain)' if include_secrets else '(excluded)'}")
+    print(
+        f"  Secrets:   {len(secrets)} keys {'(encrypted)' if password else '(plain)' if include_secrets else '(excluded)'}"
+    )
 
     if workspace:
         ws_files = list(workspace.rglob("*"))
@@ -314,11 +333,12 @@ def export_agent(
 # Package: import
 # ---------------------------------------------------------------------------
 
+
 def import_agent(
     pkg_path: Path,
     target_root: Path,
     password: Optional[str] = None,
-    on_conflict: str = "ask",   # ask | overwrite | merge | skip
+    on_conflict: str = "ask",  # ask | overwrite | merge | skip
     dry_run: bool = False,
 ) -> bool:
     """Unpack a .hashi-agent zip into target instance."""
@@ -358,13 +378,19 @@ def import_agent(
     existing = find_agent_in_instance(agent_id, target_root)
     if existing:
         if on_conflict == "ask":
-            ans = input(f"\n  Agent '{agent_id}' already exists in target. [O]verwrite / [M]erge memories / [S]kip? ").strip().lower()
+            ans = (
+                input(
+                    f"\n  Agent '{agent_id}' already exists in target. [O]verwrite / [M]erge memories / [S]kip? "
+                )
+                .strip()
+                .lower()
+            )
             if ans == "s":
                 print("Skipped.")
                 return False
             on_conflict = "overwrite" if ans == "o" else "merge"
         if on_conflict == "skip":
-            print(f"  Skipping — agent already exists.")
+            print("  Skipping — agent already exists.")
             return False
 
     if dry_run:
@@ -381,7 +407,7 @@ def import_agent(
                 shutil.rmtree(target_ws)
             target_ws.mkdir(parents=True, exist_ok=True)
             for name in ws_files:
-                rel = name[len("workspace/"):]
+                rel = name[len("workspace/") :]
                 if not rel:
                     continue
                 dest = target_ws / rel
@@ -406,7 +432,7 @@ def _merge_workspace(zf: zipfile.ZipFile, target_ws: Path, agent_id: str):
     """Merge workspace files; for sqlite, merge memory rows by timestamp."""
     ws_files = [n for n in zf.namelist() if n.startswith("workspace/")]
     for name in ws_files:
-        rel = name[len("workspace/"):]
+        rel = name[len("workspace/") :]
         if not rel:
             continue
         dest = target_ws / rel
@@ -445,6 +471,7 @@ def _merge_sqlite(src_bytes: bytes, dest_path: Path):
 # Direct instance-to-instance move
 # ---------------------------------------------------------------------------
 
+
 def move_agent(
     agent_id: str,
     source_root: Path,
@@ -476,9 +503,15 @@ def move_agent(
     existing = find_agent_in_instance(agent_id, target_root)
     if existing:
         if sync_memories and target_ws.exists() and workspace:
-            print(f"  Conflict: merging memories (--sync mode)")
+            print("  Conflict: merging memories (--sync mode)")
         else:
-            ans = input(f"\n  Agent '{agent_id}' already exists in target. [O]verwrite / [M]erge / [S]kip? ").strip().lower()
+            ans = (
+                input(
+                    f"\n  Agent '{agent_id}' already exists in target. [O]verwrite / [M]erge / [S]kip? "
+                )
+                .strip()
+                .lower()
+            )
             if ans == "s":
                 print("Skipped.")
                 return False
@@ -520,9 +553,9 @@ def move_agent(
     # Handle source
     if not keep_source:
         _deactivate_agent(agent_id, source_root)
-        print(f"  Source:   agent deactivated (is_active: false) — workspace preserved")
+        print("  Source:   agent deactivated (is_active: false) — workspace preserved")
     else:
-        print(f"  Source:   kept active (--keep-source)")
+        print("  Source:   kept active (--keep-source)")
 
     print(f"\n✅ Agent '{agent_id}' moved to {target_root}")
     print(f"   Next: /reboot on target instance to start {agent_id}")
@@ -532,6 +565,7 @@ def move_agent(
 # ---------------------------------------------------------------------------
 # agents.json / secrets.json helpers
 # ---------------------------------------------------------------------------
+
 
 def _upsert_agent_config(agent_config: dict, root: Path, agent_id: str):
     agents_file = root / "agents.json"
@@ -568,7 +602,7 @@ def _upsert_agent_config(agent_config: dict, root: Path, agent_id: str):
 
     with open(agents_file, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    print(f"  agents.json updated on target")
+    print("  agents.json updated on target")
 
 
 def _upsert_secrets(secrets: dict, root: Path):
@@ -609,13 +643,16 @@ def _try_vector_backfill(root: Path, agent_id: str):
     ws = root / "workspaces" / agent_id
     if migrate.exists() and ws.exists():
         import subprocess
+
         try:
             result = subprocess.run(
                 [sys.executable, str(migrate), str(ws)],
-                capture_output=True, text=True, cwd=str(root)
+                capture_output=True,
+                text=True,
+                cwd=str(root),
             )
             if result.returncode == 0:
-                print(f"  Vector memory backfill complete")
+                print("  Vector memory backfill complete")
             else:
                 print(f"  Vector backfill skipped: {result.stderr.strip()[:80]}")
         except Exception as e:
@@ -625,6 +662,7 @@ def _try_vector_backfill(root: Path, agent_id: str):
 # ---------------------------------------------------------------------------
 # USB auto-detect
 # ---------------------------------------------------------------------------
+
 
 def detect_usb_paths() -> list[Path]:
     candidates = []
@@ -637,6 +675,7 @@ def detect_usb_paths() -> list[Path]:
                 candidates.append(d)
     else:
         import string
+
         for letter in string.ascii_uppercase[3:]:  # D onwards
             p = Path(f"{letter}:\\")
             if p.exists():
@@ -647,6 +686,7 @@ def detect_usb_paths() -> list[Path]:
 # ---------------------------------------------------------------------------
 # Migration report
 # ---------------------------------------------------------------------------
+
 
 def print_report(agent_id: str, source: str, target: str, details: list[str]):
     width = 55
@@ -666,6 +706,7 @@ def print_report(agent_id: str, source: str, target: str, details: list[str]):
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="HASHI Agent Migration Tool",
@@ -673,30 +714,85 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("agent_id", nargs="?", help="Agent ID to move/export")
-    parser.add_argument("target_instance", nargs="?", help="Target instance ID (from instances.json)")
+    parser.add_argument(
+        "target_instance", nargs="?", help="Target instance ID (from instances.json)"
+    )
 
-    parser.add_argument("--export", metavar="DIR", help="Export agent to package in this directory")
-    parser.add_argument("--import", dest="import_path", metavar="FILE", help="Import agent from .hashi-agent package")
-    parser.add_argument("--target", metavar="INSTANCE", help="Target instance for --import (default: current)")
+    parser.add_argument(
+        "--export", metavar="DIR", help="Export agent to package in this directory"
+    )
+    parser.add_argument(
+        "--import",
+        dest="import_path",
+        metavar="FILE",
+        help="Import agent from .hashi-agent package",
+    )
+    parser.add_argument(
+        "--target",
+        metavar="INSTANCE",
+        help="Target instance for --import (default: current)",
+    )
 
-    parser.add_argument("--plain", action="store_true", help="Do not encrypt secrets (export only)")
-    parser.add_argument("--no-secrets", action="store_true", help="Exclude secrets from package")
-    parser.add_argument("--keep-source", action="store_true", help="Keep source agent active after move")
-    parser.add_argument("--sync", action="store_true", help="Merge memories instead of overwrite (move-back)")
-    parser.add_argument("--dry-run", action="store_true", help="Preview actions without making changes")
-    parser.add_argument("--list-instances", action="store_true", help="List known instances")
-    parser.add_argument("--list-agents", nargs="?", const="auto", metavar="INSTANCE", help="List agents in an instance")
-    parser.add_argument("--instances-file", metavar="FILE", help="Path to instances.json")
-    parser.add_argument("--source-instance", metavar="INSTANCE", help="Source instance (default: local global.instance_id)")
-    parser.add_argument("--password", metavar="PASS", help="Encryption password (prompted if omitted for encrypted packages)")
-    parser.add_argument("--yes", action="store_true", help="Confirm the prepared two-phase move")
-    parser.add_argument("--confirm", metavar="MOVE_ID", help="Commit an already staged agent-move-v1 package")
-    parser.add_argument("--cancel", metavar="MOVE_ID", help="Roll back an already staged agent-move-v1 package")
+    parser.add_argument(
+        "--plain", action="store_true", help="Do not encrypt secrets (export only)"
+    )
+    parser.add_argument(
+        "--no-secrets", action="store_true", help="Exclude secrets from package"
+    )
+    parser.add_argument(
+        "--keep-source", action="store_true", help="Keep source agent active after move"
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Merge memories instead of overwrite (move-back)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview actions without making changes"
+    )
+    parser.add_argument(
+        "--list-instances", action="store_true", help="List known instances"
+    )
+    parser.add_argument(
+        "--list-agents",
+        nargs="?",
+        const="auto",
+        metavar="INSTANCE",
+        help="List agents in an instance",
+    )
+    parser.add_argument(
+        "--instances-file", metavar="FILE", help="Path to instances.json"
+    )
+    parser.add_argument(
+        "--source-instance",
+        metavar="INSTANCE",
+        help="Source instance (default: local global.instance_id)",
+    )
+    parser.add_argument(
+        "--password",
+        metavar="PASS",
+        help="Encryption password (prompted if omitted for encrypted packages)",
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="Confirm the prepared two-phase move"
+    )
+    parser.add_argument(
+        "--confirm",
+        metavar="MOVE_ID",
+        help="Commit an already staged agent-move-v1 package",
+    )
+    parser.add_argument(
+        "--cancel",
+        metavar="MOVE_ID",
+        help="Roll back an already staged agent-move-v1 package",
+    )
 
     args = parser.parse_args()
     if not args.source_instance:
         args.source_instance = local_instance_id().lower()
-    instances = load_instances(Path(args.instances_file) if args.instances_file else None)
+    instances = load_instances(
+        Path(args.instances_file) if args.instances_file else None
+    )
 
     if args.confirm or args.cancel:
         try:
@@ -722,7 +818,9 @@ def main():
 
     # ── list agents ────────────────────────────────────────────────────────
     if args.list_agents is not None:
-        inst_name = args.list_agents if args.list_agents != "auto" else args.source_instance
+        inst_name = (
+            args.list_agents if args.list_agents != "auto" else args.source_instance
+        )
         inst = resolve_instance(inst_name, instances)
         root = (
             HASHI_ROOT
@@ -762,7 +860,8 @@ def main():
     # ── export ────────────────────────────────────────────────────────────
     if args.export:
         if not args.agent_id:
-            print("Error: agent_id required for --export"); sys.exit(1)
+            print("Error: agent_id required for --export")
+            sys.exit(1)
 
         resolve_instance(args.source_instance, instances)
         source_root = HASHI_ROOT
@@ -771,12 +870,22 @@ def main():
         password = None
         if not args.plain and not args.no_secrets:
             if has_crypto():
-                password = args.password or getpass.getpass("Set package password (Enter to skip encryption): ").strip() or None
+                password = (
+                    args.password
+                    or getpass.getpass(
+                        "Set package password (Enter to skip encryption): "
+                    ).strip()
+                    or None
+                )
             else:
-                print("  WARNING: cryptography package not installed — exporting secrets as plain text")
+                print(
+                    "  WARNING: cryptography package not installed — exporting secrets as plain text"
+                )
 
         export_agent(
-            args.agent_id, source_root, dest_dir,
+            args.agent_id,
+            source_root,
+            dest_dir,
             password=password,
             include_secrets=not args.no_secrets,
             dry_run=args.dry_run,
@@ -805,7 +914,10 @@ def main():
         )
         sys.exit(1)
     if args.plain:
-        print("Error: plaintext Agent credentials are not supported by agent-move-v1.", file=sys.stderr)
+        print(
+            "Error: plaintext Agent credentials are not supported by agent-move-v1.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if args.no_secrets:
         print(

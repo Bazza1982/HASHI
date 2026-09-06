@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import hashlib
 import json
 import re
 import sys
@@ -233,14 +234,16 @@ def test_deployment_versions_derive_from_the_runtime_authority():
     assert f"FROM python:{expected_python}-slim" in (
         ROOT / "Dockerfile.enterprise"
     ).read_text(encoding="utf-8")
-    for relative in (
-        "mac/prepare_usb.sh",
-        "windows/prepare_usb.bat",
-        "windows/prepare_usb_international.bat",
-    ):
-        content = (ROOT / relative).read_text(encoding="utf-8")
-        assert expected_python in content
-        assert expected_date in content
+    mac_builder = (ROOT / "mac" / "prepare_usb.sh").read_text(encoding="utf-8")
+    assert expected_python in mac_builder
+    assert expected_date in mac_builder
+
+    windows_builder = (
+        ROOT / "packaging" / "portable_windows" / "build.py"
+    ).read_text(encoding="utf-8")
+    assert 'tomllib.load(_policy_file)["tool"]["hashi"]["runtime"]' in windows_builder
+    assert 'PYTHON_VERSION = str(_RUNTIME_POLICY["python"])' in windows_builder
+    assert 'PYTHON_BUILD_DATE = str(_RUNTIME_POLICY["portable-build-date"])' in windows_builder
 
 
 def test_standard_lock_covers_every_standard_requirement_and_launch_path():
@@ -265,8 +268,6 @@ def test_standard_lock_covers_every_standard_requirement_and_launch_path():
         "bin/bridge-u.bat",
         "Dockerfile.enterprise",
         "mac/prepare_usb.sh",
-        "windows/prepare_usb.bat",
-        "windows/prepare_usb_international.bat",
         "postinstall.js",
     ):
         content = (ROOT / relative).read_text(encoding="utf-8")
@@ -295,42 +296,52 @@ def test_npm_package_contains_runtime_authority_and_reproducible_lock():
     included = set(package["files"])
 
     assert {
+        "adapters/",
+        "browser_gateway/",
+        "flow/",
+        "locales/",
+        "nagare/",
+        "orchestrator/",
         "pyproject.toml",
+        "remote/",
         "constraints/standard-py312.lock",
         "scripts/check_runtime_contract.py",
+        "scripts/launcher_helper.py",
+        "scripts/resolve_instance_runtime.py",
+        "tools/",
+        "transports/",
+        "tui/",
+    } <= included
+    assert {
+        "!flow/runs/**",
+        "!flow/evaluation_kb/improvements/**",
+        "!flow/evaluation_kb/workflow_scores/**",
+        "!flow/evaluation_kb/workflow_versions/**",
+        "!superloops/loops/**",
+        "!superloops/recordings/**",
     } <= included
 
 
-@pytest.mark.parametrize(
-    "relative",
-    ("windows/prepare_usb.bat", "windows/prepare_usb_international.bat"),
-)
-def test_windows_portable_builder_uses_approved_python_distribution(relative):
-    policy = load_runtime_policy(ROOT)
-    content = (ROOT / relative).read_text(encoding="utf-8")
+def test_vendored_usecomputer_binary_has_reviewed_provenance():
+    binary = ROOT / "tools" / "bin" / "usecomputer"
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    notice = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
 
-    assert f"set PYTHON_VERSION={policy.python_text}" in content
-    assert f"set PBS_DATE={policy.portable_build_date}" in content
-    assert "astral-sh/python-build-standalone" in content
-    assert "install_only_stripped.tar.gz" in content
-    assert "tar -xzf" in content
-    assert "-m ensurepip" in content
-    assert "check_runtime_contract.py" in content
-    assert "python.org/ftp/python" not in content
-    assert "python312._pth" not in content
-    assert "get-pip.py" not in content
+    assert digest == "6ed5444144e08de1225a64f3e990115748fb854eece7aaffc0469c5898d438e4"
+    assert "usecomputer 0.1.11" in notice
+    assert digest in notice
+    assert "Copyright (c) 2026 Tommy D. Rossi" in notice
 
 
-def test_legacy_usb_path_repair_cannot_bypass_runtime_contract():
-    policy = load_runtime_policy(ROOT)
-    content = (ROOT / "fix_usb_path.bat").read_text(encoding="utf-8")
+def test_retired_windows_usb_packagers_are_not_parallel_release_paths():
+    assert not (ROOT / "windows" / "prepare_usb.bat").exists()
+    assert not (ROOT / "windows" / "prepare_usb_international.bat").exists()
+    assert not (ROOT / "fix_usb_path.bat").exists()
 
-    assert f'set "PYTHON_VERSION={policy.python_text}"' in content
-    assert "sys.version_info[:3] == tuple(map(int" in content
-    assert "standard-py312.lock" in content
-    assert "check_runtime_contract.py" in content
-    assert "python312._pth" not in content
-    assert "get-pip.py" not in content
+    builder = ROOT / "packaging" / "portable_windows" / "build.py"
+    guide = ROOT / "packaging" / "portable_windows" / "README.md"
+    assert builder.is_file()
+    assert guide.is_file()
 
 
 def test_ci_runtime_matrix_uses_only_the_canonical_minor():

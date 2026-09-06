@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CORE_HER_V2_PROVIDERS = {"hashi-api", "deepseek-api", "openrouter-api"}
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(os.name == "nt", reason="WSL mount-scope contract")
 def test_wsl_drive_scope_resolves_only_the_mounted_windows_drive(monkeypatch):
     monkeypatch.setattr("orchestrator.process_execution.is_wsl", lambda: True)

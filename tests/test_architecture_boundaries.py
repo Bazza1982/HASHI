@@ -8,9 +8,9 @@ from remote import port_selection
 
 ROOT = Path(__file__).resolve().parent.parent
 PRIVATE_PATH_MARKERS = (
-    "/home/lily",
-    "/mnt/c/Users/thene",
-    "C:/Users/thene",
+    "/home/" + "lily",
+    "/mnt/c/Users/" + "thene",
+    "C:/Users/" + "thene",
 )
 
 

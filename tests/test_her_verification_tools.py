@@ -146,6 +146,11 @@ async def test_verification_run_lists_recipes_and_rejects_legacy_shell_text(
     )
     assert not (tmp_path / "should-not-exist").exists()
 
+    offline_recipe = her_verification._recipe_catalog(None)["pytest_offline"]
+    assert offline_recipe["argv"][-1] == (
+        "not contract and not live and not platform and not real_wall_clock"
+    )
+
 
 @pytest.mark.asyncio
 async def test_verification_run_executes_registered_argv_in_current_workspace(

@@ -1,6 +1,6 @@
 """
 HASHI Flow — Task State
-任务状态持久化，工作流可从任意检查点恢复
+任务状态持久化；当前进程内支持信号暂停/恢复，不承诺崩溃后重建 worker
 """
 
 import json
@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from nagare.logging.events import build_runtime_snapshot
+from nagare.paths import validate_path_component
 
 
 def utc_now():
@@ -19,9 +20,9 @@ class TaskState:
     """持久化工作流和步骤状态到 state.json（线程安全）"""
 
     def __init__(self, run_id: str, runs_root: str | Path = "flow/runs"):
-        self.run_id = run_id
+        self.run_id = validate_path_component(run_id, label="run_id")
         self.runs_root = Path(runs_root)
-        self.state_path = self.runs_root / run_id / "state.json"
+        self.state_path = self.runs_root / self.run_id / "state.json"
         self._lock = threading.Lock()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.state_path.exists():
@@ -92,14 +93,16 @@ class TaskState:
         with self._lock:
             state = self._read()
             if step_id not in state["steps"]:
-                state["steps"][step_id] = {"status": "pending"}
-            state["steps"][step_id]["status"] = status
-            state["steps"][step_id]["updated_at"] = utc_now()
+                state["steps"][step_id] = {"status": "pending", "attempt": 0}
+            current = state["steps"][step_id]
+            current["status"] = status
+            current["updated_at"] = utc_now()
             if status == "running":
-                state["steps"][step_id]["started_at"] = utc_now()
+                current["attempt"] = int(current.get("attempt", 0)) + 1
+                current["started_at"] = utc_now()
             elif status in ("completed", "failed"):
-                state["steps"][step_id]["ended_at"] = utc_now()
-            state["steps"][step_id].update(kwargs)
+                current["ended_at"] = utc_now()
+            current.update(kwargs)
             state["updated_at"] = utc_now()
             self._write(state)
 

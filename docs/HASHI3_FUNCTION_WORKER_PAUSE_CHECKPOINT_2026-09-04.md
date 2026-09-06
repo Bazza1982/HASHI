@@ -24,7 +24,7 @@ they do not supersede the live-status boundary recorded here.
 
 ## Repository checkpoint
 
-- Repository: `C:\Users\thene\projects\HASHI3`
+- Repository: a dedicated Windows HASHI3 validation checkout
 - Branch: `main`
 - HEAD: `02f6af378f0f` (`feat(runtime): establish transactional Python core contract`)
 - Remote relation at pause: `main` is 29 commits ahead of `origin/main` and 0 behind.

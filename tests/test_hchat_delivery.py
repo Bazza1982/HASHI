@@ -56,7 +56,7 @@ def test_parse_hchat_draft_accepts_fenced_json():
         ('{"target": "ying"}', 'missing required field "message"'),
         ("not json", "invalid JSON"),
         (
-            '/home/lily/projects/hashi/.venv/bin/python3 tools/hchat_send.py --to ying --text "hello"',
+            '/home/user/projects/hashi/.venv/bin/python tools/hchat_send.py --to agent2 --text "hello"',
             "draft looks like a shell command",
         ),
         (

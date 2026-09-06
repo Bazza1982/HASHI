@@ -618,7 +618,7 @@ python scripts/transfer_hermes_agent.py plan \
 
 python scripts/transfer_hermes_agent.py export \
   --from hashi \
-  --root /home/lily/projects/hashi \
+  --root /path/to/HASHI \
   --agent zelda \
   --out ./packages
 
@@ -638,7 +638,7 @@ python scripts/transfer_hermes_agent.py export \
 python scripts/transfer_hermes_agent.py import \
   --to hashi \
   --package ./packages/assistant.hashi-hermes-agent \
-  --root /home/lily/projects/hashi
+  --root /path/to/HASHI
 ```
 
 Later, the same functionality can be exposed through:

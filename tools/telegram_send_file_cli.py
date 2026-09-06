@@ -140,13 +140,13 @@ def send_file(file_path: Path, caption: str | None, file_type: str,
 
     # chat_id field
     write(f"--{boundary}\r\n")
-    write(f'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
+    write('Content-Disposition: form-data; name="chat_id"\r\n\r\n')
     write(f"{chat_id}\r\n")
 
     # caption field
     if caption:
         write(f"--{boundary}\r\n")
-        write(f'Content-Disposition: form-data; name="caption"\r\n\r\n')
+        write('Content-Disposition: form-data; name="caption"\r\n\r\n')
         write(f"{caption}\r\n")
 
     # file field

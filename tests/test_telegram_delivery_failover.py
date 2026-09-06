@@ -112,7 +112,7 @@ async def test_handle_retry_after_persists_incident_and_warns_failover(tmp_path)
 
     await failover.handle_retry_after(
         source,
-        exc=RetryAfter(123),
+        exc=RetryAfter(timedelta(seconds=123)),
         chat_id=321,
         request_id="req-1",
         purpose="response",
@@ -140,7 +140,7 @@ async def test_handle_blocked_send_dedupes_warning(tmp_path):
 
     await failover.handle_retry_after(
         source,
-        exc=RetryAfter(60),
+        exc=RetryAfter(timedelta(seconds=60)),
         chat_id=321,
         request_id="req-1",
         purpose="response",
@@ -170,7 +170,7 @@ async def test_failover_warning_generic_error_is_recorded_not_raised(tmp_path):
 
     await failover.handle_retry_after(
         source,
-        exc=RetryAfter(60),
+        exc=RetryAfter(timedelta(seconds=60)),
         chat_id=321,
         request_id="req-1",
         purpose="response",
@@ -221,7 +221,7 @@ async def test_tick_recovery_clears_block_and_sends_notice(tmp_path):
 @pytest.mark.asyncio
 async def test_tick_recovery_retry_after_reextends_block(tmp_path):
     source = _runtime(tmp_path, "kasumi")
-    source.app.bot = _Bot(send_error=RetryAfter(90))
+    source.app.bot = _Bot(send_error=RetryAfter(timedelta(seconds=90)))
     orchestrator = SimpleNamespace(runtimes=[source], raw_config={}, global_cfg=SimpleNamespace(project_root=tmp_path))
     source.orchestrator = orchestrator
     path = tmp_path / "state" / "telegram_delivery_health.json"

@@ -1,146 +1,85 @@
 # Nagare YAML Round-Trip Contract
 
-## Purpose
+Nagare Viz must preserve workflow meaning and must not silently discard user-authored data.
+Runtime validity and text fidelity are separate checks: a file can be preserved losslessly while
+still being intentionally invalid under the current runtime contract.
 
-This document defines what `nagare-viz` and future codec code are allowed to
-change when loading and exporting Nagare workflow YAML.
+## Preservation Rules
 
-The standard is not "exports valid YAML." The standard is "preserves workflow
-meaning and does not silently discard user-authored data."
+1. A no-op Python or editor export returns the original source unchanged.
+2. Unknown top-level and nested fields remain present unless the user explicitly removes them.
+3. `depends` is authoritative for execution order; canvas position is not.
+4. Editor layout belongs only under `x-nagare-viz`.
+5. A structural form edit must not silently convert legacy or unsupported semantics.
+6. Parse failures, invalid DAGs, retired fields, and unsupported backends block form export.
+7. Runtime overlays bind to a persisted run snapshot, never to a mutable editor draft.
 
-## Scope
+## Current Export Paths
 
-This contract applies to:
+- **No-op export:** returns the original YAML source unchanged.
+- **Metadata-only export:** replaces or appends only `x-nagare-viz`; surrounding source, comments,
+  unknown fields, and ordering are preserved.
+- **Structured form export:** rewrites supported fields from draft state. Unknown fields are carried
+  forward, but comments and exact ordering are not guaranteed, so the editor shows a fidelity
+  warning.
+- **Raw YAML:** preserves full user control and is the only semantic edit mode for Class C files.
 
-- `nagare-core` YAML parsing and serialization
-- `nagare-viz` visual editing
-- raw YAML edit mode
-- future migration/import tools
-
-It applies to the Phase 0 fixture corpus in
-`tests/fixtures/manifest.json`.
-
-## Non-Negotiable Preservation Rules
-
-1. A workflow file that loads successfully must be exportable again without
-   dropping known fields.
-2. Unknown top-level fields must be preserved unless the user explicitly deletes
-   them.
-3. Unknown nested fields under `agents`, `steps`, `pre_flight`, `meta`,
-   `error_handling`, `evaluation`, and `output` must be preserved unless the
-   user explicitly deletes them.
-4. `depends` semantics are authoritative for execution order. Visual layout is
-   never authoritative.
-5. Editor-owned layout metadata must live under `x-nagare-viz`.
-6. Export must not silently convert a workflow into a different execution model.
-7. Runtime overlays must bind to immutable run snapshots, not the mutable draft
-   currently open in the editor.
-8. When the editor cannot preserve a property with confidence, export must be
-   blocked or require an explicit warning/override path.
-
-## Comments and Ordering
-
-Comments and field ordering matter for hand-maintained workflow files, but they
-may not always be preservable through every edit path.
-
-Rules:
-
-- comment preservation is the target for no-op loads, raw-YAML edits, and
-  metadata-only edits
-- if comments will be lost on export, the UI must warn before export
-- existing key ordering should be preserved where practical
-- if ordering is normalized, the export path must warn before export
-
-The Phase 0 fixture `tests/fixtures/unknown_fields_workflow.yaml` exists
-specifically to keep this risk visible.
-
-## Unknown Field Policy
-
-Unknown fields fall into three buckets:
-
-- editor-owned extension fields
-  Example: `x-nagare-viz`
-- engine-owned future extension fields
-  Example: future `x-nagare-*` blocks
-- foreign or legacy fields
-  Example: `workflow_id`, `tasks`, `input_binding`, custom vendor metadata
-
-Policy:
-
-- preserve all three buckets on load/export
-- surface unknown fields in the UI, even if they are not form-editable
-- do not silently remap foreign fields into canonical fields
-- do not silently delete legacy dialect content because it does not fit the new
-  schema
+There is no override that allows a known runtime-invalid form export to masquerade as safe.
 
 ## Compatibility Classes
 
-### Class A: Full-fidelity editable
+- **Class A:** form-editable without a known fidelity warning.
+- **Class B:** inspectable and partially form-editable; comments or unsupported fields require a
+  visible warning.
+- **Class C:** inspect and raw-edit only.
 
-The file can be safely edited visually and exported without a fidelity warning.
+The current fixture results are:
 
-### Class B: Editable with warning
+| Fixture | Class | Reason |
+|---|---|---|
+| `smoke_test.yaml` | B | comments present |
+| `book_translation.yaml` | B | comments present |
+| `academic_writing_paragraph.yaml` | B | comments present |
+| `meta_workflow_creation.yaml` | B | comments present |
+| `unknown_fields_workflow.yaml` | B | comments plus preserved extensions |
+| `legacy_english_news_to_chinese_markdown.yaml` | C | legacy dialect |
 
-The file can be rendered and partially edited, but some comments, ordering, or
-unsupported sections may not survive export. The user must see a warning.
+The unknown-fields fixture deliberately contains a retired timeout field. The codec must preserve
+it, while runtime validation must block it. That is an adversarial preservation test, not a
+publishable workflow example.
 
-### Class C: Inspect and raw-edit only
+## Unknown Fields
 
-The file can be opened, validated, and edited in raw YAML mode, but the visual
-editor must not claim safe round-trip support.
+Unknown data is categorized for display, not silently normalized:
 
-Current expectation by fixture:
+- editor extension data such as `x-nagare-viz`;
+- future engine extensions;
+- foreign or legacy fields.
 
-- `smoke_test.yaml`: Class A
-- `book_translation.yaml`: Class A/B depending on codec maturity
-- `academic_writing_paragraph.yaml`: Class A/B depending on codec maturity
-- `meta_workflow_creation.yaml`: Class B
-- `legacy_english_news_to_chinese_markdown.yaml`: Class C
-- `unknown_fields_workflow.yaml`: Class B until comment-preserving export exists
+The editor lists unsupported scopes. Class B metadata-only edits are allowed; structural export is
+warned or blocked according to the active fidelity and runtime findings. Class C stays in raw mode.
 
-## Canonical Editor Metadata
+## Blocking Conditions
 
-Editor layout metadata is allowed only in a dedicated extension block:
+Form export is blocked for:
 
-```yaml
-x-nagare-viz:
-  version: 1
-  nodes:
-    draft:
-      position:
-        x: 120
-        y: 80
-```
+- duplicate YAML keys or parse errors;
+- duplicate step IDs, dependency cycles, or missing step/agent references;
+- unsupported runtime backends or strategies;
+- invalid required workflow, worker, step, input, output, artifact, or gate fields;
+- retired fixed timeout/retry controls and retired worker fields;
+- Class C structural edits.
 
-Rules:
+## Contract Evidence
 
-- this block must not affect execution
-- unknown fields inside this block must also be preserved
-- deleting this block must only remove editor metadata, not execution data
+The Python and frontend suites assert:
 
-## Export Blocking Conditions
+- the fixture manifest is complete;
+- no-op source equality;
+- preservation of comments, unknown fields, and editor metadata;
+- duplicate-key and DAG rejection;
+- runtime rejection of preserved retired fields;
+- editor export blocking and compatibility-class behavior;
+- execution of an exported valid workflow.
 
-The editor must block export or require explicit confirmation when:
-
-- duplicate step ids exist
-- references point to missing agents or steps
-- the graph cannot be mapped back to the YAML execution semantics
-- unsupported legacy constructs would be discarded
-- comment/order preservation is known to be broken for the chosen edit path
-- raw YAML contains parse errors
-
-## Contract Tests Required
-
-At minimum, the automated suite must cover:
-
-- fixture inventory exists and remains readable
-- unknown top-level and nested fields survive round-trip
-- editor metadata survives round-trip
-- no-op load/export does not change execution semantics
-- legacy workflow fixtures are detected and downgraded safely instead of being
-  "normalized" destructively
-
-## Current Gaps
-
-Phase 0 records the contract before the codec exists. The initial contract test
-is allowed to fail or xfail until a real round-trip implementation is present.
+These tests are active requirements; none is an allowed failure or `xfail`.

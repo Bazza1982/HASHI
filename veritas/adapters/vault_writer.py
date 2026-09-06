@@ -46,14 +46,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_VAULT_PATH = "/home/lily/obsidian/Research"
 _INDEX_FILENAME = "library_index.jsonl"
+
+
+def _default_vault_path() -> Path:
+    configured = os.environ.get("HASHI_VERITAS_VAULT", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / "Documents" / "HASHI" / "Research"
 
 
 def vault_writer(task_message: dict) -> dict:
@@ -61,7 +68,7 @@ def vault_writer(task_message: dict) -> dict:
     params = payload.get("params", {})
     input_artifacts = payload.get("input_artifacts", {})
 
-    vault_path = Path(params.get("vault_path") or _DEFAULT_VAULT_PATH)
+    vault_path = Path(params.get("vault_path") or _default_vault_path()).expanduser()
     _pdf_str = params.get("pdf_path") or ""
     pdf_source: Path | None = Path(_pdf_str) if _pdf_str else None
 

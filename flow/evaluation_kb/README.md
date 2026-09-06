@@ -1,6 +1,7 @@
 # HASHI Flow — Evaluation Knowledge Base
 
-评估知识库。由 Evaluator Agent 维护，记录工作流执行模式、质量规律和改进建议。
+评估知识库。公开仓库只携带空白、无私人运行数据的模板；模式和模型建议只有在其
+证据与复现实验可一同审查时才应提交。
 
 ## 目录结构
 
@@ -22,15 +23,19 @@ evaluation_kb/
 
 ## 使用方式
 
-Evaluator Agent 在每次工作流运行完成后：
+HASHI Evaluator 在每次工作流运行完成后：
 1. 读取 `flow/runs/{run_id}/evaluation_events.jsonl`
-2. 分析事件序列，提炼模式
-3. 更新本目录下的 YAML 文件
-4. 生成并归档改进建议到 `improvements/pending.yaml`
+2. 分析事件序列并计算有证据支持的指标
+3. 将运行分数追加到 `workflow_scores/scores.jsonl`
+4. 将规则生成的改进建议写入本地 `improvements/pending.yaml`
+
+`improvements/`、`workflow_scores/` 和 `workflow_versions/` 是被发布边界排除的本地
+运行数据。模式、benchmark 和工作流不会被被动 Evaluator 自动修改；本地阈值只会
+产生人工复核提示。
 
 ## 评分维度
 
-- **效率分** (0-10)：耗时 vs 任务复杂度
-- **质量分** (0-10)：输出质量（由人工或后续 agent 反馈）
+- **效率分**：仅在存在任务复杂度基准时可用；当前被动评估为 `null`
+- **质量分**：仅在存在 Validator 或下游反馈时可用；当前被动评估为 `null`
 - **稳定分** (0-10)：成功率，debug 次数
 - **介入分** (0-10)：实际人工介入 vs 预期（越少越好）

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$DesktopPath
@@ -19,8 +19,7 @@ $script:SourceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'
 $script:InstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
 $script:ShortcutNames = @(
     'Start HASHI.lnk',
-    'Stop HASHI.lnk',
-    'Start HASHI Workbench.lnk'
+    'Stop HASHI.lnk'
 )
 
 function Write-BilingualMessage {

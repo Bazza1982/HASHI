@@ -601,7 +601,6 @@ def test_context_profiles_separate_persistent_cli_and_stateless_api_memory(
 
 
 def test_incremental_memory_plus_prompt_keeps_authoritative_request_marker_without_background(
-    tmp_path: Path,
 ) -> None:
     class EmptyMemoryStore:
         def get_completed_exchanges(self, *, limit: int):

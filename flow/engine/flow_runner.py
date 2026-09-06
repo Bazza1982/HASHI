@@ -7,17 +7,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from nagare.engine.runner import FlowRunner as CoreFlowRunner
-
 from flow.adapters.hashi import (
-    HChatNotifier,
-    HASHIEvaluator,
-    HASHIStepHandler,
     ensure_hashi_evaluator,
     ensure_hashi_notifier,
     ensure_hashi_step_handler,
 )
-
+from nagare.engine.runner import FlowRunner as CoreFlowRunner
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -27,7 +22,11 @@ class FlowRunner(CoreFlowRunner):
         repo_root = kwargs.pop("repo_root", ROOT)
         runs_root = kwargs.pop("runs_root", ROOT / "flow" / "runs")
         notifier = ensure_hashi_notifier(kwargs.pop("notifier", None))
-        evaluator = ensure_hashi_evaluator(kwargs.pop("evaluator", None))
+        evaluator = ensure_hashi_evaluator(
+            kwargs.pop("evaluator", None),
+            runs_root=runs_root,
+            kb_path=Path(repo_root) / "flow" / "evaluation_kb",
+        )
         step_handler = ensure_hashi_step_handler(
             kwargs.pop("step_handler", None),
             run_id=run_id,

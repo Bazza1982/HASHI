@@ -254,7 +254,7 @@ python browser_cli.py screenshot --url "..." --out /tmp/shot.png --describe --ra
 ### 5.3 Model Storage
 
 ```
-/home/lily/.cache/florence2-onnx/
+~/.cache/florence2-onnx/
 ├── florence2-base-int8.onnx
 └── tokenizer/
 ```
@@ -367,7 +367,7 @@ Over a typical conversation with 5–10 screenshots, this saves 10,000–25,000 
 Every image processed by the pipeline emits one structured log event to a JSONL file:
 
 ```
-/home/lily/.cache/florence2-stats/events.jsonl
+~/.cache/florence2-stats/events.jsonl
 ```
 
 Each line is a JSON object:
@@ -418,7 +418,7 @@ Token estimates use the rule of thumb: raw image ≈ `image_bytes / 40` tokens; 
 ### 12.3 Query Script
 
 ```
-/home/lily/projects/hashi/scripts/florence_stats.py
+<HASHI_ROOT>/scripts/florence_stats.py
 ```
 
 Usage:

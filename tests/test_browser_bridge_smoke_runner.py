@@ -75,6 +75,7 @@ def _build_minimal_harness(root: Path, *, socket_path: str = "/tmp/harness.sock"
     (root / "README.md").write_text("# test\n", encoding="utf-8")
 
 
+@pytest.mark.platform
 @requires_unix_stream_server
 def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     root = tmp_path / "harness"
@@ -99,6 +100,7 @@ def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     assert trace_lines[-1]["event"] == "server_stopped"
 
 
+@pytest.mark.platform
 @requires_unix_stream_server
 def test_execute_smoke_plan_waits_for_delayed_stub_bridge(tmp_path: Path) -> None:
     root = tmp_path / "harness"

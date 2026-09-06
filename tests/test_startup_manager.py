@@ -34,7 +34,7 @@ class _Kernel:
         self.function_workers = _FunctionWorkers()
         self.paths = SimpleNamespace(
             instance_id="HASHI3",
-            bridge_home=Path(r"C:\Users\thene\projects\HASHI3"),
+            bridge_home=Path(r"C:\Users\sampleuser\projects\HASHI3"),
         )
         self.enable_api_gateway = True
         self._startup_started_monotonic = time.monotonic()

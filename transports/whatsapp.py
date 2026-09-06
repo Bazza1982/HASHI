@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 WhatsApp transport for bridge-u-f using neonize (Python Whatsmeow wrapper).
 
@@ -24,6 +22,8 @@ Commands handled at transport level (never reach the agent):
 All other messages (including /new, /verbose, /skill, etc.) are forwarded
 to the target agent(s) unchanged.
 """
+
+from __future__ import annotations
 
 import asyncio
 import inspect
