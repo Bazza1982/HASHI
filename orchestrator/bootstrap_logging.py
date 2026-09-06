@@ -89,6 +89,7 @@ class ConsoleOutputFilter(logging.Filter):
     _ALLOW_INFO_FRAGMENTS = (
         "Process bootstrap:",
         "Configured ",
+        "Private command compatibility:",
         "Universal Orchestrator is online.",
         "Startup complete:",
         "Backend API listening on",

@@ -105,14 +105,14 @@ class CoreTelegramIngress:
                 )
                 await asyncio.sleep(TELEGRAM_RETRY_SECONDS)
 
-    async def stop(self) -> None:
+    async def stop(self, *, notify_status: bool = True) -> None:
         self._stopping = True
         task = self.task
         self.task = None
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self._set_connected(False)
+        await self._set_connected(False, notify_status=notify_status)
         try:
             await self.bot.shutdown()
         except Exception as exc:
@@ -126,10 +126,15 @@ class CoreTelegramIngress:
             self.agent_name,
         )
 
-    async def _set_connected(self, connected: bool) -> None:
+    async def _set_connected(
+        self,
+        connected: bool,
+        *,
+        notify_status: bool = True,
+    ) -> None:
         changed = self.connected != bool(connected)
         self.connected = bool(connected)
-        if not changed or self.status_callback is None:
+        if not changed or not notify_status or self.status_callback is None:
             return
         try:
             result = self.status_callback(self.connected)

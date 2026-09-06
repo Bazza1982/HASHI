@@ -18,8 +18,18 @@ class ShutdownManager:
         self.kernel = kernel
 
     async def full_shutdown(self):
+        self.kernel.is_stopping = True
+        startup_status = dict(getattr(self.kernel, "startup_status", {}) or {})
+        startup_status.update(
+            {
+                "phase": "stopping",
+                "ready": False,
+                "degraded": False,
+            }
+        )
+        self.kernel.startup_status = startup_status
         main_logger.info("Shutting down active agents...")
-        bridge_logger.warning(
+        bridge_logger.info(
             "Full shutdown begin (%s) active_agents=%s workbench=%s api_gateway=%s whatsapp=%s",
             self.kernel.lifecycle_state.shutdown_meta_text(self.kernel._shutdown_request),
             len(self.kernel.runtimes),
@@ -38,9 +48,13 @@ class ShutdownManager:
             clean=True,
             phase="python-cleanup-complete",
         )
-        bridge_logger.warning(
-            "Full shutdown complete (%s)",
+        summary = dict(getattr(self.kernel, "last_shutdown_summary", {}) or {})
+        bridge_logger.info(
+            "Full shutdown complete (%s) agents=%s/%s complete=%s",
             self.kernel.lifecycle_state.shutdown_meta_text(self.kernel._shutdown_request),
+            summary.get("stopped_agents", 0),
+            summary.get("requested_agents", 0),
+            bool(summary.get("complete", False)),
         )
         self.start_exit_watchdog()
 

@@ -40,6 +40,7 @@ class RuntimeCallback:
 class RuntimeRegistrySnapshot:
     commands: tuple[RuntimeCommand, ...]
     callbacks: tuple[RuntimeCallback, ...]
+    notices: tuple[dict[str, Any], ...]
 
 
 _registry_snapshot: RuntimeRegistrySnapshot | None = None
@@ -158,6 +159,7 @@ def invalidate_runtime_registry_cache() -> None:
 def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
     commands: dict[str, RuntimeCommand] = {}
     callbacks: list[RuntimeCallback] = []
+    notices: list[dict[str, Any]] = []
     for module in _iter_runtime_modules():
         module_commands = list(_commands_from_module(module))
         is_private = _is_private_command_module(module)
@@ -167,15 +169,15 @@ def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
             if is_private and command.name in NON_OVERRIDABLE_CORE_COMMANDS
         }
         for command in module_commands:
+            if is_private and command.name in NON_OVERRIDABLE_CORE_COMMANDS:
+                logger.debug(
+                    "Ignoring private override of protected core command %s from %s",
+                    command.name,
+                    _module_label(module),
+                )
+                continue
             if command.name in commands:
                 if is_private:
-                    if command.name in NON_OVERRIDABLE_CORE_COMMANDS:
-                        logger.warning(
-                            "Ignoring private override of protected core command %s from %s",
-                            command.name,
-                            _module_label(module),
-                        )
-                        continue
                     logger.debug(
                         "Runtime command %s intentionally overridden by private command module %s",
                         command.name,
@@ -189,8 +191,19 @@ def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
                     )
             commands[command.name] = command
         module_callbacks = list(_callbacks_from_module(module))
+        if protected:
+            module_label = _module_label(module)
+            notices.extend(
+                {
+                    "code": "protected_private_command_override",
+                    "command": command_name,
+                    "module": module_label,
+                    "callbacks_ignored": bool(module_callbacks),
+                }
+                for command_name in sorted(protected)
+            )
         if protected and module_callbacks:
-            logger.warning(
+            logger.debug(
                 "Ignoring callbacks from private override of protected core command(s) %s in %s",
                 ", ".join(sorted(protected)),
                 _module_label(module),
@@ -200,6 +213,7 @@ def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
     return RuntimeRegistrySnapshot(
         commands=tuple(commands[name] for name in sorted(commands)),
         callbacks=tuple(callbacks),
+        notices=tuple(notices),
     )
 
 
@@ -222,6 +236,12 @@ def load_runtime_callbacks() -> list[RuntimeCallback]:
 
 def runtime_command_map() -> dict[str, RuntimeCommand]:
     return {command.name: command for command in load_runtime_commands()}
+
+
+def runtime_registry_notices() -> list[dict[str, Any]]:
+    """Return structured, de-duplicatable command compatibility notices."""
+
+    return [dict(notice) for notice in _runtime_registry_snapshot().notices]
 
 
 def bind_runtime_commands(runtime, *, wrap: bool = False) -> None:

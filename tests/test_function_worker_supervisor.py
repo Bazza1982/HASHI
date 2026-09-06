@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -120,6 +121,60 @@ def _metadata(name: str, pid: int) -> dict:
 
 def _handle(kernel: _Kernel, client: _Client) -> AgentRuntimeHandle:
     return AgentRuntimeHandle(kernel, client, _metadata(client.agent_name, client.pid))
+
+
+@pytest.mark.asyncio
+async def test_shutdown_status_change_does_not_call_exiting_worker():
+    kernel = _Kernel()
+    kernel.is_stopping = True
+    client = _Client("alpha", 101)
+    handle = _handle(kernel, client)
+    kernel.runtimes.append(handle)
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    await supervisor.set_worker_telegram_status("alpha", False)
+
+    assert client.calls == []
+    assert handle.metadata["telegram_connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_failures_are_aggregated_once(
+    monkeypatch,
+    caplog,
+):
+    def fail_status(_method, _params):
+        raise ConnectionResetError("worker channel reset")
+
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(instance_id="HASHI2")
+    alpha = _handle(kernel, _Client("alpha", 101, responder=fail_status))
+    beta = _handle(kernel, _Client("beta", 202, responder=fail_status))
+    kernel.runtimes.extend((alpha, beta))
+    supervisor = FunctionWorkerSupervisor(kernel)
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.TELEGRAM_STATUS_WARNING_DEBOUNCE_SECONDS",
+        0.0,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="BridgeU.Orchestrator"):
+        await asyncio.gather(
+            supervisor.set_worker_telegram_status("alpha", False),
+            supervisor.set_worker_telegram_status("beta", False),
+        )
+        await supervisor._telegram_status_warning_task
+
+    messages = [
+        record.message
+        for record in caplog.records
+        if record.name == "BridgeU.Orchestrator"
+        and "Telegram status synchronisation" in record.message
+    ]
+    assert len(messages) == 1
+    assert "2 Function Worker(s): alpha, beta" in messages[0]
+    assert "Worker IPC channels (ConnectionResetError)" in messages[0]
+    assert "does not itself stop an active task" in messages[0]
+    assert "Diagnostic code: telegram_status_channel_disconnected" in messages[0]
 
 
 @pytest.mark.asyncio

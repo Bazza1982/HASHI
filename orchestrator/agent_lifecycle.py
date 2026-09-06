@@ -4,7 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from orchestrator.bootstrap_logging import C_RESET, C_STOP
+from orchestrator.bootstrap_logging import C_OK, C_RESET, C_WARN, C_STOP
 from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
     WORKER_DRAIN_TIMEOUT_SECONDS,
@@ -255,29 +255,73 @@ class AgentLifecycleManager:
     async def shutdown_all_agents(self, timeout: float = 180.0):
         agents = list(self.kernel.runtimes)
         if not agents:
+            self.kernel.last_shutdown_summary = {
+                "requested_agents": 0,
+                "stopped_agents": 0,
+                "complete": True,
+            }
             return
         main_logger.info(
             "Shutting down %s isolated Function Workers...", len(agents)
         )
-        bridge_logger.warning(
+        bridge_logger.info(
             "Shutting down %s isolated Function Workers", len(agents)
         )
+        shutdown_complete = True
         try:
             await asyncio.wait_for(
                 self.kernel.function_workers.shutdown_all(),
                 timeout=max(1.0, float(timeout)),
             )
         except asyncio.TimeoutError:
+            shutdown_complete = False
             main_logger.error(
                 "Function Worker shutdown exceeded %.1fs", float(timeout)
             )
+        except Exception as exc:
+            shutdown_complete = False
+            main_logger.error(
+                "Function Worker shutdown failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            bridge_logger.exception("Function Worker shutdown failed")
         for runtime in agents:
             await runtime.close_route(
                 f"Agent {runtime.name!r} is stopping with HASHI Core"
             )
-            print(
-                f"{C_STOP}[system] Agent '{runtime.name}' stopped{C_RESET}",
-                flush=True,
-            )
+        stopped_agents = sum(
+            not runtime.client.process.is_alive()
+            for runtime in agents
+            if isinstance(runtime, AgentRuntimeHandle)
+        )
+        shutdown_complete = bool(
+            shutdown_complete and stopped_agents == len(agents)
+        )
+        summary = {
+            "requested_agents": len(agents),
+            "stopped_agents": stopped_agents,
+            "complete": shutdown_complete,
+        }
+        self.kernel.last_shutdown_summary = summary
         self.kernel.runtimes.clear()
         self.kernel.function_workers.publish_generation_state()
+        global_cfg = getattr(self.kernel, "global_cfg", None)
+        instance_id = str(
+            getattr(global_cfg, "instance_id", None)
+            or getattr(getattr(self.kernel, "paths", None), "instance_id", None)
+            or "HASHI"
+        ).upper()
+        if shutdown_complete:
+            print(
+                f"{C_OK}[system] {instance_id} shut down normally · "
+                f"{stopped_agents}/{len(agents)} agents stopped.{C_RESET}",
+                flush=True,
+            )
+        else:
+            print(
+                f"{C_WARN}[system] {instance_id} shutdown incomplete · "
+                f"{stopped_agents}/{len(agents)} agents stopped. "
+                f"Review the preceding shutdown errors.{C_RESET}",
+                flush=True,
+            )

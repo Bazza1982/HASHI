@@ -44,6 +44,8 @@ WORKER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 WORKER_DRAIN_TIMEOUT_SECONDS = 120.0
 WORKER_RECOVERY_ATTEMPTS = 3
 QUALIFIED_GENERATION_CACHE_SCHEMA_VERSION = 1
+TELEGRAM_STATUS_WARNING_DEBOUNCE_SECONDS = 0.5
+TELEGRAM_STATUS_WARNING_COOLDOWN_SECONDS = 30.0
 
 
 class FunctionWorkerError(RuntimeError):
@@ -1006,6 +1008,11 @@ class FunctionWorkerSupervisor:
         self._cached_generation: VerifiedFunctionGeneration | None = None
         self._cached_artifact: tuple[str, Path] | None = None
         self._telegram_ingress: dict[str, CoreTelegramIngress] = {}
+        self._telegram_status_failures: dict[str, tuple[str, str]] = {}
+        self._telegram_status_warning_task: asyncio.Task[Any] | None = None
+        self._last_telegram_status_warning: (
+            tuple[tuple[tuple[str, str], ...], float] | None
+        ) = None
 
     def qualify_generation(self) -> VerifiedFunctionGeneration:
         return probe_function_generation(self.kernel)
@@ -1228,7 +1235,7 @@ class FunctionWorkerSupervisor:
     async def stop_telegram_ingress(self, agent_name: str) -> None:
         ingress = self._telegram_ingress.pop(str(agent_name), None)
         if ingress is not None:
-            await ingress.stop()
+            await ingress.stop(notify_status=False)
 
     def telegram_ingress_running(self, agent_name: str) -> bool:
         ingress = self._telegram_ingress.get(str(agent_name))
@@ -1242,6 +1249,68 @@ class FunctionWorkerSupervisor:
             "offset": None if ingress is None else ingress.offset,
         }
 
+    def _queue_telegram_status_warning(self, agent_name: str, exc: Exception) -> None:
+        name = str(agent_name)
+        self._telegram_status_failures[name] = (type(exc).__name__, str(exc))
+        bridge_logger.debug(
+            "Function Worker Telegram status propagation failed: agent=%s error=%s: %s",
+            name,
+            type(exc).__name__,
+            exc,
+        )
+        task = self._telegram_status_warning_task
+        if task is None or task.done():
+            self._telegram_status_warning_task = asyncio.create_task(
+                self._publish_telegram_status_warning(),
+                name="telegram-status-warning",
+            )
+
+    async def _publish_telegram_status_warning(self) -> None:
+        await asyncio.sleep(TELEGRAM_STATUS_WARNING_DEBOUNCE_SECONDS)
+        if self._shutting_down or bool(getattr(self.kernel, "is_stopping", False)):
+            self._telegram_status_failures.clear()
+            return
+        failures = dict(self._telegram_status_failures)
+        self._telegram_status_failures.clear()
+        if not failures:
+            return
+        names = tuple(sorted(failures))
+        signature = tuple(
+            sorted((name, details[0]) for name, details in failures.items())
+        )
+        now = asyncio.get_running_loop().time()
+        previous = self._last_telegram_status_warning
+        if (
+            previous is not None
+            and previous[0] == signature
+            and now - previous[1] < TELEGRAM_STATUS_WARNING_COOLDOWN_SECONDS
+        ):
+            return
+        self._last_telegram_status_warning = (signature, now)
+        global_cfg = getattr(self.kernel, "global_cfg", None)
+        instance_id = str(
+            getattr(global_cfg, "instance_id", None)
+            or getattr(getattr(self.kernel, "paths", None), "instance_id", None)
+            or "HASHI"
+        ).upper()
+        agents = ", ".join(names)
+        error_types = ", ".join(
+            sorted({details[0] for details in failures.values()})
+        )
+        message = (
+            f"{instance_id} Telegram status synchronisation was interrupted for "
+            f"{len(names)} Function Worker(s): {agents}.\n"
+            "Cause: Core could not deliver the Telegram connection-state update "
+            f"to those Worker IPC channels ({error_types}).\n"
+            "Impact: Worker Telegram availability metadata may be temporarily stale. "
+            "This status update failure does not itself stop an active task; a disconnected Worker may still affect its own task.\n"
+            "System response: Core Telegram ingress keeps its normal retry loop active and will resynchronise status on the next connection transition; Worker recovery is handled separately.\n"
+            "Action: no immediate action is required. If this persists, check the function_workers and telegram_ingress fields in /api/health.\n"
+            "Diagnostic code: telegram_status_channel_disconnected"
+        )
+        logger.warning(message)
+        bridge_logger.warning(message)
+
     async def set_worker_telegram_status(
         self,
         agent_name: str,
@@ -1251,6 +1320,14 @@ class FunctionWorkerSupervisor:
         handle = self.kernel._runtime_map().get(name)
         if not isinstance(handle, AgentRuntimeHandle):
             return
+        if self._shutting_down or bool(getattr(self.kernel, "is_stopping", False)):
+            handle.metadata["telegram_connected"] = bool(connected)
+            bridge_logger.debug(
+                "Skipped Function Worker Telegram status propagation during shutdown: agent=%s connected=%s",
+                name,
+                bool(connected),
+            )
+            return
         try:
             client = handle.client
             result = await client.call(
@@ -1259,12 +1336,9 @@ class FunctionWorkerSupervisor:
                 timeout=30.0,
             )
         except Exception as exc:
-            bridge_logger.warning(
-                "Function Worker Telegram status update failed for %s: %s",
-                name,
-                exc,
-            )
+            self._queue_telegram_status_warning(name, exc)
             return
+        self._telegram_status_failures.pop(name, None)
         metadata = dict(result.get("metadata") or {})
         if metadata:
             handle.update_metadata(client, metadata)
@@ -1963,11 +2037,17 @@ class FunctionWorkerSupervisor:
 
     async def shutdown_all(self) -> None:
         self._shutting_down = True
+        warning_task = self._telegram_status_warning_task
+        self._telegram_status_warning_task = None
+        if warning_task is not None:
+            warning_task.cancel()
+            await asyncio.gather(warning_task, return_exceptions=True)
+        self._telegram_status_failures.clear()
         ingresses = list(self._telegram_ingress.values())
         self._telegram_ingress.clear()
         if ingresses:
             await asyncio.gather(
-                *(ingress.stop() for ingress in ingresses),
+                *(ingress.stop(notify_status=False) for ingress in ingresses),
                 return_exceptions=True,
             )
         recovery_tasks = list(self._recovery_tasks.values())

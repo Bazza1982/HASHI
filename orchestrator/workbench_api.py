@@ -6539,13 +6539,20 @@ class WorkbenchApiServer:
         startup = dict(getattr(orchestrator, "startup_status", {}) or {})
         if startup:
             payload["ready"] = bool(startup.get("ready", False))
+            payload["degraded"] = bool(startup.get("degraded", False))
             payload["status"] = str(startup.get("phase") or "starting")
+            payload["issues"] = list(startup.get("issues") or ())
             payload["startup"] = startup
         else:
             # Compatibility for embedded/test kernels that predate the
             # explicit startup lifecycle contract.
             payload["ready"] = True
+            payload["degraded"] = False
             payload["status"] = "ready"
+            payload["issues"] = []
+        remote_status = getattr(orchestrator, "remote_lifecycle_status", None)
+        if isinstance(remote_status, dict):
+            payload["remote"] = dict(remote_status)
         runtime = getattr(orchestrator, "runtime_fingerprint", None)
         if runtime is not None:
             payload["runtime"] = {

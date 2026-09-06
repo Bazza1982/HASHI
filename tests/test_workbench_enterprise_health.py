@@ -184,7 +184,54 @@ async def test_health_distinguishes_core_liveness_from_complete_startup(tmp_path
 
     assert payload["ok"] is True
     assert payload["ready"] is False
+    assert payload["degraded"] is False
     assert payload["status"] == "starting_workers"
+    assert payload["issues"] == []
     assert payload["startup"]["completed"] == 2
     assert payload["startup"]["total"] == 6
     assert payload["startup"]["percent"] == 40
+
+
+@pytest.mark.asyncio
+async def test_health_explains_degraded_remote_without_failing_liveness(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    issue = {
+        "code": "remote_supervisor_unavailable",
+        "component": "remote",
+        "severity": "warning",
+        "summary": "HASHI2 Remote/HChat is unavailable; local startup will continue.",
+        "impact": "Remote/HChat cannot connect to HASHI2.",
+        "automatic_retry": False,
+        "actions": ["Install and start the instance supervisor."],
+    }
+    remote = {
+        "available": False,
+        "enabled": True,
+        "supervised": True,
+        "action": "supervisor_unavailable",
+        "port": 8767,
+        "service_name": "hashi-remote-hashi2.service",
+    }
+    server.orchestrator = SimpleNamespace(
+        instance_id="HASHI2",
+        api_gateway=None,
+        runtimes=[],
+        startup_status={
+            "phase": "degraded",
+            "ready": False,
+            "degraded": True,
+            "services_ready": True,
+            "issues": [issue],
+        },
+        remote_lifecycle_status=remote,
+    )
+
+    response = await server.handle_health(_FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert payload["ready"] is False
+    assert payload["degraded"] is True
+    assert payload["status"] == "degraded"
+    assert payload["issues"] == [issue]
+    assert payload["remote"] == remote

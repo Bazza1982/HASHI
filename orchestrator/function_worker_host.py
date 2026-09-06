@@ -889,12 +889,19 @@ class FunctionWorkerHost:
     def metadata(self) -> dict[str, Any]:
         runtime = self._require_runtime()
         result = dict(runtime.get_runtime_metadata())
+        command_registry_notices: list[dict[str, Any]] = []
         try:
             from orchestrator.admin_local_testing import supported_commands
 
             commands = supported_commands(runtime)
         except Exception:
             commands = []
+        try:
+            from orchestrator.command_registry import runtime_registry_notices
+
+            command_registry_notices = runtime_registry_notices()
+        except Exception:
+            command_registry_notices = []
         native_audio: dict[str, bool] = {}
         manager = getattr(runtime, "voice_manager", None)
         native_enabled = getattr(manager, "native_audio_enabled", None)
@@ -950,6 +957,7 @@ class FunctionWorkerHost:
                     getattr(manager, "native_policy", {}) or {}
                 ),
                 "supported_commands": commands,
+                "command_registry_notices": command_registry_notices,
                 "active_transfer": bool(runtime.has_active_transfer()),
                 "is_generating": bool(runtime.is_generating),
                 "queue_depth": int(runtime.queue.qsize()),

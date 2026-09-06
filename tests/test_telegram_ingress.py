@@ -89,6 +89,34 @@ async def test_core_ingress_advances_offset_only_after_worker_accepts(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_core_ingress_shutdown_can_skip_worker_status_callback():
+    bot = _Bot("token")
+    statuses = []
+
+    class _Handle:
+        async def deliver_telegram_update(self, _payload):
+            return True
+
+    async def status(connected):
+        statuses.append(connected)
+
+    ingress = CoreTelegramIngress(
+        agent_name="alpha",
+        token="token",
+        handle_lookup=lambda _name: _Handle(),
+        status_callback=status,
+        bot_factory=lambda _token: bot,
+    )
+
+    await ingress.start(drop_pending_updates=True)
+    await ingress.stop(notify_status=False)
+
+    assert statuses == [True]
+    assert ingress.connected is False
+    assert ingress.is_running is False
+
+
+@pytest.mark.asyncio
 async def test_core_ingress_waits_at_route_gate_then_uses_committed_worker():
     bot = _Bot("token")
     old_deliveries = []

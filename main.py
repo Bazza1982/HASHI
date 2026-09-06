@@ -72,11 +72,14 @@ class UniversalOrchestrator:
         self.startup_status = {
             "phase": "core_bootstrap",
             "ready": False,
+            "degraded": False,
             "completed": 0,
             "ready_agents": 0,
             "total": 0,
             "percent": 0,
             "elapsed_seconds": 0.0,
+            "issues": [],
+            "notices": [],
         }
         self.function_workers = FunctionWorkerSupervisor(self)
         install_core_manager_bundle(
@@ -90,6 +93,7 @@ class UniversalOrchestrator:
         self.scheduler_task = None
         self.whatsapp = None
         self._lifecycle_lock = asyncio.Lock()
+        self.is_stopping = False
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._startup_tasks: dict[str, asyncio.Task] = {}
         self._restart_request: dict | None = None  # set by request_restart()
@@ -134,7 +138,10 @@ class UniversalOrchestrator:
             "requested_at": datetime.now().isoformat(),
         }
         main_logger.info(f"Shutdown requested ({reason}).")
-        bridge_logger.warning(f"Shutdown requested ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)})")
+        bridge_logger.info(
+            "Shutdown requested (%s)",
+            self.lifecycle_state.shutdown_meta_text(self._shutdown_request),
+        )
         self.lifecycle_state.record_shutdown_request(self._shutdown_request)
         self.shutdown_event.set()
 
@@ -306,12 +313,42 @@ class UniversalOrchestrator:
 
         startup_status = dict(getattr(self, "startup_status", {}) or {})
         failed_agents = int(startup_status.get("failed_agents") or 0)
+        issues = list(startup_status.get("issues") or ())
+        if failed_agents and not any(
+            issue.get("code") == "agent_startup_failed"
+            for issue in issues
+            if isinstance(issue, dict)
+        ):
+            issues.append(
+                {
+                    "code": "agent_startup_failed",
+                    "component": "function_workers",
+                    "severity": "warning",
+                    "summary": f"{failed_agents} configured agent(s) failed to start.",
+                    "impact": "Those agents are unavailable; successfully started agents and services remain usable.",
+                    "automatic_retry": False,
+                    "actions": [
+                        "Review the failed agent entries in the startup log and correct their provider or Telegram configuration."
+                    ],
+                }
+            )
+        degraded = bool(
+            failed_agents
+            or any(
+                str(issue.get("severity") or "").lower()
+                in {"warning", "error", "critical"}
+                for issue in issues
+                if isinstance(issue, dict)
+            )
+        )
         startup_status.update(
             {
-                "phase": "ready" if failed_agents == 0 else "degraded",
-                "ready": True,
+                "phase": "degraded" if degraded else "ready",
+                "ready": not degraded,
+                "degraded": degraded,
                 "services_ready": True,
                 "percent": 100,
+                "issues": issues,
                 "elapsed_seconds": round(
                     time.monotonic()
                     - getattr(self, "_startup_started_monotonic", time.monotonic()),
@@ -321,16 +358,20 @@ class UniversalOrchestrator:
         )
         self.startup_status = startup_status
         bridge_logger.info(
-            "Startup complete: %s/%s ready (overall=%s%%), failed=%s, elapsed=%.1fs",
+            "Startup complete: status=%s agents=%s/%s ready (overall=%s%%), "
+            "failed=%s issues=%s elapsed=%.1fs",
+            startup_status["phase"],
             startup_status.get("ready_agents", 0),
             startup_status.get("total", 0),
             startup_status.get("percent", 100),
             failed_agents,
+            len(issues),
             startup_status["elapsed_seconds"],
         )
         main_logger.info(
             "Universal Orchestrator is online. Awaiting messages. "
-            "Startup complete: %s/%s agents ready in %.1fs.",
+            "Startup complete: status=%s, %s/%s agents ready in %.1fs.",
+            startup_status["phase"],
             startup_status.get("ready_agents", 0),
             startup_status.get("total", 0),
             startup_status["elapsed_seconds"],

@@ -14,6 +14,7 @@ from orchestrator.command_registry import (
     load_runtime_callbacks,
     load_runtime_commands,
     runtime_bot_commands,
+    runtime_registry_notices,
 )
 
 
@@ -136,7 +137,7 @@ def test_private_command_override_is_debug_not_warning(
     assert "intentionally overridden" in matching[-1].message
 
 
-def test_session_scoped_queue_command_rejects_private_override_and_callbacks(
+def test_session_scoped_queue_command_reports_structured_notice_without_warning(
     monkeypatch,
     tmp_path,
     caplog,
@@ -158,30 +159,43 @@ def test_session_scoped_queue_command_rejects_private_override_and_callbacks(
     )
     monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", str(private_dir))
 
-    with caplog.at_level(logging.WARNING, logger="BridgeU.CommandRegistry"):
+    with caplog.at_level(logging.DEBUG, logger="BridgeU.CommandRegistry"):
         commands = {command.name: command for command in load_runtime_commands()}
         callbacks = load_runtime_callbacks()
         load_runtime_commands()
         load_runtime_callbacks()
+        notices = runtime_registry_notices()
 
     assert commands["queue"].description != "Unsafe global queue"
     assert all(callback.pattern != r"^queue:" for callback in callbacks)
-    command_warnings = [
-        record.message
+    command_records = [
+        record
         for record in caplog.records
         if "protected core command queue" in record.message
     ]
-    callback_warnings = [
-        record.message
+    callback_records = [
+        record
         for record in caplog.records
         if "callbacks from private override" in record.message
     ]
-    assert command_warnings == [
+    assert [record.message for record in command_records] == [
         "Ignoring private override of protected core command queue from queue_override.py"
     ]
-    assert callback_warnings == [
+    assert [record.message for record in callback_records] == [
         "Ignoring callbacks from private override of protected core command(s) queue "
         "in queue_override.py"
+    ]
+    assert all(
+        record.levelno == logging.DEBUG
+        for record in command_records + callback_records
+    )
+    assert notices == [
+        {
+            "code": "protected_private_command_override",
+            "command": "queue",
+            "module": "queue_override.py",
+            "callbacks_ignored": True,
+        }
     ]
 
 

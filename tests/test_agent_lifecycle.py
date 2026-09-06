@@ -289,8 +289,9 @@ async def test_stop_rejects_legacy_in_process_runtime_without_touching_it():
 
 
 @pytest.mark.asyncio
-async def test_shutdown_all_closes_routes_and_clears_registry():
+async def test_shutdown_all_closes_routes_and_prints_one_summary(capsys):
     kernel = _Kernel()
+    kernel.global_cfg.instance_id = "HASHI2"
     alpha = _handle(kernel, "alpha", 101)
     beta = _handle(kernel, "beta", 202)
     kernel.runtimes.extend((alpha, beta))
@@ -304,3 +305,14 @@ async def test_shutdown_all_closes_routes_and_clears_registry():
     assert beta.client.process.is_alive() is False
     assert alpha._offline_error is not None
     assert beta._offline_error is not None
+    assert kernel.last_shutdown_summary == {
+        "requested_agents": 2,
+        "stopped_agents": 2,
+        "complete": True,
+    }
+    system_lines = [
+        line for line in capsys.readouterr().out.splitlines() if "[system]" in line
+    ]
+    assert len(system_lines) == 1
+    assert "HASHI2 shut down normally" in system_lines[0]
+    assert "2/2 agents stopped" in system_lines[0]

@@ -45,11 +45,16 @@ class _Kernel:
 
 
 @pytest.mark.asyncio
-async def test_initial_startup_prepares_once_runs_small_fleet_in_one_wave():
+async def test_initial_startup_prepares_once_runs_small_fleet_in_one_wave(monkeypatch):
     kernel = _Kernel()
     handler = logging.NullHandler()
     manager = StartupManager(kernel, handler)
     names = [f"agent-{index}" for index in range(6)]
+    info_messages = []
+    monkeypatch.setattr(
+        "orchestrator.startup_manager.bridge_logger.info",
+        lambda message, *args: info_messages.append(message % args if args else message),
+    )
 
     await manager._run_startup_banner(
         names,
@@ -72,3 +77,106 @@ async def test_initial_startup_prepares_once_runs_small_fleet_in_one_wave():
     assert kernel.startup_status["ready_agents"] == 6
     assert kernel.startup_status["agent_percent"] == 100
     assert kernel.startup_status["percent"] == 90
+    assert not any(
+        message.startswith("Startup progress:") for message in info_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_supervisor_failure_is_actionable_and_marks_startup_degraded(
+    monkeypatch,
+    caplog,
+    tmp_path,
+):
+    kernel = _Kernel()
+    manager = StartupManager(kernel, logging.NullHandler())
+    settings = SimpleNamespace(
+        enabled=True,
+        supervised=True,
+        port=8767,
+    )
+    supervisor = SimpleNamespace(service_name="hashi-remote-hashi2.service")
+
+    async def ensure_remote_started(_root):
+        return {
+            "ok": False,
+            "action": "supervisor_unavailable",
+            "reason": "per-instance supervisor is not installed",
+            "settings": settings,
+            "supervisor": supervisor,
+            "service_name": supervisor.service_name,
+        }
+
+    monkeypatch.setattr(
+        "orchestrator.startup_manager.importlib.import_module",
+        lambda _name: SimpleNamespace(ensure_remote_started=ensure_remote_started),
+    )
+    global_config = SimpleNamespace(
+        project_root=tmp_path,
+        instance_id="HASHI2",
+    )
+
+    await manager._ensure_remote_lifecycle(global_config)
+    with caplog.at_level(logging.WARNING, logger="BridgeU.Orchestrator"):
+        manager._publish_startup_issues(kernel.startup_status["issues"])
+
+    issue = kernel.startup_status["issues"][0]
+    assert kernel.startup_status["degraded"] is True
+    assert issue["code"] == "remote_supervisor_unavailable"
+    assert issue["details"] == {
+        "lifecycle_action": "supervisor_unavailable",
+        "service_name": "hashi-remote-hashi2.service",
+        "port": 8767,
+    }
+    assert issue["automatic_retry"] is False
+    assert kernel.remote_lifecycle_status["available"] is False
+    messages = [
+        record.message
+        for record in caplog.records
+        if record.name == "BridgeU.Orchestrator"
+    ]
+    assert len(messages) == 1
+    assert "HASHI2 Remote/HChat is unavailable" in messages[0]
+    assert "bin/hashi-remote-ctl.sh install" in messages[0]
+    assert "Diagnostic code: remote_supervisor_unavailable" in messages[0]
+
+
+def test_command_registry_notices_are_deduplicated_across_workers(caplog):
+    kernel = _Kernel()
+    duplicate_notices = [
+        {
+            "code": "protected_private_command_override",
+            "command": "queue",
+            "module": "queue_buttons.py",
+            "callbacks_ignored": True,
+        },
+        {
+            "code": "protected_private_command_override",
+            "command": "wiki",
+            "module": "wiki.py",
+            "callbacks_ignored": False,
+        },
+    ]
+    kernel.runtimes = [
+        SimpleNamespace(metadata={"command_registry_notices": duplicate_notices}),
+        SimpleNamespace(metadata={"command_registry_notices": duplicate_notices}),
+    ]
+    manager = StartupManager(kernel, logging.NullHandler())
+
+    notices = manager._command_registry_notices()
+    with caplog.at_level(logging.INFO, logger="BridgeU.Orchestrator"):
+        manager._publish_command_registry_notice(notices)
+
+    assert [(item["command"], item["module"]) for item in notices] == [
+        ("queue", "queue_buttons.py"),
+        ("wiki", "wiki.py"),
+    ]
+    messages = [
+        record.message
+        for record in caplog.records
+        if record.name == "BridgeU.Orchestrator"
+    ]
+    assert len(messages) == 1
+    assert "ignored 2 protected override(s)" in messages[0]
+    assert "/queue (queue_buttons.py)" in messages[0]
+    assert "/wiki (wiki.py)" in messages[0]
