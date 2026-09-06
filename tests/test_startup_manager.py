@@ -101,7 +101,7 @@ async def test_remote_supervisor_failure_is_actionable_and_marks_startup_degrade
         return {
             "ok": False,
             "action": "supervisor_unavailable",
-            "reason": "per-instance supervisor is not installed",
+            "reason": "per-instance supervisor is not registered",
             "settings": settings,
             "supervisor": supervisor,
             "service_name": supervisor.service_name,
@@ -137,8 +137,52 @@ async def test_remote_supervisor_failure_is_actionable_and_marks_startup_degrade
     ]
     assert len(messages) == 1
     assert "HASHI2 Remote/HChat is unavailable" in messages[0]
-    assert "bin/hashi-remote-ctl.sh install" in messages[0]
+    assert "Hashi Remote is included with HASHI" in messages[0]
+    assert "Use /remote on to activate Hashi Remote" in messages[0]
+    assert "bin/hashi-remote-ctl.sh enable" in messages[0]
+    assert "install Hashi Remote" not in messages[0]
     assert "Diagnostic code: remote_supervisor_unavailable" in messages[0]
+
+
+@pytest.mark.asyncio
+async def test_remote_child_fallback_is_available_without_degrading_startup(
+    monkeypatch,
+    caplog,
+    tmp_path,
+):
+    kernel = _Kernel()
+    manager = StartupManager(kernel, logging.NullHandler())
+    settings = SimpleNamespace(enabled=True, supervised=True, port=8767)
+    process = SimpleNamespace(pid=123)
+
+    async def ensure_remote_started(_root):
+        return {
+            "ok": True,
+            "action": "started_child_fallback",
+            "settings": settings,
+            "process": process,
+            "service_name": "hashi-remote-hashi2.service",
+            "supervisor_fallback": {
+                "reason": "systemd user service is unavailable",
+            },
+        }
+
+    monkeypatch.setattr(
+        "orchestrator.startup_manager.importlib.import_module",
+        lambda _name: SimpleNamespace(ensure_remote_started=ensure_remote_started),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="BridgeU.Bridge"):
+        await manager._ensure_remote_lifecycle(
+            SimpleNamespace(project_root=tmp_path, instance_id="HASHI2")
+        )
+
+    assert kernel.remote_lifecycle_status["available"] is True
+    assert kernel.remote_lifecycle_status["supervised"] is False
+    assert kernel.remote_lifecycle_status["supervisor_requested"] is True
+    assert kernel.startup_status.get("degraded") is not True
+    assert kernel._remote_lifecycle_process is process
+    assert "Hashi Remote is active for HASHI2" in caplog.text
 
 
 def test_command_registry_notices_are_deduplicated_across_workers(caplog):

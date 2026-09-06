@@ -818,26 +818,28 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
 
     if arg == "off":
         state_path = remote_lifecycle.write_disabled_state(cfg["root"])
-        if runtime._remote_process is None or runtime._remote_process.returncode is not None:
+        stopped = await remote_lifecycle.stop_remote(cfg["root"])
+        if not stopped.get("ok"):
             await runtime._reply_text(
                 update,
                 ui_language.tr(
-                    "remote.lifecycle.disabled",
+                    "remote.lifecycle.stop_failed",
                     state=html.escape(str(state_path)),
+                    reason=html.escape(str(stopped.get("reason") or "unknown")),
                 ),
                 parse_mode="HTML",
             )
             return
-        runtime._remote_process.terminate()
-        try:
-            await asyncio.wait_for(runtime._remote_process.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            runtime._remote_process.kill()
         runtime._remote_process = None
+        message_key = (
+            "remote.lifecycle.disabled"
+            if stopped.get("action") == "already_stopped"
+            else "remote.lifecycle.stopped"
+        )
         await runtime._reply_text(
             update,
             ui_language.tr(
-                "remote.lifecycle.stopped",
+                message_key,
                 state=html.escape(str(state_path)),
             ),
             parse_mode="HTML",
@@ -855,58 +857,58 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
                 ),
             )
             return
-
-        root = cfg["root"]
-        venv_python = root / ".venv" / "bin" / "python3"
-        if not venv_python.exists():
-            venv_python = root / ".venv" / "Scripts" / "python.exe"
-        if not venv_python.exists():
+        try:
+            started = await remote_lifecycle.ensure_remote_started(cfg["root"])
+        except Exception as exc:
+            started = {
+                "ok": False,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        if not started.get("ok"):
+            runtime._remote_process = None
             await runtime._reply_text(
                 update,
                 ui_language.tr(
-                    "remote.lifecycle.missing_interpreter",
-                    path=html.escape(str(venv_python)),
+                    "remote.lifecycle.activation_failed",
+                    reason=html.escape(str(started.get("reason") or "unknown")),
                 ),
                 parse_mode="HTML",
             )
             return
-
-        cmd = [str(venv_python), "-m", "remote", "--hashi-root", str(root)]
-        cmd.extend(["--port", str(cfg["port"])])
-        if not cfg["use_tls"]:
-            cmd.append("--no-tls")
-        if cfg["backend"] in {"lan", "tailscale", "both"}:
-            cmd.extend(["--discovery", cfg["backend"]])
-        log_path = runtime._remote_start_log_path()
-        with suppress(Exception):
-            log_path.unlink()
-        log_handle = log_path.open("ab")
-        try:
-            runtime._remote_process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(root),
-                stdout=log_handle,
-                stderr=log_handle,
+        process = started.get("process")
+        if process is not None:
+            runtime._remote_process = process
+            cmd = remote_lifecycle.build_child_command(lifecycle)
+            log_path = Path(started.get("log_path") or runtime._remote_start_log_path())
+            ok, detail = await runtime._await_remote_start_health(
+                process=process,
+                cfg=cfg,
+                cmd=cmd,
+                log_path=log_path,
             )
-        finally:
-            log_handle.close()
-
-        ok, detail = await runtime._await_remote_start_health(
-            process=runtime._remote_process,
-            cfg=cfg,
-            cmd=cmd,
-            log_path=log_path,
+            if not ok:
+                runtime._remote_process = None
+                await runtime._reply_text(update, detail, parse_mode="HTML")
+                return
+        else:
+            port = int(started.get("port") or cfg["port"])
+            host = str(started.get("health_host") or "127.0.0.1")
+            scheme = "https" if cfg["use_tls"] else "http"
+            detail = f"{scheme}://{host}:{port}/health"
+        action = str(started.get("action") or "started")
+        mode = (
+            "supervisor"
+            if action == "started_supervisor"
+            else "bundled child"
+            if action in {"started_child", "started_child_fallback"}
+            else "existing service"
         )
-        if not ok:
-            runtime._remote_process = None
-            await runtime._reply_text(update, detail, parse_mode="HTML")
-            return
         await runtime._reply_text(
             update,
             ui_language.tr(
-                "remote.lifecycle.started",
-                pid=runtime._remote_process.pid,
-                port=cfg["port"],
+                "remote.lifecycle.activated",
+                mode=html.escape(mode),
+                port=int(started.get("port") or cfg["port"]),
                 tls=ui_language.tr(
                     "remote.lifecycle.on" if cfg["use_tls"] else "remote.lifecycle.off"
                 ),

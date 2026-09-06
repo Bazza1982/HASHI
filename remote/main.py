@@ -82,18 +82,28 @@ def _load_remote_config(hashi_root: Path) -> dict:
             continue
         if ":" not in line or not current:
             continue
-        key, value = [part.strip() for part in line.split(":", 1)]
-        value = value.strip("\"'")
+        key, raw_value = [part.strip() for part in line.split(":", 1)]
+        quoted = (
+            len(raw_value) >= 2
+            and raw_value[0] in {"\"", "'"}
+            and raw_value[-1] == raw_value[0]
+        )
+        value = raw_value[1:-1] if quoted else raw_value
         target = {"server": server, "security": security, "discovery": discovery}.get(current)
         if target is None:
             continue
-        if value.lower() in {"true", "false"}:
-            target[key] = value.lower() == "true"
-        else:
+        normalized_value = value.lower()
+        if not quoted and normalized_value in {"null", "none", "~"}:
+            target[key] = None
+        elif not quoted and normalized_value in {"true", "false"}:
+            target[key] = normalized_value == "true"
+        elif not quoted:
             try:
                 target[key] = int(value)
             except ValueError:
                 target[key] = value
+        else:
+            target[key] = value
     return {"server": server, "security": security, "discovery": discovery}
 
 

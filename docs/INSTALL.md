@@ -115,9 +115,10 @@ Example (conceptual):
 
 ## Hashi Remote
 
-New installs should run Hashi Remote as a default-on sidecar. `/remote on`
-still works as a development fallback, but rescue-grade installs should use the
-OS helper so Remote can survive HASHI core shutdown.
+Hashi Remote is included and enabled by default. On supported platforms HASHI
+registers and enables its per-instance OS supervisor on first startup. If OS
+supervision is unavailable, HASHI uses bundled child mode so Remote remains
+available for the current session. `/remote on|off` remains the operator control.
 
 ### Shared token
 
@@ -142,8 +143,7 @@ rescue controls are unavailable.
 ### Linux / WSL
 
 ```bash
-bin/hashi-remote-ctl.sh install
-bin/hashi-remote-ctl.sh start
+bin/hashi-remote-ctl.sh enable
 bin/hashi-remote-ctl.sh status
 ```
 
@@ -162,8 +162,7 @@ python -m remote --hashi-root "$(pwd)" --no-tls --discovery lan
 ### Windows
 
 ```powershell
-.\bin\hashi_remote_ctl.ps1 install
-.\bin\hashi_remote_ctl.ps1 start
+.\bin\hashi_remote_ctl.ps1 enable
 .\bin\hashi_remote_ctl.ps1 status
 .\bin\hashi_remote_ctl.ps1 doctor
 ```

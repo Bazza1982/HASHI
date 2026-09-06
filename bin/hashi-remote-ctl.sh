@@ -2,9 +2,9 @@
 #
 # Manage Hashi Remote as an OS-supervised side program on Linux/WSL.
 #
-# This script installs a systemd --user service when systemd is available.
-# It keeps legacy `/remote on` untouched; supervised Remote is an optional
-# rescue-grade lifecycle for machines that need remote recovery.
+# This script registers and controls a systemd --user supervisor when systemd
+# is available. Hashi Remote itself is already included with every HASHI
+# installation; this helper only manages independent OS supervision.
 
 set -euo pipefail
 
@@ -20,10 +20,14 @@ SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 LOG_DIR="$HASHI_ROOT/logs"
 LOG_PATH="$LOG_DIR/hashi-remote-supervisor.log"
 
-if [[ -x "$HASHI_ROOT/.venv/bin/python3" ]]; then
-    PYTHON_BIN="${HASHI_REMOTE_PYTHON:-$HASHI_ROOT/.venv/bin/python3}"
+if [[ -n "${HASHI_REMOTE_PYTHON:-}" ]]; then
+    PYTHON_BIN="$HASHI_REMOTE_PYTHON"
+elif [[ -x "$HASHI_ROOT/.venv-wsl/bin/python3" ]]; then
+    PYTHON_BIN="$HASHI_ROOT/.venv-wsl/bin/python3"
+elif [[ -x "$HASHI_ROOT/.venv/bin/python3" ]]; then
+    PYTHON_BIN="$HASHI_ROOT/.venv/bin/python3"
 else
-    PYTHON_BIN="${HASHI_REMOTE_PYTHON:-python3}"
+    PYTHON_BIN="python3"
 fi
 
 IDENTITY_SCRIPT="$HASHI_ROOT/remote/supervisor_identity.py"
@@ -119,7 +123,7 @@ Environment=$instance_environment
 Environment=PYTHONUTF8=1
 Environment=PYTHONIOENCODING=utf-8
 ExecStart=$exec_start
-Restart=always
+Restart=on-failure
 RestartSec=5
 StandardOutput=$log_target
 StandardError=$log_target
@@ -140,20 +144,33 @@ require_systemd_user() {
 }
 
 case "$ACTION" in
-    install)
+    register|install)
         require_systemd_user
         write_service
         systemctl --user daemon-reload
         systemctl --user enable "$SERVICE_NAME"
-        echo "Installed $SERVICE_PATH"
+        echo "Registered and enabled Remote supervisor $SERVICE_PATH"
         echo "Instance $INSTANCE_ID ($IDENTITY_SOURCE)"
         ;;
-    uninstall)
+    enable)
+        require_systemd_user
+        write_service
+        systemctl --user daemon-reload
+        systemctl --user enable --now "$SERVICE_NAME"
+        echo "Registered, enabled, and activated Remote supervisor $SERVICE_NAME"
+        echo "Instance $INSTANCE_ID ($IDENTITY_SOURCE)"
+        ;;
+    disable)
+        require_systemd_user
+        systemctl --user disable --now "$SERVICE_NAME"
+        echo "Disabled Remote supervisor $SERVICE_NAME"
+        ;;
+    unregister|uninstall)
         require_systemd_user
         systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
         rm -f "$SERVICE_PATH"
         systemctl --user daemon-reload
-        echo "Uninstalled $SERVICE_NAME"
+        echo "Unregistered Remote supervisor $SERVICE_NAME"
         ;;
     start)
         require_systemd_user
@@ -196,7 +213,7 @@ case "$ACTION" in
         echo "$SERVICE_NAME"
         ;;
     *)
-        echo "Usage: $0 {install|uninstall|start|stop|restart|status|logs|command|service-name}"
+        echo "Usage: $0 {register|enable|disable|unregister|start|stop|restart|status|logs|command|service-name}"
         exit 64
         ;;
 esac

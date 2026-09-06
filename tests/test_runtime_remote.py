@@ -437,3 +437,102 @@ async def test_remote_status_includes_peer_list(tmp_path, monkeypatch):
     assert "<b>Offline</b> · <code>1</code>" in text
     assert "peer:HASHI9" in text
     assert "peer:MSI" in text
+
+
+@pytest.mark.asyncio
+async def test_remote_on_uses_unified_supervisor_lifecycle(tmp_path, monkeypatch):
+    replies = []
+    lifecycle = SimpleNamespace(
+        enabled=True,
+        supervised=True,
+        disabled_path=tmp_path / "state" / "remote_disabled.json",
+        root=tmp_path,
+        port=8767,
+        use_tls=False,
+        backend="lan",
+    )
+    cleared = []
+
+    async def ensure_remote_started(root):
+        assert root == tmp_path
+        return {
+            "ok": True,
+            "action": "started_supervisor",
+            "port": 8767,
+            "health_host": "127.0.0.1",
+        }
+
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "load_settings", lambda _root: lifecycle)
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "read_disabled_state", lambda _root: None)
+    monkeypatch.setattr(
+        runtime_remote.remote_lifecycle,
+        "clear_disabled_state",
+        lambda root: cleared.append(root),
+    )
+    monkeypatch.setattr(
+        runtime_remote.remote_lifecycle,
+        "ensure_remote_started",
+        ensure_remote_started,
+    )
+    runtime = SimpleNamespace(
+        _is_authorized_user=lambda _user_id: True,
+        _remote_config_snapshot=lambda: {
+            "root": tmp_path,
+            "port": 8767,
+            "use_tls": False,
+            "backend": "lan",
+        },
+        _remote_process=None,
+        _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
+    )
+
+    await runtime_remote.cmd_remote(
+        runtime,
+        SimpleNamespace(effective_user=SimpleNamespace(id=1)),
+        SimpleNamespace(args=["on"]),
+    )
+
+    assert cleared == [tmp_path]
+    assert "HASHI Remote is active" in replies[-1]["text"]
+    assert "Lifecycle supervisor" in replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_remote_off_persists_disable_and_stops_supervisor(tmp_path, monkeypatch):
+    replies = []
+    lifecycle = SimpleNamespace(
+        enabled=True,
+        supervised=True,
+        disabled_path=tmp_path / "state" / "remote_disabled.json",
+    )
+    stopped = []
+
+    async def stop_remote(root):
+        stopped.append(root)
+        return {"ok": True, "action": "supervisor_stopped"}
+
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "load_settings", lambda _root: lifecycle)
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "read_disabled_state", lambda _root: None)
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "stop_remote", stop_remote)
+    runtime = SimpleNamespace(
+        _is_authorized_user=lambda _user_id: True,
+        _remote_config_snapshot=lambda: {
+            "root": tmp_path,
+            "port": 8767,
+            "use_tls": False,
+            "backend": "lan",
+        },
+        _remote_process=None,
+        _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
+    )
+
+    await runtime_remote.cmd_remote(
+        runtime,
+        SimpleNamespace(effective_user=SimpleNamespace(id=1)),
+        SimpleNamespace(args=["off"]),
+    )
+
+    assert stopped == [tmp_path]
+    state = json.loads((tmp_path / "state" / "remote_disabled.json").read_text())
+    assert state["disabled"] is True
+    assert "stopped and disabled" in replies[-1]["text"]

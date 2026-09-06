@@ -38,6 +38,8 @@ The onboarding program will:
 - Guide you through creating your first agent
 - Set up Telegram/WhatsApp connections (optional)
 - Prepare HASHI for local transports and authenticated external clients
+- Keep the bundled Hashi Remote available by default; supported systems register
+  and enable its per-instance OS supervisor automatically on first launch
 
 ### Step 4: Launch HASHI
 

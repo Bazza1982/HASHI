@@ -53,7 +53,7 @@ def _install_linux_unit(tmp_path: Path, *, root_name: str, instance_id: str) -> 
         "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
     }
     result = subprocess.run(
-        ["bash", str(ROOT / "bin" / "hashi-remote-ctl.sh"), "install"],
+        ["bash", str(ROOT / "bin" / "hashi-remote-ctl.sh"), "enable"],
         capture_output=True,
         text=True,
         check=False,
@@ -96,5 +96,7 @@ def test_linux_remote_supervisor_units_are_isolated_per_instance(tmp_path):
     assert 'StandardOutput="' not in hashi1_text
     assert "WorkingDirectory=" in hashi1_text
     assert "StandardOutput=append:" in hashi1_text
+    assert "Restart=on-failure" in hashi1_text
     assert "Instance HASHI1 (agents_json)" in hashi1_output
     assert "Instance HASHI2 (agents_json)" in hashi2_output
+    assert "Registered, enabled, and activated Remote supervisor" in hashi1_output

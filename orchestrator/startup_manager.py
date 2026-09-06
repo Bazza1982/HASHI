@@ -36,14 +36,14 @@ def _remote_issue_from_result(result: dict[str, Any], instance_id: str) -> dict[
 
     if action == "supervisor_unavailable":
         cause = (
-            f"Supervised Remote is enabled, but {service_name} is not installed "
-            f"or running"
+            f"Hashi Remote is included with HASHI, but its OS supervisor "
+            f"{service_name} is not registered or enabled"
         )
         if port is not None:
             cause += f", and no healthy HASHI Remote endpoint was found on port {port}"
         actions = [
-            "Run bin/hashi-remote-ctl.sh install, then bin/hashi-remote-ctl.sh start.",
-            "If an external supervisor is not wanted, set lifecycle.remote_supervised to false in remote/config.yaml.",
+            "Use /remote on to activate Hashi Remote.",
+            "If automatic activation remains unavailable, register and enable the OS supervisor with bin/hashi-remote-ctl.sh enable (Linux/WSL) or .\\bin\\hashi_remote_ctl.ps1 enable (Windows).",
         ]
     else:
         cause = reason
@@ -79,7 +79,7 @@ def _format_remote_issue(issue: dict[str, Any]) -> str:
     retry = (
         "HASHI will retry automatically."
         if issue.get("automatic_retry")
-        else "HASHI will keep its local services running but will not change system services or configuration automatically."
+        else "HASHI attempted the default Remote lifecycle and kept local services running."
     )
     return (
         f"{issue['summary']}\n"
@@ -196,7 +196,12 @@ class StartupManager:
         remote_status = {
             "available": bool(result.get("ok")),
             "enabled": bool(getattr(settings, "enabled", action != "skipped")),
-            "supervised": bool(getattr(settings, "supervised", False)),
+            "supervised": bool(
+                getattr(settings, "supervised", False)
+                and action not in {"started_child", "started_child_fallback"}
+                and not isinstance(result.get("supervisor_fallback"), dict)
+            ),
+            "supervisor_requested": bool(getattr(settings, "supervised", False)),
             "action": str(action or "unknown"),
             "port": getattr(settings, "port", None),
             "service_name": str(result.get("service_name") or ""),
@@ -211,6 +216,25 @@ class StartupManager:
                 action,
                 remote_status["port"],
             )
+            supervisor_fallback = result.get("supervisor_fallback")
+            if isinstance(supervisor_fallback, dict):
+                bridge_logger.warning(
+                    "Hashi Remote is active for %s through the bundled child lifecycle, "
+                    "but the OS supervisor could not be activated (%s). "
+                    "Use /remote on|off to control Remote. For availability independent "
+                    "of HASHI Core, register and enable the platform Remote supervisor.",
+                    instance_id,
+                    supervisor_fallback.get("reason") or "no detail",
+                )
+            supervisor_refresh = result.get("supervisor_refresh")
+            if isinstance(supervisor_refresh, dict) and not supervisor_refresh.get("ok"):
+                bridge_logger.warning(
+                    "Hashi Remote is active for %s, but its OS supervisor registration "
+                    "could not be refreshed (%s). Use /remote on to retry activation; "
+                    "if needed, register and enable the platform Remote supervisor.",
+                    instance_id,
+                    supervisor_refresh.get("reason") or "no detail",
+                )
             process = result.get("process")
             if process is not None:
                 setattr(self.kernel, "_remote_lifecycle_process", process)
