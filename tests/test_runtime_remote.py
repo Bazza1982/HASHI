@@ -24,7 +24,9 @@ class _Query:
 
 def _runtime(tmp_path):
     replies = []
-    return SimpleNamespace(
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = SimpleNamespace(
         global_config=SimpleNamespace(project_root=tmp_path, instance_id="HASHI_TEST"),
         _is_authorized_user=lambda user_id: user_id == 1,
         _load_instances=lambda: {"hashi2": {"display_name": "HASHI2"}},
@@ -32,7 +34,15 @@ def _runtime(tmp_path):
         _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
         _send_text=lambda chat_id, text, **kwargs: _reply(replies, text, kwargs),
         replies=replies,
+        _fetch_remote_json=AsyncMock(return_value=({"ok": True, "peers": [{
+            "instance_id": "HASHI2", "display_name": "HASHI2", "host": "127.0.0.1", "port": 8767,
+            "capabilities": ["agent_move_receive_v1"],
+            "properties": {"live_status": "online", "handshake_state": "handshake_accepted"},
+        }]}, "http://127.0.0.1/peers")),
     )
+    runtime._format_remote_age = lambda value: FlexibleAgentRuntime._format_remote_age(runtime, value)
+    runtime._remote_peer_presence = lambda peer: FlexibleAgentRuntime._remote_peer_presence(runtime, peer)
+    return runtime
 
 
 async def _reply(replies, text, kwargs):
@@ -165,14 +175,10 @@ async def test_handle_move_callback_exec_invokes_runtime_do_move(tmp_path):
 
     await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
 
-    assert calls == [
-        (
-            "zelda",
-            "hashi2",
-            {"hashi2": {"display_name": "HASHI2"}},
-            {"keep_source": True, "sync": False, "dry_run": False},
-        )
-    ]
+    assert len(calls) == 1
+    assert calls[0][:2] == ("zelda", "hashi2")
+    assert calls[0][2]["hashi2"]["remote_port"] == 8767
+    assert calls[0][3] == {"keep_source": True, "sync": False, "dry_run": False}
 
 
 @pytest.mark.asyncio
@@ -180,6 +186,8 @@ async def test_handle_move_callback_commit_runs_two_phase_cutover(
     tmp_path, monkeypatch
 ):
     runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime.global_config.project_root = tmp_path / "code-generation"
     result = {
         "status": "moved_pending_reboots",
         "agent_id": "zelda",
@@ -190,7 +198,7 @@ async def test_handle_move_callback_commit_runs_two_phase_cutover(
 
     def _confirm(root, instances, package_id):
         assert root == tmp_path
-        assert instances == {"hashi2": {"display_name": "HASHI2"}}
+        assert instances["hashi2"]["host"] == "127.0.0.1"
         assert package_id == "12345678-abcd"
         return result
 
@@ -281,6 +289,8 @@ async def test_handle_move_callback_rechecks_agent_busy_before_cutover(
 @pytest.mark.asyncio
 async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime.global_config.project_root = tmp_path / "code-generation"
     runtime.orchestrator = SimpleNamespace(runtimes=[])
     monkeypatch.setattr(runtime_pending, "delayed_count", AsyncMock(return_value=0))
     calls = []
@@ -536,3 +546,127 @@ async def test_remote_off_persists_disable_and_stops_supervisor(tmp_path, monkey
     state = json.loads((tmp_path / "state" / "remote_disabled.json").read_text())
     assert state["disabled"] is True
     assert "stopped and disabled" in replies[-1]["text"]
+
+
+def test_load_instances_uses_instance_root_not_generation(tmp_path, monkeypatch):
+    root = tmp_path / "instance"
+    root.mkdir()
+    snapshot = tmp_path / "generation" / "orchestrator" / "runtime_remote.py"
+    monkeypatch.setattr(runtime_remote, "__file__", str(snapshot))
+    monkeypatch.setattr(runtime_remote.Path, "home", lambda: tmp_path / "home")
+    expected = {"hashi3": {"display_name": "HASHI3"}}
+    (root / "instances.json").write_text(json.dumps({"instances": expected}))
+    assert runtime_remote.load_instances(project_root=root) == expected
+
+
+@pytest.mark.asyncio
+async def test_move_reads_bom_configuration_from_separate_instance_home(tmp_path):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = _runtime(tmp_path / "source")
+    runtime.global_config.bridge_home = tmp_path
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"agents": [{"name": "live-agent"}]}), encoding="utf-8-sig"
+    )
+    (tmp_path / "instances.json").write_text(
+        json.dumps({"instances": {"peer": {"instance_id": "PEER"}}}), encoding="utf-8-sig"
+    )
+    await runtime_remote.move_show_agent_picker(runtime, SimpleNamespace(), {})
+    button = runtime.replies[-1]["reply_markup"].inline_keyboard[0][0]
+    assert button.callback_data == "move:agent:live-agent"
+    assert FlexibleAgentRuntime._load_instances(runtime) == {"peer": {"instance_id": "PEER"}}
+
+
+@pytest.mark.parametrize("contents", ['{', '[]', '{"instances": []}', '{"instances": {"bad": null}}'])
+def test_load_instances_rejects_invalid_config(tmp_path, contents):
+    path = tmp_path / "instances.json"
+    path.write_text(contents)
+    with pytest.raises(runtime_remote.InstanceConfigurationError):
+        runtime_remote.load_instances([path])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["en", "zh-CN"])
+async def test_move_discovers_connected_peers_without_legacy_file(tmp_path, monkeypatch, locale):
+    from aiohttp import web
+    from orchestrator import ui_language
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    peer = {
+        "instance_id": "HASHI9", "display_name": "Destination <9>",
+        "host": "old-host", "port": 9999,
+        "resolved_route_host": "127.0.0.1", "resolved_route_port": 18769,
+        "capabilities": ["agent_move_receive_v1"],
+        "properties": {"live_status": "online", "handshake_state": "handshake_accepted"},
+    }
+    response = {"ok": True, "peers": [peer, {**peer, "instance_id": "HASHI_TEST"}]}
+    requests = []
+
+    async def peers_handler(request):
+        requests.append(request.path)
+        return web.json_response(response)
+
+    app = web.Application()
+    app.router.add_get("/peers", peers_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    try:
+        runtime = _runtime(tmp_path)
+        runtime._load_instances = lambda: FlexibleAgentRuntime._load_instances(runtime)
+        runtime._remote_urls = lambda path: [f"http://127.0.0.1:{port}{path}"]
+        runtime._fetch_remote_json = lambda path: FlexibleAgentRuntime._fetch_remote_json(runtime, path)
+        runtime._format_remote_age = lambda value: FlexibleAgentRuntime._format_remote_age(runtime, value)
+        runtime._remote_peer_presence = lambda p: FlexibleAgentRuntime._remote_peer_presence(runtime, p)
+        runtime._move_show_target_picker = lambda u, a, i: runtime_remote.move_show_target_picker(runtime, u, a, i)
+        runtime._do_move = lambda u, a, t, i, **kw: runtime_remote.do_move(runtime, u, a, t, i, **kw)
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=1), effective_chat=SimpleNamespace(id=1))
+        context = SimpleNamespace(args=["zelda"])
+        monkeypatch.setattr(runtime_remote, "__file__", str(tmp_path / "generation" / "orchestrator" / "runtime_remote.py"))
+        monkeypatch.setattr(runtime_pending, "delayed_count", AsyncMock(return_value=0))
+        with ui_language.language_scope(runtime, locale=locale):
+            await FlexibleAgentRuntime.cmd_move(runtime, update, context)
+            buttons = runtime.replies[-1]["reply_markup"].inline_keyboard
+            assert [b.callback_data for row in buttons for b in row] == ["move:target:zelda:hashi9"]
+            assert "Destination <9>" == buttons[0][0].text.removeprefix("📦 ")
+            assert requests == ["/peers"]
+            assert not (tmp_path / "instances.json").exists()
+            (tmp_path / "instances.json").write_text("{")
+            directory = await runtime_remote.load_move_instances(runtime)
+            assert directory["hashi9"]["host"] == "127.0.0.1"
+            assert directory["hashi9"]["remote_port"] == 18769
+            context.args = ["list"]
+            await FlexibleAgentRuntime.cmd_move(runtime, update, context)
+            assert "Destination &lt;9&gt;" in runtime.replies[-1]["text"]
+            peer["capabilities"] = []
+            query = _Query("move:target:zelda:hashi9")
+            await runtime_remote.handle_move_callback(runtime, SimpleNamespace(callback_query=query), context)
+            assert query.edits[-1]["text"] == ui_language.tr("remote.move.target_unsupported", target="hashi9")
+            peer["capabilities"] = ["agent_move_receive_v1"]
+            peer["properties"]["live_status"] = "offline"
+            query = _Query("move:target:zelda:hashi9")
+            await runtime_remote.handle_move_callback(runtime, SimpleNamespace(callback_query=query), context)
+            assert query.edits[-1]["text"] == ui_language.tr("remote.move.target_unavailable", target="hashi9")
+            prepare = AsyncMock(side_effect=AssertionError("Disconnected target must not be staged"))
+            monkeypatch.setattr(runtime_remote, "prepare_outbound_move", prepare)
+            query = _Query("move:exec:zelda:hashi9:move")
+            await runtime_remote.handle_move_callback(runtime, SimpleNamespace(callback_query=query, effective_chat=update.effective_chat), context)
+            assert runtime.replies[-1]["text"] == ui_language.tr("remote.move.target_unavailable", target="hashi9")
+            prepare.assert_not_called()
+            context.args = ["zelda"]
+            await FlexibleAgentRuntime.cmd_move(runtime, update, context)
+            assert runtime.replies[-1]["text"] == ui_language.tr("remote.move.no_targets")
+            response["peers"] = []
+            await FlexibleAgentRuntime.cmd_move(runtime, update, context)
+            assert runtime.replies[-1]["text"] == ui_language.tr("remote.move.no_targets")
+            response["trusted_view"] = False
+            await FlexibleAgentRuntime.cmd_move(runtime, update, context)
+            assert runtime.replies[-1]["text"] == ui_language.tr("move.remote_untrusted")
+            response.clear()
+            response.update({"ok": False, "error": "service unavailable"})
+            await FlexibleAgentRuntime.cmd_move(runtime, update, context)
+            assert runtime.replies[-1]["text"] == ui_language.tr("move.remote_unavailable")
+    finally:
+        await runner.cleanup()

@@ -3260,15 +3260,19 @@ class FlexibleAgentRuntime:
 
     # ── /move command ────────────────────────────────────────────────────────
     def _load_instances(self) -> dict:
-        return runtime_remote.load_instances()
+        return runtime_remote.load_instances(project_root=runtime_remote.instance_root(self))
 
     async def cmd_move(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
 
-        instances = self._load_instances()
+        try:
+            instances = await runtime_remote.load_move_instances(self)
+        except runtime_remote.MoveDiscoveryError as exc:
+            await self._reply_text(update, ui_language.tr(exc.message_key))
+            return
         if not instances:
-            await self._reply_text(update, ui_language.tr("move.instances_missing"))
+            await self._reply_text(update, ui_language.tr("remote.move.no_targets"))
             return
 
         args = context.args or []
@@ -3283,6 +3287,8 @@ class FlexibleAgentRuntime:
                     if "agent_move_receive_v1" in capabilities
                     else ui_language.tr("move.receiver_probe")
                 )
+                if inst.get("active") is False:
+                    receiver = ui_language.tr("move.peer_disconnected")
                 platform_name = inst.get("environment_kind") or inst.get("platform") or ui_language.tr("common.unknown")
                 lines.append(
                     f"  • <code>{html.escape(str(name))}</code> — "
@@ -3300,6 +3306,10 @@ class FlexibleAgentRuntime:
             sync = "--sync" in args
             dry = "--dry-run" in args
             await self._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry)
+            return
+
+        if not any(inst.get("active") for inst in instances.values()):
+            await self._reply_text(update, ui_language.tr("remote.move.no_targets"))
             return
 
         # /move <agent> — show target picker

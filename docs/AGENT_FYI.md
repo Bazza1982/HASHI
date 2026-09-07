@@ -69,6 +69,14 @@ second authoritative chat archive. See the owning architecture documents.
 
 ## Configuration and discovery
 
+`/move` derives destinations from the local Remote's trusted live `/peers`
+directory, including resolved routes and receiver capabilities. It refreshes
+discovery before staging or confirming a move; disconnected or unsupported
+targets are rejected. Discovery failure leaves recovery actions available.
+Migration configuration and state belong to `bridge_home`, independently of
+the source checkout or loaded Function generation. The command does not start
+either instance's reboot automatically. See [Agent Move](HASHI_AGENT_MOVE_V1.md).
+
 Read the active instance's `agents.json` / instance registry for identity,
 workspace, enabled Agents, endpoints and ports. Do not guess them from folder
 names or reuse a machine address from memory. Credentials stay in configured

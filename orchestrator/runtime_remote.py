@@ -85,26 +85,115 @@ def _move_recovery_markup(package_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def load_instances(candidates: list[Path] | None = None) -> dict:
-    """Load instances.json from the project root or ~/.hashi/instances.json."""
+class InstanceConfigurationError(ValueError):
+    """The instance connection directory cannot be read safely."""
+
+
+def instance_root(runtime: Any) -> Path:
+    """Resolve mutable migration state from the instance, never its code artifact."""
+    config = runtime.global_config
+    if home := getattr(config, "bridge_home", None):
+        return Path(home)
+    if config_path := getattr(config, "config_path", None):
+        return Path(config_path).parent
+    return Path(config.project_root)
+
+
+def load_instances(
+    candidates: list[Path] | None = None, *, project_root: Path | str | None = None,
+) -> dict:
+    """Read live instance configuration independently of the code generation."""
     if candidates is None:
+        if project_root is None:
+            raise InstanceConfigurationError("Instance root is unavailable")
         candidates = [
-            Path(__file__).parent.parent / "instances.json",
+            Path(project_root) / "instances.json",
             Path.home() / ".hashi" / "instances.json",
         ]
     for path in candidates:
-        if path.exists():
-            with open(path, encoding="utf-8") as f:
+        try:
+            with open(path, encoding="utf-8-sig") as f:
                 data = json.load(f)
-            return data.get("instances", {})
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise InstanceConfigurationError("Cannot read instance configuration") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("instances", {}), dict):
+            raise InstanceConfigurationError("Invalid instance directory")
+        instances = data.get("instances", {})
+        if any(not isinstance(entry, dict) for entry in instances.values()):
+            raise InstanceConfigurationError("Invalid instance entry")
+        return instances
     return {}
+
+
+class MoveDiscoveryError(ValueError):
+    """A localized failure to obtain the local Remote peer directory."""
+
+    def __init__(self, message_key: str) -> None:
+        super().__init__(message_key)
+        self.message_key = message_key
+
+
+async def load_move_instances(runtime: Any) -> dict[str, dict[str, Any]]:
+    """Derive migration routes from Remote's trusted live peer view."""
+    data, _url = await runtime._fetch_remote_json("/peers")
+    if not isinstance(data, dict) or data.get("ok") is False:
+        raise MoveDiscoveryError("move.remote_unavailable")
+    if data.get("trusted_view") is False:
+        raise MoveDiscoveryError("move.remote_untrusted")
+    peers = data.get("peers")
+    if not isinstance(peers, list):
+        raise MoveDiscoveryError("move.remote_unavailable")
+    current_instance = str(runtime.global_config.instance_id or "").strip().upper()
+    instances = {}
+    for peer in peers:
+        if not isinstance(peer, dict):
+            continue
+        instance_id = str(peer.get("instance_id") or "").strip().upper()
+        if not instance_id or instance_id in {current_instance, "UNKNOWN"}:
+            continue
+        props = peer.get("properties") or {}
+        host = str(peer.get("resolved_route_host") or peer.get("host") or "").strip()
+        try:
+            port = int(peer.get("resolved_route_port") or peer.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        rank, _label, _state = runtime._remote_peer_presence(peer)
+        instances[instance_id.lower()] = {
+            **peer,
+            "instance_id": instance_id,
+            "host": host,
+            "remote_port": port,
+            "environment_kind": props.get("environment_kind") or peer.get("platform"),
+            "active": rank == 0 and bool(host) and 0 < port <= 65535,
+        }
+    return instances
+
+
+def _move_target_error(target: str, instances: dict) -> str | None:
+    entry = next(
+        (value for key, value in instances.items()
+         if str(key).casefold() == str(target).casefold()
+         or str(value.get("instance_id") or "").casefold() == str(target).casefold()),
+        None,
+    )
+    if entry is None:
+        key = "remote.move.unknown_target"
+    elif entry.get("active") is False:
+        key = "remote.move.target_unavailable"
+    elif "capabilities" in entry and "agent_move_receive_v1" not in (entry.get("capabilities") or []):
+        key = "remote.move.target_unsupported"
+    else:
+        return None
+    return ui_language.tr(key, target=html.escape(str(target)))
 
 
 async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> None:
     """Step 1: pick which agent to move from the current instance."""
-    root = getattr(getattr(runtime, "global_config", None), "project_root", None) or Path(__file__).parent.parent
+    root = instance_root(runtime)
     try:
-        with open(Path(root) / "agents.json", encoding="utf-8") as f:
+        with open(root / "agents.json", encoding="utf-8-sig") as f:
             data = json.load(f)
         agents = data if isinstance(data, list) else data.get("agents", [])
         agent_names = [
@@ -249,26 +338,9 @@ async def do_move(
         )
         return
 
-    target_entry = instances.get(target)
-    if target_entry is None:
-        target_entry = next(
-            (
-                value
-                for key, value in instances.items()
-                if str(key).upper() == str(target).upper()
-                or str((value or {}).get("instance_id") or "").upper()
-                == str(target).upper()
-            ),
-            None,
-        )
-    if target_entry is None:
-        await runtime._send_text(
-            chat_id,
-            ui_language.tr(
-                "remote.move.unknown_target", target=html.escape(str(target))
-            ),
-            parse_mode="HTML",
-        )
+    target_error = _move_target_error(target, instances)
+    if target_error:
+        await runtime._send_text(chat_id, target_error, parse_mode="HTML")
         return
 
     selected_runtime = _find_agent_runtime(runtime, agent_id)
@@ -293,9 +365,7 @@ async def do_move(
     )
 
     global_config = getattr(runtime, "global_config", None)
-    project_root = Path(
-        getattr(global_config, "project_root", None) or Path(__file__).parent.parent
-    )
+    project_root = instance_root(runtime)
     source_instance = str(getattr(global_config, "instance_id", None) or "HASHI")
     try:
         if dry_run:
@@ -484,6 +554,21 @@ def render_remote_peer_lines(
 
 
 async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
+    try:
+        await _handle_move_callback(runtime, update, context)
+    except MoveDiscoveryError as exc:
+        data = _resolve_move_callback_data(runtime, update.callback_query.data or "") or ""
+        parts = data.split(":")
+        markup = (
+            _move_recovery_markup(parts[2])
+            if len(parts) == 3 and parts[1] in {"commit", "abort"} else None
+        )
+        await update.callback_query.edit_message_text(
+            ui_language.tr(exc.message_key), reply_markup=markup,
+        )
+
+
+async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
     """Handle move: callback queries."""
     query = update.callback_query
     if not runtime._is_authorized_user(query.from_user.id):
@@ -508,7 +593,7 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
 
     if action == "agent" and len(parts) >= 3:
         agent_id = parts[2]
-        instances = runtime._load_instances()
+        instances = await load_move_instances(runtime)
         rows = []
         current_instance = str(
             getattr(getattr(runtime, "global_config", None), "instance_id", None) or "HASHI"
@@ -545,6 +630,11 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
     if action == "target" and len(parts) >= 4:
         agent_id = parts[2]
         target = parts[3]
+        instances = await load_move_instances(runtime)
+        target_error = _move_target_error(target, instances)
+        if target_error:
+            await query.edit_message_text(target_error, parse_mode="HTML")
+            return
         markup = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
@@ -589,17 +679,15 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         keep = mode == "keep"
         sync = mode == "sync"
         dry = mode == "dry"
-        instances = runtime._load_instances()
+        instances = await load_move_instances(runtime)
         await runtime._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry)
         return
 
     if action in {"commit", "abort"} and len(parts) >= 3:
         package_id = parts[2]
         global_config = getattr(runtime, "global_config", None)
-        project_root = Path(
-            getattr(global_config, "project_root", None) or Path(__file__).parent.parent
-        )
-        instances = runtime._load_instances()
+        project_root = instance_root(runtime)
+        instances = await load_move_instances(runtime)
         await query.edit_message_text(
             ui_language.tr(
                 "remote.move.committing" if action == "commit" else "remote.move.cancelling"

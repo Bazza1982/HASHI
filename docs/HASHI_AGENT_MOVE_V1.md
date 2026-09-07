@@ -112,3 +112,61 @@ credential.
 
 Legacy `--sync` and plaintext direct-move credentials are rejected. Offline
 HASHI ↔ Hermes import/export remains on its existing, separate workflow.
+
+
+## HASHI3 /move Remote discovery — 2026-09-07
+
+`/move` reads the local Remote `/peers` API, the same trusted connection view
+used by `/remote list`. Connected peers automatically become destinations;
+no separately configured `instances.json` is required. Resolved Remote hosts,
+ports, receiver capabilities and connection status come from that view.
+The local instance is excluded. Menus omit disconnected peers; `/move list`
+labels disconnected and unsupported receivers. Selecting or executing a target
+refreshes the view before any package is staged. The migration coordinator still
+performs its authenticated identity/capability checks and explicit confirmation.
+Recovery callbacks retain disconnected routes and retry/cancel buttons.
+
+English and Chinese notices distinguish local Remote unavailability, an
+untrusted peer view, no connected targets, a disconnected target and an
+unsupported receiver. No UI asks the user to maintain a second target list.
+
+This supersedes the earlier configuration-file-only fix: that fix repaired
+path resolution but did not integrate Remote discovery, so its empty-directory
+live result was not a successful migration-menu acceptance.
+
+Scope: HASHI3 Frontend Connector / Functions only; no Core changes and no
+HASHI1/HASHI2 code or configuration changes. Agent1 `/reboot min` is authorized.
+Focused regression uses a real HTTP peer endpoint with no legacy file, relocated
+code, English/Chinese menus, route propagation and connection loss before staging.
+Before this change both locale cases failed to show a destination menu.
+Implementation checks and live adoption evidence are recorded separately.
+
+
+### HASHI3 verification receipt
+
+- Focused: `python -m pytest -q tests/test_runtime_remote.py tests/test_ui_language.py tests/test_agent_move_coordinator.py tests/test_remote_agent_move.py`
+  — 55 passed, 2 third-party deprecation warnings. No failed/skipped tests.
+- Windows native: `python -m pytest -q tests/test_runtime_remote.py -k discovers_connected_peers`
+  — 2 passed, 21 deselected. Both locales use explicit language contexts.
+- Ruff, protected Core and whitespace checks passed.
+- One authorized Agent1 `/reboot min` adopted generation
+  `sha256:68ae4783ef07db71d51b88bd7eeec279959f7656b3ad4819322c835eb5d07634`.
+  Core PID stayed 26056; Agent1 Worker changed from 27376 to 9412 and remained
+  ACTIVE, accepting, and Telegram connected.
+- Live `/move`, `/move list`, and `/move agent1` showed the agent and discovered
+  destinations without a legacy instance file. HASHI1/HASHI2 advertised migration;
+  connected INTEL/INTEL-WT did not advertise it; offline peers were labelled.
+- Live `/move agent1 hashi2 --dry-run` authenticated the receiver and produced a
+  119,973-byte disposable preview with 13 workspace files and 3 exclusions.
+  No package was staged remotely, no Agent was migrated, and neither instance's
+  configuration was changed. Full move/copy/recovery behavior was tested offline.
+- HASHI1/HASHI2 received no code or configuration changes. Existing unrelated
+  HASHI3 worktree modifications were retained outside this commit.
+
+## Separate code and instance roots
+
+On the shared-Functions runtime, migration reads and writes bridge_home
+(or the explicit configuration directory), not the immutable generation or
+source checkout. Legacy instance-directory reads and the Agent picker accept
+UTF-8 with or without a BOM. Stage, confirm and recovery use the same instance
+root so a split installation cannot migrate another checkout's Agent.
