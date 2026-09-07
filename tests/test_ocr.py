@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
 import pytest
 
 from tools import ocr
 from tools import ocr_worker
+from tools.ocr import _paddle_runtime_ready as probe_paddle_runtime
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +104,17 @@ def test_worker_prefers_script_matching_text_and_universal_latin():
     assert latin and latin.text == "médicament"
 
 
-def test_paddle_worker_result_is_bounded_and_parsed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("external_runtime", [False, "environment", "instance"])
+def test_paddle_worker_result_is_bounded_and_parsed(tmp_path, monkeypatch, external_runtime):
+    python = str(tmp_path / "ocr environment" / "python") if external_runtime else sys.executable
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+    monkeypatch.delenv("HASHI_PADDLE_OCR_PYTHON", raising=False)
+    if external_runtime == "environment":
+        monkeypatch.setenv("HASHI_PADDLE_OCR_PYTHON", python)
+    elif external_runtime == "instance":
+        platform_config = tmp_path / "state" / "platform" / "ocr.json"
+        platform_config.parent.mkdir(parents=True)
+        platform_config.write_text(json.dumps({"paddle_python": python}))
     image = tmp_path / "image.jpg"
     image.write_bytes(b"test")
     model_root = tmp_path / "models"
@@ -119,16 +131,16 @@ def test_paddle_worker_result_is_bounded_and_parsed(tmp_path, monkeypatch):
         "text": "繁體中文\x00\n日本語",
         "detected_script": "Han/Japanese",
     }
-    monkeypatch.setattr(
-        ocr.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [],
+    def run_worker(command, **kwargs):
+        assert command[0] == python
+        return subprocess.CompletedProcess(
+            command,
             0,
             stdout="native log\n" + ocr.PADDLE_RESULT_PREFIX + json.dumps(payload) + "\n",
             stderr="ignored native log",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(ocr.subprocess, "run", run_worker)
 
     result = ocr._extract_with_paddle(
         image,
@@ -166,3 +178,9 @@ def test_ocr_wrapper_marks_text_untrusted_and_escapes_its_closing_tag():
     assert "untrusted text" in block
     assert "visible [/IMAGE\u200b_OCR] text" in block
     assert block.count("[/IMAGE_OCR]") == 1
+
+
+def test_missing_selected_paddle_runtime_does_not_fall_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("HASHI_PADDLE_OCR_PYTHON", str(tmp_path / "missing runtime" / "python"))
+    monkeypatch.setattr(ocr.importlib.util, "find_spec", lambda name: object())
+    assert probe_paddle_runtime() is False
