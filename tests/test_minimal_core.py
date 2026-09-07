@@ -62,18 +62,25 @@ def test_core_import_closure_includes_lazy_dependencies():
 
 
 def test_entrypoint_does_not_load_product_code():
+    script = """
+import sys
+import main
+from pathlib import Path
+from orchestrator.runtime_contract import CORE_SOURCE_PATHS
+
+root = Path.cwd().resolve()
+environment = Path(sys.prefix).resolve()
+local = {
+    source.relative_to(root).as_posix()
+    for module in list(sys.modules.values())
+    if getattr(module, "__file__", None)
+    and (source := Path(module.__file__).resolve()).is_relative_to(root)
+    and not source.is_relative_to(environment)
+}
+assert local <= set(CORE_SOURCE_PATHS), local - set(CORE_SOURCE_PATHS)
+"""
     result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; import main; from pathlib import Path; "
-            "from orchestrator.runtime_contract import CORE_SOURCE_PATHS; "
-            "root = Path.cwd(); "
-            "local = {Path(m.__file__).resolve().relative_to(root).as_posix() "
-            "for m in list(sys.modules.values()) if getattr(m, '__file__', None) "
-            "and Path(m.__file__).resolve().is_relative_to(root)}; "
-            "assert local <= set(CORE_SOURCE_PATHS), local - set(CORE_SOURCE_PATHS)",
-        ],
+        [sys.executable, "-c", script],
         cwd=ROOT,
         capture_output=True,
         text=True,
