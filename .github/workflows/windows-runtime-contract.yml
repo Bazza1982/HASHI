@@ -74,9 +74,18 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+      # Managed CPython also supplies Windows security-only patch releases
+      # that are absent from actions/python-versions.
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare the declared Python runtime
+        shell: bash
+        run: |
+          uv venv --seed --python "${{ matrix.python-version }}" .venv
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          fi
       - name: Install runtime and test dependencies
         run: python -m pip install -r constraints/standard-py312.lock ".[test]"
       - name: Verify native Windows audit, shell, path, argv, and process contracts

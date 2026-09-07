@@ -47,7 +47,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest "psycopg[binary]"
+          python -m pip install -r constraints/standard-py312.lock ".[test,postgres]"
 
       - name: Run PostgreSQL lease rehearsal
         run: pytest -q tests/test_enterprise_postgres_integration.py
