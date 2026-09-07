@@ -18,6 +18,7 @@ import asyncio, json, logging, sys, warnings
 from pathlib import Path
 from orchestrator import function_worker_host as module
 home=Path(sys.argv[1])
+credential='123456789:abcdefghijklmnopqrstuvwxyz_ABCD'
 class Peer:
     def start(self): pass
     async def emit(self, event, payload):
@@ -32,7 +33,10 @@ class Host:
         self.stop_event=asyncio.Event()
         self.phase='READY'
     async def prepare(self):
-        logging.getLogger('PostTurnRegistry').warning('observer registration diagnostic')
+        logging.getLogger('PostTurnRegistry').warning(
+            f'observer registration diagnostic https://api.telegram.org/bot{credential}/getMe',
+            extra={'terminal_detail': f'token={credential}'},
+        )
         warnings.warn('library warning diagnostic')
         self.stop_event.set()
     async def shutdown(self): self.phase='STOPPED'
@@ -48,8 +52,13 @@ asyncio.run(module.run_function_worker(None, {}))
     diagnostic = files[0].read_text()
     assert "observer registration diagnostic" in diagnostic
     assert "library warning diagnostic" in diagnostic
+    assert "123456789:abcdefghijklmnopqrstuvwxyz_ABCD" not in diagnostic
+    assert "[REDACTED_BOT_TOKEN]" in diagnostic
+    assert files[0].stat().st_mode & 0o077 == 0
     events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert len(events) == 2 and all(event["event"] == "worker.log" for event in events)
+    assert "123456789:abcdefghijklmnopqrstuvwxyz_ABCD" not in json.dumps(events)
+    assert events[0]["payload"]["terminal_detail"] == "token=[REDACTED]"
 
     output = io.StringIO()
     console = logging.StreamHandler(output)

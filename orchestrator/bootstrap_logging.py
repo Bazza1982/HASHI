@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import threading
 from contextlib import suppress
@@ -19,6 +20,46 @@ C_ERROR = "\033[38;5;203m"
 C_OK = "\033[38;5;108m"
 C_STOP = "\033[38;5;179m"
 _console_filter_lock = threading.RLock()
+_LOG_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+        "Bearer [REDACTED]",
+    ),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"), "[REDACTED_API_KEY]"),
+    (
+        re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])"),
+        "[REDACTED_BOT_TOKEN]",
+    ),
+    (
+        re.compile(
+            r"(?i)(\b(?:api[_ -]?key|password|passwd|token|secret|authorization|cookie|"
+            r"private[_ -]?key)\s*[:=]\s*)([^\s,;]+)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        re.compile(
+            r"(?i)([?&](?:access_token|refresh_token|token|key|secret|signature)=)"
+            r"[^&#\s]+"
+        ),
+        r"\1[REDACTED]",
+    ),
+)
+
+
+def redact_log_text(value: object) -> str:
+    """Remove credential-shaped text before it reaches any log sink."""
+    text = str(value or "")
+    for pattern, replacement in _LOG_SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+class CredentialRedactingFormatter(logging.Formatter):
+    """Format complete diagnostics while withholding embedded credentials."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_log_text(super().format(record))
 
 
 class AnimMute(logging.Filter):
@@ -29,7 +70,7 @@ class AnimMute(logging.Filter):
 
 
 class WorkerLogRelay(logging.Handler):
-    """Send warnings to the shared console owner; files retain full diagnostics."""
+    """Relay sanitized warnings while files retain sanitized diagnostics."""
 
     def __init__(self, peer):
         super().__init__(logging.WARNING)
@@ -39,9 +80,11 @@ class WorkerLogRelay(logging.Handler):
 
     def emit(self, record):
         payload = {"name": record.name, "level": record.levelno,
-                   "message": record.getMessage()[:8000],
+                   "message": redact_log_text(record.getMessage())[:8000],
                    "terminal_safe": bool(getattr(record, "terminal_safe", False)),
-                   "terminal_detail": str(getattr(record, "terminal_detail", ""))}
+                   "terminal_detail": redact_log_text(
+                       getattr(record, "terminal_detail", "")
+                   )}
 
         def send():
             task = self.loop.create_task(self.peer.emit("worker.log", payload))
@@ -66,7 +109,11 @@ def setup_worker_logging(bridge_home: Path, peer) -> WorkerLogRelay:
     directory = Path(bridge_home) / "logs" / "function-workers"
     directory.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(directory / f"worker-{os.getpid()}.log", encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
+    with suppress(OSError):
+        Path(handler.baseFilename).chmod(0o600)
+    handler.setFormatter(
+        CredentialRedactingFormatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
+    )
     relay = WorkerLogRelay(peer)
     logging.basicConfig(level=logging.INFO, handlers=[handler, relay], force=True)
     logging.captureWarnings(True)
@@ -79,10 +126,10 @@ def receive_worker_log(payload: dict) -> None:
         "name": str(payload.get("name") or "BridgeU.FunctionWorker"),
         "levelno": int(payload.get("level") or logging.WARNING),
         "levelname": logging.getLevelName(int(payload.get("level") or logging.WARNING)),
-        "msg": str(payload.get("message") or ""),
+        "msg": redact_log_text(payload.get("message") or ""),
         "args": (),
         "terminal_safe": bool(payload.get("terminal_safe", False)),
-        "terminal_detail": str(payload.get("terminal_detail") or ""),
+        "terminal_detail": redact_log_text(payload.get("terminal_detail") or ""),
     })
     logging.getLogger(record.name).handle(record)
 

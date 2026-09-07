@@ -144,8 +144,10 @@ Agent Worker logging has no independent console handler. Each Worker retains
 diagnostics in `logs/function-workers/worker-<pid>.log` and relays warning/error
 records through Function IPC to the shared terminal owner. That owner applies
 the existing terminal level and animation filters; Python warnings use the same
-route. Muting the animation does not discard file diagnostics. This introduces
-no Core log policy or new protocol version.
+route. Credential-shaped text is redacted before either sink, including tokens
+embedded in request URLs, and Worker diagnostic files are owner-readable only.
+Muting the animation does not discard file diagnostics. This introduces no Core
+log policy or new protocol version.
 
 Local desktop wrappers should select the instance/distro and delegate to the
 existing `bin/bridge-u.sh` menu. The menu obtains Agent choices and service ports

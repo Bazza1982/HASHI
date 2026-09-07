@@ -186,6 +186,8 @@ routes through the configured registry/Remote protocol and advertised capabiliti
 not a hard-coded HASHI1/HASHI9 address. Old mailbox transport is retired.
 Attachments and remote file operations require their advertised capabilities and
 configured credentials; never copy a token into a command example or log.
+Function Worker diagnostic logs redact credential-shaped text, including tokens
+embedded in request URLs, before file persistence or shared-console relay.
 
 `/browser`, `/usecomputer`, `/exp`, voice/media and remote tools are optional
 capabilities. Select the available route for the task; inspect permissions and
