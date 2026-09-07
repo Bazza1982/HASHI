@@ -1510,6 +1510,9 @@ class FunctionWorkerHost:
 async def run_function_worker(connection: Any, bootstrap: Mapping[str, Any]) -> None:
     host = FunctionWorkerHost(connection, bootstrap)
     host.peer.start()
+    from orchestrator.bootstrap_logging import setup_worker_logging
+
+    log_relay = setup_worker_logging(host.bridge_home, host.peer)
     try:
         await asyncio.wait_for(host.prepare(), timeout=WORKER_PREPARE_TIMEOUT_SECONDS)
     except Exception as exc:
@@ -1527,6 +1530,7 @@ async def run_function_worker(connection: Any, bootstrap: Mapping[str, Any]) -> 
             )
         except Exception:
             pass
+        await log_relay.drain()
         await host.peer.close()
         return
 
@@ -1542,4 +1546,5 @@ async def run_function_worker(connection: Any, bootstrap: Mapping[str, Any]) -> 
     await asyncio.gather(*pending, return_exceptions=True)
     if host.phase != "STOPPED":
         await host.shutdown()
+    await log_relay.drain()
     await host.peer.close()

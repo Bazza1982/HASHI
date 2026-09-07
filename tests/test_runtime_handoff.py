@@ -14,6 +14,7 @@ from orchestrator.function_generation import (
 )
 from orchestrator.function_worker_supervisor import materialize_generation_artifact
 from orchestrator.runtime_contract import enforce_runtime_contract
+from orchestrator.startup_manager import StartupManager
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -127,6 +128,7 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         _load_whatsapp_cfg=lambda: ({}, {"enabled": True}),
         start_whatsapp_transport=start_whatsapp_transport,
     )
+    app.startup_manager = StartupManager(app, None)
     host = RuntimeAppHost(None, {})
     host.app = app
     host.task = asyncio.create_task(asyncio.Event().wait())

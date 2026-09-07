@@ -246,6 +246,47 @@ class UniversalOrchestrator:
     async def _do_hot_restart(self, restart: dict):
         await self.reboot_manager.hot_restart(restart)
 
+    def _report_startup(self):
+        startup_status = dict(self.startup_status)
+        failed_agents = int(startup_status.get("failed_agents") or 0)
+        issues = list(startup_status.get("issues") or ())
+        show_startup_status = getattr(
+            self.startup_manager,
+            "show_startup_status",
+            None,
+        )
+        if callable(show_startup_status):
+            try:
+                show_startup_status()
+            except Exception as exc:
+                # Presentation must never decide whether Core is available.
+                from orchestrator.terminal_console import record_output_exception
+
+                record_output_exception(
+                    purpose="startup_status",
+                    sink="startup_status_renderer",
+                    error=exc,
+                )
+        bridge_logger.info(
+            "Startup complete: status=%s agents=%s/%s ready (overall=%s%%), "
+            "failed=%s issues=%s elapsed=%.1fs",
+            startup_status["phase"],
+            startup_status.get("ready_agents", 0),
+            startup_status.get("total", 0),
+            startup_status.get("percent", 100),
+            failed_agents,
+            len(issues),
+            startup_status["elapsed_seconds"],
+        )
+        main_logger.info(
+            "HASHI is online. Awaiting messages. "
+            "Startup complete: status=%s, %s/%s agents ready in %.1fs.",
+            startup_status["phase"],
+            startup_status.get("ready_agents", 0),
+            startup_status.get("total", 0),
+            startup_status["elapsed_seconds"],
+        )
+
     async def run(self):
         try:
             global_cfg, agent_configs, secrets = self._load_config_bundle()
@@ -335,8 +376,8 @@ class UniversalOrchestrator:
         )
         startup_status.update(
             {
-                "phase": "degraded" if degraded else "ready",
-                "ready": not degraded,
+                "phase": "connecting" if getattr(self, "_handoff_draining", False) else "degraded" if degraded else "ready",
+                "ready": not degraded and not getattr(self, "_handoff_draining", False),
                 "degraded": degraded,
                 "services_ready": True,
                 "percent": 100,
@@ -349,42 +390,8 @@ class UniversalOrchestrator:
             }
         )
         self.startup_status = startup_status
-        show_startup_status = getattr(
-            self.startup_manager,
-            "show_startup_status",
-            None,
-        )
-        if callable(show_startup_status):
-            try:
-                show_startup_status()
-            except Exception as exc:
-                # Presentation must never decide whether Core is available.
-                from orchestrator.terminal_console import record_output_exception
-
-                record_output_exception(
-                    purpose="startup_status",
-                    sink="startup_status_renderer",
-                    error=exc,
-                )
-        bridge_logger.info(
-            "Startup complete: status=%s agents=%s/%s ready (overall=%s%%), "
-            "failed=%s issues=%s elapsed=%.1fs",
-            startup_status["phase"],
-            startup_status.get("ready_agents", 0),
-            startup_status.get("total", 0),
-            startup_status.get("percent", 100),
-            failed_agents,
-            len(issues),
-            startup_status["elapsed_seconds"],
-        )
-        main_logger.info(
-            "HASHI is online. Awaiting messages. "
-            "Startup complete: status=%s, %s/%s agents ready in %.1fs.",
-            startup_status["phase"],
-            startup_status.get("ready_agents", 0),
-            startup_status.get("total", 0),
-            startup_status["elapsed_seconds"],
-        )
+        if not getattr(self, "_handoff_draining", False):
+            self._report_startup()
 
         # --- Main event loop: supports hot restart ---
         while True:

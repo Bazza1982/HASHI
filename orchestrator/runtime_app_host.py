@@ -188,52 +188,28 @@ class RuntimeAppHost:
                 errors[name] = f"{type(exc).__name__}: {exc}"
 
         async with self.connector_lock:
-            await asyncio.gather(
-                *(
-                    activate_ingress(name, ingress)
-                    for name, ingress in app.function_workers._telegram_ingress.items()
-                )
-            )
+            app._connector_activation_pending = True
             try:
-                _, whatsapp = app._load_whatsapp_cfg()
-                if whatsapp.get("enabled") and app.whatsapp is None:
-                    ok, message = await app.start_whatsapp_transport(
-                        persist_enabled=False
+                app.startup_manager.reconcile_connector_status(pending=True, publish=False)
+                await asyncio.gather(
+                    *(
+                        activate_ingress(name, ingress)
+                        for name, ingress in app.function_workers._telegram_ingress.items()
                     )
-                    if not ok:
-                        errors["whatsapp"] = message
-            except Exception as exc:
-                errors["whatsapp"] = str(exc)
-            status = dict(app.startup_status)
-            issues = [
-                issue
-                for issue in status.get("issues", [])
-                if issue.get("code") != "connector_activation"
-            ]
-            if errors:
-                issues.append(
-                    {
-                        "code": "connector_activation",
-                        "severity": "warning",
-                        "summary": "Connectors are retrying activation",
-                        "details": errors,
-                        "automatic_retry": True,
-                    }
                 )
-            degraded = bool(
-                status.get("failed_agents")
-                or any(
-                    issue.get("severity") in {"warning", "error", "critical"}
-                    for issue in issues
-                )
-            )
-            status.update(
-                issues=issues,
-                degraded=degraded,
-                ready=not degraded,
-                phase="degraded" if degraded else "ready",
-            )
-            app.startup_status = status
+                try:
+                    _, whatsapp = app._load_whatsapp_cfg()
+                    if whatsapp.get("enabled") and app.whatsapp is None:
+                        ok, message = await app.start_whatsapp_transport(
+                            persist_enabled=False
+                        )
+                        if not ok:
+                            errors["whatsapp"] = message
+                except Exception as exc:
+                    errors["whatsapp"] = str(exc)
+            finally:
+                app._connector_activation_pending = False
+            app.startup_manager.reconcile_connector_status(errors)
         return errors
 
     async def _retry_connectors(self):

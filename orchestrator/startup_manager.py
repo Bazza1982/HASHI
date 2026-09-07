@@ -528,6 +528,11 @@ class StartupManager:
                     return agent_name, (False, str(e))
                 if ok:
                     new_state = "local" if "LOCAL MODE" in msg.upper() else "online"
+                    snapshot = getattr(self.kernel.function_workers, "telegram_ingress_snapshot", None)
+                    if (getattr(self.kernel, "_handoff_draining", False)
+                            and callable(snapshot) and snapshot(agent_name).get("configured")):
+                        # Worker readiness precedes shared Connector activation.
+                        new_state = "online"
                     boot_state[agent_name] = new_state
                     if new_state == "local":
                         boot_reason[agent_name] = "Telegram unavailable"
@@ -744,6 +749,77 @@ class StartupManager:
                 and bool(accepting)
             )
         return alive and startup_state in {"online", "local"}
+
+    def reconcile_connector_status(self, errors=None, *, pending=False, publish=True) -> None:
+        """Derive startup health from current ingress; retain unrelated failures."""
+        status = dict(getattr(self.kernel, "startup_status", {}) or {})
+        previous_issues = list(status.get("issues") or [])
+        states = dict(status.get("agent_states") or {})
+        reasons = dict(status.get("agent_reasons") or {})
+        workers = self.kernel.function_workers
+        snapshot = getattr(workers, "telegram_ingress_snapshot", None)
+        unavailable = []
+        connecting = []
+        for name, handle in self.kernel._runtime_map().items():
+            ingress = dict(snapshot(name) or {}) if callable(snapshot) else {}
+            configured = ingress.get("configured", name in getattr(workers, "_telegram_ingress", {}))
+            connected = bool(ingress.get("running") and ingress.get("connected")
+                             and getattr(handle, "telegram_connected", False))
+            if configured:
+                if connected:
+                    states[name] = "online"
+                    reasons.pop(name, None)
+                elif pending:
+                    connecting.append(name)
+                else:
+                    unavailable.append(name)
+                    states[name] = "local"
+                    reasons[name] = "Telegram unavailable"
+            elif states.get(name) == "local":
+                unavailable.append(name)
+
+        errors = dict(status.get("connector_errors") or {}) if errors is None else dict(errors)
+        issues = [issue for issue in previous_issues if issue.get("code") not in {
+            "agent_telegram_unavailable", "connector_activation"}]
+        if unavailable:
+            issues.append({
+                "code": "agent_telegram_unavailable", "component": "telegram",
+                "severity": "warning", "summary": f"{len(unavailable)} agent(s) have no active Telegram connection.",
+                "automatic_retry": bool(any(name in getattr(workers, "_telegram_ingress", {}) for name in unavailable)),
+                "details": {"agents": sorted(unavailable)},
+            })
+        if errors:
+            issues.append({"code": "connector_activation", "component": "connectors",
+                "severity": "warning", "summary": "Connectors are retrying activation",
+                "details": errors, "automatic_retry": True})
+        degraded = bool(status.get("failed_agents") or any(
+            issue.get("severity") in {"warning", "error", "critical"} for issue in issues))
+        status.update(issues=issues, connector_errors=errors, degraded=degraded,
+            ready=not pending and not degraded,
+            phase="connecting" if pending else "degraded" if degraded else "ready",
+            agent_states=states, agent_reasons=reasons,
+            connecting_agents=len(connecting), local_agents=len(unavailable),
+            waiting_for=sorted(connecting))
+        self.kernel.startup_status = status
+        if pending or not publish:
+            return
+        signature = (tuple(sorted(states.items())), tuple(sorted(unavailable)),
+                     tuple(sorted(errors)), tuple(issue.get("code") for issue in issues))
+        if signature == getattr(self, "_connector_status_signature", None):
+            return
+        self._connector_status_signature = signature
+        previous_codes = {issue.get("code") for issue in previous_issues}
+        current_codes = {issue.get("code") for issue in issues}
+        if not (unavailable or errors) and (previous_codes - current_codes) & {
+                "agent_telegram_unavailable", "connector_activation"}:
+            main_logger.info("Connector startup recovered.", extra={"terminal_safe": True})
+            bridge_logger.info("Connector startup recovered.")
+        if unavailable or errors:
+            main_logger.warning("Connector startup is degraded; inspect /api/health for affected agents.",
+                                extra={"terminal_safe": True})
+        report = getattr(self.kernel, "_report_startup", None)
+        if callable(report):
+            report()
 
     def show_startup_status(self) -> None:
         """Render verified Worker, Telegram ingress, and live service state."""

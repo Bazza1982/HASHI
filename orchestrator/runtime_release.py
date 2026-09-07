@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from orchestrator.function_generation import probe_function_generation
 from orchestrator.function_worker_supervisor import materialize_generation_artifact
 from orchestrator.runtime_contract import RuntimeFingerprint
+from orchestrator.pathing import build_bridge_paths
 
 
 def qualify_release(payload: dict) -> dict:
@@ -15,7 +16,8 @@ def qualify_release(payload: dict) -> dict:
     runtime = RuntimeFingerprint.from_mapping(payload["runtime"])
     generation = probe_function_generation(
         SimpleNamespace(
-            paths=SimpleNamespace(code_root=root), runtime_fingerprint=runtime
+            paths=build_bridge_paths(root, payload["bridge_home"], canonical_home=True),
+            runtime_fingerprint=runtime,
         )
     )
     artifact = materialize_generation_artifact(Path(payload["bridge_home"]), generation)

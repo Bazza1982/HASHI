@@ -57,6 +57,18 @@ Health reports Core, shared and per-Agent process generations separately. Read
 Core changes require a planned cold adoption. Neither action is implicit in a
 request to fix code. If operational testing is forbidden, report that clearly.
 
+Startup qualification includes enabled post-Turn observer factory modules and
+their dependencies from active Agents' instance configuration. Newly enabled
+observers invalidate incomplete generation caches; they never bypass immutable
+imports. Shared startup stays connecting until actual Connector activation,
+then derives readiness and recovery from ingress results without hiding other
+failures. Worker warnings retain per-process file diagnostics and use the shared
+terminal's animation/level filters. Local desktop launchers delegate Agent and
+port display to the existing configuration-driven menu. See
+[Startup and qualification ownership](HASHI_SLIM_CORE_ARCHITECTURE.md#startup-presentation-and-connector-health).
+These repairs require the relevant new shared/Agent generations; source edits
+and offline tests alone do not prove live adoption.
+
 ## Reboot outcome notifications
 
 Runtime acknowledges `/reboot` before executing it and persists the actual

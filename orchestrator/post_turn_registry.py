@@ -47,18 +47,22 @@ def build_post_turn_observers(
     return observers
 
 
-def _load_observer_specs(workspace_dir: Path) -> list[dict[str, Any]]:
+def _load_observer_specs(workspace_dir: Path, *, strict: bool = False) -> list[dict[str, Any]]:
     path = workspace_dir / OBSERVER_CONFIG
     if not path.exists():
         return []
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
+        if strict:
+            raise ValueError(f"Invalid observer configuration: {path}") from exc
         logger.warning("Failed to read %s: %s", path, exc)
         return []
     if isinstance(raw, dict):
         raw = raw.get("observers", [])
     if not isinstance(raw, list):
+        if strict:
+            raise ValueError(f"Observer configuration must contain a list: {path}")
         logger.warning("%s must contain a list or an object with an observers list", path)
         return []
     specs: list[dict[str, Any]] = []
@@ -70,12 +74,46 @@ def _load_observer_specs(workspace_dir: Path) -> list[dict[str, Any]]:
     return specs
 
 
-def _load_factory(factory_path: str):
+def _factory_parts(factory_path: str) -> tuple[str, str]:
     module_name, sep, attr_name = factory_path.partition(":")
     if not sep:
         module_name, sep, attr_name = factory_path.rpartition(".")
     if not module_name or not attr_name:
         raise ValueError(f"Invalid observer factory path: {factory_path!r}")
+    return module_name, attr_name
+
+
+def declared_observer_modules(paths: Any) -> tuple[str, ...]:
+    """Read enabled instance declarations without loading PCM or running factories."""
+    from orchestrator.pathing import resolve_path_value
+
+    config_path = getattr(paths, "config_path", None)
+    if config_path is None:
+        home = getattr(paths, "bridge_home", None)
+        if home is None:
+            return ()
+        config_path = Path(home) / "agents.json"
+    config_path = Path(config_path)
+    if not config_path.exists():
+        return ()
+    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    modules: set[str] = set()
+    for agent in config.get("agents", []):
+        if not agent.get("is_active", True):
+            continue
+        workspace = resolve_path_value(
+            agent["workspace_dir"], config_dir=config_path.parent,
+            bridge_home=getattr(paths, "bridge_home", config_path.parent),
+        )
+        for spec in _load_observer_specs(workspace, strict=True):
+            if spec.get("enabled", True):
+                module, _attribute = _factory_parts(str(spec.get("factory", "")).strip())
+                modules.add(module)
+    return tuple(sorted(modules))
+
+
+def _load_factory(factory_path: str):
+    module_name, attr_name = _factory_parts(factory_path)
     module = importlib.import_module(module_name)
     factory = getattr(module, attr_name)
     if not callable(factory):

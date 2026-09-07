@@ -102,6 +102,17 @@ Missing project modules fail closed instead of falling back to mutable source.
 Core paths cannot be shadowed by artifacts. Runtime, Core digest, source bytes,
 asset bytes and executable modes are checked before process use.
 
+Enabled post-Turn observers declared by active Agents are additional qualification
+roots. PAO reads factory module names from the instance's observer declarations,
+resolving workspaces through the existing path owner without loading PCM or
+executing factories. Cold qualification and Agent qualification include their
+transitive project dependencies. Memory and disk caches are reusable only when
+they cover the current enabled declarations; enabling a previously omitted
+observer forces qualification. Disabled declarations add no dependency. The
+immutable import guard remains authoritative; a missing or invalid project
+module rejects qualification instead of reading mutable checkout code. Existing
+running artifacts do not change when a configuration file is edited.
+
 Core and Function API are now 3. CPython remains 3.12.13, Agent worker protocol
 remains 1 and the Function artifact schema remains 2. This is an authorized Core
 migration, not permission to bypass compatibility checks on old running Core.
@@ -116,6 +127,38 @@ shared children have dedicated process groups, with bounded cleanup of remaining
 children. Windows uses an OS Job Object with kill-on-close descendant ownership,
 plus bounded exact-PID tree cleanup; native Windows live
 qualification remains a separately reported platform check.
+
+## Startup presentation and Connector health
+
+PAO startup and Frontend Connector status belong to the shared Functions process.
+Worker preparation can finish before shared commit opens Telegram intake. During
+that interval health remains `connecting`/not ready, and the final startup table
+is deferred. A prepared Worker does not prove a connected transport. After
+activation, startup presentation and health use the actual ingress and Worker
+connection state. Failed connectors retain degraded health and automatic retry;
+successful retries and later polling recovery clear only Connector-owned issues.
+Unrelated service and Agent failures remain visible. Recovery is logged and the
+startup table is refreshed when the derived state changes.
+
+Agent Worker logging has no independent console handler. Each Worker retains
+diagnostics in `logs/function-workers/worker-<pid>.log` and relays warning/error
+records through Function IPC to the shared terminal owner. That owner applies
+the existing terminal level and animation filters; Python warnings use the same
+route. Muting the animation does not discard file diagnostics. This introduces
+no Core log policy or new protocol version.
+
+Local desktop wrappers should select the instance/distro and delegate to the
+existing `bin/bridge-u.sh` menu. The menu obtains Agent choices and service ports
+from the existing launcher configuration view. Wrappers must not copy those
+lists or advertise a retired Workbench frontend. Machine paths and identities
+remain local configuration; back up a local wrapper before replacement.
+
+The 2026-09-07 startup repairs are PAO/Frontend Functions and launcher changes.
+Their source and offline checks do not constitute production adoption. Applying
+the shared startup/logging owner requires separately authorized shared adoption;
+an Agent-only reboot does not update the shared owner. Live observer execution,
+Telegram reconnect and desktop startup remain operator acceptance checks when
+restarts or test messages are forbidden by the task.
 
 ## Rules that prevent product code returning to Core
 

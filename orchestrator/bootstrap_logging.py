@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -25,6 +26,65 @@ class AnimMute(logging.Filter):
 
     def filter(self, _record: logging.LogRecord) -> bool:
         return False
+
+
+class WorkerLogRelay(logging.Handler):
+    """Send warnings to the shared console owner; files retain full diagnostics."""
+
+    def __init__(self, peer):
+        super().__init__(logging.WARNING)
+        self.peer = peer
+        self.loop = asyncio.get_running_loop()
+        self.pending = set()
+
+    def emit(self, record):
+        payload = {"name": record.name, "level": record.levelno,
+                   "message": record.getMessage()[:8000],
+                   "terminal_safe": bool(getattr(record, "terminal_safe", False)),
+                   "terminal_detail": str(getattr(record, "terminal_detail", ""))}
+
+        def send():
+            task = self.loop.create_task(self.peer.emit("worker.log", payload))
+            self.pending.add(task)
+
+            def done(completed):
+                self.pending.discard(completed)
+                if not completed.cancelled():
+                    completed.exception()
+            task.add_done_callback(done)
+
+        if not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(send)
+
+    async def drain(self):
+        await asyncio.sleep(0)
+        if self.pending:
+            await asyncio.gather(*tuple(self.pending), return_exceptions=True)
+
+
+def setup_worker_logging(bridge_home: Path, peer) -> WorkerLogRelay:
+    directory = Path(bridge_home) / "logs" / "function-workers"
+    directory.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(directory / f"worker-{os.getpid()}.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
+    relay = WorkerLogRelay(peer)
+    logging.basicConfig(level=logging.INFO, handlers=[handler, relay], force=True)
+    logging.captureWarnings(True)
+    return relay
+
+
+def receive_worker_log(payload: dict) -> None:
+    """Apply the shared console's level and animation filters to child records."""
+    record = logging.makeLogRecord({
+        "name": str(payload.get("name") or "BridgeU.FunctionWorker"),
+        "levelno": int(payload.get("level") or logging.WARNING),
+        "levelname": logging.getLevelName(int(payload.get("level") or logging.WARNING)),
+        "msg": str(payload.get("message") or ""),
+        "args": (),
+        "terminal_safe": bool(payload.get("terminal_safe", False)),
+        "terminal_detail": str(payload.get("terminal_detail") or ""),
+    })
+    logging.getLogger(record.name).handle(record)
 
 
 def configure_console_encoding() -> None:

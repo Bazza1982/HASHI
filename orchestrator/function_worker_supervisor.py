@@ -24,6 +24,7 @@ from orchestrator.function_generation import (
     SourceManifest,
     VerifiedFunctionGeneration,
     probe_function_generation,
+    configured_observers_are_qualified,
     verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_bootstrap import run_function_worker_process
@@ -1028,6 +1029,8 @@ class FunctionWorkerSupervisor:
             if cached is not None:
                 try:
                     cached.verify_qualified_source(self.kernel.runtime_fingerprint)
+                    if not configured_observers_are_qualified(self.kernel, cached):
+                        raise ValueError("Enabled observers require a new Function generation")
                 except Exception:
                     self._cached_generation = None
                     self._cached_artifact = None
@@ -1039,7 +1042,7 @@ class FunctionWorkerSupervisor:
                 self.kernel.paths.code_root,
                 self.kernel.runtime_fingerprint,
             )
-            if disk_cached is not None:
+            if disk_cached is not None and configured_observers_are_qualified(self.kernel, disk_cached[0]):
                 generation, artifact = disk_cached
                 self._cached_generation = generation
                 self._cached_artifact = (
@@ -1260,6 +1263,7 @@ class FunctionWorkerSupervisor:
     def telegram_ingress_snapshot(self, agent_name: str) -> dict[str, Any]:
         ingress = self._telegram_ingress.get(str(agent_name))
         return {
+            "configured": ingress is not None,
             "running": bool(ingress is not None and ingress.is_running),
             "connected": bool(ingress is not None and ingress.connected),
             "offset": None if ingress is None else ingress.offset,
@@ -1353,11 +1357,18 @@ class FunctionWorkerSupervisor:
             )
         except Exception as exc:
             self._queue_telegram_status_warning(name, exc)
-            return
-        self._telegram_status_failures.pop(name, None)
-        metadata = dict(result.get("metadata") or {})
-        if metadata:
-            handle.update_metadata(client, metadata)
+        else:
+            self._telegram_status_failures.pop(name, None)
+            metadata = dict(result.get("metadata") or {})
+            if metadata:
+                handle.update_metadata(client, metadata)
+        # Ingress truth still changes when Worker IPC cannot refresh metadata.
+        startup = getattr(self.kernel, "startup_manager", None)
+        reconcile = getattr(startup, "reconcile_connector_status", None)
+        if (callable(reconcile) and getattr(self.kernel, "_shared_committed", False)
+                and not getattr(self.kernel, "_handoff_draining", False)
+                and not getattr(self.kernel, "_connector_activation_pending", False)):
+            reconcile()
 
     async def prepare_worker(
         self,
@@ -1574,6 +1585,11 @@ class FunctionWorkerSupervisor:
         event: str,
         payload: dict[str, Any],
     ) -> None:
+        if event == "worker.log":
+            from orchestrator.bootstrap_logging import receive_worker_log
+
+            receive_worker_log(payload)
+            return
         if event == "runtime.request_completed":
             handle = self.kernel._runtime_map().get(client.agent_name)
             if isinstance(handle, AgentRuntimeHandle):

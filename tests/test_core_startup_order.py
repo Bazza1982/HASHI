@@ -17,9 +17,11 @@ class _LifecycleState:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("deferred", [False, True])
 async def test_core_publishes_workbench_before_starting_function_workers(
     tmp_path,
     monkeypatch,
+    deferred,
 ):
     events: list[str] = []
 
@@ -27,6 +29,9 @@ async def test_core_publishes_workbench_before_starting_function_workers(
         async def start_initial_agents(self, _global_cfg, _agent_configs, _secrets):
             events.append("workers")
             return True, {}
+
+        def show_startup_status(self):
+            events.append("status")
 
     class _ServiceManager:
         async def start_workbench_api(self, _global_cfg, _secrets):
@@ -55,6 +60,7 @@ async def test_core_publishes_workbench_before_starting_function_workers(
         config_path=tmp_path / "agents.json",
     )
     kernel.runtime_fingerprint = runtime_fingerprint
+    kernel._handoff_draining = deferred
     kernel.lifecycle_state = _LifecycleState()
     kernel.startup_manager = _StartupManager()
     kernel.service_manager = _ServiceManager()
@@ -74,8 +80,11 @@ async def test_core_publishes_workbench_before_starting_function_workers(
         "workbench",
         "workers",
         "remaining-services",
+        *([] if deferred else ["status"]),
         "shutdown",
     ]
+    assert kernel.startup_status["ready"] is not deferred
+    assert kernel.startup_status["phase"] == ("connecting" if deferred else "ready")
 
 
 @pytest.mark.asyncio
