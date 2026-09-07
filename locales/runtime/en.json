@@ -1677,6 +1677,7 @@
     "anatta.reload.unavailable": "observer reload unavailable",
     "anatta.mode_set": "Mode set to {mode}: {observer}; {reload}.",
     "api.control_unavailable": "API Gateway control is unavailable.",
+    "api.model_requires_restart": "Restart the API Gateway to load newly configured models before selecting this default.",
     "restart.current": "controlled by WatchTower",
     "restart.controller": "Controller",
     "restart.watchtower_api": "WatchTower API",

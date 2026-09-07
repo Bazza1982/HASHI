@@ -9,6 +9,7 @@ import sys
 import traceback
 from contextlib import suppress
 from pathlib import Path
+from orchestrator import ui_language
 from orchestrator.agent_directory import AgentDirectory
 from orchestrator.api_gateway_config import (
     available_api_models,
@@ -271,7 +272,7 @@ class ServiceManager:
         running = self.kernel.api_gateway
         configured_models = getattr(running, "configured_models", None)
         if callable(configured_models) and normalized not in configured_models():
-            return False, "Restart the API Gateway to load newly configured models before selecting this default."
+            return False, ui_language.tr("api.model_requires_restart")
         self._save_api_gateway_state(default_model=normalized)
         if running is not None:
             running.set_default_model(normalized)

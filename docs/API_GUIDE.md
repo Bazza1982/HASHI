@@ -139,6 +139,8 @@ including UTF-8 BOM files and installations with separate source and instance
 directories. It does not load Agent personas or mutate the shared model catalog.
 The `/api` model menu, persisted default and Gateway request routes use these
 instance opt-ins. Other instances retain their own model lists.
+The model menu includes configured names even when they do not use a built-in
+model-family prefix.
 
 The Gateway snapshots model and effort opt-ins when it starts. Restart the
 Gateway after changing these entries. Selecting a newly configured model before
@@ -162,13 +164,13 @@ The separate HASHI-native device-login utility is documented in
 [HASHI_XAI_OAUTH.md](HASHI_XAI_OAUTH.md). Its token store is not implicitly
 injected into an active backend.
 
-### GPT-5.6 through Codex CLI
-
 For an instance opting into GPT-6 Astra, the Codex CLI adapter also declares its
 context capacity to the compaction resolver: a 1,050,000-token window with
 128,000 tokens of response headroom. Explicit instance/profile capacity settings
 retain precedence. This capacity declaration neither enables the model nor
 changes the compaction trigger policy.
+
+### GPT-5.6 through Codex CLI
 
 HASHI supports the smoke-tested Codex CLI variants below. The bare `gpt-5.6`
 alias is deliberately not advertised because it was rejected by the configured

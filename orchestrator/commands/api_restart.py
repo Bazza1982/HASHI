@@ -99,6 +99,10 @@ def _gateway_model_keyboard(runtime: Any) -> InlineKeyboardMarkup:
         [model for model in snapshot["available_models"] if model.startswith("gemini-")],
         [model for model in snapshot["available_models"] if model.startswith("grok-")],
     ]
+    grouped_models = {model for group in groups for model in group}
+    groups.append([
+        model for model in snapshot["available_models"] if model not in grouped_models
+    ])
     rows: list[list[InlineKeyboardButton]] = []
     for group in groups:
         if not group:

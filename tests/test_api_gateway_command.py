@@ -226,21 +226,22 @@ async def test_instance_models_survive_shared_service_restart_and_route_http(tmp
 
 
 @pytest.mark.asyncio
-async def test_canonical_api_menu_uses_instance_model_catalog(tmp_path):
+@pytest.mark.parametrize("model", ["gpt-6-astra", "instance-preview"])
+async def test_canonical_api_menu_uses_instance_model_catalog(tmp_path, model):
     cfg = _global_config(tmp_path)
-    _write_instance_models(cfg)
+    _write_instance_models(cfg, model=model)
     manager = ServiceManager(SimpleNamespace(paths=cfg, global_cfg=cfg, api_gateway=None))
     runtime = _FakeRuntime(cfg)
     runtime.orchestrator = SimpleNamespace(service_manager=manager)
     query = _FakeQuery("apigw:menu:model")
     await api_restart.api_callback(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
     markup = query.edits[-1][1]["reply_markup"]
-    assert "apigw:model:gpt-6-astra" in [
+    assert f"apigw:model:{model}" in [
         button.callback_data for row in markup.inline_keyboard for button in row
     ]
-    query = _FakeQuery("apigw:model:gpt-6-astra")
+    query = _FakeQuery(f"apigw:model:{model}")
     await api_restart.api_callback(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
-    assert load_api_gateway_config(cfg)["default_model"] == "gpt-6-astra"
+    assert load_api_gateway_config(cfg)["default_model"] == model
 
 
 @pytest.mark.parametrize("conflict", ["engine", "effort"])

@@ -1677,6 +1677,7 @@
     "anatta.reload.unavailable": "无法重新加载观察器",
     "anatta.mode_set": "模式已设为 {mode}：{observer}；{reload}。",
     "api.control_unavailable": "API 网关控制不可用。",
+    "api.model_requires_restart": "请先重启 API 网关以加载新配置的模型，再将其设为默认模型。",
     "restart.current": "由 WatchTower 控制",
     "restart.controller": "控制器",
     "restart.watchtower_api": "WatchTower API",
