@@ -10,27 +10,16 @@ from __future__ import annotations
 
 import argparse
 import ast
-import atexit
-import asyncio
-import builtins
-import concurrent.futures
-import contextlib
 import hashlib
 import importlib
 import importlib.util
-import io
 import json
-import multiprocessing.process
 import os
-import shutil
-import signal
-import socket
 import stat
 import subprocess
 import sys
-import threading
 import traceback
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from types import ModuleType
@@ -47,6 +36,9 @@ from orchestrator.function_contract import (
     is_function_module_name,
     validate_function_contract,
 )
+from orchestrator.kernel_artifact import manifest_digest
+from orchestrator.kernel_import_guard import candidate_import_guard as stable_import_guard
+from orchestrator.manager_registry import FUNCTION_MANAGER_SPECS
 from orchestrator.runtime_contract import (
     RuntimeFingerprint,
     compare_runtime_fingerprints,
@@ -62,6 +54,9 @@ _ROOT_PACKAGES = tuple(prefix[:-1] for prefix in FUNCTION_MODULE_PREFIXES)
 # A cold Core deliberately need not import Agent modules. These roots define
 # the operational surface; static closure and the probe expand them.
 FUNCTION_GENERATION_ENTRYPOINTS = (
+    "orchestrator.runtime_app_host",
+    "orchestrator.runtime_release",
+    "orchestrator.function_worker_host",
     "orchestrator.admin_local_testing",
     "orchestrator.flexible_agent_runtime",
     "orchestrator.runtime_command_binding",
@@ -409,7 +404,7 @@ def _order_source_entries(
 def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
     root = Path(code_root).resolve()
     assets: list[AssetEntry] = []
-    for package in _ROOT_PACKAGES:
+    for package in (*_ROOT_PACKAGES, "locales"):
         package_root = root / package
         if not package_root.is_dir():
             continue
@@ -446,23 +441,8 @@ def build_source_manifest_from_entries(
 ) -> SourceManifest:
     canonical_entries = tuple(entries)
     canonical_assets = tuple(assets)
-    digest = hashlib.sha256()
-    for entry in canonical_entries:
-        digest.update(b"module\0")
-        digest.update(entry.module.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(entry.relative_path.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(entry.sha256.encode("ascii"))
-        digest.update(b"\n")
-    for asset in canonical_assets:
-        digest.update(b"asset\0")
-        digest.update(asset.relative_path.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(asset.sha256.encode("ascii"))
-        digest.update(b"\0x\n" if asset.executable else b"\0-\n")
     return SourceManifest(
-        generation_id="sha256:" + digest.hexdigest(),
+        generation_id=manifest_digest([asdict(e) for e in canonical_entries], [asdict(a) for a in canonical_assets]),
         entries=canonical_entries,
         assets=canonical_assets,
     )
@@ -596,132 +576,8 @@ def verify_qualified_manifest_bytes(
         ) from exc
 
 
-@contextlib.contextmanager
-def candidate_import_guard() -> Iterator[None]:
-    """Reject import-time I/O and process-state mutation."""
-
-    originals: list[tuple[Any, str, Any]] = []
-    staging_thread = threading.get_ident()
-
-    def patch(owner: Any, attribute: str, replacement: Any) -> None:
-        if hasattr(owner, attribute):
-            originals.append((owner, attribute, getattr(owner, attribute)))
-            setattr(owner, attribute, replacement)
-
-    def patch_blocked(owner: Any, attribute: str, label: str) -> None:
-        if not hasattr(owner, attribute):
-            return
-        original = getattr(owner, attribute)
-
-        def reject(*args: Any, **kwargs: Any) -> Any:
-            if threading.get_ident() == staging_thread:
-                raise FunctionGenerationError(
-                    f"Function modules must be import-pure; blocked {label}"
-                )
-            return original(*args, **kwargs)
-
-        patch(owner, attribute, reject)
-
-    def is_null_sink(value: Any) -> bool:
-        try:
-            return Path(value).resolve() == Path(os.devnull).resolve()
-        except (OSError, TypeError, ValueError):
-            return False
-
-    original_open = builtins.open
-
-    def guarded_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any):
-        if (
-            threading.get_ident() == staging_thread
-            and any(flag in str(mode) for flag in ("w", "a", "x", "+"))
-            and not is_null_sink(file)
-        ):
-            raise FunctionGenerationError(
-                f"Function modules must be import-pure; blocked file write: {file}"
-            )
-        return original_open(file, mode, *args, **kwargs)
-
-    original_io_open = io.open
-
-    def guarded_io_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any):
-        if (
-            threading.get_ident() == staging_thread
-            and any(flag in str(mode) for flag in ("w", "a", "x", "+"))
-            and not is_null_sink(file)
-        ):
-            raise FunctionGenerationError(
-                f"Function modules must be import-pure; blocked file write: {file}"
-            )
-        return original_io_open(file, mode, *args, **kwargs)
-
-    original_os_open = os.open
-
-    def guarded_os_open(path: Any, flags: int, *args: Any, **kwargs: Any):
-        write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
-        if (
-            threading.get_ident() == staging_thread
-            and flags & write_flags
-            and not is_null_sink(path)
-        ):
-            raise FunctionGenerationError(
-                f"Function modules must be import-pure; blocked file write: {path}"
-            )
-        return original_os_open(path, flags, *args, **kwargs)
-
-    original_popen = subprocess.Popen
-
-    def guarded_popen(*args: Any, **kwargs: Any):
-        command = args[0] if args else kwargs.get("args")
-        normalized = (
-            tuple(str(part) for part in command)
-            if isinstance(command, (list, tuple))
-            else ()
-        )
-        if normalized == ("/sbin/ldconfig", "-p"):
-            return original_popen(*args, **kwargs)
-        if threading.get_ident() == staging_thread:
-            raise FunctionGenerationError(
-                "Function modules must be import-pure; blocked process start"
-            )
-        return original_popen(*args, **kwargs)
-
-    old_dont_write_bytecode = sys.dont_write_bytecode
-    patch(builtins, "open", guarded_open)
-    patch(io, "open", guarded_io_open)
-    patch(os, "open", guarded_os_open)
-    for attribute in ("write_text", "write_bytes", "touch", "mkdir", "unlink"):
-        patch_blocked(Path, attribute, f"Path.{attribute}")
-    for attribute in ("rename", "replace"):
-        patch_blocked(Path, attribute, f"Path.{attribute}")
-    for attribute in (
-        "mkdir", "makedirs", "remove", "unlink", "rename", "replace",
-        "rmdir", "removedirs", "chdir", "system", "fork", "forkpty",
-        "posix_spawn", "posix_spawnp", "putenv", "unsetenv",
-    ):
-        patch_blocked(os, attribute, f"os.{attribute}")
-    for attribute in ("copy", "copy2", "copyfile", "copytree", "move", "rmtree"):
-        patch_blocked(shutil, attribute, f"shutil.{attribute}")
-    patch(subprocess, "Popen", guarded_popen)
-    for attribute in ("run", "call", "check_call", "check_output"):
-        patch_blocked(subprocess, attribute, f"subprocess.{attribute}")
-    patch_blocked(multiprocessing.process.BaseProcess, "start", "process start")
-    patch_blocked(threading.Thread, "start", "thread start")
-    patch_blocked(asyncio, "create_task", "asyncio.create_task")
-    patch_blocked(asyncio.BaseEventLoop, "create_task", "event-loop task creation")
-    patch_blocked(concurrent.futures.ThreadPoolExecutor, "submit", "thread work")
-    patch_blocked(concurrent.futures.ProcessPoolExecutor, "submit", "process work")
-    patch_blocked(socket, "create_connection", "network connection")
-    patch_blocked(signal, "signal", "signal mutation")
-    patch_blocked(atexit, "register", "exit handler registration")
-    patch_blocked(os._Environ, "__setitem__", "environment mutation")
-    patch_blocked(os._Environ, "__delitem__", "environment mutation")
-    sys.dont_write_bytecode = True
-    try:
-        yield
-    finally:
-        sys.dont_write_bytecode = old_dont_write_bytecode
-        for owner, attribute, original in reversed(originals):
-            setattr(owner, attribute, original)
+def candidate_import_guard():
+    return stable_import_guard(error_type=FunctionGenerationError)
 
 
 _candidate_import_guard = candidate_import_guard
@@ -739,7 +595,7 @@ def run_candidate_probe(
         "module_names": list(module_names),
         "expected_runtime": expected_runtime.to_dict(),
     }
-    command = [sys.executable, "-I", str(Path(__file__).resolve()), "--probe"]
+    command = [sys.executable, "-I", str(Path(code_root).resolve() / "orchestrator" / "function_generation.py"), "--probe"]
     try:
         completed = subprocess.run(
             command,
@@ -808,10 +664,11 @@ def probe_function_generation(
             "Core runtime fingerprint is unavailable; Function Worker reboot is disabled"
         )
     requested = set(FUNCTION_GENERATION_ENTRYPOINTS)
-    # The Core's live ``sys.modules`` set is timing-dependent: after Workbench
-    # starts it contains Core-hosted modules that are absent during cold
+    requested.update(spec.module for spec in FUNCTION_MANAGER_SPECS)
+    # The shared process's live ``sys.modules`` set is timing-dependent: after Workbench
+    # starts it contains shared-service modules that are absent during cold
     # bootstrap. Seeding a Function generation from that set makes /reboot
-    # absorb unrelated Core modules and produces a different artifact from a
+    # absorb unrelated loaded modules and produces a different artifact from a
     # cold start. Explicit roots plus static closure and the isolated probe are
     # the single deterministic qualification path for both cases.
     if module_names is not None:
@@ -881,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.probe:
         return _probe_main()
-    parser.error("function_generation is an internal Core module")
+    parser.error("function_generation is an internal Functions module")
     return 2
 
 

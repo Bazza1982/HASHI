@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from orchestrator.kernel_process import instance_runtime_dir, canonical_instance_home
+
 
 HOME_PREFIX = "@home/"
 
@@ -29,18 +31,7 @@ def expand_path_string(value: str) -> str:
 
 
 def resolve_bridge_home(code_root: Path, override: str | Path | None = None) -> Path:
-    raw = str(override).strip() if override is not None else os.environ.get("BRIDGE_HOME", "").strip()
-    # Defensively sanitize accidental cmd quoting artifacts.
-    # On Windows, %~dp0 ends with \ so "path\" causes \" to be parsed as an
-    # escaped quote by the C runtime, potentially swallowing later arguments
-    # into this value.  A quote character is never valid in a Windows path, so
-    # truncate at the first one.
-    if '"' in raw:
-        raw = raw[:raw.index('"')]
-    raw = raw.strip().rstrip("'")
-    if not raw:
-        return code_root
-    return Path(expand_path_string(raw)).resolve()
+    return canonical_instance_home(code_root, override)
 
 
 def resolve_home_file(
@@ -107,14 +98,10 @@ def resolve_instance_id(config_path: Path) -> str:
     return instance_id or "HASHI"
 
 
-def instance_runtime_dir(bridge_home: Path) -> Path:
-    """Keep process coordination under the installation's stable instance home."""
-    return Path(bridge_home) / "state" / "instance"
 
-
-def build_bridge_paths(code_root: Path, bridge_home: str | Path | None = None) -> BridgePaths:
+def build_bridge_paths(code_root: Path, bridge_home: str | Path | None = None, *, canonical_home: bool = False) -> BridgePaths:
     resolved_code_root = code_root.resolve()
-    resolved_home = resolve_bridge_home(resolved_code_root, bridge_home)
+    resolved_home = Path(bridge_home).resolve() if canonical_home else resolve_bridge_home(resolved_code_root, bridge_home)
     config_path = resolve_home_file(
         resolved_home,
         resolved_code_root,

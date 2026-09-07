@@ -1,4 +1,4 @@
-"""Stable Core ownership of Telegram long polling for one Agent route."""
+"""Shared Functions ownership of Telegram polling for one stable Agent route."""
 
 from __future__ import annotations
 
@@ -19,8 +19,9 @@ TELEGRAM_RETRY_SECONDS = 2.0
 
 
 class CoreTelegramIngress:
-    """Poll Telegram in Core and deliver JSON updates through a stable handle.
+    """Poll in shared Functions and deliver JSON updates through a stable handle.
 
+    The historical class name is retained for source compatibility.
     The handle lookup happens for every update, so an atomic Function Worker
     pointer swap changes the recipient without restarting this transport.
     Offset advances only after the selected Worker accepts the update.
@@ -34,11 +35,13 @@ class CoreTelegramIngress:
         handle_lookup: Callable[[str], Any | None],
         status_callback: Callable[[bool], Any] | None = None,
         bot_factory: Callable[[str], Any] = Bot,
+        checkpoint_callback: Callable[[int], Any] | None = None,
     ) -> None:
         self.agent_name = str(agent_name)
         self.token = str(token)
         self.handle_lookup = handle_lookup
         self.status_callback = status_callback
+        self.checkpoint_callback = checkpoint_callback
         self.bot = bot_factory(self.token)
         self.offset: int | None = None
         self.task: asyncio.Task[None] | None = None
@@ -93,6 +96,8 @@ class CoreTelegramIngress:
                         )
                     await handle.deliver_telegram_update(update.to_dict())
                     self.offset = int(update.update_id) + 1
+                    if self.checkpoint_callback is not None:
+                        self.checkpoint_callback(self.offset)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -104,6 +109,22 @@ class CoreTelegramIngress:
                     exc,
                 )
                 await asyncio.sleep(TELEGRAM_RETRY_SECONDS)
+
+    async def pause(self) -> None:
+        """Finish the accepted batch and retain its offset before handoff.
+
+        Cancellation can occur between accepting an update and advancing the
+        offset. A service rollout therefore awaits this loop instead of
+        cancelling it; a timeout rejects the rollout and resumes the poller.
+        """
+        self._stopping = True
+        if self.task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(self.task), timeout=45)
+            except BaseException:
+                self._stopping = False
+                raise
+        await self.stop(notify_status=False)
 
     async def stop(self, *, notify_status: bool = True) -> None:
         self._stopping = True

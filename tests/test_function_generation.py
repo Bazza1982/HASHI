@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import main
+from orchestrator.runtime_contract import enforce_runtime_contract
 from orchestrator.function_generation import (
     CandidateProbeReceipt,
     FUNCTION_GENERATION_ENTRYPOINTS,
@@ -218,12 +218,12 @@ def test_default_hot_probe_does_not_seed_from_core_loaded_modules(monkeypatch):
 
     kernel = types.SimpleNamespace(
         paths=types.SimpleNamespace(code_root=ROOT),
-        runtime_fingerprint=main.RUNTIME_FINGERPRINT,
+        runtime_fingerprint=enforce_runtime_contract(ROOT),
     )
     verified = probe_function_generation(kernel, probe_runner=probe_runner)
 
     assert set(FUNCTION_GENERATION_ENTRYPOINTS) <= set(seen["module_names"])
-    assert "orchestrator.workbench_api" not in verified.manifest.module_names
+    assert "orchestrator.workbench_api" in verified.manifest.module_names
 
 
 def test_in_process_generation_commit_api_is_retired():
@@ -235,7 +235,7 @@ def test_in_process_generation_commit_api_is_retired():
 
 def test_isolated_probe_rejects_dependency_environment_drift_before_import():
     incompatible = dataclasses.replace(
-        main.RUNTIME_FINGERPRINT,
+        enforce_runtime_contract(ROOT),
         dependency_digest="sha256:" + "0" * 64,
     )
 

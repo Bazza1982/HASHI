@@ -18,7 +18,7 @@ if str(CODE_ROOT) not in sys.path:
 
 
 async def _run(agent_name: str, bridge_home: Path) -> int:
-    import main
+    from orchestrator import runtime_app as main
     from orchestrator.pathing import build_bridge_paths
 
     paths = build_bridge_paths(CODE_ROOT, bridge_home=bridge_home)

@@ -268,7 +268,23 @@ class WorkbenchApiServer:
         self.transfer_store = TransferStore(
             self.config_path.parent / "state" / "bridge_transfers.sqlite"
         )
-        self.app = web.Application(client_max_size=64 * 1024 * 1024)
+        @web.middleware
+        async def runtime_admission(request, handler):
+            if getattr(self.orchestrator, "_handoff_draining", False):
+                return web.json_response({"error": "shared_functions_draining"}, status=503,
+                                         headers={"Retry-After": "1", "Connection": "close"})
+            owner = self.orchestrator
+            tracked = owner is not None and request.method != "GET"
+            if tracked:
+                owner._handoff_requests = getattr(owner, "_handoff_requests", 0) + 1
+            try:
+                return await handler(request)
+            finally:
+                if tracked:
+                    owner._handoff_requests -= 1
+
+        self.app = web.Application(client_max_size=64 * 1024 * 1024,
+                                   middlewares=[runtime_admission])
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
@@ -6569,6 +6585,11 @@ class WorkbenchApiServer:
                 "dependency_digest": runtime.dependency_digest,
                 "core_source_digest": runtime.core_source_digest,
             }
+        payload["kernel_pid"] = getattr(orchestrator, "kernel_pid", None)
+        payload["shared_functions"] = {
+            "pid": os.getpid(),
+            "generation_id": getattr(orchestrator, "shared_generation_id", None),
+        }
         generation = getattr(orchestrator, "function_generation", None)
         if isinstance(generation, dict):
             payload["function_generation"] = dict(generation)

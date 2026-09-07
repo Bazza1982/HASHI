@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import importlib.abc
-import importlib.util
 import logging
 import os
 import sys
@@ -21,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from orchestrator.kernel_artifact import GenerationModuleFinder
 from orchestrator.function_generation import (
     FUNCTION_GENERATION_SCHEMA_VERSION,
     SourceManifest,
@@ -52,43 +51,10 @@ class FunctionWorkerStateError(RuntimeError):
     """An operation is invalid for the worker's current lifecycle phase."""
 
 
-class _GenerationModuleFinder(importlib.abc.MetaPathFinder):
-    """Resolve only manifest-owned modules from the immutable generation.
-
-    A broad ``sys.path`` prepend lets a copied package shadow protected Core
-    children.  Exact manifest routing preserves the boundary: listed function
-    modules come from the artifact, while every non-listed module continues to
-    resolve from the stable Core source tree.
-    """
-
-    def __init__(
-        self,
-        *,
-        generation_root: Path,
-        code_root: Path,
-        manifest: SourceManifest,
-    ) -> None:
-        self.generation_root = Path(generation_root).resolve()
-        self.code_root = Path(code_root).resolve()
-        self.entries = {entry.module: entry for entry in manifest.entries}
-
-    def find_spec(self, fullname: str, path=None, target=None):
-        del path, target
-        entry = self.entries.get(fullname)
-        if entry is None:
-            return None
-        source = self.generation_root / entry.relative_path
-        if entry.relative_path.endswith("/__init__.py"):
-            live_package = self.code_root / Path(*fullname.split("."))
-            locations = [str(source.parent)]
-            if live_package.is_dir() and live_package.resolve() != source.parent.resolve():
-                locations.append(str(live_package.resolve()))
-            return importlib.util.spec_from_file_location(
-                fullname,
-                source,
-                submodule_search_locations=locations,
-            )
-        return importlib.util.spec_from_file_location(fullname, source)
+class _GenerationModuleFinder(GenerationModuleFinder):
+    def __init__(self, *, generation_root, code_root, manifest):
+        super().__init__(generation_root=generation_root, code_root=code_root,
+                         manifest=manifest.to_dict())
 
 
 class _WhatsAppMarker:
@@ -159,7 +125,7 @@ class WorkerSchedulerFacade:
 
 
 class WorkerServiceManagerFacade:
-    """Worker-side control surface for Core-owned process services."""
+    """Worker control surface for shared Functions; legacy wire names stay stable."""
 
     def __init__(self, peer: JsonConnectionPeer) -> None:
         self.peer = peer
@@ -805,11 +771,12 @@ class FunctionWorkerHost:
         from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
         from orchestrator.skill_manager import SkillManager
 
-        self.paths = build_bridge_paths(self.code_root, bridge_home=self.bridge_home)
+        self.paths = build_bridge_paths(self.code_root, bridge_home=self.bridge_home, canonical_home=True)
         manager = ConfigManager(
             self.paths.config_path,
             self.paths.secrets_path,
             bridge_home=self.paths.bridge_home,
+            code_root=self.paths.code_root,
         )
         global_cfg, agent_configs, secrets = manager.load()
         agent_cfg = next(

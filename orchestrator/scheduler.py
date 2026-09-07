@@ -1355,6 +1355,9 @@ class TaskScheduler:
     async def run(self):
         scheduler_logger.info("Task Scheduler started%s.", " (croniter available)" if HAS_CRONITER else " (croniter NOT available, fallback mode)")
         while True:
+            if getattr(self.orchestrator, "_handoff_draining", False):
+                await asyncio.sleep(0.1)
+                continue
             lease_held = False
             try:
                 if self.enterprise_lease_store is not None:

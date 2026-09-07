@@ -192,3 +192,28 @@ async def test_core_ingress_waits_at_route_gate_then_uses_committed_worker():
     assert old_deliveries == []
     assert new_deliveries == [7]
     assert ("delete_webhook", False) in bot.calls
+
+
+@pytest.mark.asyncio
+async def test_shared_handoff_finishes_acceptance_before_preserving_offset():
+    bot = _Bot("token")
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    class Handle:
+        async def deliver_telegram_update(self, payload):
+            entered.set()
+            await finish.wait()
+            return True
+
+    ingress = CoreTelegramIngress(agent_name="alpha", token="token",
+        handle_lookup=lambda _: Handle(), bot_factory=lambda _: bot)
+    await ingress.start(drop_pending_updates=False)
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    pause = asyncio.create_task(ingress.pause())
+    await asyncio.sleep(0)
+    assert not pause.done()
+    assert ingress.offset is None
+    finish.set()
+    await asyncio.wait_for(pause, timeout=1)
+    assert ingress.offset == 8
+    assert not ingress.is_running

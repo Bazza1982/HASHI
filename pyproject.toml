@@ -132,8 +132,8 @@ implementation = "cpython"
 python = "3.12.13"
 standard-lock = "constraints/standard-py312.lock"
 portable-build-date = "20260303"
-core-api = 2
-function-api = 2
+core-api = 3
+function-api = 3
 worker-model = "per-agent-process"
 worker-protocol = 1
 generation-schema = 2
@@ -161,6 +161,9 @@ testpaths = [
     "tests/test_her_v2_core.py",
     "tests/test_function_contract.py",
     "tests/test_function_generation.py",
+    "tests/test_minimal_core.py",
+    "tests/test_kernel_process.py",
+    "tests/test_runtime_handoff.py",
     "tests/test_function_worker_protocol.py",
     "tests/test_function_worker_supervisor.py",
     "tests/test_hchat_send.py",

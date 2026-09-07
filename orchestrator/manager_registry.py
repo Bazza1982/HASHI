@@ -11,7 +11,7 @@ ManagerConstructor = Literal["empty", "paths", "kernel", "kernel_console", "skil
 
 @dataclass(frozen=True)
 class ManagerSpec:
-    """One authoritative construction rule for a kernel-owned manager."""
+    """One authoritative construction rule for a shared Function manager."""
 
     attribute: str
     module: str
@@ -19,7 +19,7 @@ class ManagerSpec:
     constructor: ManagerConstructor
 
 
-CORE_MANAGER_SPECS: tuple[ManagerSpec, ...] = (
+FUNCTION_MANAGER_SPECS: tuple[ManagerSpec, ...] = (
     ManagerSpec(
         "endpoint_registry",
         "orchestrator.service_endpoints",
@@ -57,15 +57,15 @@ def _construct_manager(spec: ManagerSpec, manager_class, kernel, console_handler
     raise ValueError(f"Unknown manager constructor rule: {spec.constructor}")
 
 
-def build_core_manager_bundle(
+def build_function_manager_bundle(
     kernel,
     console_handler,
     *,
     module_loader: Callable[[str], ModuleType] = importlib.import_module,
 ) -> dict[str, object]:
-    """Construct the stable Core control-plane manager set at cold start."""
+    """Construct the shared Function manager set at process startup."""
     bundle: dict[str, object] = {}
-    for spec in CORE_MANAGER_SPECS:
+    for spec in FUNCTION_MANAGER_SPECS:
         module = module_loader(spec.module)
         manager_class = getattr(module, spec.class_name)
         bundle[spec.attribute] = _construct_manager(
@@ -77,19 +77,19 @@ def build_core_manager_bundle(
     return bundle
 
 
-def install_core_manager_bundle(
+def install_function_manager_bundle(
     kernel,
     bundle: dict[str, object],
     *,
     module_loader: Callable[[str], ModuleType] = importlib.import_module,
 ) -> None:
-    """Install a complete Core manager bundle during Core construction."""
+    """Install a complete Function manager bundle inside the shared process."""
 
-    expected = {spec.attribute for spec in CORE_MANAGER_SPECS}
+    expected = {spec.attribute for spec in FUNCTION_MANAGER_SPECS}
     if set(bundle) != expected:
         missing = sorted(expected - set(bundle))
         extra = sorted(set(bundle) - expected)
         raise ValueError(f"Invalid manager bundle; missing={missing}, extra={extra}")
 
-    for spec in CORE_MANAGER_SPECS:
+    for spec in FUNCTION_MANAGER_SPECS:
         setattr(kernel, spec.attribute, bundle[spec.attribute])

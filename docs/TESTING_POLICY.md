@@ -117,11 +117,18 @@ python -m pytest -q \
   tests/test_reboot_manager.py
 ```
 
+For shared Functions or minimal-Core changes, also run
+`tests/test_kernel_process.py`, `tests/test_minimal_core.py` and
+`tests/test_runtime_handoff.py`. These use isolated processes and temporary
+instance state, including actual full-product preparation without provider
+activation. They verify the product import boundary, code adoption and failure
+recovery; production reboot is not part of the test.
+
 Old tests that assert `importlib.reload()` progress, rebuilt Manager objects,
 warm-service recreation, or a repair shim between mixed class generations are
 invalid: those implementations are forbidden. Replacement tests assert that
 candidate rejection does not gate an active Worker, target selection is exact,
-multi-Agent pointer publication is atomic, Core services retain identity, and
+multi-Agent pointer publication is atomic, shared Functions retain identity, and
 Worker crash recovery uses the same immutable artifact.
 
 ### 5. Offline product suite

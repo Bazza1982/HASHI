@@ -612,9 +612,14 @@ class AgentRuntimeHandle:
             if self._cutover:
                 raise FunctionWorkerError(f"Agent {self.name!r} is already cutting over")
             self._cutover = True
-            while self._route_inflight:
-                await self._condition.wait()
-            return self._client
+            try:
+                while self._route_inflight:
+                    await self._condition.wait()
+                return self._client
+            except BaseException:
+                self._cutover = False
+                self._condition.notify_all()
+                raise
 
     async def commit_cutover(
         self,
@@ -1163,6 +1168,8 @@ class FunctionWorkerSupervisor:
             "per_agent": per_agent,
             "runtime_id": self.kernel.runtime_fingerprint.runtime_id,
         }
+        from orchestrator.runtime_handoff import persist
+        persist(self.kernel)
 
     def topology_snapshot(self, *, agent_name: str | None = None) -> dict[str, Any]:
         runtimes = [runtime.get_runtime_metadata() for runtime in self.kernel.runtimes]
@@ -1223,14 +1230,23 @@ class FunctionWorkerSupervisor:
             agent_name=name,
             token=str(token),
             handle_lookup=lambda target: self.kernel._runtime_map().get(target),
-            status_callback=lambda connected: self.set_worker_telegram_status(
-                name,
-                connected,
-            ),
+            status_callback=lambda connected: self.set_worker_telegram_status(name, connected),
+            checkpoint_callback=lambda offset: self._checkpoint_telegram_offset(name, offset),
         )
-        await ingress.start(drop_pending_updates=drop_pending_updates)
+        offsets = getattr(self.kernel, "_handoff_offsets", {})
+        if name in offsets:
+            ingress.offset = offsets[name]
+            drop_pending_updates = False
+        ingress.drop_pending_on_start = drop_pending_updates
+        if not getattr(self.kernel, "_handoff_draining", False):
+            await ingress.start(drop_pending_updates=drop_pending_updates)
         self._telegram_ingress[name] = ingress
         return True
+
+    def _checkpoint_telegram_offset(self, name: str, offset: int) -> None:
+        if getattr(self.kernel, "_shared_committed", False):
+            from orchestrator.runtime_handoff import checkpoint_offset
+            checkpoint_offset(self.kernel.paths.bridge_home, name, offset)
 
     async def stop_telegram_ingress(self, agent_name: str) -> None:
         ingress = self._telegram_ingress.pop(str(agent_name), None)
@@ -1362,6 +1378,7 @@ class FunctionWorkerSupervisor:
         parent_connection, child_connection = context.Pipe(duplex=True)
         nonce = uuid4().hex
         bootstrap = {
+            "entrypoint": "orchestrator.function_worker_host:run_function_worker",
             "protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
             "nonce": nonce,
             "agent_name": str(agent_name),

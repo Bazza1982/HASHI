@@ -1,0 +1,4 @@
+{
+  "qualifier": "orchestrator.runtime_release:qualify_release",
+  "entrypoint": "orchestrator.runtime_app_host:serve"
+}

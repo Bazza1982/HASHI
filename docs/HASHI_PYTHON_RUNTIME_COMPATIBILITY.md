@@ -1,18 +1,20 @@
 # HASHI Core Runtime and Function Worker Contract
 
-Status: accepted and live-adopted on HASHI3; promotion and external canaries remain gated
+Status: Core API 3 accepted for HASHI2; source/offline verification and live cold adoption are separate
 
 Decision date: 2026-09-03; revised for Function Workers on 2026-09-04
 
 Owners: HASHI Core maintainers
 
-Current implementation and verification status is recorded in
+The current process/ownership contract is [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md).
+HASHI2 evidence is [this migration record](HASHI2_MINIMAL_CORE_2026-09-07.md).
+Earlier API 2 implementation and verification status is recorded in
 [`HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
 
 ## Decision
 
 HASHI Core owns one mandatory runtime. Functional code runs in replaceable,
-per-Agent Worker processes created by that Core. Functional code may use the
+shared Function and per-Agent Worker processes supervised by that Core. Functional code may use the
 Core contract; it may not choose a Python version, mutate Core, or share Python
 objects across the process boundary.
 
@@ -23,8 +25,8 @@ implementation:    CPython
 approved Python:   3.12.13
 source range:      >=3.12,<3.13
 standard lock:     constraints/standard-py312.lock
-Core API:          2
-Function API:      2
+Core API:          3
+Function API:      3
 Worker model:      per-agent-process
 Worker protocol:   1
 generation schema: 2
@@ -87,62 +89,23 @@ environment.
 
 ## Ownership boundary
 
-### Stable Core
+### Stable Core and replaceable Functions
 
-Core owns only process and shared-resource authority:
+Core retains runtime enforcement, its OS instance lock, generic process lifetime,
+verified immutable artifact loading and versioned JSON transport. It does not
+host application managers, models, scheduler policy, API execution, UI or
+frontend ingress. Those run in a pinned shared Function process with isolated
+Agent children. Shared replacement has an explicit broad operational scope;
+Agent-only `/reboot` never implicitly replaces shared services.
 
-- process entry, runtime enforcement, paths and instance lock;
-- lifecycle locks, fatal shutdown and external supervision boundary;
-- Telegram long polling, Workbench/API ingress and shared
-  background/scheduler services;
-- immutable generation qualification and artifacts;
-- Worker process supervision, route gates, crash recovery and `/reboot` scope;
-- cross-Agent routing and shared service capability RPC;
-- stable protocol and persistence-schema boundaries.
-
-The authoritative file manifest is
-`orchestrator.runtime_contract.CORE_SOURCE_PATHS`. Core-source edits invalidate
-the running fingerprint and cannot be adopted by `/reboot`.
-
-Core service objects remain alive during a Function reboot. A feature-specific
-operation reached through Workbench, API Gateway, Scheduler, HChat, background
-jobs or another ingress must cross `AgentRuntimeHandle` into the selected
-Worker. New product behavior must not be added to the stable ingress merely to
-avoid defining an IPC method.
-
-### Function generation
-
-Each Agent Worker owns its replaceable behavior, including:
-
-- `FlexibleAgentRuntime`, commands and request execution;
-- backend adapters and provider routing;
-- tools and skills used inside an Agent turn;
-- message rendering, Agent-specific Telegram handlers and outbound delivery;
-- Agent-local memory, media, voice and workbench execution behavior;
-- function-layer transports reached through stable Core capabilities.
-
-`orchestrator.function_generation` starts from the declared operational
-entrypoints, expands every static or literal dynamic import in the functional
-namespace, compiles each source, includes non-Python assets, and hashes the
-result. Protected Core modules are excluded.
-
-The resulting content-addressed artifact lives below
-`state/function_generations/<sha256>`. A Worker reads functional imports from
-that artifact through exact manifest routing; arbitrary `sys.path` shadowing is
-forbidden. The live checkout is reverified before commit so an edit between
-probe and cutover cannot enter service.
-
-### External sidecars
-
-Platform helpers such as `tools.windows_helper` and
-`tools.windows_use_mcp_client` have independent runtimes. They cross a
-versioned JSON/HTTP boundary and are neither Core imports nor Function Worker
-modules. Their Python/dependency policy must be declared and tested by the
-sidecar itself.
+The import boundary is checked including lazy dependencies. Changing a model,
+UI renderer or provider policy cannot require Core protection to be bypassed.
+The full process contract and handoff limits are in the Minimal Core decision.
 
 ## Worker protocol
 
-Core and a Worker use a private duplex byte pipe carrying UTF-8 JSON envelopes:
+Core/shared-Functions and shared-Functions/Agent-Worker links use private duplex
+byte pipes carrying UTF-8 JSON envelopes:
 
 ```text
 version + kind + request id/method/params
@@ -165,22 +128,22 @@ BOOTING -> READY -> ACTIVATING -> ACTIVE -> DRAINING -> QUIESCED -> STOPPED
 READY means the Worker has matched the Core runtime, verified the immutable
 artifact, imported the complete functional closure, validated public
 cross-module identities, constructed the real Agent runtime and initialized
-its backend. It does not yet own the active Core route.
+its backend. It does not yet own the active shared Function route.
 
-Telegram `getUpdates` offset and long polling remain in Core. Each update is
+Telegram `getUpdates` offset and long polling live in shared Functions. Each update is
 converted to JSON and delivered through the stable handle. While a route gate
-is closed, the Core poller holds the update until commit or rollback; a
+is closed, the shared poller holds the update until commit or rollback; a
 candidate cannot fetch, acknowledge or process it early.
 
 ## Transactional `/reboot`
 
-For `min`, a number, `same`, or `max`, Core performs:
+For `min`, a number, `same`, or `max`, the shared Function supervisor performs:
 
 1. Resolve an immutable target set. Invalid input fails without widening it.
 2. Qualify one generation in an isolated process.
 3. Materialize and verify its immutable artifact.
 4. Spawn one READY candidate Worker for every selected Agent.
-5. Close only those stable route gates and wait for in-flight Core calls.
+5. Close only those stable route gates and wait for in-flight shared route calls.
 6. Quiesce the selected old Workers and their Agent-local ingress.
 7. Reverify runtime, Core and generation fingerprints.
 8. Activate all candidates and require their health receipts.
@@ -194,7 +157,7 @@ pointers retain identity. After step 9, diagnostic publication failures are
 logged but cannot falsely report that an already committed pointer swap was
 rolled back.
 
-`/reboot min` and `/reboot N` work in a multi-Agent Core because every Agent has
+`/reboot min` and `/reboot N` work in a multi-Agent instance because every Agent has
 an independent Worker and stable handle. Different Agents may intentionally
 run different generation IDs during a staged rollout; health output reports
 that aggregate state as `mixed`.
@@ -247,7 +210,7 @@ assertions include:
 8. targeted reboot changes only its Agent in a multi-Agent Core;
 9. broad reboot publishes all selected routes together or restores all old
    routes;
-10. Core and Core-service object identity survives repeated Function reboots;
+10. Core and shared-service object identity during Agent-only replacement survives repeated Function reboots;
 11. a source edit after probe cannot commit;
 12. active Worker death recovers the same artifact or fails that route closed;
 13. Workbench health exposes Core contract plus per-Agent Worker PID,
@@ -267,7 +230,7 @@ HASHI3 may be promoted to HASHI1/HASHI2 only after:
 - the curated Core gate and explicit offline product suite pass;
 - protected-Core and runtime-authority checks pass;
 - a real HASHI3 cold start reports CPython 3.12.13 and Worker protocol 1;
-- targeted and repeated live reboots preserve the Core PID and Core services;
+- targeted and repeated live reboots preserve the Core PID and shared services for Agent-only updates;
 - an injected candidate failure is shown to leave the active generation live;
 - launchers, CI, containers and portable builders agree with
   `[tool.hashi.runtime]`.

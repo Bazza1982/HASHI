@@ -26,7 +26,7 @@ from orchestrator.function_generation import (
     FUNCTION_GENERATION_SCHEMA_VERSION,
 )
 from orchestrator.function_worker_protocol import FUNCTION_WORKER_PROTOCOL_VERSION
-from orchestrator.manager_registry import CORE_MANAGER_SPECS
+from orchestrator.manager_registry import FUNCTION_MANAGER_SPECS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -107,7 +107,7 @@ def test_machine_policy_matches_implemented_worker_protocols():
     assert policy.generation_schema == FUNCTION_GENERATION_SCHEMA_VERSION
 
 
-def test_core_managers_are_protected_and_function_entrypoints_are_disjoint():
+def test_function_managers_and_entrypoints_are_disjoint_from_core():
     core_modules = {
         relative.removesuffix("/__init__.py")
         .removesuffix(".py")
@@ -115,7 +115,7 @@ def test_core_managers_are_protected_and_function_entrypoints_are_disjoint():
         for relative in CORE_SOURCE_PATHS
     }
 
-    assert {spec.module for spec in CORE_MANAGER_SPECS} <= core_modules
+    assert {spec.module for spec in FUNCTION_MANAGER_SPECS}.isdisjoint(core_modules)
     assert set(FUNCTION_GENERATION_ENTRYPOINTS).isdisjoint(core_modules)
 
 
@@ -373,7 +373,7 @@ def test_main_enforces_core_runtime_before_other_project_imports():
         index
         for index, node in enumerate(tree.body)
         if isinstance(node, ast.ImportFrom)
-        and node.module == "orchestrator.pathing"
+        and node.module == "orchestrator.instance_lock"
     )
 
     assert guard_index < first_function_import
@@ -434,32 +434,10 @@ def test_process_identity_manifest_matches_importable_core_modules():
     assert PROCESS_IDENTITY_MODULES == importable_core
 
 
-def test_replaceable_function_modules_do_not_own_process_lock_registries():
-    violations = []
-    for top_level in ("adapters", "flow", "nagare", "orchestrator", "remote", "tools", "transports"):
-        for path in (ROOT / top_level).rglob("*.py"):
-            relative = path.relative_to(ROOT).as_posix()
-            if relative in CORE_SOURCE_PATHS:
-                continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in tree.body:
-                targets = []
-                value = None
-                if isinstance(node, ast.Assign):
-                    targets = node.targets
-                    value = node.value
-                elif isinstance(node, ast.AnnAssign):
-                    targets = [node.target]
-                    value = node.value
-                for target in targets:
-                    if (
-                        isinstance(target, ast.Name)
-                        and target.id.endswith("_LOCKS")
-                        and isinstance(value, ast.Dict)
-                    ):
-                        violations.append(f"{relative}:{node.lineno}:{target.id}")
-
-    assert violations == []
+def test_instance_lock_remains_in_core_and_local_locks_belong_to_function_processes():
+    assert "orchestrator/instance_lock.py" in CORE_SOURCE_PATHS
+    from orchestrator.function_contract import is_function_module_name
+    assert is_function_module_name("orchestrator.process_resources")
 
 
 def test_cross_platform_modules_do_not_call_posix_only_fchmod_directly():

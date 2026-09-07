@@ -1,39 +1,89 @@
-"""Stable process entry for one HASHI Agent Function Worker."""
+"""Product-neutral spawned-process entry and artifact import boundary."""
 
 from __future__ import annotations
 
 import asyncio
+import importlib
+import json
 import os
-from typing import Any
+import sys
+from pathlib import Path
+
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from orchestrator.kernel_import_guard import candidate_import_guard
+from orchestrator.kernel_artifact import GenerationModuleFinder, verify_artifact
+from orchestrator.runtime_contract import (
+    RuntimeFingerprint,
+    compare_runtime_fingerprints,
+    enforce_runtime_contract,
+)
 
 
-def run_function_worker_process(connection: Any, bootstrap: dict) -> None:
-    """Multiprocessing ``spawn`` target.
-
-    Keep this entry deliberately small.  Runtime enforcement and candidate
-    source verification happen before the functional host imports an Agent
-    runtime or adapter.
-    """
-
-    bridge_home = str(bootstrap.get("bridge_home") or "").strip()
-    code_root = str(bootstrap.get("code_root") or "").strip()
-    generation_root = str(bootstrap.get("generation_root") or "").strip()
-    if bridge_home:
-        os.environ["BRIDGE_HOME"] = bridge_home
-    if code_root:
-        os.environ["HASHI_SOURCE_ROOT"] = code_root
-    if generation_root:
-        os.environ["HASHI_FUNCTION_GENERATION_ROOT"] = generation_root
-    os.environ["HASHI_FUNCTION_WORKER"] = "1"
-    os.environ["HASHI_FUNCTION_WORKER_AGENT"] = str(
-        bootstrap.get("agent_name") or ""
-    )
+def run_generation_process(connection, bootstrap: dict) -> None:
     try:
-        from orchestrator.function_worker_host import run_function_worker
-
-        asyncio.run(run_function_worker(connection, bootstrap))
+        if bootstrap.get("process_group") and os.name != "nt":
+            os.setsid()
+        code_root = Path(bootstrap["code_root"]).resolve()
+        artifact = Path(bootstrap["generation_root"]).resolve()
+        runtime = enforce_runtime_contract(code_root)
+        compare_runtime_fingerprints(
+            RuntimeFingerprint.from_mapping(bootstrap["runtime"]), runtime
+        )
+        verify_artifact(artifact, bootstrap["manifest"])
+        os.environ.update(
+            {
+                "BRIDGE_HOME": bootstrap["bridge_home"],
+                "HASHI_SOURCE_ROOT": str(code_root),
+                "HASHI_FUNCTION_GENERATION_ROOT": str(artifact),
+                "HASHI_FUNCTION_WORKER": "1",
+                "HASHI_FUNCTION_WORKER_AGENT": str(bootstrap.get("agent_name") or ""),
+            }
+        )
+        # No product imports may happen before the manifest finder is installed.
+        sys.meta_path.insert(
+            0,
+            GenerationModuleFinder(
+                generation_root=artifact,
+                code_root=code_root,
+                manifest=bootstrap["manifest"],
+            ),
+        )
+        module, separator, attribute = bootstrap["entrypoint"].partition(":")
+        if not separator or module not in {
+            entry["module"] for entry in bootstrap["manifest"]["entries"]
+        }:
+            raise ValueError("entrypoint is outside the qualified generation")
+        with candidate_import_guard():
+            entry = getattr(importlib.import_module(module), attribute)
+        asyncio.run(entry(connection, bootstrap))
     finally:
-        try:
-            connection.close()
-        except (OSError, ValueError):
-            pass
+        connection.close()
+
+
+def run_function_worker_process(connection, bootstrap: dict) -> None:
+    run_generation_process(connection, bootstrap)
+
+
+QUALIFICATION_RESULT_PREFIX = "HASHI_RUNTIME_RELEASE="
+
+
+def qualify_process() -> None:
+    payload = json.loads(sys.stdin.read())
+    code_root = Path(payload["code_root"]).resolve()
+    runtime = enforce_runtime_contract(code_root)
+    compare_runtime_fingerprints(RuntimeFingerprint.from_mapping(payload["runtime"]), runtime)
+    os.environ["HASHI_SOURCE_ROOT"] = str(code_root)
+    # Product qualification is the same import boundary as a prepared child.
+    module, separator, attribute = payload["qualifier"].partition(":")
+    if not separator:
+        raise ValueError("invalid qualification entrypoint")
+    with candidate_import_guard():
+        qualifier = getattr(importlib.import_module(module), attribute)
+    result = qualifier(payload)
+    print(QUALIFICATION_RESULT_PREFIX + json.dumps(result), flush=True)
+
+
+if __name__ == "__main__":
+    qualify_process()

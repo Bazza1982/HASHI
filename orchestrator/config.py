@@ -204,7 +204,13 @@ class FlexibleAgentConfig:
         return canonical_agent_md(self.workspace_dir)
 
 class ConfigManager:
-    def __init__(self, config_path: Path, secrets_path: Path, bridge_home: Path | None = None):
+    def __init__(self, config_path: Path, secrets_path: Path, bridge_home: Path | None = None, *, code_root: Path | None = None):
+        module_path = Path(__file__).resolve()
+        generation_root = os.environ.get("HASHI_FUNCTION_GENERATION_ROOT")
+        source_root = os.environ.get("HASHI_SOURCE_ROOT")
+        if code_root is None and generation_root and source_root and module_path.is_relative_to(Path(generation_root).resolve()):
+            code_root = Path(source_root).resolve()
+        self.code_root = code_root or module_path.parent.parent
         self.config_path = config_path
         self.secrets_path = secrets_path
         self.bridge_home = bridge_home or config_path.parent
@@ -543,7 +549,7 @@ class ConfigManager:
         profile_ctx = parse_profile_context(g_raw)
         validate_profile_context(profile_ctx)
         config_dir = self.config_path.parent
-        code_root = Path(__file__).resolve().parent.parent
+        code_root = self.code_root
         bridge_home = self.bridge_home
 
         # authorized_id: secrets.json takes priority (written by Hashiko during

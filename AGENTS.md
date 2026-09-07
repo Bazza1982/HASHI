@@ -18,9 +18,12 @@ choose verification using `docs/TESTING_POLICY.md`.
   `--authorized` records an authorization already given; it does not grant one.
   Do not persist `HASHI_CORE_EDIT_AUTHORIZED=1` in configuration or shell profiles.
 - Model/effort opt-ins for an instance belong in `allowed_backends` and resolve
-  through `runtime_effort_options`; do not edit the protected shared compatibility
-  baseline merely to add an instance model. Shared catalogue/Engine compatibility
-  changes are planned Core work, not a reason to remove a protected path.
+  through `runtime_effort_options`; do not edit the shared catalogue merely to
+  add an instance model. Shared catalogue/Engine compatibility belongs to the
+  qualified Functions generation. Never move product behavior back into Core.
+- Core imports no product module, including lazy imports. Shared services run
+  in a replaceable Function process. `/reboot` retains its Agent scope; the
+  separate shared replacement operation is broad and needs operational scope.
 - UI wording belongs in renderers and runtime language catalogs. Use shared card
   and navigation helpers, escaped HTML values, and the user's chosen UI locale.
   The retired Workbench compatibility identifiers mean Backend API; they do not

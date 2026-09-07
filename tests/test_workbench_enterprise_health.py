@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -235,3 +236,33 @@ async def test_health_explains_degraded_remote_without_failing_liveness(tmp_path
     assert payload["status"] == "degraded"
     assert payload["issues"] == [issue]
     assert payload["remote"] == remote
+
+
+@pytest.mark.asyncio
+async def test_shared_handoff_rejects_new_http_work_and_can_resume(tmp_path):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    server = _server(tmp_path, profile="personal")
+    owner = SimpleNamespace(_handoff_draining=False)
+    server.orchestrator = owner
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def work(request):
+        entered.set()
+        await finish.wait()
+        return web.json_response({"saved": True})
+
+    server.app.router.add_post("/test-handoff-work", work)
+    async with TestClient(TestServer(server.app)) as client:
+        active = asyncio.create_task(client.post("/test-handoff-work"))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert owner._handoff_requests == 1
+        owner._handoff_draining = True
+        rejected = await client.post("/test-handoff-work")
+        assert rejected.status == 503
+        finish.set()
+        assert (await active).status == 200
+        assert owner._handoff_requests == 0
+        owner._handoff_draining = False
+        assert (await client.post("/test-handoff-work")).status == 200

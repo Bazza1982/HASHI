@@ -8,8 +8,7 @@ from pathlib import Path
 from orchestrator.pathing import BridgePaths
 
 
-def run_onboarding_gate(paths: BridgePaths, code_root: Path) -> bool:
-    """Return True when onboarding was launched and the caller should exit."""
+def needs_onboarding(paths: BridgePaths) -> bool:
     agents_path = paths.bridge_home / "agents.json"
     onboarding_done = False
     try:
@@ -22,9 +21,22 @@ def run_onboarding_gate(paths: BridgePaths, code_root: Path) -> bool:
     except Exception:
         pass
 
-    if onboarding_done:
-        return False
+    return not onboarding_done
 
+
+def run_onboarding_gate(paths: BridgePaths, code_root: Path, *, terminal: str | None = None) -> bool:
+    """First-run Function flow; never launch this during a replacement probe."""
+    if not needs_onboarding(paths):
+        return False
     print("\033[38;5;180mOnboarding required. Starting onboarding program...\033[0m")
-    subprocess.run([sys.executable, str(code_root / "onboarding" / "onboarding_main.py")])
+    command = [sys.executable, str(code_root / "onboarding" / "onboarding_main.py")]
+    if terminal is not None:
+        # Multiprocessing closes stdin. Reopen only the terminal supplied by
+        # the supervising process, never the RPC pipe or a guessed device.
+        with open(terminal, "r", encoding="utf-8") as input_stream:
+            subprocess.run(command, stdin=input_stream, check=True)
+    elif sys.stdin.isatty():
+        subprocess.run(command, check=True)
+    else:
+        raise RuntimeError("First-run setup requires an interactive terminal; run onboarding/onboarding_main.py")
     return True

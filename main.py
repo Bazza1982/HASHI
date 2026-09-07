@@ -1,25 +1,18 @@
+"""HASHI process entry. Product code runs only in verified child processes."""
+
 from __future__ import annotations
 
-# ruff: noqa: E402 -- Core must enforce its runtime before project imports.
-
+# ruff: noqa: E402 -- enforce the runtime before other project imports.
 import argparse
 import asyncio
-import logging
-import os
+import json
 import signal
 import sys
-import time
-import traceback
-from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
-# The Core runtime contract is the first project import.  Function modules are
-# not allowed to execute until the interpreter and ABI have been accepted.
 CODE_ROOT = Path(__file__).resolve().parent
-from orchestrator.runtime_contract import (
-    RuntimeContractError,
-    enforce_runtime_contract,
-)
+from orchestrator.runtime_contract import RuntimeContractError, enforce_runtime_contract
 
 try:
     RUNTIME_FINGERPRINT = enforce_runtime_contract(CODE_ROOT)
@@ -27,437 +20,65 @@ except RuntimeContractError as exc:
     print(f"HASHI Core runtime rejected: {exc}", file=sys.stderr, flush=True)
     raise SystemExit(78) from exc
 
-from orchestrator.bootstrap_logging import (
-    configure_terminal_console,
-    emit_bridge_audit,
-    setup_bridge_file_logging,
-    setup_console_logging,
-)
 from orchestrator.instance_lock import InstanceLock
-from orchestrator.function_worker_supervisor import FunctionWorkerSupervisor
-from orchestrator.lifecycle_state import LifecycleState
-from orchestrator.manager_registry import (
-    build_core_manager_bundle,
-    install_core_manager_bundle,
+from orchestrator.kernel_process import (
+    KernelRuntime,
+    write_record,
+    instance_runtime_dir,
+    canonical_instance_home,
 )
-from orchestrator.onboarding_gate import run_onboarding_gate
-from orchestrator.pathing import BridgePaths, build_bridge_paths
-
-main_logger = logging.getLogger("BridgeU.Orchestrator")
-bridge_logger = logging.getLogger("BridgeU.Bridge")  # file-only orchestrator log
-
-_handler = setup_console_logging()
 
 
-def _emit_bridge_audit(paths: BridgePaths | None, level: int, message: str):
-    emit_bridge_audit(paths, level, message, bridge_logger)
-
-class UniversalOrchestrator:
-    def __init__(self, paths: BridgePaths, selected_agents: set[str] | None = None, enable_api_gateway: bool = False):
-        self.paths = paths
-        self.runtimes = []
-        self.shutdown_event = asyncio.Event()
-        self.selected_agents = selected_agents
-        self.enable_api_gateway = enable_api_gateway
-        self.global_cfg = None
-        self.secrets = {}
-        self.agent_authority_roots: dict[str, str] = {}
-        self.runtime_fingerprint = RUNTIME_FINGERPRINT
-        self.function_generation = {
-            "generation_id": "bootstrap",
-            "module_count": 0,
-            "runtime_id": RUNTIME_FINGERPRINT.runtime_id,
-        }
-        self._startup_started_monotonic = time.monotonic()
-        self.startup_status = {
-            "phase": "core_bootstrap",
-            "ready": False,
-            "degraded": False,
-            "completed": 0,
-            "ready_agents": 0,
-            "total": 0,
-            "percent": 0,
-            "elapsed_seconds": 0.0,
-            "issues": [],
-            "notices": [],
-        }
-        self.function_workers = FunctionWorkerSupervisor(self)
-        install_core_manager_bundle(
-            self,
-            build_core_manager_bundle(self, _handler),
-        )
-        self.workbench_api = None
-        self.api_gateway = None
-        self.scheduler = None
-        self.agent_directory = None
-        self.scheduler_task = None
-        self.whatsapp = None
-        self._lifecycle_lock = asyncio.Lock()
-        self.is_stopping = False
-        self._agent_locks: dict[str, asyncio.Lock] = {}
-        self._startup_tasks: dict[str, asyncio.Task] = {}
-        self._restart_request: dict | None = None  # set by request_restart()
-        self._shutdown_request = {
-            "reason": "external",
-            "source": "unknown",
-            "detail": "",
-            "requested_at": None,
-        }
-        self.lifecycle_state = LifecycleState()
-
-    def _install_signal_handlers(self):
-        loop = asyncio.get_running_loop()
-        for sig_name in ("SIGTERM", "SIGINT", "SIGHUP"):
-            sig = getattr(signal, sig_name, None)
-            if sig is None:
-                continue
-            try:
-                loop.add_signal_handler(
-                    sig,
-                    self.request_shutdown,
-                    f"signal:{sig_name}",
-                    "os-signal",
-                    sig_name,
-                )
-                bridge_logger.info(f"Installed shutdown signal handler for {sig_name}")
-            except (NotImplementedError, RuntimeError):
-                continue
-
-    def request_shutdown(self, reason: str = "external", source: str = "unknown", detail: str = ""):
-        if self.shutdown_event.is_set():
-            main_logger.info(f"Shutdown already requested; ignoring duplicate request ({reason}).")
-            bridge_logger.warning(
-                f"Duplicate shutdown request ignored ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)}) "
-                f"new_reason={reason} new_source={source} new_detail={detail or '-'}"
-            )
-            return
-        self._shutdown_request = {
-            "reason": reason,
-            "source": source,
-            "detail": detail,
-            "requested_at": datetime.now().isoformat(),
-        }
-        main_logger.info(f"Shutdown requested ({reason}).")
-        bridge_logger.info(
-            "Shutdown requested (%s)",
-            self.lifecycle_state.shutdown_meta_text(self._shutdown_request),
-        )
-        self.lifecycle_state.record_shutdown_request(self._shutdown_request)
-        self.shutdown_event.set()
-
-    def request_restart(self, mode: str = "same", agent_name: str | None = None, agent_number: int | None = None):
-        """Signal a hot restart. Modes: same, min, max, number."""
-        self._restart_request = {"mode": mode, "agent_name": agent_name, "agent_number": agent_number}
-        main_logger.info(f"Restart requested (mode={mode}, agent={agent_name}, number={agent_number}).")
-        bridge_logger.warning(
-            f"Restart requested (mode={mode}, agent={agent_name or '-'}, "
-            f"number={agent_number if agent_number is not None else '-'}"
-            ")"
-        )
-        self.shutdown_event.set()
-
-    def _runtime_map(self):
-        return {rt.name: rt for rt in self.runtimes}
-
-    def _agent_lock(self, agent_name: str) -> asyncio.Lock:
-        lock = self._agent_locks.get(agent_name)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._agent_locks[agent_name] = lock
-        return lock
-
-    def _load_raw_config(self) -> dict:
-        return self.config_admin.load_raw_config()
-
-    def _write_raw_config(self, raw_cfg: dict):
-        self.config_admin.write_raw_config(raw_cfg)
-
-    def _load_whatsapp_cfg(self) -> tuple[dict, dict]:
-        return self.whatsapp_manager.load_config()
-
-    async def start_whatsapp_transport(self, persist_enabled: bool = True) -> tuple[bool, str]:
-        return await self.whatsapp_manager.start_transport(persist_enabled)
-
-    async def stop_whatsapp_transport(self, persist_enabled: bool = True) -> tuple[bool, str]:
-        return await self.whatsapp_manager.stop_transport(persist_enabled)
-
-    async def send_whatsapp_text(self, phone_number: str, text: str) -> tuple[bool, str]:
-        return await self.whatsapp_manager.send_text(phone_number, text)
-
-    async def _send_whatsapp_startup_notification(self, runtime):
-        await self.whatsapp_manager.send_startup_notification(runtime)
-
-    def _load_config_bundle(self):
-        from orchestrator.config import ConfigManager
-        cfg_mgr = ConfigManager(self.paths.config_path, self.paths.secrets_path, bridge_home=self.paths.bridge_home)
-        global_cfg, agent_configs, secrets = cfg_mgr.load()
-        self.global_cfg = global_cfg
-        self.secrets = secrets
-        self.agent_authority_roots = {
-            str(config.name): str(config.resolve_access_root().resolve())
-            for config in agent_configs
-        }
-        return global_cfg, agent_configs, secrets
-
-    def get_all_agents_raw(self) -> list[dict]:
-        return self.config_admin.get_all_agents_raw()
-
-    def set_agent_active(self, agent_name: str, active: bool) -> bool:
-        return self.config_admin.set_agent_active(agent_name, active)
-
-    def delete_agent_from_config(self, agent_name: str) -> bool:
-        return self.config_admin.delete_agent_from_config(agent_name)
-
-    def add_agent_to_config(self, agent_name: str, agent_cfg: dict | str | None = None, token: str | None = None):
-        return self.config_admin.add_agent_to_config(agent_name, agent_cfg, token)
-
-    def configured_agent_names(self) -> list[str]:
-        return self.config_admin.configured_agent_names()
-
-    def get_startable_agent_names(self, exclude_name: str | None = None) -> list[str]:
-        return self.config_admin.get_startable_agent_names(
-            running=set(self._runtime_map()),
-            starting=set(self._startup_tasks),
-            exclude_name=exclude_name,
-        )
-
-    def _check_backend_availability(self, global_cfg, agent_configs, secrets) -> dict[str, tuple[bool, str]]:
-        return self.backend_preflight.check_backend_availability(global_cfg, agent_configs, secrets)
-
-    def _partition_agents_by_availability(
-        self, agent_configs, engine_status: dict[str, tuple[bool, str]]
-    ) -> tuple[list, list[tuple[str, str]]]:
-        return self.backend_preflight.partition_agents_by_availability(agent_configs, engine_status)
-
-    async def start_agent(
-        self,
-        agent_name: str,
-        *,
-        generation=None,
-        generation_root: Path | None = None,
-    ) -> tuple[bool, str]:
-        return await self.agent_lifecycle.start_agent(
-            agent_name,
-            generation=generation,
-            generation_root=generation_root,
-        )
-
-    async def stop_agent(self, agent_name: str, reason: str = "manual-stop") -> tuple[bool, str]:
-        return await self.agent_lifecycle.stop_agent(agent_name, reason)
-
-    async def _teardown_runtime(self, runtime, timeout: float = 10.0):
-        await self.agent_lifecycle.teardown_runtime(runtime, timeout)
-
-    async def _shutdown_all_agents(self, timeout: float = 30.0):
-        await self.agent_lifecycle.shutdown_all_agents(timeout)
-
-    async def _do_hot_restart(self, restart: dict):
-        await self.reboot_manager.hot_restart(restart)
-
-    async def run(self):
-        try:
-            global_cfg, agent_configs, secrets = self._load_config_bundle()
-        except Exception as e:
-            main_logger.critical(f"Failed to load configuration: {e}")
-            return
-
-        setup_bridge_file_logging(global_cfg, bridge_logger, logging.getLogger("BridgeU.Scheduler"))
-        self.global_cfg = global_cfg
-        self.secrets = secrets
-        self.lifecycle_state.state_path = global_cfg.base_logs_dir / "orchestrator_state.json"
-        bridge_logger.info("=== Bridge starting ===")
-        previous_state, unexpected_previous_exit = self.lifecycle_state.mark_started(os.getpid())
-        if unexpected_previous_exit:
-            bridge_logger.error(
-                "Previous bridge session ended unexpectedly "
-                f"(pid={previous_state.get('pid', '?')} "
-                f"started_at={previous_state.get('last_started_at', '?')} "
-                f"pending_reason={previous_state.get('pending_shutdown_reason') or '-'} "
-                f"pending_source={previous_state.get('pending_shutdown_source') or '-'} "
-                f"last_exit_phase={previous_state.get('last_exit_phase') or '-'})"
-            )
-        self._install_signal_handlers()
-        bridge_logger.info(
-            "Process bootstrap: "
-            f"pid={os.getpid()} ppid={os.getppid()} exe={sys.executable} cwd={Path.cwd()} "
-            f"code_root={self.paths.code_root} bridge_home={self.paths.bridge_home} "
-            f"config={self.paths.config_path} runtime={self.runtime_fingerprint.runtime_id} "
-            f"platform_abi={self.runtime_fingerprint.platform_abi} "
-            f"dependencies={self.runtime_fingerprint.dependency_digest}"
-        )
-
-        # Fixed CLI backends build their HASHI MCP descriptor while the
-        # Function Worker initializes.  Publish the Core-owned Workbench
-        # endpoint first so every Worker receives a live, instance-scoped
-        # service route in its bootstrap topology.
-        await self.service_manager.start_workbench_api(global_cfg, secrets)
-
-        startup_ok, wa_cfg = await self.startup_manager.start_initial_agents(global_cfg, agent_configs, secrets)
-        if not startup_ok:
-            await self.service_manager.stop_workbench_api()
-            return
-
-        startup_status = dict(getattr(self, "startup_status", {}) or {})
-        startup_status.update({"phase": "starting_services", "percent": 90})
-        self.startup_status = startup_status
-        await self.service_manager.start_runtime_services(global_cfg, secrets)
-
-        try:
-            _, wa_cfg = self._load_whatsapp_cfg()
-        except Exception:
-            wa_cfg = {}
-        if wa_cfg.get("enabled"):
-            ok, message = await self.start_whatsapp_transport(persist_enabled=False)
-            if not ok:
-                main_logger.warning(message)
-
-        startup_status = dict(getattr(self, "startup_status", {}) or {})
-        failed_agents = int(startup_status.get("failed_agents") or 0)
-        issues = list(startup_status.get("issues") or ())
-        if failed_agents and not any(
-            issue.get("code") == "agent_startup_failed"
-            for issue in issues
-            if isinstance(issue, dict)
-        ):
-            issues.append(
-                {
-                    "code": "agent_startup_failed",
-                    "component": "function_workers",
-                    "severity": "warning",
-                    "summary": f"{failed_agents} configured agent(s) failed to start.",
-                    "impact": "Those agents are unavailable; successfully started agents and services remain usable.",
-                    "automatic_retry": False,
-                    "actions": [
-                        "Review the failed agent entries in the startup log and correct their provider or Telegram configuration."
-                    ],
-                }
-            )
-        degraded = bool(
-            failed_agents
-            or any(
-                str(issue.get("severity") or "").lower()
-                in {"warning", "error", "critical"}
-                for issue in issues
-                if isinstance(issue, dict)
-            )
-        )
-        startup_status.update(
-            {
-                "phase": "degraded" if degraded else "ready",
-                "ready": not degraded,
-                "degraded": degraded,
-                "services_ready": True,
-                "percent": 100,
-                "issues": issues,
-                "elapsed_seconds": round(
-                    time.monotonic()
-                    - getattr(self, "_startup_started_monotonic", time.monotonic()),
-                    1,
-                ),
-            }
-        )
-        self.startup_status = startup_status
-        show_startup_status = getattr(
-            self.startup_manager,
-            "show_startup_status",
-            None,
-        )
-        if callable(show_startup_status):
-            try:
-                show_startup_status()
-            except Exception as exc:
-                # Presentation must never decide whether Core is available.
-                from orchestrator.terminal_console import record_output_exception
-
-                record_output_exception(
-                    purpose="startup_status",
-                    sink="startup_status_renderer",
-                    error=exc,
-                )
-        bridge_logger.info(
-            "Startup complete: status=%s agents=%s/%s ready (overall=%s%%), "
-            "failed=%s issues=%s elapsed=%.1fs",
-            startup_status["phase"],
-            startup_status.get("ready_agents", 0),
-            startup_status.get("total", 0),
-            startup_status.get("percent", 100),
-            failed_agents,
-            len(issues),
-            startup_status["elapsed_seconds"],
-        )
-        main_logger.info(
-            "HASHI is online. Awaiting messages. "
-            "Startup complete: status=%s, %s/%s agents ready in %.1fs.",
-            startup_status["phase"],
-            startup_status.get("ready_agents", 0),
-            startup_status.get("total", 0),
-            startup_status["elapsed_seconds"],
-        )
-
-        # --- Main event loop: supports hot restart ---
-        while True:
-            try:
-                await self.shutdown_event.wait()
-            except asyncio.CancelledError:
-                main_logger.info("Shutdown signal received.")
-                bridge_logger.warning(
-                    f"Shutdown wait interrupted ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)})"
-                )
-
-            restart = self._restart_request
-            self._restart_request = None
-
-            if restart is not None:
-                # --- Hot restart: stop agents only, keep services alive ---
-                await self._do_hot_restart(restart)
-                self.shutdown_event.clear()
-                continue
-
-            await self.shutdown_manager.full_shutdown()
-            break
-
-if __name__ == "__main__":
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--agents", nargs="*", help="Only start the specified agents")
-    parser.add_argument("--api-gateway", action="store_true", help="Enable the local OpenAI-compatible API gateway")
-    parser.add_argument("--bridge-home", help="Override the bridge home directory (defaults to BRIDGE_HOME or the code root).")
-    args = parser.parse_args()
-    selected_agents = set(args.agents) if args.agents else None
-    paths = build_bridge_paths(CODE_ROOT, bridge_home=args.bridge_home)
-    os.environ["BRIDGE_HOME"] = str(paths.bridge_home)
-    configure_terminal_console(paths.bridge_home)
-
-    if run_onboarding_gate(paths, CODE_ROOT):
-        sys.exit(0)
-
-    orchestrator = UniversalOrchestrator(paths=paths, selected_agents=selected_agents, enable_api_gateway=args.api_gateway)
-    lock = InstanceLock(
-        paths.lock_path,
-        pid_path=paths.pid_path,
-        instance_id=paths.instance_id,
+    parser.add_argument("--bridge-home")
+    parser.add_argument(
+        "--replace-functions",
+        action="store_true",
+        help="Explicitly replace shared Functions after draining all active work",
     )
-    exit_code = 0
-    try:
-        lock.acquire()
-        bootstrap_msg = (
-            "Process bootstrap: "
-            f"pid={os.getpid()} ppid={os.getppid()} exe={sys.executable} cwd={Path.cwd()} "
-            f"instance_id={paths.instance_id} code_root={paths.code_root} "
-            f"bridge_home={paths.bridge_home} config={paths.config_path}"
+    args, function_args = parser.parse_known_args(argv)
+    bridge_home = canonical_instance_home(CODE_ROOT, args.bridge_home)
+    state_dir = instance_runtime_dir(bridge_home)
+    if args.replace_functions:
+        status = json.loads((state_dir / "kernel.json").read_text(encoding="utf-8"))
+        if status.get("phase") != "active":
+            raise RuntimeError("Core is not ready for a shared Function replacement")
+        request_id = uuid4().hex
+        write_record(
+            state_dir / "kernel-requests" / (request_id + ".json"), {"id": request_id}
         )
-        main_logger.info(bootstrap_msg)
-        _emit_bridge_audit(paths, logging.INFO, bootstrap_msg)
-        asyncio.run(orchestrator.run())
-    except KeyboardInterrupt:
-        msg = "KeyboardInterrupt received. Exiting."
-        main_logger.info(msg)
-        _emit_bridge_audit(paths, logging.WARNING, msg)
-    except Exception as e:
-        exit_code = 1
-        crash_msg = f"Fatal crash: {type(e).__name__}: {e}"
-        main_logger.critical(f"{crash_msg}\n{traceback.format_exc()}")
-        _emit_bridge_audit(paths, logging.CRITICAL, crash_msg)
+        print(
+            f"Shared Function replacement requested: {request_id}. Check its receipt for completion.",
+            flush=True,
+        )
+        return 0
+    lock = InstanceLock(state_dir / "process.lock", pid_path=state_dir / "process.pid")
+    lock.acquire()
+    try:
+
+        async def run():
+            kernel = KernelRuntime(
+                CODE_ROOT,
+                bridge_home,
+                RUNTIME_FINGERPRINT,
+                arguments={"argv": function_args},
+            )
+            loop = asyncio.get_running_loop()
+            for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+                sig = getattr(signal, name, None)
+                if sig is not None:
+                    try:
+                        loop.add_signal_handler(sig, kernel.stop_event.set)
+                    except (NotImplementedError, RuntimeError):
+                        pass
+            await kernel.run()
+
+        asyncio.run(run())
+        return 0
     finally:
         lock.release()
-    # If asyncio.run() returned but Go runtime threads are still alive, kill them.
-    os._exit(exit_code)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

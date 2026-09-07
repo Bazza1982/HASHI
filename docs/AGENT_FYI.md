@@ -21,12 +21,18 @@ specific authorization does not need to be requested again.
 Core protection derives from `orchestrator.runtime_contract.CORE_SOURCE_PATHS`.
 Ordinary feature changes belong in Functions/configuration. Instance model and
 effort opt-ins use `allowed_backends`, resolved by the Function-layer options
-view; they do not require changing the protected shared model baseline.
+view. The shared catalogue is now Functions; neither kind of model change
+requires a Core edit. Core never imports model/UI/provider/task policy.
 Before edits name the owner, layer and focused check; use the existing Core guard.
 
 Source implementation, offline verification and live adoption are separate.
 An immutable Function Worker keeps its installed generation until an authorized
-replacement. `/reboot min` replaces one Agent Worker; `/reboot max` is broader.
+replacement. `/reboot min` replaces one Agent Worker; `same`/`max` retain their
+Agent-only target rules. Shared services now run in a separate Function process;
+`python main.py --replace-functions` requests a broad shared handoff with a service
+gap. This operation requires explicit operational scope. Accepted is not completed.
+Health reports Core, shared and per-Agent process generations separately. Read
+[Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) before changing these boundaries.
 Core changes require a planned cold adoption. Neither action is implicit in a
 request to fix code. If operational testing is forbidden, report that clearly.
 

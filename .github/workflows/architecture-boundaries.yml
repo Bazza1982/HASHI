@@ -89,6 +89,9 @@ jobs:
             tests/test_function_worker_protocol.py \
             tests/test_function_worker_supervisor.py \
             tests/test_function_generation.py \
+            tests/test_minimal_core.py \
+            tests/test_kernel_process.py \
+            tests/test_runtime_handoff.py \
             tests/test_instance_lock_scope.py \
             tests/test_manager_registry.py \
             tests/test_model_catalog.py \

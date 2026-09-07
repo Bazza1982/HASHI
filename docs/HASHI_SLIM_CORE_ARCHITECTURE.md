@@ -1,252 +1,134 @@
-# HASHI Stable Core and Function Worker Architecture
+# HASHI Minimal Core and Function Processes
 
-Status: accepted and live-adopted on HASHI3; promotion remains gated
+Status: accepted for HASHI2 on 2026-09-07; source implementation complete.
+Live adoption requires the operator's cold restart. Earlier HASHI3 closeout
+records describe the previous Core API 2 topology, not this migration.
 
-Original slim-Core decision: 2026-05-02
+## Decision and ownership
 
-Worker-isolation revision: 2026-09-04
+Core is a product-neutral process supervisor. It owns the interpreter and
+compatibility fingerprint, the instance OS lock, immutable artifact verification,
+JSON process protocol, process creation, replacement and exit handling. Its sole
+source manifest is `orchestrator.runtime_contract.CORE_SOURCE_PATHS`.
 
-The exact source, offline and live evidence, installed Worker state, and
-remaining operator-dependent canaries are recorded in
-[`HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
-
-## Summary
-
-`main.py` is a stable process kernel. Each running Agent lives in its own
-Function Worker process behind a stable `AgentRuntimeHandle`. `/reboot` builds
-and validates replacement Workers, then changes only those handles; it does not
-reload modules or rebuild managers inside Core.
-
-```text
-                          immutable generation artifact
-                                      |
-                       probe -> candidate Worker READY
-                                      |
-Telegram / Workbench / API / Scheduler / HChat
-                    |                 |
-              stable HASHI Core -> AgentRuntimeHandle
-                                      |
-                         active per-Agent Worker
-```
-
-The old v3.2 design used `importlib.reload()` in the Core process and rebuilt
-Manager/service objects. It could leave a mixed module generation after a late
-failure. That mechanism and its recovery tests are retired.
-
-## Core responsibilities
-
-Core owns identities and shared authority that cannot safely be replaced from
-inside a running Python process:
-
-- CPython/dependency/ABI enforcement;
-- process entry, instance lock, paths, signals and fatal shutdown;
-- lifecycle and route locks;
-- Telegram long polling plus Workbench and API ingress;
-- Scheduler, background jobs and shared transport/service ownership;
-- Function generation qualification and immutable artifacts;
-- Worker spawn, IPC, target switching and crash recovery;
-- cross-Agent routing and versioned persistence/protocol boundaries.
-
-Core files are declared once in
-`orchestrator.runtime_contract.CORE_SOURCE_PATHS`. The same manifest drives the
-Core digest, protected-edit check and Function-generation exclusion.
-
-`orchestrator.manager_registry.CORE_MANAGER_SPECS` constructs Core managers at
-process startup. They are not reconstructed by `/reboot`:
+Every product capability runs in Functions or configuration. In particular,
+models/defaults/effort catalogues, provider and media execution, PCM, HER policy,
+commands, UI text and rendering, configuration interpretation, scheduling,
+background jobs, routing, Telegram/WhatsApp and Backend API are not Core code.
 
 ```text
-ConfigAdminManager
-BackendPreflightManager
-AgentLifecycleManager
-ServiceManager
-RebootManager
-StartupManager
-ShutdownManager
-WhatsAppManager
-SkillManager
+stable Core: runtime contract + instance lock + process supervision
+    |
+    +-- verified shared Functions process
+            |-- PAO managers, scheduler, background jobs and shared routing
+            |-- Frontend Connectors, Backend API, model/media API Gateway
+            |-- immutable shared catalogue, UI and HER policy generation
+            +-- stable Agent handles -> isolated per-Agent Function Workers
 ```
 
-Their live state belongs to the kernel and retains identity for the Core
-lifetime. In particular, a Function reboot does not replace Workbench API, API
-Gateway, Scheduler, delivery watcher, background jobs, instance lock or Core
-runtime fingerprint.
+`main.py` loads no product module, including through lazy imports. The one
+verified child bootstrap is the only dynamic product import boundary. The
+Core never imports the product entrypoint into its own module space.
+`runtime-entry.json` selects the Function qualification and execution entrypoints.
+Qualification runs in an isolated subprocess before any active service is gated.
 
-## Function Worker responsibilities
+`orchestrator.runtime_app.UniversalOrchestrator` and
+`orchestrator.manager_registry.FUNCTION_MANAGER_SPECS` own the shared Functions
+process. They retain object identity during Agent-only replacements. Their
+entire functional closure is pinned to an immutable artifact; they are not
+cached mutable modules in Core under a different filename.
 
-One Worker contains one real `FlexibleAgentRuntime` and its replaceable
-functional closure:
+## Two explicit replacement scopes
 
-- backend adapters and model execution;
-- slash commands and Agent-specific handlers;
-- tools, skills and turn orchestration;
-- Agent memory, media and voice behavior;
-- Telegram application handlers and outbound delivery, but not long polling;
-- Agent-local state and request queues.
+### Agent-only replacement
 
-The Worker receives a narrow `WorkerKernelFacade`. Shared operations—starting
-another Agent, Scheduler recovery, API Gateway control, background jobs,
-WhatsApp, HChat routing and cross-Agent messages—are requested from Core over
-versioned JSON RPC. Core objects are never shared or pickled.
+`/reboot min`, a numbered target, `same` and `max` keep their existing target
+rules. They qualify real candidate Agent Workers, close only selected route
+gates, drain, activate, atomically publish selected pointers and retire old
+Workers. Candidate failure resumes the old selected Workers; unselected Agents,
+shared services and Core remain online. No mode silently widens into a shared
+service replacement.
 
-When new product behavior needs shared authority, extend the explicit RPC
-contract. Do not move functional code into Core merely because direct Python
-calls are easier.
+Agent updates can adopt new models, effort choices, commands and execution code
+without replacing the shared Functions process. Shared views (for example the
+model API catalogue or terminal display) retain their own installed generation
+until an explicitly authorized shared replacement.
 
-## Stable Agent handle
+### Shared Functions replacement
 
-Code outside a Worker sees an `AgentRuntimeHandle`, not
-`FlexibleAgentRuntime`. The handle provides stable metadata and routes
-supported operations to its current Worker.
+The local operator entry is `python main.py --replace-functions`, using the
+normal `--bridge-home` when needed. It submits a request; acceptance is not a
+completion receipt. This is a broad operational action requiring the user's
+scope, just like reboot. It never authorizes itself from a code-edit request.
 
-Each handle owns:
+1. Qualify and hash the complete candidate closure and assets out of process.
+2. Verify the artifact and prepare a new shared process without binding ports
+   or initializing providers.
+3. Reject new external work, pause scheduling and finish the accepted Telegram
+   batch, preserving its update offset.
+4. Drain active API requests, Agent work and background jobs. Busy/failed drain
+   rejects replacement and resumes the existing process. Jobs are not killed
+   to force an upgrade through.
+5. Close the old shared process and its Agent Workers; retain the Core PID and
+   instance lock. Start the candidate from its pinned artifact, with exactly the
+   previously running Agent set and preserved Telegram offsets.
+6. Commit the replacement and reopen intake. A later observability/transport
+   error is a post-commit fault, not a claim that the old generation resumed.
 
-- one route condition/gate;
-- the current Worker client pointer;
-- per-route in-flight count;
-- current metadata and offline error;
-- completion listeners for requests crossing IPC.
+Preparation failure leaves the original shared PID unchanged. Startup failure
+before commit restores the previous shared artifact and each Agent's own
+immutable generation, including Agents independently updated since shared startup.
+Durable Session, journal, schedule, configuration and Memory+ stores stay in the
+instance home. A failed rollback is reported as failed, never as successful
+recovery. This mechanism does not reverse an incompatible database migration.
 
-During cutover, new calls wait at the gate. Core first waits for calls already
-using the old Worker, then quiesces that Worker. Pointer publication and gate
-opening happen under the route locks.
+Shared replacement has a service gap while processes and listeners transfer;
+it is **not zero downtime**, and existing streaming/client connections may need
+to reconnect. It does not cold-restart Core. Keep normal feature updates scoped
+to the relevant Agent whenever the shared service itself has not changed.
 
-Core owns one Telegram polling task and update offset per online Agent. It
-serializes each `Update` to JSON and routes it through the handle. Candidate
-Workers initialize their Telegram application and handlers but never call
-`getUpdates`; therefore the stable poller cannot be duplicated and an update
-cannot be consumed by a candidate before route commit.
+`state/instance/kernel.json` records Core PID, shared PID, shared generation and
+outcome. `replacement-<request-id>.json` records completion. Backend API health
+also reports shared Functions separately from per-Agent generations. Source,
+qualified artifacts and running generations are different facts.
 
-The kernel-owned `runtimes` list retains identity because Workbench, Scheduler
-and directories may hold it. Starting and stopping Agents mutate it in place.
+## Qualification and recovery
 
-## Generation qualification
+The stable, product-neutral import-purity guard runs before the first product
+import in a spawned process. Function manifest/schema and cross-module contract
+checks cover both shared and Agent code. Manifest routing
+includes package initializers, literal lazy imports and manager registry entries.
+Missing project modules fail closed instead of falling back to mutable source.
+Core paths cannot be shadowed by artifacts. Runtime, Core digest, source bytes,
+asset bytes and executable modes are checked before process use.
 
-`orchestrator.function_generation` performs four separate checks:
+Core and Function API are now 3. CPython remains 3.12.13, Agent worker protocol
+remains 1 and the Function artifact schema remains 2. This is an authorized Core
+migration, not permission to bypass compatibility checks on old running Core.
 
-1. Discover operational entrypoints and their complete functional import
-   closure, including literal lazy imports.
-2. Compile, hash and order Python sources; hash functional non-Python assets.
-3. Launch a disposable isolated probe with the running Core executable.
-4. Rebuild and compare the manifest after the probe.
+Unexpected process recovery uses the last committed shared artifact and exact
+per-Agent generation checkpoints, never checkout edits or the original Agent
+selection. Telegram offsets are persisted when accepted and recovery never
+requests pending-message deletion. Individual connector activation failures
+are reported as degraded health and retried without blocking healthy connectors.
+The child observes parent IPC closure and stops its Workers. On POSIX,
+shared children have dedicated process groups, with bounded cleanup of remaining
+children. Windows uses an OS Job Object with kill-on-close descendant ownership,
+plus bounded exact-PID tree cleanup; native Windows live
+qualification remains a separately reported platform check.
 
-The probe enforces the exact Core runtime, imports the full closure under an
-import-purity guard, validates public cross-module identities, and returns a
-versioned receipt. It cannot write files, launch processes/threads/tasks,
-change environment or signal state, or open a network connection during
-candidate import.
+## Rules that prevent product code returning to Core
 
-Core copies verified bytes into:
+- Ordinary feature changes belong in an existing Function owner or configuration.
+- The Core import closure includes lazy imports and implicit package initializers.
+  Do not hide product imports behind helpers, `importlib`, `exec` or aliases.
+- The protected manifest, local hook and existing architecture CI remain the
+  safeguards. Product ownership and real process handoff tests run in the normal
+  checks; no new approval layer or duplicated ownership manifest is introduced.
+- Never unprotect a file while a live Core consumer still imports or owns it.
+- No in-process reload, shared Python objects across IPC, target widening or
+  cold-restart fallback for a normal Function update.
+- New persistence/protocol incompatibilities require a planned migration.
 
-```text
-state/function_generations/<generation-sha256>/
-```
-
-A Worker resolves only manifest-listed modules from that tree. Non-listed Core
-imports continue to resolve from the stable source tree. Existing artifacts
-are verified before reuse; source or artifact tampering is rejected.
-
-## Worker lifecycle
-
-The Worker state machine is:
-
-```text
-BOOTING -> READY -> ACTIVATING -> ACTIVE
-                              -> DRAINING -> QUIESCED
-                              -> STOPPING -> STOPPED
-```
-
-READY requires the real Agent configuration, backend initialization, complete
-function import and contract checks. ACTIVE owns request execution. DRAINING
-closes intake, stops Agent-local polling and waits for the queue, foreground
-generation and tracked background work to become idle. QUIESCED can either be
-resumed after rollback or retired after commit.
-
-## Transactional reboot
-
-`RebootManager` resolves targets before candidate work:
-
-- `min`: requesting Agent only;
-- a number: exactly that configured/running Agent;
-- `same`: currently running Agents;
-- `max`: currently running Agents under a full rollout request.
-
-Invalid or offline targets fail closed and never become “all Agents.”
-
-For a valid request:
-
-1. qualify one candidate generation;
-2. prepare all selected Workers to READY;
-3. close only selected handles and drain their in-flight routes;
-4. quiesce selected old Workers;
-5. reverify the runtime and source manifests;
-6. activate all candidates and verify capabilities;
-7. acquire all selected handle locks;
-8. replace all pointers without an await point;
-9. open the gates, publish topology and terminate old Workers.
-
-All failures before step 8 discard every candidate and resume all old Workers.
-No Core module, manager, service or unselected Agent changes. This is the
-architectural rollback; there is no attempt to reverse mutated `sys.modules`.
-
-After step 8, the new route generation is committed. A diagnostic or topology
-publication error is reported as a post-commit observability fault and cannot
-be mislabeled as a rollback.
-
-## Multi-Agent isolation
-
-Every Agent has an independent process, artifact pointer and route gate.
-`/reboot min` therefore works in a multi-Agent Core without interrupting the
-others. A staged rollout may temporarily report:
-
-```text
-function_generation.generation_id = mixed
-```
-
-Workbench health lists each Agent's generation, Worker PID, phase, acceptance
-state and process liveness so this is explicit rather than inferred.
-
-Broad cutover prepares and activates all candidates before publishing any
-route. Pointer publication is all-or-none under all selected locks.
-
-## Worker crash recovery
-
-An unexpected Worker exit fails its outstanding request listeners and closes
-only that route. Core tries up to three times to start the same Agent from the
-same verified immutable artifact. Success updates the stable handle and
-broadcasts topology. Exhaustion marks that route explicitly failed; other
-Agents and Core services remain online.
-
-Recovery does not use the mutable checkout and cannot silently advance a
-generation.
-
-## Startup and shutdown
-
-Cold startup performs the one-time Core construction, qualifies a Function
-generation, and starts selected Agent Workers with bounded concurrency. Shared
-Core services start after Agent selection succeeds.
-
-Normal shutdown first closes and drains Agent routes, terminates all Workers,
-then stops shared Core services and releases the instance lock. The external
-supervisor owns Core replacement.
-
-Changing Python, dependencies, Core sources or protocol/API versions is a
-planned Core migration. HASHI3 may use one controlled cold restart during this
-pilot; production should use blue/green Core handoff where continuous service
-is required.
-
-## Required engineering rules
-
-- No in-process project module reload.
-- No duplicate Core or Function ownership manifests.
-- No Python objects or pickle across Worker IPC.
-- No live dependency installation.
-- No candidate import side effects.
-- No target widening.
-- No pointer publication before every selected candidate is healthy.
-- No Core cold restart as Function failure recovery.
-- Core ingress delegates feature execution through a stable handle.
-- Tests assert observable isolation, rollback and liveness outcomes.
-
-The normative runtime values and promotion gate are in
-`HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`. Layer ownership and edit authority are
-in `HASHI_LAYERED_RUNTIME_BOUNDARIES.md`.
+Approval, source/offline evidence and live adoption are recorded separately in
+`HASHI2_MINIMAL_CORE_2026-09-07.md`.

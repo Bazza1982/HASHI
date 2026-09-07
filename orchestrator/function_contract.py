@@ -17,6 +17,12 @@ FUNCTION_MODULE_PREFIXES = (
     "nagare.",
     "remote.",
     "transports.",
+    "exp.",
+    "veritas.",
+    "specs.",
+    "browser_gateway.",
+    "apps.",
+    "onboarding.",
 )
 # These modules execute in a separately launched Windows helper environment.
 # Their JSON/HTTP boundary is validated independently; they must never be
@@ -54,7 +60,7 @@ def is_function_module_name(name: str) -> bool:
         for prefix in FUNCTION_SIDECAR_PREFIXES
     ):
         return False
-    return any(name.startswith(prefix) for prefix in FUNCTION_MODULE_PREFIXES)
+    return any(name == prefix.removesuffix(".") or name.startswith(prefix) for prefix in FUNCTION_MODULE_PREFIXES)
 
 # Only dependency roots that are imported by many consumers belong here.
 # The order is centralized so /reboot has one generation contract. Providers
@@ -202,6 +208,7 @@ def validate_function_contract(
     generation before any Agent is stopped.
     """
 
+    module_loader("orchestrator.ui_language").language_options()
     stream_events = module_loader("adapters.stream_events")
     adapter_base = module_loader("adapters.base")
     backend_registry = module_loader("adapters.registry")

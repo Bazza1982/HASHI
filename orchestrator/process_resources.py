@@ -1,9 +1,8 @@
-"""Core-owned process resources shared by every function generation.
+"""Process-local Function synchronization (never an interprocess file lock).
 
-Function generations may overlap while a targeted Agent drains and its
-replacement starts. Locks that protect shared files therefore cannot live in
-replaceable module globals: old and new generations must resolve the exact
-same lock object from this protected Core registry.
+Each immutable shared/Agent process has its own registry. Durable stores that
+need cross-process exclusion must use their store transaction or OS file lock.
+There is no overlapping in-process module reload and no lock object crosses IPC.
 """
 
 from __future__ import annotations

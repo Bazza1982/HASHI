@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import main as main_module
+from orchestrator import runtime_app as main_module
 
 
 class _LifecycleState:

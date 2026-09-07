@@ -153,6 +153,9 @@ class StartupManager:
             if cfg.name not in [selected.name for selected in selected_configs]
         ]
 
+        if not selected_configs and getattr(self.kernel, "_allow_empty_start", False):
+            return True, {}
+
         if not selected_configs:
             print("\n" + "!" * 64)
             print("  CRITICAL ERROR: No active agents found.")
@@ -463,7 +466,13 @@ class StartupManager:
                 startup_progress["phase"] = "starting_workers"
                 _publish_progress()
                 return None, None
-            generation, generation_root = await prepare()
+            pinned = getattr(self.kernel, "_startup_artifact", None)
+            if pinned is not None:
+                from orchestrator.function_worker_supervisor import verify_generation_artifact
+                generation, generation_root = pinned
+                await asyncio.to_thread(verify_generation_artifact, generation_root, generation)
+            else:
+                generation, generation_root = await prepare()
             startup_progress.update(
                 {
                     "phase": "starting_workers",
@@ -500,13 +509,15 @@ class StartupManager:
                 bridge_logger.info("%s: pending -> connecting", agent_name)
                 _publish_progress()
                 try:
-                    if generation is None:
+                    selected_generation, selected_root = getattr(self.kernel, "_startup_agent_artifacts", {}).get(
+                        agent_name, (generation, generation_root))
+                    if selected_generation is None:
                         ok, msg = await self.kernel.start_agent(agent_name)
                     else:
                         ok, msg = await self.kernel.start_agent(
                             agent_name,
-                            generation=generation,
-                            generation_root=generation_root,
+                            generation=selected_generation,
+                            generation_root=selected_root,
                         )
                 except Exception as e:
                     main_logger.exception("Unexpected startup error for '%s': %s", agent_name, e)

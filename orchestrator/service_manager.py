@@ -210,6 +210,8 @@ class ServiceManager:
                 default_model=state["default_model"],
             )
             await self.kernel.api_gateway.start()
+            if getattr(self.kernel, "_handoff_draining", False):
+                self.kernel.api_gateway._accepting_requests = False
             bind_host = getattr(self.kernel.api_gateway, "bind_host", None) or "127.0.0.1"
             endpoint = self._publish_service_endpoint(
                 "api_gateway",

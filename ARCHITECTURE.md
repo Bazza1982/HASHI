@@ -4,7 +4,11 @@ The canonical architecture and engineering guideline is
 [`docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md`](docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 The normative Python/ABI and transactional function-generation decision is
 [`docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`](docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md).
-The current HASHI3 implementation and promotion boundary is
+The current minimal Core decision for HASHI2 is
+[`docs/HASHI_SLIM_CORE_ARCHITECTURE.md`](docs/HASHI_SLIM_CORE_ARCHITECTURE.md);
+source, offline checks and pending cold adoption are recorded in
+[`docs/HASHI2_MINIMAL_CORE_2026-09-07.md`](docs/HASHI2_MINIMAL_CORE_2026-09-07.md).
+The earlier HASHI3 implementation and promotion boundary is
 [`docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md`](docs/HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md).
 The accepted HASHI3 Browser/Computer Worker, cross-WSL/Windows discovery, lease,
 and silent-background-runtime target is
@@ -49,7 +53,7 @@ HASHI has four engineering layers:
 
 1. **Core** — the small, continuously running process kernel and stable
    contracts that let normal functions be adopted without a cold restart.
-2. **Functions** — hot-reloadable product behaviour, including the primary
+2. **Functions** — replaceable shared and per-Agent process generations, including the primary
    implementations of PCM, PAO, HER v2, and Frontend Connectors.
 3. **Platform Configuration** — adaptations required for Windows, Linux,
    macOS, WSL, packaging, and platform-side services.

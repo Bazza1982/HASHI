@@ -664,3 +664,17 @@ async def test_recovery_exhaustion_fails_closed_instead_of_routing_to_dead_worke
     assert handle._offline_error is not None
     with pytest.raises(FunctionWorkerDisconnected, match="could not be recovered"):
         await handle.enqueue_api_text("must not reach dead process")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_gate_acquisition_reopens_the_route():
+    kernel = _Kernel()
+    handle = _handle(kernel, _Client("alpha", 101))
+    handle._route_inflight = 1
+    cutover = asyncio.create_task(handle.begin_cutover())
+    await asyncio.sleep(0)
+    assert handle._cutover
+    cutover.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cutover
+    assert not handle._cutover
