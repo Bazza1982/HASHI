@@ -313,7 +313,10 @@ async def test_ensure_windows_helper_started_uses_pythonpath_not_working_directo
     monkeypatch.setattr(
         windows_use,
         "_resolve_windows_save_path",
-        lambda path: (r"\\\\wsl.localhost\\Ubuntu-22.04\\home\\lily\\projects\\hashi", None),
+        lambda path: (
+            r"\\\\wsl.localhost\\Ubuntu-22.04\\home\\sampleuser\\projects\\hashi",
+            None,
+        ),
     )
 
     started = await windows_use._ensure_windows_helper_started()
@@ -322,7 +325,7 @@ async def test_ensure_windows_helper_started_uses_pythonpath_not_working_directo
     assert "$env:PYTHONPATH" in seen["body"]
     assert "-WorkingDirectory $repoRoot" not in seen["body"]
     assert "-WorkingDirectory $helperWorkingDir" in seen["body"]
-    assert "-WindowStyle Hidden" not in seen["body"]
+    assert "-WindowStyle Hidden" in seen["body"]
     assert "'--with', 'pillow'" in seen["body"]
 
 
@@ -396,6 +399,7 @@ async def test_windows_reset_input_state_reports_state(monkeypatch: pytest.Monke
 @pytest.mark.asyncio
 async def test_windows_helper_warmup_reports_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HASHI_WINDOWS_HELPER", "1")
+    monkeypatch.setattr(windows_use, "_WINDOWS_HELPER_PORT", 47831)
 
     async def fake_start() -> bool:
         return True

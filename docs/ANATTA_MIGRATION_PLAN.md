@@ -180,7 +180,7 @@ creating a second divergent source list.
 3. Confirm the HASHI2 source checkpoint commits are present:
 
 ```bash
-git -C /home/lily/projects/hashi2 show --stat 2d5a090 41519d1 8fc85fd
+git -C /path/to/HASHI show --stat 2d5a090 41519d1 8fc85fd
 ```
 
 4. Treat HASHI2 commits as source material only. Do not use `git cherry-pick`

@@ -1,14 +1,16 @@
 from __future__ import annotations
-import sys
+
+import asyncio
 import os
 import signal
-import time
-import asyncio
 import subprocess
+import sys
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from adapters.stream_events import StreamCallback
 from adapters.timeout_policy import (
@@ -392,7 +394,7 @@ class BaseBackend(ABC):
         )
         if activity_monotonic > 0:
             return max(0.0, time.monotonic() - activity_monotonic)
-        # Compatibility for a backend instance created before a minimal hot reload.
+        # Compatibility with persisted diagnostics from older releases.
         activity_wall = float(getattr(self, "last_activity_at", 0.0) or 0.0)
         if activity_wall > 0:
             return max(0.0, time.time() - activity_wall)
@@ -491,6 +493,78 @@ class BaseBackend(ABC):
             except Exception as exc:
                 return f"<tasklist failed: {exc}>"
         return f"pid={pid}"
+
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> bool:
+        """Synchronously terminate active CLI children from a control thread.
+
+        This performs no asyncio work. The owning event loop still performs
+        normal task cancellation and shutdown; API-only backends have no local
+        process and therefore return ``False``.
+        """
+
+        candidates: list[Any] = []
+        current = getattr(self, "current_proc", None)
+        if current is not None:
+            candidates.append(current)
+        external = getattr(self, "_external_tool_processes", None)
+        if external is not None:
+            try:
+                candidates.extend(tuple(external))
+            except (RuntimeError, TypeError):
+                pass
+
+        interrupted = False
+        seen: set[int] = set()
+        logger = getattr(self, "logger", None)
+        for proc in candidates:
+            pid = getattr(proc, "pid", None)
+            if (
+                not isinstance(pid, int)
+                or pid <= 0
+                or pid == os.getpid()
+                or pid in seen
+                or getattr(proc, "returncode", None) is not None
+            ):
+                continue
+            seen.add(pid)
+            try:
+                if os.name == "nt":
+                    completed = subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if completed.returncode not in {0, 128}:
+                        raise RuntimeError(
+                            self._preview_text(completed.stderr or completed.stdout)
+                        )
+                else:
+                    pgid = os.getpgid(pid)
+                    own_pgid = os.getpgrp()
+                    if pgid == pid and pgid != own_pgid:
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                interrupted = True
+                if logger:
+                    logger.warning(
+                        "Out-of-band provider interrupt pid=%s reason=%r",
+                        pid,
+                        reason,
+                    )
+            except ProcessLookupError:
+                continue
+            except Exception as exc:
+                if logger:
+                    logger.warning(
+                        "Out-of-band provider interrupt failed pid=%s "
+                        "reason=%r: %s",
+                        pid,
+                        reason,
+                        exc,
+                    )
+        return interrupted
 
     async def force_kill_process_tree(self, proc, logger=None, reason: str = "") -> bool:
         if not proc:

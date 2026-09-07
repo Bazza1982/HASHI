@@ -19,7 +19,19 @@ class ManagerSpec:
     constructor: ManagerConstructor
 
 
-HOT_MANAGER_SPECS: tuple[ManagerSpec, ...] = (
+CORE_MANAGER_SPECS: tuple[ManagerSpec, ...] = (
+    ManagerSpec(
+        "endpoint_registry",
+        "orchestrator.service_endpoints",
+        "ServiceEndpointRegistry",
+        "kernel",
+    ),
+    ManagerSpec(
+        "capability_broker",
+        "orchestrator.capability_broker",
+        "CapabilityBroker",
+        "kernel",
+    ),
     ManagerSpec("skill_manager", "orchestrator.skill_manager", "SkillManager", "skill"),
     ManagerSpec("config_admin", "orchestrator.config_admin", "ConfigAdmin", "paths"),
     ManagerSpec("backend_preflight", "orchestrator.backend_preflight", "BackendPreflight", "empty"),
@@ -45,15 +57,15 @@ def _construct_manager(spec: ManagerSpec, manager_class, kernel, console_handler
     raise ValueError(f"Unknown manager constructor rule: {spec.constructor}")
 
 
-def build_hot_manager_bundle(
+def build_core_manager_bundle(
     kernel,
     console_handler,
     *,
     module_loader: Callable[[str], ModuleType] = importlib.import_module,
 ) -> dict[str, object]:
-    """Build every manager before mutating the live kernel."""
+    """Construct the stable Core control-plane manager set at cold start."""
     bundle: dict[str, object] = {}
-    for spec in HOT_MANAGER_SPECS:
+    for spec in CORE_MANAGER_SPECS:
         module = module_loader(spec.module)
         manager_class = getattr(module, spec.class_name)
         bundle[spec.attribute] = _construct_manager(
@@ -65,17 +77,19 @@ def build_hot_manager_bundle(
     return bundle
 
 
-def install_hot_manager_bundle(
+def install_core_manager_bundle(
     kernel,
     bundle: dict[str, object],
     *,
     module_loader: Callable[[str], ModuleType] = importlib.import_module,
 ) -> None:
-    expected = {spec.attribute for spec in HOT_MANAGER_SPECS}
+    """Install a complete Core manager bundle during Core construction."""
+
+    expected = {spec.attribute for spec in CORE_MANAGER_SPECS}
     if set(bundle) != expected:
         missing = sorted(expected - set(bundle))
         extra = sorted(set(bundle) - expected)
         raise ValueError(f"Invalid manager bundle; missing={missing}, extra={extra}")
 
-    for spec in HOT_MANAGER_SPECS:
+    for spec in CORE_MANAGER_SPECS:
         setattr(kernel, spec.attribute, bundle[spec.attribute])

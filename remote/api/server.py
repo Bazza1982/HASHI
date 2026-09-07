@@ -22,6 +22,7 @@ replaced with hchat relay and terminal execution.
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -42,7 +43,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+from orchestrator.agent_move.package import AGENT_MOVE_CAPABILITY, AgentMoveError
+from orchestrator.agent_move.service import (
+    MAX_PACKAGE_BYTES,
+    activate_agent_move,
+    commit_agent_move,
+    get_agent_move_status,
+    receiver_capabilities,
+    rollback_agent_move,
+    stage_agent_move,
+)
+from orchestrator.agent_move.transport_crypto import (
+    ENVELOPE_OVERHEAD_BYTES,
+    ENVELOPE_SCHEME,
+    decrypt_package_transport,
+)
 from orchestrator.pathing import instance_runtime_dir
+from orchestrator.process_execution import process_is_alive
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 
 from ..attachments import AttachmentStore
@@ -68,8 +85,13 @@ from ..security.auth import (
     verify_protocol_request,
     verify_token,
 )
-from ..security.pairing import PairingManager
-from ..security.shared_token import build_auth_headers, load_shared_token
+from ..security.pairing import PairingManager, PairingState
+from ..security.shared_token import (
+    HEADER_NONCE,
+    build_auth_headers,
+    build_response_auth,
+    load_shared_token,
+)
 from ..terminal.executor import AuthLevel, TerminalExecutor
 
 logger = logging.getLogger(__name__)
@@ -93,6 +115,7 @@ API_PROTOCOL_CAPABILITIES = [
     "protocol_reply_v1",
     "workbench_gateway_v1",
     "tui_proxy_v1",
+    AGENT_MOVE_CAPABILITY,
 ]
 
 _WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
@@ -193,8 +216,31 @@ class FilePushPayload(BaseModel):
     create_dirs: bool = True
 
 
+class AgentMoveStagePayload(BaseModel):
+    from_instance: str
+    encryption: str
+    package_b64: str
+    sha256: str
+
+
+class AgentMoveActionPayload(BaseModel):
+    from_instance: str
+    package_id: str
+
+
 class HashiStartPayload(BaseModel):
     reason: Optional[str] = None
+
+
+class HashiRestartPayload(BaseModel):
+    reason: Optional[str] = None
+
+
+class HashiRebootPayload(BaseModel):
+    agent: str
+    mode: str = "min"
+    reason: Optional[str] = None
+    fallback_restart: bool = True
 
 
 class PairRequestPayload(BaseModel):
@@ -329,6 +375,31 @@ class ProtocolMessageWithAttachmentsPayload(BaseModel):
 MAX_FILE_PUSH_BYTES = 256 * 1024 * 1024
 
 
+def _agent_move_response(
+    request: Request,
+    content: dict[str, Any],
+    *,
+    status_code: int = 200,
+) -> JSONResponse:
+    """Authenticate a receiver response against its request nonce.
+
+    Request HMAC protects the target from an impersonated source. This proof
+    provides the other half of the exchange: the source must not disable its
+    local Agent after accepting a forged success response from another host.
+    """
+
+    payload = dict(content)
+    shared_token = load_shared_token(Path(_hashi_root) if _hashi_root else None)
+    request_nonce = str(request.headers.get(HEADER_NONCE) or "").strip()
+    if shared_token and request_nonce:
+        payload["response_auth"] = build_response_auth(
+            shared_token=shared_token,
+            request_nonce=request_nonce,
+            payload=payload,
+        )
+    return JSONResponse(status_code=status_code, content=payload)
+
+
 def _resolve_file_push_destination(dest_path: str) -> Path:
     raw = str(dest_path or "").strip()
     if not raw:
@@ -430,7 +501,11 @@ def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout:
 
 def _peer_is_tui_trusted(instance_id: str) -> tuple[bool, str, Any]:
     """Require a live, mutually handshaken peer with TUI proxy support."""
-    peer = _peer_registry.get_peer(str(instance_id or "").upper()) if _peer_registry else None
+    peer = (
+        _peer_registry.get_peer(str(instance_id or "").upper())
+        if _peer_registry
+        else None
+    )
     if peer is None:
         return False, "peer_not_found", None
     properties = dict(getattr(peer, "properties", None) or {})
@@ -440,7 +515,10 @@ def _peer_is_tui_trusted(instance_id: str) -> tuple[bool, str, Any]:
     live_status = str(properties.get("live_status") or "unknown").strip().lower()
     if live_status in {"offline", "unknown"}:
         return False, f"peer_{live_status}", peer
-    capabilities = {str(item).strip() for item in (getattr(peer, "capabilities", None) or [])}
+    capabilities = {
+        str(item).strip()
+        for item in (getattr(peer, "capabilities", None) or [])
+    }
     if "tui_proxy_v1" not in capabilities:
         return False, "tui_proxy_unsupported", peer
     return True, "ok", peer
@@ -465,7 +543,11 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
     return True, "ok"
 
 
-def _local_workbench_tui_request(payload: ProtocolTuiRequest, *, timeout: int = 15) -> tuple[int, dict[str, Any]]:
+def _local_workbench_tui_request(
+    payload: ProtocolTuiRequest,
+    *,
+    timeout: int = 15,
+) -> tuple[int, dict[str, Any]]:
     """Execute one allowlisted TUI operation against this instance's Workbench."""
     operation = str(payload.operation or "").strip().lower()
     agent = str(payload.agent or "").strip()
@@ -477,22 +559,39 @@ def _local_workbench_tui_request(payload: ProtocolTuiRequest, *, timeout: int = 
     elif operation == "chat":
         path = "/api/chat"
         method = "POST"
-        body_bytes = json.dumps({"agent": agent, "text": str(payload.text or "")}).encode("utf-8")
+        body_bytes = json.dumps(
+            {"agent": agent, "text": str(payload.text or "")}
+        ).encode("utf-8")
     elif operation == "transcript_recent":
         path = f"/api/transcript/{quote(agent, safe='')}?limit={int(payload.limit)}"
     elif operation == "transcript_poll":
-        path = f"/api/transcript/{quote(agent, safe='')}/poll?offset={int(payload.offset)}"
+        path = (
+            f"/api/transcript/{quote(agent, safe='')}/poll?offset="
+            f"{int(payload.offset)}"
+        )
 
     last_error: Exception | None = None
     for host in local_http_hosts():
         url = local_http_url(_workbench_port, path, host=host)
-        headers = {"Content-Type": "application/json"} if body_bytes is not None else {}
-        request = urllib_request.Request(url, data=body_bytes, headers=headers, method=method)
+        headers = (
+            {"Content-Type": "application/json"}
+            if body_bytes is not None
+            else {}
+        )
+        request = urllib_request.Request(
+            url,
+            data=body_bytes,
+            headers=headers,
+            method=method,
+        )
         try:
             with urllib_request.urlopen(request, timeout=timeout) as response:
                 raw = response.read(TUI_PROXY_MAX_RESPONSE_BYTES + 1)
                 if len(raw) > TUI_PROXY_MAX_RESPONSE_BYTES:
-                    return 502, {"ok": False, "error": "workbench_response_too_large"}
+                    return 502, {
+                        "ok": False,
+                        "error": "workbench_response_too_large",
+                    }
                 result = json.loads(raw.decode("utf-8"))
                 if not isinstance(result, dict):
                     return 502, {"ok": False, "error": "invalid_workbench_response"}
@@ -503,38 +602,32 @@ def _local_workbench_tui_request(payload: ProtocolTuiRequest, *, timeout: int = 
                 result = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, ValueError):
                 result = {"ok": False, "error": f"Workbench HTTP {exc.code}"}
-            return int(exc.code), result if isinstance(result, dict) else {"ok": False, "error": str(result)}
+            if not isinstance(result, dict):
+                result = {"ok": False, "error": str(result)}
+            return int(exc.code), result
         except (URLError, OSError, ValueError) as exc:
             last_error = exc
             logger.debug(
-                "TUI proxy local Workbench candidate failed: operation=%s url=%s error=%s",
+                "TUI proxy local Workbench candidate failed: "
+                "operation=%s url=%s error=%s",
                 operation,
                 url,
                 exc,
             )
-    logger.warning("TUI proxy local Workbench unavailable: operation=%s error=%s", operation, last_error)
-    return 503, {"ok": False, "error": "local_workbench_unreachable", "detail": str(last_error or "no route")}
+    logger.warning(
+        "TUI proxy local Workbench unavailable: operation=%s error=%s",
+        operation,
+        last_error,
+    )
+    return 503, {
+        "ok": False,
+        "error": "local_workbench_unreachable",
+        "detail": str(last_error or "no route"),
+    }
 
 
 def _process_exists(pid: int) -> bool:
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
-            process_query_limited_information = 0x1000
-            handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            return False
-        except Exception:
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    return process_is_alive(pid)
 
 
 def _read_hashi_pid_state() -> dict[str, Any]:
@@ -599,14 +692,15 @@ def _hashi_start_command() -> list[str]:
     raise FileNotFoundError("No supported HASHI launcher found under bin/")
 
 
-def _start_hashi_process() -> dict[str, Any]:
+def _launch_hashi_process(
+    cmd: list[str], *, log_name: str
+) -> dict[str, Any]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
-    cmd = _hashi_start_command()
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "remote_rescue_hashi_start.log"
+    log_path = log_dir / log_name
     log_handle = log_path.open("ab")
     kwargs: dict[str, Any] = {
         "cwd": str(root),
@@ -635,6 +729,49 @@ def _start_hashi_process() -> dict[str, Any]:
     }
 
 
+def _start_hashi_process() -> dict[str, Any]:
+    return _launch_hashi_process(
+        _hashi_start_command(),
+        log_name="remote_rescue_hashi_start.log",
+    )
+
+
+def _hashi_restart_command() -> list[str]:
+    if not _control_hashi_root:
+        raise ValueError("Hashi root is unavailable")
+    root = Path(_control_hashi_root)
+    if platform.system().lower() == "windows":
+        ctl = root / "bin" / "bridge_ctl.ps1"
+        if ctl.exists():
+            return [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ctl),
+                "-Action",
+                "restart",
+                "-Resume",
+            ]
+    launcher = root / "bin" / "bridge-u.sh"
+    if launcher.exists():
+        return [
+            str(launcher),
+            "--resume-last",
+            "--api-gateway",
+            "--force",
+        ]
+    raise FileNotFoundError("No supported HASHI restart launcher found under bin/")
+
+
+def _restart_hashi_process() -> dict[str, Any]:
+    return _launch_hashi_process(
+        _hashi_restart_command(),
+        log_name="remote_rescue_hashi_restart.log",
+    )
+
+
 def _append_rescue_audit(
     *,
     requester: str,
@@ -647,6 +784,10 @@ def _append_rescue_audit(
     log_path: str | None = None,
     status: dict[str, Any] | None = None,
     error: str | None = None,
+    operation: str = "start",
+    agent: str | None = None,
+    mode: str | None = None,
+    fallback_used: bool = False,
 ) -> None:
     if not _control_hashi_root:
         return
@@ -655,6 +796,10 @@ def _append_rescue_audit(
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "requester": requester,
+        "operation": str(operation or "unknown"),
+        "agent": agent,
+        "mode": mode,
+        "fallback_used": bool(fallback_used),
         "reason": reason,
         "reason_truncated": bool(reason_truncated),
         "reason_original_length": reason_original_length,
@@ -675,12 +820,13 @@ def _read_rescue_log(name: str, tail: int = 120) -> dict[str, Any]:
     root = Path(_control_hashi_root)
     files = {
         "start": root / "logs" / "remote_rescue_hashi_start.log",
+        "restart": root / "logs" / "remote_rescue_hashi_restart.log",
         "audit": root / "logs" / "remote_rescue_audit.jsonl",
         "supervisor": root / "logs" / "hashi-remote-supervisor.log",
     }
     key = str(name or "start").strip().lower()
     if key not in files:
-        raise ValueError("log name must be one of: start, audit, supervisor")
+        raise ValueError("log name must be one of: start, restart, audit, supervisor")
     path = files[key]
     try:
         requested_tail = int(tail)
@@ -731,7 +877,9 @@ def _workbench_health_url() -> str:
 
 
 def _workbench_gateway_timeout() -> float:
-    raw = str(os.getenv("HASHI_WORKBENCH_GATEWAY_TIMEOUT_SECONDS") or "30").strip()
+    raw = str(
+        os.getenv("HASHI_WORKBENCH_GATEWAY_TIMEOUT_SECONDS") or "30"
+    ).strip()
     try:
         return max(1.0, min(float(raw), 120.0))
     except (TypeError, ValueError):
@@ -739,7 +887,8 @@ def _workbench_gateway_timeout() -> float:
 
 
 def _workbench_admin_token() -> str:
-    """Return the local-only Workbench admin token without exposing it remotely."""
+    """Return the local Workbench token without exposing it remotely."""
+
     if not _control_hashi_root:
         return ""
     secrets_path = Path(_control_hashi_root) / "secrets.json"
@@ -781,14 +930,14 @@ def _forward_workbench_gateway_request(
     }
     admin_token = _workbench_admin_token()
     if admin_token:
-        # The shared-token gateway terminates remote authentication. The
-        # existing local admin token is injected only on the loopback hop.
+        # Remote authentication terminates at this gateway. The local admin
+        # token is injected only on the loopback Workbench hop.
         headers["X-Workbench-Token"] = admin_token
 
     last_error: Exception | None = None
     for host in local_http_hosts():
         url = local_http_url(_workbench_port, upstream_path, host=host)
-        request_data = body_bytes if normalized_method not in {"GET"} else None
+        request_data = body_bytes if normalized_method != "GET" else None
         upstream = urllib_request.Request(
             url,
             data=request_data,
@@ -796,7 +945,10 @@ def _forward_workbench_gateway_request(
             method=normalized_method,
         )
         try:
-            with urllib_request.urlopen(upstream, timeout=_workbench_gateway_timeout()) as response:
+            with urllib_request.urlopen(
+                upstream,
+                timeout=_workbench_gateway_timeout(),
+            ) as response:
                 response_headers = {
                     name.lower(): value
                     for name, value in response.headers.items()
@@ -825,6 +977,48 @@ def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
         except Exception:
             continue
     return None
+
+
+def _request_workbench_reboot(
+    *, agent: str, mode: str, timeout: float = 30.0
+) -> tuple[int, dict[str, Any]]:
+    """Request an ordinary hot reboot through loopback Workbench."""
+
+    normalized_agent = str(agent or "").strip()
+    normalized_mode = str(mode or "").strip().casefold()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", normalized_agent):
+        raise ValueError("agent must be a configured HASHI Agent name")
+    if normalized_mode != "min":
+        raise ValueError("out-of-process reboot control supports mode=min only")
+    body = json.dumps(
+        {"agent": normalized_agent, "command": "/reboot min"}
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    admin_token = _workbench_admin_token()
+    if admin_token:
+        headers["X-Workbench-Token"] = admin_token
+    last_error: Exception | None = None
+    path = "/api/admin/command"
+    for host in local_http_hosts():
+        req = urllib_request.Request(
+            local_http_url(_workbench_port, path, host=host),
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=max(0.5, float(timeout))) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                return int(resp.status), dict(payload or {})
+        except HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                payload = {"ok": False, "error": str(exc)}
+            return int(exc.code), dict(payload or {})
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+    raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
 
 
 def _hashi_control_status() -> dict[str, Any]:
@@ -927,6 +1121,12 @@ def create_app(
                 "peer_count": len(peers),
                 "protocol_auth_mode": protocol_auth_mode(),
                 "lan_mode": is_lan_mode(),
+                "pairing_auto_approve": bool(
+                    _pairing_manager and _pairing_manager.auto_approve
+                ),
+                "pairing_token_ttl_seconds": (
+                    _pairing_manager.token_ttl_seconds if _pairing_manager else None
+                ),
                 "trusted_view": False,
                 "shared_token_configured": has_shared_token(),
             }
@@ -940,6 +1140,12 @@ def create_app(
             "peers": peers,
             "protocol_auth_mode": protocol_auth_mode(),
             "lan_mode": is_lan_mode(),
+            "pairing_auto_approve": bool(
+                _pairing_manager and _pairing_manager.auto_approve
+            ),
+            "pairing_token_ttl_seconds": (
+                _pairing_manager.token_ttl_seconds if _pairing_manager else None
+            ),
             "trusted_view": True,
         }
 
@@ -1038,6 +1244,8 @@ def create_app(
                 "ok": True,
                 **_redacted_protocol_status(),
                 "rescue_start_enabled": rescue_start_enabled,
+                "rescue_restart_enabled": rescue_start_enabled,
+                "rescue_reboot_enabled": rescue_start_enabled,
                 "rescue_start_requirement": "L3_RESTART",
             }
         return {
@@ -1051,6 +1259,8 @@ def create_app(
             "lan_mode": is_lan_mode(),
             "protocol_api_state": _protocol_api_state_summary(),
             "rescue_start_enabled": rescue_start_enabled,
+            "rescue_restart_enabled": rescue_start_enabled,
+            "rescue_reboot_enabled": rescue_start_enabled,
             "rescue_start_requirement": "L3_RESTART",
             "trusted_view": True,
         }
@@ -1746,6 +1956,207 @@ def create_app(
             "status": status,
         }
 
+    @app.post("/control/hashi/restart")
+    async def hashi_control_restart(request: Request, payload: HashiRestartPayload):
+        """Recover a stuck HASHI core through the independent Remote service."""
+
+        body_bytes = await request.body()
+        client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
+        if not _terminal_executor or not _terminal_executor.allows_level(
+            AuthLevel.L3_RESTART
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": "HASHI restart requires max_terminal_level=L3_RESTART",
+                },
+            )
+        reason_meta = _sanitize_rescue_reason(payload.reason)
+        before = _hashi_control_status()
+        try:
+            started = _restart_hashi_process()
+        except Exception as exc:
+            logger.exception("HASHI rescue restart failed")
+            _append_rescue_audit(
+                requester=client_id,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
+                outcome="failed",
+                status=before,
+                error=str(exc),
+                operation="restart",
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": str(exc)},
+            )
+        deadline = time.monotonic() + 15.0
+        status = _hashi_control_status()
+        while not status["hashi_running"] and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            status = _hashi_control_status()
+        _append_rescue_audit(
+            requester=client_id,
+            reason=reason_meta["reason"],
+            reason_truncated=reason_meta["truncated"],
+            reason_original_length=reason_meta["original_length"],
+            outcome="restart_launched",
+            command=started["command"],
+            pid=started["pid"],
+            log_path=started["log_path"],
+            status=status,
+            operation="restart",
+        )
+        return {
+            "ok": True,
+            "restart_launched": True,
+            "pid": started["pid"],
+            "command": started["command"],
+            "log_path": started["log_path"],
+            "launcher_kind": started.get("launcher_kind"),
+            "platform": started.get("platform"),
+            "reason": reason_meta["reason"],
+            "reason_truncated": reason_meta["truncated"],
+            "status_before": before,
+            "status": status,
+        }
+
+    @app.post("/control/hashi/reboot")
+    async def hashi_control_reboot(request: Request, payload: HashiRebootPayload):
+        """Supervise `/reboot min`, falling back only when HASHI is unreachable."""
+
+        body_bytes = await request.body()
+        client_id = _authenticate_rescue_control(request, body_bytes=body_bytes)
+        if not _terminal_executor or not _terminal_executor.allows_level(
+            AuthLevel.L3_RESTART
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": "HASHI reboot rescue requires max_terminal_level=L3_RESTART",
+                },
+            )
+        reason_meta = _sanitize_rescue_reason(payload.reason)
+        try:
+            status_code, command_result = await asyncio.to_thread(
+                _request_workbench_reboot,
+                agent=payload.agent,
+                mode=payload.mode,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": str(exc)},
+            )
+        except ConnectionError as exc:
+            if not payload.fallback_restart:
+                _append_rescue_audit(
+                    requester=client_id,
+                    reason=reason_meta["reason"],
+                    reason_truncated=reason_meta["truncated"],
+                    reason_original_length=reason_meta["original_length"],
+                    outcome="workbench_unreachable",
+                    status=_hashi_control_status(),
+                    error=str(exc),
+                    operation="reboot",
+                    agent=payload.agent,
+                    mode=payload.mode,
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={"ok": False, "error": str(exc)},
+                )
+            try:
+                started = _restart_hashi_process()
+            except Exception as restart_exc:
+                _append_rescue_audit(
+                    requester=client_id,
+                    reason=reason_meta["reason"],
+                    reason_truncated=reason_meta["truncated"],
+                    reason_original_length=reason_meta["original_length"],
+                    outcome="fallback_restart_failed",
+                    status=_hashi_control_status(),
+                    error=str(restart_exc),
+                    operation="reboot",
+                    agent=payload.agent,
+                    mode=payload.mode,
+                    fallback_used=True,
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={"ok": False, "error": str(restart_exc)},
+                )
+            _append_rescue_audit(
+                requester=client_id,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
+                outcome="fallback_restart_launched",
+                command=started["command"],
+                pid=started["pid"],
+                log_path=started["log_path"],
+                status=_hashi_control_status(),
+                error=str(exc),
+                operation="reboot",
+                agent=payload.agent,
+                mode=payload.mode,
+                fallback_used=True,
+            )
+            return {
+                "ok": True,
+                "hot_reboot_requested": False,
+                "fallback_restart_launched": True,
+                "pid": started["pid"],
+                "command": started["command"],
+                "log_path": started["log_path"],
+                "reason": reason_meta["reason"],
+            }
+
+        if status_code < 200 or status_code >= 300 or not command_result.get("ok"):
+            _append_rescue_audit(
+                requester=client_id,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
+                outcome="hot_reboot_rejected",
+                status=_hashi_control_status(),
+                error=str(command_result.get("error") or f"HTTP {status_code}"),
+                operation="reboot",
+                agent=payload.agent,
+                mode=payload.mode,
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "error": command_result.get("error") or "hot reboot rejected",
+                    "workbench_status": status_code,
+                },
+            )
+        _append_rescue_audit(
+            requester=client_id,
+            reason=reason_meta["reason"],
+            reason_truncated=reason_meta["truncated"],
+            reason_original_length=reason_meta["original_length"],
+            outcome="hot_reboot_requested",
+            status=_hashi_control_status(),
+            operation="reboot",
+            agent=payload.agent,
+            mode=payload.mode,
+        )
+        return {
+            "ok": True,
+            "hot_reboot_requested": True,
+            "fallback_restart_launched": False,
+            "agent": payload.agent,
+            "mode": payload.mode,
+            "command_result": command_result,
+            "reason": reason_meta["reason"],
+        }
+
     # ── File push ────────────────────────────────────────────
 
     @app.post("/files/push")
@@ -1831,13 +2242,20 @@ def create_app(
     @app.post("/pair/request")
     async def pair_request(payload: PairRequestPayload):
         if _pairing_manager.is_auto_approved():
-            # LAN mode: auto-approve immediately
+            # One-click mode issues a bearer immediately; protected endpoints
+            # still require that token unless legacy LAN mode is enabled.
             token = _pairing_manager.approve_request_direct(
                 payload.client_id, payload.client_name
             )
+            paired = _pairing_manager.get_paired_client(payload.client_id)
             audit = get_audit_logger()
             audit.log_pairing_request(payload.client_id, payload.client_name, auto_approved=True)
-            return {"ok": True, "auto_approved": True, "token": token}
+            return {
+                "ok": True,
+                "auto_approved": True,
+                "token": token,
+                "expires_at": paired.expires_at if paired else None,
+            }
 
         req = _pairing_manager.create_pairing_request(payload.client_id, payload.client_name)
         audit = get_audit_logger()
@@ -1854,6 +2272,14 @@ def create_app(
     async def pair_status(client_id: str):
         req = _pairing_manager.get_request(client_id)
         if not req:
+            paired = _pairing_manager.get_paired_client(client_id)
+            if paired:
+                return {
+                    "ok": True,
+                    "state": PairingState.APPROVED.value,
+                    "client_id": client_id,
+                    "expires_at": paired.expires_at,
+                }
             raise HTTPException(status_code=404, detail="Pairing request not found")
         return {"ok": True, "state": req.state.value, "client_id": client_id}
 
@@ -1862,11 +2288,251 @@ def create_app(
         token = _pairing_manager.approve_request(client_id)
         if not token:
             raise HTTPException(status_code=404, detail="Request not found or expired")
-        return {"ok": True, "token": token}
+        paired = _pairing_manager.get_paired_client(client_id)
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": paired.expires_at if paired else None,
+        }
 
     @app.post("/pair/reject/{client_id}")
     async def pair_reject(client_id: str, client_id_auth: str = Depends(verify_token)):
         ok = _pairing_manager.reject_request(client_id)
         return {"ok": ok}
+
+    # ── Agent move receiver v1 ───────────────────────────────
+
+    @app.get("/agent-move/v1/capabilities")
+    async def agent_move_capabilities(request: Request):
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=b"",
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent move authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            result = await asyncio.to_thread(receiver_capabilities, Path(_hashi_root))
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": str(exc)},
+            )
+        result["instance_id"] = str(
+            _instance_info.get("instance_id")
+            or result.get("instance_id")
+            or "HASHI"
+        ).upper()
+        result["authenticated_instance"] = authenticated_instance
+        result["authenticated_response_proof"] = True
+        return _agent_move_response(request, result)
+
+    @app.post("/agent-move/v1/stage")
+    async def agent_move_stage(request: Request, payload: AgentMoveStagePayload):
+        body_bytes = await request.body()
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent move authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        max_envelope_bytes = MAX_PACKAGE_BYTES + ENVELOPE_OVERHEAD_BYTES
+        if len(payload.package_b64) > ((max_envelope_bytes + 2) // 3) * 4 + 4:
+            return _agent_move_response(
+                request,
+                status_code=413,
+                content={
+                    "ok": False,
+                    "error": "Agent move package exceeds the receiver size limit",
+                },
+            )
+        try:
+            envelope = base64.b64decode(payload.package_b64, validate=True)
+        except (ValueError, binascii.Error):
+            return _agent_move_response(
+                request,
+                status_code=400,
+                content={"ok": False, "error": "Agent move package_b64 is invalid"},
+            )
+        if payload.encryption != ENVELOPE_SCHEME:
+            return _agent_move_response(
+                request,
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "Encrypted Agent move transport is required",
+                },
+            )
+        try:
+            package_bytes = await asyncio.to_thread(
+                decrypt_package_transport,
+                envelope,
+                shared_token=load_shared_token(Path(_hashi_root)) or "",
+                source_instance=authenticated_instance or payload.from_instance,
+                target_instance=str(_instance_info.get("instance_id") or ""),
+                package_sha256=payload.sha256,
+            )
+            result = await asyncio.to_thread(
+                stage_agent_move,
+                Path(_hashi_root),
+                package_bytes,
+                expected_sha256=payload.sha256,
+                source_instance=authenticated_instance or payload.from_instance,
+                target_instance=str(_instance_info.get("instance_id") or "HASHI"),
+                secret_passphrase=load_shared_token(Path(_hashi_root)),
+            )
+            return _agent_move_response(request, result)
+        except AgentMoveError as exc:
+            status_code = 409 if "already" in str(exc).lower() else 400
+            return _agent_move_response(
+                request,
+                status_code=status_code,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    async def _agent_move_action(
+        request: Request,
+        payload: AgentMoveActionPayload,
+        action,
+    ):
+        body_bytes = await request.body()
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent move authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            current = await asyncio.to_thread(
+                get_agent_move_status,
+                Path(_hashi_root),
+                payload.package_id,
+            )
+            if str(current.get("source_instance") or "").upper() != str(
+                authenticated_instance or payload.from_instance
+            ).upper():
+                return _agent_move_response(
+                    request,
+                    status_code=403,
+                    content={
+                        "ok": False,
+                        "error": "Agent move belongs to another source instance",
+                    },
+                )
+            kwargs = {}
+            if action is commit_agent_move:
+                kwargs["secret_passphrase"] = load_shared_token(Path(_hashi_root))
+            result = await asyncio.to_thread(
+                action,
+                Path(_hashi_root),
+                payload.package_id,
+                **kwargs,
+            )
+            return _agent_move_response(request, result)
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=409,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    @app.post("/agent-move/v1/commit")
+    async def agent_move_commit(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, commit_agent_move)
+
+    @app.post("/agent-move/v1/activate")
+    async def agent_move_activate(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, activate_agent_move)
+
+    @app.post("/agent-move/v1/rollback")
+    async def agent_move_rollback(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, rollback_agent_move)
+
+    @app.get("/agent-move/v1/status/{package_id}")
+    async def agent_move_status(request: Request, package_id: str):
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=b"",
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent move authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            result = await asyncio.to_thread(
+                get_agent_move_status,
+                Path(_hashi_root),
+                package_id,
+            )
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=404,
+                content={"ok": False, "error": str(exc)},
+            )
+        if str(result.get("source_instance") or "").upper() != str(
+            authenticated_instance or ""
+        ).upper():
+            return _agent_move_response(
+                request,
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": "Agent move belongs to another source instance",
+                },
+            )
+        return _agent_move_response(request, result)
 
     return app

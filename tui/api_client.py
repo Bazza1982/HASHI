@@ -11,6 +11,25 @@ from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 
 logger = logging.getLogger(__name__)
 
+TUI_TERMINAL_RUN_STATES = frozenset(
+    {"completed", "failed", "stopped", "superseded", "interrupted"}
+)
+
+
+def run_failure_text(payload: dict) -> str:
+    """Return a user-visible terminal failure, or an empty string."""
+
+    run = payload.get("run")
+    if not isinstance(run, dict):
+        return ""
+    state = str(run.get("state") or "").strip().casefold()
+    if state not in TUI_TERMINAL_RUN_STATES or state == "completed":
+        return ""
+    error = str(run.get("error_text") or "").strip()
+    code = str(run.get("error_code") or "").strip()
+    detail = error or code or state or "Request failed"
+    return f"{code}: {detail}" if code and error and code not in error else detail
+
 
 class TuiApiClient:
     """Talk to one Workbench while keeping transcript offsets instance-local.
@@ -39,7 +58,7 @@ class TuiApiClient:
         self.expected_instance_id = str(expected_instance_id or target_instance or "").strip().upper()
         self.remote_url = str(remote_url or "").rstrip("/")
         self.target_instance = str(target_instance or "").strip().upper()
-        self._offsets: dict[str, int] = {}
+        self._offsets: dict[str, int | None] = {}
 
     @property
     def proxied(self) -> bool:
@@ -67,7 +86,8 @@ class TuiApiClient:
         timeout: float = 10,
     ) -> dict:
         ordered_bases = [self.base, *(base for base in self._bases if base != self.base)]
-        last_error: Exception | None = None
+        first_error: Exception | None = None
+        first_error_base = ordered_bases[0]
         for base in ordered_bases:
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
@@ -82,10 +102,21 @@ class TuiApiClient:
                     self.base = base
                 return data
             except (aiohttp.ClientError, TimeoutError) as exc:
-                last_error = exc
+                if first_error is None:
+                    first_error = exc
+                    first_error_base = base
                 logger.debug("TUI Workbench route unavailable: url=%s%s error=%s", base, path, exc)
-        logger.warning("TUI Workbench request failed: path=%s error=%s", path, last_error)
-        return {"ok": False, "error": str(last_error or "Workbench unavailable")}
+        logger.warning(
+            "TUI Workbench request failed: url=%s path=%s error=%s",
+            first_error_base,
+            path,
+            first_error,
+        )
+        return {
+            "ok": False,
+            "error": f"Cannot connect to local HASHI at {first_error_base}: "
+            f"{first_error or 'Workbench unavailable'}",
+        }
 
     async def _proxy_request(
         self,
@@ -183,8 +214,30 @@ class TuiApiClient:
             timeout=25,
         )
 
+    async def run_info(self, session_id: str, run_id: str) -> dict:
+        """Read the durable status of one directly submitted Session Run."""
+
+        if self.proxied:
+            return {
+                "ok": False,
+                "error": "Run status is unavailable through this Remote proxy.",
+                "error_code": "run_status_proxy_unavailable",
+            }
+        encoded_session = quote(str(session_id), safe="")
+        encoded_run = quote(str(run_id), safe="")
+        return await self._direct_request(
+            "GET",
+            f"/api/v1/sessions/{encoded_session}/runs/{encoded_run}",
+            timeout=5,
+        )
+
     async def poll_transcript(self, agent: str) -> list[dict]:
         offset = self._offsets.get(agent, 0)
+        if offset is None:
+            # Agent selection starts an asynchronous recent-history load.  Do
+            # not race that request from byte zero or the initial assistant
+            # messages will be rendered twice.
+            return []
         if self.proxied:
             data = await self._proxy_request("transcript_poll", agent=agent, offset=offset)
         else:
@@ -220,4 +273,4 @@ class TuiApiClient:
         return messages if isinstance(messages, list) else []
 
     def reset_offset(self, agent: str):
-        self._offsets.pop(agent, None)
+        self._offsets[agent] = None

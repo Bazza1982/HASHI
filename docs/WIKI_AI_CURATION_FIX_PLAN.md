@@ -345,7 +345,7 @@ Discovery should consider:
 - high-frequency terms in `UNCATEGORIZED_REVIEW`
 - recent `NONE` rows with project-like names
 - current active topics and aliases
-- recent Daily logs with project path patterns such as `/home/lily/projects/...`
+- recent Daily logs with project path patterns such as `/home/user/projects/...`
 - repeated repo names, product names, system names, or game names
 - all recent classifiable memories, even when already classified into an existing topic
 - periodic historical samples across the full consolidated memory library

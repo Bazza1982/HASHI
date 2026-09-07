@@ -34,6 +34,7 @@ import {
   createDraftFromDocument,
   exportWorkflowDocument,
   getUnsupportedScopes,
+  materializeDraftData,
   parseWorkflowDocument,
   type DraftStep,
   type WorkflowDocument,
@@ -47,7 +48,7 @@ const DEFAULT_WORKFLOW = `workflow:
   description: "Minimal workflow for nagare-viz."
 
 meta:
-  created_by: baymax
+  created_by: nagare-viz
   created_at: "2026-04-03T00:00:00Z"
 
 pre_flight:
@@ -55,18 +56,16 @@ pre_flight:
 
 agents:
   orchestrator:
-    id: akane
+    id: flow-runner
   workers:
     - id: writer_01
       role: "Writer"
       agent_md: "flow/agents/analyst/AGENT.md"
       backend: claude-cli
-      model: claude-sonnet-4-6
     - id: checker_01
       role: "Checker"
       agent_md: "flow/agents/analyst/AGENT.md"
       backend: claude-cli
-      model: claude-sonnet-4-6
 
 steps:
   - id: step_write
@@ -75,14 +74,12 @@ steps:
     depends: []
     prompt: |
       Write one sentence.
-    timeout_seconds: 120
   - id: step_check
     name: "Check"
     agent: checker_01
     depends: [step_write]
     prompt: |
       Review the output.
-    timeout_seconds: 120
 
 x-nagare-viz:
   version: 1
@@ -134,7 +131,7 @@ export default function App() {
   );
 
   const workers = useMemo<WorkerInfo[]>(() => {
-    const agents = isRecord(document.data.agents) ? document.data.agents : {};
+    const agents = isRecord(draft.data.agents) ? draft.data.agents : {};
     const workerList = Array.isArray(agents.workers) ? agents.workers : [];
     return workerList.filter(isRecord).map((w) => ({
       id: typeof w.id === "string" ? w.id : "",
@@ -142,7 +139,7 @@ export default function App() {
       backend: typeof w.backend === "string" ? w.backend : "",
       model: typeof w.model === "string" ? w.model : "",
     }));
-  }, [document.data]);
+  }, [draft.data]);
 
   const nodes = useMemo<Node[]>(
     () =>
@@ -185,43 +182,48 @@ export default function App() {
   );
 
   const unsupportedScopes = useMemo(() => getUnsupportedScopes(document, draft), [document, draft]);
+  const draftData = useMemo(() => materializeDraftData(draft), [draft]);
   const validationIssues = useMemo(
-    () => buildValidationIssues(document, unsupportedScopes.length),
-    [document, unsupportedScopes.length],
+    () => buildValidationIssues(document, unsupportedScopes.length, draftData),
+    [document, draftData, unsupportedScopes.length],
   );
 
   const structuralEdits = useMemo(() => {
     const current = JSON.stringify({
-      steps: draft.steps.map(({ id, name, agent, depends, prompt, timeoutSeconds }) => ({
+      steps: draft.steps.map(({ id, name, agent, depends, prompt }) => ({
         id,
         name,
         agent,
         depends,
         prompt,
-        timeoutSeconds,
       })),
+      workers: isRecord(draft.data.agents) && Array.isArray(draft.data.agents.workers)
+        ? draft.data.agents.workers
+        : [],
     });
     const originalDraft = createDraftFromDocument(document);
     const original = JSON.stringify({
-      steps: originalDraft.steps.map(({ id, name, agent, depends, prompt, timeoutSeconds }) => ({
+      steps: originalDraft.steps.map(({ id, name, agent, depends, prompt }) => ({
         id,
         name,
         agent,
         depends,
         prompt,
-        timeoutSeconds,
       })),
+      workers: isRecord(originalDraft.data.agents) && Array.isArray(originalDraft.data.agents.workers)
+        ? originalDraft.data.agents.workers
+        : [],
     });
     return current !== original;
-  }, [document, draft.steps]);
+  }, [document, draft.data.agents, draft.steps]);
 
-  const hasBlockingWorkflowErrors = document.warnings.some((warning) => warning.severity === "error");
+  const hasBlockingWorkflowErrors = validationIssues.some((issue) => issue.severity === "blocking");
   const blockedReason = !structuralEdits
     ? null
     : document.compatibilityClass !== "A"
       ? "Form edits are blocked from export for class B/C workflows. Use raw YAML or metadata-only export."
       : hasBlockingWorkflowErrors
-        ? "Form edits are blocked until duplicate ids, missing references, and cycle errors are resolved."
+        ? "Form edits are blocked until runtime-contract and graph errors are resolved."
         : null;
   const exportIssues = useMemo(
     () => buildExportIssues(document, structuralEdits, blockedReason),
@@ -514,7 +516,7 @@ export default function App() {
 
   const handleClearSelection = () => setSelectedStepIds(new Set());
 
-  const handleBatchStepChange = (field: "agent" | "timeoutSeconds", value: string | number | null) => {
+  const handleBatchStepChange = (field: "agent", value: string) => {
     setDraft((current) => ({
       ...current,
       steps: current.steps.map((step) =>
@@ -539,7 +541,7 @@ export default function App() {
 
   const handleBatchWorkerChange = (field: "backend" | "model", value: string) => {
     const agentIds = new Set(selectedSteps.map((s) => s.agent).filter(Boolean));
-    setDocument((current) => {
+    setDraft((current) => {
       const data = { ...current.data };
       const agents = isRecord(data.agents) ? { ...data.agents } : {};
       const workerList = Array.isArray(agents.workers) ? [...agents.workers] : [];
@@ -547,6 +549,8 @@ export default function App() {
         if (!isRecord(w) || typeof w.id !== "string" || !agentIds.has(w.id)) return w;
         const updatedWorker = { ...w, [field]: value };
         if (field === "backend" && value === "callable") {
+          delete updatedWorker.model;
+        } else if (field === "model" && value.trim().length === 0) {
           delete updatedWorker.model;
         }
         return updatedWorker;
@@ -560,7 +564,7 @@ export default function App() {
   };
 
   const handleWorkerChange = (workerId: string, field: "backend" | "model", value: string) => {
-    setDocument((current) => {
+    setDraft((current) => {
       const data = { ...current.data };
       const agents = isRecord(data.agents) ? { ...data.agents } : {};
       const workerList = Array.isArray(agents.workers) ? [...agents.workers] : [];
@@ -569,6 +573,8 @@ export default function App() {
 
       const updatedWorker = { ...(workerList[workerIndex] as Record<string, unknown>), [field]: value };
       if (field === "backend" && value === "callable") {
+        delete updatedWorker.model;
+      } else if (field === "model" && value.trim().length === 0) {
         delete updatedWorker.model;
       }
       workerList[workerIndex] = updatedWorker;

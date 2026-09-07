@@ -12,9 +12,10 @@ import pytest
 
 from adapters.base import BackendResponse
 from adapters.her_v2 import _ExecutionStageCompactionProvider
-from orchestrator import runtime_pipeline, runtime_session
+from orchestrator import runtime_pipeline, runtime_session, ui_language
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+from orchestrator.commands.compact import _outcome_text
 from orchestrator.context_compaction import (
     CAPSULE_FORMAT,
     CONTEXT_PROTECTED_SET_TOO_LARGE,
@@ -39,15 +40,15 @@ from orchestrator.context_compaction import (
     install_history_section,
     load_policy,
     load_route_config,
+    render_history,
     resolve_compact_route,
     resolve_target_capacity,
     resolve_trigger_budget,
-    render_history,
     schedule_execution_stage,
 )
 from orchestrator.her_v2.interfaces import StageInvocationError
-from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.her_v2.models import Stage, StageRequest
+from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.runtime_pipeline import (
     _typed_capacity_recovery_is_safe,
     recover_typed_context_capacity_rejection,
@@ -661,6 +662,12 @@ async def test_manual_compact_is_unnecessary_only_below_64k(tmp_path):
     assert outcome.code == "BELOW_MANUAL_COMPACTION_WINDOW"
     assert outcome.before_tokens == DEFAULT_MANUAL_COMPACTION_MIN_TOKENS - 1
     assert f"{DEFAULT_MANUAL_COMPACTION_MIN_TOKENS:,}" in outcome.message
+    assert outcome.message_key == "compact.message.below_manual_window"
+    with ui_language.language_scope(runtime, locale="zh-CN"):
+        rendered = _outcome_text(outcome)
+    assert "当前上下文为 63,999 个 Token" in rendered
+    assert "低于 64,000 个 Token 的手动压缩阈值" in rendered
+    assert "Current context is" not in rendered
     assert calls == []
 
 
@@ -1305,9 +1312,13 @@ async def test_compactor_blocks_before_provider_when_durable_meter_is_unavailabl
 ):
     runtime = _Runtime(tmp_path)
     created = []
+    prepared = []
     runtime.backend_manager.current_backend = SimpleNamespace(
         record_maintenance_provider_requests=lambda _rows: None,
         can_record_maintenance_provider_requests=lambda: False,
+        ensure_maintenance_provider_accounting=lambda request_ref: prepared.append(
+            request_ref
+        ),
     )
     runtime.backend_manager.create_ephemeral_backend = lambda *_args, **_kwargs: created.append(True)
     route = resolve_compact_route(runtime)
@@ -1336,7 +1347,86 @@ async def test_compactor_blocks_before_provider_when_durable_meter_is_unavailabl
 
     assert caught.value.code == "COMPACTION_ACCOUNTING_UNAVAILABLE"
     assert caught.value.retryable is False
+    assert prepared == ["req-no-meter"]
     assert created == []
+
+
+@pytest.mark.asyncio
+async def test_compactor_establishes_durable_meter_before_provider_call(tmp_path):
+    runtime = _Runtime(tmp_path)
+    events = []
+    recorded = []
+    wrong_session_records = []
+    accounting = {"ready": False}
+
+    class Backend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+            self.shutdown_calls = 0
+
+        async def initialize(self):
+            events.append("provider_initialized")
+            return True
+
+        async def generate_response(self, *_args, **_kwargs):
+            events.append("provider_called")
+            # Detached Compact can finish after the Agent advances to another
+            # backend/Session. Its recorder must stay bound to preflight.
+            runtime.backend_manager.current_backend = SimpleNamespace(
+                record_maintenance_provider_requests=(
+                    lambda rows: wrong_session_records.extend(rows)
+                )
+            )
+            return BackendResponse(text="ok", duration_ms=1)
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+
+    def prepare_accounting(request_ref):
+        events.append(f"accounting:{request_ref}")
+        accounting["ready"] = True
+        return True
+
+    backend = Backend()
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        record_maintenance_provider_requests=lambda rows: recorded.extend(rows),
+        can_record_maintenance_provider_requests=lambda: accounting["ready"],
+        ensure_maintenance_provider_accounting=prepare_accounting,
+    )
+    runtime.backend_manager.create_ephemeral_backend = lambda *_args, **_kwargs: backend
+    route = resolve_compact_route(runtime)
+    request = CompactionRequest(
+        compaction_id="cmp-prepared-meter",
+        request_ref="req-prepared-meter",
+        trigger="test",
+        provider=route.provider,
+        model=route.model,
+        reasoning=route.reasoning,
+        her_effort=route.her_effort,
+        timeout_tier=route.timeout_tier,
+        deadline_s=1,
+        attempt=1,
+        source_digest="sha256:test",
+        source_segment_ids=("turn:1",),
+    )
+
+    response = await ContextCompactionCoordinator(runtime)._invoke_model(
+        route,
+        request,
+        "direct compact system",
+        "quoted source",
+    )
+
+    assert response.text == "ok"
+    assert events == [
+        "accounting:req-prepared-meter",
+        "provider_initialized",
+        "provider_called",
+    ]
+    assert len(recorded) == 1
+    assert wrong_session_records == []
+    assert recorded[0]["compact"] is True
+    assert backend.shutdown_calls == 1
 
 
 @pytest.mark.asyncio

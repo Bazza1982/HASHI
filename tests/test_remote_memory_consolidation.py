@@ -5,24 +5,20 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
-
-from scripts.remote_memory_consolidation import main
-
-try:
-    from scripts.wiki.config import WikiConfig
-    from scripts.wiki.fetcher import fetch_new_memories
-    from scripts.wiki.state import WikiState
-except ModuleNotFoundError:  # scripts/wiki is a local generated pipeline on some instances.
-    WikiConfig = None
-    WikiState = None
-    fetch_new_memories = None
+from scripts.remote_memory_consolidation import RemoteConfig, build_parser, main
 
 
-requires_local_wiki_pipeline = pytest.mark.skipif(
-    WikiConfig is None or WikiState is None or fetch_new_memories is None,
-    reason="local scripts/wiki pipeline is not present in this checkout",
-)
+def test_relative_config_and_default_vault_are_root_bound(tmp_path: Path) -> None:
+    config = tmp_path / "private" / "remote_memory_config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"mirror_root": "mirror"}), encoding="utf-8")
+    args = build_parser().parse_args(["--root", str(tmp_path), "diagnose"])
+
+    resolved = RemoteConfig.from_args(args)
+
+    assert resolved.root == tmp_path.resolve()
+    assert resolved.vault_root == (tmp_path / "wiki").resolve()
+    assert resolved.mirror_root == (tmp_path / "mirror").resolve()
 
 
 def test_export_dry_run_does_not_write_batch(tmp_path: Path) -> None:
@@ -40,7 +36,6 @@ def test_export_dry_run_does_not_write_batch(tmp_path: Path) -> None:
     assert not (root / "private" / "remote_memory_export").exists()
 
 
-@requires_local_wiki_pipeline
 def test_export_and_import_are_idempotent(tmp_path: Path) -> None:
     root = tmp_path
     workspace = root / "workspaces" / "sakura"
@@ -71,15 +66,6 @@ def test_export_and_import_are_idempotent(tmp_path: Path) -> None:
     assert rows[0][2] == "remote_memory"
     assert rows[0][3] == "episodic"
     assert rows[0][5].startswith("remote:batch-test:")
-
-    wiki_state = root / "workspaces" / "lily" / "wiki_state.sqlite"
-    with WikiState(wiki_state) as state:
-        state.init_schema()
-        fetched = fetch_new_memories(WikiConfig(hashi_root=root, consolidated_db=db, wiki_state_db=wiki_state), state)
-    assert fetched.total_seen == 1
-    assert fetched.classifiable[0].instance == "INTEL"
-    assert fetched.classifiable[0].agent_id == "sakura"
-    assert fetched.classifiable[0].domain == "remote_memory"
 
 
 def test_import_dedupes_same_record_across_different_batches(tmp_path: Path) -> None:

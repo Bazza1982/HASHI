@@ -5,7 +5,6 @@ import shutil
 
 from adapters.xai_oauth_credentials import (
     find_hermes_auth_path,
-    hermes_oauth_available,
     xai_api_credentials_available,
 )
 from orchestrator.flexible_backend_registry import get_secret_lookup_order

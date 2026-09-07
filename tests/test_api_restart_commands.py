@@ -235,7 +235,7 @@ async def test_restart_confirm_fails_closed_when_human_proof_missing(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_restart_confirm_rejects_duplicate_inflight(monkeypatch):
+async def test_restart_confirm_rejects_duplicate_inflight():
     runtime = _FakeRuntime()
     runtime._watchtower_restart_inflight = True
     query = _FakeCallbackQuery("hardrestart:confirm")

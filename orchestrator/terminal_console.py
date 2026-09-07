@@ -11,14 +11,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from orchestrator.activity_digest import ActivityDigest
 from orchestrator.pathing import instance_runtime_dir
-
 
 LEVEL_QUIET = "quiet"
 LEVEL_ACTIVITY = "activity"
@@ -29,6 +30,7 @@ DEFAULT_LEVEL = LEVEL_QUIET
 
 _STATE_VERSION = 1
 _STATE_FILENAME = "terminal.json"
+_OUTPUT_DIAGNOSTIC_FILENAME = "terminal_output_errors.jsonl"
 _IDENTIFIER_RE = re.compile(r"[^A-Za-z0-9_.:@/+\-]+")
 _ERROR_CODE_RE = re.compile(r"^\s*\[([A-Z][A-Z0-9_]{2,63})\]")
 _SAFE_ERROR_PREFIXES = (
@@ -53,6 +55,34 @@ _CONTENT_EVENT_KINDS = {
 _lock = threading.RLock()
 _configured_home: Path | None = None
 _level = DEFAULT_LEVEL
+
+
+@dataclass(frozen=True)
+class ConsoleWriteFailure:
+    """Sanitised metadata for one failed terminal-output attempt."""
+
+    sink: str
+    error_type: str
+    errno: int | None = None
+    winerror: int | None = None
+
+
+@dataclass(frozen=True)
+class ConsoleWriteResult:
+    """Outcome of one best-effort terminal write."""
+
+    success: bool
+    sink: str | None
+    failures: tuple[ConsoleWriteFailure, ...] = ()
+
+
+@dataclass(frozen=True)
+class TerminalAnimationCapability:
+    """Whether the current terminal can safely render cursor animation."""
+
+    supported: bool
+    reason: str
+    sink: str | None = None
 
 
 def normalize_level(value: object) -> str:
@@ -100,6 +130,18 @@ def setting_path(bridge_home: str | Path | None = None) -> Path | None:
             else _configured_home
         )
     return _state_path(home) if home is not None else None
+
+
+def output_diagnostic_path(bridge_home: str | Path | None = None) -> Path | None:
+    """Return the instance-scoped terminal delivery diagnostic path."""
+
+    with _lock:
+        home = (
+            Path(bridge_home).expanduser().resolve()
+            if bridge_home is not None
+            else _configured_home
+        )
+    return home / "logs" / _OUTPUT_DIAGNOSTIC_FILENAME if home is not None else None
 
 
 def set_level(level: object, *, bridge_home: str | Path | None = None) -> str:
@@ -168,14 +210,300 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
-def _safe_print(text: str, *, end: str = "\n") -> None:
+def _write_failure(sink: str, exc: BaseException) -> ConsoleWriteFailure:
+    """Reduce an exception to non-content-bearing diagnostic fields."""
+
+    return ConsoleWriteFailure(
+        sink=sink,
+        error_type=type(exc).__name__,
+        errno=getattr(exc, "errno", None),
+        winerror=getattr(exc, "winerror", None),
+    )
+
+
+def _persist_output_diagnostic(
+    *,
+    purpose: str,
+    result: ConsoleWriteResult,
+) -> None:
+    if not result.failures:
+        return
+    path = output_diagnostic_path()
+    if path is None:
+        return
+    record = {
+        "version": 1,
+        "recorded_at": datetime.now(UTC).isoformat(),
+        "event": "terminal_output_failure",
+        "pid": os.getpid(),
+        "platform": sys.platform,
+        "purpose": safe_identifier(purpose, fallback="terminal_output"),
+        "delivered": result.success,
+        "final_sink": result.sink,
+        "attempts": [
+            {
+                "sink": failure.sink,
+                "error_type": failure.error_type,
+                "errno": failure.errno,
+                "winerror": failure.winerror,
+            }
+            for failure in result.failures
+        ],
+    }
     try:
-        print(text, end=end, flush=True)
-    except (UnicodeEncodeError, OSError):
-        safe = text.encode("utf-8", errors="backslashreplace").decode(
-            "utf-8", errors="replace"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _lock, path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+            handle.flush()
+    except Exception:
+        # A disk failure cannot be made durable.  Leave a content-free last
+        # resort clue on the original process stderr without recursing through
+        # this module's delivery path.
+        fallback = getattr(sys, "__stderr__", None)
+        if fallback is not None:
+            try:
+                fallback.write(
+                    "[HASHI] terminal output diagnostic could not be persisted.\n"
+                )
+                fallback.flush()
+            except Exception:
+                pass
+
+
+def record_output_exception(
+    *,
+    purpose: str,
+    sink: str,
+    error: BaseException,
+) -> None:
+    """Persist a sanitised failure from a related presentation sink."""
+
+    _persist_output_diagnostic(
+        purpose=purpose,
+        result=ConsoleWriteResult(
+            success=False,
+            sink=None,
+            failures=(_write_failure(sink, error),),
+        ),
+    )
+
+
+def _stream_is_tty(stream: object) -> bool:
+    try:
+        return bool(stream is not None and stream.isatty())
+    except Exception:
+        return False
+
+
+def _should_use_windows_console() -> bool:
+    """Use Win32 console I/O only for an attached interactive stdout."""
+
+    return os.name == "nt" and _stream_is_tty(sys.stdout)
+
+
+def _write_windows_console(payload: str) -> None:
+    """Write Unicode directly through the attached Win32 console handle."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel32.GetStdHandle.restype = wintypes.HANDLE
+    kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
+    kernel32.GetConsoleMode.restype = wintypes.BOOL
+    kernel32.WriteConsoleW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPDWORD,
+        wintypes.LPVOID,
+    ]
+    kernel32.WriteConsoleW.restype = wintypes.BOOL
+
+    stdout_handle = kernel32.GetStdHandle(wintypes.DWORD(-11).value)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if not stdout_handle or stdout_handle == invalid_handle:
+        raise OSError(ctypes.get_last_error(), "GetStdHandle failed")
+    mode = wintypes.DWORD()
+    if not kernel32.GetConsoleMode(stdout_handle, ctypes.byref(mode)):
+        raise OSError(ctypes.get_last_error(), "stdout is not a console handle")
+
+    # WriteConsoleW documents a practical upper bound below 64 KiB.  Startup
+    # blocks are small, but chunking keeps the helper safe for other callers.
+    for offset in range(0, len(payload), 16_000):
+        chunk = payload[offset : offset + 16_000]
+        written = wintypes.DWORD()
+        if not kernel32.WriteConsoleW(
+            stdout_handle,
+            chunk,
+            len(chunk),
+            ctypes.byref(written),
+            None,
+        ):
+            raise OSError(ctypes.get_last_error(), "WriteConsoleW failed")
+        if written.value != len(chunk):
+            raise OSError(0, "WriteConsoleW performed a partial write")
+
+
+def _enable_windows_virtual_terminal_processing() -> None:
+    """Enable ANSI cursor and colour handling on the attached stdout console."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel32.GetStdHandle.restype = wintypes.HANDLE
+    kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
+    kernel32.GetConsoleMode.restype = wintypes.BOOL
+    kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.SetConsoleMode.restype = wintypes.BOOL
+
+    stdout_handle = kernel32.GetStdHandle(wintypes.DWORD(-11).value)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if not stdout_handle or stdout_handle == invalid_handle:
+        raise OSError(ctypes.get_last_error(), "GetStdHandle failed")
+
+    mode = wintypes.DWORD()
+    if not kernel32.GetConsoleMode(stdout_handle, ctypes.byref(mode)):
+        raise OSError(ctypes.get_last_error(), "stdout is not a console handle")
+
+    enable_virtual_terminal_processing = 0x0004
+    desired_mode = mode.value | enable_virtual_terminal_processing
+    if desired_mode != mode.value and not kernel32.SetConsoleMode(
+        stdout_handle,
+        desired_mode,
+    ):
+        raise OSError(
+            ctypes.get_last_error(),
+            "SetConsoleMode(ENABLE_VIRTUAL_TERMINAL_PROCESSING) failed",
         )
-        print(safe, end=end, flush=True)
+
+
+def prepare_terminal_animation() -> TerminalAnimationCapability:
+    """Qualify animation support without allowing presentation to stop Core.
+
+    Animation is the normal interactive startup path.  Static output is used
+    only when stdout is not interactive, the terminal explicitly reports no
+    cursor-control support, or Windows cannot enable virtual-terminal mode.
+    """
+
+    if not _stream_is_tty(sys.stdout):
+        return TerminalAnimationCapability(False, "stdout_not_interactive")
+
+    if os.name == "nt":
+        try:
+            _enable_windows_virtual_terminal_processing()
+        except Exception as exc:
+            record_output_exception(
+                purpose="startup_animation_capability",
+                sink="windows_console_mode",
+                error=exc,
+            )
+            return TerminalAnimationCapability(
+                False,
+                "windows_virtual_terminal_unavailable",
+            )
+        return TerminalAnimationCapability(
+            True,
+            "windows_console_virtual_terminal",
+            "windows_console",
+        )
+
+    if str(os.environ.get("TERM") or "").strip().casefold() == "dumb":
+        return TerminalAnimationCapability(False, "terminal_reports_dumb")
+
+    return TerminalAnimationCapability(True, "interactive_ansi_terminal", "stdout")
+
+
+def _write_stream(
+    stream: object,
+    payload: str,
+    *,
+    sink: str,
+    failures: list[ConsoleWriteFailure],
+) -> str | None:
+    try:
+        stream.write(payload)
+        stream.flush()
+        return sink
+    except (UnicodeEncodeError, OSError, ValueError, AttributeError) as exc:
+        failures.append(_write_failure(sink, exc))
+
+    encoding = str(getattr(stream, "encoding", None) or "ascii")
+    try:
+        safe = payload.encode(encoding, errors="backslashreplace").decode(
+            encoding,
+            errors="strict",
+        )
+    except (LookupError, UnicodeError):
+        safe = payload.encode("ascii", errors="backslashreplace").decode("ascii")
+
+    try:
+        stream.write(safe)
+        stream.flush()
+        return f"{sink}_escaped"
+    except (UnicodeEncodeError, OSError, ValueError, AttributeError) as exc:
+        failures.append(_write_failure(f"{sink}_escaped", exc))
+        return None
+
+
+def _safe_print(
+    text: str,
+    *,
+    end: str = "\n",
+    purpose: str = "terminal_output",
+) -> ConsoleWriteResult:
+    payload = f"{text}{end}"
+    failures: list[ConsoleWriteFailure] = []
+
+    if _should_use_windows_console():
+        try:
+            _write_windows_console(payload)
+            result = ConsoleWriteResult(True, "windows_console")
+            return result
+        except Exception as exc:
+            failures.append(_write_failure("windows_console", exc))
+        sink = _write_stream(
+            sys.stderr,
+            payload,
+            sink="stderr",
+            failures=failures,
+        )
+    else:
+        sink = _write_stream(
+            sys.stdout,
+            payload,
+            sink="stdout",
+            failures=failures,
+        )
+        if sink is None:
+            sink = _write_stream(
+                sys.stderr,
+                payload,
+                sink="stderr",
+                failures=failures,
+            )
+
+    result = ConsoleWriteResult(
+        success=sink is not None,
+        sink=sink,
+        failures=tuple(failures),
+    )
+    _persist_output_diagnostic(purpose=purpose, result=result)
+    return result
+
+
+def safe_print(
+    text: str = "",
+    *,
+    end: str = "\n",
+    purpose: str = "terminal_output",
+) -> ConsoleWriteResult:
+    """Best-effort stdout output that cannot interrupt HASHI runtime work."""
+
+    return _safe_print(str(text), end=end, purpose=purpose)
 
 
 def print_raw(text: str, *, end: str = "\n") -> None:

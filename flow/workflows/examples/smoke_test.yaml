@@ -22,13 +22,13 @@ agents:
   workers:
     - id: writer_01
       role: "测试写手"
-      agent_md: "flow/agents/analyst/AGENT.md"
+      agent_md: "flow/agents/smoke/AGENT.md"
       backend: claude-cli
       model: claude-sonnet-4-6
 
     - id: checker_01
       role: "测试检查员"
-      agent_md: "flow/agents/analyst/AGENT.md"
+      agent_md: "flow/agents/smoke/AGENT.md"
       backend: claude-cli
       model: claude-sonnet-4-6
 
@@ -49,7 +49,6 @@ steps:
         - key: quote
           path: output.txt
           type: text
-    timeout_seconds: 120
 
   - id: step_check
     name: "检查并评分"
@@ -69,10 +68,6 @@ steps:
         - key: review
           path: review.txt
           type: text
-    timeout_seconds: 120
-
-error_handling:
-  max_attempts: 2
 
 success_criteria:
   - "step_check 状态为 completed"

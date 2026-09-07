@@ -1,6 +1,6 @@
 # HASHI Background Jobs Design
 
-Status: historical design plus Phase 1/Backend API implementation notes
+Status: local Phase 1 and Backend API implemented; remote/enterprise phases pending
 Date: 2026-07-06
 Scope: HASHI runtime, HASHI Remote, Backend API, governed tool execution
 
@@ -11,10 +11,16 @@ compatibility identifiers for the Backend API.
 > baseline. The legacy fixed runtime has since been removed; current Background
 > Jobs behavior is owned by `FlexibleAgentRuntime` and its extracted runtime
 > modules.
+>
+> This document began as the design record. The current release already ships
+> the SQLite-backed `BackgroundJobManager`, `/bg`, Backend API routes, durable
+> logs and state, completion delivery, and Agent-facing management tools.
+> Future-tense sections below describe the remaining remote and enterprise
+> phases unless explicitly labelled as current behavior.
 
 ## Summary
 
-HASHI should add a first-class Background Jobs subsystem for session-aware
+HASHI provides a first-class Background Jobs subsystem for session-aware
 long-running operating-system tasks. This is different from cron, heartbeat,
 superloop, delegated agent work, and the existing background LLM generation
 path.
@@ -73,8 +79,10 @@ POST /api/background-jobs/{job_id}/cancel
 ```
 
 - Backend API job starts accept both shell strings and argv arrays.
-- `/reboot` hot reload recreates the Backend API service so changed route
-  handlers are loaded without requiring a full process restart.
+- The Backend API and `BackgroundJobManager` are stable Core services and retain
+  identity through `/reboot`. Agent-facing background-job commands cross the
+  versioned Function Worker RPC facade; functional changes are adopted by
+  replacing the selected Agent Worker.
 - Terminal success/failure notifications can be delivered back to the user.
 - Terminal success/failure can also enqueue a one-shot
   `background-job-event` to the responsible agent. The event includes the
@@ -635,12 +643,12 @@ does not change the primary process terminal state.
     "mode": "shell",
     "display": "python batch.py",
     "argv": null,
-    "cwd": "/home/lily/projects/example",
+    "cwd": "/home/user/projects/example",
     "env_keys": ["PYTHONPATH"]
   },
   "policy": {
     "auth_level": "L2_WRITE",
-    "workspace_root": "/home/lily/projects/example",
+    "workspace_root": "/home/user/projects/example",
     "max_stdout_bytes": 5242880,
     "max_stderr_bytes": 5242880
   },

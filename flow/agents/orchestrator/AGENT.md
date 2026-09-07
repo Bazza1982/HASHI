@@ -45,7 +45,7 @@ Orchestrator 是现有的 Telegram-enabled agent（如小茜）。
 
 **打扰**（通知用户）：
 - Pre-flight 问题收集（一次，工作流开始前）
-- Debug Agent 在 max_attempts 后无法恢复
+- Debug Agent 明确报告当前路径不可恢复
 - 工作流成功完成，交付结果
 - C 类改进建议需要用户批准
 
@@ -53,7 +53,7 @@ Orchestrator 是现有的 Telegram-enabled agent（如小茜）。
 - 步骤失败且 Debug Agent 正在恢复中
 - A/B 类改进建议的处理
 - 中间步骤的正常进度
-- 单步骤超时（交给 Debug）
+- 可恢复的步骤级任务错误（交给 Debug）
 
 ---
 

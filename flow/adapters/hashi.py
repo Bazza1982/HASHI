@@ -9,7 +9,6 @@ from typing import Any, Callable
 from nagare.handlers.subprocess_handler import SubprocessStepHandler
 from nagare.logging.events import RunEventLogger
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUNS_ROOT = ROOT / "flow" / "runs"
 
@@ -109,7 +108,11 @@ class HASHIStepHandler:
             raise
 
         status = str(result.get("status", "unknown")).lower()
-        event_name = "adapter.step_handler.completed" if status in {"completed", "success"} else "adapter.step_handler.failed"
+        event_name = (
+            "adapter.step_handler.completed"
+            if status in {"completed", "recovered", "success"}
+            else "adapter.step_handler.failed"
+        )
         self._emit(
             event_name,
             message="HASHI step handler dispatch finished",
@@ -234,9 +237,13 @@ class HASHIEvaluator:
         evaluator: Any | None = None,
         *,
         event_logger: RunEventLogger | None = None,
+        runs_root: str | Path = DEFAULT_RUNS_ROOT,
+        kb_path: str | Path = ROOT / "flow" / "evaluation_kb",
     ) -> None:
         self.evaluator = evaluator
         self.event_logger = event_logger
+        self.runs_root = Path(runs_root)
+        self.kb_path = Path(kb_path)
 
     def bind_runtime_context(self, *, event_logger: RunEventLogger, **_: Any) -> None:
         self.event_logger = event_logger
@@ -280,7 +287,10 @@ class HASHIEvaluator:
         if self.evaluator is None:
             from flow.agents.evaluator.evaluator import FlowEvaluator
 
-            self.evaluator = FlowEvaluator()
+            self.evaluator = FlowEvaluator(
+                runs_path=self.runs_root,
+                kb_path=self.kb_path,
+            )
         return self.evaluator
 
     def _emit(self, event: str, **kwargs: Any) -> None:
@@ -314,7 +324,12 @@ def ensure_hashi_notifier(notifier: Any | None) -> HChatNotifier:
     return HChatNotifier(delegate=notifier)
 
 
-def ensure_hashi_evaluator(evaluator: Any | None) -> HASHIEvaluator:
+def ensure_hashi_evaluator(
+    evaluator: Any | None,
+    *,
+    runs_root: str | Path = DEFAULT_RUNS_ROOT,
+    kb_path: str | Path = ROOT / "flow" / "evaluation_kb",
+) -> HASHIEvaluator:
     if isinstance(evaluator, HASHIEvaluator):
         return evaluator
-    return HASHIEvaluator(evaluator)
+    return HASHIEvaluator(evaluator, runs_root=runs_root, kb_path=kb_path)

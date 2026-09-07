@@ -1,153 +1,167 @@
 #!/bin/bash
-# ============================================================
-# HASHI9 USB Packager for macOS
-# Builds a fully self-contained HASHI9 on a USB drive.
-# Run this ONCE on the host Mac before distributing the USB.
-#
-# Usage:
-#   bash prepare_usb.sh                    # auto-detect USB
-#   bash prepare_usb.sh /Volumes/MyUSB    # specify mount point
-#
-# Requirements: internet connection (downloads Python + packages)
-# ============================================================
+# Build a self-contained, integrity-checked HASHI image on a macOS volume.
+# Run this from a clean Git checkout on a connected macOS build machine.
 
 set -euo pipefail
 
-SOURCE="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON_VERSION="3.13.2"
-PBS_DATE="20250317"
+SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHON_VERSION="3.12.13"
+PBS_DATE="20260303"
+PYTHON_SHA256_AARCH64="377234f346fce41b6d3112b5ead89cb6af2d5596244f9edc1a739065770dde1f"
 
-# ── Detect target ────────────────────────────────────────────
+BUILD_ROOT=""
+DOWNLOAD_ROOT=""
+
+fail() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+cleanup() {
+    result=$?
+    if [ -n "$BUILD_ROOT" ] && [ -d "$BUILD_ROOT" ]; then
+        rm -rf -- "$BUILD_ROOT"
+    fi
+    if [ -n "$DOWNLOAD_ROOT" ] && [ -d "$DOWNLOAD_ROOT" ]; then
+        rm -rf -- "$DOWNLOAD_ROOT"
+    fi
+    return "$result"
+}
+
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+for tool in curl git shasum tar; do
+    command -v "$tool" >/dev/null 2>&1 || fail "Required build tool is missing: $tool"
+done
+
+repo_root="$(git -C "$SOURCE_ROOT" rev-parse --show-toplevel 2>/dev/null)" || \
+    fail "The source directory is not a Git checkout."
+[ "$repo_root" = "$SOURCE_ROOT" ] || fail "Run the builder from the HASHI repository root."
+
+dirty="$(git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=normal)"
+[ -z "$dirty" ] || fail "The source checkout has uncommitted files. Commit or remove them before packaging."
+revision="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+
 if [ -n "${1:-}" ]; then
-    TARGET="$1/HASHI9"
+    VOLUME_ROOT="${1%/}"
 else
-    echo "Looking for USB drives under /Volumes ..."
+    echo "Looking for writable volumes under /Volumes ..."
     VOLUMES=()
-    while IFS= read -r vol; do
-        # Skip system volumes
-        case "$vol" in
-            /Volumes/Macintosh\ HD*|/Volumes/Recovery*|/Volumes/VM*|/Volumes/Preboot*) continue ;;
+    while IFS= read -r volume; do
+        case "$volume" in
+            /Volumes/Macintosh\ HD*|/Volumes/Recovery*|/Volumes/VM*|/Volumes/Preboot*)
+                continue
+                ;;
         esac
-        VOLUMES+=("$vol")
+        [ -d "$volume" ] && [ -w "$volume" ] && VOLUMES+=("${volume%/}")
     done < <(ls -d /Volumes/*/ 2>/dev/null || true)
 
-    if [ ${#VOLUMES[@]} -eq 0 ]; then
-        echo "ERROR: No external volumes found. Insert USB drive or specify path:"
-        echo "  bash prepare_usb.sh /Volumes/MyUSB"
-        exit 1
-    elif [ ${#VOLUMES[@]} -eq 1 ]; then
-        TARGET="${VOLUMES[0]%/}/HASHI9"
-        echo "Found: ${VOLUMES[0]}"
+    if [ "${#VOLUMES[@]}" -eq 0 ]; then
+        fail "No writable external volume found. Supply one explicitly: bash mac/prepare_usb.sh /Volumes/MyUSB"
+    elif [ "${#VOLUMES[@]}" -eq 1 ]; then
+        VOLUME_ROOT="${VOLUMES[0]}"
     else
-        echo "Multiple volumes found. Choose one:"
-        select vol in "${VOLUMES[@]}"; do
-            TARGET="${vol%/}/HASHI9"
+        echo "Multiple writable volumes found. Choose one:"
+        select volume in "${VOLUMES[@]}"; do
+            [ -n "$volume" ] || continue
+            VOLUME_ROOT="$volume"
             break
         done
     fi
 fi
 
-echo ""
-echo "============================================================"
-echo "  HASHI9 USB Packager for macOS"
-echo "  Target: $TARGET"
-echo "============================================================"
-echo ""
-read -p "Type YES to continue: " CONFIRM
-if [ "$CONFIRM" != "YES" ]; then
-    echo "Cancelled."
-    exit 0
-fi
+[ -d "$VOLUME_ROOT" ] || fail "Destination volume does not exist: $VOLUME_ROOT"
+[ -w "$VOLUME_ROOT" ] || fail "Destination volume is not writable: $VOLUME_ROOT"
 
-PYTHON_DIR="$TARGET/python"
+TARGET="$VOLUME_ROOT/HASHI"
+[ ! -e "$TARGET" ] || fail "Destination already exists and will not be overwritten: $TARGET"
 
-# ── Step 1: Copy project files ───────────────────────────────
-echo ""
-echo "[1/5] Copying project files..."
-mkdir -p "$TARGET"
+[ "$(uname -s)" = "Darwin" ] || fail "This portable builder must run on macOS."
+machine_arch="$(uname -m)"
+case "$machine_arch" in
+    arm64)
+        pbs_arch="aarch64"
+        expected_sha256="$PYTHON_SHA256_AARCH64"
+        ;;
+    x86_64)
+        fail "The portable image currently supports Apple Silicon only; use the source-install path on Intel Macs."
+        ;;
+    *)
+        fail "Unsupported macOS architecture: $machine_arch"
+        ;;
+esac
 
-rsync -a --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
-    --exclude='*.pyc' --exclude='*.pyo' --exclude='build' \
-    --exclude='dist' --exclude='*.spec' --exclude='logs' \
-    --exclude='node_modules' --exclude='.idea' --exclude='.vscode' \
-    --exclude='windows-packaging-smoke-home' \
-    "$SOURCE/" "$TARGET/"
-
-echo "   Done."
-
-# ── Step 2: Download Python ──────────────────────────────────
-echo ""
-echo "[2/5] Downloading Python $PYTHON_VERSION (portable build)..."
-
-if [ -f "$PYTHON_DIR/bin/python3" ]; then
-    echo "   Python already present, skipping download."
-else
-    ARCH="$(uname -m)"  # arm64 or x86_64
-    PBS_FILE="cpython-${PYTHON_VERSION}+${PBS_DATE}-${ARCH}-apple-darwin-install_only_stripped.tar.gz"
-    PBS_URL="https://github.com/indygreg/python-build-standalone/releases/download/${PBS_DATE}/${PBS_FILE}"
-
-    TMP_DIR="$(mktemp -d)"
-    echo "   Downloading $PBS_FILE ..."
-    curl -L --progress-bar "$PBS_URL" -o "$TMP_DIR/$PBS_FILE"
-
-    echo "   Extracting..."
-    mkdir -p "$PYTHON_DIR"
-    tar -xzf "$TMP_DIR/$PBS_FILE" -C "$PYTHON_DIR" --strip-components=1
-    rm -rf "$TMP_DIR"
-    echo "   Done."
-fi
-
-PYTHON_EXE="$PYTHON_DIR/bin/python3"
-
-# ── Step 3: Upgrade pip ──────────────────────────────────────
-echo ""
-echo "[3/5] Upgrading pip..."
-"$PYTHON_EXE" -m pip install --upgrade pip --quiet
-echo "   Done."
-
-# ── Step 4: Install packages ─────────────────────────────────
-echo ""
-echo "[4/5] Installing Python packages (this may take a few minutes)..."
-"$PYTHON_EXE" -m pip install \
-    "python-telegram-bot>=20.0" \
-    "httpx>=0.24.0" \
-    "aiohttp>=3.8.0" \
-    "pillow>=9.0.0" \
-    "rich>=13.0.0" \
-    "textual>=0.50.0" \
-    "edge-tts>=6.0.0" \
-    "psutil>=5.9.0" \
-    --quiet
-
-echo "   Done."
-
-# ── Step 5: Finalise ─────────────────────────────────────────
-echo ""
-echo "[5/5] Finalising..."
-
-# Clear runtime data that may have been copied
-rm -rf "$TARGET/logs"
-rm -f "$TARGET/workspaces/hashiko/bridge_memory.sqlite"
-rm -f "$TARGET/workspaces/hashiko/transcript.jsonl"
-rm -f "$TARGET/workspaces/hashiko/recent_context.jsonl"
-: > "$TARGET/workspaces/onboarding_agent/conversation_log.jsonl" 2>/dev/null || true
-
-# Create fresh logs dir
-mkdir -p "$TARGET/logs"
-
-# Make all .command and .sh scripts executable
-find "$TARGET/mac" -name "*.command" -o -name "*.sh" | xargs chmod +x 2>/dev/null || true
-
-echo "   Done."
+python_asset="cpython-${PYTHON_VERSION}+${PBS_DATE}-${pbs_arch}-apple-darwin-install_only_stripped.tar.gz"
+python_url="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_DATE}/${python_asset}"
 
 echo ""
 echo "============================================================"
-echo "  USB package built successfully at $TARGET"
-echo ""
-echo "  To start HASHI9 on any Mac:"
-echo "    Double-click:  HASHI9/mac/start_tui.command"
-echo ""
-echo "  NOTE: First run may need macOS Gatekeeper approval."
-echo "  Right-click the .command file → Open → Open anyway."
+echo "  HASHI verified portable builder for macOS"
+echo "  Source revision: $revision"
+echo "  Architecture:    $machine_arch"
+echo "  Destination:     $TARGET"
 echo "============================================================"
 echo ""
+read -r -p "Type YES to build a new image: " confirmation
+[ "$confirmation" = "YES" ] || { echo "Cancelled."; exit 0; }
+
+BUILD_ROOT="$VOLUME_ROOT/.HASHI-build-$$"
+[ ! -e "$BUILD_ROOT" ] || fail "Temporary build path already exists: $BUILD_ROOT"
+mkdir -m 700 "$BUILD_ROOT"
+DOWNLOAD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hashi-macos-download.XXXXXX")"
+
+echo "[1/5] Copying the committed source tree..."
+git -C "$SOURCE_ROOT" archive --format=tar HEAD | tar -xf - -C "$BUILD_ROOT"
+
+echo "[2/5] Downloading the pinned Python $PYTHON_VERSION runtime..."
+python_archive="$DOWNLOAD_ROOT/$python_asset"
+curl --fail --location --proto '=https' --tlsv1.2 \
+    --retry 3 --output "$python_archive" "$python_url"
+actual_sha256="$(shasum -a 256 "$python_archive" | awk '{print $1}')"
+[ "$actual_sha256" = "$expected_sha256" ] || \
+    fail "Python archive checksum mismatch: expected $expected_sha256, got $actual_sha256"
+
+while IFS= read -r member; do
+    case "$member" in
+        python/*) ;;
+        *) fail "Python archive contains an unexpected path: $member" ;;
+    esac
+    case "/$member/" in
+        */../*) fail "Python archive contains an unsafe path: $member" ;;
+    esac
+done < <(tar -tzf "$python_archive")
+
+echo "[3/5] Extracting the verified runtime..."
+tar -xzf "$python_archive" -C "$BUILD_ROOT"
+PYTHON_EXE="$BUILD_ROOT/python/bin/python3"
+[ -x "$PYTHON_EXE" ] || fail "The verified archive did not contain python/bin/python3"
+"$PYTHON_EXE" -c \
+    "import sys; raise SystemExit(0 if sys.version_info[:3] == (3, 12, 13) and sys.platform == 'darwin' else 1)" || \
+    fail "The extracted interpreter does not match the approved macOS runtime."
+
+echo "[4/5] Installing the pinned standard dependency generation..."
+"$PYTHON_EXE" -m pip install --disable-pip-version-check --only-binary=:all: \
+    -r "$BUILD_ROOT/constraints/standard-py312.lock"
+"$PYTHON_EXE" "$BUILD_ROOT/scripts/check_runtime_contract.py" --code-root "$BUILD_ROOT"
+
+echo "[5/5] Finalising the image..."
+mkdir -p "$BUILD_ROOT/logs"
+find "$BUILD_ROOT/mac" -type f \( -name '*.command' -o -name '*.sh' \) \
+    -exec chmod +x {} +
+printf '%s\n' \
+    "HASHI portable macOS image" \
+    "Source revision: $revision" \
+    "Python asset: $python_asset" \
+    "Python SHA-256: $expected_sha256" \
+    > "$BUILD_ROOT/PORTABLE_BUILD_INFO.txt"
+
+mv "$BUILD_ROOT" "$TARGET"
+BUILD_ROOT=""
+
+echo ""
+echo "============================================================"
+echo "  Portable image built successfully: $TARGET"
+echo "  Start: $TARGET/mac/start_tui.command"
+echo "  No ignored or untracked source files were copied."
+echo "============================================================"

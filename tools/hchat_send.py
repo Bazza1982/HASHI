@@ -31,19 +31,29 @@ from types import SimpleNamespace
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+CODE_ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ.get("BRIDGE_HOME") or CODE_ROOT).resolve()
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
 if __name__ == "__main__":
     sys.modules.setdefault("tools.hchat_send", sys.modules[__name__])
 
-from remote.delivery_results import format_delivery_result
-from remote.security.client_auth import build_client_auth_headers
-from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
+from remote.delivery_results import format_delivery_result  # noqa: E402
+from remote.security.client_auth import build_client_auth_headers  # noqa: E402
+from orchestrator.runtime_defaults import (  # noqa: E402
+    DEFAULT_HASHI_REMOTE_PORT,
+    DEFAULT_WORKBENCH_PORT,
+)
+from orchestrator.service_endpoints import (  # noqa: E402
+    ServiceEndpointError,
+    discover_local_hosts,
+    load_service_endpoint,
+)
 
 CONTACTS_FILE = ROOT / "contacts.json"
 INSTANCES_FILE = ROOT / "instances.json"
 LIVE_ENDPOINTS_FILE = ROOT / "state" / "remote_live_endpoints.json"
+SERVICE_ENDPOINTS_FILE = ROOT / "state" / "service_endpoints.json"
 DEFAULT_TTL = 3600
 DEFAULT_REMOTE_PORT = DEFAULT_HASHI_REMOTE_PORT
 LIVE_ENDPOINT_TTL_SECONDS = int(os.getenv("HASHI_HCHAT_LIVE_ENDPOINT_TTL", "7200"))
@@ -200,11 +210,25 @@ def _merge_live_endpoints(instances: dict) -> dict:
 
 
 def _get_workbench_port(cfg: dict) -> int:
+    endpoint = _published_local_workbench(cfg)
+    if endpoint is not None:
+        return endpoint.port
     return cfg.get("global", {}).get("workbench_port", DEFAULT_WORKBENCH_PORT)
 
 
 def _get_instance_id(cfg: dict) -> str:
     return str(cfg.get("global", {}).get("instance_id") or "HASHI").strip() or "HASHI"
+
+
+def _published_local_workbench(cfg: dict):
+    try:
+        return load_service_endpoint(
+            SERVICE_ENDPOINTS_FILE,
+            "workbench",
+            expected_instance=_get_instance_id(cfg),
+        )
+    except ServiceEndpointError:
+        return None
 
 
 def _hchat_channel_egress_allowed(
@@ -473,11 +497,16 @@ def _load_remote_agents_live(instance_info: dict) -> list[str]:
     ]
 
 
-def _load_remote_agents_workbench(instance_info: dict) -> list[str]:
+def _load_remote_agents_workbench(
+    instance_id: str,
+    instance_info: dict,
+) -> list[str]:
     wb_port = instance_info.get("workbench_port")
     if not wb_port:
         return []
     host = _preferred_host(instance_info)
+    if not _probe_workbench_health(host, int(wb_port), instance_id):
+        return []
     for path in ("/api/agents", "/api/health"):
         url = f"http://{host}:{int(wb_port)}{path}"
         try:
@@ -504,7 +533,7 @@ def _load_remote_agents_workbench(instance_info: dict) -> list[str]:
 def _remote_agent_names(instance_id: str, instance_info: dict) -> list[str]:
     return (
         _load_remote_agents_live(instance_info)
-        or _load_remote_agents_workbench(instance_info)
+        or _load_remote_agents_workbench(instance_id, instance_info)
         or _load_remote_agents(instance_id, instance_info)
     )
 
@@ -543,7 +572,6 @@ def _instance_host_candidates(instance_info: dict, *, for_remote: bool = False) 
         instance_info.get("lan_ip"),
         instance_info.get("tailscale_ip"),
         instance_info.get("internet_host"),
-        "10.255.255.254",
         instance_info.get("same_host_loopback"),
     )
 
@@ -571,21 +599,60 @@ def _probe_http(url: str, timeout: int = 3) -> bool:
         return False
 
 
-def _probe_workbench(host: str, port: int) -> bool:
-    return _probe_http(f"http://{host}:{port}/api/chat")
+def _read_http_json(url: str, timeout: int = 3) -> dict | None:
+    try:
+        req = urllib_request.Request(url, method="GET")
+        kwargs = {"timeout": timeout}
+        if url.startswith("https://"):
+            kwargs["context"] = ssl._create_unverified_context()
+        with urllib_request.urlopen(req, **kwargs) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
 
 
-def _probe_workbench_health(host: str, port: int) -> bool:
-    return _probe_http(f"http://{host}:{port}/api/health") or _probe_workbench(host, port)
+def _probe_workbench_health(
+    host: str,
+    port: int,
+    expected_instance: str,
+) -> bool:
+    health = _read_http_json(f"http://{host}:{port}/api/health")
+    if not health or health.get("ok") is not True:
+        return False
+    expected = _normalize_instance_id(expected_instance)
+    actual = _normalize_instance_id(health.get("instance_id"))
+    endpoint = health.get("workbench_endpoint") or {}
+    endpoint_owner = _normalize_instance_id(
+        endpoint.get("instance_id") if isinstance(endpoint, dict) else None
+    )
+    return bool(expected and actual == expected and endpoint_owner in {None, expected})
 
 
-def _probe_remote_http(host: str, port: int) -> bool:
-    return _probe_http(f"http://{host}:{port}/health")
+def _probe_workbench(host: str, port: int, expected_instance: str) -> bool:
+    return _probe_workbench_health(host, port, expected_instance)
 
 
-def _first_reachable_workbench(hosts: list[str], port: int) -> str | None:
+def _probe_remote_http(host: str, port: int, expected_instance: str) -> bool:
+    health = _read_http_json(f"http://{host}:{port}/health")
+    instance = health.get("instance") if isinstance(health, dict) else None
+    actual = _normalize_instance_id(
+        instance.get("instance_id") if isinstance(instance, dict) else None
+    )
+    return bool(
+        health
+        and health.get("ok") is True
+        and actual == _normalize_instance_id(expected_instance)
+    )
+
+
+def _first_reachable_workbench(
+    hosts: list[str],
+    port: int,
+    expected_instance: str,
+) -> str | None:
     for host in hosts:
-        if _probe_workbench_health(host, port):
+        if _probe_workbench_health(host, port, expected_instance):
             return host
     return None
 
@@ -602,11 +669,11 @@ def _unique_hosts(*values: str | None) -> list[str]:
 
 def _local_workbench_hosts(cfg: dict) -> list[str]:
     configured = str(cfg.get("global", {}).get("api_host") or "").strip()
+    endpoint = _published_local_workbench(cfg)
     return _unique_hosts(
-        "10.255.255.254",
-        "10.0.0.2",
+        endpoint.host if endpoint is not None else None,
         configured,
-        "127.0.0.1",
+        *discover_local_hosts(),
     )
 
 
@@ -619,8 +686,20 @@ def _send_via_local_workbench(
     source_instance: str,
     reply_route: dict | None = None,
 ) -> bool:
+    expected_instance = _get_instance_id(cfg)
     for host in _local_workbench_hosts(cfg):
-        if _send_via_workbench(host, port, to_agent, from_agent, text, source_instance, reply_route):
+        if not _probe_workbench_health(host, port, expected_instance):
+            continue
+        if _send_via_workbench(
+            host,
+            port,
+            to_agent,
+            from_agent,
+            text,
+            source_instance,
+            reply_route,
+            expected_instance=expected_instance,
+        ):
             return True
     return False
 
@@ -632,7 +711,6 @@ def _workbench_hosts_for_route(route: dict) -> list[str]:
         route.get("lan_ip"),
         route.get("tailscale_ip"),
         route.get("internet_host"),
-        "10.255.255.254",
         route.get("same_host_loopback"),
     )
 
@@ -644,10 +722,23 @@ def _remote_urls(host: str, port: int) -> list[str]:
     ]
 
 
-def _probe_remote(host: str, port: int) -> str | None:
+def _probe_remote(
+    host: str,
+    port: int,
+    expected_instance: str,
+) -> str | None:
     for scheme in ("https", "http"):
         url = f"{scheme}://{host}:{port}/health"
-        if _probe_http(url):
+        health = _read_http_json(url)
+        instance = health.get("instance") if isinstance(health, dict) else None
+        actual = _normalize_instance_id(
+            instance.get("instance_id") if isinstance(instance, dict) else None
+        )
+        if (
+            health
+            and health.get("ok") is True
+            and actual == _normalize_instance_id(expected_instance)
+        ):
             return scheme
     return None
 
@@ -697,7 +788,11 @@ def _find_remote_instance(
         return None
 
     for candidate in candidates:
-        if _probe_workbench(candidate["host"], candidate["wb_port"]):
+        if _probe_workbench(
+            candidate["host"],
+            candidate["wb_port"],
+            candidate["instance_id"],
+        ):
             return candidate
 
     return candidates[0]
@@ -805,7 +900,17 @@ def _send_via_workbench(
     source_instance: str,
     reply_route: dict | None = None,
     label: str = "local",
+    expected_instance: str | None = None,
 ) -> bool:
+    if not expected_instance:
+        print("❌ Hchat Workbench route has no expected instance identity.", file=sys.stderr)
+        return False
+    if not _probe_workbench_health(host, port, expected_instance):
+        print(
+            f"❌ Hchat Workbench identity check failed ({host}:{port}, expected {expected_instance}).",
+            file=sys.stderr,
+        )
+        return False
     url = f"http://{host}:{port}/api/chat"
     full_text = format_hchat_message(from_agent, source_instance, text)
     payload = {"agent": to_agent.lower(), "text": full_text}
@@ -841,6 +946,7 @@ def _send_via_remote(
     source_instance: str,
     reply_route: dict | None = None,
     to_instance: str | None = None,
+    endpoint_instance: str | None = None,
 ) -> bool:
     full_text = format_hchat_message(from_agent, source_instance, text)
     payload = {
@@ -854,7 +960,15 @@ def _send_via_remote(
     if reply_route:
         payload["reply_route"] = reply_route
     data = json.dumps(payload).encode("utf-8")
-    for url in _remote_urls(host, port):
+    expected_endpoint = _normalize_instance_id(endpoint_instance or to_instance)
+    scheme = _probe_remote(host, port, expected_endpoint or "")
+    if scheme is None:
+        print(
+            f"❌ Hchat Remote identity check failed ({host}:{port}, expected {expected_endpoint or 'unknown'}).",
+            file=sys.stderr,
+        )
+        return False
+    for url in (f"{scheme}://{host}:{port}/hchat",):
         req = urllib_request.Request(
             url,
             data=data,
@@ -909,24 +1023,27 @@ def _deliver_remote_route(
 
     if wb_port:
         for candidate_host in _workbench_hosts_for_route(route):
-            if _probe_workbench(candidate_host, wb_port):
-                if _send_via_workbench(candidate_host, wb_port, to_agent, from_agent, text, source_instance, reply_route, label=cache_label):
+            if _probe_workbench(candidate_host, wb_port, route["instance_id"]):
+                if _send_via_workbench(
+                    candidate_host,
+                    wb_port,
+                    to_agent,
+                    from_agent,
+                    text,
+                    source_instance,
+                    reply_route,
+                    label=cache_label,
+                    expected_instance=route["instance_id"],
+                ):
                     update_contact(to_agent, route["instance_id"], candidate_host, remote_port or DEFAULT_REMOTE_PORT, wb_port=wb_port)
                     return True
 
-    if remote_host and remote_port and _probe_remote(remote_host, remote_port):
-        if _send_via_remote(remote_host, remote_port, to_agent, from_agent, text, source_instance, reply_route, to_instance=route["instance_id"]):
-            update_contact(to_agent, route["instance_id"], remote_host, remote_port, wb_port=wb_port or remote_port)
-            return True
-
-    if wb_port:
-        for candidate_host in _workbench_hosts_for_route(route):
-            if _send_via_workbench(candidate_host, wb_port, to_agent, from_agent, text, source_instance, reply_route, label=cache_label):
-                update_contact(to_agent, route["instance_id"], candidate_host, remote_port or DEFAULT_REMOTE_PORT, wb_port=wb_port)
-                return True
-
-    if remote_host and remote_port:
-        if _send_via_remote(remote_host, remote_port, to_agent, from_agent, text, source_instance, reply_route, to_instance=route["instance_id"]):
+    if remote_host and remote_port and _probe_remote(
+        remote_host,
+        remote_port,
+        route["instance_id"],
+    ):
+        if _send_via_remote(remote_host, remote_port, to_agent, from_agent, text, source_instance, reply_route, to_instance=route["instance_id"], endpoint_instance=route["instance_id"]):
             update_contact(to_agent, route["instance_id"], remote_host, remote_port, wb_port=wb_port or remote_port)
             return True
 
@@ -946,7 +1063,11 @@ def _send_via_exchange(
     host = exchange_route.get("host")
     workbench_port = exchange_route.get("workbench_port")
     port = exchange_route.get("remote_port")
-    if host and workbench_port:
+    if host and workbench_port and _probe_workbench_health(
+        host,
+        int(workbench_port),
+        exchange_instance,
+    ):
         url = f"http://{host}:{workbench_port}/api/bridge/hchat-exchange"
         payload = {
             "to_agent": to_agent.lower(),
@@ -987,6 +1108,7 @@ def _send_via_exchange(
             source_instance,
             reply_route,
             to_instance=target_instance,
+            endpoint_instance=exchange_instance,
         )
     return False
 
@@ -1141,7 +1263,11 @@ def check_hchat_route(
         if not members:
             result["error"] = f"group '{group_name}' not found or empty"
             return result
-        host = _first_reachable_workbench(_local_workbench_hosts(cfg), local_port)
+        host = _first_reachable_workbench(
+            _local_workbench_hosts(cfg),
+            local_port,
+            instance_id,
+        )
         result.update(
             ok=bool(host),
             route_type="local_group_workbench",
@@ -1156,7 +1282,11 @@ def check_hchat_route(
         if not _is_local_agent(cfg, to_agent):
             result["error"] = f"{to_agent}@{result['target_instance']} is not a local active agent"
             return result
-        host = _first_reachable_workbench(_local_workbench_hosts(cfg), local_port)
+        host = _first_reachable_workbench(
+            _local_workbench_hosts(cfg),
+            local_port,
+            instance_id,
+        )
         result.update(
             ok=bool(host),
             route_type="local_workbench",
@@ -1171,7 +1301,11 @@ def check_hchat_route(
     if shared_token and protocol_route:
         remote_port = protocol_route.get("remote_port") or protocol_route.get("port")
         remote_host = protocol_route.get("remote_host", protocol_route.get("host"))
-        if remote_host and remote_port and _probe_remote_http(remote_host, int(remote_port)):
+        if remote_host and remote_port and _probe_remote_http(
+            remote_host,
+            int(remote_port),
+            target_instance,
+        ):
             result.update(
                 ok=True,
                 route_type="remote_protocol",
@@ -1188,7 +1322,11 @@ def check_hchat_route(
             host = exchange_route.get("host")
             workbench_port = exchange_route.get("workbench_port")
             remote_port = exchange_route.get("remote_port")
-            if host and workbench_port and _probe_workbench_health(host, workbench_port):
+            if host and workbench_port and _probe_workbench_health(
+                host,
+                workbench_port,
+                exchange_instance_id,
+            ):
                 result.update(
                     ok=True,
                     route_type="exchange_workbench",
@@ -1198,7 +1336,11 @@ def check_hchat_route(
                     remote_port=remote_port,
                 )
                 return result
-            if host and remote_port and _probe_remote(host, remote_port):
+            if host and remote_port and _probe_remote(
+                host,
+                remote_port,
+                exchange_instance_id,
+            ):
                 result.update(
                     ok=True,
                     route_type="exchange_remote",
@@ -1219,13 +1361,21 @@ def check_hchat_route(
         }
         wb_port = cached_route.get("wb_port")
         if wb_port:
-            host = _first_reachable_workbench(_workbench_hosts_for_route(cached_route), wb_port)
+            host = _first_reachable_workbench(
+                _workbench_hosts_for_route(cached_route),
+                wb_port,
+                cached_route["instance_id"],
+            )
             if host:
                 result.update(ok=True, route_type="cached_workbench", host=host, port=wb_port)
                 return result
         remote_host = cached_route.get("remote_host")
         remote_port = cached_route.get("remote_port")
-        if remote_host and remote_port and _probe_remote(remote_host, remote_port):
+        if remote_host and remote_port and _probe_remote(
+            remote_host,
+            remote_port,
+            cached_route["instance_id"],
+        ):
             result.update(ok=True, route_type="cached_remote", host=remote_host, remote_port=remote_port)
             return result
 
@@ -1236,7 +1386,11 @@ def check_hchat_route(
 
     wb_port = remote.get("wb_port")
     if wb_port:
-        host = _first_reachable_workbench(_workbench_hosts_for_route(remote), wb_port)
+        host = _first_reachable_workbench(
+            _workbench_hosts_for_route(remote),
+            wb_port,
+            remote["instance_id"],
+        )
         if host:
             result.update(
                 ok=True,
@@ -1249,7 +1403,11 @@ def check_hchat_route(
 
     remote_host = remote.get("remote_host", remote.get("host"))
     remote_port = remote.get("remote_port")
-    if remote_host and remote_port and _probe_remote(remote_host, remote_port):
+    if remote_host and remote_port and _probe_remote(
+        remote_host,
+        remote_port,
+        remote["instance_id"],
+    ):
         result.update(
             ok=True,
             route_type="remote_hchat",

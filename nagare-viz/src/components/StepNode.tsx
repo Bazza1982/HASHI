@@ -13,18 +13,8 @@ type StepNodeData = {
 
 type StepFlowNode = Node<StepNodeData, "step">;
 
-/** Short display name for model IDs */
 function shortModel(model: string): string {
-  return model
-    .replace("claude-opus-4-6", "Opus 4.6")
-    .replace("claude-sonnet-4-6", "Sonnet 4.6")
-    .replace("claude-haiku-4-5", "Haiku 4.5")
-    .replace("gemini-2.5-pro", "Gemini Pro")
-    .replace("gemini-2.5-flash", "Gemini Flash")
-    .replace("deepseek/deepseek-v4-pro", "DS V4 Pro")
-    .replace("deepseek/deepseek-v4-flash", "DS V4 Flash")
-    .replace("deepseek-v4-pro", "DS V4 Pro")
-    .replace("deepseek-v4-flash", "DS V4 Flash");
+  return model.length > 28 ? `${model.slice(0, 27)}…` : model;
 }
 
 export function StepNode({ data }: NodeProps<StepFlowNode>) {

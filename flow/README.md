@@ -1,7 +1,6 @@
 # HASHI Flow — 元工作流平台
 
-> **版本**: 0.2.0
-> **状态**: Phase 2 完成 — 可运行
+> **状态**: 当前实现参考（发布前审查版）
 
 ---
 
@@ -24,7 +23,7 @@ ORCHESTRATOR（如小茜）        ← 唯一对外接口
  ├── EVALUATOR               ← 系统级观察者，持续自我改进
  ├── ANALYST                 ← 任务开始前分析，一次性收集人工输入
  ├── DESIGNER                ← 动态生成工作流 YAML
- ├── DEBUG                   ← 故障自动恢复（最多3次，可调）
+ ├── DEBUG                   ← 故障诊断与有针对性的持续恢复
  └── WORKERS (local-only)    ← 执行具体任务的专业化 agent
 ```
 
@@ -36,15 +35,8 @@ ORCHESTRATOR（如小茜）        ← 唯一对外接口
 flow/
 ├── README.md                   # 本文件
 ├── flow_cli.py                 # ✅ CLI 入口（run/status/list/eval）
-├── schema/
-│   ├── workflow.schema.yaml    # 工作流 YAML 标准
-│   └── agent.schema.yaml       # Worker Agent 配置标准
 ├── engine/
-│   ├── flow_runner.py          # ✅ 工作流执行器（DAG + HChat）
-│   ├── worker_dispatcher.py    # ✅ claude CLI 子进程调度器
-│   ├── preflight.py            # ✅ Pre-flight 信息收集
-│   ├── artifact_store.py       # ✅ 工件管理
-│   └── task_state.py           # ✅ 任务状态持久化
+│   └── ...                     # nagare/ 核心的 HASHI 兼容导入层
 ├── agents/
 │   ├── orchestrator/AGENT.md   # Orchestrator 角色定义
 │   ├── analyst/AGENT.md        # Analyst 角色定义
@@ -59,6 +51,8 @@ flow/
 │   ├── improvements/           # 改进建议（pending/accepted/implemented）
 │   └── workflow_scores/        # 历史评分记录
 ├── workflows/
+│   ├── schema/
+│   │   └── workflow_schema.yaml         # 当前工作流契约
 │   ├── examples/
 │   │   └── meta_workflow_creation.yaml   # ✅ 元工作流（工作流创建工作流）
 │   └── library/
@@ -76,11 +70,15 @@ flow/
 
 ## 核心设计原则
 
-1. **任务前确认**：所有人工输入在工作流开始前一次性收集，运行中不打断
+1. **优先任务前确认**：通常在工作流开始前收集输入；声明 `wait_for_human`
+   的步骤也可以在运行中显式暂停并等待回答
 2. **角色独立**：每个 worker 是独立的 local-only agent，防止记忆和人格污染
-3. **可控模型**：每步骤可指定不同 model，由 Orchestrator 或人类控制
-4. **自动恢复**：失败由 Debug Agent 处理（最多 3 次），超限才上报
-5. **持续改进**：Evaluator 观察所有行为，积累知识，自动改进工作流质量
+3. **可控模型**：每个 worker 明确声明受支持的 backend 与 model；需要不同配置时
+   建立独立 worker
+4. **自动恢复**：失败由 Debug Agent 诊断并改变恢复策略；次数本身不触发终止，
+   只有明确不可恢复、基础设施故障或外部停止信号才结束该路径
+5. **可审查改进**：被动 Evaluator 只记录可测量指标并生成建议；只有明确的
+   candidate-authoring 步骤才可写候选，候选仍须通过一次完整运行才会晋升
 
 ---
 
@@ -134,7 +132,10 @@ result = runner.start()
 ## 工作流生命周期
 
 ```
-CREATED → PRE_FLIGHT → CONFIRMED → RUNNING → REVIEWING → COMPLETED
-                ↑                      ↓
-            人工确认              DEBUG（自动）
+CREATED → pre-flight 校验／可选 CLI 确认 → RUNNING → COMPLETED
+                                            ├── PAUSED（当前进程内可恢复）
+                                            └── FAILED / ABORTED
 ```
+
+步骤失败时，顺序和并行执行路径都会调用 Debug Agent 进行有针对性的恢复；工作流也可通过
+`wait_for_human` 暂停等待明确的人类输入。

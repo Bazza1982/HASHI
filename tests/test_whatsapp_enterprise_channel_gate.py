@@ -180,7 +180,7 @@ async def test_enterprise_whatsapp_egress_allows_bound_agent(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_whatsapp_ingress_passes_chat_key_to_session_routing(tmp_path):
+async def test_whatsapp_ingress_passes_chat_key_to_session_routing():
     captured = []
 
     class Runtime:

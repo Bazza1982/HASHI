@@ -40,6 +40,7 @@ class RuntimeCallback:
 class RuntimeRegistrySnapshot:
     commands: tuple[RuntimeCommand, ...]
     callbacks: tuple[RuntimeCallback, ...]
+    notices: tuple[dict[str, Any], ...]
 
 
 _registry_snapshot: RuntimeRegistrySnapshot | None = None
@@ -78,7 +79,7 @@ def _load_private_command_module(path: Path):
     module_name = f"_hashi_private_command_{path.stem}_{abs(hash(path.resolve()))}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load private command module: {path.name}")
+        raise ImportError(f"Cannot load local command extension: {path.name}")
     module = importlib.util.module_from_spec(spec)
     module.__hashi_private_command_path__ = str(path)
     sys.modules[module_name] = module
@@ -132,7 +133,7 @@ def _iter_runtime_modules():
         try:
             yield _load_private_command_module(path)
         except Exception as exc:
-            logger.warning("Failed to import private command module %s: %s", path.name, exc)
+            logger.warning("Failed to import local command extension %s: %s", path.name, exc)
 
 
 def _source_signature() -> tuple[Any, ...]:
@@ -158,6 +159,7 @@ def invalidate_runtime_registry_cache() -> None:
 def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
     commands: dict[str, RuntimeCommand] = {}
     callbacks: list[RuntimeCallback] = []
+    notices: list[dict[str, Any]] = []
     for module in _iter_runtime_modules():
         module_commands = list(_commands_from_module(module))
         is_private = _is_private_command_module(module)
@@ -167,17 +169,17 @@ def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
             if is_private and command.name in NON_OVERRIDABLE_CORE_COMMANDS
         }
         for command in module_commands:
+            if is_private and command.name in NON_OVERRIDABLE_CORE_COMMANDS:
+                logger.debug(
+                    "Ignoring local extension override of protected core command %s from %s",
+                    command.name,
+                    _module_label(module),
+                )
+                continue
             if command.name in commands:
                 if is_private:
-                    if command.name in NON_OVERRIDABLE_CORE_COMMANDS:
-                        logger.warning(
-                            "Ignoring private override of protected core command %s from %s",
-                            command.name,
-                            _module_label(module),
-                        )
-                        continue
                     logger.debug(
-                        "Runtime command %s intentionally overridden by private command module %s",
+                        "Runtime command %s intentionally overridden by local command extension %s",
                         command.name,
                         _module_label(module),
                     )
@@ -189,9 +191,20 @@ def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
                     )
             commands[command.name] = command
         module_callbacks = list(_callbacks_from_module(module))
+        if protected:
+            module_label = _module_label(module)
+            notices.extend(
+                {
+                    "code": "protected_private_command_override",
+                    "command": command_name,
+                    "module": module_label,
+                    "callbacks_ignored": bool(module_callbacks),
+                }
+                for command_name in sorted(protected)
+            )
         if protected and module_callbacks:
-            logger.warning(
-                "Ignoring callbacks from private override of protected core command(s) %s in %s",
+            logger.debug(
+                "Ignoring callbacks from local extension override of protected core command(s) %s in %s",
                 ", ".join(sorted(protected)),
                 _module_label(module),
             )
@@ -200,6 +213,7 @@ def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
     return RuntimeRegistrySnapshot(
         commands=tuple(commands[name] for name in sorted(commands)),
         callbacks=tuple(callbacks),
+        notices=tuple(notices),
     )
 
 
@@ -222,6 +236,12 @@ def load_runtime_callbacks() -> list[RuntimeCallback]:
 
 def runtime_command_map() -> dict[str, RuntimeCommand]:
     return {command.name: command for command in load_runtime_commands()}
+
+
+def runtime_registry_notices() -> list[dict[str, Any]]:
+    """Return structured, de-duplicatable command compatibility notices."""
+
+    return [dict(notice) for notice in _runtime_registry_snapshot().notices]
 
 
 def bind_runtime_commands(runtime, *, wrap: bool = False) -> None:

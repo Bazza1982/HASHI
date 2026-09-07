@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402 - dependency stubs must be installed before runtime imports.
+
 import re
 import sys
 import types
@@ -194,6 +196,20 @@ def test_retired_mode_callbacks_are_bound_to_compatibility_notice(callback_data)
         ("her_model_compact", "callback_model"),
         ("her_model_compact_mode:inherit_quick", "callback_model"),
         ("her_model_compact_confirm:1:abcdef:2:abcdef:high", "callback_model"),
+        ("her_model_advanced", "callback_model"),
+        ("her_execution", "callback_model"),
+        ("her_execution_mode:auto", "callback_model"),
+        ("her_execution_reasoning:0:abcdef", "callback_model"),
+        ("her_advanced_routes", "callback_model"),
+        ("her_adv_route:execution_simple", "callback_model"),
+        ("her_adv_slot:execution_simple:pro", "callback_model"),
+        ("her_adv_custom:execution_simple", "callback_model"),
+        ("her_adv_reason:execution_simple:1:abcdef", "callback_model"),
+        ("her_adv_provider:execution_simple:0:abcdef", "callback_model"),
+        (
+            "her_adv_model:execution_simple:0:abcdef:1:abcdef",
+            "callback_model",
+        ),
         ("her_routes", "callback_model"),
         ("her_route_menu:execution_simple", "callback_model"),
         ("her_route_slot:execution_simple:pro", "callback_model"),

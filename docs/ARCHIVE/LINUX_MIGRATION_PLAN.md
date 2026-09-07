@@ -869,11 +869,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=lily
-WorkingDirectory=/home/lily/projects/hashi
-Environment=BRIDGE_HOME=/home/lily/projects/hashi
-ExecStart=/home/lily/projects/hashi/.venv/bin/python main.py
-ExecStop=/home/lily/projects/hashi/kill-sessions.sh --quiet
+User=hashi
+WorkingDirectory=/opt/hashi
+Environment=BRIDGE_HOME=/opt/hashi
+ExecStart=/opt/hashi/.venv/bin/python main.py
+ExecStop=/opt/hashi/kill-sessions.sh --quiet
 Restart=on-failure
 RestartSec=10
 

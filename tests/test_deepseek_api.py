@@ -264,8 +264,12 @@ def test_openai_compatible_connection_and_stream_failures_are_typed():
 
     assert connection.error_code == "PROVIDER_CONNECTION_FAILED"
     assert connection.error_retryable is True
+    assert connection.stream_metadata["provider_http_failure"]["request"][
+        "url"
+    ] == str(request.url)
     assert incomplete.error_code == "PROVIDER_INCOMPLETE_STREAM"
     assert incomplete.error_retryable is True
+    assert "request" not in incomplete.stream_metadata["provider_http_failure"]
     assert timeout.error_code == "PROVIDER_REQUEST_TIMEOUT"
     assert timeout.error_retryable is True
     assert invalid_url.error_code == "PROVIDER_CONFIGURATION_ERROR"

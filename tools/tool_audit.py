@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
-_WRITE_LOCK = threading.Lock()
+from orchestrator.process_resources import path_lock as process_path_lock
+
 _SECRET_PATTERN = re.compile(r"(?i)(api[_-]?key|token|password|passwd|secret|bearer)\s*[:=]\s*\S+")
 _IMAGE_DATA_PATTERN = re.compile(
     r"(?i)(data:image/[a-z0-9.+-]+;base64,)[A-Za-z0-9+/=]*"
@@ -79,7 +79,7 @@ def append_tool_audit_record(path: Path, record: dict[str, Any]) -> Path:
     audit_path = Path(path)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(sanitize_value(record), ensure_ascii=False)
-    with _WRITE_LOCK:
+    with process_path_lock(audit_path):
         with audit_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
     return audit_path

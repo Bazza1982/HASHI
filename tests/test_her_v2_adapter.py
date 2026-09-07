@@ -266,6 +266,97 @@ class _ZeroProvider:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent_mode", ["fixed", "flex"])
+async def test_adapter_prepares_pre_turn_compaction_accounting_in_both_modes(
+    tmp_path,
+    agent_mode,
+):
+    config = _agent_config(tmp_path)
+    config._her_v2_stage_provider = _DirectProvider()
+    global_config = _global_config(tmp_path)
+    from orchestrator import runtime_session
+
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(
+            agent_mode=agent_mode,
+            current_backend=None,
+        ),
+        _request_meta_by_id={},
+        current_request_meta={},
+        global_config=global_config,
+        config=SimpleNamespace(active_backend="her-v2"),
+        workspace_dir=config.workspace_dir,
+        name=config.name,
+    )
+    outer_session = runtime_session.initialize_runtime_sessions(runtime)
+    request_meta = {
+        "request_id": "request-accounting",
+        "hashi_session_id": outer_session["session_id"],
+        "hashi_message_id": "message-accounting",
+        "context_generation": outer_session["context_generation"],
+        "owner_id": outer_session["owner_id"],
+        "session_workspace": str(
+            runtime_session.ensure_store(runtime).session_workspace(
+                outer_session["session_id"],
+                outer_session["context_generation"],
+            )
+        ),
+    }
+    runtime._request_meta_by_id["request-accounting"] = request_meta
+    runtime.current_request_meta = request_meta
+    config._hashi_runtime = runtime
+    adapter = HERv2Adapter(config, global_config)
+    assert await adapter.initialize() is True
+    runtime.backend_manager.current_backend = adapter
+
+    assert adapter.can_record_maintenance_provider_requests() is False
+    assert adapter.ensure_maintenance_provider_accounting(
+        "request-accounting"
+    ) is True
+    session_id = adapter._session_id
+    assert session_id
+    shell = adapter._session_coordinator.store.session(session_id)
+    assert shell["status"] == "accounting"
+    assert shell["hashi_conversation_id"] == outer_session["session_id"]
+    assert runtime_session.ensure_store(runtime).backend_binding(
+        agent_id=config.name,
+        session_id=outer_session["session_id"],
+        context_generation=outer_session["context_generation"],
+        backend_id="her-v2",
+    ) == session_id
+    assert adapter.can_resume_fixed_session() is False
+    assert adapter._session_id == session_id
+
+    # The preflight is idempotent and retains one shell/session ID.
+    assert adapter.ensure_maintenance_provider_accounting(
+        "request-accounting"
+    ) is True
+    assert adapter._session_id == session_id
+
+    # A later request may replace the adapter's current Session while detached
+    # Compact is settling. The request-bound ledger target must not move.
+    adapter._session_id = "unrelated-later-session"
+    assert adapter.record_maintenance_provider_requests(
+        [
+            {
+                "provider_request_id": f"compact-{agent_mode}",
+                "parent_request_id": "request-accounting",
+                "phase": "compact",
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "input": 10,
+                "output": 2,
+                "compact": True,
+            }
+        ]
+    ) == 1
+    assert adapter._session_coordinator.store.usage_summary(session_id)["total"][
+        "provider_requests"
+    ] == 1
+    adapter._session_id = session_id
+
+
+@pytest.mark.asyncio
 async def test_adapter_fixed_backend_keeps_one_session_and_accepts_incremental_turns(
     tmp_path,
 ):
@@ -712,6 +803,21 @@ class _SideEffectFailureProvider(_DirectProvider):
                 "provider stream ended before completion",
                 code=ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT,
                 human_description=("The provider response began but did not complete."),
+                http_status=400,
+                provider_request_id="gateway-reject-side-effect-1",
+                details={
+                    "tool_call_count": 3,
+                    "tool_loop_count": 3,
+                    "provider_http_failure": {
+                        "response": {
+                            "status": 400,
+                            "body": '{"error":{"code":"invalid_tool_result"}}',
+                        },
+                        "transport_audit_refs": [
+                            "hashi-transport:test:client_response_rejected"
+                        ],
+                    },
+                },
             )
         elif request.stage is Stage.FINALISATION:
             payload = {
@@ -986,6 +1092,7 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
     assert response.stream_metadata["her_v2"]["classification"] is None
     assert response.stream_metadata["her_v2"]["plan_id"] is None
+    assert response.stream_metadata["her_v2"]["stage_timings_s"]["direct"] > 0
     assert response.stream_metadata["her_v2"]["effort"] == {
         "configured": "zero",
         "effective": "zero",
@@ -1074,6 +1181,59 @@ async def test_scheduler_direct_policy_is_request_scoped_and_preserves_instructi
     )
     assert ordinary_execution_profile.model == "configured/lightweight"
     assert ordinary_execution_profile.reasoning == "provider-lightweight"
+    assert adapter.effort == "max"
+    await adapter.shutdown()
+
+
+@pytest.mark.parametrize("source", ["bridge:hchat", "bridge:hchat-draft"])
+@pytest.mark.asyncio
+async def test_hchat_policy_uses_one_direct_call_without_early_delivery(
+    tmp_path,
+    source,
+):
+    provider = _EffortPolicyProvider()
+    request_id = f"request-{source.replace(':', '-')}"
+    runtime_context = SimpleNamespace(
+        current_request_meta={
+            "request_id": request_id,
+            "source": source,
+        }
+    )
+    config = _agent_config(tmp_path / source.replace(":", "-"), effort="max")
+    config._hashi_runtime = runtime_context
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(
+        config,
+        _global_config(tmp_path / source.replace(":", "-")),
+    )
+    events = []
+
+    async def capture(event):
+        events.append(event)
+        return True
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Compose and send the requested HChat message.",
+        request_id,
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert [request.stage for _profile, request in provider.requests] == [Stage.DIRECT]
+    assert provider.requests[0][1].allow_tools is True
+    assert provider.requests[0][1].allow_side_effects is True
+    assert response.stream_metadata["her_v2"]["effort"] == {
+        "configured": "max",
+        "effective": "zero",
+        "reason": "hchat_direct_policy",
+    }
+    assert not any(event.delivery_class == DELIVERY_USER_COMMENTARY for event in events)
+    assert [
+        event.delivery_class
+        for event in events
+        if event.delivery_class in {DELIVERY_FINAL, DELIVERY_USER_COMMENTARY}
+    ] == [DELIVERY_FINAL]
     assert adapter.effort == "max"
     await adapter.shutdown()
 
@@ -1212,12 +1372,24 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
     recovery_code = ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
     assert response.is_success is False
     assert response.error_code == primary_code
+    assert response.http_status == 400
+    assert response.provider_request_id == "gateway-reject-side-effect-1"
+    assert response.side_effects_possible is True
+    assert response.tool_call_count == 3
+    assert response.tool_loop_count == 3
     assert primary_code in response.error
     assert primary_code in response.text
     assert recovery_code in response.text
     assert "Foreground cleanup:" in response.text
     chain = response.stream_metadata["her_v2"]["failure_chain"]
     assert chain["primary_failure"]["code"] == primary_code
+    assert chain["primary_failure"]["http_status"] == 400
+    assert chain["primary_failure"]["provider_request_id"] == (
+        "gateway-reject-side-effect-1"
+    )
+    assert chain["primary_failure"]["details"]["provider_http_failure"][
+        "response"
+    ]["body"] == '{"error":{"code":"invalid_tool_result"}}'
     assert chain["recovery_decision"]["code"] == recovery_code
     assert chain["recovery_decision"]["automatic_replay_attempted"] is False
     assert chain["foreground_cleanup"]["status"] == "terminated"
@@ -1907,6 +2079,50 @@ class _FakeManager:
         return backend
 
 
+class _ControlledForegroundToolBackend(_FakeBackend):
+    def __init__(self, system_md=None):
+        super().__init__(system_md)
+        self.tool_started = asyncio.Event()
+        self.release_tool = asyncio.Event()
+
+    async def generate_response(
+        self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+    ):
+        del request_id, is_retry, silent
+        self.prompt = prompt
+        await on_stream_event(
+            StreamEvent(
+                kind=KIND_THINKING,
+                raw_delta="preparing foreground work",
+                summary="preparing foreground work",
+            )
+        )
+        await on_stream_event(
+            StreamEvent(
+                kind=KIND_TOOL_START,
+                summary="foreground tool is running",
+                tool_name="bash",
+            )
+        )
+        self.tool_started.set()
+        await self.release_tool.wait()
+        return BackendResponse(
+            text='{"disposition":"COMPLETED","summary":"done"}',
+            duration_ms=1,
+            tool_call_count=1,
+            tool_loop_count=1,
+        )
+
+
+class _ControlledForegroundToolManager(_FakeManager):
+    def create_ephemeral_backend(self, engine, target_model=None):
+        assert engine == "openrouter-api"
+        assert target_model == "configured/model"
+        backend = _ControlledForegroundToolBackend(self.system_md)
+        self.backends.append(backend)
+        return backend
+
+
 class _CommentaryFakeBackend(_FakeBackend):
     async def generate_response(
         self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
@@ -2067,6 +2283,98 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
         allow_tools=allow_tools,
         allow_side_effects=allow_side_effects,
     )
+
+
+@pytest.mark.asyncio
+async def test_stage_provider_does_not_wrap_foreground_tool_in_absolute_timeout(
+    monkeypatch,
+):
+    manager = _ControlledForegroundToolManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    profile = ProviderProfile(
+        "execution",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-high",
+    )
+    installed_deadlines = []
+    original_timeout = getattr(asyncio, "timeout", None)
+
+    def observe_absolute_timeout(delay):
+        installed_deadlines.append(delay)
+        if original_timeout is None:
+            raise AssertionError("asyncio.timeout is unavailable on Python 3.10")
+        return original_timeout(delay)
+
+    monkeypatch.setattr(
+        asyncio,
+        "timeout",
+        observe_absolute_timeout,
+        raising=False,
+    )
+    invocation = asyncio.create_task(
+        provider.invoke(
+            profile,
+            _stage_request(
+                Stage.EXECUTION,
+                allow_tools=True,
+                allow_side_effects=True,
+            ),
+        )
+    )
+
+    await asyncio.sleep(0)
+    backend = manager.backends[0]
+    await asyncio.wait_for(backend.tool_started.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+
+    assert invocation.done() is False
+    assert installed_deadlines == []
+
+    backend.release_tool.set()
+    response = await asyncio.wait_for(invocation, timeout=1)
+
+    assert json.loads(response.text)["disposition"] == "COMPLETED"
+    assert response.reasoning_trace == "preparing foreground work"
+    assert backend.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_still_cleans_up_active_foreground_tool():
+    manager = _ControlledForegroundToolManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    invocation = asyncio.create_task(
+        provider.invoke(
+            ProviderProfile(
+                "execution",
+                "openrouter-api",
+                "configured/model",
+            ),
+            _stage_request(
+                Stage.EXECUTION,
+                allow_tools=True,
+                allow_side_effects=True,
+            ),
+        )
+    )
+
+    await asyncio.sleep(0)
+    backend = manager.backends[0]
+    await asyncio.wait_for(backend.tool_started.wait(), timeout=1)
+    invocation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert backend.release_tool.is_set() is False
+    assert backend.shutdown_called is True
+    assert provider.interrupt_nowait("after-cancel") == 0
 
 
 def _adapter_replan_outcome(*, completion_percent: int = 50) -> ReplanningOutcome:
@@ -3138,7 +3446,9 @@ async def test_policy_denial_returns_before_due_replan_gates_next_admission():
                 )
             return SimpleNamespace(
                 tool_call_id=tool_call_id,
-                output="allowed",
+                # This test exercises the compulsory Replan cadence rather
+                # than a no-new-information cycle, so each read is distinct.
+                output=f"allowed:{tool_call_id}",
                 is_error=False,
             )
 

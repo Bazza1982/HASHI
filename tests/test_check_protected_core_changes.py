@@ -23,13 +23,37 @@ def test_changed_files_supports_cached_and_base(monkeypatch) -> None:
     assert calls == [["git", "diff", "--name-only", "--cached", "main", "--"]]
 
 
+def test_changed_files_includes_untracked_new_core_files(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(args, check, capture_output, text):
+        calls.append(args)
+        output = (
+            "main.py\n"
+            if args[:2] == ["git", "diff"]
+            else "orchestrator/runtime_contract.py\n"
+        )
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(checker.subprocess, "run", fake_run)
+    args = argparse.Namespace(cached=False, base=None)
+
+    changed = checker._changed_files(args)
+
+    assert changed == {"main.py", "orchestrator/runtime_contract.py"}
+    assert calls == [
+        ["git", "diff", "--name-only"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    ]
+
+
 def test_main_blocks_protected_paths_without_authorization(monkeypatch, capsys) -> None:
     monkeypatch.setattr(checker, "_repo_root", lambda: __import__("pathlib").Path("/tmp/repo"))
     monkeypatch.setattr(checker.os, "chdir", lambda path: None)
     monkeypatch.setattr(
         checker,
         "_changed_files",
-        lambda args: {"remote/protocol_manager.py", "remote/main.py"},
+        lambda args: {"orchestrator/runtime_contract.py", "remote/main.py"},
     )
     monkeypatch.delenv("HASHI_CORE_EDIT_AUTHORIZED", raising=False)
 
@@ -38,7 +62,8 @@ def test_main_blocks_protected_paths_without_authorization(monkeypatch, capsys) 
     captured = capsys.readouterr()
     assert result == 2
     assert "protected core check: blocked" in captured.err
-    assert "remote/protocol_manager.py" in captured.err
+    assert "orchestrator/runtime_contract.py" in captured.err
+    assert "remote/main.py" not in captured.err
 
 
 def test_main_allows_protected_paths_with_authorization(monkeypatch) -> None:

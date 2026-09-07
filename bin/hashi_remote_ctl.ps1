@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "uninstall", "start", "stop", "restart", "status", "logs", "command", "doctor")]
+    [ValidateSet("register", "enable", "disable", "unregister", "install", "uninstall", "start", "stop", "restart", "status", "logs", "command", "doctor")]
     [string]$Action = "status",
 
     [string]$HashiRoot,
@@ -73,7 +73,7 @@ function Ensure-LogDir {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 }
 
-function Install-HashiRemoteTask {
+function Register-HashiRemoteSupervisor {
     Ensure-LogDir
     $RunnerArgs = @(
         "-NoProfile",
@@ -93,7 +93,7 @@ function Install-HashiRemoteTask {
     $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
     $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal
     Register-ScheduledTask -TaskName $TaskName -InputObject $Task -Force | Out-Null
-    Write-Host "Installed scheduled task '$TaskName'"
+    Write-Host "Registered and enabled Remote supervisor task '$TaskName'"
     Write-Host $CommandPreview
 }
 
@@ -133,12 +133,23 @@ function Show-RemoteDoctor {
 }
 
 switch ($Action) {
-    "install" {
-        Install-HashiRemoteTask
+    { $_ -in "register", "install" } {
+        Register-HashiRemoteSupervisor
     }
-    "uninstall" {
+    "enable" {
+        Register-HashiRemoteSupervisor
+        Enable-ScheduledTask -TaskName $TaskName | Out-Null
+        Start-ScheduledTask -TaskName $TaskName
+        Write-Host "Activated Remote supervisor task '$TaskName'"
+    }
+    "disable" {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Disable-ScheduledTask -TaskName $TaskName | Out-Null
+        Write-Host "Disabled Remote supervisor task '$TaskName'"
+    }
+    { $_ -in "unregister", "uninstall" } {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        Write-Host "Uninstalled scheduled task '$TaskName'"
+        Write-Host "Unregistered Remote supervisor task '$TaskName'"
     }
     "start" {
         Start-ScheduledTask -TaskName $TaskName
@@ -153,7 +164,7 @@ switch ($Action) {
     "status" {
         $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         if ($null -eq $Task) {
-            Write-Host "Task '$TaskName' is not installed"
+            Write-Host "Remote supervisor task '$TaskName' is not registered"
             exit 2
         }
         $Info = Get-ScheduledTaskInfo -TaskName $TaskName

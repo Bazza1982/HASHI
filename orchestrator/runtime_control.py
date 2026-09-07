@@ -236,6 +236,31 @@ async def _shutdown_active_backend(runtime: Any) -> str:
     return "none"
 
 
+async def _interrupt_active_backend(runtime: Any, *, reason: str) -> str:
+    """Issue the independent process signal before orderly loop cleanup."""
+
+    lane = getattr(runtime, "control_lane", None)
+    if lane is not None:
+        try:
+            result = await asyncio.wait_for(lane.interrupt(reason), timeout=10.0)
+            runtime.logger.info(
+                "Agent control lane interrupt reason=%s backend=%s interrupted=%s "
+                "worker_thread=%s",
+                result.reason,
+                result.backend,
+                result.interrupted,
+                result.worker_thread_id,
+            )
+        except Exception as exc:
+            runtime.logger.warning(
+                "Agent control lane interruption failed (%s); continuing with "
+                "orderly cleanup: %s",
+                type(exc).__name__,
+                exc,
+            )
+    return await _shutdown_active_backend(runtime)
+
+
 async def _clear_request_queue(
     runtime: Any,
     *,
@@ -422,7 +447,7 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
                 type(exc).__name__,
                 exc,
             )
-        await _shutdown_active_backend(runtime)
+        await _interrupt_active_backend(runtime, reason="USER_STOP")
         await _notify_interrupted(
             runtime,
             reason="user_stop",
@@ -623,7 +648,10 @@ async def cmd_steer(
     # Mark before kill so exit -9 / SIGKILL is not reported as ❌ Backend error.
     interrupt_reason = "user_focus" if focus_mode else "user_steer"
     mark_user_interrupt(runtime, interrupt_reason, request_meta=active_meta)
-    await _shutdown_active_backend(runtime)
+    await _interrupt_active_backend(
+        runtime,
+        reason="STEERED" if not focus_mode else "FOCUSED",
+    )
     await _notify_interrupted(
         runtime,
         reason=interrupt_reason,
@@ -861,7 +889,7 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
             runtime.queue.qsize(),
         )
 
-        await _shutdown_active_backend(runtime)
+        await _interrupt_active_backend(runtime, reason="USER_RETRY")
         if has_active_request:
             await _notify_interrupted(
                 runtime,

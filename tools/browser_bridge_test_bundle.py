@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools.browser_bridge_handoff import write_handoff_markdown
 from tools.browser_bridge_live_bundle import write_live_bundle
 from tools.browser_bridge_maturity import write_maturity_report
+from tools.browser_bridge_transport import DEFAULT_UNIX_SOCKET
 
 HOST_NAME = "com.hashi.browser_bridge"
 EXTENSION_ID = "jdeaedmoejdapldleofeggedgenogpka"
@@ -47,6 +48,7 @@ def _copytree_clean(src: Path, dst: Path) -> None:
 
 
 def _write_install_ps1(path: Path, *, distro_name: str, linux_repo_root: Path, bundle_dir: Path) -> None:
+    socket_path = str(DEFAULT_UNIX_SOCKET)
     content = f"""param()
 
 $ErrorActionPreference = "Stop"
@@ -88,7 +90,7 @@ Write-Log "Copied extension to $ExtensionInstallDir"
 $WrapperContent = @"
 @echo off
 cd /d %LOCALAPPDATA%
-C:\\Windows\\System32\\wsl.exe -d {distro_name} bash -lc "cd '{linux_repo_root}' && /usr/bin/env python3 -m tools.browser_native_host --stdio --socket /tmp/hashi-browser-bridge.sock --log-file '{linux_repo_root}/logs/browser_native_host.log'"
+C:\\Windows\\System32\\wsl.exe -d {distro_name} bash -lc "cd '{linux_repo_root}' && /usr/bin/env python3 -m tools.browser_native_host --stdio --socket '{socket_path}' --log-file '{linux_repo_root}/logs/browser_native_host.log'"
 "@
 Set-Content -Path $WrapperPath -Value $WrapperContent -Encoding ASCII
 Write-Log "Wrote native host wrapper: $WrapperPath"

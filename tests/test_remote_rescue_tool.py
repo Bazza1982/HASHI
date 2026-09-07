@@ -32,7 +32,7 @@ def test_candidate_base_urls_prefers_live_endpoint_port(monkeypatch):
         lambda _root: {
             "hashi9": {
                 "instance_id": "HASHI9",
-                "host": "192.168.0.211",
+                "host": "192.168.50.21",
                 "port": 35821,
                 "remote_port": 35821,
             }
@@ -41,7 +41,7 @@ def test_candidate_base_urls_prefers_live_endpoint_port(monkeypatch):
 
     urls = remote_rescue._candidate_base_urls("HASHI9")
 
-    assert urls[:2] == ["https://192.168.0.211:35821", "http://192.168.0.211:35821"]
+    assert urls[:2] == ["https://192.168.50.21:35821", "http://192.168.50.21:35821"]
 
 
 def test_capabilities_treat_missing_rescue_endpoint_as_unsupported(monkeypatch):

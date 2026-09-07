@@ -96,27 +96,64 @@ class RemoteConfig:
     def from_args(cls, args: argparse.Namespace) -> "RemoteConfig":
         root = Path(args.root).resolve()
         config_path = Path(args.config)
+        if not config_path.is_absolute():
+            config_path = root / config_path
         data: dict[str, Any] = {}
         if config_path.exists():
             data = load_json(config_path)
         base_private = root / "private"
+
+        def resolve_path(value: Any, default: Path) -> Path:
+            candidate = Path(value) if value else default
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            return candidate.resolve()
+
         return cls(
             root=root,
-            export_root=Path(args.export_root or data.get("export_root") or base_private / "remote_memory_export").resolve(),
-            inbox_root=Path(args.inbox_root or data.get("inbox_root") or base_private / "remote_memory_inbox").resolve(),
-            accepted_store=Path(args.accepted_store or data.get("accepted_store") or base_private / "remote_memory_accepted" / "accepted_records.jsonl").resolve(),
-            quarantine_root=Path(args.quarantine_root or data.get("quarantine_root") or base_private / "remote_memory_quarantine").resolve(),
-            logs_root=Path(args.logs_root or data.get("logs_root") or root / "logs").resolve(),
-            vault_root=Path(args.vault_root or data.get("vault_root") or "/mnt/c/Users/thene/Documents/lily_hashi_wiki").resolve(),
-            mirror_root=Path(args.mirror_root or data.get("mirror_root") or base_private / "remote_wiki_mirror").resolve(),
-            consolidated_db=Path(args.consolidated_db or data.get("consolidated_db") or root / "workspaces/lily/consolidated_memory.sqlite").resolve(),
+            export_root=resolve_path(
+                args.export_root or data.get("export_root"),
+                base_private / "remote_memory_export",
+            ),
+            inbox_root=resolve_path(
+                args.inbox_root or data.get("inbox_root"),
+                base_private / "remote_memory_inbox",
+            ),
+            accepted_store=resolve_path(
+                args.accepted_store or data.get("accepted_store"),
+                base_private / "remote_memory_accepted" / "accepted_records.jsonl",
+            ),
+            quarantine_root=resolve_path(
+                args.quarantine_root or data.get("quarantine_root"),
+                base_private / "remote_memory_quarantine",
+            ),
+            logs_root=resolve_path(
+                args.logs_root or data.get("logs_root"),
+                root / "logs",
+            ),
+            vault_root=resolve_path(
+                args.vault_root or data.get("vault_root"),
+                root / "wiki",
+            ),
+            mirror_root=resolve_path(
+                args.mirror_root or data.get("mirror_root"),
+                base_private / "remote_wiki_mirror",
+            ),
+            consolidated_db=resolve_path(
+                args.consolidated_db
+                or data.get("consolidated_db"),
+                root / "workspaces" / "lily" / "consolidated_memory.sqlite",
+            ),
         )
 
 
 def print_header(mode: str, cfg: RemoteConfig, args: argparse.Namespace) -> None:
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = cfg.root / config_path
     print(f"[remote-memory] mode={mode}")
     print(f"[remote-memory] root={cfg.root}")
-    print(f"[remote-memory] config={Path(args.config).resolve()}")
+    print(f"[remote-memory] config={config_path.resolve()}")
     print(f"[remote-memory] dry_run={bool(getattr(args, 'dry_run', False))}")
     print(f"[remote-memory] check={bool(getattr(args, 'check', False))}")
     print(f"[remote-memory] export_root={cfg.export_root}")

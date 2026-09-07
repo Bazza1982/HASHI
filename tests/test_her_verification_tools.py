@@ -89,23 +89,30 @@ async def test_workspace_search_falls_back_to_grep_when_rg_is_unavailable(
         "operation": "search",
         "exit_code": 0,
         "matches": 1,
-        "search_backend": "grep",
+        "search_backend": "grep" if real_which("grep") else "python",
     }
 
 
 @pytest.mark.asyncio
-async def test_workspace_search_reports_unavailable_without_a_search_binary(
+async def test_workspace_search_uses_python_fallback_without_a_search_binary(
     tmp_path, monkeypatch
 ):
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
     monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
 
     result = await her_verification.execute_workspace_inspect(
-        {"operation": "search", "query": "alpha", "path": "."},
+        {"operation": "search", "query": "beta", "path": "sample.txt"},
         workspace_dir=tmp_path,
     )
 
-    assert result.output.startswith("Error: workspace search is unavailable")
-    assert result.details["unavailable"] is True
+    assert result.output == "2:beta\n"
+    assert result.details == {
+        "operation": "search",
+        "exit_code": 0,
+        "matches": 1,
+        "search_backend": "python",
+    }
 
 
 @pytest.mark.asyncio
@@ -138,6 +145,11 @@ async def test_verification_run_lists_recipes_and_rejects_legacy_shell_text(
         "Error: verification_run does not accept implicit-shell command text"
     )
     assert not (tmp_path / "should-not-exist").exists()
+
+    offline_recipe = her_verification._recipe_catalog(None)["pytest_offline"]
+    assert offline_recipe["argv"][-1] == (
+        "not contract and not live and not platform and not real_wall_clock"
+    )
 
 
 @pytest.mark.asyncio

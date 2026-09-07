@@ -1,10 +1,8 @@
 """Tests for ETE v1 codec — roundtrip (import → export → re-import)."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
 
 import sys
 

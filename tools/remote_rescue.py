@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-remote_rescue.py - Inspect and start HASHI core through Hashi Remote.
+remote_rescue.py - Inspect and recover HASHI core through Hashi Remote.
 
 Usage:
     python tools/remote_rescue.py capabilities HASHI1
     python tools/remote_rescue.py status HASHI1
     python tools/remote_rescue.py start HASHI1 --reason "core down"
     python tools/remote_rescue.py restart WATCHTOWER --reason "operator hard restart"
+    python tools/remote_rescue.py reboot HASHI1 --agent zhaojun --mode min
 """
 
 from __future__ import annotations
+
+# ruff: noqa: E402 - direct execution bootstraps the repository import path.
 
 import argparse
 import json
@@ -196,6 +199,8 @@ def probe_capabilities(
             "protocol_status": protocol.status != 404 and protocol.ok,
             "rescue_control": rescue_control,
             "rescue_start": rescue_start,
+            "rescue_restart": "rescue_restart" in advertised,
+            "rescue_reboot": "rescue_reboot" in advertised,
         },
         "remote_supervisor": protocol.body.get("remote_supervisor") if protocol.ok else None,
         "status_endpoint_status": status_probe.status,
@@ -305,6 +310,51 @@ def rescue_restart(
     return (0 if result.ok else EXIT_REMOTE_ERROR), payload
 
 
+def rescue_reboot(
+    instance_id: str,
+    *,
+    agent: str,
+    mode: str = "min",
+    reason: str | None = None,
+    fallback_restart: bool = True,
+    token: str | None = None,
+    shared_token: str | None = None,
+    from_instance: str | None = None,
+    timeout: int = 45,
+) -> tuple[int, dict]:
+    base_url = _reachable_base_url(
+        instance_id,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+    )
+    result = _request_json_status(
+        f"{base_url}/control/hashi/reboot",
+        method="POST",
+        payload={
+            "agent": agent,
+            "mode": mode,
+            "reason": reason,
+            "fallback_restart": bool(fallback_restart),
+        },
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+    )
+    if result.status == 404:
+        return EXIT_UNSUPPORTED, _unsupported_payload(
+            instance_id, "/control/hashi/reboot", base_url
+        )
+    payload = dict(result.body)
+    payload.setdefault("instance", _normalize_instance_id(instance_id))
+    payload.setdefault("base_url", base_url)
+    if result.status in {401, 403}:
+        return EXIT_FORBIDDEN, payload
+    return (0 if result.ok else EXIT_REMOTE_ERROR), payload
+
+
 def _print_result(payload: dict, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
@@ -342,9 +392,20 @@ def main(argv: list[str] | None = None) -> int:
     restart.add_argument("instance", help="Target instance, e.g. WATCHTOWER")
     restart.add_argument("--reason", default="remote hard restart", help="Audit reason recorded by target Remote")
 
+    reboot = sub.add_parser("reboot")
+    reboot.add_argument("instance", help="Target instance, e.g. HASHI1")
+    reboot.add_argument("--agent", required=True, help="Target Agent name")
+    reboot.add_argument("--mode", choices=["min"], default="min")
+    reboot.add_argument("--reason", default="supervised hot reboot")
+    reboot.add_argument(
+        "--no-fallback-restart",
+        action="store_true",
+        help="Do not launch process recovery if Workbench is unreachable",
+    )
+
     logs = sub.add_parser("logs")
     logs.add_argument("instance", help="Target instance, e.g. HASHI1")
-    logs.add_argument("--name", choices=["start", "audit", "supervisor"], default="start")
+    logs.add_argument("--name", choices=["start", "restart", "audit", "supervisor"], default="start")
     logs.add_argument("--tail", type=int, default=120)
 
     args = parser.parse_args(argv)
@@ -363,6 +424,20 @@ def main(argv: list[str] | None = None) -> int:
             return code
         if args.cmd == "restart":
             code, payload = rescue_restart(args.instance, reason=args.reason, token=args.token, shared_token=None if args.token else args.shared_token, from_instance=args.from_instance, timeout=max(args.timeout, 15))
+            _print_result(payload, as_json=args.json)
+            return code
+        if args.cmd == "reboot":
+            code, payload = rescue_reboot(
+                args.instance,
+                agent=args.agent,
+                mode=args.mode,
+                reason=args.reason,
+                fallback_restart=not args.no_fallback_restart,
+                token=args.token,
+                shared_token=None if args.token else args.shared_token,
+                from_instance=args.from_instance,
+                timeout=max(args.timeout, 45),
+            )
             _print_result(payload, as_json=args.json)
             return code
         if args.cmd == "logs":

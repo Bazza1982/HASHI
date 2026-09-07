@@ -5,8 +5,16 @@
 - Testing scope follows `docs/TESTING_POLICY.md`; focused, core, offline
   product, contract, platform, and live results are reported separately.
 - Static compile: `python3 -m py_compile main.py orchestrator/*.py`
+- Runtime contract:
+  - `python scripts/check_runtime_contract.py --json`
+  - CPython is the approved 3.12.13 patch and packaging, container, CI and portable builders agree
+  - standard dependencies install from `constraints/standard-py312.lock`
+  - `python -m pytest -q tests/test_runtime_contract.py tests/test_function_generation.py tests/test_reboot_manager.py`
 - Core gate: `python -m pytest -q`
-- Offline product suite for the release candidate: `python -m pytest -q tests -m "not contract and not live and not platform"`
+- Offline product suite for the release candidate: `python -m pytest -q tests -m "not contract and not live and not platform and not real_wall_clock"`
+- Python source distribution and wheel: `python -m build`
+- npm publication boundary: `npm pack --dry-run --json` and
+  `python -m pytest -q tests/contract/test_npm_package_contract.py`
 - Relevant contract and platform scopes are run and reported separately; live
   scope requires explicit authorization
 - Architecture boundaries:
@@ -18,7 +26,7 @@
     process files from regressing
   - no new model, command, manager, workspace-state, instance-lock, or
     platform fact source duplicates an existing owner
-- Backend API health: `curl http://127.0.0.1:<workbench_port>/api/health`
+- Backend API health: `curl http://127.0.0.1:<backend_api_port>/api/health`
 - API Gateway health when enabled: `curl http://127.0.0.1:<api_gateway_port>/health`
 - Live reboot smoke:
   - `/reboot min`
@@ -28,12 +36,18 @@
     and returns, with no implicit `max` and no targeted-interface rejection
   - verify malformed `min`/number requests are rejected before preflight and
     never fall back to all running Agents
-  - no function change or failed reload directs the operator to a cold process restart
+  - no function change or failed generation directs the operator to a cold process restart
   - verify agents return to `ONLINE`
-  - verify Backend API, enabled API Gateway, scheduler, delivery watcher, and
-    background jobs are recreated and healthy
-  - introduce a syntax error in a disposable fixture and verify preflight
-    rejects `/reboot` without stopping live agents
+  - verify the Backend API, enabled API Gateway, scheduler, delivery watcher,
+    and background-job manager retain Core ownership and remain healthy
+  - introduce a syntax/import/contract error in a disposable candidate and
+    verify the isolated staging worker rejects `/reboot` without stopping live
+    agents or changing the active generation ID
+  - change a disposable source after probe and verify the commit-time digest
+    check restores the previous generation
+  - verify the staging receipt uses another PID and exactly matches Core's
+    executable, platform ABI, dependency digest, protected-Core digest and API levels
+  - perform two successful `/reboot min` operations under the same Core PID
   - scan bridge logs for post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, and `LOCAL MODE`
 - Slim core docs:
   - `docs/HASHI_SLIM_CORE_ARCHITECTURE.md` reflects current manager boundaries
@@ -113,6 +127,9 @@
     private media/cache content, local operator notes, or unrelated user edits
   - generated binaries are included only when their provenance, platform,
     checksum, license, and release purpose are reviewed
+  - npm and Portable packaging include the reviewed built-in workflow library,
+    while excluding runtime-generated/private workflows and instance-local
+    Skills whether or not those resources are installed locally
   - optional EXP binary assets are absent from Git/source distributions; the
     independent pack checksum and safe restore test pass
   - scan the exact outbound range for private-key blocks, access-token formats,

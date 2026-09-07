@@ -10,7 +10,6 @@ from adapters.xai_oauth_credentials import (
     secrets_oauth_refresh_available,
     xai_api_credentials_available,
 )
-from orchestrator.flexible_backend_registry import get_secret_lookup_order
 
 
 def _cli_command(global_config: Any, engine: str) -> str:

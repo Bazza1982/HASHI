@@ -750,16 +750,48 @@ async def handle_voice_or_audio(
     if runtime._should_redirect_after_transfer():
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
-    from orchestrator.voice_transcriber import get_transcriber
-
     _print_user_message(runtime.name, f"Transcribing {filename}...", media_tag=media_kind)
     try:
         local_path = await runtime.download_media(file_id, filename)
-        transcriber = get_transcriber()
         backend = getattr(runtime.backend_manager, "current_backend", None)
+        manager = getattr(runtime, "voice_manager", None)
+        native_enabled = getattr(manager, "native_audio_enabled", None)
+        native_requested = False
+        if callable(native_enabled):
+            try:
+                native_requested = bool(native_enabled("telegram"))
+            except TypeError:
+                native_requested = bool(native_enabled())
+        collecting = runtime_long.is_collecting(
+            runtime, update.effective_chat.id
+        )
+        if native_requested and collecting:
+            local_path.unlink(missing_ok=True)
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "voice.native.long_unavailable",
+                    locale=ui_language.preferred_locale(runtime, update),
+                ),
+            )
+            return
         native_audio = _backend_supports_native_audio_chat(
             runtime, backend, terminal="telegram"
-        ) and not runtime_long.is_collecting(runtime, update.effective_chat.id)
+        )
+        if native_requested and not native_audio:
+            local_path.unlink(missing_ok=True)
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "voice.native.unavailable",
+                    locale=ui_language.preferred_locale(runtime, update),
+                ),
+            )
+            return
+
+        from orchestrator.voice_transcriber import get_transcriber
+
+        transcriber = get_transcriber()
         if native_audio:
             transcript_task = asyncio.create_task(transcriber.transcribe(local_path))
             request_content, manifest, request_metadata = (
@@ -784,7 +816,9 @@ async def handle_voice_or_audio(
                 "gate_lock": asyncio.Lock(),
                 "status": "pending",
                 "attachment_id": attachment_id,
-                "safe_voice": bool(runtime._safevoice_enabled),
+                # Choosing Native is explicit authorization for the complete
+                # raw-audio Turn, including its one derived audit transcript.
+                "safe_voice": False,
                 "confirmation_requested": False,
                 "confirmation_presented": False,
                 "native_audio_completed": False,
@@ -832,7 +866,7 @@ async def handle_voice_or_audio(
             transcript_state["auto_release"] = _auto_release
             registry[attachment_id] = transcript_state
             request_metadata["voice_transcript_key"] = attachment_id
-            request_metadata["safe_voice"] = bool(runtime._safevoice_enabled)
+            request_metadata["safe_voice"] = False
             request_id = await runtime.enqueue_request(
                 update.effective_chat.id,
                 caption,

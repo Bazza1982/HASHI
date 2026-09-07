@@ -158,13 +158,19 @@ def test_prompt_assembler_injects_global_before_agent_local_sys(tmp_path: Path) 
 
     assert prompt.count("--- INSTANCE-GLOBAL /sys ---") == 1
     assert "[Global /sys slot 1]\nAlways answer in Chinese." in prompt
+    assert prompt.count("--- INSTANCE PATH PRESENTATION ---") == 1
     assert "--- AGENT-LOCAL /sys ---" in prompt
     assert prompt.index("Always answer in Chinese.") < prompt.index(
         "Zelda local reporting style"
     )
     sections = {item["key"]: item for item in payload["envelope"]["sections"]}
     assert sections["instance_global_sys"]["rank"] > sections["agent_local_sys"]["rank"]
+    assert (
+        sections["instance_path_presentation"]["rank"]
+        > sections["current_user_request"]["rank"]
+    )
     assert sections["instance_global_sys"]["protected"] is True
+    assert sections["instance_path_presentation"]["protected"] is True
     assert sections["agent_local_sys"]["protected"] is True
 
 

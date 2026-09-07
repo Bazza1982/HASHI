@@ -82,8 +82,8 @@ def test_voice_manager_native_controls_are_persistent_and_legacy_tts_stays_separ
 
     assert manager.native_policy["mode"] == "off"
     assert manager.is_enabled() is False
-    manager.set_native_mode("auto")
     manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")
+    manager.set_native_mode("auto")
     manager.set_native_voice("alloy")
     manager.set_native_format("wav")
     manager.set_native_reply_content("both")
@@ -93,7 +93,7 @@ def test_voice_manager_native_controls_are_persistent_and_legacy_tts_stays_separ
     reloaded = VoiceManager(tmp_path / "workspace", tmp_path / "media")
     assert reloaded.native_audio_enabled() is True
     assert reloaded.native_policy == {
-        "mode": "auto",
+        "mode": "native",
         "reply_trigger": "voice_message",
         "reply_content": "audio_and_text",
         "provider": "openrouter-api",
@@ -112,6 +112,7 @@ def test_voice_manager_native_controls_are_persistent_and_legacy_tts_stays_separ
 
 def test_terminal_and_conversation_native_presentation_precedence(tmp_path):
     manager = VoiceManager(tmp_path / "workspace", tmp_path / "media")
+    manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")
     manager.set_native_mode("auto")
     state = manager.get_state()
     state["native"]["terminal_overrides"] = {
@@ -1216,7 +1217,7 @@ async def test_generic_session_audio_upload_run_transcript_replay_and_retrieval(
 
 
 @pytest.mark.asyncio
-async def test_generic_safe_voice_waits_for_consumer_before_confirmation(
+async def test_generic_native_selection_bypasses_safe_voice_for_all_consumers(
     tmp_path,
     monkeypatch,
 ):
@@ -1284,7 +1285,7 @@ async def test_generic_safe_voice_waits_for_consumer_before_confirmation(
         session["session_id"],
         "voice.input.transcript_ready",
     )
-    assert ready["detail"]["safe_voice_state"] == "ready"
+    assert ready["detail"]["safe_voice_state"] == "released"
     assert all(
         event["kind"] != "voice.input.transcript_pending_confirmation"
         for event in server.session_store.events(
@@ -1292,32 +1293,20 @@ async def test_generic_safe_voice_waits_for_consumer_before_confirmation(
         )
     )
     state = runtime._native_voice_transcripts[run["request_id"]]
-    assert state["status"] == "ready"
-    assert state["release_event"].is_set() is False
-
-    consumer = asyncio.create_task(await_authorized_transcript(state))
-    pending = await _wait_for_event(
-        server,
-        session["session_id"],
-        "voice.input.transcript_pending_confirmation",
+    assert state["safe_voice"] is False
+    assert state["status"] == "released"
+    assert state["release_event"].is_set() is True
+    assert await await_authorized_transcript(state) == (
+        "safe voice transcript",
+        "released",
     )
-    assert pending["detail"]["text"] == "safe voice transcript"
-    assert pending["detail"]["safe_voice_state"] == "pending_confirmation"
-    transcript_id = pending["detail"]["transcript_id"]
-
-    decided = await server.handle_v1_voice_transcript_decide(
-        _Request(
-            {"decision": "confirm"},
-            match_info={
-                "session_id": session["session_id"],
-                "transcript_id": transcript_id,
-            },
+    assert state["confirmation_requested"] is False
+    assert all(
+        event["kind"] != "voice.input.transcript_pending_confirmation"
+        for event in server.session_store.events(
+            session["session_id"], owner_id="user:7"
         )
     )
-    assert decided.status == 200
-    assert state["release_event"].is_set() is True
-    assert state["status"] == "released"
-    assert await consumer == ("safe voice transcript", "released")
     await server.shutdown()
 
 
@@ -1518,6 +1507,7 @@ class _SSEClient:
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
 async def test_openrouter_normalizes_ogg_once_when_exact_model_requires_wav(tmp_path):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:

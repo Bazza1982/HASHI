@@ -1,4 +1,3 @@
-import os
 import shutil
 import json
 from pathlib import Path
@@ -6,7 +5,7 @@ from pathlib import Path
 def nuclear_reset():
     # Navigate to project root (parent of scripts/)
     project_root = Path(__file__).parent.parent
-    print(f"=== HASHI NUCLEAR RESET ===")
+    print("=== HASHI NUCLEAR RESET ===")
     print(f"Target: {project_root}")
     print("-" * 30)
 

@@ -148,6 +148,9 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch):
     payloads = []
 
     class FakeResponse:
+        def __init__(self, body=b'{"ok": true}'):
+            self.body = body
+
         def __enter__(self):
             return self
 
@@ -155,9 +158,14 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch):
             return False
 
         def read(self):
-            return b'{"ok": true}'
+            return self.body
 
     def fake_urlopen(req, timeout):
+        if req.get_method() == "GET":
+            return FakeResponse(
+                b'{"ok": true, "instance_id": "HASHI1", '
+                b'"workbench_endpoint": {"instance_id": "HASHI1"}}'
+            )
         payloads.append(json.loads(req.data.decode("utf-8")))
         return FakeResponse()
 
@@ -170,6 +178,7 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch):
         "zelda",
         "Please review the queue fix.",
         "HASHI1",
+        expected_instance="HASHI1",
     )
 
     assert payloads[0]["agent"] == "akane"
@@ -195,13 +204,66 @@ def test_probe_http_returns_false_on_url_error(monkeypatch):
     assert hchat_send._probe_http("http://127.0.0.1:18800/api/health") is False
 
 
+def test_workbench_probe_rejects_healthy_wrong_instance(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "instance_id": "HASHI1",
+                    "workbench_endpoint": {"instance_id": "HASHI1"},
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        hchat_send.urllib_request,
+        "urlopen",
+        lambda _request, **_kwargs: FakeResponse(),
+    )
+
+    assert hchat_send._probe_workbench_health(
+        "127.0.0.1",
+        18800,
+        "HASHI3",
+    ) is False
+    assert hchat_send._probe_workbench_health(
+        "127.0.0.1",
+        18800,
+        "HASHI1",
+    ) is True
+
+
+def test_remote_probe_rejects_healthy_wrong_instance(monkeypatch):
+    monkeypatch.setattr(
+        hchat_send,
+        "_read_http_json",
+        lambda _url, timeout=3: {
+            "ok": True,
+            "instance": {"instance_id": "HASHI2"},
+        },
+    )
+
+    assert hchat_send._probe_remote("127.0.0.1", 8767, "HASHI3") is None
+    assert hchat_send._probe_remote("127.0.0.1", 8767, "HASHI2") == "https"
+
+
 def test_check_hchat_route_local_agent_probes_without_delivery(monkeypatch):
     cfg = _local_cfg()
     send_calls = []
 
     monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
     monkeypatch.setattr(hchat_send, "_send_via_local_workbench", lambda *args: send_calls.append(args) or True)
-    monkeypatch.setattr(hchat_send, "_first_reachable_workbench", lambda hosts, port: "10.255.255.254")
+    monkeypatch.setattr(
+        hchat_send,
+        "_first_reachable_workbench",
+        lambda hosts, port, expected_instance: "10.255.255.254",
+    )
 
     result = hchat_send.check_hchat_route("akane", "zelda")
 
@@ -218,7 +280,14 @@ def test_check_hchat_route_unknown_local_agent_fails_before_probe(monkeypatch):
     probes = []
 
     monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
-    monkeypatch.setattr(hchat_send, "_first_reachable_workbench", lambda hosts, port: probes.append((hosts, port)) or None)
+    monkeypatch.setattr(
+        hchat_send,
+        "_first_reachable_workbench",
+        lambda hosts, port, expected_instance: probes.append(
+            (hosts, port, expected_instance)
+        )
+        or None,
+    )
 
     result = hchat_send.check_hchat_route("unknown", "zelda")
 
@@ -232,7 +301,11 @@ def test_check_hchat_route_group_reports_members_without_delivery(monkeypatch):
     cfg["groups"] = {"staff": {"members": ["akane", "zelda"], "exclude_from_broadcast": []}}
 
     monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
-    monkeypatch.setattr(hchat_send, "_first_reachable_workbench", lambda hosts, port: "127.0.0.1")
+    monkeypatch.setattr(
+        hchat_send,
+        "_first_reachable_workbench",
+        lambda hosts, port, expected_instance: "127.0.0.1",
+    )
 
     result = hchat_send.check_hchat_route("@staff", "zelda")
 
@@ -254,7 +327,11 @@ def test_check_hchat_route_remote_workbench(monkeypatch):
     monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
     monkeypatch.setattr(hchat_send, "_get_cached_route", lambda _agent: None)
     monkeypatch.setattr(hchat_send, "_find_remote_instance", lambda *args, **kwargs: remote)
-    monkeypatch.setattr(hchat_send, "_first_reachable_workbench", lambda hosts, port: "10.0.0.3")
+    monkeypatch.setattr(
+        hchat_send,
+        "_first_reachable_workbench",
+        lambda hosts, port, expected_instance: "10.0.0.3",
+    )
 
     result = hchat_send.check_hchat_route("rika@HASHI2", "zelda")
 
@@ -306,22 +383,26 @@ def test_check_hchat_route_reports_protocol_transport_when_available(monkeypatch
     cfg = _local_cfg()
     remote = {
         "instance_id": "INTEL",
-        "host": "192.168.0.6",
+        "host": "192.168.50.6",
         "wb_port": 18802,
-        "remote_host": "192.168.0.6",
+        "remote_host": "192.168.50.6",
         "remote_port": 8766,
     }
 
     monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
     monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
     monkeypatch.setattr(hchat_send, "_find_remote_instance", lambda *args, **kwargs: remote)
-    monkeypatch.setattr(hchat_send, "_probe_remote_http", lambda host, port, timeout=3: True)
+    monkeypatch.setattr(
+        hchat_send,
+        "_probe_remote_http",
+        lambda host, port, expected_instance: True,
+    )
 
     result = hchat_send.check_hchat_route("agent1@INTEL", "zelda")
 
     assert result["ok"] is True
     assert result["route_type"] == "remote_protocol"
-    assert result["host"] == "192.168.0.6"
+    assert result["host"] == "192.168.50.6"
     assert result["remote_port"] == 8766
 
 
@@ -336,8 +417,8 @@ def test_load_instances_overlays_live_endpoint_over_stale_instance(monkeypatch, 
                     "intel": {
                         "instance_id": "INTEL",
                         "active": False,
-                        "api_host": "192.168.0.6",
-                        "lan_ip": "192.168.0.6",
+                        "api_host": "192.168.50.6",
+                        "lan_ip": "192.168.50.6",
                         "remote_port": 40050,
                         "workbench_port": 18802,
                     }
@@ -353,7 +434,7 @@ def test_load_instances_overlays_live_endpoint_over_stale_instance(monkeypatch, 
                     "intel": {
                         "instance_id": "INTEL",
                         "display_name": "INTEL",
-                        "host": "192.168.0.6",
+                        "host": "192.168.50.6",
                         "port": 8766,
                         "remote_port": 8766,
                         "workbench_port": 18802,
@@ -376,8 +457,8 @@ def test_load_instances_overlays_live_endpoint_over_stale_instance(monkeypatch, 
     instances = hchat_send._load_instances()
 
     assert instances["intel"]["active"] is True
-    assert instances["intel"]["api_host"] == "192.168.0.6"
-    assert instances["intel"]["lan_ip"] == "192.168.0.6"
+    assert instances["intel"]["api_host"] == "192.168.50.6"
+    assert instances["intel"]["lan_ip"] == "192.168.50.6"
     assert instances["intel"]["remote_port"] == 8766
     assert instances["intel"]["workbench_port"] == 18802
     assert instances["intel"]["_discovery"] == "lan"
@@ -394,7 +475,7 @@ def test_load_instances_ignores_stale_live_endpoint(monkeypatch, tmp_path):
                     "intel": {
                         "instance_id": "INTEL",
                         "active": False,
-                        "api_host": "192.168.0.6",
+                        "api_host": "192.168.50.6",
                         "remote_port": 40050,
                         "workbench_port": 18802,
                     }
@@ -409,7 +490,7 @@ def test_load_instances_ignores_stale_live_endpoint(monkeypatch, tmp_path):
                 "endpoints": {
                     "intel": {
                         "instance_id": "INTEL",
-                        "host": "192.168.0.6",
+                        "host": "192.168.50.6",
                         "remote_port": 8766,
                         "workbench_port": 18802,
                         "updated_at": 100.0,
@@ -466,8 +547,13 @@ def test_load_instances_keeps_agents_json_authoritative_for_local_instance(
 
 def test_remote_agent_names_falls_back_to_workbench_agents(monkeypatch):
     payloads = {
-        "http://192.168.0.6:40050/protocol/agents": URLError("remote stale"),
-        "http://192.168.0.6:18802/api/agents": {
+        "http://192.168.50.6:40050/protocol/agents": URLError("remote stale"),
+        "http://192.168.50.6:18802/api/health": {
+            "ok": True,
+            "instance_id": "INTEL",
+            "workbench_endpoint": {"instance_id": "INTEL"},
+        },
+        "http://192.168.50.6:18802/api/agents": {
             "agents": [
                 {"id": "lily", "name": "lily", "online": True},
                 {"id": "agent1", "name": "agent1", "online": True},
@@ -501,8 +587,8 @@ def test_remote_agent_names_falls_back_to_workbench_agents(monkeypatch):
         "intel",
         {
             "instance_id": "INTEL",
-            "api_host": "192.168.0.6",
-            "lan_ip": "192.168.0.6",
+            "api_host": "192.168.50.6",
+            "lan_ip": "192.168.50.6",
             "remote_port": 40050,
             "workbench_port": 18802,
         },
@@ -546,15 +632,15 @@ def test_remote_agent_names_prefers_authenticated_protocol_directory(monkeypatch
         "intel",
         {
             "instance_id": "INTEL",
-            "api_host": "192.168.0.6",
-            "lan_ip": "192.168.0.6",
+            "api_host": "192.168.50.6",
+            "lan_ip": "192.168.50.6",
             "remote_port": 40050,
             "workbench_port": 18802,
         },
     )
 
     assert agents == ["lily"]
-    assert captured["url"] == "http://192.168.0.6:40050/protocol/directory"
+    assert captured["url"] == "http://192.168.50.6:40050/protocol/directory"
     headers = {key.lower(): value for key, value in captured["headers"].items()}
     assert headers["x-hashi-auth-scheme"] == "hashi-shared-hmac-v1"
     assert headers["x-hashi-from-instance"] == "HASHI1"
@@ -590,7 +676,11 @@ def test_find_remote_instance_accepts_agent_on_explicit_target(monkeypatch):
 
     monkeypatch.setattr(hchat_send, "_load_instances", lambda: instances)
     monkeypatch.setattr(hchat_send, "_remote_agent_names", lambda _inst_id, _inst_info: ["hashiko"])
-    monkeypatch.setattr(hchat_send, "_probe_workbench", lambda _host, _port: False)
+    monkeypatch.setattr(
+        hchat_send,
+        "_probe_workbench",
+        lambda _host, _port, _expected_instance: False,
+    )
 
     route = hchat_send._find_remote_instance("hashiko", "HASHI1", target_instance="HASHI9")
 
@@ -602,26 +692,26 @@ def test_preferred_host_deprioritizes_same_host_loopback():
     instance_info = {
         "same_host_loopback": "127.0.0.1",
         "api_host": "127.0.0.1",
-        "lan_ip": "192.168.0.211",
+        "lan_ip": "192.168.50.21",
         "tailscale_ip": "100.64.0.9",
         "internet_host": "198.51.100.10",
     }
 
-    assert hchat_send._preferred_host(instance_info) == "192.168.0.211"
-    assert hchat_send._preferred_host(instance_info, for_remote=True) == "192.168.0.211"
+    assert hchat_send._preferred_host(instance_info) == "192.168.50.21"
+    assert hchat_send._preferred_host(instance_info, for_remote=True) == "192.168.50.21"
 
 
 def test_workbench_hosts_for_route_prefers_canonical_before_loopback():
     route = {
-        "host": "192.168.0.211",
+        "host": "192.168.50.21",
         "api_host": "127.0.0.1",
-        "lan_ip": "192.168.0.211",
+        "lan_ip": "192.168.50.21",
         "same_host_loopback": "127.0.0.1",
     }
 
     hosts = hchat_send._workbench_hosts_for_route(route)
 
-    assert hosts[0] == "192.168.0.211"
+    assert hosts[0] == "192.168.50.21"
     assert hosts[-1] == "127.0.0.1"
 
 

@@ -11,6 +11,8 @@ from typing import Any
 
 from tools.registry import ToolRegistry
 from tools.schemas import ALL_TOOL_NAMES
+from orchestrator.file_permissions import tighten_fd_permissions
+from orchestrator.service_endpoints import ServiceEndpointError
 
 CONTEXT_SCHEMA_VERSION = 5
 _COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, 4, CONTEXT_SCHEMA_VERSION})
@@ -68,19 +70,42 @@ def live_workbench_api_base_url(
         or audit.get("_kernel")
     )
     server = getattr(kernel, "workbench_api", None) if kernel is not None else None
+    expected_instance = str(getattr(global_config, "instance_id", "") or "").strip()
+    resolver = getattr(kernel, "resolve_service_endpoint", None)
+    if callable(resolver):
+        endpoint = resolver(
+            "workbench",
+            expected_instance=expected_instance or None,
+        )
+        url = str(endpoint.get("base_url") or "").strip().rstrip("/")
+        if not url:
+            raise ServiceEndpointError("live Workbench endpoint has no base URL")
+        return url
+    endpoint_registry = getattr(kernel, "endpoint_registry", None)
+    if endpoint_registry is not None:
+        return endpoint_registry.resolve(
+            "workbench",
+            expected_instance=expected_instance or None,
+        ).base_url
     host = str(
         getattr(server, "bind_host", None)
         or getattr(global_config, "api_host", None)
-        or "127.0.0.1"
     ).strip()
-    if host in {"", "0.0.0.0", "localhost"}:
-        host = "127.0.0.1"
-    elif host == "::":
-        host = "::1"
-    port = int(
-        getattr(getattr(server, "global_config", None), "workbench_port", None)
-        or getattr(global_config, "workbench_port", 18800)
-    )
+    if not host or host in {"0.0.0.0", "::"}:
+        raise ServiceEndpointError("connectable Workbench host is unavailable")
+    server_config = getattr(server, "global_config", None)
+    server_instance = str(getattr(server_config, "instance_id", "") or "").strip()
+    if expected_instance and server_instance and server_instance.casefold() != expected_instance.casefold():
+        raise ServiceEndpointError(
+            "cross-instance Workbench endpoint rejected: "
+            f"expected={expected_instance} received={server_instance}"
+        )
+    raw_port = getattr(server, "bound_port", None) or getattr(
+        server_config, "workbench_port", None
+    ) or getattr(global_config, "workbench_port", None)
+    if raw_port is None:
+        raise ServiceEndpointError("live Workbench port is unavailable")
+    port = int(raw_port)
     url_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
     return f"http://{url_host}:{port}"
 
@@ -267,7 +292,7 @@ def write_gateway_context(
     payload = json.dumps(asdict(context), ensure_ascii=False, indent=2, sort_keys=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(fd, 0o600)
+        tighten_fd_permissions(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.write("\n")

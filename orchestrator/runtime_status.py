@@ -56,7 +56,7 @@ def _delivery_line(delivery: Mapping[str, Any] | None) -> str:
     status = str(delivery.get("status") or "blocked")
     remaining_text = ui_language.tr("status.delivery.remaining_unknown")
 
-    if blocked_until_raw:
+    if blocked_until_raw and status == "blocked":
         try:
             blocked_until = datetime.fromisoformat(str(blocked_until_raw))
             now = datetime.now().astimezone()

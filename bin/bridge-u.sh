@@ -9,7 +9,7 @@ set -euo pipefail
 # ── macOS dependency guard ──────────────────────────────────────────────────
 if [[ "$(uname)" == "Darwin" ]]; then
     MISSING=()
-    command -v python3  &>/dev/null || MISSING+=("python3 (brew install python@3.11)")
+    command -v python3.12 &>/dev/null || MISSING+=("python3.12 (brew install python@3.12)")
     command -v node     &>/dev/null || MISSING+=("node    (brew install node)")
     command -v ffmpeg   &>/dev/null || MISSING+=("ffmpeg  (brew install ffmpeg)")
     if [[ ${#MISSING[@]} -gt 0 ]]; then
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [options]"
             echo "Options:"
             echo "  --resume-last       Automatically resume last selected agents"
-            echo "  --api-gateway, -a   Enable API gateway (default: backend API port + 1)"
+            echo "  --api-gateway, -a   Enable API gateway (default: Workbench port + 1)"
             echo "  --agents NAME       Start specific agent(s)"
             echo "  --dry-run           Show what would be done"
             echo "  --help, -h          Show this help"
@@ -236,7 +236,7 @@ render_menu() {
     # ── Services ──
     echo -e "${C_RAIL}│${C_RESET} ${C_ACCENT}Services${C_RESET}"
     
-    echo -e "${C_RAIL}│${C_RESET}   Backend API     ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
+    echo -e "${C_RAIL}│${C_RESET}   Workbench       ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
     
     if [[ "$api_label" == "ON" ]]; then
         echo -e "${C_RAIL}│${C_RESET}   API Gateway     ${C_OK}ON${C_RESET} (:${API_GATEWAY_PORT})"
@@ -391,22 +391,46 @@ choose_agents() {
 }
 
 ensure_env() {
-    if [[ ! -d .venv ]]; then
+    local venv_dir="${HASHI_VENV_DIR:-.venv}"
+    if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
+        venv_dir="${HASHI_VENV_DIR:-.venv-wsl}"
+    fi
+    if [[ ! -d "$venv_dir" ]]; then
+        local bootstrap_python=""
+        if command -v python3.12 >/dev/null 2>&1; then
+            bootstrap_python="$(command -v python3.12)"
+        elif command -v python3 >/dev/null 2>&1; then
+            bootstrap_python="$(command -v python3)"
+        fi
+        if [[ -z "$bootstrap_python" ]] || ! "$bootstrap_python" \
+            "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
+            --code-root "$SCRIPT_DIR" --runtime-only >/dev/null; then
+            echo -e "${C_ERR}HASHI requires the approved CPython Core version to create its environment.${C_RESET}"
+            exit 78
+        fi
         echo -e "${C_MUTED}Creating virtual environment...${C_RESET}"
-        python3 -m venv .venv
+        "$bootstrap_python" -m venv "$venv_dir"
     fi
     
-    source .venv/bin/activate
-
-    # Prefer Linux user-installed CLIs over Windows PATH entries exposed by WSL.
+    # Put user-installed CLIs on PATH before activation. Activating last keeps
+    # the Core interpreter first and prevents PATH drift to system Python.
     if [[ -d "$HOME/.local/bin" ]]; then
         export PATH="$HOME/.local/bin:$PATH"
     fi
-    
-    # Check dependencies
-    if ! python3 -c "import telegram, httpx, aiohttp, PIL, croniter" 2>/dev/null; then
-        echo -e "${C_WARN}Installing Python dependencies...${C_RESET}"
-        pip install --quiet -r requirements.txt
+    source "$venv_dir/bin/activate"
+    if ! python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
+        --code-root "$SCRIPT_DIR" --runtime-only >/dev/null; then
+        echo -e "${C_ERR}Existing HASHI environment violates the Core runtime contract.${C_RESET}"
+        echo -e "${C_MUTED}Rebuild $venv_dir with the approved CPython version; /reboot cannot replace Python.${C_RESET}"
+        exit 78
+    fi
+
+    if ! python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
+        --code-root "$SCRIPT_DIR" >/dev/null; then
+        echo -e "${C_WARN}Installing the approved dependency generation...${C_RESET}"
+        python3 -m pip install --quiet -r "$SCRIPT_DIR/constraints/standard-py312.lock"
+        python3 "$SCRIPT_DIR/scripts/check_runtime_contract.py" \
+            --code-root "$SCRIPT_DIR" >/dev/null || exit 78
     fi
 }
 
@@ -532,7 +556,7 @@ launch() {
     
     echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Agents           ${C_RESET} ${C_TEXT}${start_label}${C_RESET}"
     
-    echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Backend API      ${C_RESET} ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
+    echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Workbench        ${C_RESET} ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
     
     if [[ "$API_GATEWAY_LAUNCH" == "1" ]]; then
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_OK}enabled${C_RESET} (:${API_GATEWAY_PORT})"

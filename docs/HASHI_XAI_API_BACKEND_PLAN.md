@@ -60,13 +60,14 @@ API key. The adapter needs the same refresh semantics Hermes uses at runtime.
 
 | Item | Value |
 | --- | --- |
-| Hermes home | `C:\Users\thene\AppData\Local\hermes` (via `get_hermes_home()`) |
+| Hermes home | `%LOCALAPPDATA%\hermes` (via `get_hermes_home()`) |
 | Auth file | `auth.json` under Hermes home — **not** `C:\Users\<user>\.hermes\auth.json` |
 | Schema | v1: `providers.xai-oauth` + `credential_pool["xai-oauth"][]` |
 | Runtime source | Hermes resolver over `credential_pool["xai-oauth"][]` / `providers.xai-oauth.tokens` |
 | Base URL | `https://api.x.ai/v1` |
 
-WSL path equivalent: `/mnt/c/Users/thene/AppData/Local/hermes/auth.json`.
+WSL path equivalent:
+`/mnt/c/Users/<windows-user>/AppData/Local/hermes/auth.json`.
 
 ### What not to do
 
@@ -227,7 +228,7 @@ is being built. That is independent and smaller in scope.
 
 ```json
 {
-  "hermes_home": "C:\\Users\\thene\\AppData\\Local\\hermes",
+  "hermes_home": "C:\\Users\\<windows-user>\\AppData\\Local\\hermes",
   "xai_api_base_url": "https://api.x.ai/v1",
   "xai_oauth_enabled": true
 }

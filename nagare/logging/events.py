@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from nagare.paths import validate_path_component
 
 EVENT_LEVELS = {
     "run.failed": "ERROR",
     "run.cancelled": "WARNING",
+    "run.escalated": "WARNING",
     "step.failed": "ERROR",
     "workflow.load.failed": "ERROR",
     "workflow.validate.failed": "ERROR",
@@ -23,7 +26,10 @@ LEGACY_EVENT_NAMES = {
     "run.completed": "workflow_completed",
     "run.failed": "workflow_failed",
     "run.cancelled": "workflow_aborted",
+    "run.escalated": "escalated_to_orchestrator",
     "step.started": "step_started",
+    "step.waiting_human": "human_intervention",
+    "step.resumed": "step_resumed",
     "step.completed": "step_completed",
     "step.failed": "step_failed",
     "handler.invoke.started": "handler_started",
@@ -49,15 +55,16 @@ class RunEventLogger:
         runs_root: str | Path = "flow/runs",
         component: str = "engine.runner",
     ) -> None:
-        self.run_id = run_id
+        self.run_id = validate_path_component(run_id, label="run_id")
         self.trace_id = trace_id
         self.workflow_id = workflow_id
         self.workflow_path = workflow_path
         self.component = component
         self.runs_root = Path(runs_root)
-        self.run_dir = self.runs_root / run_id
+        self.run_dir = self.runs_root / self.run_id
         self.events_path = self.run_dir / "events.jsonl"
         self.legacy_events_path = self.run_dir / "evaluation_events.jsonl"
+        self._write_lock = threading.Lock()
         self.logger = logging.getLogger(f"nagare.events.{run_id}")
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,25 +99,28 @@ class RunEventLogger:
             "error_message": error_message,
             "data": data or {},
         }
-        with open(self.events_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with self._write_lock:
+            with open(self.events_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        legacy_name = LEGACY_EVENT_NAMES.get(event)
-        if legacy_name:
-            legacy = {
-                "event_type": legacy_name,
-                "workflow_id": self.workflow_id,
-                "run_id": self.run_id,
-                "trace_id": self.trace_id,
-                "ts": record["timestamp"],
-                "data": dict(record["data"]),
-            }
-            if step_id and "step_id" not in legacy["data"]:
-                legacy["data"]["step_id"] = step_id
-            if error_message and "error" not in legacy["data"]:
-                legacy["data"]["error"] = error_message
-            with open(self.legacy_events_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(legacy, ensure_ascii=False) + "\n")
+            legacy_name = LEGACY_EVENT_NAMES.get(event)
+            if legacy_name:
+                legacy = {
+                    "event_type": legacy_name,
+                    "workflow_id": self.workflow_id,
+                    "run_id": self.run_id,
+                    "trace_id": self.trace_id,
+                    "ts": record["timestamp"],
+                    "data": dict(record["data"]),
+                }
+                if step_id and "step_id" not in legacy["data"]:
+                    legacy["data"]["step_id"] = step_id
+                if duration_ms is not None and "duration_seconds" not in legacy["data"]:
+                    legacy["data"]["duration_seconds"] = duration_ms / 1000
+                if error_message and "error" not in legacy["data"]:
+                    legacy["data"]["error"] = error_message
+                with open(self.legacy_events_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(legacy, ensure_ascii=False) + "\n")
 
         log_line = f"{event} | run={self.run_id}"
         if step_id:
@@ -142,7 +152,7 @@ def build_runtime_snapshot(state: dict) -> dict[str, Any]:
     for step_id, step in steps.items():
         step_status[step_id] = {
             "status": step.get("status", "unknown").upper(),
-            "attempt": step.get("attempt", 1),
+            "attempt": step.get("attempt", 0),
             "started_at": step.get("started_at"),
             "ended_at": step.get("ended_at"),
             "artifacts": step.get("artifacts", {}),

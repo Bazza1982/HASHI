@@ -3,8 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
-set "BRIDGE_FORCE_ASCII_BANNER=1"
-title Bridge-U-F Launcher
+title HASHI Launcher
 
 rem This script lives under <repo>\bin\. We want BRIDGE_CODE_ROOT to be the repo root,
 rem not the bin folder, otherwise agents.json will be looked up in the wrong place.
@@ -15,12 +14,12 @@ set "BRIDGE_CODE_ROOT=!SCRIPT_DIR!\.."
 for %%I in ("!BRIDGE_CODE_ROOT!") do set "BRIDGE_CODE_ROOT=%%~fI"
 cd /d "!BRIDGE_CODE_ROOT!"
 
-:: USB mode: use embedded Python if present (no system Python or venv required)
+:: USB mode: use approved portable Python if present (no system Python or venv required)
 set "PYTHON_EXE=python"
-set "USING_EMBEDDED=0"
+set "USING_PORTABLE=0"
 if exist "!BRIDGE_CODE_ROOT!\python\python.exe" (
     set "PYTHON_EXE=!BRIDGE_CODE_ROOT!\python\python.exe"
-    set "USING_EMBEDDED=1"
+    set "USING_PORTABLE=1"
 )
 
 if not defined BRIDGE_HOME set "BRIDGE_HOME=!BRIDGE_CODE_ROOT!"
@@ -117,9 +116,9 @@ goto launch
 
 :launch
 cls
-call :print_banner "BRIDGE-U-F BOOT" "Multi-backend orchestrator launch"
+call :print_banner "HASHI BOOT" "Professional Agentic AI System"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Agents           !C_RESET! !C_TEXT!!START_LABEL!!C_RESET!
-echo !C_RAIL!^|!C_RESET! !C_LABEL!Backend API      !C_RESET! !C_OK!enabled!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!enabled!C_RESET!
 if "!API_GATEWAY_LAUNCH!"=="1" (
     echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!enabled ^(port 18801^)!C_RESET!
 ) else (
@@ -143,7 +142,7 @@ echo !C_RAIL!^|!C_RESET!
 if exist "%AGENTS_FILE%" del "%AGENTS_FILE%" >nul 2>&1
 set "GW_ARG="
 if "!API_GATEWAY_LAUNCH!"=="1" set "GW_ARG=--api-gateway"
-:: Ensure project root is on sys.path (required for embedded Python which doesn't add cwd)
+:: Keep the project root explicit for every supported portable environment.
 set "PYTHONPATH=!BRIDGE_CODE_ROOT!"
 call :resolve_wakeup_file
 if defined WAKEUP_FILE call :start_wakeup_injector
@@ -199,10 +198,10 @@ exit /b 0
 cls
 set "API_GATEWAY_LABEL=OFF"
 if "!API_GATEWAY_LAUNCH!"=="1" set "API_GATEWAY_LABEL=ON"
-call :print_banner "BRIDGE-U-F LAUNCHER" "Universal multi-agent bridge"
+call :print_banner "HASHI LAUNCHER" "Powered by HER-V2 - Flexible with CLI backends"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
-echo !C_RAIL!^|!C_RESET! !C_LABEL!Backend API      !C_RESET! !C_OK!enabled!C_RESET!
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!enabled!C_RESET!
 if "!API_GATEWAY_LABEL!"=="ON" (
     echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!ON!C_RESET!
 ) else (
@@ -276,27 +275,46 @@ echo !C_RAIL!^|!C_RESET!
 exit /b 0
 
 :ensure_env
-if "!USING_EMBEDDED!"=="1" (
-    :: USB mode - embedded Python has all packages pre-installed, skip venv entirely
-    "!PYTHON_EXE!" -c "import telegram, httpx, aiohttp, PIL" >nul 2>&1
+if "!USING_PORTABLE!"=="1" (
+    :: USB mode - portable Python has the approved lock installed; skip venv.
+    "!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" >nul
     if errorlevel 1 (
-        echo !C_WARN!Embedded Python is missing required packages.!C_RESET!
-        echo !C_MUTED!Run prepare_usb.bat again to reinstall dependencies.!C_RESET!
-        exit /b 1
+        echo !C_WARN!Portable Python violates the HASHI Core runtime contract.!C_RESET!
+        echo !C_MUTED!Rebuild the package with the approved Python and dependency lock.!C_RESET!
+        exit /b 78
     )
     exit /b 0
 )
 if not exist .venv (
     echo !C_MUTED!Creating virtual environment...!C_RESET!
-    python -m venv .venv || exit /b 1
+    py -3.12 "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" --runtime-only >nul 2>&1
+    if errorlevel 1 (
+        python "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" --runtime-only >nul 2>&1
+        if errorlevel 1 (
+            echo !C_WARN!HASHI requires the approved CPython Core version.!C_RESET!
+            exit /b 78
+        )
+        python -m venv .venv || exit /b 1
+    ) else (
+        py -3.12 -m venv .venv || exit /b 1
+    )
 )
 
 call .venv\Scripts\activate.bat || exit /b 1
+set "PYTHON_EXE=!BRIDGE_CODE_ROOT!\.venv\Scripts\python.exe"
 
-python -c "import telegram, httpx, aiohttp, PIL" >nul 2>&1
+"!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" --runtime-only >nul
 if errorlevel 1 (
-    echo !C_MUTED!Installing Python dependencies...!C_RESET!
-    pip install python-telegram-bot httpx aiohttp pillow || exit /b 1
+    echo !C_WARN!Existing .venv violates the HASHI Core runtime contract.!C_RESET!
+    echo !C_MUTED!Rebuild it with the approved CPython version; /reboot cannot replace Python.!C_RESET!
+    exit /b 78
+)
+
+"!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" >nul
+if errorlevel 1 (
+    echo !C_MUTED!Installing the approved dependency generation...!C_RESET!
+    "!PYTHON_EXE!" -m pip install -r "!BRIDGE_CODE_ROOT!\constraints\standard-py312.lock" || exit /b 1
+    "!PYTHON_EXE!" "!BRIDGE_CODE_ROOT!\scripts\check_runtime_contract.py" --code-root "!BRIDGE_CODE_ROOT!" >nul || exit /b 78
 )
 exit /b 0
 

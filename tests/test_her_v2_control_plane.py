@@ -703,6 +703,73 @@ def test_provider_request_accounting_summarises_turn_session_and_provider(tmp_pa
     assert valuation_row == ("prices-v1", 0.01, "provider")
 
 
+def test_pre_turn_accounting_session_promotes_without_losing_usage(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    shell = coordinator.store.ensure_accounting_session(
+        session_id="session-1",
+        **binding,
+    )
+    assert shell["status"] == "accounting"
+    assert shell["state_version"] == 0
+    assert shell["last_turn_id"] is None
+
+    compact_usage = {
+        "provider_request_id": "compact-before-turn-1",
+        "parent_request_id": "compact:1",
+        "phase": "compact",
+        "engine": "deepseek-api",
+        "model": "deepseek-v4-flash",
+        "input": 120,
+        "output": 30,
+        "compact": True,
+        "pricing_revision": "prices-v1",
+    }
+    assert coordinator.store.record_provider_requests(
+        session_id="session-1",
+        turn_id="",
+        line_items=[compact_usage],
+    ) == 1
+
+    accepted = _accept(coordinator, "turn-1", "Open after Compact")
+    promoted = coordinator.store.session("session-1")
+
+    assert accepted.session_id == "session-1"
+    assert promoted["status"] == "open"
+    assert promoted["state_version"] == 1
+    assert promoted["last_turn_id"] == "turn-1"
+    assert coordinator.store.usage_summary("session-1")["total"] == {
+        "provider_requests": 1,
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "thinking_tokens": 0,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 0,
+        "cost_usd": None,
+        "retry_count": 0,
+        "compact_requests": 1,
+        "pricing_revisions": ["prices-v1"],
+    }
+
+    # Repeated preflight is idempotent and cannot duplicate immutable usage.
+    assert coordinator.store.ensure_accounting_session(
+        session_id="session-1",
+        **binding,
+    )["status"] == "open"
+    assert coordinator.store.record_provider_requests(
+        session_id="session-1",
+        turn_id="",
+        line_items=[compact_usage],
+    ) == 0
+
+
 def test_provider_request_is_durable_before_active_turn_completes(tmp_path):
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     turn = _accept(coordinator, "turn-1", "Meter immediately")

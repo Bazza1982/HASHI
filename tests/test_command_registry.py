@@ -14,6 +14,7 @@ from orchestrator.command_registry import (
     load_runtime_callbacks,
     load_runtime_commands,
     runtime_bot_commands,
+    runtime_registry_notices,
 )
 
 
@@ -136,19 +137,22 @@ def test_private_command_override_is_debug_not_warning(
     assert "intentionally overridden" in matching[-1].message
 
 
-def test_session_scoped_queue_command_rejects_private_override_and_callbacks(
+@pytest.mark.parametrize("protected_command", ["queue", "wiki"])
+def test_protected_core_command_reports_structured_notice_without_warning(
     monkeypatch,
     tmp_path,
     caplog,
+    protected_command,
 ):
     private_dir = tmp_path / "private_commands"
     private_dir.mkdir()
-    (private_dir / "queue_override.py").write_text(
+    module_name = f"{protected_command}_override.py"
+    (private_dir / module_name).write_text(
         "from orchestrator.command_registry import RuntimeCallback, RuntimeCommand\n"
         "async def callback(runtime, update, context):\n"
         "    return None\n"
-        "COMMANDS = [RuntimeCommand(name='queue', description='Unsafe global queue', callback=callback)]\n"
-        "CALLBACKS = [RuntimeCallback(pattern=r'^queue:', callback=callback)]\n",
+        f"COMMANDS = [RuntimeCommand(name='{protected_command}', description='Unsafe override', callback=callback)]\n"
+        f"CALLBACKS = [RuntimeCallback(pattern=r'^{protected_command}:', callback=callback)]\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -158,30 +162,46 @@ def test_session_scoped_queue_command_rejects_private_override_and_callbacks(
     )
     monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", str(private_dir))
 
-    with caplog.at_level(logging.WARNING, logger="BridgeU.CommandRegistry"):
+    with caplog.at_level(logging.DEBUG, logger="BridgeU.CommandRegistry"):
         commands = {command.name: command for command in load_runtime_commands()}
         callbacks = load_runtime_callbacks()
         load_runtime_commands()
         load_runtime_callbacks()
+        notices = runtime_registry_notices()
 
-    assert commands["queue"].description != "Unsafe global queue"
-    assert all(callback.pattern != r"^queue:" for callback in callbacks)
-    command_warnings = [
-        record.message
+    assert commands[protected_command].description != "Unsafe override"
+    assert all(
+        callback.pattern != rf"^{protected_command}:" for callback in callbacks
+    )
+    command_records = [
+        record
         for record in caplog.records
-        if "protected core command queue" in record.message
+        if f"protected core command {protected_command}" in record.message
     ]
-    callback_warnings = [
-        record.message
+    callback_records = [
+        record
         for record in caplog.records
-        if "callbacks from private override" in record.message
+        if "callbacks from local extension override" in record.message
     ]
-    assert command_warnings == [
-        "Ignoring private override of protected core command queue from queue_override.py"
+    assert [record.message for record in command_records] == [
+        f"Ignoring local extension override of protected core command "
+        f"{protected_command} from {module_name}"
     ]
-    assert callback_warnings == [
-        "Ignoring callbacks from private override of protected core command(s) queue "
-        "in queue_override.py"
+    assert [record.message for record in callback_records] == [
+        f"Ignoring callbacks from local extension override of protected core "
+        f"command(s) {protected_command} in {module_name}"
+    ]
+    assert all(
+        record.levelno == logging.DEBUG
+        for record in command_records + callback_records
+    )
+    assert notices == [
+        {
+            "code": "protected_private_command_override",
+            "command": protected_command,
+            "module": module_name,
+            "callbacks_ignored": True,
+        }
     ]
 
 

@@ -108,7 +108,7 @@ def test_mark_bug_does_not_reset_window_for_same_unresolved_bug():
 
 def test_peer_summary_extracts_runtime_route_fields():
     peer = _peer("HASHI9", agents=["hashiko"])
-    peer["canonical"]["host"] = "192.168.0.211"
+    peer["canonical"]["host"] = "192.168.50.21"
     peer["canonical"]["port"] = 35821
     peer["canonical"]["workbench_port"] = 18819
     peer["canonical"]["properties"].update(
@@ -127,7 +127,7 @@ def test_peer_summary_extracts_runtime_route_fields():
         "live_status": "online",
         "handshake_state": "handshake_accepted",
         "preferred_backend": "lan",
-        "host": "192.168.0.211",
+        "host": "192.168.50.21",
         "agents": ["hashiko"],
     }
 

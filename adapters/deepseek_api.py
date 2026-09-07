@@ -47,9 +47,7 @@ HASHI_MODEL_CAPACITY_PROFILES = {
 
 
 def _with_reasoning_content(result: _APIResult, reasoning_content: str) -> _APIResult:
-    # /reboot min can reload this adapter while retaining the already-imported
-    # OpenRouter _APIResult class. Attach dynamically so the DeepSeek fix works
-    # with both the old and new dataclass shapes.
+    # Keep provider augmentation explicit at the adapter boundary.
     result.reasoning_content = reasoning_content
     return result
 
@@ -68,10 +66,7 @@ def _with_deepseek_cache_usage(
     result: _APIResult,
     usage: Mapping[str, object],
 ) -> _APIResult:
-    """Attach official DeepSeek prompt-cache counters, including across hot reloads."""
-
-    # Like reasoning_content above, dynamic attachment keeps /reboot min safe
-    # when this adapter is reloaded before the shared _APIResult definition.
+    """Attach official DeepSeek prompt-cache counters."""
     result.prompt_cache_hit_tokens = _optional_usage_int(
         usage, "prompt_cache_hit_tokens"
     )

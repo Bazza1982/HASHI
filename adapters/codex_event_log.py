@@ -8,7 +8,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 2
@@ -203,7 +203,7 @@ class CodexEventLogWriter:
         self._handle = None
         self._size = 0
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> CodexEventLogWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         for index in range(1, self.backup_count + 1):
             self._sanitise_existing(self._backup(index))

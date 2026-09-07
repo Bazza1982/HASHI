@@ -281,11 +281,104 @@ def _retry_after_seconds(response: httpx.Response | None) -> float | None:
 def _provider_request_id(response: httpx.Response | None) -> str:
     if response is None:
         return ""
-    for name in ("x-request-id", "request-id", "cf-ray", "x-amzn-requestid"):
+    for name in (
+        "x-hashi-gateway-request-id",
+        "x-request-id",
+        "request-id",
+        "cf-ray",
+        "x-amzn-requestid",
+    ):
         value = str(response.headers.get(name) or "").strip()
         if value:
             return value
     return ""
+
+
+_SENSITIVE_HTTP_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "set-cookie",
+        "x-api-key",
+    }
+)
+
+
+def _diagnostic_headers(headers: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        str(name): (
+            "[REDACTED]"
+            if str(name).strip().casefold() in _SENSITIVE_HTTP_HEADER_NAMES
+            else str(value)
+        )
+        for name, value in headers.items()
+    }
+
+
+def _diagnostic_body(payload: bytes) -> dict[str, Any]:
+    raw = bytes(payload)
+    try:
+        body = raw.decode("utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        body = base64.b64encode(raw).decode("ascii")
+        encoding = "base64"
+    return {
+        "body": body,
+        "body_encoding": encoding,
+        "body_bytes": len(raw),
+        "body_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _provider_http_failure_diagnostics(error: Exception) -> dict[str, Any]:
+    """Preserve the complete HTTP request/response evidence for local audit."""
+
+    diagnostics: dict[str, Any] = {}
+    try:
+        response = getattr(error, "response", None)
+    except RuntimeError:
+        response = None
+    try:
+        request = getattr(error, "request", None)
+    except RuntimeError:
+        request = None
+    if not isinstance(request, httpx.Request) and isinstance(response, httpx.Response):
+        try:
+            request = response.request
+        except RuntimeError:
+            request = None
+
+    if isinstance(request, httpx.Request):
+        try:
+            request_body = bytes(request.content)
+        except (httpx.RequestNotRead, TypeError, ValueError):
+            request_body = b""
+        diagnostics["request"] = {
+            "method": str(request.method),
+            "url": str(request.url),
+            "headers": _diagnostic_headers(request.headers),
+            **_diagnostic_body(request_body),
+        }
+
+    if isinstance(response, httpx.Response):
+        try:
+            response_body = bytes(response.content)
+        except (httpx.ResponseNotRead, TypeError, ValueError):
+            response_body = b""
+        diagnostics["response"] = {
+            "status": int(response.status_code),
+            "headers": _diagnostic_headers(response.headers),
+            **_diagnostic_body(response_body),
+        }
+
+    audit_refs = getattr(error, "hashi_transport_audit_refs", ())
+    if isinstance(audit_refs, (list, tuple)):
+        diagnostics["transport_audit_refs"] = [
+            str(item) for item in audit_refs if str(item).strip()
+        ]
+    return diagnostics
 
 
 def _backend_failure_response(
@@ -399,6 +492,7 @@ def _backend_failure_response(
             "provider_activity_observed": bool(
                 getattr(error, "provider_activity_observed", False)
             ),
+            "provider_http_failure": _provider_http_failure_diagnostics(error),
         },
     )
 
@@ -847,6 +941,11 @@ class OpenRouterAdapter(BaseBackend):
             "X-Title": "Bridge-U Orchestrator",
         }
 
+    def _chat_completions_url(self) -> str:
+        """Return the concrete provider endpoint for this adapter."""
+
+        return self.global_config.openrouter_url
+
     def _augment_assistant_tool_message(
         self,
         assistant_msg: dict[str, Any],
@@ -1229,7 +1328,7 @@ class OpenRouterAdapter(BaseBackend):
             raw_args = fn.get("arguments", "{}")
 
             # Determine stream event kind
-            if tool_name == "bash":
+            if tool_name in {"bash", "shell"}:
                 evt_kind = KIND_SHELL_EXEC
             elif tool_name == "file_read":
                 evt_kind = KIND_FILE_READ
@@ -1262,7 +1361,7 @@ class OpenRouterAdapter(BaseBackend):
             event_metadata: dict[str, Any] = {}
             event_path = ""
             if isinstance(arguments, Mapping):
-                if tool_name == "bash":
+                if tool_name in {"bash", "shell"}:
                     command = arguments.get("command") or arguments.get("cmd")
                     if command:
                         event_metadata["command"] = str(command)
@@ -1391,8 +1490,16 @@ class OpenRouterAdapter(BaseBackend):
 
     def _tool_policy_action_resource(self, tool_name: str, arguments: dict) -> tuple[str, str]:
         normalized = (tool_name or "").strip().lower()
-        if normalized == "bash":
-            return "shell.execute", "shell:bash"
+        if normalized in {"bash", "shell"}:
+            if normalized == "bash":
+                selected_shell = "bash"
+            else:
+                from orchestrator.process_execution import default_shell_name
+
+                selected_shell = str(
+                    arguments.get("shell") or default_shell_name()
+                ).strip().casefold()
+            return "shell.execute", f"shell:{selected_shell}"
         if normalized == "file_write":
             return "file.write", _file_resource(arguments)
         if normalized == "file_read":
@@ -1415,7 +1522,7 @@ class OpenRouterAdapter(BaseBackend):
         on_stream_event: StreamCallback,
     ) -> _APIResult:
         response = await self.client.post(
-            self.global_config.openrouter_url,
+            self._chat_completions_url(),
             json=payload,
             headers=headers,
         )
@@ -1501,7 +1608,7 @@ class OpenRouterAdapter(BaseBackend):
 
         async with self.client.stream(
             "POST",
-            self.global_config.openrouter_url,
+            self._chat_completions_url(),
             json=payload,
             headers=headers,
         ) as response:
@@ -1513,7 +1620,7 @@ class OpenRouterAdapter(BaseBackend):
                 # doubles may omit httpx's response.request metadata.  Error
                 # events still need a concrete request for HTTPStatusError.
                 stream_request = httpx.Request(
-                    "POST", self.global_config.openrouter_url
+                    "POST", self._chat_completions_url()
                 )
 
             async for line in response.aiter_lines():

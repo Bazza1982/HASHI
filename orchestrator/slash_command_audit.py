@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from orchestrator.command_specs import SENSITIVE_COMMAND_NAMES
+from orchestrator.process_resources import path_lock as process_path_lock
 
-_WRITE_LOCK = threading.Lock()
-
-# `pswd` is provided by an optional private command package rather than the
+# `pswd` is provided by an optional local command extension rather than the
 # built-in registry, so it remains an explicit external sensitivity rule.
 _SENSITIVE_COMMANDS = SENSITIVE_COMMAND_NAMES | {"pswd"}
 _SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|token|password|passwd|secret|bearer)\s*[:=]\s*\S+"
 )
 _MAX_ARG_CHARS = 240
+_ACTIVE_SLASH_COMMAND_AUDIT_SESSION: ContextVar[Any | None] = ContextVar(
+    "hashi_active_slash_command_audit_session",
+    default=None,
+)
 
 
 def default_audit_path(workspace_dir: Path) -> Path:
@@ -79,7 +84,7 @@ def append_audit_record(path: Path, record: dict[str, Any]) -> Path:
     audit_path = Path(path)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, ensure_ascii=False)
-    with _WRITE_LOCK:
+    with process_path_lock(audit_path):
         with audit_path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     return audit_path
@@ -200,6 +205,25 @@ class SlashCommandAuditSession:
             blocked_reason=self.blocked_reason,
             side_effects=self.side_effects,
         )
+
+
+@contextmanager
+def bind_slash_command_audit_session(
+    session: SlashCommandAuditSession,
+) -> Iterator[SlashCommandAuditSession]:
+    """Bind command auditing to the current async execution context."""
+
+    token = _ACTIVE_SLASH_COMMAND_AUDIT_SESSION.set(session)
+    try:
+        yield session
+    finally:
+        _ACTIVE_SLASH_COMMAND_AUDIT_SESSION.reset(token)
+
+
+def active_slash_command_audit_session() -> SlashCommandAuditSession | None:
+    session = _ACTIVE_SLASH_COMMAND_AUDIT_SESSION.get()
+    return session if isinstance(session, SlashCommandAuditSession) else None
+
 
 def looks_like_slash_command(text: str) -> bool:
     raw = (text or "").strip()

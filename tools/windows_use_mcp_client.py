@@ -6,8 +6,6 @@ import json
 import traceback
 import sys
 
-from fastmcp.client import Client, UvxStdioTransport
-
 
 def _serialize_item(item) -> dict:
     item_type = getattr(item, "type", None)
@@ -26,6 +24,12 @@ def _serialize_item(item) -> dict:
 
 
 async def _run(payload: dict) -> dict:
+    # This client runs in the Windows helper sidecar, whose ``uv run --with``
+    # command supplies FastMCP.  Keep the optional dependency outside module
+    # import so the Core can inspect and stage the function source without
+    # inheriting the sidecar's environment.
+    from fastmcp.client import Client, UvxStdioTransport
+
     transport = UvxStdioTransport("windows-mcp")
     async with Client(transport) as client:
         action = payload.get("action")

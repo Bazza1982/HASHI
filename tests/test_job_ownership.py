@@ -17,7 +17,7 @@ def test_resource_owner_mismatch_detects_cross_agent_workspace_path():
     job = {
         "id": "zelda-loop-9ada33",
         "agent": "zelda",
-        "prompt": "Read /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+        "prompt": "Read /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
     }
 
     assert resource_owner_mismatches(job) == ["lily"]
@@ -28,7 +28,7 @@ def test_resource_owner_mismatch_allows_own_workspace_path():
     job = {
         "id": "lily-loop-9ada33",
         "agent": "lily",
-        "prompt": "Read /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+        "prompt": "Read /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
     }
 
     assert resource_owner_mismatches(job) == []
@@ -39,7 +39,7 @@ def test_resource_owner_mismatch_detects_windows_workspace_path():
     job = {
         "id": "zelda-loop-9ada33",
         "agent": "zelda",
-        "prompt": r"Read C:\Users\lily\projects\hashi\workspaces\lily\wiki_state.sqlite",
+        "prompt": r"Read C:\Users\sampleuser\projects\hashi\workspaces\lily\wiki_state.sqlite",
     }
 
     assert resource_owner_mismatches(job) == ["lily"]
@@ -55,7 +55,7 @@ def test_scheduler_blocks_owner_mismatch_before_enqueue(tmp_path, caplog):
     job = {
         "id": "zelda-loop-9ada33",
         "agent": "zelda",
-        "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+        "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
     }
 
     label = scheduler._job_owner_mismatch(
@@ -80,7 +80,7 @@ def test_skill_manager_refuses_to_enable_owner_mismatch(tmp_path):
                         "agent": "zelda",
                         "enabled": False,
                         "interval_seconds": 600,
-                        "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+                        "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
                     }
                 ],
                 "crons": [],
@@ -111,7 +111,7 @@ def test_skill_manager_imports_owner_mismatch_disabled(tmp_path):
             "agent": "zelda",
             "enabled": True,
             "interval_seconds": 600,
-            "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+            "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
         },
     )
 
@@ -134,7 +134,7 @@ def test_skill_manager_transfer_marks_mismatch_for_review(tmp_path):
                         "agent": "lily",
                         "enabled": True,
                         "interval_seconds": 600,
-                        "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+                        "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
                     }
                 ],
                 "crons": [],
@@ -165,7 +165,7 @@ def test_jobs_text_displays_owner_mismatch(tmp_path):
                         "agent": "zelda",
                         "enabled": False,
                         "interval_seconds": 600,
-                        "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+                        "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
                     }
                 ],
                 "crons": [],
@@ -191,7 +191,7 @@ def test_jobs_with_buttons_displays_owner_mismatch(tmp_path):
                         "agent": "zelda",
                         "enabled": False,
                         "interval_seconds": 600,
-                        "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+                        "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
                     }
                 ],
                 "crons": [],
@@ -223,7 +223,7 @@ async def test_runtime_run_job_now_refuses_owner_mismatch():
     job = {
         "id": "zelda-loop-9ada33",
         "agent": "zelda",
-        "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+        "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
     }
 
     ok, message = await FlexibleAgentRuntime._run_job_now(runtime, job)
@@ -240,7 +240,7 @@ async def test_jobs_run_callback_refuses_owner_mismatch():
             return {
                 "id": task_id,
                 "agent": "zelda",
-                "prompt": "Check /home/lily/projects/hashi/workspaces/lily/wiki_state.sqlite",
+                "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
             }
 
     class _Query:

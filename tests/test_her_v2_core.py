@@ -291,7 +291,7 @@ def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
     assert config.direct_strategy_self_selection is False
     assert config.strategy_tools_enabled is True
     assert config.planning_tools_enabled is True
-    assert config.cognitive_control_enabled is False
+    assert not hasattr(config, "cognitive_control_enabled")
 
 
 def test_direct_strategy_self_selection_is_an_explicit_boolean_experiment():
@@ -330,21 +330,16 @@ def test_strategy_and_planning_tool_access_are_explicit_boolean_controls():
             HERv2Config.from_mapping({"profiles": _profiles(), field: "true"})
 
 
-def test_cognitive_control_is_an_explicit_boolean_rollout_gate():
-    config = HERv2Config.from_mapping(
-        {
-            "profiles": _profiles(),
-            "cognitive_control_enabled": True,
-        }
-    )
-
-    assert config.cognitive_control_enabled is True
-
-    with pytest.raises(HERv2ConfigurationError):
+@pytest.mark.parametrize("value", [False, True, "true", 0, 1, None])
+def test_cognitive_control_switch_is_removed_and_rejected(value):
+    with pytest.raises(
+        HERv2ConfigurationError,
+        match="Cognitive control is permanently active",
+    ):
         HERv2Config.from_mapping(
             {
                 "profiles": _profiles(),
-                "cognitive_control_enabled": "true",
+                "cognitive_control_enabled": value,
             }
         )
 
@@ -546,7 +541,6 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         ("direct_strategy_self_selection", 1),
         ("strategy_tools_enabled", 1),
         ("planning_tools_enabled", 1),
-        ("cognitive_control_enabled", 1),
         ("audit_failure_terminal", "COMPLETED"),
     ]
     for field, value in cases:
@@ -566,6 +560,7 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         "max_replans",
         "max_subagents",
         "max_tokens",
+        "provider_wall_clock_timeout_s",
         "reporting_attempts",
         "replan_limit",
         "replan_limits",

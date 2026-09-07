@@ -1,6 +1,7 @@
 import inspect
 import json
 import logging
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
@@ -64,6 +65,29 @@ from orchestrator.workspace_state import WorkspaceStateStore
 from orchestrator import workzone as workzone_module
 
 HER_HABIT_MEDITATION_STATE_KEY = "her_habit_meditation"
+AGENT_MODE_POLICY_VERSION_STATE_KEY = "agent_mode_policy_version"
+CURRENT_AGENT_MODE_POLICY_VERSION = 1
+
+
+def _additional_access_roots_from_environment() -> tuple[Path, ...]:
+    """Return explicitly granted filesystem roots for portable/host access."""
+
+    configured = str(os.environ.get("HASHI_ADDITIONAL_ACCESS_ROOTS") or "").strip()
+    if not configured:
+        return ()
+    roots: list[Path] = []
+    for value in configured.split(os.pathsep):
+        value = value.strip()
+        if not value:
+            continue
+        root = Path(value).expanduser().resolve()
+        if root.is_dir() and root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
+AGENT_MODE_POLICY_VERSION_STATE_KEY = "agent_mode_policy_version"
+CURRENT_AGENT_MODE_POLICY_VERSION = 1
 
 
 class FlexibleBackendManager:
@@ -228,6 +252,26 @@ class FlexibleBackendManager:
                         # Memory+ flag once backend capabilities are available.
                         self.agent_mode = persisted_mode
                     elif persisted_mode in SUPPORTED_AGENT_MODES:
+                        policy_version = self._agent_mode_policy_version(state)
+                        migrate_legacy_flex = (
+                            persisted_mode == "flex"
+                            and policy_version < CURRENT_AGENT_MODE_POLICY_VERSION
+                            and self._mode_for_backend(
+                                self.config.default_mode,
+                                self.config.active_backend,
+                            )
+                            == "fixed"
+                        )
+                        if migrate_legacy_flex:
+                            persisted_mode = "fixed"
+                            state["agent_mode"] = persisted_mode
+                            state_needs_repair = True
+                            self.logger.warning(
+                                "Migrated legacy persisted flex mode to the fixed "
+                                "product default; future explicit mode choices are "
+                                "preserved by policy version %s.",
+                                CURRENT_AGENT_MODE_POLICY_VERSION,
+                            )
                         self.agent_mode = self._mode_for_backend(
                             persisted_mode,
                             self.config.active_backend,
@@ -259,6 +303,18 @@ class FlexibleBackendManager:
                         )
                         state["agent_mode"] = self.agent_mode
                         state_needs_repair = True
+                if (
+                    self._agent_mode_policy_version(state)
+                    < CURRENT_AGENT_MODE_POLICY_VERSION
+                ):
+                    # This marker distinguishes legacy persisted ``flex`` from
+                    # an explicit choice made after Fixed became the product
+                    # default.  It is written once and then carried by every
+                    # normal state save.
+                    state[AGENT_MODE_POLICY_VERSION_STATE_KEY] = (
+                        CURRENT_AGENT_MODE_POLICY_VERSION
+                    )
+                    state_needs_repair = True
                 if "privacy_level" in state:
                     try:
                         self.privacy_level = parse_privacy_level(state["privacy_level"])
@@ -308,9 +364,23 @@ class FlexibleBackendManager:
             self.logger.error(f"Failed to read state.json: {e}")
         return {}
 
+    @staticmethod
+    def _agent_mode_policy_version(state: dict[str, Any]) -> int:
+        try:
+            return max(
+                0,
+                int(state.get(AGENT_MODE_POLICY_VERSION_STATE_KEY) or 0),
+            )
+        except (TypeError, ValueError):
+            return 0
+
     def _apply_managed_state_fields(self, state: dict[str, Any]) -> None:
         state["active_backend"] = self.config.active_backend
         state["agent_mode"] = self.agent_mode
+        state[AGENT_MODE_POLICY_VERSION_STATE_KEY] = max(
+            self._agent_mode_policy_version(state),
+            CURRENT_AGENT_MODE_POLICY_VERSION,
+        )
         state["privacy_level"] = int(self.privacy_level)
         if (
             self.config.active_backend != HER_V2_ENGINE
@@ -1171,7 +1241,7 @@ class FlexibleBackendManager:
         from adapters.registry import get_backend_class
 
         BackendClass = get_backend_class(engine)
-        api_key = self._resolve_api_key(engine)
+        api_key = self._resolve_api_key(engine, backend_cfg_raw)
         return BackendClass(adapter_cfg, self.global_config, api_key)
 
     async def generate_ephemeral_response(
@@ -1214,6 +1284,7 @@ class FlexibleBackendManager:
             "deepseek-api",
             "hashi-api",
             "ollama-api",
+            "openai-compatible-api",
             "openrouter-api",
             "xai-api",
         }:
@@ -1258,13 +1329,31 @@ class FlexibleBackendManager:
             }
         return None
 
-    def _resolve_api_key(self, engine: str) -> Optional[Any]:
+    def _resolve_api_key(
+        self,
+        engine: str,
+        backend_cfg_raw: dict[str, Any] | None = None,
+    ) -> Optional[Any]:
         if engine == "xai-api":
             creds = self._resolve_xai_api_credentials()
             if creds:
                 self.logger.info("Resolved xAI API credentials from secrets.json")
                 return creds
             return None
+        explicit_secret = str(
+            (backend_cfg_raw or {}).get("api_key_secret")
+            or (backend_cfg_raw or {}).get("secret")
+            or ""
+        ).strip()
+        if explicit_secret:
+            api_key = self.secrets.get(explicit_secret)
+            if api_key:
+                self.logger.info(
+                    "Resolved API key for %s via configured secret '%s'",
+                    engine,
+                    explicit_secret,
+                )
+                return api_key
         for secret_key in get_secret_lookup_order(engine, self.config.name):
             api_key = self.secrets.get(secret_key)
             if api_key:
@@ -1307,7 +1396,7 @@ class FlexibleBackendManager:
         try:
             from adapters.registry import get_backend_class
             BackendClass = get_backend_class(engine)
-            api_key = self._resolve_api_key(engine)
+            api_key = self._resolve_api_key(engine, backend_cfg_raw)
             self._attach_runtime_context(adapter_cfg)
 
             self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
@@ -1319,6 +1408,7 @@ class FlexibleBackendManager:
             if engine in (
                 "openrouter-api",
                 "deepseek-api",
+                "openai-compatible-api",
                 "hashi-api",
                 "ollama-api",
                 "xai-api",
@@ -1692,7 +1782,28 @@ class FlexibleBackendManager:
         request_metadata = request_meta.get("request_metadata")
         context.pop("memory_search_authorization", None)
         context.pop("request_tool_allowlist", None)
+        for key in (
+            "system_exchange",
+            "system_exchange_kind",
+            "system_exchange_terminal",
+            "protocol_message_id",
+            "protocol_conversation_id",
+            "protocol_from_instance",
+            "protocol_from_agent",
+        ):
+            context.pop(key, None)
         if isinstance(request_metadata, dict):
+            for key in (
+                "system_exchange",
+                "system_exchange_kind",
+                "system_exchange_terminal",
+                "protocol_message_id",
+                "protocol_conversation_id",
+                "protocol_from_instance",
+                "protocol_from_agent",
+            ):
+                if key in request_metadata:
+                    context[key] = request_metadata[key]
             raw_allowlist = request_metadata.get("tool_allowlist")
             if isinstance(raw_allowlist, list):
                 context["request_tool_allowlist"] = sorted(

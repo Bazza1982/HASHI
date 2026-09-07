@@ -4,6 +4,7 @@ import json
 import os
 import sys
 
+
 def main():
     bridge_home = os.environ.get('BRIDGE_HOME', os.path.dirname(os.path.abspath(__file__)))
     bridge_code = os.environ.get('BRIDGE_CODE_ROOT', bridge_home)
@@ -31,7 +32,7 @@ def main():
         try:
             with open(secrets_path, encoding='utf-8-sig') as f:
                 secrets = json.load(f)
-        except:
+        except (OSError, json.JSONDecodeError, TypeError):
             pass
     
     # Global settings

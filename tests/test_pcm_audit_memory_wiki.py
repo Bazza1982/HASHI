@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import sqlite3
 import sys
 import types
@@ -18,6 +19,7 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 from orchestrator.bridge_memory import BridgeMemoryStore
 from orchestrator import runtime_workspace
 from orchestrator.canonical_audit import (
+    BufferedCanonicalAuditWriter,
     CanonicalAuditAccessError,
     CanonicalAuditConfigurationError,
     CanonicalAuditStore,
@@ -81,16 +83,17 @@ def test_canonical_audit_keeps_complete_chain_and_content_addressed_artifact(tmp
     ]
     assert events[1]["previous_record_digest"] == wrappers[0]["record_digest"]
     assert events[1]["payload"]["arguments"]["token"] == "unredacted"
-    for private_directory in (
-        store.base,
-        store.instance_root,
-        store.root,
-        store.artifacts_root,
-        store.artifact_dir,
-        artifact_path.parent,
-    ):
-        assert private_directory.stat().st_mode & 0o777 == 0o700
-    assert artifact_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        for private_directory in (
+            store.base,
+            store.instance_root,
+            store.root,
+            store.artifacts_root,
+            store.artifact_dir,
+            artifact_path.parent,
+        ):
+            assert private_directory.stat().st_mode & 0o777 == 0o700
+        assert artifact_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_canonical_audit_encryption_hides_plaintext_and_preserves_reasoning_semantics(
@@ -154,6 +157,57 @@ def test_canonical_audit_survives_workspace_lifecycle_and_has_no_expiry(tmp_path
     )
     assert reloaded.read_events(RAW_AUTH)[0]["event_id"] == event_id
     assert not hasattr(reloaded, "ttl") and not hasattr(reloaded, "prune")
+
+
+def test_canonical_audit_record_many_uses_one_durable_commit_and_keeps_chain(
+    tmp_path, monkeypatch
+):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI2", agent_id="rika")
+    real_fsync = os.fsync
+    fsync_calls: list[int] = []
+
+    def tracked_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr("orchestrator.canonical_audit.os.fsync", tracked_fsync)
+    event_ids = store.record_many(
+        {
+            "event_type": "provider_stream_event",
+            "payload": {"raw_delta": f"chunk-{index}"},
+            "request_id": "req-batch",
+        }
+        for index in range(200)
+    )
+
+    assert len(event_ids) == 200
+    assert len(fsync_calls) == 1
+    events = store.read_events(RAW_AUTH)
+    assert [event["event_id"] for event in events] == event_ids
+    wrappers = [
+        json.loads(line)
+        for line in store.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[0]["previous_record_digest"] == ""
+    for index in range(1, len(events)):
+        assert events[index]["previous_record_digest"] == wrappers[index - 1][
+            "record_digest"
+        ]
+
+
+def test_canonical_audit_fails_fast_when_durable_store_is_unavailable(
+    tmp_path, monkeypatch
+):
+    def denied_tail(_self):
+        raise PermissionError("audit volume is read-only")
+
+    monkeypatch.setattr(CanonicalAuditStore, "_last_digest", denied_tail)
+
+    with pytest.raises(
+        CanonicalAuditConfigurationError,
+        match="canonical audit store is not durably writable",
+    ):
+        CanonicalAuditStore(tmp_path, instance_id="HASHI2", agent_id="rika")
 
 
 def test_raw_audit_read_and_wipe_require_separate_explicit_authority(tmp_path):
@@ -245,6 +299,102 @@ def test_canonical_audit_tail_lookup_does_not_scan_large_history(tmp_path):
 
     assert store._last_digest() == expected_digest
     assert observed_file.bytes_read <= 128 * 1024
+
+
+def test_canonical_audit_batch_preserves_chain_with_one_fsync(tmp_path, monkeypatch):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI1", agent_id="zhaojun")
+    fsync_calls = 0
+    original_fsync = __import__("os").fsync
+
+    def counting_fsync(fd):
+        nonlocal fsync_calls
+        fsync_calls += 1
+        return original_fsync(fd)
+
+    monkeypatch.setattr("orchestrator.canonical_audit.os.fsync", counting_fsync)
+    event_ids = store.record_batch(
+        {
+            "event_type": "provider_stream_event",
+            "payload": {"index": index},
+            "request_id": "req-batch",
+        }
+        for index in range(3)
+    )
+
+    assert len(event_ids) == 3
+    assert fsync_calls == 1
+    events = store.read_events(RAW_AUTH)
+    assert [event["payload"]["index"] for event in events] == [0, 1, 2]
+
+
+def test_buffered_audit_losslessly_coalesces_thinking_deltas(tmp_path):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI1", agent_id="zhaojun")
+    writer = BufferedCanonicalAuditWriter(store, coalesce_window_s=5.0)
+    try:
+        for raw_delta in ("alpha", "-", "omega"):
+            writer.record_thinking(
+                {
+                    "kind": "thinking",
+                    "raw_delta": raw_delta,
+                    "summary": raw_delta,
+                    "detail": "",
+                },
+                request_id="req-thinking",
+                provenance={
+                    "source": "her_v2:deepseek-api",
+                    "provider_provenance": "provider_native",
+                },
+            )
+        writer.flush()
+    finally:
+        writer.close()
+
+    events = store.read_events(RAW_AUTH)
+    assert [event["event_type"] for event in events] == [
+        "provider_stream_event",
+        "provider_reasoning",
+    ]
+    assert events[0]["payload"]["raw_delta"] == "alpha-omega"
+    assert events[1]["payload"]["raw_delta"] == "alpha-omega"
+    assert events[0]["payload"]["coalesced_delta_count"] == 3
+    assert events[1]["provenance"]["fabricated"] is False
+
+
+def test_buffered_audit_preserves_prebatched_stream_records_with_one_fsync(
+    tmp_path, monkeypatch
+):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI1", agent_id="zhaojun")
+    fsync_calls = 0
+    original_fsync = os.fsync
+
+    def counting_fsync(fd):
+        nonlocal fsync_calls
+        fsync_calls += 1
+        return original_fsync(fd)
+
+    monkeypatch.setattr("orchestrator.canonical_audit.os.fsync", counting_fsync)
+    writer = BufferedCanonicalAuditWriter(store, coalesce_window_s=5.0)
+    try:
+        event_ids = writer.record_many(
+            {
+                "event_type": "provider_stream_event",
+                "payload": {"raw_delta": raw_delta, "stream_sequence": index},
+                "request_id": "req-prebatched",
+            }
+            for index, raw_delta in enumerate(("alpha", "-", "omega"), start=1)
+        )
+        writer.flush()
+    finally:
+        writer.close()
+
+    events = store.read_events(RAW_AUTH)
+    assert [event["event_id"] for event in events] == event_ids
+    assert [event["payload"]["raw_delta"] for event in events] == [
+        "alpha",
+        "-",
+        "omega",
+    ]
+    assert fsync_calls == 1
 
 
 @pytest.mark.parametrize("damage", ["partial-record", "missing-newline"])
@@ -459,7 +609,7 @@ def test_wiki_prompt_is_generic_and_contains_no_private_deployment_data():
 
 
 @pytest.mark.asyncio
-async def test_wiki_core_command_fails_clearly_without_provider_or_capability():
+async def test_wiki_core_command_reports_unconfigured_provider_as_information():
     replies = []
 
     async def reply(_update, text, **_kwargs):
@@ -475,7 +625,8 @@ async def test_wiki_core_command_fails_clearly_without_provider_or_capability():
         effective_chat=SimpleNamespace(id=2),
     )
     await wiki_command(runtime, update, SimpleNamespace(args=["question"]))
-    assert "Wiki unavailable" in replies[-1]
+    assert replies[-1] == "ℹ️ This HASHI instance has no configured Wiki provider."
+    assert "Wiki unavailable" not in replies[-1]
 
 
 @pytest.mark.asyncio
@@ -523,3 +674,58 @@ async def test_tool_registry_request_scope_filters_catalogue_and_admission(tmp_p
     denial = registry.evaluate_admission("file_read", {"path": "x"}, "call-1")
     assert denial is not None and denial.is_error is True
     assert "current request" in denial.output
+
+
+@pytest.mark.asyncio
+async def test_wiki_search_is_read_only_scoped_and_hides_configured_root(tmp_path):
+    vault = tmp_path / "private-vault"
+    topics = vault / "10_GENERATED_TOPICS"
+    topics.mkdir(parents=True)
+    (topics / "RCA_Applications.md").write_text(
+        "# RCA applications\n\nRenee prepared source documents and application templates.",
+        encoding="utf-8",
+    )
+    outside = vault / "Private"
+    outside.mkdir()
+    (outside / "Secret.md").write_text("not curated", encoding="utf-8")
+
+    global_config = SimpleNamespace(
+        wiki_provider={
+            "id": "curated-test",
+            "capability": "wiki_search",
+            "root": str(vault),
+            "zones": ["10_GENERATED_TOPICS"],
+        }
+    )
+    registry = ToolRegistry(
+        allowed_tools=["wiki_search"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"global_config": global_config},
+    )
+
+    search = await registry.execute(
+        "wiki_search", {"operation": "search", "query": "RCA applications Renee"}
+    )
+    assert search.is_error is False
+    payload = json.loads(search.output)
+    assert payload["results"][0]["source"] == "10_GENERATED_TOPICS/RCA_Applications.md"
+    assert "Renee prepared" in payload["results"][0]["excerpt"]
+    assert str(vault) not in search.output
+
+    read = await registry.execute(
+        "wiki_search",
+        {
+            "operation": "read",
+            "path": "10_GENERATED_TOPICS/RCA_Applications.md",
+        },
+    )
+    assert read.is_error is False
+    assert "application templates" in json.loads(read.output)["content"]
+
+    denied = await registry.execute(
+        "wiki_search", {"operation": "read", "path": "Private/Secret.md"}
+    )
+    assert denied.is_error is True
+    assert "outside configured zones" in denied.output

@@ -7,7 +7,6 @@ HASHI Flow CLI — 工作流命令行管理工具
     python flow/flow_cli.py status <run_id>
     python flow/flow_cli.py list
     python flow/flow_cli.py eval <run_id>
-    python flow/flow_cli.py resume <run_id>
 
 示例:
     python flow/flow_cli.py run flow/workflows/examples/meta_workflow_creation.yaml
@@ -25,9 +24,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from flow.engine.flow_runner import FlowRunner
-from flow.engine.preflight import PreFlightCollector, load_prefill_from_file
-from flow.engine.task_state import TaskState
+from flow.engine.flow_runner import FlowRunner  # noqa: E402
+from flow.engine.preflight import (  # noqa: E402
+    PreFlightCollector,
+    load_prefill_from_file,
+)
+from flow.engine.task_state import TaskState  # noqa: E402
+from nagare.paths import validate_path_component  # noqa: E402
+
+RUNS_ROOT = ROOT / "flow" / "runs"
+
+
+def _run_dir(run_id: str) -> Path:
+    run_id = validate_path_component(run_id, label="run_id")
+    return RUNS_ROOT / run_id
 
 
 # =============================================================================
@@ -52,7 +62,11 @@ def cmd_run(args):
     # 加载预填充答案（如果有）
     prefill = {}
     if args.prefill:
-        prefill = load_prefill_from_file(args.prefill)
+        try:
+            prefill = load_prefill_from_file(args.prefill)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"❌ 无法读取 Pre-flight 预填充文件: {exc}")
+            raise SystemExit(2) from exc
         print(f"   预填充答案: {args.prefill} ({len(prefill)} 项)")
 
     # Pre-flight 收集
@@ -67,7 +81,11 @@ def cmd_run(args):
         prefill=prefill,
         silent=args.silent,
     )
-    pre_flight_data = collector.run()
+    try:
+        pre_flight_data = collector.run()
+    except ValueError as exc:
+        print(f"❌ Pre-flight 输入无效: {exc}")
+        raise SystemExit(2) from exc
 
     if pre_flight_data:
         runner.set_pre_flight_data(pre_flight_data)
@@ -103,13 +121,13 @@ def cmd_run(args):
     )
 
     # 执行工作流
-    print(f"\n▶️  开始执行...\n")
+    print("\n▶️  开始执行...\n")
     result = runner.start()
 
     # 输出结果
     print()
     if result.get("success"):
-        print(f"✅ 工作流完成！")
+        print("✅ 工作流完成！")
         completed = result.get("completed_steps", [])
         print(f"   完成步骤: {', '.join(completed)}")
     else:
@@ -135,7 +153,11 @@ def cmd_run(args):
 
 def cmd_status(args):
     run_id = args.run_id
-    runs_dir = ROOT / "flow" / "runs" / run_id
+    try:
+        runs_dir = _run_dir(run_id)
+    except ValueError as exc:
+        print(f"❌ Run ID 无效: {exc}")
+        raise SystemExit(1) from exc
 
     if not runs_dir.exists():
         print(f"❌ Run 不存在: {run_id}")
@@ -153,7 +175,7 @@ def cmd_status(args):
 
     steps = status.get("steps", {})
     if steps:
-        print(f"\n   步骤状态:")
+        print("\n   步骤状态:")
         for step_id, step_info in steps.items():
             s = step_info.get("status", "unknown")
             icon = {"completed": "✅", "failed": "❌", "running": "🔄", "pending": "⏳"}.get(s, "❓")
@@ -169,7 +191,7 @@ def cmd_status(args):
                 record = json.loads(line)
                 if record.get("run_id") == run_id:
                     scores = record.get("scores", {})
-                    print(f"\n   📈 评估评分:")
+                    print("\n   📈 评估评分:")
                     print(f"   稳定分: {scores.get('stability')}/10")
                     print(f"   效率分: {scores.get('efficiency')}/10")
                     print(f"   介入分: {scores.get('intervention')}/10")
@@ -230,18 +252,23 @@ def cmd_eval(args):
     from flow.agents.evaluator.evaluator import FlowEvaluator
 
     run_id = args.run_id
+    try:
+        _run_dir(run_id)
+    except ValueError as exc:
+        print(f"❌ Run ID 无效: {exc}")
+        raise SystemExit(1) from exc
     print(f"\n🔍 评估 run: {run_id}")
 
     evaluator = FlowEvaluator()
     report = evaluator.evaluate_run(run_id)
 
-    print(f"\n📊 评估报告")
+    print("\n📊 评估报告")
     print(f"   工作流: {report.get('workflow_id')}")
     print(f"   结果: {'✅ 成功' if report.get('success') else '❌ 失败'}")
     print(f"   评估时间: {report.get('evaluated_at')}")
 
     metrics = report.get("metrics", {})
-    print(f"\n   📈 指标:")
+    print("\n   📈 指标:")
     print(f"   总耗时: {metrics.get('total_duration_seconds', 'N/A')}s")
     print(f"   完成步骤: {metrics.get('completed_steps', 0)}")
     print(f"   失败步骤: {metrics.get('failed_steps', 0)}")
@@ -249,7 +276,7 @@ def cmd_eval(args):
     print(f"   人工介入: {metrics.get('human_interventions', 0)}")
 
     scores = report.get("scores", {})
-    print(f"\n   ⭐ 评分:")
+    print("\n   ⭐ 评分:")
     print(f"   稳定分: {scores.get('stability')}/10")
     print(f"   效率分: {scores.get('efficiency')}/10")
     print(f"   介入分: {scores.get('intervention')}/10")
@@ -258,17 +285,6 @@ def cmd_eval(args):
 
     if args.json:
         print(f"\n{json.dumps(report, ensure_ascii=False, indent=2)}")
-
-
-# =============================================================================
-# 子命令：resume（暂未实现完整逻辑，预留接口）
-# =============================================================================
-
-def cmd_resume(args):
-    run_id = args.run_id
-    print(f"⚠️  Resume 功能尚在开发中。")
-    print(f"   Run ID: {run_id}")
-    print(f"   当前可手动检查状态: python flow/flow_cli.py status {run_id}")
 
 
 # =============================================================================
@@ -308,11 +324,6 @@ def main():
     p_eval.add_argument("run_id", help="Run ID")
     p_eval.add_argument("--json", action="store_true", help="输出完整 JSON 报告")
     p_eval.set_defaults(func=cmd_eval)
-
-    # resume
-    p_resume = sub.add_parser("resume", help="恢复暂停的工作流")
-    p_resume.add_argument("run_id", help="Run ID")
-    p_resume.set_defaults(func=cmd_resume)
 
     args = parser.parse_args()
     args.func(args)

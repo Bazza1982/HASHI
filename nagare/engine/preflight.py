@@ -4,7 +4,6 @@ HASHI Flow — Pre-flight Collector
 """
 
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +24,8 @@ class PreFlightCollector:
             silent: 静默模式，所有问题使用默认值（用于测试）
         """
         self.workflow = workflow
+        if prefill is not None and not isinstance(prefill, dict):
+            raise ValueError("Pre-flight prefill must be a JSON object")
         self.prefill = prefill or {}
         self.silent = silent
         self.answers = {}
@@ -36,25 +37,51 @@ class PreFlightCollector:
         """
         pre_flight = self.workflow.get("pre_flight", {})
         questions = pre_flight.get("collect_from_human", [])
+        defaults = pre_flight.get("defaults", {})
+        if not isinstance(defaults, dict):
+            raise ValueError("pre_flight.defaults must be a mapping")
+        if not isinstance(questions, list):
+            raise ValueError("pre_flight.collect_from_human must be a list")
+
+        # Defaults provide non-interactive context; explicit prefill wins and may
+        # include host-supplied keys that are not interactive questions.
+        self.answers = dict(defaults)
+        self.answers.update(self.prefill)
 
         if not questions:
-            return {}
+            return dict(self.answers)
 
         wf_name = self.workflow.get("workflow", {}).get("name", "工作流")
-        self._print_header(wf_name, len(questions))
+        if not self.silent:
+            self._print_header(wf_name, len(questions))
 
         for i, q in enumerate(questions, 1):
+            if not isinstance(q, dict) or not isinstance(q.get("key"), str):
+                raise ValueError("Each pre-flight question must be a mapping with a string key")
             key = q["key"]
+            question_type = q.get("type", "text")
+            if question_type not in {"text", "choice"}:
+                raise ValueError(
+                    f"Unsupported pre-flight question type for '{key}': {question_type}"
+                )
 
             # 优先使用预填充值
             if key in self.prefill:
-                self.answers[key] = self.prefill[key]
-                self._print_prefilled(i, q, self.prefill[key])
+                value = self.prefill[key]
+                self._validate_supplied_value(q, value)
+                self.answers[key] = value
+                if not self.silent:
+                    self._print_prefilled(i, q, self.prefill[key])
                 continue
 
             # 静默模式：使用默认值
             if self.silent:
-                default = q.get("default", "")
+                default = q.get("default", self.answers.get(key, ""))
+                if q.get("required", False) and default in (None, ""):
+                    raise ValueError(
+                        f"Required pre-flight value '{key}' has no prefill or default"
+                    )
+                self._validate_supplied_value(q, default)
                 self.answers[key] = default
                 continue
 
@@ -62,8 +89,21 @@ class PreFlightCollector:
             answer = self._ask_question(i, q)
             self.answers[key] = answer
 
-        self._print_summary()
-        return self.answers
+        if not self.silent:
+            self._print_summary()
+        return dict(self.answers)
+
+    @staticmethod
+    def _validate_supplied_value(question: dict, value) -> None:
+        key = question["key"]
+        if question.get("required", False) and value in (None, ""):
+            raise ValueError(f"Required pre-flight value '{key}' is empty")
+        if question.get("type", "text") == "choice" and value not in (None, ""):
+            choices = question.get("choices", [])
+            if value not in choices:
+                raise ValueError(
+                    f"Pre-flight value for '{key}' must be one of {choices!r}"
+                )
 
     # =========================================================================
     # 提问逻辑
@@ -85,7 +125,7 @@ class PreFlightCollector:
                 print(f"    {j}. {c}{marker}")
             prompt_str = f"    请选择 [1-{len(choices)}]"
             if default:
-                prompt_str += f"（直接回车选默认）"
+                prompt_str += "（直接回车选默认）"
             prompt_str += ": "
 
             while True:
@@ -98,7 +138,7 @@ class PreFlightCollector:
                         return choices[idx_choice]
                     print(f"    ⚠️  请输入 1-{len(choices)} 之间的数字")
                 except ValueError:
-                    print(f"    ⚠️  请输入数字")
+                    print("    ⚠️  请输入数字")
                 except EOFError:
                     return default or ""
 
@@ -106,9 +146,9 @@ class PreFlightCollector:
             if default:
                 prompt_str = f"    输入（直接回车使用默认 \"{default}\"）: "
             elif required:
-                prompt_str = f"    输入（必填）: "
+                prompt_str = "    输入（必填）: "
             else:
-                prompt_str = f"    输入（可选，直接回车跳过）: "
+                prompt_str = "    输入（可选，直接回车跳过）: "
 
             while True:
                 try:
@@ -131,7 +171,7 @@ class PreFlightCollector:
 
     def _print_header(self, wf_name: str, count: int):
         print(f"\n{'='*60}")
-        print(f"  HASHI Flow — Pre-flight 信息收集")
+        print("  HASHI Flow — Pre-flight 信息收集")
         print(f"  工作流: {wf_name}")
         print(f"  需要回答 {count} 个问题（工作流运行前一次性收集）")
         print(f"{'='*60}")
@@ -142,13 +182,16 @@ class PreFlightCollector:
 
     def _print_summary(self):
         print(f"\n{'='*60}")
-        print(f"  ✅ Pre-flight 完成，即将开始工作流...")
+        print("  ✅ Pre-flight 完成，即将开始工作流...")
         print(f"{'='*60}\n")
 
 
 def load_prefill_from_file(path: str) -> dict:
     """从 JSON 文件加载预填充答案（用于自动化/测试）"""
     p = Path(path)
-    if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
-    return {}
+    if not p.is_file():
+        raise FileNotFoundError(f"Pre-flight prefill file does not exist: {p}")
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Pre-flight prefill file must contain a JSON object")
+    return data

@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import ssl
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -73,6 +74,7 @@ from orchestrator.her_v2.presentation import (
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.prompts import (
     render_direct_system_prompt,
+    render_execution_environment_contract,
     render_execution_system_prompt,
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
@@ -295,6 +297,21 @@ def _backend_response_error(
             else inferred_retryable
         )
     )
+    details = {
+        "stop_reason": response.stop_reason,
+        "tool_call_count": int(response.tool_call_count or 0),
+        "tool_loop_count": int(response.tool_loop_count or 0),
+        "attachment_id": metadata.get("attachment_id"),
+        "media_routing": list(metadata.get("multimodal_routing") or []),
+    }
+    for key in (
+        "provider_http_failure",
+        "transport_audit_path",
+        "gateway_continuation",
+    ):
+        value = metadata.get(key)
+        if value not in (None, "", [], {}):
+            details[key] = value
     return StageInvocationError(
         response.error or fallback,
         retryable=retryable,
@@ -306,13 +323,7 @@ def _backend_response_error(
         provider_request_id=response.provider_request_id or "",
         retry_after_s=response.retry_after_s,
         side_effects_possible=bool(response.side_effects_possible),
-        details={
-            "stop_reason": response.stop_reason,
-            "tool_call_count": int(response.tool_call_count or 0),
-            "tool_loop_count": int(response.tool_loop_count or 0),
-            "attachment_id": metadata.get("attachment_id"),
-            "media_routing": list(metadata.get("multimodal_routing") or []),
-        },
+        details=details,
     )
 
 
@@ -552,7 +563,13 @@ def _provider_exception_error(
                 retry_after_s = max(0.0, float(raw_retry_after))
             except ValueError:
                 retry_after_s = None
-        for header in ("x-request-id", "request-id", "cf-ray", "x-amzn-requestid"):
+        for header in (
+            "x-hashi-gateway-request-id",
+            "x-request-id",
+            "request-id",
+            "cf-ray",
+            "x-amzn-requestid",
+        ):
             provider_request_id = str(response.headers.get(header) or "").strip()
             if provider_request_id:
                 break
@@ -764,6 +781,8 @@ class _DelegatedToolRegistry:
     ):
         self._base = base
         requested = {str(item) for item in delegated_tools if str(item).strip()}
+        if "bash" in requested or "shell" in requested:
+            requested.update({"bash", "shell"})
         self._allowed = {
             name for name in requested if bool(getattr(base, "is_allowed")(name))
         }
@@ -1532,6 +1551,15 @@ class _CognitiveControlToolRegistry:
             )
         )
 
+    def _active_tool_allowlist(self) -> frozenset[str] | None:
+        allowed = self.controller.active_tool_allowlist
+        if allowed is None:
+            return None
+        normalized = set(allowed)
+        if "bash" in normalized or "shell" in normalized:
+            normalized.update({"bash", "shell"})
+        return frozenset(normalized)
+
     @staticmethod
     def _task_delta_schema() -> dict[str, Any]:
         return {
@@ -1573,7 +1601,7 @@ class _CognitiveControlToolRegistry:
         if self.controller.final_response_required:
             return []
         definitions = self._base_definitions(tiers)
-        allowed = self.controller.active_tool_allowlist
+        allowed = self._active_tool_allowlist()
         selected = (
             definitions
             if allowed is None
@@ -1590,7 +1618,7 @@ class _CognitiveControlToolRegistry:
             return (COGNITIVE_DECISION_TOOL,)
         if self.controller.final_response_required:
             return ()
-        allowed = self.controller.active_tool_allowlist
+        allowed = self._active_tool_allowlist()
         names = self._all_base_tool_names()
         return (
             names
@@ -1604,7 +1632,7 @@ class _CognitiveControlToolRegistry:
             return name == COGNITIVE_DECISION_TOOL
         if self.controller.final_response_required:
             return False
-        allowed = self.controller.active_tool_allowlist
+        allowed = self._active_tool_allowlist()
         if allowed is not None and name not in allowed:
             return False
         checker = getattr(self._base, "is_allowed", None)
@@ -1619,6 +1647,24 @@ class _CognitiveControlToolRegistry:
             return True
         checker = getattr(self._base, "is_read_only", None)
         return bool(checker(tool_name)) if callable(checker) else False
+
+    def _control_allows(self, tool_name: str) -> bool:
+        """Return only the cognitive boundary's admission decision.
+
+        Underlying permission and cadence registries must still receive an
+        ordinary call so they can return and audit their own typed denial or
+        compulsory-Replan boundary. Cognitive control must never impersonate
+        those independent authorities merely because their ``is_allowed``
+        result is false.
+        """
+
+        name = str(tool_name or "")
+        if self.controller.awaiting_decision:
+            return name == COGNITIVE_DECISION_TOOL
+        if self.controller.final_response_required:
+            return False
+        allowed = self._active_tool_allowlist()
+        return allowed is None or name in allowed
 
     def evaluate_admission(
         self, tool_name: str, arguments: dict, tool_call_id: str = ""
@@ -1810,7 +1856,7 @@ class _CognitiveControlToolRegistry:
                 },
             )
 
-        if not self.is_allowed(name):
+        if not self._control_allows(name):
             payload = self.controller.interrupt_payload()
             return self._result(
                 tool_call_id=tool_call_id,
@@ -2174,7 +2220,13 @@ class _AdapterDelivery(DeliveryPort):
 
 
 class HashiStageProvider(StageProvider):
-    """Invoke configured provider adapters without giving HER tool ownership."""
+    """Invoke configured provider adapters without giving HER tool ownership.
+
+    A backend lifecycle may include model generation, foreground tools, and
+    later continuation.  HER therefore installs no absolute deadline around
+    ``generate_response``; transports own inactivity guards and tools own their
+    explicit timeouts.
+    """
 
     def __init__(
         self,
@@ -2189,8 +2241,19 @@ class HashiStageProvider(StageProvider):
         runtime_context: Any = None,
         usage_observer: Callable[[PerCallUsageLineItem], None] | None = None,
         default_recovery_kind: str = "none",
-        cognitive_control_enabled: bool = False,
+        **removed_options: Any,
     ) -> None:
+        # One-generation hot-reload membrane: an already-running HER adapter
+        # from before the mandatory-control migration still supplies the
+        # retired keyword. It is deliberately absent from this constructor's
+        # declared options and can never affect behaviour. Fresh configuration
+        # rejects the field in HERv2Config; any other unknown option is fatal.
+        unknown_options = set(removed_options).difference(
+            {"cognitive_control_enabled"}
+        )
+        if unknown_options:
+            names = ", ".join(sorted(unknown_options))
+            raise TypeError(f"unexpected HashiStageProvider option(s): {names}")
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
         self.on_stream_event = on_stream_event
@@ -2201,7 +2264,8 @@ class HashiStageProvider(StageProvider):
         self.runtime_context = runtime_context
         self.usage_observer = usage_observer
         self.default_recovery_kind = str(default_recovery_kind or "none")
-        self.cognitive_control_enabled = bool(cognitive_control_enabled)
+        self._active_backend_lock = threading.RLock()
+        self._active_backends: dict[int, Any] = {}
         self._persona_invocation_serial = 0
         self._persona_audit_contexts: dict[str, tuple[str, str]] = {}
         self.logger = logging.getLogger("HASHI.HERv2.StageProvider")
@@ -2218,6 +2282,34 @@ class HashiStageProvider(StageProvider):
         # profile.engine / profile.model / stage are still known.
         self.usage_line_items: list[PerCallUsageLineItem] = []
         self._observed_provider_request_ids: set[str] = set()
+
+    def _track_active_backend(self, backend: Any) -> None:
+        with self._active_backend_lock:
+            self._active_backends[id(backend)] = backend
+
+    def _untrack_active_backend(self, backend: Any) -> None:
+        with self._active_backend_lock:
+            self._active_backends.pop(id(backend), None)
+
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
+        """Interrupt active provider subprocesses from the control thread."""
+
+        with self._active_backend_lock:
+            active = tuple(self._active_backends.values())
+        interrupted = 0
+        for backend in active:
+            interrupt = getattr(backend, "interrupt_nowait", None)
+            if not callable(interrupt):
+                continue
+            try:
+                interrupted += int(bool(interrupt(reason)))
+            except Exception as exc:
+                self.logger.warning(
+                    "Out-of-band provider interrupt failed for %s: %s",
+                    type(backend).__name__,
+                    exc,
+                )
+        return interrupted
 
     async def resolve_stage_modalities(
         self, profile: ProviderProfile
@@ -2925,6 +3017,7 @@ class HashiStageProvider(StageProvider):
                 code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                 human_description="The configured provider backend could not be created.",
             ) from exc
+        self._track_active_backend(backend)
 
         # Provider reasoning remains provider-specific and never receives the
         # HER effort label.  Adapters may consume either the explicit option or
@@ -2960,6 +3053,7 @@ class HashiStageProvider(StageProvider):
 
         supports_tools, controls_tools = _backend_tool_control(backend)
         if request.allow_tools and not supports_tools:
+            self._untrack_active_backend(backend)
             await backend.shutdown()
             raise StageInvocationError(
                 f"provider engine {profile.engine!r} does not support requested tool use",
@@ -2970,6 +3064,7 @@ class HashiStageProvider(StageProvider):
                 ),
             )
         if supports_tools and not controls_tools:
+            self._untrack_active_backend(backend)
             await backend.shutdown()
             raise StageInvocationError(
                 f"provider engine {profile.engine!r} cannot prove HASHI tool isolation",
@@ -3001,6 +3096,7 @@ class HashiStageProvider(StageProvider):
                     and _registry_is_read_only(selected_registry, name)
                 )
             if not isinstance(delegated, list):
+                self._untrack_active_backend(backend)
                 await backend.shutdown()
                 raise StageInvocationError(
                     "sub-agent delegated_tools must be a list",
@@ -3046,6 +3142,7 @@ class HashiStageProvider(StageProvider):
             selected_registry = evidence_registry
             if request.checkpoint_coordinator is not None:
                 if request.stage is not Stage.EXECUTION:
+                    self._untrack_active_backend(backend)
                     await backend.shutdown()
                     raise StageInvocationError(
                         "compulsory Replan coordinator may be installed only for Execution",
@@ -3058,16 +3155,15 @@ class HashiStageProvider(StageProvider):
                     bound_plan_id=str(request.plan_id or ""),
                     enforce_plan_binding=request.role.startswith("sub_agent:"),
                 )
-            if self.cognitive_control_enabled:
-                cognitive_registry = _CognitiveControlToolRegistry(
-                    selected_registry,
-                    request,
-                    audit_log=self.audit_log,
-                    provider=profile.engine,
-                    model=profile.model,
-                )
-                lifecycle_task_state = cognitive_registry.task_state
-                selected_registry = cognitive_registry
+            cognitive_registry = _CognitiveControlToolRegistry(
+                selected_registry,
+                request,
+                audit_log=self.audit_log,
+                provider=profile.engine,
+                model=profile.model,
+            )
+            lifecycle_task_state = cognitive_registry.task_state
+            selected_registry = cognitive_registry
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
             backend.tool_registry = selected_registry
@@ -3099,6 +3195,7 @@ class HashiStageProvider(StageProvider):
                 triage_capability is not None and triage_capability.supports("audio")
             )
             if triage_input_policy == "native" and not triage_hears_audio:
+                self._untrack_active_backend(backend)
                 await backend.shutdown()
                 raise StageInvocationError(
                     "voice Triage is configured native but its exact model cannot consume audio",
@@ -3134,6 +3231,7 @@ class HashiStageProvider(StageProvider):
                         }
                         for item in original_manifest
                     )
+                    self._untrack_active_backend(backend)
                     await backend.shutdown()
                     return StageResponse(
                         data={
@@ -3362,13 +3460,16 @@ class HashiStageProvider(StageProvider):
         reasoning_chunks: list[str] = []
         provider_tool_activity = False
         provider_replay_activity = False
+        provider_text_activity = False
         provider_request_inflight: tuple[str, str, str, bool] | None = None
 
         async def _capture(event: StreamEvent) -> None:
-            nonlocal provider_replay_activity, provider_tool_activity
+            nonlocal provider_replay_activity, provider_text_activity, provider_tool_activity
             content = str(event.raw_delta or event.summary or "")
             if content or event.tool_name:
                 provider_replay_activity = True
+            if event.kind == KIND_TEXT_DELTA and content:
+                provider_text_activity = True
             if event.kind in {KIND_TOOL_START, KIND_TOOL_END} or event.tool_name:
                 provider_tool_activity = True
             owner = str(event.delivery_class or "") or legacy_delivery_class(event.kind)
@@ -3720,7 +3821,46 @@ class HashiStageProvider(StageProvider):
                         stage_prompt = request.goal
                     elif not installed:
                         stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
-            if self.cognitive_control_enabled and lifecycle_task_state is not None:
+            environment_contract = render_execution_environment_contract(
+                request.context.get("execution_environment")
+            )
+            if environment_contract:
+                current_system = str(
+                    getattr(backend, "sys_prompt", "") or ""
+                ).strip()
+                if current_system:
+                    combined_system = f"{current_system}\n\n{environment_contract}"
+                    if _install_system_prompt(backend, combined_system):
+                        system_prompt = combined_system
+                    elif request.allow_tools:
+                        raise StageInvocationError(
+                            f"{request.stage.value} backend cannot install the execution environment contract",
+                            retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                f"The configured {request.stage.value} provider cannot "
+                                "isolate HASHI's required execution environment facts."
+                            ),
+                        )
+                    else:
+                        stage_prompt = f"{environment_contract}\n\n{stage_prompt}"
+                else:
+                    if _install_system_prompt(backend, environment_contract):
+                        system_prompt = environment_contract
+                    elif request.allow_tools:
+                        raise StageInvocationError(
+                            f"{request.stage.value} backend cannot install the execution environment contract",
+                            retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                f"The configured {request.stage.value} provider cannot "
+                                "isolate HASHI's required execution environment facts."
+                            ),
+                        )
+                    else:
+                        stage_prompt = f"{environment_contract}\n\n{stage_prompt}"
+
+            if lifecycle_task_state is not None:
                 contracts = []
                 if cognitive_registry is not None:
                     contracts.append(cognitive_system_contract())
@@ -3864,6 +4004,7 @@ class HashiStageProvider(StageProvider):
                                 "not be created."
                             ),
                         ) from exc
+                    self._track_active_backend(fallback_backend)
                     try:
                         fallback_backend.privacy_level = (
                             self.backend_manager.privacy_level
@@ -3946,6 +4087,7 @@ class HashiStageProvider(StageProvider):
                             recovery_kind="native_audio_fallback",
                         )
                     finally:
+                        self._untrack_active_backend(fallback_backend)
                         await fallback_backend.shutdown()
                     response_metadata = (
                         dict(response.stream_metadata)
@@ -4234,7 +4376,17 @@ class HashiStageProvider(StageProvider):
                 label=f"{profile.engine}/{profile.model} invocation failed",
             ) from exc
         finally:
-            await backend.shutdown()
+            try:
+                self._untrack_active_backend(backend)
+                await backend.shutdown()
+            finally:
+                flush_audit = getattr(
+                    self.on_stream_event,
+                    "flush_canonical_audit",
+                    None,
+                )
+                if callable(flush_audit):
+                    flush_audit(reason=f"her_stage_end:{request.stage.value}")
 
     async def package_persona_commentary(
         self,
@@ -4452,6 +4604,7 @@ class HashiStageProvider(StageProvider):
             backend = self.backend_manager.create_ephemeral_backend(
                 profile.engine, target_model=profile.model
             )
+            self._track_active_backend(backend)
             backend_extra = dict(getattr(backend.config, "extra", None) or {})
             if profile.reasoning is not None:
                 backend_extra["provider_reasoning"] = profile.reasoning
@@ -4565,6 +4718,7 @@ class HashiStageProvider(StageProvider):
             ) from exc
         finally:
             if backend is not None:
+                self._untrack_active_backend(backend)
                 await backend.shutdown()
 
 

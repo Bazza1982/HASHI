@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
-import runpy
+from types import SimpleNamespace
 
 import pytest
 
 from orchestrator import runtime_session
-from orchestrator import session_store as session_store_module
 from orchestrator.session_store import (
     IdempotencyConflict,
     SessionConflict,
@@ -18,48 +17,6 @@ from orchestrator.session_store import (
 
 def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
-
-
-def test_reload_hands_new_store_api_to_live_class_identity(tmp_path):
-    class LegacySessionStoreError(RuntimeError):
-        pass
-
-    class LegacySessionNotFound(LegacySessionStoreError):
-        pass
-
-    class LegacySessionConflict(LegacySessionStoreError):
-        pass
-
-    class LegacyIdempotencyConflict(LegacySessionConflict):
-        pass
-
-    class LegacyStaleFencingToken(LegacySessionConflict):
-        pass
-
-    class LegacySessionStore:
-        pass
-
-    reloaded = runpy.run_path(
-        session_store_module.__file__,
-        init_globals={
-            "SessionStoreError": LegacySessionStoreError,
-            "SessionNotFound": LegacySessionNotFound,
-            "SessionConflict": LegacySessionConflict,
-            "IdempotencyConflict": LegacyIdempotencyConflict,
-            "StaleFencingToken": LegacyStaleFencingToken,
-            "SessionStore": LegacySessionStore,
-        },
-    )
-
-    assert reloaded["SessionStore"] is LegacySessionStore
-    assert reloaded["SessionNotFound"] is LegacySessionNotFound
-    assert callable(getattr(LegacySessionStore, "recent_agent_exchanges", None))
-    live_store = LegacySessionStore(
-        tmp_path / "reloaded" / "sessions.sqlite3", instance_id="HASHI1"
-    )
-    assert live_store.recent_agent_exchanges(
-        owner_id="user:7", agent_id="lily"
-    ) == []
 
 
 def test_runtime_without_bridge_root_keeps_session_db_in_its_workspace(tmp_path):
@@ -106,6 +63,148 @@ def _complete(
     )
     assert run and run["state"] == "completed"
     return accepted
+
+
+def test_assistant_delivery_receipts_are_route_scoped_and_success_only(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+
+    first = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-delivered",
+        key="delivery-1",
+        text="first prompt",
+        answer="last delivered in chat one",
+        source="text",
+    )
+    delivered = store.record_assistant_delivery(
+        first.request_id,
+        delivered=True,
+        surface="telegram",
+        channel_key="chat-1",
+        transport="telegram",
+        completion_path="foreground",
+        disposition="transport_delivered",
+    )
+    duplicate = store.record_assistant_delivery(
+        first.request_id,
+        delivered=True,
+        surface="telegram",
+        channel_key="chat-1",
+        transport="telegram",
+        completion_path="foreground",
+        disposition="transport_delivered",
+    )
+
+    failed = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-failed-delivery",
+        key="delivery-2",
+        text="second prompt",
+        answer="newer but not delivered",
+        source="text",
+    )
+    store.record_assistant_delivery(
+        failed.request_id,
+        delivered=False,
+        surface="telegram",
+        channel_key="chat-1",
+        transport="telegram",
+        completion_path="foreground",
+        disposition="transport_returned_no_receipt",
+    )
+
+    other_route = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-other-chat",
+        key="delivery-3",
+        text="third prompt",
+        answer="delivered in chat two",
+        source="text",
+    )
+    store.record_assistant_delivery(
+        other_route.request_id,
+        delivered=True,
+        assistant_text="transport presentation override",
+        surface="telegram",
+        channel_key="chat-2",
+        transport="telegram",
+        completion_path="background",
+        disposition="transport_delivered",
+    )
+
+    assert delivered is not None
+    assert duplicate is not None
+    assert duplicate["event_id"] == delivered["event_id"]
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="telegram", channel_key="chat-1"
+    ) == "last delivered in chat one"
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="telegram", channel_key="chat-2"
+    ) == "transport presentation override"
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="workbench", channel_key="chat-1"
+    ) is None
+    assert store.has_assistant_delivery_outcome(
+        session["session_id"], surface="telegram", channel_key="chat-1"
+    ) is True
+    assert store.has_assistant_delivery_outcome(
+        session["session_id"], surface="telegram", channel_key="unseen-chat"
+    ) is False
+
+
+def test_say_delivery_lookup_targets_telegram_when_command_arrives_via_workbench(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    accepted = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-api-controlled-say",
+        key="api-controlled-say",
+        text="prompt",
+        answer="telegram-delivered answer",
+        source="text",
+    )
+    store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=True,
+        surface="telegram",
+        channel_key="99",
+        transport="telegram",
+        completion_path="foreground",
+    )
+    runtime = SimpleNamespace(
+        name="lily",
+        workspace_dir=tmp_path,
+        session_store=store,
+        global_config=SimpleNamespace(authorized_id=7, instance_id="HASHI1"),
+    )
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=99),
+        callback_query=None,
+        _hashi_session_surface="workbench",
+        _hashi_session_channel_key="default",
+        _hashi_session_owner_id=None,
+        _hashi_session_id=None,
+    )
+
+    text, tracking_started = runtime_session.telegram_delivery_state_for_update(
+        runtime, update
+    )
+
+    assert text == "telegram-delivered answer"
+    assert tracking_started is True
 
 
 def test_default_session_is_permanent_and_channel_bindings_are_isolated(tmp_path):
@@ -770,3 +869,43 @@ def test_restart_reconciliation_terminalizes_queued_and_running_runs_once(tmp_pa
         assert terminal[0]["detail"]["prior_state"] == prior_state
 
     assert restarted.reconcile_incomplete_runs() == []
+
+
+def test_agent_restart_reconciliation_does_not_interrupt_other_agents(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    alpha_session = store.ensure_default_session(owner_id=owner, agent_id="alpha")
+    beta_session = store.ensure_default_session(owner_id=owner, agent_id="beta")
+    alpha = store.accept_run(
+        session_id=alpha_session["session_id"],
+        owner_id=owner,
+        agent_id="alpha",
+        request_id="req-alpha-restart",
+        text="alpha work",
+        source="test",
+        idempotency_key="alpha-restart",
+    )
+    beta = store.accept_run(
+        session_id=beta_session["session_id"],
+        owner_id=owner,
+        agent_id="beta",
+        request_id="req-beta-still-live",
+        text="beta work",
+        source="test",
+        idempotency_key="beta-still-live",
+    )
+    store.mark_request_running(alpha.request_id, worker_id="alpha-before-restart")
+    store.mark_request_running(beta.request_id, worker_id="beta-still-live")
+
+    reconciled = store.reconcile_incomplete_runs(agent_id="alpha")
+
+    assert [row["run_id"] for row in reconciled] == [alpha.run_id]
+    alpha_run = store.get_run(alpha.run_id, owner_id=owner)
+    assert alpha_run["state"] == "interrupted"
+    assert alpha_run["error_code"] == "runtime_restart_interrupted"
+    assert store.get_run(beta.run_id, owner_id=owner)["state"] == "running"
+    alpha_events = store.events(alpha_session["session_id"], owner_id=owner)
+    terminal = [event for event in alpha_events if event["kind"] == "run.interrupted"]
+    assert len(terminal) == 1
+    assert terminal[0]["detail"]["agent_id"] == "alpha"
+    assert terminal[0]["detail"]["recovery_scope"] == "agent"

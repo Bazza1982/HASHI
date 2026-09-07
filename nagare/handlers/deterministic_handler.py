@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from nagare.paths import resolve_relative_path, validate_path_component
+
 
 class DeterministicStepHandler:
     """
@@ -30,8 +32,9 @@ class DeterministicStepHandler:
         del agent_md_path, backend, model
 
         payload = task_message.get("payload", {})
-        run_id = task_message["run_id"]
-        step_id = payload["step_id"]
+        run_id = validate_path_component(task_message["run_id"], label="run_id")
+        step_id = validate_path_component(payload["step_id"], label="step_id")
+        agent_id = validate_path_component(agent_id, label="agent_id")
         worker_dir = self.runs_root / run_id / "deterministic-workers" / agent_id
         worker_dir.mkdir(parents=True, exist_ok=True)
 
@@ -42,12 +45,17 @@ class DeterministicStepHandler:
         for artifact in output_spec:
             key = artifact["key"]
             relative_path = artifact["path"]
-            output_path = worker_dir / relative_path
+            output_path = resolve_relative_path(
+                worker_dir,
+                relative_path,
+                label=f"artifact '{key}' output path",
+            )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             self._write_artifact(
                 output_path,
                 step_id=step_id,
                 artifact_key=key,
+                artifact_type=artifact.get("type", "file"),
                 input_artifacts=input_artifacts,
                 params=payload.get("params", {}),
             )
@@ -65,9 +73,13 @@ class DeterministicStepHandler:
         *,
         step_id: str,
         artifact_key: str,
+        artifact_type: str,
         input_artifacts: dict,
         params: dict,
     ) -> None:
+        if artifact_type == "directory":
+            output_path.mkdir(parents=True, exist_ok=True)
+            return
         suffix = output_path.suffix.lower()
         if suffix == ".json":
             payload = {

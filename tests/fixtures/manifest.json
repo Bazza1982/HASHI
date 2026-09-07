@@ -28,7 +28,7 @@
       "id": "academic_writing_paragraph",
       "path": "tests/fixtures/academic_writing_paragraph.yaml",
       "category": "nested_config",
-      "source": "flow/workflows/library/academic-writing-paragraph/workflow.yaml",
+      "source": "flow/minato/ai-consulting/shimanto/workflow-work/nagare/academic-writing-paragraph/workflow.yaml",
       "preservation_focus": [
         "scope_notice",
         "defaults",
@@ -43,7 +43,7 @@
       "source": "flow/workflows/examples/meta_workflow_creation.yaml",
       "preservation_focus": [
         "wait_for_human",
-        "timeout_recovery",
+        "human_pause_resume",
         "evaluator_semantics",
         "large_real_workflow"
       ]
@@ -52,7 +52,8 @@
       "id": "legacy_english_news_to_chinese_markdown",
       "path": "tests/fixtures/legacy_english_news_to_chinese_markdown.yaml",
       "category": "legacy_hand_edited",
-      "source": "flow/workflows/library/english_news_to_chinese_markdown.yaml",
+      "source": "tests/fixtures/legacy_english_news_to_chinese_markdown.yaml",
+      "provenance": "Frozen legacy dialect retained only for compatibility testing",
       "preservation_focus": [
         "legacy_dialect",
         "noncanonical_keys",

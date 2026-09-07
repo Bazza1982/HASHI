@@ -267,6 +267,9 @@ class _TurnState:
     execution_draft_event_id: str = ""
     execution_draft_text: str = ""
     execution_draft_delivered: bool = False
+    stage_timing_intervals: dict[str, list[tuple[float, float]]] = field(
+        default_factory=dict
+    )
 
 
 class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
@@ -289,6 +292,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         retry_policy: ProviderRetryPolicy | None = None,
         workzone_ref: str = "",
         checkpoint_clock: Callable[[], float] = time.monotonic,
+        timing_clock: Callable[[], float] = time.perf_counter,
         skills_catalogue: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         self.config = config
@@ -308,6 +312,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.workzone_ref = str(workzone_ref or "")
         self.checkpoint_clock = checkpoint_clock
+        self.timing_clock = timing_clock
         self.skills_catalogue = tuple(
             dict(item)
             for item in (skills_catalogue or ())
@@ -344,12 +349,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             effort=effort_value,
             ledger=ledger,
             control=control,
-            task_state=(
-                HERTaskState(
-                    goal=extract_authoritative_current_request(prompt) or prompt
-                )
-                if self.config.cognitive_control_enabled
-                else None
+            # Cognitive control is a permanent HER v2 safety invariant, not an
+            # Agent/configuration capability. Every Turn therefore owns one
+            # lifecycle-wide TaskState before any stage is invoked.
+            task_state=HERTaskState(
+                goal=extract_authoritative_current_request(prompt) or prompt
             ),
             request_content=normalized_request_content,
             attachment_manifest=manifest,
@@ -417,6 +421,29 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             return False
         control.stop(reason)
         return True
+
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
+        """Signal live turns and provider children from the control lane."""
+
+        try:
+            controls = tuple(self._controls.values())
+        except RuntimeError:
+            controls = tuple(
+                control
+                for key in tuple(self._controls)
+                if (control := self._controls.get(key)) is not None
+            )
+        interrupted = 0
+        for control in controls:
+            control.stop(reason)
+            interrupted += 1
+        provider_interrupt = getattr(self.provider, "interrupt_nowait", None)
+        if callable(provider_interrupt):
+            try:
+                interrupted += int(provider_interrupt(reason) or 0)
+            except Exception:
+                self.logger.exception("Out-of-band provider interruption failed")
+        return interrupted
 
     async def steer(
         self,
@@ -829,9 +856,29 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
 
         playbook = load_strategy_playbook()
+
+        def capability_index(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+            indexed: list[dict[str, Any]] = []
+            for item in items:
+                function = item.get("function")
+                function = function if isinstance(function, Mapping) else {}
+                name = str(function.get("name") or item.get("name") or "").strip()
+                if not name:
+                    continue
+                description = str(
+                    function.get("description") or item.get("description") or ""
+                ).strip()
+                row: dict[str, Any] = {"name": name}
+                if description:
+                    row["description"] = description[:500]
+                if "hashi_read_only" in item:
+                    row["hashi_read_only"] = item.get("hashi_read_only") is True
+                indexed.append(row)
+            return indexed
+
         execution_capabilities = {
-            "tools": [dict(item) for item in self._execution_tool_catalogue()],
-            "skills": [dict(item) for item in self.skills_catalogue],
+            "tools": capability_index(self._execution_tool_catalogue()),
+            "skills": capability_index(self.skills_catalogue),
             "allow_side_effects": not self.config.shadow_mode,
         }
         request_resources = {
@@ -875,7 +922,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 role_override="strategist",
                 context={
                     "habit_catalogue": list(state.habit_catalogue),
-                    "strategy_cards": playbook.prompt_payload(),
+                    "strategy_cards": playbook.selection_payload(),
                     "execution_capabilities": execution_capabilities,
                     "request_resources": request_resources,
                 },

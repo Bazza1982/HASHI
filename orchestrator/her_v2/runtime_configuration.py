@@ -28,25 +28,15 @@ HER_V2_CONFIGURATION_STATE_KEY = "her_v2_configuration"
 HER_V2_CONFIGURATION_DRAFT_STATE_KEY = "her_v2_configuration_draft"
 HER_V2_CONFIGURATION_PRESETS_STATE_KEY = "her_v2_configuration_presets"
 HER_V2_CAPABILITY_REVISION = 1
-HER_V2_PRICING_REVISION_FALLBACK = "2026-08-23.v1"
 
 
 def _loaded_pricing_revision() -> str:
-    """Read the pricing revision across the first mixed-generation reboot.
+    """Require the pricing contract from the same verified generation."""
 
-    A running HASHI process can reload this consumer before the previously
-    imported token tracker. The fallback exactly identifies the pricing table
-    introduced with this control-plane revision; subsequent reboots reload the
-    token tracker first through ``FOUNDATION_PHASES``.
-    """
-
-    return str(
-        getattr(
-            token_tracker,
-            "PRICING_REVISION",
-            HER_V2_PRICING_REVISION_FALLBACK,
-        )
-    )
+    revision = str(getattr(token_tracker, "PRICING_REVISION", "") or "").strip()
+    if not revision:
+        raise RuntimeError("Token tracker pricing revision is unavailable")
+    return revision
 
 
 HER_V2_PRICING_REVISION = _loaded_pricing_revision()

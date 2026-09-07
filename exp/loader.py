@@ -10,7 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 from typing import Any
+
+
+_EXP_ID_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 @dataclass(frozen=True)
@@ -74,9 +78,14 @@ class ExpStore:
 
     def _manifest_path(self, exp_id: str) -> Path:
         parts = exp_id.split("/")
-        if len(parts) != 2 or any(not part for part in parts):
+        if len(parts) != 2 or any(
+            _EXP_ID_COMPONENT.fullmatch(part) is None for part in parts
+        ):
             raise ValueError("EXP id must have the shape '<owner>/<domain>'")
-        manifest_path = self.root.joinpath(*parts, "manifest.json")
+        root = self.root.resolve()
+        manifest_path = root.joinpath(*parts, "manifest.json").resolve()
+        if not manifest_path.is_relative_to(root):
+            raise ValueError("EXP manifest must stay inside the EXP root")
         if not manifest_path.exists():
             raise FileNotFoundError(f"EXP manifest not found: {manifest_path}")
         return manifest_path

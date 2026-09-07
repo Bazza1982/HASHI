@@ -1,10 +1,11 @@
-from __future__ import annotations
 """
 Per-chat routing state for the WhatsApp transport.
 
 Tracks which agent(s) each WhatsApp chat is currently routed to.
 State is persisted to a JSON file so it survives restarts.
 """
+
+from __future__ import annotations
 
 import json
 import logging

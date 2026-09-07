@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from orchestrator.process_execution import process_is_alive
+
 
 def runtime_claim_path(root: Path | str) -> Path:
     return Path(root).expanduser().resolve() / "state" / "remote_runtime_claim.json"
@@ -94,18 +96,4 @@ def remove_runtime_claim(root: Path | str, *, pid: int | None = None) -> bool:
 
 
 def pid_is_alive(pid: int | str | None) -> bool:
-    try:
-        value = int(pid or 0)
-    except Exception:
-        return False
-    if value <= 0:
-        return False
-    try:
-        os.kill(value, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return process_is_alive(pid)

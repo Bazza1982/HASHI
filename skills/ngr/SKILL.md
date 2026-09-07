@@ -10,6 +10,10 @@ Parse the first word of the user's command to determine which action to take:
 - `edit <name>` → Modify an existing packaged NGR workflow
 - `run <name>` → Directly trigger a packaged workflow by name
 
+All paths below are relative to the HASHI repository root. Resolve that root
+from `BRIDGE_PROJECT_ROOT` when it is set; otherwise use the current Git
+repository root. Never embed an operator-specific absolute path in a workflow.
+
 ---
 
 ## Action: new <name>
@@ -18,9 +22,9 @@ Run an **interactive packaging session** with the user to design and create a co
 
 ### Paths
 
-- Workflow YAML: `/home/lily/projects/hashi/flow/workflows/library/<name>.yaml`
-- Skill file: `/home/lily/projects/hashi/skills/<kebab-case-name>/SKILL.md`
-- Workspace: `/home/lily/projects/hashi/flow/workspaces/<name>/`
+- Workflow YAML: `flow/workflows/library/<name>.yaml`
+- Skill file: `skills/<kebab-case-name>/SKILL.md`
+- Workspace: `flow/workspaces/<name>/`
 
 ### Step 1 — Understand the workflow
 
@@ -54,7 +58,7 @@ pre_flight:
 workers:
   - id: <agent_id>
     role: <role description>
-    agent_md: /home/lily/projects/hashi/flow/agents/<role>/AGENT.md
+    agent_md: flow/agents/<role>/AGENT.md
     timeout: <seconds>
 
 steps:
@@ -66,7 +70,7 @@ steps:
       Use {artifacts.<key>} to reference outputs from previous steps.>
     artifacts_produced:
       - key: <artifact_key>
-        path: /home/lily/projects/hashi/flow/workspaces/<name>/<filename>
+        path: <filename>
 ```
 
 Show the draft YAML to the user and ask for feedback. Revise until approved.
@@ -103,7 +107,7 @@ Run the **<name>** Nagare workflow.
 
 2. Confirm the inputs with the user, then launch:
    ```
-   cd /home/lily/projects/hashi && python flow/flow_trigger.py start <name> \
+   python flow/flow_trigger.py start <name> \
      --input "<field_key>=<value>" \
      --input "<field_key>=<value>"
    ```
@@ -114,7 +118,7 @@ Run the **<name>** Nagare workflow.
    ```
 
 4. When the workflow completes, check the workspace at:
-   `/home/lily/projects/hashi/flow/workspaces/<name>/`
+   `flow/workspaces/<name>/`
    and report the outputs to the user.
 
 ## On failure
@@ -131,7 +135,8 @@ Report the error and ask the user whether to retry or abort.
 
 ## Action: list
 
-Show all packaged NGR workflows by scanning `/home/lily/projects/hashi/skills/` for skill files that trigger NGR workflows.
+Show all packaged NGR workflows by scanning `skills/` for skill files that
+trigger NGR workflows.
 
 For each, display:
 - Skill id
@@ -156,7 +161,7 @@ For each, display:
 Collect any required pre-flight inputs from the user (check the workflow YAML's `pre_flight.fields`), then launch:
 
 ```
-cd /home/lily/projects/hashi && python flow/flow_trigger.py start <name> [--input key=value ...]
+python flow/flow_trigger.py start <name> [--input key=value ...]
 ```
 
 Monitor and report back.

@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import math
 import re
-import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-_WRITE_LOCK = threading.Lock()
+from orchestrator.process_resources import path_lock as process_path_lock
+
 _IMAGE_DATA_PATTERN = re.compile(
     r"(data:image/[a-z0-9.+-]+;base64,)[A-Za-z0-9+/=]*",
     re.IGNORECASE,
@@ -53,8 +53,8 @@ def append_audit_record(record: dict[str, Any], path: Path | None = None) -> Pat
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(record)
     payload.setdefault("ts", time.time())
-    line = json.dumps(sanitize_value(payload), ensure_ascii=False, allow_nan=False)
-    with _WRITE_LOCK:
+    line = json.dumps(sanitize_value(payload), ensure_ascii=False)
+    with process_path_lock(audit_path):
         with audit_path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     return audit_path

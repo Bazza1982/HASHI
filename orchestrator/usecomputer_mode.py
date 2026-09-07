@@ -43,7 +43,11 @@ def set_usecomputer_mode(sys_prompt_manager: SysPromptManager, enabled: bool) ->
     return ui_language.tr("computer.disabled", slot=USECOMPUTER_SLOT)
 
 
-def get_usecomputer_status(sys_prompt_manager: SysPromptManager) -> str:
+def get_usecomputer_status(
+    sys_prompt_manager: SysPromptManager,
+    *,
+    capability_status: dict | None = None,
+) -> str:
     slot = sys_prompt_manager._slot(USECOMPUTER_SLOT)
     active = bool(slot.get("active"))
     configured = slot.get("text") == USECOMPUTER_SYSTEM_PROMPT
@@ -56,6 +60,25 @@ def get_usecomputer_status(sys_prompt_manager: SysPromptManager) -> str:
     else:
         current = f"<b>{ui_language.tr('common.off')}</b>"
         consequence = ui_language.tr("computer.effect.off")
+    capability_facts = []
+    if capability_status is not None:
+        registrations = capability_status.get("capabilities") or []
+        computers = [
+            item
+            for item in registrations
+            if isinstance(item, dict)
+            and item.get("capability_kind") == "computer_control"
+        ]
+        if computers:
+            registration = computers[0]
+            capability_facts.append(
+                "<b>Computer Control Worker</b> · 🟢 registered · "
+                f"<code>{registration.get('device_id', 'unknown')}</code>"
+            )
+        else:
+            capability_facts.append(
+                "<b>Computer Control Worker</b> · 🔴 unavailable"
+            )
     return setting_card(
         "🖥️",
         "Computer use",
@@ -63,6 +86,7 @@ def get_usecomputer_status(sys_prompt_manager: SysPromptManager) -> str:
         facts=[
             f"<b>{ui_language.tr('computer.system_slot')}</b> · <code>/sys {USECOMPUTER_SLOT}</code>",
             f"<b>{ui_language.tr('computer.alias')}</b> · <code>/usercomputer</code>",
+            *capability_facts,
         ],
         consequence=consequence,
         action=ui_language.tr("computer.action"),

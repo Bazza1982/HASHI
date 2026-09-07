@@ -7,7 +7,9 @@ import copy
 import hashlib
 import json
 import re
+import time
 from dataclasses import replace
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from orchestrator.her_json_repair import render_json_repair_input
@@ -17,6 +19,7 @@ from orchestrator.multimodal_contract import (
     request_content_is_voice_origin,
     subset_request_content,
 )
+from orchestrator.process_execution import execution_environment_descriptor
 
 from .audit import AuditPersistenceError
 from .checkpoint import CompulsoryReplanCoordinator
@@ -55,6 +58,57 @@ _CLASSIFICATION_ANCHOR_RE = re.compile(
     r'"classification"\s*:\s*"(DIRECT_RESPONSE|SIMPLE_TASK|COMPLEX_TASK|'
     r'HIGH_VOLUME_TASK|CONFIRMATION_REQUIRED)"'
 )
+
+
+def _audit_context_summary(context: Mapping[str, Any]) -> Mapping[str, Any]:
+    encoded = json.dumps(
+        context,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=repr,
+    ).encode("utf-8")
+    return {
+        "keys": sorted(str(key) for key in context),
+        "bytes": len(encoded),
+        "sha256": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _measure_stage_runtime(method):
+    """Record one logical stage interval without affecting its outcome.
+
+    The wrapped invocation already owns Provider retries, tool loops, output
+    validation, and JSON repair.  Measuring at this boundary therefore gives
+    the wall-clock duration the user experienced for that stage instead of
+    mislabelling Provider HTTP latency as whole-stage time.
+    """
+
+    @wraps(method)
+    async def measured(self, state, stage, *args, **kwargs):
+        clock = getattr(self, "timing_clock", time.perf_counter)
+        started_at: float | None = None
+        try:
+            started_at = float(clock())
+        except Exception:
+            # Timing is optional observability and must never break a Turn.
+            pass
+        try:
+            return await method(self, state, stage, *args, **kwargs)
+        finally:
+            if started_at is not None:
+                try:
+                    completed_at = float(clock())
+                    intervals = getattr(state, "stage_timing_intervals", None)
+                    if isinstance(intervals, dict) and completed_at >= started_at:
+                        intervals.setdefault(stage.value, []).append(
+                            (started_at, completed_at)
+                        )
+                except Exception:
+                    # Preserve the primary stage result even if telemetry fails.
+                    pass
+
+    return measured
 
 
 def _rejected_output(response: StageResponse) -> str:
@@ -112,6 +166,7 @@ def _used_typed_media_fallback(value: Any) -> bool:
 
 
 class RuntimeInvocationMixin:
+    @_measure_stage_runtime
     async def _invoke_stage(
         self,
         state: _TurnState,
@@ -144,6 +199,17 @@ class RuntimeInvocationMixin:
             else self.config.stage_roles.get(stage, selected.name)
         )
         base_context = copy.deepcopy(dict(context or {}))
+        registry = getattr(self.provider, "tool_registry", None)
+        execution_cwd = (
+            getattr(registry, "workspace_dir", None)
+            or self.workzone_ref
+            or None
+        )
+        # Runtime facts are authoritative and identical across Strategy,
+        # Planning, Direct, Execution, sub-agent, Review, and recovery stages.
+        base_context["execution_environment"] = execution_environment_descriptor(
+            execution_cwd
+        )
         if stage in {
             Stage.PLANNING,
             Stage.EXECUTION,
@@ -253,6 +319,7 @@ class RuntimeInvocationMixin:
             "allow_tools": allow_tools,
             "allow_side_effects": allow_side_effects,
             "delegated_tools": base_context.get("delegated_tools"),
+            "execution_environment": base_context["execution_environment"],
             "workzone": self.workzone_ref or None,
             "plan_id": invocation_plan_id,
             "attachments": [
@@ -346,7 +413,7 @@ class RuntimeInvocationMixin:
                     "provider_retry_count": provider_retry_count,
                     "retry_invariant_hash": retry_invariant_hash,
                     "retry_invariants": invariant_payload,
-                    "context": attempt_context,
+                    "context_summary": _audit_context_summary(attempt_context),
                 },
             )
             state.ledger.add_log_ref(start_ref)

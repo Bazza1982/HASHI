@@ -18,6 +18,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-platform device control (HASHI3 only)** — implemented separate
+  Browser Control and Computer Control Workers behind shared capability
+  discovery, authorization, audit, and lease/handoff contracts. The WSL Core
+  dynamically publishes its current Windows host-gateway candidates; a
+  persistent windowless Computer Worker selects a bindable route, registers an
+  ephemeral endpoint, survives Core restart, and never falls back to a
+  per-action shell/CLI process. Browser installation is instance-scoped. The
+  logged-in Chrome extension and disruptive/external canaries remain open, and
+  no promotion to HASHI1/HASHI2 is claimed.
+- **Stable Core runtime and per-Agent Function Workers (HASHI3 pilot)** — made
+  CPython 3.12.13 the enforced Core runtime; added executable, ABI,
+  architecture, dependency, policy, Core-source and API/protocol
+  fingerprinting; aligned launchers, CI, containers and portable builders; and
+  established a locked standard dependency generation. `/reboot` no longer
+  mutates live module objects or rebuilds Core Managers/services. It verifies
+  an immutable function artifact, prepares an isolated process for every
+  selected Agent, drains stable route handles and publishes all new Worker
+  pointers atomically. Candidate failure resumes the previous Workers; an
+  unexpected Worker exit recovers from its last immutable generation without
+  restarting Core. HASHI3 passed controlled cold adoption, targeted live
+  cutover, same-generation crash recovery, cold/hot artifact consistency,
+  dynamic endpoint publication, and WSL-Core restart with the Windows Worker
+  retaining its PID. The 2026-09-05 closeout records remaining external gates.
+- **HASHI3 runtime-alignment completion** — isolated typed Scheduler turns and
+  dynamically injected its read-back endpoint; converged orphaned Session Runs
+  per Agent after Worker replacement; bound HChat to one Direct caller Session;
+  made `/say` select only confirmed delivery on that route; preserved complete
+  HASHI API request/response/SSE and Codex terminal-event failure evidence;
+  fixed pre-turn Compact accounting and legacy policy migration; applied
+  `/verbose`, `/think`, and `/commentary` to active turns; expanded `/meter`,
+  `/model`, Native Voice fail-closed checks, and Telegram flood recovery; and
+  introduced revisioned Session Workzone slots `main` plus `1`–`9` with exact
+  access roots. Core-owned command ingress now reaches a dedicated per-Worker
+  provider-interrupt lane through versioned RPC. Authenticated HASHI Remote
+  source can request `/reboot min` through the protected Workbench admin
+  endpoint and audit a hard-restart fallback; live Remote deployment remains an
+  explicit operator gate.
 - **HER v2 Fast/Low Strategy experiment (HASHI3)** — upgraded the compatible
   Triage wire stage to a tool-capable Strategist backed by a versioned external
   38-card Playbook and schema v3. Low effort now passes only the selected Card
@@ -167,6 +204,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Function Worker cold-start latency and readiness truth** — qualifies and
+  materializes one immutable Function generation per startup instead of
+  rebuilding the same 268-module dependency graph for every Agent; unchanged
+  cold restarts reuse the persisted isolated-probe receipt only after exact
+  source, asset, Core runtime, ABI, dependency, and artifact checks. Up to eight
+  Workers now prepare concurrently. The terminal and Workbench health endpoint
+  expose phase, overall percentage, Agent completion, failures, and elapsed
+  time continuously, and readiness reaches 100% only after Core services and
+  optional transports have started.
+- **Reasoning-stream canonical audit hot path** — lossless provider stream
+  evidence now commits in bounded 200 ms / 8 KiB groups with one lock, chain-tail
+  read, append, flush, and `fsync`. Each raw delta retains its own sequence,
+  timestamp, event, and digest-chain link; one semantic reasoning record
+  references the batch instead of copying every delta a second time. Canonical
+  audit startup is fail-closed and uses native `fcntl` or `msvcrt` locking.
+- **Platform-truthful execution contracts** — replaced the misleading implicit
+  `bash` execution path with an explicit `shell` tool: PowerShell on native
+  Windows and Bash on Linux, WSL, and macOS, with selectable CMD and a real-Bash
+  compatibility alias. HER stages now receive authoritative OS, Shell, cwd,
+  path, encoding, Python, and argv facts. Windows process trees, `.cmd`/`.bat`
+  and `.ps1` entry points, UTF-8 output, native paths, WSL drive scopes,
+  background jobs, verification commands, CLI adapters, and CI are covered by
+  native Windows regression tests.
+- **Workbench smoke-result correlation** — live Agent smoke checks now wait on
+  the current request ID in the canonical core transcript instead of watching
+  the legacy presentation transcript for an adjacent user/assistant pair. This
+  prevents successful HER v2 requests from being reported as 180-second false
+  timeouts and avoids cross-request response matches under concurrency.
+- **Fixed/Flex first hot-reload adoption** — configuration now reloads before
+  working-mode consumers, Context Compact tolerates the one mixed-generation
+  reboot that installs this ordering, and the post-reload contract rejects a
+  runtime whose Fixed/Flex symbols are still stale.
 - **Notification-policy delivery and hot-reload safety** — notification helper
   signature mismatches or policy exceptions can no longer suppress a final
   message. Delivery uses a compatibility fallback or safe audible default, and
@@ -178,9 +247,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response request metadata. Codex document/media fallback prompts continue
   through stdin rather than reverting to an oversized command-line argument.
 - **HER read-only search portability** — `workspace_inspect search` now uses
-  the system `grep` binary when `rg` is absent from the service process PATH,
-  preserving bounded, workzone-scoped Review and Verification evidence instead
-  of returning an unexpected tool failure.
+  the system `grep` binary when `rg` is absent, then a bounded built-in Python
+  search when neither binary exists. Pure native-Windows Review and
+  Verification therefore keep workzone-scoped evidence instead of returning an
+  unexpected tool failure.
 - **API Gateway hot-reload process-group crash** — isolated Codex MCP inventory
   subprocesses from HASHI's POSIX process group and made process-tree cleanup
   refuse any group kill that could target HASHI itself. Gateway shutdown now
@@ -430,9 +500,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Initial Telegram `/notify` preference** — introduced the earlier
   two-state `/notify [on|off]` form. The current three-state behavior is
   documented under Unreleased above.
-- **Managed `/bg` background jobs** — added a Workbench-backed BackgroundJobManager path for long OS/process work with durable job ids, status/tail/cancel APIs, bounded stdout/stderr logs, terminal success/failure notifications, and one-shot `background-job-event` routing that can wake the responsible agent to summarize the completed job.
+- **Managed `/bg` background jobs** — added a function-layer
+  `BackgroundJobManager` for long OS/process work with durable job ids,
+  status/tail/cancel APIs, bounded stdout/stderr logs, terminal success/failure
+  notifications, and one-shot `background-job-event` routing that can wake the
+  responsible agent to summarize the completed job.
 
 ### Fixed
+
+- **Final release-contract cleanup** — aligned the Portable Windows builder
+  with the canonical CPython 3.12.13 python-build-standalone artifact, expanded
+  the npm publication allowlist to include the complete imported runtime, and
+  added a real `npm pack` contract that rejects local state and generated
+  outputs.
+- **Release test truthfulness** — moved the Veritas adapter smoke into the
+  collected pytest inventory, removed its machine-specific path, made remote
+  memory idempotence independent of an unshipped local wiki pipeline, and
+  separated platform and deliberate real-wall-clock cases from the offline
+  product claim.
+- **Forward-compatible test dependencies** — opted tests into
+  python-telegram-bot's `timedelta` retry contract, added Starlette's `httpx2`
+  test client, and replaced aiohttp string request keys with typed keys.
+- **Portable remote-memory paths** — relative private configuration now resolves
+  from the selected HASHI root, and the default wiki/Veritas vaults no longer
+  embed developer-machine paths.
 
 - **Non-blocking HER planning boundary** — strict TaskFrame and independent-review
   validation no longer suppresses the primary Agent when planning exhausts its bounded

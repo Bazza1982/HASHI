@@ -4,7 +4,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from orchestrator.admin_local_testing import supported_commands
 from orchestrator.handoff_builder import HandoffBuilder

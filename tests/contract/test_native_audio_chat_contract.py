@@ -31,6 +31,7 @@ from orchestrator.multimodal_contract import (
     canonical_request_content,
 )
 from orchestrator.session_store import SessionStore, SessionStoreError
+from orchestrator.voice_transcript_gate import await_authorized_transcript
 from tests.test_runtime_media import _runtime as telegram_runtime
 from tests.test_runtime_media import _update as telegram_update
 from tests.test_session_api import _Request, _server
@@ -333,12 +334,48 @@ async def test_nac_005_018_native_voice_admission_does_not_wait_for_stt_or_safev
         ]
         assert len(media) == 1
         assert media[0]["semantic_role"] == "voice_message"
+        assert request["request_metadata"]["safe_voice"] is False
+        transcript_state = next(
+            iter(runtime._native_voice_transcripts.values())
+        )
+        assert transcript_state["safe_voice"] is False
         assert runtime.replies == []
     finally:
         release_stt.set()
         await handler
 
     assert len(runtime.enqueued) == 1
+    transcript, status = await await_authorized_transcript(transcript_state)
+    assert transcript == "remember this transcript"
+    assert status == "released"
+    assert transcript_state["confirmation_requested"] is False
+    assert runtime.replies == []
+
+
+@pytest.mark.asyncio
+async def test_native_selection_never_silently_falls_back_to_safe_voice(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = telegram_runtime(tmp_path)
+    runtime.voice_manager = SimpleNamespace(
+        native_audio_enabled=lambda _terminal=None: True
+    )
+    runtime._safevoice_enabled = True
+
+    monkeypatch.setattr(
+        "orchestrator.voice_transcriber.get_transcriber",
+        lambda: pytest.fail("STT must not start for an unavailable native route"),
+    )
+    update = telegram_update(voice=SimpleNamespace(file_id="voice-1"))
+
+    await runtime_media.handle_voice(runtime, update, SimpleNamespace())
+
+    assert runtime.enqueued == []
+    assert runtime._pending_voice == {}
+    assert len(runtime.replies) == 1
+    assert "no compatible audio model" in runtime.replies[0]["text"]
+    assert list(runtime.media_dir.rglob("*.ogg")) == []
 
 
 @pytest.mark.asyncio

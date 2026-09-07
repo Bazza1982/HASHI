@@ -32,7 +32,7 @@ exp/
   README.md
   loader.py
   schema.md
-  <owner>/
+  <owner>/                 # local and gitignored
     <domain>/
       manifest.json
       EXP.md
@@ -51,8 +51,8 @@ EXP is callable through the lightweight loader:
 from exp.loader import ExpStore
 
 store = ExpStore()
-manifest = store.get_manifest("barry/office_desktop")
-playbook = store.get_playbook("barry/office_desktop", "powerpoint")
+manifest = store.get_manifest("sample-user/office_desktop")
+playbook = store.get_playbook("sample-user/office_desktop", "powerpoint")
 ```
 
 The loader is read-only. It does not register commands, mutate HASHI runtime
@@ -60,10 +60,11 @@ state, or alter core orchestration behavior.
 
 ## Optional asset packs
 
-Text guidebooks, manifests, playbooks, validators, and failure memory remain in
-Git. Large Office documents, PDFs, and rendered evidence images are distributed
-as independent, checksum-pinned asset packs and restored only when a selected
-EXP needs them.
+Owner EXP directories contain preferences, machine details, failure memory, and
+evidence, so they are local and gitignored. Only deliberately anonymized sample
+EXP may be published under `exp/examples/`. Large Office documents, PDFs, and
+rendered evidence images can be distributed separately as checksum-pinned asset
+packs and restored only when a selected EXP needs them.
 
 ```text
 python scripts/exp_assets.py status

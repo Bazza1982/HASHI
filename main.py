@@ -1,15 +1,32 @@
 from __future__ import annotations
-import os
-import sys
-import asyncio
-import argparse
-import logging
-import signal
-import traceback
-from pathlib import Path
-from datetime import datetime
 
-from orchestrator.pathing import BridgePaths, build_bridge_paths
+# ruff: noqa: E402 -- Core must enforce its runtime before project imports.
+
+import argparse
+import asyncio
+import logging
+import os
+import signal
+import sys
+import time
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+# The Core runtime contract is the first project import.  Function modules are
+# not allowed to execute until the interpreter and ABI have been accepted.
+CODE_ROOT = Path(__file__).resolve().parent
+from orchestrator.runtime_contract import (
+    RuntimeContractError,
+    enforce_runtime_contract,
+)
+
+try:
+    RUNTIME_FINGERPRINT = enforce_runtime_contract(CODE_ROOT)
+except RuntimeContractError as exc:
+    print(f"HASHI Core runtime rejected: {exc}", file=sys.stderr, flush=True)
+    raise SystemExit(78) from exc
+
 from orchestrator.bootstrap_logging import (
     configure_terminal_console,
     emit_bridge_audit,
@@ -17,12 +34,14 @@ from orchestrator.bootstrap_logging import (
     setup_console_logging,
 )
 from orchestrator.instance_lock import InstanceLock
+from orchestrator.function_worker_supervisor import FunctionWorkerSupervisor
 from orchestrator.lifecycle_state import LifecycleState
-from orchestrator.manager_registry import build_hot_manager_bundle, install_hot_manager_bundle
+from orchestrator.manager_registry import (
+    build_core_manager_bundle,
+    install_core_manager_bundle,
+)
 from orchestrator.onboarding_gate import run_onboarding_gate
-
-# --- Global Orchestrator Setup ---
-CODE_ROOT = Path(__file__).resolve().parent
+from orchestrator.pathing import BridgePaths, build_bridge_paths
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")  # file-only orchestrator log
@@ -42,9 +61,30 @@ class UniversalOrchestrator:
         self.enable_api_gateway = enable_api_gateway
         self.global_cfg = None
         self.secrets = {}
-        install_hot_manager_bundle(
+        self.agent_authority_roots: dict[str, str] = {}
+        self.runtime_fingerprint = RUNTIME_FINGERPRINT
+        self.function_generation = {
+            "generation_id": "bootstrap",
+            "module_count": 0,
+            "runtime_id": RUNTIME_FINGERPRINT.runtime_id,
+        }
+        self._startup_started_monotonic = time.monotonic()
+        self.startup_status = {
+            "phase": "core_bootstrap",
+            "ready": False,
+            "degraded": False,
+            "completed": 0,
+            "ready_agents": 0,
+            "total": 0,
+            "percent": 0,
+            "elapsed_seconds": 0.0,
+            "issues": [],
+            "notices": [],
+        }
+        self.function_workers = FunctionWorkerSupervisor(self)
+        install_core_manager_bundle(
             self,
-            build_hot_manager_bundle(self, _handler),
+            build_core_manager_bundle(self, _handler),
         )
         self.workbench_api = None
         self.api_gateway = None
@@ -53,6 +93,7 @@ class UniversalOrchestrator:
         self.scheduler_task = None
         self.whatsapp = None
         self._lifecycle_lock = asyncio.Lock()
+        self.is_stopping = False
         self._agent_locks: dict[str, asyncio.Lock] = {}
         self._startup_tasks: dict[str, asyncio.Task] = {}
         self._restart_request: dict | None = None  # set by request_restart()
@@ -97,7 +138,10 @@ class UniversalOrchestrator:
             "requested_at": datetime.now().isoformat(),
         }
         main_logger.info(f"Shutdown requested ({reason}).")
-        bridge_logger.warning(f"Shutdown requested ({self.lifecycle_state.shutdown_meta_text(self._shutdown_request)})")
+        bridge_logger.info(
+            "Shutdown requested (%s)",
+            self.lifecycle_state.shutdown_meta_text(self._shutdown_request),
+        )
         self.lifecycle_state.record_shutdown_request(self._shutdown_request)
         self.shutdown_event.set()
 
@@ -149,6 +193,10 @@ class UniversalOrchestrator:
         global_cfg, agent_configs, secrets = cfg_mgr.load()
         self.global_cfg = global_cfg
         self.secrets = secrets
+        self.agent_authority_roots = {
+            str(config.name): str(config.resolve_access_root().resolve())
+            for config in agent_configs
+        }
         return global_cfg, agent_configs, secrets
 
     def get_all_agents_raw(self) -> list[dict]:
@@ -181,23 +229,18 @@ class UniversalOrchestrator:
     ) -> tuple[list, list[tuple[str, str]]]:
         return self.backend_preflight.partition_agents_by_availability(agent_configs, engine_status)
 
-    def _build_runtime(self, agent_cfg, global_cfg, secrets):
-        return self.agent_lifecycle.build_runtime(agent_cfg, global_cfg, secrets)
-
-    async def _cleanup_runtime_start_failure(self, rt):
-        await self.agent_lifecycle.cleanup_runtime_start_failure(rt)
-
-    async def telegram_preflight(self, token: str, agent_name: str, attempt: int = 0, max_attempts: int = 0) -> bool:
-        return await self.agent_lifecycle.telegram_preflight(token, agent_name, attempt, max_attempts)
-
-    async def _start_runtime(self, rt) -> tuple[bool, str]:
-        return await self.agent_lifecycle.start_runtime(rt)
-
-    async def _try_telegram_connect(self, rt) -> bool:
-        return await self.agent_lifecycle.try_telegram_connect(rt)
-
-    async def start_agent(self, agent_name: str) -> tuple[bool, str]:
-        return await self.agent_lifecycle.start_agent(agent_name)
+    async def start_agent(
+        self,
+        agent_name: str,
+        *,
+        generation=None,
+        generation_root: Path | None = None,
+    ) -> tuple[bool, str]:
+        return await self.agent_lifecycle.start_agent(
+            agent_name,
+            generation=generation,
+            generation_root=generation_root,
+        )
 
     async def stop_agent(self, agent_name: str, reason: str = "manual-stop") -> tuple[bool, str]:
         return await self.agent_lifecycle.stop_agent(agent_name, reason)
@@ -207,12 +250,6 @@ class UniversalOrchestrator:
 
     async def _shutdown_all_agents(self, timeout: float = 30.0):
         await self.agent_lifecycle.shutdown_all_agents(timeout)
-
-    def _rebuild_hot_managers(self):
-        self.reboot_manager.rebuild_hot_managers()
-
-    def _reload_project_modules(self):
-        self.reboot_manager.reload_project_modules()
 
     async def _do_hot_restart(self, restart: dict):
         await self.reboot_manager.hot_restart(restart)
@@ -244,15 +281,25 @@ class UniversalOrchestrator:
             "Process bootstrap: "
             f"pid={os.getpid()} ppid={os.getppid()} exe={sys.executable} cwd={Path.cwd()} "
             f"code_root={self.paths.code_root} bridge_home={self.paths.bridge_home} "
-            f"config={self.paths.config_path}"
+            f"config={self.paths.config_path} runtime={self.runtime_fingerprint.runtime_id} "
+            f"platform_abi={self.runtime_fingerprint.platform_abi} "
+            f"dependencies={self.runtime_fingerprint.dependency_digest}"
         )
+
+        # Fixed CLI backends build their HASHI MCP descriptor while the
+        # Function Worker initializes.  Publish the Core-owned Workbench
+        # endpoint first so every Worker receives a live, instance-scoped
+        # service route in its bootstrap topology.
+        await self.service_manager.start_workbench_api(global_cfg, secrets)
 
         startup_ok, wa_cfg = await self.startup_manager.start_initial_agents(global_cfg, agent_configs, secrets)
         if not startup_ok:
+            await self.service_manager.stop_workbench_api()
             return
 
-        main_logger.info("Universal Orchestrator is online. Awaiting messages.")
-
+        startup_status = dict(getattr(self, "startup_status", {}) or {})
+        startup_status.update({"phase": "starting_services", "percent": 90})
+        self.startup_status = startup_status
         await self.service_manager.start_runtime_services(global_cfg, secrets)
 
         try:
@@ -263,6 +310,89 @@ class UniversalOrchestrator:
             ok, message = await self.start_whatsapp_transport(persist_enabled=False)
             if not ok:
                 main_logger.warning(message)
+
+        startup_status = dict(getattr(self, "startup_status", {}) or {})
+        failed_agents = int(startup_status.get("failed_agents") or 0)
+        issues = list(startup_status.get("issues") or ())
+        if failed_agents and not any(
+            issue.get("code") == "agent_startup_failed"
+            for issue in issues
+            if isinstance(issue, dict)
+        ):
+            issues.append(
+                {
+                    "code": "agent_startup_failed",
+                    "component": "function_workers",
+                    "severity": "warning",
+                    "summary": f"{failed_agents} configured agent(s) failed to start.",
+                    "impact": "Those agents are unavailable; successfully started agents and services remain usable.",
+                    "automatic_retry": False,
+                    "actions": [
+                        "Review the failed agent entries in the startup log and correct their provider or Telegram configuration."
+                    ],
+                }
+            )
+        degraded = bool(
+            failed_agents
+            or any(
+                str(issue.get("severity") or "").lower()
+                in {"warning", "error", "critical"}
+                for issue in issues
+                if isinstance(issue, dict)
+            )
+        )
+        startup_status.update(
+            {
+                "phase": "degraded" if degraded else "ready",
+                "ready": not degraded,
+                "degraded": degraded,
+                "services_ready": True,
+                "percent": 100,
+                "issues": issues,
+                "elapsed_seconds": round(
+                    time.monotonic()
+                    - getattr(self, "_startup_started_monotonic", time.monotonic()),
+                    1,
+                ),
+            }
+        )
+        self.startup_status = startup_status
+        show_startup_status = getattr(
+            self.startup_manager,
+            "show_startup_status",
+            None,
+        )
+        if callable(show_startup_status):
+            try:
+                show_startup_status()
+            except Exception as exc:
+                # Presentation must never decide whether Core is available.
+                from orchestrator.terminal_console import record_output_exception
+
+                record_output_exception(
+                    purpose="startup_status",
+                    sink="startup_status_renderer",
+                    error=exc,
+                )
+        bridge_logger.info(
+            "Startup complete: status=%s agents=%s/%s ready (overall=%s%%), "
+            "failed=%s issues=%s elapsed=%.1fs",
+            startup_status["phase"],
+            startup_status.get("ready_agents", 0),
+            startup_status.get("total", 0),
+            startup_status.get("percent", 100),
+            failed_agents,
+            len(issues),
+            startup_status["elapsed_seconds"],
+        )
+        main_logger.info(
+            "HASHI is online. Awaiting messages. "
+            "Startup complete: status=%s, %s/%s agents ready in %.1fs.",
+            startup_status["phase"],
+            startup_status.get("ready_agents", 0),
+            startup_status.get("total", 0),
+            startup_status["elapsed_seconds"],
+        )
 
         # --- Main event loop: supports hot restart ---
         while True:

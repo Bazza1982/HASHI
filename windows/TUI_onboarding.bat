@@ -6,8 +6,8 @@ rem ============================================================
 rem HASHI - TUI Onboarding
 rem First-run setup: language, disclaimer, API key check,
 rem then seamless chat with Hashiko for Telegram + agent setup.
-rem USB mode: uses embedded Python from \python\ if present.
-rem Fallback: uses .venv Python for local dev installs.
+rem Uses an approved private Python from \python\ when present.
+rem Falls back to .venv Python or an approved PATH Python for local installs.
 rem ============================================================
 
 set ROOT=%~dp0..
@@ -31,10 +31,17 @@ if not exist "%PYTHON_EXE%" (
     echo ERROR: Python not found. >> "%LOG_FILE%"
     echo.
     echo ERROR: Python not found at %PYTHON_EXE%
-    echo        On USB: run prepare_usb.bat to set up embedded Python.
-    echo        On dev machine: run start_main.bat first to create .venv.
+    echo        Build the verified Portable Windows image, or create .venv
+    echo        with the approved CPython and locked dependencies.
     pause
     exit /b 1
+)
+"%PYTHON_EXE%" "%ROOT%\scripts\check_runtime_contract.py" --code-root "%ROOT%" >nul
+if errorlevel 1 (
+    echo ERROR: Python or the dependency generation violates the HASHI Core runtime contract.
+    echo        Rebuild this installation; /reboot cannot replace the Core runtime.
+    pause
+    exit /b 78
 )
 set "PID_FILE="
 set "INSTANCE_ID=HASHI"

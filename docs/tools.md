@@ -89,6 +89,7 @@ configuration, transition, migration, and regression contract.
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
 - `/commentary [on|off]` — HER only: show explicitly model-authored Persona acknowledgements and interim reports once each; independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show one temporary deterministic activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status. The same Telegram card is edited as work advances; raw technical events remain in logs, while Persona speech, reasoning, and answer drafts stay excluded.
+- Bare `/think`, `/commentary`, and `/verbose` commands only open their menus. Choosing On or Off applies to the active turn immediately; display events produced while Off are not replayed later.
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/notify [on|quiet|off]` — `on` notifies for every message; `quiet` silences interim activity but not final results, errors, warnings, recovery, or important alerts; `off` delivers every message silently
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
@@ -96,11 +97,11 @@ configuration, transition, migration, and regression contract.
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
-- `/reboot [min|max|number|help]` — preflight and hot-reload Python code,
-  rebuild managers, restart the exact selected lifecycle scope, and
-  warm-recreate the Backend API/gateway/scheduler/watchers; `min` and numbered
-  targets are never widened or rejected because a valid class interface
-  changed, while the process lock and live WhatsApp transport remain intact
+- `/reboot [min|max|number|help]` — qualify an immutable Function generation,
+  prepare isolated candidate Worker processes, drain the exact selected Agent
+  scope, and atomically switch its stable route handles; `min` and numbered
+  targets are never widened, while the Core PID, process lock, Workbench/API
+  ingress, scheduler, shared services, and unselected Agents remain intact
 - `/rebuild` — one-version compatibility notice for the retired native HER build workflow; performs no build, reload, or restart
 - Alias: `/usercomputer`
 
@@ -116,7 +117,7 @@ events and known command/tool shapes; no model generates or paraphrases it.
 **Engine and Model Provider configuration:**
 - `/backend` — switch the active Engine Provider in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the Engine picker. Selecting `her-v2` switches only the Engine; it never asks the user to select the internal `role-configured` sentinel.
 - `/provider [name|hybrid]` — HER v2-only Model Provider routing picker. A named Model Provider keeps the immediate Single-provider flow; `hybrid` opens a draft with independent Quick and Pro Model Provider/model targets.
-- `/model` — for HER v2, edit complete Quick/Pro targets and let each effective task route follow Quick, follow Pro, or use a Custom Model Provider/model target. The Direct route is fixed to Quick and defaults to Model Provider reasoning `high`; `/model reasoning direct <value|inherit>` may override or restore that reasoning default. Use `/model quick|pro [provider] <model>`, `/model route <route> <quick|pro>`, `/model route <route> custom <provider> <model>`, `/model reasoning <route> <value|inherit>`, and `/model apply|discard`. Other Engines retain their existing single-model `/model [name]` behaviour.
+- `/model` — for HER v2, edit complete Quick/Pro targets and configure the public Direct, Strategy, Planning, and Execution stages. Direct is fixed to Quick. Execution `Auto` uses Quick for simple tasks and Pro for complex or high-volume tasks; Quick and Pro apply one choice to every execution class. Provider-reasoning choices are limited to values declared by the active provider/model. Per-task Custom targets and Compact are under Advanced settings; internal/background routes retain their saved defaults without appearing in the normal menu. Typed compatibility controls remain `/model quick|pro [provider] <model>`, `/model route <route> <quick|pro>`, `/model route <route> custom <provider> <model>`, `/model reasoning <route> <value|inherit>`, and `/model apply|discard`. Other Engines retain their existing single-model `/model [name]` behaviour.
 - `/compact [status|cancel]` — HER v2-only maintenance over settled HER Engine Session history. Manual Compact is blocked while a Turn is active and follows the active Quick/Light Model Provider/model route. Canonical typed recovery state is never compacted away. The WIP Journal is only a shadow/legacy compatibility projection and is not re-ingested when canonical recovery is available.
 - `/model compact inherit_quick [auto|tier_2|tier_3]` or `/model compact off` — enable the approved inherited Quick/Light Compact policy, choose its isolated watchdog tier, or turn it off. Legacy inherited-Pro and explicit Compact records migrate to `inherit_quick`.
 - Non-HER Engine/model selection continues to the existing optional effort step when supported. HER v2 keeps Engine, Model Provider, models/reasoning, and effort as independent controls.

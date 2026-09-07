@@ -62,8 +62,10 @@ when ambiguous.
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]`:
   inspect or maintain the bounded Memory+ work card and archive index.
 - `/model`: on HER v2, define complete Quick/Pro provider/model targets and
-  independently choose Follow Quick, Follow Pro, or Custom plus provider
-  reasoning for each effective task route; on other
+  configure Direct, Strategy, Planning, and grouped Execution. Execution Auto
+  uses Quick for simple tasks and Pro for complex or high-volume tasks. Custom
+  per-task targets and Compact are under Advanced settings, while reasoning
+  choices follow the active provider/model's declared capabilities. On other
   backends, retain the existing single-model behaviour.
 - `/habit [view|on|off|default|delete|reset]`: inspect or control the default-off,
   adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
@@ -89,6 +91,9 @@ when ambiguous.
   Persona acknowledgements and interim reports. Each logical event is durable
   and delivered at most once, independently from `/think` and `/verbose`; other
   backends retain their own display rules.
+  For these three display commands, the bare command only opens its menu. An
+  On/Off selection applies to the active turn immediately, and output produced
+  while Off is never replayed after a later On.
 - `/typing [on|off|status]`: control both the temporary typing bubble and Telegram's native typing indicator, independently from `/verbose` and `/think`.
 - `/notify [on|quiet|off]`: control Telegram notification sound. `quiet`
   silences acknowledgements, commentary, reasoning, verbose activity, and
@@ -105,13 +110,13 @@ when ambiguous.
 - `/recall [count]`: remove requests still waiting in this agent's READY or FUTURE queue without interrupting the current task. With no count, remove both layers completely. The optional count may be any positive whole number and selects the newest requests across both layers by creation time. If `n` exceeds the combined queue length, all waiting requests are removed without error. Retained READY requests keep their original FIFO order. It does not restart the backend or affect cron, heartbeat, nudge, or other `/jobs` work. This command is separate from the hidden legacy recall-state compatibility setting. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).
 - `/privacy [0-5]`: show the privacy menu and active-backend compatibility details, or request a level directly. Level 0 disables the privacy framework; Level 1 is the default provider-trust mode with no local redaction. Levels 2–5 remain visible as reserved framework states and cannot be activated until their promised controls are installed and verified. Lowering the active level requires explicit confirmation.
 - `/start`: start another stopped agent.
-- `/reboot`: hot restart agents with live Python code reload. Modes:
-  - `/reboot` — restart all running agents (same selection), picks up code + config changes.
-  - `/reboot min` — reload current code/config and restart only this bot; it is
-    never promoted to all bots or blocked merely because a class interface
-    changed.
-  - `/reboot max` — restart all active agents.
-  - `/reboot [number]` — reload current code/config and restart exactly that agent.
+- `/reboot`: transactionally switch Agent Function Workers. Modes:
+  - `/reboot` — replace all currently running Agent Workers with one verified
+    immutable generation.
+  - `/reboot min` — replace only this Agent's Worker; other Agents and Core
+    services keep their existing objects and generation.
+  - `/reboot max` — replace all active Agent Workers.
+  - `/reboot [number]` — replace exactly that configured/running Agent Worker.
   - `/reboot help` — list modes and show all agents with numbers.
 - `/rebuild`: one-version compatibility notice for the retired native HER build workflow. It performs no build, reload, restart, or status lookup. Use `/reboot` to adopt HASHI Python updates.
 - `/terminate`: shut down this agent.
@@ -131,9 +136,11 @@ when ambiguous.
   Hybrid routing draft. Instance configuration is sufficient; a Model Provider
   need not be repeated in the Agent's Engine list.
 - `/model`: while HER v2 is active, define Quick/Pro Model Provider/model
-  targets and configure each effective task route's target and provider
-  reasoning separately. Hybrid edits take effect together through Apply. Other
-  active Engines retain their existing behaviour.
+  targets and configure Direct, shared Strategy, Planned-only Planning, and
+  grouped Execution. Execution Auto maps simple work to Quick and complex or
+  high-volume work to Pro. Advanced settings contain per-task Custom targets
+  and Compact. Hybrid edits take effect together through Apply. Other active
+  Engines retain their existing behaviour.
 - Engine and model changes continue to an optional effort picker when the
   selected model supports effort. Keeping the current value leaves it unchanged;
   models without selectable effort finish with `n/a`.
@@ -374,9 +381,9 @@ This tier is one of the backends that `/usecomputer` may choose when Linux/X11 d
 
 **For CLI-backend agents (Claude CLI, Gemini CLI, Codex CLI)** — use `bash` directly:
 ```bash
-DISPLAY=:10 ~/projects/hashi2/tools/bin/usecomputer screenshot /tmp/shot.png --json
+DISPLAY=:10 ./tools/bin/usecomputer screenshot /tmp/shot.png --json
 DISPLAY=:10 xdotool type "hello world"
-DISPLAY=:10 ~/projects/hashi2/tools/bin/usecomputer press "ctrl+s"
+DISPLAY=:10 ./tools/bin/usecomputer press "ctrl+s"
 ```
 
 **For HER v2 or a tool-capable provider invocation** — add the `desktop` tier
@@ -400,7 +407,9 @@ DISPLAY=:10 WAYLAND_DISPLAY="" dbus-launch xfwm4 &
 **Keyboard note:** `desktop_type` uses `xdotool` for full Unicode/space/symbol support.
 Requires `xdotool` installed: `sudo apt-get install -y xdotool`
 
-**Binary:** vendored at `tools/bin/usecomputer` (MIT license, native Zig binary, no runtime deps).
+**Binary:** vendored from `usecomputer@0.1.11` at
+`tools/bin/usecomputer` (MIT license, native Zig binary, no runtime deps). See
+`THIRD_PARTY_NOTICES.md` for the exact upstream artifact and digest.
 
 ## Windows Use Tool
 

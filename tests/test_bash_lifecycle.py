@@ -16,6 +16,7 @@ from tools.registry import ToolRegistry
 
 pytestmark = [
     pytest.mark.integration,
+    pytest.mark.platform,
     pytest.mark.skipif(
         os.name != "posix",
         reason="foreground process-group ownership is exercised on POSIX",

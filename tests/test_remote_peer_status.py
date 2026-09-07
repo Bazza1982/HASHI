@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402 -- dependency stubs must be installed before project imports.
 
 import asyncio
 import stat
@@ -117,8 +118,8 @@ def test_lan_discovery_prefers_advertised_non_loopback_candidate_when_mdns_addre
             b"platform": b"windows",
             b"workbench_port": b"18819",
             b"protocol_version": b"2.0",
-            b"address_candidates_json": json.dumps([["192.168.0.211", "l", "in"]]).encode(),
-            b"observed_candidates_json": json.dumps([["192.168.0.211", "l", "in"]]).encode(),
+            b"address_candidates_json": json.dumps([["192.168.50.21", "l", "in"]]).encode(),
+            b"observed_candidates_json": json.dumps([["192.168.50.21", "l", "in"]]).encode(),
         }
         port = 35821
         server = "hashi9.local."
@@ -129,7 +130,7 @@ def test_lan_discovery_prefers_advertised_non_loopback_candidate_when_mdns_addre
     peer = _service_info_to_peer(FakeInfo(), "HASHI2")
 
     assert peer is not None
-    assert peer.host == "192.168.0.211"
+    assert peer.host == "192.168.50.21"
 
 
 def test_registry_rejects_unknown_peer_and_prunes_unknown_instance_seed(tmp_path):
@@ -148,7 +149,7 @@ def test_registry_rejects_unknown_peer_and_prunes_unknown_instance_seed(tmp_path
                     },
                     "hashi2": {
                         "instance_id": "HASHI2",
-                        "api_host": "192.168.0.211",
+                        "api_host": "192.168.50.21",
                         "remote_port": 8767,
                     },
                 }
@@ -178,7 +179,7 @@ def test_registry_rejects_unknown_peer_and_prunes_unknown_instance_seed(tmp_path
     assert "hashi2" in data["instances"]
 
 
-def test_handle_handshake_prefers_payload_lan_candidate_over_loopback_client_ip(tmp_path):
+def test_handle_handshake_prefers_payload_lan_candidate_over_loopback_client_ip():
     captured = []
 
     class RegistryStub:
@@ -192,7 +193,7 @@ def test_handle_handshake_prefers_payload_lan_candidate_over_loopback_client_ip(
     manager.get_local_agents_snapshot = lambda: []
     manager.get_local_agent_directory_state = lambda: {"version": "", "directory_state": "fresh"}
     manager._local_network_profile = lambda: {
-        "host_identity": "a9max",
+        "host_identity": "sample-host",
         "environment_kind": "wsl",
         "address_candidates": [{"host": "172.21.12.144", "scope": "lan", "source": "interface_scan"}],
         "observed_candidates": [{"host": "172.21.12.144", "scope": "lan", "source": "interface_scan"}],
@@ -206,14 +207,14 @@ def test_handle_handshake_prefers_payload_lan_candidate_over_loopback_client_ip(
             "remote_port": 8766,
             "workbench_port": 18800,
             "platform": "wsl",
-            "address_candidates": [{"host": "192.168.0.211", "scope": "lan", "source": "in"}],
-            "observed_candidates": [{"host": "192.168.0.211", "scope": "lan", "source": "in"}],
+            "address_candidates": [{"host": "192.168.50.21", "scope": "lan", "source": "in"}],
+            "observed_candidates": [{"host": "192.168.50.21", "scope": "lan", "source": "in"}],
         },
     )
 
     assert response["status"] == "handshake_accept"
     assert captured
-    assert captured[0].host == "192.168.0.211"
+    assert captured[0].host == "192.168.50.21"
 
 
 def test_live_endpoints_skip_unknown_instance_id(tmp_path):
@@ -336,7 +337,7 @@ async def test_protocol_status_refresh_recovers_reachable_cached_offline_peer(tm
         "WATCHTOWER": PeerInfo(
             instance_id="WATCHTOWER",
             display_name="HASHI WatchTower",
-            host="192.168.0.211",
+            host="192.168.50.21",
             port=43766,
             workbench_port=18800,
             platform="windows",
@@ -366,10 +367,10 @@ async def test_protocol_status_refresh_recovers_reachable_cached_offline_peer(tm
                 "workbench_port": 18800,
             },
             "local_network_profile": {
-                "host_identity": "a9max",
+                "host_identity": "sample-host",
                 "environment_kind": "windows",
-                "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
-                "observed_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+                "address_candidates": [{"host": "192.168.50.21", "scope": "lan"}],
+                "observed_candidates": [{"host": "192.168.50.21", "scope": "lan"}],
             },
         }
 
@@ -393,7 +394,7 @@ def test_registry_refresh_success_derives_live_status_via_common_path(tmp_path):
     registry._peers["HASHI1"] = PeerInfo(
         instance_id="HASHI1",
         display_name="HASHI1",
-        host="192.168.0.211",
+        host="192.168.50.21",
         port=8766,
         workbench_port=18800,
         platform="wsl",
@@ -422,7 +423,7 @@ def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
                         "instance_id": "HASHI1",
                         "platform": "wsl",
                         "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi",
-                        "host_identity": "a9max",
+                        "host_identity": "sample-host",
                     },
                 }
             }
@@ -434,11 +435,11 @@ def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
         "lan": PeerInfo(
             instance_id="HASHI1",
             display_name="HASHI1",
-            host="192.168.0.211",
+            host="192.168.50.21",
             port=8766,
             workbench_port=18800,
             platform="wsl",
-            properties={"discovery": "lan", "host_identity": "a9max", "environment_kind": "wsl"},
+            properties={"discovery": "lan", "host_identity": "sample-host", "environment_kind": "wsl"},
         )
     }
 
@@ -446,7 +447,7 @@ def test_registry_rebuild_keeps_observed_host_for_same_host_wsl_peer(tmp_path):
 
     peer = registry.get_peer("HASHI1")
     assert peer is not None
-    assert peer.host == "192.168.0.211"
+    assert peer.host == "192.168.50.21"
     assert peer.properties["same_host_loopback"] == "127.0.0.1"
 
 
@@ -502,7 +503,7 @@ def test_handshake_success_does_not_clobber_lan_peer_with_loopback_fallback(tmp_
             {
                 "instances": {
                     "hashi2": {"instance_id": "HASHI2", "platform": "wsl"},
-                    "hashi9": {"instance_id": "HASHI9", "platform": "windows", "wsl_root": r"/mnt/c/Users/thene/projects/HASHI"},
+                    "hashi9": {"instance_id": "HASHI9", "platform": "windows", "wsl_root": r"/mnt/c/Users/sampleuser/projects/HASHI"},
                 }
             }
         ),
@@ -513,11 +514,11 @@ def test_handshake_success_does_not_clobber_lan_peer_with_loopback_fallback(tmp_
         "lan": PeerInfo(
             instance_id="HASHI9",
             display_name="HASHI9",
-            host="192.168.0.211",
+            host="192.168.50.21",
             port=8767,
             workbench_port=18819,
             platform="windows",
-            properties={"discovery": "lan", "host_identity": "a9max", "environment_kind": "windows"},
+            properties={"discovery": "lan", "host_identity": "sample-host", "environment_kind": "windows"},
         ),
         "bootstrap_fallback": PeerInfo(
             instance_id="HASHI9",
@@ -526,7 +527,7 @@ def test_handshake_success_does_not_clobber_lan_peer_with_loopback_fallback(tmp_
             port=60862,
             workbench_port=18819,
             platform="windows",
-            properties={"discovery": "bootstrap_fallback", "host_identity": "a9max", "environment_kind": "windows"},
+            properties={"discovery": "bootstrap_fallback", "host_identity": "sample-host", "environment_kind": "windows"},
         ),
     }
 
@@ -535,7 +536,7 @@ def test_handshake_success_does_not_clobber_lan_peer_with_loopback_fallback(tmp_
 
     peer = registry.get_peer("HASHI9")
     assert peer is not None
-    assert peer.host == "192.168.0.211"
+    assert peer.host == "192.168.50.21"
     assert peer.port == 8767
     assert peer.properties["preferred_backend"] == "lan"
 
@@ -570,11 +571,11 @@ def test_registry_route_replacement_drops_stale_loopback_handshake_state(tmp_pat
         "lan": PeerInfo(
             instance_id="HASHI9",
             display_name="HASHI9",
-            host="192.168.0.211",
+            host="192.168.50.21",
             port=35821,
             workbench_port=18819,
             platform="windows",
-            properties={"discovery": "lan", "host_identity": "a9max", "environment_kind": "windows"},
+            properties={"discovery": "lan", "host_identity": "sample-host", "environment_kind": "windows"},
         )
     }
 
@@ -582,7 +583,7 @@ def test_registry_route_replacement_drops_stale_loopback_handshake_state(tmp_pat
 
     peer = registry.get_peer("HASHI9")
     assert peer is not None
-    assert peer.host == "192.168.0.211"
+    assert peer.host == "192.168.50.21"
     assert peer.port == 35821
     assert peer.properties["preferred_backend"] == "lan"
     assert peer.properties.get("handshake_state", "") == ""
@@ -600,7 +601,7 @@ def test_registry_prunes_legacy_alias_when_new_identity_shares_same_endpoint(tmp
         "lan": PeerInfo(
             instance_id="MSI",
             display_name="MSI",
-            host="192.168.0.41",
+            host="192.168.50.41",
             port=8767,
             workbench_port=8779,
             platform="windows",
@@ -609,8 +610,8 @@ def test_registry_prunes_legacy_alias_when_new_identity_shares_same_endpoint(tmp
             properties={
                 "discovery": "lan",
                 "host_identity": "desktopvn0amd7",
-                "address_candidates": [{"host": "192.168.0.41", "scope": "lan"}],
-                "observed_candidates": [{"host": "192.168.0.41", "scope": "lan"}],
+                "address_candidates": [{"host": "192.168.50.41", "scope": "lan"}],
+                "observed_candidates": [{"host": "192.168.50.41", "scope": "lan"}],
             },
         )
     }
@@ -618,7 +619,7 @@ def test_registry_prunes_legacy_alias_when_new_identity_shares_same_endpoint(tmp
         "bootstrap": PeerInfo(
             instance_id="HASHI-DESKTOP",
             display_name="HASHI Desktop",
-            host="192.168.0.41",
+            host="192.168.50.41",
             port=8766,
             workbench_port=8779,
             platform="windows",
@@ -654,7 +655,7 @@ def test_registry_load_state_prunes_legacy_alias_when_new_identity_exists(tmp_pa
                                 "instance_id": "MSI",
                                 "display_name": "MSI",
                                 "display_handle": "@msi",
-                                "host": "192.168.0.41",
+                                "host": "192.168.50.41",
                                 "port": 8767,
                                 "workbench_port": 8779,
                                 "platform": "windows",
@@ -673,7 +674,7 @@ def test_registry_load_state_prunes_legacy_alias_when_new_identity_exists(tmp_pa
                                     "instance_id": "MSI",
                                     "display_name": "MSI",
                                     "display_handle": "@msi",
-                                    "host": "192.168.0.41",
+                                    "host": "192.168.50.41",
                                     "port": 8767,
                                     "workbench_port": 8779,
                                     "platform": "windows",
@@ -693,7 +694,7 @@ def test_registry_load_state_prunes_legacy_alias_when_new_identity_exists(tmp_pa
                                 "instance_id": "HASHI-DESKTOP",
                                 "display_name": "HASHI Desktop",
                                 "display_handle": "@hashi-desktop",
-                                "host": "192.168.0.41",
+                                "host": "192.168.50.41",
                                 "port": 8766,
                                 "workbench_port": 8779,
                                 "platform": "windows",
@@ -711,7 +712,7 @@ def test_registry_load_state_prunes_legacy_alias_when_new_identity_exists(tmp_pa
                                     "instance_id": "HASHI-DESKTOP",
                                     "display_name": "HASHI Desktop",
                                     "display_handle": "@hashi-desktop",
-                                    "host": "192.168.0.41",
+                                    "host": "192.168.50.41",
                                     "port": 8766,
                                     "workbench_port": 8779,
                                     "platform": "windows",
@@ -792,7 +793,7 @@ def test_registry_load_state_rebuilds_stale_canonical_from_fresher_observation(t
                                     "capabilities": ["handshake_v2"],
                                     "properties": {
                                         "discovery": "bootstrap_fallback",
-                                        "host_identity": "a9max",
+                                        "host_identity": "sample-host",
                                         "environment_kind": "wsl",
                                         "handshake_state": "handshake_accepted",
                                         "last_seen_ok": now,
@@ -814,7 +815,7 @@ def test_registry_load_state_rebuilds_stale_canonical_from_fresher_observation(t
                                     "capabilities": ["handshake_v2"],
                                     "properties": {
                                         "discovery": "handshake_inbound",
-                                        "host_identity": "a9max",
+                                        "host_identity": "sample-host",
                                         "environment_kind": "wsl",
                                     },
                                 },
@@ -902,7 +903,7 @@ def test_registry_load_state_prefers_newer_inbound_route_over_stale_loopback_fal
                                     "properties": {
                                         "discovery": "handshake_inbound",
                                         "route_observed_at": now,
-                                        "host_identity": "a9max",
+                                        "host_identity": "sample-host",
                                         "environment_kind": "windows",
                                     },
                                 },
@@ -941,7 +942,7 @@ def test_registry_load_state_prunes_expired_peer_state(tmp_path, monkeypatch):
                         "canonical": {
                             "instance_id": "MSI",
                             "display_name": "MSI",
-                            "host": "192.168.0.41",
+                            "host": "192.168.50.41",
                             "port": 8767,
                             "workbench_port": 8779,
                             "platform": "windows",
@@ -976,8 +977,8 @@ def test_bootstrap_dedupes_legacy_aliases_on_same_endpoint():
             "instance_id": "MSI",
             "display_name": "MSI (Barry's Main Gaming Rig)",
             "platform": "windows",
-            "api_host": "192.168.0.41",
-            "lan_ip": "192.168.0.41",
+            "api_host": "192.168.50.41",
+            "lan_ip": "192.168.50.41",
             "remote_port": 8766,
             "workbench_port": 8779,
             "protocol_version": "2.0",
@@ -989,8 +990,8 @@ def test_bootstrap_dedupes_legacy_aliases_on_same_endpoint():
             "instance_id": "HASHI-DESKTOP",
             "display_name": "HASHI Desktop (5950X/3090)",
             "platform": "windows",
-            "api_host": "192.168.0.41",
-            "lan_ip": "192.168.0.41",
+            "api_host": "192.168.50.41",
+            "lan_ip": "192.168.50.41",
             "remote_port": 8766,
             "workbench_port": 8779,
             "protocol_version": "1.0",
@@ -1008,9 +1009,9 @@ def test_same_machine_hint_recognizes_same_host_wsl_siblings():
     manager = object.__new__(ProtocolManager)
     manager._instance_info = {"instance_id": "HASHI2", "platform": "wsl"}
     manager._local_network_profile = lambda: {
-        "host_identity": "a9max",
+        "host_identity": "sample-host",
         "environment_kind": "wsl",
-        "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+        "address_candidates": [{"host": "192.168.50.21", "scope": "lan"}],
     }
     manager._load_instances = lambda: {
         "hashi2": {
@@ -1023,9 +1024,9 @@ def test_same_machine_hint_recognizes_same_host_wsl_siblings():
     entry = {
         "instance_id": "HASHI1",
         "platform": "wsl",
-        "host_identity": "a9max",
+        "host_identity": "sample-host",
         "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi",
-        "lan_ip": "192.168.0.211",
+        "lan_ip": "192.168.50.21",
     }
 
     assert ProtocolManager._same_machine_hint(manager, entry) is True
@@ -1035,15 +1036,15 @@ def test_same_machine_hint_does_not_falsely_match_wsl_siblings_on_different_host
     manager = object.__new__(ProtocolManager)
     manager._instance_info = {"instance_id": "HASHI2", "platform": "wsl"}
     manager._local_network_profile = lambda: {
-        "host_identity": "a9max",
+        "host_identity": "sample-host",
         "environment_kind": "wsl",
-        "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+        "address_candidates": [{"host": "192.168.50.21", "scope": "lan"}],
     }
     manager._load_instances = lambda: {
         "hashi2": {
             "instance_id": "HASHI2",
             "platform": "wsl",
-            "host_identity": "a9max",
+            "host_identity": "sample-host",
             "wsl_root_from_windows": r"\\\\wsl$\\Ubuntu-22.04\\home\\lily\\projects\\hashi2",
         }
     }
@@ -1064,7 +1065,7 @@ def test_resolve_peer_route_uses_loopback_candidate_for_live_same_host_peer():
     peer = PeerInfo(
         instance_id="HASHI1",
         display_name="HASHI1",
-        host="192.168.0.211",
+        host="192.168.50.21",
         port=8766,
         workbench_port=18800,
         platform="wsl",
@@ -1074,7 +1075,7 @@ def test_resolve_peer_route_uses_loopback_candidate_for_live_same_host_peer():
     manager._load_instances = lambda: {
         "hashi1": {"instance_id": "HASHI1", "same_host_loopback": "127.0.0.1", "remote_port": 8766}
     }
-    manager._candidate_hosts_for_peer = lambda _peer: ["127.0.0.1", "192.168.0.211"]
+    manager._candidate_hosts_for_peer = lambda _peer: ["127.0.0.1", "192.168.50.21"]
     manager._probe_route = lambda host, port: host == "127.0.0.1" and port == 8766
 
     route = ProtocolManager._resolve_peer_route(manager, "HASHI1")
@@ -1090,13 +1091,13 @@ def test_protocol_status_includes_route_diagnostics(tmp_path):
                     "hashi1": {
                         "instance_id": "HASHI1",
                         "platform": "wsl",
-                        "host_identity": "a9max",
+                        "host_identity": "sample-host",
                         "remote_port": 8766,
                     },
                     "hashi2": {
                         "instance_id": "HASHI2",
                         "platform": "wsl",
-                        "host_identity": "a9max",
+                        "host_identity": "sample-host",
                         "remote_port": 8766,
                     },
                 }
@@ -1257,7 +1258,7 @@ def test_render_remote_peer_endpoints_explains_same_host_loopback(tmp_path):
                     "hashi9": {
                         "instance_id": "HASHI9",
                         "api_host": "127.0.0.1",
-                        "lan_ip": "192.168.0.211",
+                        "lan_ip": "192.168.50.21",
                         "remote_port": 8768,
                         "same_host_loopback": "127.0.0.1",
                     }
@@ -1277,7 +1278,7 @@ def test_render_remote_peer_endpoints_explains_same_host_loopback(tmp_path):
 
     lines = FlexibleAgentRuntime._render_remote_peer_endpoints(dummy, peer)
 
-    assert lines == ["addr: <code>local 127.0.0.1:8768</code>  ·  <code>lan 192.168.0.211:8768</code>"]
+    assert lines == ["addr: <code>local 127.0.0.1:8768</code>  ·  <code>lan 192.168.50.21:8768</code>"]
 
 
 def test_render_remote_peer_endpoints_shows_route_and_network_when_they_differ(tmp_path):
@@ -1287,8 +1288,8 @@ def test_render_remote_peer_endpoints_shows_route_and_network_when_they_differ(t
                 "instances": {
                     "msi": {
                         "instance_id": "MSI",
-                        "api_host": "192.168.0.41",
-                        "lan_ip": "192.168.0.41",
+                        "api_host": "192.168.50.41",
+                        "lan_ip": "192.168.50.41",
                         "remote_port": 8767,
                     }
                 }
@@ -1309,7 +1310,7 @@ def test_render_remote_peer_endpoints_shows_route_and_network_when_they_differ(t
 
     assert lines == [
         "addr: <code>desktopvn0amd7:8767</code>",
-        "lan: <code>192.168.0.41:8767</code>",
+        "lan: <code>192.168.50.41:8767</code>",
     ]
 
 
@@ -1385,7 +1386,7 @@ def test_old_peer_without_hmac_is_marked_rejected_auth_required():
     manager._handshake_timeout_seconds = 1
     manager._candidate_hosts_for_peer = lambda _peer: ["10.0.0.2"]
     manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
-    manager._local_network_profile = lambda: {"host_identity": "a9max", "environment_kind": "wsl", "address_candidates": [], "observed_candidates": []}
+    manager._local_network_profile = lambda: {"host_identity": "sample-host", "environment_kind": "wsl", "address_candidates": [], "observed_candidates": []}
     manager.get_local_agents_snapshot = lambda: []
     manager.get_local_agent_directory_state = lambda: {"version": "", "directory_state": "fresh"}
     manager._post_json = lambda _url, _payload, timeout=0: {
@@ -1522,22 +1523,22 @@ def test_bootstrap_known_peers_recovers_stale_windows_remote_port(tmp_path):
             "instance_id": "INTEL",
             "display_name": "INTEL",
             "platform": "windows",
-            "lan_ip": "192.168.0.6",
+            "lan_ip": "192.168.50.6",
             "remote_port": 40050,
             "workbench_port": 18802,
         }
     }
     manager._dedupe_bootstrap_instances = lambda instances: instances
-    manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
+    manager._candidate_hosts_for_entry = lambda entry: ["192.168.50.6"]
     manager._probe_instance_route = (
-        lambda host, port, instance_id, timeout=2: host == "192.168.0.6" and int(port) == 8766 and instance_id == "INTEL"
+        lambda host, port, instance_id, timeout=2: host == "192.168.50.6" and int(port) == 8766 and instance_id == "INTEL"
     )
 
     asyncio.run(manager._bootstrap_known_peers())
 
     assert len(captured) == 1
     peer = captured[0]
-    assert peer.host == "192.168.0.6"
+    assert peer.host == "192.168.50.6"
     assert peer.port == 8766
 
 
@@ -1547,7 +1548,7 @@ def test_bootstrap_known_peers_repairs_existing_offline_peer(tmp_path):
     stale_peer = PeerInfo(
         instance_id="INTEL",
         display_name="INTEL",
-        host="192.168.0.6",
+        host="192.168.50.6",
         port=40050,
         workbench_port=18802,
         platform="windows",
@@ -1571,15 +1572,15 @@ def test_bootstrap_known_peers_repairs_existing_offline_peer(tmp_path):
             "instance_id": "INTEL",
             "display_name": "INTEL",
             "platform": "windows",
-            "lan_ip": "192.168.0.6",
+            "lan_ip": "192.168.50.6",
             "remote_port": 40050,
             "workbench_port": 18802,
         }
     }
     manager._dedupe_bootstrap_instances = lambda instances: instances
-    manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
+    manager._candidate_hosts_for_entry = lambda entry: ["192.168.50.6"]
     manager._probe_instance_route = (
-        lambda host, port, instance_id, timeout=2: host == "192.168.0.6" and int(port) == 8766 and instance_id == "INTEL"
+        lambda host, port, instance_id, timeout=2: host == "192.168.50.6" and int(port) == 8766 and instance_id == "INTEL"
     )
 
     asyncio.run(manager._bootstrap_known_peers())
@@ -1594,7 +1595,7 @@ def test_bootstrap_known_peers_skips_existing_online_peer(tmp_path):
     online_peer = PeerInfo(
         instance_id="INTEL",
         display_name="INTEL",
-        host="192.168.0.6",
+        host="192.168.50.6",
         port=8766,
         workbench_port=18802,
         platform="windows",
@@ -1618,13 +1619,13 @@ def test_bootstrap_known_peers_skips_existing_online_peer(tmp_path):
             "instance_id": "INTEL",
             "display_name": "INTEL",
             "platform": "windows",
-            "lan_ip": "192.168.0.6",
+            "lan_ip": "192.168.50.6",
             "remote_port": 40050,
             "workbench_port": 18802,
         }
     }
     manager._dedupe_bootstrap_instances = lambda instances: instances
-    manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
+    manager._candidate_hosts_for_entry = lambda entry: ["192.168.50.6"]
     manager._probe_route = lambda host, port, timeout=2: True
 
     asyncio.run(manager._bootstrap_known_peers())
@@ -1638,7 +1639,7 @@ def test_bootstrap_known_peers_skips_existing_peer_owned_by_live_discovery(tmp_p
     existing_peer = PeerInfo(
         instance_id="INTEL",
         display_name="INTEL",
-        host="192.168.0.6",
+        host="192.168.50.6",
         port=8766,
         workbench_port=18802,
         platform="windows",
@@ -1662,13 +1663,13 @@ def test_bootstrap_known_peers_skips_existing_peer_owned_by_live_discovery(tmp_p
             "instance_id": "INTEL",
             "display_name": "INTEL",
             "platform": "windows",
-            "lan_ip": "192.168.0.6",
+            "lan_ip": "192.168.50.6",
             "remote_port": 40050,
             "workbench_port": 18802,
         }
     }
     manager._dedupe_bootstrap_instances = lambda instances: instances
-    manager._candidate_hosts_for_entry = lambda entry: ["192.168.0.6"]
+    manager._candidate_hosts_for_entry = lambda entry: ["192.168.50.6"]
     manager._probe_instance_route = lambda host, port, instance_id, timeout=2: True
 
     asyncio.run(manager._bootstrap_known_peers())
@@ -1692,7 +1693,7 @@ def test_bootstrap_known_peers_logs_when_no_probe_ports(caplog, tmp_path):
     assert "Bootstrap: HASHI2 has no live or fallback probe ports, skipping" in caplog.text
 
 
-def test_bootstrap_probe_rejects_mismatched_instance_identity(tmp_path):
+def test_bootstrap_probe_rejects_mismatched_instance_identity():
     manager = object.__new__(ProtocolManager)
     manager._use_tls = False
     manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
@@ -1711,7 +1712,7 @@ def test_live_endpoints_file_is_private(tmp_path):
             PeerInfo(
                 instance_id="HASHI2",
                 display_name="HASHI2",
-                host="192.168.0.211",
+                host="192.168.50.21",
                 port=30264,
                 workbench_port=18802,
                 platform="wsl",
@@ -1731,7 +1732,7 @@ def test_remove_live_endpoint_removes_only_matching_instance(tmp_path):
             PeerInfo(
                 instance_id="HASHI2",
                 display_name="HASHI2",
-                host="192.168.0.211",
+                host="192.168.50.21",
                 port=30264,
                 workbench_port=18802,
                 platform="wsl",
@@ -1762,7 +1763,7 @@ def test_write_live_endpoints_can_preserve_self_endpoint(tmp_path):
         PeerInfo(
             instance_id="HASHI9",
             display_name="HASHI9",
-            host="192.168.0.211",
+            host="192.168.50.21",
             port=35821,
             workbench_port=18819,
             platform="windows",
@@ -1774,7 +1775,7 @@ def test_write_live_endpoints_can_preserve_self_endpoint(tmp_path):
             PeerInfo(
                 instance_id="HASHI2",
                 display_name="HASHI2",
-                host="192.168.0.211",
+                host="192.168.50.21",
                 port=8767,
                 workbench_port=18802,
                 platform="wsl",
@@ -1794,7 +1795,7 @@ def test_write_live_endpoints_can_preserve_only_selected_existing_endpoint(tmp_p
         PeerInfo(
             instance_id="HASHI9",
             display_name="HASHI9",
-            host="192.168.0.211",
+            host="192.168.50.21",
             port=35821,
             workbench_port=18819,
             platform="windows",
@@ -1805,7 +1806,7 @@ def test_write_live_endpoints_can_preserve_only_selected_existing_endpoint(tmp_p
         PeerInfo(
             instance_id="WATCHTOWER",
             display_name="WatchTower",
-            host="192.168.0.211",
+            host="192.168.50.21",
             port=43766,
             workbench_port=18800,
             platform="windows",
@@ -1850,7 +1851,7 @@ def test_tailscale_discovery_uses_live_endpoint_port(monkeypatch, tmp_path):
             PeerInfo(
                 instance_id="HASHI2",
                 display_name="HASHI2",
-                host="192.168.0.211",
+                host="192.168.50.21",
                 port=30264,
                 workbench_port=18802,
                 platform="wsl",
@@ -1926,8 +1927,8 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
                         "instance_id": "MSI",
                         "display_name": "MSI",
                         "platform": "windows",
-                        "api_host": "192.168.0.41",
-                        "lan_ip": "192.168.0.41",
+                        "api_host": "192.168.50.41",
+                        "lan_ip": "192.168.50.41",
                         "remote_port": 8767,
                         "workbench_port": 8779,
                         "protocol_version": "2.0",
@@ -1941,8 +1942,8 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
                         "instance_id": "HASHI-DESKTOP",
                         "display_name": "HASHI Desktop",
                         "platform": "windows",
-                        "api_host": "192.168.0.41",
-                        "lan_ip": "192.168.0.41",
+                        "api_host": "192.168.50.41",
+                        "lan_ip": "192.168.50.41",
                         "remote_port": 8767,
                         "workbench_port": 8779,
                         "protocol_version": "1.0",
@@ -1960,14 +1961,14 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
         "MSI": PeerInfo(
             instance_id="MSI",
             display_name="MSI",
-            host="192.168.0.41",
+            host="192.168.50.41",
             port=8767,
             workbench_port=8779,
             platform="windows",
             protocol_version="2.0",
             capabilities=["handshake_v2"],
             properties={
-                "address_candidates": [{"host": "192.168.0.41", "scope": "lan"}],
+                "address_candidates": [{"host": "192.168.50.41", "scope": "lan"}],
                 "handshake_state": "handshake_accepted",
                 "live_status": "online",
                 "host_identity": "desktopvn0amd7",
@@ -1977,14 +1978,14 @@ def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
         "HASHI-DESKTOP": PeerInfo(
             instance_id="HASHI-DESKTOP",
             display_name="HASHI Desktop",
-            host="192.168.0.41",
+            host="192.168.50.41",
             port=8767,
             workbench_port=8779,
             platform="windows",
             protocol_version="1.0",
             capabilities=[],
             properties={
-                "address_candidates": [{"host": "192.168.0.41", "scope": "peer"}],
+                "address_candidates": [{"host": "192.168.50.41", "scope": "peer"}],
                 "handshake_state": "handshake_timed_out",
                 "live_status": "offline",
             },
@@ -2017,8 +2018,8 @@ def test_registry_prunes_failed_legacy_alias_with_obsolete_remote_port(tmp_path)
             "instance_id": "MSI",
             "display_name": "MSI",
             "platform": "windows",
-            "api_host": "192.168.0.41",
-            "lan_ip": "192.168.0.41",
+            "api_host": "192.168.50.41",
+            "lan_ip": "192.168.50.41",
             "remote_port": 8767,
             "workbench_port": 8779,
             "_discovery": "lan",
@@ -2033,8 +2034,8 @@ def test_registry_prunes_failed_legacy_alias_with_obsolete_remote_port(tmp_path)
             "instance_id": "HASHI-DESKTOP",
             "display_name": "HASHI Desktop",
             "platform": "windows",
-            "api_host": "192.168.0.41",
-            "lan_ip": "192.168.0.41",
+            "api_host": "192.168.50.41",
+            "lan_ip": "192.168.50.41",
             "remote_port": 8768,
             "workbench_port": 8779,
             "_discovery": "bootstrap",
@@ -2081,12 +2082,12 @@ def test_registry_keeps_distinct_live_peers_with_same_host_and_workbench(tmp_pat
                 capabilities=["handshake_v2"],
                 properties={
                     "discovery": "lan",
-                    "host_identity": "a9max",
+                    "host_identity": "sample-host",
                     "environment_kind": "wsl",
                     "last_seen_ok": int(time.time()),
                     "handshake_state": "handshake_accepted",
                     "live_status": "online",
-                    "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+                    "address_candidates": [{"host": "192.168.50.21", "scope": "lan"}],
                 },
             )
         },
@@ -2102,9 +2103,9 @@ def test_registry_keeps_distinct_live_peers_with_same_host_and_workbench(tmp_pat
                 capabilities=["handshake_v2", "rescue_start"],
                 properties={
                     "discovery": "lan",
-                    "host_identity": "a9max",
+                    "host_identity": "sample-host",
                     "environment_kind": "wsl",
-                    "address_candidates": [{"host": "192.168.0.211", "scope": "lan"}],
+                    "address_candidates": [{"host": "192.168.50.21", "scope": "lan"}],
                 },
             )
         },
@@ -2129,13 +2130,13 @@ def test_registry_keeps_distinct_live_instance_entries_with_same_host_and_workbe
             "display_name": "HASHI1 (WSL)",
             "platform": "wsl",
             "api_host": "127.0.0.1",
-            "lan_ip": "192.168.0.211",
+            "lan_ip": "192.168.50.21",
             "remote_port": 8766,
             "workbench_port": 18800,
             "_discovery": "lan",
             "protocol_version": "2.0",
             "capabilities": ["handshake_v2"],
-            "host_identity": "a9max",
+            "host_identity": "sample-host",
             "environment_kind": "wsl",
             "handshake_state": "handshake_accepted",
             "live_status": "online",
@@ -2145,13 +2146,13 @@ def test_registry_keeps_distinct_live_instance_entries_with_same_host_and_workbe
             "display_name": "HASHI Watchtower",
             "platform": "wsl",
             "api_host": "127.0.0.1",
-            "lan_ip": "192.168.0.211",
+            "lan_ip": "192.168.50.21",
             "remote_port": 35990,
             "workbench_port": 18800,
             "_discovery": "lan",
             "protocol_version": "2.0",
             "capabilities": ["handshake_v2", "rescue_start"],
-            "host_identity": "a9max",
+            "host_identity": "sample-host",
             "environment_kind": "wsl",
             "live_status": "online",
         },
@@ -2173,8 +2174,8 @@ def test_registry_keeps_distinct_mixed_backend_entries_with_same_host_and_workbe
         "hashi9": {
             "instance_id": "HASHI9",
             "platform": "windows",
-            "api_host": "192.168.0.211",
-            "lan_ip": "192.168.0.211",
+            "api_host": "192.168.50.21",
+            "lan_ip": "192.168.50.21",
             "remote_port": 35821,
             "workbench_port": 18800,
             "_discovery": "bootstrap_fallback",
@@ -2183,8 +2184,8 @@ def test_registry_keeps_distinct_mixed_backend_entries_with_same_host_and_workbe
         "watchtower": {
             "instance_id": "WATCHTOWER",
             "platform": "windows",
-            "api_host": "192.168.0.211",
-            "lan_ip": "192.168.0.211",
+            "api_host": "192.168.50.21",
+            "lan_ip": "192.168.50.21",
             "remote_port": 43766,
             "workbench_port": 18800,
             "_discovery": "lan",
@@ -2262,7 +2263,7 @@ def test_render_remote_peer_block_keeps_offline_rows_compact():
     lines = dummy._render_remote_peer_block(
         {
             "instance_id": "MSI",
-            "host": "192.168.0.41",
+            "host": "192.168.50.41",
             "port": 8767,
             "properties": {
                 "live_status": "offline",
@@ -2303,7 +2304,7 @@ def test_registry_prunes_stale_legacy_instance_not_in_live_peers(tmp_path):
                         "instance_id": "MSI",
                         "display_name": "MSI",
                         "platform": "windows",
-                        "lan_ip": "192.168.0.41",
+                        "lan_ip": "192.168.50.41",
                         "remote_port": 8767,
                         "_discovery": "lan",
                         "last_seen": old_seen,
@@ -2344,7 +2345,7 @@ def test_registry_prunes_unknown_bootstrap_instance_without_live_timestamp(tmp_p
                         "instance_id": "WATCHTOWER_VALIDATE2",
                         "platform": "windows",
                         "api_host": "127.0.0.1",
-                        "lan_ip": "192.168.0.211",
+                        "lan_ip": "192.168.50.21",
                         "remote_port": 8766,
                         "workbench_port": 18800,
                         "_discovery": "bootstrap",
@@ -2379,7 +2380,7 @@ def test_registry_sync_writes_prune_only_changes_without_live_peers(tmp_path):
                         "instance_id": "WATCHTOWER_VALIDATE2",
                         "platform": "windows",
                         "api_host": "127.0.0.1",
-                        "lan_ip": "192.168.0.211",
+                        "lan_ip": "192.168.50.21",
                         "remote_port": 8766,
                         "workbench_port": 18800,
                         "_discovery": "bootstrap",
@@ -2415,7 +2416,7 @@ def test_registry_keeps_current_peer_even_when_legacy_timestamp_is_old(tmp_path)
                         "instance_id": "INTEL",
                         "display_name": "INTEL",
                         "platform": "windows",
-                        "lan_ip": "192.168.0.6",
+                        "lan_ip": "192.168.50.6",
                         "remote_port": 8766,
                         "_discovery": "lan",
                         "last_seen": old_seen,
@@ -2432,7 +2433,7 @@ def test_registry_keeps_current_peer_even_when_legacy_timestamp_is_old(tmp_path)
         "INTEL": PeerInfo(
             instance_id="INTEL",
             display_name="INTEL",
-            host="192.168.0.6",
+            host="192.168.50.6",
             port=8766,
             workbench_port=18802,
             platform="windows",
@@ -2461,7 +2462,7 @@ def test_registry_sync_salvages_and_rewrites_malformed_instances_json(tmp_path):
         "INTEL": PeerInfo(
             instance_id="INTEL",
             display_name="INTEL",
-            host="192.168.0.6",
+            host="192.168.50.6",
             port=8766,
             workbench_port=18802,
             platform="windows",
@@ -2475,7 +2476,7 @@ def test_registry_sync_salvages_and_rewrites_malformed_instances_json(tmp_path):
     instances_path = hashi_root / "instances.json"
     data = json.loads(instances_path.read_text(encoding="utf-8"))
     assert "trailing-bytes" not in instances_path.read_text(encoding="utf-8")
-    assert data["instances"]["intel"]["lan_ip"] == "192.168.0.6"
+    assert data["instances"]["intel"]["lan_ip"] == "192.168.50.6"
 
 
 def test_parse_hchat_message_exposes_reply_body_for_loop_guard():
@@ -2608,8 +2609,9 @@ def _reply_manager(tmp_path):
     manager._outbound_path = tmp_path / "outbound.json"
     manager.get_local_agents_snapshot = lambda: [{"agent_name": "zelda"}]
 
-    async def enqueue(agent_name, text):
+    async def enqueue(agent_name, text, **kwargs):
         manager._last_enqueue = (agent_name, text)
+        manager._last_enqueue_kwargs = kwargs
         return "req-1"
 
     manager._enqueue_local_prompt = enqueue
@@ -2655,7 +2657,82 @@ def test_agent_reply_accepts_and_records_legacy_missing_correlation(tmp_path):
     assert result["correlation_state"] == "missing_legacy_allowed"
     assert manager._inflight["msg-1:reply"]["state"] == "reply_delivered_locally"
     assert manager._inflight["msg-1:reply"]["correlation_state"] == "missing_legacy_allowed"
-    assert manager._last_enqueue == ("zelda", "System exchange reply from rika@HASHI2:\ndone")
+    assert manager._last_enqueue[0] == "zelda"
+    assert manager._last_enqueue[1].startswith(
+        "System exchange reply from rika@HASHI2:\ndone"
+    )
+    assert "Terminal protocol notice" in manager._last_enqueue[1]
+    assert manager._last_enqueue_kwargs == {
+        "exchange_kind": "reply",
+        "message_id": "msg-1:reply",
+        "conversation_id": "conv-1",
+        "from_instance": "HASHI2",
+        "from_agent": "rika",
+    }
+
+
+def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._workbench_port = 18804
+    manager._local_workbench_routes = lambda: [("127.0.0.1", 18804)]
+    manager._probe_local_workbench = lambda _host, _port: True
+    captured = []
+
+    def post(_url, payload, timeout):
+        captured.append((payload, timeout))
+        return {"ok": True, "request_id": "req-terminal"}
+
+    manager._post_json = post
+    monkeypatch.setattr(
+        "remote.protocol_manager.local_http_hosts",
+        lambda: ("127.0.0.1",),
+    )
+
+    request_id = asyncio.run(
+        manager._enqueue_local_prompt(
+            "zelda",
+            "terminal reply",
+            exchange_kind="reply",
+            message_id="reply-1",
+            conversation_id="conversation-1",
+            from_instance="HASHI2",
+            from_agent="rika",
+        )
+    )
+
+    assert request_id == "req-terminal"
+    payload = captured[0][0]
+    assert payload["source"] == "protocol:reply"
+    assert payload["idempotency_key"] == "protocol:reply:reply-1"
+    assert payload["request_metadata"]["system_exchange_terminal"] is True
+    assert payload["request_metadata"]["tool_allowlist"] == []
+
+
+def test_protocol_local_workbench_probe_rejects_wrong_instance_identity():
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI3"}
+    manager._workbench_identity_cache = {}
+    manager._get_json = lambda _url, timeout: {
+        "ok": True,
+        "instance_id": "HASHI1",
+        "workbench_endpoint": {"instance_id": "HASHI1"},
+    }
+
+    assert manager._probe_local_workbench("127.0.0.1", 18804) is False
+
+
+def test_protocol_message_prompt_forbids_side_channel_ack():
+    manager = ProtocolManager.__new__(ProtocolManager)
+
+    prompt = manager._render_remote_message_prompt(
+        "rika",
+        "HASHI2",
+        {"text": "please inspect this"},
+    )
+
+    assert "respond once" in prompt
+    assert "Do not send Hchat" in prompt
+    assert "protocol returns this response automatically" in prompt
 
 
 def test_agent_reply_marks_existing_correlation_terminal(tmp_path):

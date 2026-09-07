@@ -14,21 +14,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
+from orchestrator.path_presentation import path_presentation_policy
 from orchestrator.pcm import PCMDocument, load_pcm_document
+from orchestrator.process_resources import path_lock as process_path_lock
 from tools.token_tracker import estimate_tokens as _estimate_tokens
 
 CURRENT_REQUEST_SEPARATOR = "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
 
 sys_prompt_logger = logging.getLogger("BridgeU.SysPrompt")
 memory_logger = logging.getLogger("BridgeU.Memory")
-_SYS_PROMPT_LOCKS_GUARD = globals().get("_SYS_PROMPT_LOCKS_GUARD", threading.Lock())
-_SYS_PROMPT_LOCKS: dict[str, threading.RLock] = globals().get("_SYS_PROMPT_LOCKS", {})
-
-
 def _sys_prompt_path_lock(path: Path) -> threading.RLock:
-    key = str(Path(path).resolve())
-    with _SYS_PROMPT_LOCKS_GUARD:
-        return _SYS_PROMPT_LOCKS.setdefault(key, threading.RLock())
+    return process_path_lock(path)
 
 
 def global_sys_prompt_state_path(global_config: Any) -> Path:
@@ -1177,7 +1173,7 @@ class SysPromptManager:
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
             return self._normalize(payload)
-        except Exception as exc:  # noqa: BLE001 - malformed state must not stop an Agent
+        except Exception as exc:
             sys_prompt_logger.error(
                 "Could not load %s system prompt state from %s: %s",
                 self.scope,
@@ -1308,13 +1304,26 @@ class SysPromptManager:
 class BridgeContextAssembler:
     """Assemble backend-neutral PCM with explicit authority metadata."""
 
-    PROMPT_BUDGETS: ClassVar[dict[str, int]] = {
-        "codex-cli": 24000,
-        "gemini-cli": 24000,
-        "claude-cli": 50000,
-        "openrouter-api": 35000,
-        "ollama-api": 30000,
+    DEFAULT_PROMPT_TOKEN_BUDGET: ClassVar[int] = 64_000
+    PROMPT_TOKEN_BUDGETS: ClassVar[dict[str, int]] = {
+        "codex-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "gemini-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "claude-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "grok-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "openrouter-api": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "deepseek-api": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "xai-api": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "hashi-api": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "ollama-api": DEFAULT_PROMPT_TOKEN_BUDGET,
     }
+    # Compatibility alias for extensions that previously adjusted this class
+    # variable. Values are token counts now; the old character-cap semantics
+    # were the continuity bug this policy replaces.
+    PROMPT_BUDGETS: ClassVar[dict[str, int]] = PROMPT_TOKEN_BUDGETS
+    PROMPT_TOKEN_BUDGET_PROVENANCE: ClassVar[str] = (
+        "hashi_pcm_non_her_64k_tokens_v1"
+    )
+    HISTORY_CAPSULE_EXCERPT_CHARS: ClassVar[int] = 320
     MAX_RECENT_EXCHANGES: ClassVar[int] = 10
     AUTHORITY_RANKS: ClassVar[dict[str, int]] = {
         "permanent_system": 900,
@@ -1330,6 +1339,7 @@ class BridgeContextAssembler:
     _TRANSPORT_ORDER_SLOTS: ClassVar[dict[str, int]] = {
         "permanent_system": 1,
         "instance_global_sys": 1,
+        "instance_path_presentation": 2,
         "agent_local_sys": 1,
         "current_user_request": 1,
         "permanent_memory": 1,
@@ -1474,6 +1484,7 @@ class BridgeContextAssembler:
         extra_sections: list[tuple[str, str] | tuple[str, str, dict[str, Any]]] | None = None,
         context_profile: str | None = None,
         recent_exchanges: list[dict[str, Any]] | None = None,
+        prompt_budget_tokens: int | None = None,
     ) -> str:
         return self.build_prompt_payload(
             user_prompt,
@@ -1482,7 +1493,77 @@ class BridgeContextAssembler:
             extra_sections=extra_sections,
             context_profile=context_profile,
             recent_exchanges=recent_exchanges,
+            prompt_budget_tokens=prompt_budget_tokens,
         )["final_prompt"]
+
+    @classmethod
+    def _history_excerpt(cls, value: Any) -> str:
+        """Return a bounded semantic cue without treating it as a full summary.
+
+        Handoff and cross-session messages can contain an entire typed envelope.
+        In those cases the current-request block is much more useful than the
+        repeated boilerplate at the start of the value.  The result remains an
+        explicitly labelled excerpt, never a claim that HASHI reconstructed the
+        full omitted exchange.
+        """
+
+        text = str(value or "").replace("\r\n", "\n").strip()
+        marker = CURRENT_REQUEST_SEPARATOR.strip()
+        if marker in text:
+            text = text.split(marker, 1)[1]
+            next_section = re.search(r"\n--- [A-Z][^\n]* ---\n", text)
+            if next_section:
+                text = text[: next_section.start()]
+        elif "\nOriginal task:\n" in text:
+            text = text.split("\nOriginal task:\n", 1)[1]
+            if "\nAssistant result:\n" in text:
+                text = text.split("\nAssistant result:\n", 1)[0]
+        text = re.sub(r"\s+", " ", text).strip()
+        limit = cls.HISTORY_CAPSULE_EXCERPT_CHARS
+        if len(text) <= limit:
+            return text
+        head = max(1, (limit * 2) // 3)
+        tail = max(1, limit - head - 3)
+        return f"{text[:head].rstrip()} … {text[-tail:].lstrip()}"
+
+    @classmethod
+    def _history_capsule_row(
+        cls,
+        exchange: dict[str, Any],
+        *,
+        sequence: int,
+        source_text: str,
+    ) -> str:
+        user_excerpt = cls._history_excerpt(exchange.get("user_text")) or "(empty)"
+        assistant_excerpt = (
+            cls._history_excerpt(exchange.get("assistant_text")) or "(empty)"
+        )
+        source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        return (
+            f"Exchange sequence={sequence}; user_ts={exchange.get('user_ts') or 'unknown-time'}; "
+            f"assistant_ts={exchange.get('assistant_ts') or 'unknown-time'}; "
+            f"source_sha256={source_hash}\n"
+            f"USER_EXCERPT: {user_excerpt}\n"
+            f"ASSISTANT_EXCERPT: {assistant_excerpt}"
+        )
+
+    def _resolve_prompt_token_budget(
+        self,
+        engine: str,
+        override: int | None,
+    ) -> tuple[int | None, str]:
+        if str(engine or "").strip().lower() == "her-v2":
+            return None, "her_v2_managed_compaction"
+        if isinstance(override, int) and not isinstance(override, bool) and override > 0:
+            return override, "backend_config_pcm_prompt_token_budget"
+        normalized = str(engine or "").strip().lower()
+        return (
+            self.PROMPT_TOKEN_BUDGETS.get(
+                normalized,
+                self.DEFAULT_PROMPT_TOKEN_BUDGET,
+            ),
+            self.PROMPT_TOKEN_BUDGET_PROVENANCE,
+        )
 
     @staticmethod
     def _render_section(section: dict[str, Any]) -> str:
@@ -1539,8 +1620,9 @@ class BridgeContextAssembler:
         inject_memory: bool = True,
         context_profile: str | None = None,
         recent_exchanges: list[dict[str, Any]] | None = None,
+        prompt_budget_tokens: int | None = None,
     ) -> dict[str, Any]:
-        """Build PCM and prune only oldest complete exchanges for char caps."""
+        """Build PCM with token-aware, traceable non-HER history fallback."""
 
         document = self._load_pcm()
         sections: list[dict[str, Any]] = []
@@ -1599,6 +1681,13 @@ class BridgeContextAssembler:
                 protected=True,
                 item_count=len(global_entries),
             )
+        add_section(
+            "instance_path_presentation",
+            "INSTANCE PATH PRESENTATION",
+            path_presentation_policy(),
+            "global_system",
+            protected=True,
+        )
         local_entries = (
             self.sys_prompt_manager.get_active_texts() if self.sys_prompt_manager else []
         )
@@ -1658,6 +1747,7 @@ class BridgeContextAssembler:
                 except (TypeError, ValueError):
                     pass
                 exchanges = getter(**kwargs)
+        capsule_rows: dict[str, str] = {}
         for exchange in exchanges:
             sequence = int(exchange.get("sequence") or exchange.get("exchange_id") or 0)
             user_ts = str(exchange.get("user_ts") or "unknown-time")
@@ -1678,16 +1768,23 @@ class BridgeContextAssembler:
                 if assistant_provenance
                 else "ASSISTANT"
             )
+            exchange_key = f"recent_exchange:{sequence}"
+            exchange_text = (
+                f"Exchange sequence={sequence}; user_ts={user_ts}; assistant_ts={assistant_ts}\n"
+                f"{user_label}: {exchange.get('user_text', '')}\n"
+                f"{assistant_label}: {exchange.get('assistant_text', '')}"
+            )
             add_section(
-                f"recent_exchange:{sequence}",
+                exchange_key,
                 "RECENT COMPLETED EXCHANGE",
-                (
-                    f"Exchange sequence={sequence}; user_ts={user_ts}; assistant_ts={assistant_ts}\n"
-                    f"{user_label}: {exchange.get('user_text', '')}\n"
-                    f"{assistant_label}: {exchange.get('assistant_text', '')}"
-                ),
+                exchange_text,
                 "history",
                 metadata={"sequence": sequence, "exchange_id": exchange.get("exchange_id")},
+            )
+            capsule_rows[exchange_key] = self._history_capsule_row(
+                exchange,
+                sequence=sequence,
+                source_text=exchange_text,
             )
 
         if document and document.memory:
@@ -1806,10 +1903,52 @@ class BridgeContextAssembler:
             for section in unbudgeted_sections
             if section["authority"] != "current_user"
         )
-        limit = self.PROMPT_BUDGETS.get(engine, 30000)
+        limit, budget_provenance = self._resolve_prompt_token_budget(
+            engine,
+            prompt_budget_tokens,
+        )
         omitted: list[dict[str, Any]] = []
-        if engine != "her-v2":
-            while len(self._render_pcm_prompt(sections)) > limit:
+        capsule_key = "history_continuity_capsule"
+
+        def install_capsule() -> None:
+            sections[:] = [section for section in sections if section["key"] != capsule_key]
+            if not omitted:
+                return
+            omitted_keys = [str(item["key"]) for item in omitted]
+            body = (
+                "COMPACTED HISTORY CONTINUITY CAPSULE\n"
+                "HASHI removed the raw bodies of the following oldest complete exchanges "
+                "from this request only to meet the non-HER bootstrap token budget. "
+                "The exact exchanges remain durable in HASHI's canonical history ledger. "
+                "These bounded excerpts are continuity cues, not complete summaries; do not "
+                "invent missing detail. Each source_sha256 identifies the exact omitted body.\n\n"
+                + "\n\n".join(capsule_rows[key] for key in omitted_keys)
+            )
+            add_section(
+                capsule_key,
+                "COMPACTED HISTORY CONTINUITY CAPSULE",
+                body,
+                "history",
+                protected=True,
+                item_count=len(omitted_keys),
+                metadata={
+                    "sequences": [item["sequence"] for item in omitted],
+                    "method": "deterministic_salient_excerpt_v1",
+                },
+            )
+            capsule = sections.pop()
+            first_history = next(
+                (
+                    index
+                    for index, section in enumerate(sections)
+                    if section["authority"] == "history"
+                ),
+                len(sections),
+            )
+            sections.insert(first_history, capsule)
+
+        if limit is not None:
+            while _estimate_tokens(self._render_pcm_prompt(sections)) > limit:
                 history_index = next(
                     (
                         index
@@ -1826,17 +1965,32 @@ class BridgeContextAssembler:
                     {
                         "key": removed["key"],
                         "sequence": removed["metadata"].get("sequence"),
-                        "reason": "assembled_request_character_cap",
+                        "reason": "non_her_prompt_token_budget",
+                        "represented_by": capsule_key,
+                        "source_content_sha256": hashlib.sha256(
+                            removed["text"].encode("utf-8")
+                        ).hexdigest(),
                     }
                 )
+                install_capsule()
         final_prompt = self._render_pcm_prompt(sections)
+        final_prompt_tokens = _estimate_tokens(final_prompt)
         if omitted:
             memory_logger.warning(
-                "PCM history omission: engine=%s omitted=%s retained=%s limit_chars=%s",
+                "PCM history compacted: engine=%s omitted_raw=%s retained_raw=%s "
+                "capsule=%s limit_tokens=%s before_tokens=%s after_tokens=%s provenance=%s",
                 engine,
                 len(omitted),
-                sum(1 for section in sections if section["authority"] == "history"),
+                sum(
+                    1
+                    for section in sections
+                    if section["key"].startswith("recent_exchange:")
+                ),
+                capsule_key,
                 limit,
+                _estimate_tokens(final_prompt_unbudgeted),
+                final_prompt_tokens,
+                budget_provenance,
             )
 
         envelope_sections = [
@@ -1889,12 +2043,24 @@ class BridgeContextAssembler:
             "audit": {
                 "incremental": incremental,
                 "context_profile": context_profile,
-                "budget_limit_chars": limit,
+                # Kept as a nullable compatibility field so older audit readers
+                # do not mistake a token budget for a character count.
+                "budget_limit_chars": None,
+                "budget_limit_tokens": limit,
+                "budget_unit": "estimated_tokens" if limit is not None else "her_v2_managed",
+                "budget_provenance": budget_provenance,
                 "budget_applied": bool(omitted),
-                "budget_unresolved": engine != "her-v2" and len(final_prompt) > limit,
+                "budget_unresolved": limit is not None and final_prompt_tokens > limit,
                 "context_chars_before_budget": len(unbudgeted_context_text),
+                "context_tokens_before_budget": _estimate_tokens(
+                    unbudgeted_context_text
+                ),
                 "final_prompt_chars_before_budget": len(final_prompt_unbudgeted),
                 "final_prompt_chars_after_budget": len(final_prompt),
+                "final_prompt_tokens_before_budget": _estimate_tokens(
+                    final_prompt_unbudgeted
+                ),
+                "final_prompt_tokens_after_budget": final_prompt_tokens,
                 "time_fyi_chars": len(time_fyi),
                 "context_fingerprint": hashlib.sha1(
                     context_text.encode("utf-8")
@@ -1906,6 +2072,14 @@ class BridgeContextAssembler:
                     if section["key"].startswith("recent_exchange:")
                 ),
                 "history_omitted": omitted,
+                "history_capsule": {
+                    "present": bool(omitted),
+                    "key": capsule_key if omitted else None,
+                    "item_count": len(omitted),
+                    "method": (
+                        "deterministic_salient_excerpt_v1" if omitted else None
+                    ),
+                },
                 "sections": [
                     {
                         "key": section["key"],

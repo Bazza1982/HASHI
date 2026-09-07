@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -140,7 +141,7 @@ async def control_remote_supervisor(
         return {
             "ok": False,
             "action": "supervisor_unavailable",
-            "reason": f"per-instance supervisor is not installed at {info.service_path}",
+            "reason": f"per-instance supervisor is not registered at {info.service_path}",
             **common,
         }
     if not info.owns_root:
@@ -186,6 +187,97 @@ async def control_remote_supervisor(
     return {
         "ok": True,
         "action": f"supervisor_{action}ed" if action != "stop" else "supervisor_stopped",
+        "exit_code": process.returncode,
+        "stdout": output,
+        "stderr": error,
+        **common,
+    }
+
+
+async def activate_remote_supervisor(
+    root: Path | str | None,
+) -> dict[str, Any]:
+    """Register, enable, and start the per-instance OS supervisor when supported."""
+    resolved_root = resolve_hashi_root(root)
+    info = remote_supervisor_info(resolved_root)
+    identity = resolve_supervisor_identity(
+        resolved_root,
+        instance_id=os.getenv("HASHI_INSTANCE_ID"),
+    )
+    python = find_python(resolved_root)
+    activation_env = dict(os.environ)
+    if python is not None:
+        activation_env["HASHI_REMOTE_PYTHON"] = str(python)
+    if sys.platform.startswith("linux"):
+        helper = resolved_root / "bin" / "hashi-remote-ctl.sh"
+        command = ["bash", str(helper), "enable"]
+        service_name = info.service_name
+    elif sys.platform == "win32":
+        helper = resolved_root / "bin" / "hashi_remote_ctl.ps1"
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(helper),
+            "enable",
+            "-HashiRoot",
+            str(resolved_root),
+        ]
+        if python is not None:
+            command.extend(["-Python", str(python)])
+        service_name = identity.windows_task_name
+    else:
+        return {
+            "ok": False,
+            "action": "supervisor_activation_unsupported",
+            "reason": (
+                f"automatic Remote supervisor activation is unavailable on {sys.platform}; "
+                "the bundled child lifecycle remains available"
+            ),
+            "supervisor": info,
+            "service_name": info.service_name,
+        }
+    common = {"supervisor": info, "service_name": service_name}
+    if not helper.is_file():
+        return {
+            "ok": False,
+            "action": "supervisor_activation_unavailable",
+            "reason": f"Remote supervisor activation helper is missing at {helper}",
+            **common,
+        }
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(resolved_root),
+            env=activation_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+    except (FileNotFoundError, OSError) as exc:
+        return {
+            "ok": False,
+            "action": "supervisor_activation_unavailable",
+            "reason": f"Remote supervisor activation is unavailable: {type(exc).__name__}: {exc}",
+            **common,
+        }
+    output = stdout.decode("utf-8", errors="replace").strip()
+    error = stderr.decode("utf-8", errors="replace").strip()
+    if process.returncode != 0:
+        return {
+            "ok": False,
+            "action": "supervisor_activation_failed",
+            "reason": error or output or f"activation helper exited {process.returncode}",
+            "exit_code": process.returncode,
+            "stdout": output,
+            "stderr": error,
+            **common,
+        }
+    return {
+        "ok": True,
+        "action": "supervisor_activated",
         "exit_code": process.returncode,
         "stdout": output,
         "stderr": error,
@@ -268,7 +360,7 @@ def load_settings(root: Path | str | None = None) -> RemoteLifecycleSettings:
     return RemoteLifecycleSettings(
         root=hashi_root,
         enabled=_as_bool(lifecycle.get("remote_enabled", data.get("remote_enabled")), True),
-        supervised=_as_bool(lifecycle.get("remote_supervised", data.get("remote_supervised")), False),
+        supervised=_as_bool(lifecycle.get("remote_supervised", data.get("remote_supervised")), True),
         disabled_path=disabled_state_path(hashi_root),
         port=_resolve_remote_port(hashi_root, data),
         use_tls=_as_bool(server.get("use_tls"), True),
@@ -324,9 +416,10 @@ def clear_disabled_state(root: Path | str | None = None) -> bool:
 
 def find_python(root: Path) -> Path | None:
     candidates = [
+        Path(sys.executable),
+        root / ".venv-wsl" / "bin" / "python3",
         root / ".venv" / "bin" / "python3",
         root / ".venv" / "Scripts" / "python.exe",
-        Path(sys.executable),
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -339,6 +432,9 @@ def build_child_command(settings: RemoteLifecycleSettings) -> list[str]:
     if python is None:
         raise FileNotFoundError("No Python interpreter found for Hashi Remote")
     cmd = [str(python), "-m", "remote", "--hashi-root", str(settings.root), "--port", str(settings.port)]
+    control_root = str(os.environ.get("HASHI_REMOTE_CONTROL_ROOT") or "").strip()
+    if control_root:
+        cmd.extend(["--control-hashi-root", str(Path(control_root).expanduser().resolve())])
     if not settings.use_tls:
         cmd.append("--no-tls")
     if settings.backend in {"lan", "tailscale", "both"}:
@@ -346,41 +442,11 @@ def build_child_command(settings: RemoteLifecycleSettings) -> list[str]:
     return cmd
 
 
-async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any]:
-    settings = load_settings(root)
-    disabled = read_disabled_state(settings.root)
-    if not settings.enabled:
-        return {"ok": False, "action": "skipped", "reason": "remote_enabled=false", "settings": settings}
-    if disabled:
-        return {"ok": False, "action": "skipped", "reason": "remote explicitly disabled", "disabled": disabled, "settings": settings}
-    owned = await _find_owned_remote(settings)
-    if owned:
-        return {"ok": True, "action": "already_running", "settings": settings, **owned}
-    if settings.supervised:
-        control = await control_remote_supervisor(settings.root, action="start")
-        if not control.get("ok"):
-            return {**control, "settings": settings}
-        for _attempt in range(_SUPERVISOR_HEALTH_ATTEMPTS):
-            owned = await _find_owned_remote(settings)
-            if owned:
-                return {
-                    **control,
-                    "ok": True,
-                    "action": "started_supervisor",
-                    "settings": settings,
-                    **owned,
-                }
-            await asyncio.sleep(_SUPERVISOR_HEALTH_INTERVAL_SECONDS)
-        return {
-            **control,
-            "ok": False,
-            "action": "supervisor_started_unhealthy",
-            "reason": (
-                f"{control.get('service_name')} started but Remote did not become "
-                f"healthy on configured port {settings.port}"
-            ),
-            "settings": settings,
-        }
+async def _start_child_remote(
+    settings: RemoteLifecycleSettings,
+    *,
+    supervisor_fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     cmd = build_child_command(settings)
     log_path = settings.root / "tmp" / "hashi_remote_startup.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -394,12 +460,190 @@ async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any
         )
     finally:
         log_handle.close()
-    return {
+    result = {
         "ok": True,
-        "action": "started_child",
+        "action": "started_child_fallback" if supervisor_fallback else "started_child",
         "pid": process.pid,
         "process": process,
         "log_path": log_path,
+        "settings": settings,
+    }
+    if supervisor_fallback:
+        result.update(
+            {
+                "service_name": str(supervisor_fallback.get("service_name") or ""),
+                "supervisor_fallback": supervisor_fallback,
+            }
+        )
+    return result
+
+
+async def _wait_for_owned_remote(
+    settings: RemoteLifecycleSettings,
+) -> dict[str, Any] | None:
+    for _attempt in range(_SUPERVISOR_HEALTH_ATTEMPTS):
+        owned = await _find_owned_remote(settings)
+        if owned:
+            return owned
+        await asyncio.sleep(_SUPERVISOR_HEALTH_INTERVAL_SECONDS)
+    return None
+
+
+async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any]:
+    settings = load_settings(root)
+    disabled = read_disabled_state(settings.root)
+    if not settings.enabled:
+        return {"ok": False, "action": "skipped", "reason": "remote_enabled=false", "settings": settings}
+    if disabled:
+        return {"ok": False, "action": "skipped", "reason": "remote explicitly disabled", "disabled": disabled, "settings": settings}
+    owned = await _find_owned_remote(settings)
+    if owned:
+        result = {"ok": True, "action": "already_running", "settings": settings, **owned}
+        claim = read_runtime_claim(settings.root) or {}
+        if (
+            settings.supervised
+            and bool(claim.get("supervised"))
+            and sys.platform.startswith("linux")
+        ):
+            # Refresh the registered unit on normal HASHI upgrades without
+            # restarting an already healthy Remote process.
+            refresh = await activate_remote_supervisor(settings.root)
+            result["supervisor_refresh"] = refresh
+            result["service_name"] = str(refresh.get("service_name") or "")
+        return result
+    if settings.supervised:
+        control = await control_remote_supervisor(settings.root, action="start")
+        if not control.get("ok") and control.get("action") == "supervisor_unavailable":
+            control = await activate_remote_supervisor(settings.root)
+        if control.get("ok"):
+            owned = await _wait_for_owned_remote(settings)
+            if owned:
+                return {
+                    **control,
+                    "ok": True,
+                    "action": "started_supervisor",
+                    "settings": settings,
+                    **owned,
+                }
+            return {
+                **control,
+                "ok": False,
+                "action": "supervisor_started_unhealthy",
+                "reason": (
+                    f"{control.get('service_name')} started but Remote did not become "
+                    f"healthy on configured port {settings.port}"
+                ),
+                "settings": settings,
+            }
+
+        if control.get("action") in {
+            "invalid_supervisor_name",
+            "supervisor_root_mismatch",
+            "supervisor_start_failed",
+        }:
+            return {**control, "settings": settings}
+
+        # Remote is bundled with HASHI. A missing or unavailable OS supervisor
+        # must not make the feature disappear from an otherwise valid install.
+        # Preserve the supervisor failure as diagnostics and start the normal
+        # child lifecycle for this session.
+        owned = await _find_owned_remote(settings)
+        if owned:
+            return {
+                "ok": True,
+                "action": "already_running",
+                "settings": settings,
+                "service_name": str(control.get("service_name") or ""),
+                "supervisor_fallback": control,
+                **owned,
+            }
+        try:
+            return await _start_child_remote(
+                settings,
+                supervisor_fallback=control,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            return {
+                **control,
+                "ok": False,
+                "action": "remote_activation_failed",
+                "reason": (
+                    f"Remote supervisor activation failed ({control.get('reason') or 'unknown'}); "
+                    f"bundled child activation also failed: {type(exc).__name__}: {exc}"
+                ),
+                "settings": settings,
+            }
+    return await _start_child_remote(settings)
+
+
+async def stop_remote(root: Path | str | None = None) -> dict[str, Any]:
+    """Stop the owned Remote process without changing the persisted on/off state."""
+    settings = load_settings(root)
+    owned = await _find_owned_remote(settings)
+    claim = read_runtime_claim(settings.root)
+    supervisor_requested = bool(settings.supervised or (claim or {}).get("supervised"))
+    if supervisor_requested:
+        info = remote_supervisor_info(settings.root)
+        if info.installed and info.owns_root:
+            control = await control_remote_supervisor(settings.root, action="stop")
+            if control.get("ok"):
+                return {**control, "settings": settings}
+            if owned:
+                return {**control, "settings": settings}
+    if not owned:
+        return {"ok": True, "action": "already_stopped", "settings": settings}
+    if not isinstance(claim, dict):
+        return {
+            "ok": False,
+            "action": "remote_stop_unavailable",
+            "reason": "owned Remote is healthy but has no runtime claim",
+            "settings": settings,
+        }
+    expected_id = configured_instance_id(settings.root).upper()
+    actual_id = str(claim.get("instance_id") or "").strip().upper()
+    claim_root = str(claim.get("root") or "").strip()
+    try:
+        root_matches = Path(claim_root).expanduser().resolve() == settings.root
+    except (OSError, RuntimeError):
+        root_matches = False
+    try:
+        pid = int(claim.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if not root_matches or actual_id != expected_id or pid <= 0:
+        return {
+            "ok": False,
+            "action": "remote_stop_refused",
+            "reason": "runtime claim does not match this HASHI root and instance",
+            "settings": settings,
+        }
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        remove_runtime_claim(settings.root, pid=pid)
+        return {"ok": True, "action": "already_stopped", "settings": settings}
+    except OSError as exc:
+        return {
+            "ok": False,
+            "action": "remote_stop_failed",
+            "reason": f"could not stop owned Remote PID {pid}: {type(exc).__name__}: {exc}",
+            "settings": settings,
+        }
+    for _attempt in range(50):
+        if not pid_is_alive(pid):
+            remove_runtime_claim(settings.root, pid=pid)
+            return {
+                "ok": True,
+                "action": "child_stopped",
+                "pid": pid,
+                "settings": settings,
+            }
+        await asyncio.sleep(0.1)
+    return {
+        "ok": False,
+        "action": "remote_stop_timed_out",
+        "reason": f"owned Remote PID {pid} did not stop within 5 seconds",
+        "pid": pid,
         "settings": settings,
     }
 

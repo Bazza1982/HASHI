@@ -7,13 +7,12 @@ HASHI Flow — Evaluator Agent (Python Implementation)
 
 import json
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
+from nagare.paths import validate_path_component
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent  # hashi/
 KB_PATH = ROOT / "flow" / "evaluation_kb"
@@ -31,12 +30,19 @@ class FlowEvaluator:
     分析事件流，更新知识库，生成改进建议。
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        runs_path: str | Path | None = None,
+        kb_path: str | Path | None = None,
+    ):
         self.logger = logging.getLogger("flow.evaluator")
-        KB_PATH.mkdir(parents=True, exist_ok=True)
-        (KB_PATH / "improvements").mkdir(parents=True, exist_ok=True)
-        (KB_PATH / "patterns").mkdir(parents=True, exist_ok=True)
-        (KB_PATH / "workflow_scores").mkdir(parents=True, exist_ok=True)
+        self.runs_path = Path(runs_path) if runs_path is not None else RUNS_PATH
+        self.kb_path = Path(kb_path) if kb_path is not None else KB_PATH
+        self.kb_path.mkdir(parents=True, exist_ok=True)
+        (self.kb_path / "improvements").mkdir(parents=True, exist_ok=True)
+        (self.kb_path / "patterns").mkdir(parents=True, exist_ok=True)
+        (self.kb_path / "workflow_scores").mkdir(parents=True, exist_ok=True)
 
     def evaluate_run(self, run_id: str) -> dict:
         """
@@ -48,7 +54,8 @@ class FlowEvaluator:
         Returns:
             评估报告字典
         """
-        run_dir = RUNS_PATH / run_id
+        run_id = validate_path_component(run_id, label="run_id")
+        run_dir = self.runs_path / run_id
         events_file = run_dir / "evaluation_events.jsonl"
 
         if not events_file.exists():
@@ -63,15 +70,24 @@ class FlowEvaluator:
 
         # 生成改进建议（如有）
         improvements = self._generate_improvements(run_id, events, report)
+        report["recommendations"] = improvements
         if improvements:
             self._save_improvements(improvements)
 
-        # 更新模式库（运行足够多后触发）
+        # 达到复核阈值时留下明确提示；模式变更仍需独立审查。
         self._maybe_update_patterns(events, report)
 
+        report_path = run_dir / "evaluation_report.json"
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        efficiency = report["scores"].get("efficiency")
+        efficiency_label = "n/a" if efficiency is None else f"{efficiency:.1f}"
         self.logger.info(
             f"[Evaluator] run={run_id} | "
-            f"efficiency={report['scores']['efficiency']:.1f} "
+            f"efficiency={efficiency_label} "
             f"stability={report['scores']['stability']:.1f} "
             f"interventions={report['metrics']['human_interventions']}"
         )
@@ -105,8 +121,8 @@ class FlowEvaluator:
         debug_count = 0
         escalation_count = 0
         human_interventions = 0
-        failed_steps = []
-        completed_steps = []
+        failed_steps: set[str] = set()
+        completed_steps: set[str] = set()
 
         for ev in events:
             ts = ev.get("ts")
@@ -115,19 +131,31 @@ class FlowEvaluator:
 
             if event_type == "workflow_started" and start_ts is None:
                 start_ts = ts
-            elif event_type in ("workflow_completed", "workflow_failed"):
+            elif event_type == "workflow_completed":
+                end_ts = ts
+            elif event_type == "workflow_failed":
+                end_ts = ts
+                if data.get("orchestrator_id"):
+                    escalation_count += 1
+                    human_interventions += 1
+            elif event_type == "workflow_aborted":
                 end_ts = ts
 
             elif event_type == "step_completed":
                 step_id = data.get("step_id")
                 duration = data.get("duration_seconds", 0)
                 step_durations[step_id] = duration
-                completed_steps.append(step_id)
+                if step_id:
+                    completed_steps.add(step_id)
 
             elif event_type == "step_failed":
-                failed_steps.append(data.get("step_id"))
+                step_id = data.get("step_id")
+                if step_id:
+                    failed_steps.add(step_id)
 
-            elif event_type == "debug_started":
+            elif event_type == "debug_started" or (
+                event_type == "handler_started" and data.get("debug_agent")
+            ):
                 debug_count += 1
 
             elif event_type == "escalated_to_orchestrator":
@@ -152,10 +180,7 @@ class FlowEvaluator:
         # 评分计算
         scores = self._compute_scores(
             success=success,
-            total_duration=total_duration,
-            step_count=len(completed_steps),
             debug_count=debug_count,
-            escalation_count=escalation_count,
             human_interventions=human_interventions,
         )
 
@@ -177,9 +202,12 @@ class FlowEvaluator:
             "recommendations": [],  # 填充于 _generate_improvements
         }
 
-    def _compute_scores(self, success: bool, total_duration: Optional[float],
-                        step_count: int, debug_count: int, escalation_count: int,
-                        human_interventions: int) -> dict:
+    def _compute_scores(
+        self,
+        success: bool,
+        debug_count: int,
+        human_interventions: int,
+    ) -> dict:
         """计算四个维度的评分（0-10）"""
 
         # 稳定分：基于成功率和 debug 次数
@@ -194,8 +222,8 @@ class FlowEvaluator:
         else:
             stability = 2.0
 
-        # 效率分：基于耗时（没有基准时给 5 分）
-        efficiency = 5.0  # 暂无基准，给中等分
+        # 没有任务复杂度基准时，耗时不能诚实地转换为效率分。
+        efficiency = None
 
         # 介入分：越少越好
         if human_interventions == 0:
@@ -207,17 +235,20 @@ class FlowEvaluator:
         else:
             intervention_score = max(0, 10 - human_interventions * 2)
 
-        # 质量分：暂无自动评测，给默认分
-        quality = 7.0  # 需要人工或后续工作流反馈
+        # 没有 Validator 或下游反馈时，不制造质量分。
+        quality = None
 
-        overall = (stability + efficiency + intervention_score + quality) / 4
+        measured_scores = (stability, intervention_score)
+        overall = sum(measured_scores) / len(measured_scores)
 
         return {
             "stability": round(stability, 1),
-            "efficiency": round(efficiency, 1),
+            "efficiency": efficiency,
             "intervention": round(intervention_score, 1),
-            "quality": round(quality, 1),
+            "quality": quality,
             "overall": round(overall, 1),
+            "coverage": 0.5,
+            "measured_dimensions": ["stability", "intervention"],
         }
 
     # =========================================================================
@@ -230,7 +261,16 @@ class FlowEvaluator:
 
         # 规则1：debug 次数过多
         if metrics["debug_interventions"] >= 2:
-            failed = [ev["data"]["step_id"] for ev in events if ev.get("event_type") == "debug_started"]
+            failed = [
+                ev.get("data", {}).get("step_id")
+                for ev in events
+                if ev.get("event_type") == "debug_started"
+                or (
+                    ev.get("event_type") == "handler_started"
+                    and ev.get("data", {}).get("debug_agent")
+                )
+            ]
+            failed = [step_id for step_id in failed if step_id]
             improvements.append({
                 "id": f"imp-{run_id[:8]}-001",
                 "class": "B",
@@ -263,7 +303,7 @@ class FlowEvaluator:
 
     def _save_improvements(self, improvements: list[dict]):
         """将新的改进建议追加到 pending.yaml"""
-        pending_file = KB_PATH / "improvements" / "pending.yaml"
+        pending_file = self.kb_path / "improvements" / "pending.yaml"
         try:
             if pending_file.exists():
                 data = yaml.safe_load(pending_file.read_text(encoding="utf-8")) or {}
@@ -287,7 +327,7 @@ class FlowEvaluator:
 
     def _record_score(self, report: dict):
         """将评分记录追加到 scores.jsonl"""
-        scores_file = KB_PATH / "workflow_scores" / "scores.jsonl"
+        scores_file = self.kb_path / "workflow_scores" / "scores.jsonl"
         record = {
             "run_id": report["run_id"],
             "workflow_id": report["workflow_id"],
@@ -310,8 +350,8 @@ class FlowEvaluator:
     # =========================================================================
 
     def _maybe_update_patterns(self, events: list[dict], report: dict):
-        """当有足够运行数据时，更新成功/失败模式库"""
-        scores_file = KB_PATH / "workflow_scores" / "scores.jsonl"
+        """达到固定历史复核批次时记录提示，不自动修改模式库。"""
+        scores_file = self.kb_path / "workflow_scores" / "scores.jsonl"
         if not scores_file.exists():
             return
         # 简单统计：当同一 workflow 有 5+ 次运行时触发分析
@@ -324,9 +364,9 @@ class FlowEvaluator:
             )
             if count >= 5 and count % 5 == 0:
                 self.logger.info(
-                    f"[Evaluator] {workflow_id} 已运行 {count} 次，触发模式分析 (TODO: LLM 分析)"
+                    f"[Evaluator] {workflow_id} 已运行 {count} 次；"
+                    "已达到人工模式复核阈值，未自动修改知识库或工作流"
                 )
-                # TODO: 调用 LLM（claude sonnet）分析 scores.jsonl，更新 successful.yaml
         except Exception:
             pass
 

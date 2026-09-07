@@ -4,13 +4,14 @@ import json
 import logging
 import os
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+from orchestrator.process_resources import named_lock
 
 logger = logging.getLogger("Backend.XaiOAuth")
 
@@ -33,7 +34,7 @@ class XaiOAuthCredentialError(RuntimeError):
     pass
 
 
-_cache_lock = threading.Lock()
+_cache_lock = named_lock("xai-oauth-credential-cache")
 _cache: dict[str, Any] = {
     "access_token": "",
     "expires_at": 0.0,

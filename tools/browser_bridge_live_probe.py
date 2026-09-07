@@ -10,13 +10,14 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.browser_bridge_live_acceptance import write_live_acceptance_runbook
+from tools.browser_bridge_transport import DEFAULT_UNIX_SOCKET
 
 
 def build_live_probe_plan(
     root_dir: Path,
     *,
     rollback_commit: str,
-    live_socket_path: str = "/tmp/hashi-browser-bridge.sock",
+    live_socket_path: str = str(DEFAULT_UNIX_SOCKET),
     benign_url: str = "https://example.com",
 ) -> dict[str, Any]:
     runbook = write_live_acceptance_runbook(root_dir, rollback_commit=rollback_commit)
@@ -91,7 +92,7 @@ def write_live_probe_plan(
     root_dir: Path,
     *,
     rollback_commit: str,
-    live_socket_path: str = "/tmp/hashi-browser-bridge.sock",
+    live_socket_path: str = str(DEFAULT_UNIX_SOCKET),
     benign_url: str = "https://example.com",
 ) -> dict[str, Any]:
     plan = build_live_probe_plan(
@@ -110,7 +111,7 @@ def main() -> int:
     parser.add_argument("command", choices=["build"])
     parser.add_argument("--root", required=True)
     parser.add_argument("--rollback-commit", required=True)
-    parser.add_argument("--live-socket-path", default="/tmp/hashi-browser-bridge.sock")
+    parser.add_argument("--live-socket-path", default=str(DEFAULT_UNIX_SOCKET))
     parser.add_argument("--benign-url", default="https://example.com")
     args = parser.parse_args()
 

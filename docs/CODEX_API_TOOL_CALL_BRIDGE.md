@@ -142,14 +142,14 @@ to call `killpg` when the target group is HASHI's own group or when the target
 process is not the group leader; it falls back to terminating only that child.
 This is a hard safety boundary, not merely a best-effort cleanup convention.
 
-Gateway hot reload first stops admitting requests, returns a retriable 503 to
-any request that reaches an already accepted connection during the drain, and
-allows active handlers up to ten seconds to finish. Remaining handlers are
-cancelled before the adapter pool is shut down; if cancellation cannot quiesce
-them, Adapter shutdown and replacement fail closed. The service manager applies
-the same transport-first ordering to a live legacy Gateway generation when this
-code is adopted for the first time, and hands the new process-group kill guard
-to that generation's already-live adapter instances before draining them.
+API Gateway is stable Core ingress and is not stopped or replaced by an Agent
+`/reboot`. During planned Core shutdown it first stops admitting requests,
+returns a retriable 503 to a request that reaches an already accepted
+connection during the drain, and allows active handlers up to ten seconds to
+finish. Remaining handlers are cancelled before the adapter pool is shut down;
+if cancellation cannot quiesce them, adapter shutdown fails closed. Functional
+Agent execution reached through Core ingress is replaced behind stable
+`AgentRuntimeHandle` routes.
 
 The inert MCP replacement is intentional. Codex CLI config overrides replace an
 MCP table rather than deep-merging it, so an `enabled=false` leaf alone produces

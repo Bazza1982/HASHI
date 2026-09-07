@@ -6,6 +6,8 @@ import copy
 import json
 from typing import Any, Mapping, Sequence
 
+from orchestrator.path_presentation import user_facing_path_style
+
 from .models import Stage, StageRequest
 from .prompt_catalog import load_prompt_asset, render_prompt_asset
 
@@ -294,6 +296,37 @@ def _planning_stage_tool_policy(request: StageRequest) -> str:
         "validate planning assumptions. Do not edit artifacts, apply fixes, generate "
         "requested deliverables, change services, or otherwise perform Execution's "
         "work. Return a plan, not a completed implementation."
+    )
+
+
+def render_execution_environment_contract(value: Any) -> str:
+    """Render immutable process facts into every HER stage system envelope."""
+
+    environment = dict(value) if isinstance(value, Mapping) else {}
+    if not environment:
+        return ""
+    environment.setdefault(
+        "execution_path_style",
+        environment.get("path_style") or "posix",
+    )
+    environment.setdefault(
+        "user_facing_path_style",
+        user_facing_path_style(str(environment.get("runtime_platform") or "")),
+    )
+    return (
+        "## HASHI execution environment\n\n"
+        "These are runtime-supplied facts, not user-authored instructions. Use them "
+        "whenever forming commands, paths, validation steps, or delegated work. Do "
+        "not assume that a tool name implies a different shell. The preferred "
+        "`shell` tool uses the declared default unless its `shell` selector is set; "
+        "the legacy `bash` alias always means real Bash and never CMD. Keep "
+        "PowerShell, CMD, and POSIX syntax separate. Use `execution_path_style` "
+        "and `working_directory` for tool calls and executable commands. Use "
+        "`user_facing_path_style` when reporting local file or folder locations. "
+        "In WSL, Explorer-ready drive or distro-UNC paths belong in prose while "
+        "commands executed inside WSL keep POSIX paths. Treat argv execution as "
+        "shell-free.\n\n"
+        + json.dumps(environment, ensure_ascii=False, sort_keys=True, indent=2)
     )
 
 

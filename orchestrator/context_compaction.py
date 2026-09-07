@@ -20,7 +20,6 @@ import os
 import re
 import sqlite3
 import tempfile
-import threading
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -30,12 +29,13 @@ from types import SimpleNamespace
 from typing import Any
 
 from adapters.openrouter_api import ProviderCallObserverError
+from orchestrator import config as runtime_config
 from orchestrator import ui_language
-from orchestrator.config import DEFAULT_AGENT_MODE
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
 )
+from orchestrator.process_resources import path_lock as process_path_lock
 
 STATE_KEY = "context_compaction"
 MANAGED_HISTORY_TITLE = "HASHI MANAGED CONVERSATION HISTORY"
@@ -62,6 +62,14 @@ DEFAULT_POST_COMPACTION_TARGET_TOKENS = 64_000
 # names.  They now describe the same universal 64k-128k operating window.
 DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS = DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
 DEFAULT_UNKNOWN_TARGET_LOW_TOKENS = DEFAULT_POST_COMPACTION_TARGET_TOKENS
+
+
+def _default_agent_mode() -> str:
+    """Read the mode default from the running Core configuration contract."""
+
+    return str(runtime_config.DEFAULT_AGENT_MODE)
+
+
 # Live HASHI API evidence showed that a 64k mixed-character estimate serializes
 # to roughly 100k provider tokens once the maintenance schema and provider
 # envelope are included.  Keep unknown-capacity maintenance chunks well below
@@ -346,6 +354,8 @@ class CompactionOutcome:
     changed: bool = False
     code: str = ""
     message: str = ""
+    message_key: str = ""
+    message_values: Mapping[str, Any] = field(default_factory=dict)
     before_tokens: int = 0
     after_tokens: int = 0
     selected_segment_count: int = 0
@@ -392,14 +402,8 @@ class _Selection:
     before_tokens: int
 
 
-_LOCKS_GUARD = globals().get("_LOCKS_GUARD") or threading.Lock()
-_PATH_LOCKS: dict[str, threading.RLock] = globals().get("_PATH_LOCKS") or {}
-
-
-def _path_lock(path: Path) -> threading.RLock:
-    key = str(Path(path).resolve())
-    with _LOCKS_GUARD:
-        return _PATH_LOCKS.setdefault(key, threading.RLock())
+def _path_lock(path: Path):
+    return process_path_lock(path)
 
 
 def _atomic_json_write(path: Path, payload: Mapping[str, Any]) -> None:
@@ -1558,9 +1562,10 @@ def install_history_section(
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
         return list(extra_sections), None
     manager = getattr(runtime, "backend_manager", None)
+    default_agent_mode = _default_agent_mode()
     if str(
-        getattr(manager, "agent_mode", DEFAULT_AGENT_MODE)
-        or DEFAULT_AGENT_MODE
+        getattr(manager, "agent_mode", default_agent_mode)
+        or default_agent_mode
     ).lower() != "flex":
         return list(extra_sections), None
     coordinator = coordinator_for(
@@ -2022,16 +2027,31 @@ class ContextCompactionCoordinator:
         accounting_ready = getattr(
             current_backend, "can_record_maintenance_provider_requests", None
         )
-        if (
-            callable(maintenance_recorder)
-            and callable(accounting_ready)
-            and not accounting_ready()
-        ):
-            raise CompactionFailure(
-                "COMPACTION_ACCOUNTING_UNAVAILABLE",
-                "Compact cannot call its Provider before a durable HER Session is bound",
-                retryable=False,
+        if callable(maintenance_recorder) and callable(accounting_ready):
+            ready = bool(accounting_ready())
+            prepare_accounting = getattr(
+                current_backend,
+                "ensure_maintenance_provider_accounting",
+                None,
             )
+            if callable(prepare_accounting):
+                try:
+                    prepare_accounting(request.request_ref)
+                    # Re-read the durable store rather than trusting the
+                    # preflight's return value or process-local state.
+                    ready = bool(accounting_ready())
+                except Exception as exc:
+                    raise CompactionFailure(
+                        "COMPACTION_ACCOUNTING_UNAVAILABLE",
+                        "Compact could not establish its durable HER Session accounting binding",
+                        retryable=False,
+                    ) from exc
+            if not ready:
+                raise CompactionFailure(
+                    "COMPACTION_ACCOUNTING_UNAVAILABLE",
+                    "Compact cannot call its Provider before a durable HER Session is bound",
+                    retryable=False,
+                )
         backend = manager.create_ephemeral_backend(route.provider, target_model=route.model)
         if hasattr(backend, "tool_registry"):
             backend.tool_registry = None
@@ -2090,6 +2110,7 @@ class ContextCompactionCoordinator:
                         observed_provider_request_ids=(
                             observed_provider_request_ids
                         ),
+                        recorder=maintenance_recorder,
                     )
 
                 physical_observer_setter(observe_physical_call)
@@ -2116,6 +2137,7 @@ class ContextCompactionCoordinator:
                     else "failed_response"
                 ),
                 observed_provider_request_ids=observed_provider_request_ids,
+                recorder=maintenance_recorder,
             )
             if not bool(getattr(response, "is_success", False)):
                 raise CompactionFailure(
@@ -2137,14 +2159,24 @@ class ContextCompactionCoordinator:
         except asyncio.TimeoutError as exc:
             usage_attempted = True
             if not physical_observer_bound:
-                self._record_provider_usage(route, request, None, status="timeout")
+                self._record_provider_usage(
+                    route,
+                    request,
+                    None,
+                    status="timeout",
+                    recorder=maintenance_recorder,
+                )
             raise CompactionFailure("COMPACTION_TIMEOUT", "Compact provider attempt timed out", retryable=True) from exc
         except asyncio.CancelledError:
             if provider_request_started and not usage_attempted:
                 usage_attempted = True
                 if not physical_observer_bound:
                     self._record_provider_usage(
-                        route, request, None, status="cancelled"
+                        route,
+                        request,
+                        None,
+                        status="cancelled",
+                        recorder=maintenance_recorder,
                     )
             raise
         except BaseException:
@@ -2156,6 +2188,7 @@ class ContextCompactionCoordinator:
                         request,
                         None,
                         status="failed_without_receipt",
+                        recorder=maintenance_recorder,
                     )
             raise
         finally:
@@ -2170,13 +2203,21 @@ class ContextCompactionCoordinator:
         status: str,
         calls_override: Sequence[Mapping[str, Any]] | None = None,
         observed_provider_request_ids: set[str] | None = None,
+        recorder: Callable[[list[Mapping[str, Any]]], Any] | None = None,
     ) -> None:
         """Persist each Compact provider call without coupling Compact success."""
 
-        backend = getattr(
-            getattr(self.runtime, "backend_manager", None), "current_backend", None
-        )
-        recorder = getattr(backend, "record_maintenance_provider_requests", None)
+        if recorder is None:
+            backend = getattr(
+                getattr(self.runtime, "backend_manager", None),
+                "current_backend",
+                None,
+            )
+            recorder = getattr(
+                backend,
+                "record_maintenance_provider_requests",
+                None,
+            )
         if not callable(recorder):
             return
         metadata = getattr(response, "stream_metadata", None)
@@ -2586,6 +2627,11 @@ class ContextCompactionCoordinator:
                         f"Current context is {current_tokens:,} tokens, below the "
                         f"{policy.manual_min_tokens:,}-token manual Compact threshold."
                     ),
+                    message_key="compact.message.below_manual_window",
+                    message_values={
+                        "current_tokens": f"{current_tokens:,}",
+                        "manual_min_tokens": f"{policy.manual_min_tokens:,}",
+                    },
                 )
         task = asyncio.current_task()
         async with self._operation_lock:
@@ -2634,6 +2680,11 @@ class ContextCompactionCoordinator:
                             "No historical conversation content is available to compact."
                             if manual_request
                             else "No eligible historical prefix exists outside the recent guard."
+                        ),
+                        message_key=(
+                            "compact.message.no_history"
+                            if manual_request
+                            else "compact.message.no_eligible_history"
                         ),
                         covered_through_turn_id=snapshot.covered_through_turn_id,
                         route_provider=route.provider,
@@ -2860,6 +2911,7 @@ class ContextCompactionCoordinator:
                     compaction_id=compaction_id,
                     changed=True,
                     message="Historical context was compacted and atomically committed.",
+                    message_key="compact.message.completed",
                     before_tokens=selection.before_tokens,
                     after_tokens=after_tokens,
                     selected_segment_count=len(candidate.source_hashes),
@@ -2986,6 +3038,11 @@ class ContextCompactionCoordinator:
                     f"Current context is {projected:,} tokens; automatic Compact "
                     f"starts only above {budget.high_projected_tokens:,} tokens."
                 ),
+                message_key="compact.message.automatic_below_threshold",
+                message_values={
+                    "projected_tokens": f"{projected:,}",
+                    "automatic_trigger_tokens": f"{budget.high_projected_tokens:,}",
+                },
             )
         required = max(
             1,

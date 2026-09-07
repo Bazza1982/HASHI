@@ -40,7 +40,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12.13"
 
       - name: Install build tools
         run: |
@@ -55,7 +55,7 @@ jobs:
           python -m venv .venv-smoke
           . .venv-smoke/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install dist/*.whl pytest pytest-asyncio
+          python -m pip install "dist/$(basename dist/*.whl)[test]"
 
       - name: CLI smoke run
         run: |

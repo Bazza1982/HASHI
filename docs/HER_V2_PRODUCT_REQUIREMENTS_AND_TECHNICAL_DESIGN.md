@@ -146,12 +146,15 @@ to this section before implementation or supporting tests are added.
 
 #### 3.2.2 Lifecycle-wide cognitive control
 
-Every tool-enabled HER v2 stage may use the same provider-neutral cognitive
+Every tool-enabled HER v2 stage must use the same provider-neutral cognitive
 control. This includes Direct, tool-enabled Strategy/Triage, Planning,
-Execution, Replanning, Review, and delegated execution. It is not a Planning
-special case and it is not a tool-round ceiling.
+Execution, Replanning, Review, and delegated execution. The mechanism is a
+permanent Engine safety invariant for every Agent: it has no enable/disable
+configuration, rollout gate, Agent override, mode override, or provider
+override. Legacy switch fields are rejected. It is not a Planning special case
+and it is not a tool-round ceiling.
 
-When enabled, one compact `TaskState` is shared by every stage in the Turn. It
+One compact `TaskState` is always shared by every stage in the Turn. It
 contains the resolved goal, stable completion-criterion IDs, evidence-bound
 facts, open/resolved questions, focus, discarded paths, blockers, and an
 optional research working model. It is a projection of task conclusions, not a
@@ -195,6 +198,9 @@ Agent's underlying permissions, launch another stage, or fork the provider
 thread. It makes a decision boundary explicit inside the existing continuous
 tool conversation and retains normal `/stop`, cancellation, audit, and
 lifecycle authority.
+
+This permanent decision is recorded in
+[HER v2 Mandatory Cognitive Control Decision](HER_V2_MANDATORY_COGNITIVE_CONTROL_DECISION.md).
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
@@ -501,12 +507,17 @@ model names.
 ### 5.1 Runtime configuration command boundary
 
 HER v2 presents two reusable task model slots, Quick and Pro. `/provider`
-selects the concrete Model Provider route that carries them. `/model` defines
-those two models, independently assigns a model slot and provider reasoning to
-each effective task route, and exposes Compact enablement plus its Tier 2/Tier
-3 timeout policy. Compact always follows the initiating Agent's active
-Quick/Light provider and model at fixed high HER effort; it has no third
-provider/model path and never silently falls back to Pro or a global default.
+selects the concrete Model Provider route that carries them. The normal
+`/model` menu exposes Direct, Strategy, Planning, and grouped Execution so it
+matches the public Direct/Strategic/Planned execution design. Execution Auto
+assigns Simple to Quick and Complex/High-volume to Pro; Quick or Pro assigns
+all three execution classes together. Advanced settings expose per-task Custom
+targets and Compact. Internal/background routes retain their saved defaults and
+are not ordinary menu choices. Provider-reasoning choices are derived from the
+active provider/model's declared capabilities. Compact always follows the
+initiating Agent's active Quick/Light provider and model at fixed high HER
+effort; it has no third provider/model path and never silently falls back to
+Pro or a global default.
 Execution is split into Simple, Complex, and High-volume routes because
 classification changes the actual profile. JSON Repair inherits its rejected
 source stage's frozen provider/model target and is not a separately

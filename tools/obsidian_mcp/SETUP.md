@@ -10,7 +10,7 @@
 
 ## Step 2: HASHI secrets.json
 
-Add to `/home/lily/projects/hashi/secrets.json`:
+Add the following fields to `secrets.json` in the HASHI repository root:
 
 ```json
 {

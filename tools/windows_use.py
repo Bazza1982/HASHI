@@ -30,7 +30,11 @@ from urllib.error import URLError, HTTPError
 
 logger = logging.getLogger("Tools.WindowsUse")
 _WINDOWS_HELPER_ENV = "HASHI_WINDOWS_HELPER"
-_WINDOWS_HELPER_PORT = int(os.environ.get("HASHI_WINDOWS_HELPER_PORT", "47831"))
+_WINDOWS_HELPER_PORT = (
+    int(os.environ["HASHI_WINDOWS_HELPER_PORT"])
+    if os.environ.get("HASHI_WINDOWS_HELPER_PORT")
+    else None
+)
 
 
 def _is_wsl() -> bool:
@@ -60,10 +64,15 @@ def _normalize_provider(provider: str | None) -> str:
 
 
 def _windows_helper_enabled() -> bool:
-    return os.environ.get(_WINDOWS_HELPER_ENV, "1").strip().lower() not in {"0", "false", "off", "no"}
+    explicit = os.environ.get(_WINDOWS_HELPER_ENV, "0").strip().lower()
+    return explicit in {"1", "true", "on", "yes"} and _WINDOWS_HELPER_PORT is not None
 
 
 def _windows_helper_base_url() -> str:
+    if _WINDOWS_HELPER_PORT is None:
+        raise RuntimeError(
+            "legacy Windows helper requires an explicit HASHI_WINDOWS_HELPER_PORT"
+        )
     return f"http://127.0.0.1:{_WINDOWS_HELPER_PORT}"
 
 
@@ -500,7 +509,7 @@ $argsList = @()
 $argsList += $uv.base_args
 $argsList += @('run', '--no-project', '--with', 'fastapi', '--with', 'uvicorn', '--with', 'fastmcp', '--with', 'windows-mcp', '--with', 'pillow', '--with', 'uiautomation', 'python', '-m', 'tools.windows_helper.server', '--host', '127.0.0.1', '--port', {_ps_quote(str(_WINDOWS_HELPER_PORT))}, '--log-dir', $logDir)
 $env:PYTHONPATH = $(if ($env:PYTHONPATH) {{ $repoRoot + ';' + $env:PYTHONPATH }} else {{ $repoRoot }})
-Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $helperWorkingDir | Out-Null
+Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $helperWorkingDir -WindowStyle Hidden | Out-Null
 @{{ ok = $true }} | ConvertTo-Json -Compress
 """
     data, error = await _run_powershell_json(body, timeout=20)

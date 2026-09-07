@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
+import time
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +25,7 @@ from adapters.stream_events import (
     KIND_PROGRESS,
     KIND_REVIEW,
     KIND_TEXT_DELTA,
+    KIND_THINKING,
     StreamEvent,
 )
 from orchestrator import (
@@ -31,9 +34,14 @@ from orchestrator import (
     runtime_retry,
     runtime_session,
     telegram_stream_policy,
+    ui_language,
 )
 from orchestrator import telegram_delivery_failover as failover
-from orchestrator.canonical_audit import CanonicalAuditStore
+from orchestrator.canonical_audit import (
+    CanonicalAuditConfigurationError,
+    CanonicalAuditStore,
+)
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.session_store import SessionStore
 
 
@@ -48,6 +56,9 @@ class _Logger:
         self.messages.append(message % args if args else message)
 
     def error(self, message, *args):
+        self.messages.append(message % args if args else message)
+
+    def debug(self, message, *args):
         self.messages.append(message % args if args else message)
 
 
@@ -240,7 +251,18 @@ def _runtime():
     runtime._last_full_prompt_tokens = 0
     runtime._last_prompt_audit = {
         "sections": [{"key": "Workzone", "chars": 8, "tokens_est": 2, "item_count": 1}],
-        "budget_applied": False,
+        "budget_applied": True,
+        "budget_limit_tokens": 64_000,
+        "budget_unit": "estimated_tokens",
+        "budget_provenance": "hashi_pcm_non_her_64k_tokens_v1",
+        "budget_unresolved": False,
+        "context_tokens_before_budget": 65_000,
+        "final_prompt_tokens_before_budget": 65_100,
+        "final_prompt_tokens_after_budget": 63_000,
+        "history_requested": 8,
+        "history_included": 7,
+        "history_omitted": [{"sequence": 1}],
+        "history_capsule": {"present": True, "item_count": 1},
         "context_fingerprint": "fp",
     }
     runtime._thinking_chars_this_req = 12
@@ -406,6 +428,16 @@ def test_begin_queue_item_records_processing_metadata():
     assert runtime.maintenance_events[0][0] == "processing"
 
 
+def test_begin_queue_item_resolves_locale_from_prefixed_session_owner():
+    runtime = _runtime()
+    ui_language.set_preferred_locale(runtime, "zh-CN", actor_id=123)
+    item = _item(owner_id="user:123")
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert runtime.current_request_meta["ui_locale_at_start"] == "zh-CN"
+
+
 @pytest.mark.asyncio
 async def test_canonical_audit_correlates_complete_foreground_request_chain(tmp_path):
     runtime = _runtime()
@@ -462,6 +494,92 @@ async def test_canonical_audit_correlates_complete_foreground_request_chain(tmp_
     assert {event["request_id"] for event in events} == {"req-audit"}
     assert events[-1]["payload"]["assistant_provider_text"] == "provider raw answer"
     assert events[-1]["payload"]["assistant_delivered_text"] == "delivered answer"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_stream_audit_batches_without_copying_raw_delta(
+    monkeypatch,
+):
+    monkeypatch.setattr(runtime_pipeline, "CANONICAL_STREAM_BATCH_MAX_AGE_S", 0.01)
+
+    class BatchStore:
+        def __init__(self):
+            self.commits: list[list[dict]] = []
+
+        def record_many(self, records):
+            self.commits.append([dict(record) for record in records])
+
+    store = BatchStore()
+    runtime = SimpleNamespace(canonical_audit=store, error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-reasoning")
+
+    for index in range(100):
+        batch.capture(
+            StreamEvent(
+                kind=KIND_THINKING,
+                summary="",
+                raw_delta=f"delta-{index}",
+                event_id=f"provider-{index}",
+                origin="deepseek",
+                provenance="provider_returned",
+            )
+        )
+
+    assert store.commits == []
+    await asyncio.sleep(0.03)
+
+    assert len(store.commits) == 1
+    records = store.commits[0]
+    assert len(records) == 101
+    stream_records = [
+        record for record in records if record["event_type"] == "provider_stream_event"
+    ]
+    reasoning_records = [
+        record for record in records if record["event_type"] == "provider_reasoning"
+    ]
+    assert [record["payload"]["raw_delta"] for record in stream_records] == [
+        f"delta-{index}" for index in range(100)
+    ]
+    assert len(reasoning_records) == 1
+    reasoning_payload = reasoning_records[0]["payload"]
+    assert "raw_delta" not in reasoning_payload
+    assert reasoning_payload["chunk_count"] == 100
+    assert reasoning_payload["raw_delta_char_count"] == sum(
+        len(f"delta-{index}") for index in range(100)
+    )
+    assert reasoning_payload["stream_batch_ref"] == {
+        "audit_batch_id": "req-reasoning:stream-batch:1",
+        "request_id": "req-reasoning",
+        "first_stream_sequence": 1,
+        "last_stream_sequence": 100,
+        "event_kind": "thinking",
+    }
+    assert {record["provenance"]["audit_batch_id"] for record in records} == {
+        "req-reasoning:stream-batch:1"
+    }
+    assert runtime._canonical_reasoning_seen == {"req-reasoning"}
+
+
+def test_canonical_stream_audit_failure_is_not_silently_ignored():
+    class FailingStore:
+        def record_many(self, _records):
+            raise OSError("audit volume full")
+
+    runtime = SimpleNamespace(canonical_audit=FailingStore(), error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-audit-fail")
+    event = StreamEvent(
+        kind=KIND_THINKING,
+        summary="",
+        raw_delta="evidence",
+        origin="provider",
+    )
+    batch.capture(event)
+
+    with pytest.raises(OSError, match="audit volume full"):
+        batch.flush(reason="provider_end")
+    with pytest.raises(CanonicalAuditConfigurationError, match="audit volume full"):
+        batch.capture(event)
+    assert any("Canonical stream audit batch failed" in message for message in runtime.error_logger.messages)
 
 
 def test_begin_queue_item_preserves_explicit_habit_ineligibility():
@@ -688,6 +806,54 @@ async def test_fixed_session_backend_uses_incremental_prompt():
 
     assert runtime.current_request_meta["session_scope"] == "persistent"
     assert prompt.incremental is True
+
+
+@pytest.mark.asyncio
+async def test_build_turn_prompt_passes_backend_pcm_token_budget():
+    runtime = _runtime()
+    runtime.config.active_backend = "openrouter-api"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        config=SimpleNamespace(extra={"pcm_prompt_token_budget": 32_000}),
+        capabilities=SimpleNamespace(
+            supports_sessions=False,
+            supports_thinking_stream=True,
+        ),
+    )
+    observed = {}
+
+    class _BudgetAssembler:
+        MAX_RECENT_EXCHANGES = 10
+
+        def build_prompt_payload(
+            self,
+            prompt,
+            backend,
+            *,
+            extra_sections,
+            inject_memory,
+            incremental,
+            recent_exchanges=None,
+            prompt_budget_tokens,
+        ):
+            observed["backend"] = backend
+            observed["prompt_budget_tokens"] = prompt_budget_tokens
+            return {"final_prompt": prompt, "audit": {"sections": []}}
+
+    runtime.context_assembler = _BudgetAssembler()
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert observed == {
+        "backend": "openrouter-api",
+        "prompt_budget_tokens": 32_000,
+    }
 
 
 @pytest.mark.asyncio
@@ -1035,6 +1201,180 @@ async def test_run_backend_generation_detaches_background_task():
     assert (await generation.generation_task).text == "late"
 
 
+@pytest.mark.asyncio
+async def test_run_backend_generation_isolates_and_restores_fixed_provider_session():
+    runtime = _runtime()
+    runtime.config.extra = {
+        "background_mode": True,
+        "background_detach_after": 0.001,
+    }
+    backend = SimpleNamespace(
+        _session_id="primary-thread",
+        capabilities=SimpleNamespace(supports_sessions=True),
+    )
+    observed_session_ids = []
+
+    class _FixedSessionManager:
+        agent_mode = "fixed"
+        current_backend = backend
+
+        async def generate_response(self, *_args, **_kwargs):
+            observed_session_ids.append(backend._session_id)
+            await asyncio.sleep(0.01)
+            backend._session_id = "isolated-scheduler-thread"
+            return SimpleNamespace(is_success=True, text="scheduled result")
+
+    runtime.backend_manager = _FixedSessionManager()
+    item = _item(
+        source="scheduler",
+        scheduler_context={
+            "kind": "cron",
+            "task_id": "sunny-scan-gmail",
+            "trigger": "scheduled",
+        },
+    )
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    generation = await runtime_pipeline.run_backend_generation(
+        runtime,
+        item,
+        "scheduled prompt",
+        on_stream_event=None,
+        audit_active=False,
+    )
+
+    assert observed_session_ids == [None]
+    assert backend._session_id == "primary-thread"
+    assert generation.detached is False
+    assert generation.generation_task is None
+    assert generation.response.text == "scheduled result"
+    assert runtime.is_generating is False
+
+
+@pytest.mark.asyncio
+async def test_run_backend_generation_restores_provider_session_after_failure():
+    runtime = _runtime()
+    backend = SimpleNamespace(
+        _session_id="primary-thread",
+        capabilities=SimpleNamespace(supports_sessions=True),
+    )
+
+    class _FailingFixedSessionManager:
+        agent_mode = "fixed"
+        current_backend = backend
+
+        async def generate_response(self, *_args, **_kwargs):
+            assert backend._session_id is None
+            backend._session_id = "failed-scheduler-thread"
+            raise RuntimeError("provider failed")
+
+    runtime.backend_manager = _FailingFixedSessionManager()
+    item = _item(
+        source="scheduler-recovery",
+        scheduler_context={
+            "kind": "heartbeat",
+            "task_id": "health-check",
+            "trigger": "recovery",
+        },
+    )
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        await runtime_pipeline.run_backend_generation(
+            runtime,
+            item,
+            "recovery prompt",
+            on_stream_event=None,
+            audit_active=False,
+        )
+
+    assert backend._session_id == "primary-thread"
+    assert runtime.is_generating is False
+
+
+@pytest.mark.asyncio
+async def test_run_backend_generation_restores_provider_session_after_cancellation():
+    runtime = _runtime()
+    backend = SimpleNamespace(
+        _session_id="primary-thread",
+        capabilities=SimpleNamespace(supports_sessions=True),
+    )
+    entered = asyncio.Event()
+
+    class _BlockingFixedSessionManager:
+        agent_mode = "fixed"
+        current_backend = backend
+
+        async def generate_response(self, *_args, **_kwargs):
+            assert backend._session_id is None
+            backend._session_id = "cancelled-scheduler-thread"
+            entered.set()
+            await asyncio.Event().wait()
+
+    runtime.backend_manager = _BlockingFixedSessionManager()
+    item = _item(
+        source="scheduler",
+        scheduler_context={
+            "kind": "cron",
+            "task_id": "daily-report",
+            "trigger": "manual",
+        },
+    )
+    runtime_pipeline.begin_queue_item(runtime, item)
+    task = asyncio.create_task(
+        runtime_pipeline.run_backend_generation(
+            runtime,
+            item,
+            "manual prompt",
+            on_stream_event=None,
+            audit_active=False,
+        )
+    )
+    await entered.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert backend._session_id == "primary-thread"
+    assert runtime.is_generating is False
+
+
+@pytest.mark.asyncio
+async def test_run_backend_generation_keeps_normal_fixed_provider_session():
+    runtime = _runtime()
+    backend = SimpleNamespace(
+        _session_id="primary-thread",
+        capabilities=SimpleNamespace(supports_sessions=True),
+    )
+    observed_session_ids = []
+
+    class _FixedSessionManager:
+        agent_mode = "fixed"
+        current_backend = backend
+
+        async def generate_response(self, *_args, **_kwargs):
+            observed_session_ids.append(backend._session_id)
+            backend._session_id = "primary-thread-next-turn"
+            return SimpleNamespace(is_success=True, text="normal result")
+
+    runtime.backend_manager = _FixedSessionManager()
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    generation = await runtime_pipeline.run_backend_generation(
+        runtime,
+        item,
+        "normal prompt",
+        on_stream_event=None,
+        audit_active=False,
+    )
+
+    assert observed_session_ids == ["primary-thread"]
+    assert backend._session_id == "primary-thread-next-turn"
+    assert generation.response.text == "normal result"
+
+
 def test_log_backend_finished_records_structured_maintenance():
     runtime = _runtime()
     item = _item()
@@ -1144,6 +1484,54 @@ async def test_cleanup_verbose_rollover_deletes_only_active_message():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_does_not_delete_live_verbose_placeholder_twice():
+    runtime = _runtime()
+    placeholder = SimpleNamespace(message_id=77)
+    display_state = runtime_pipeline.VerboseDisplayState(
+        current_message=None,
+        message_ids=[77],
+        deleted_message_ids={77},
+    )
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=None,
+        typing_task=None,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+        verbose_display_state=display_state,
+    )
+
+    assert runtime.app.bot.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_older_verbose_card_after_live_display_stopped():
+    runtime = _runtime()
+    placeholder = SimpleNamespace(message_id=77)
+    display_state = runtime_pipeline.VerboseDisplayState(
+        current_message=None,
+        message_ids=[77, 78],
+        ever_activated=True,
+    )
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=None,
+        typing_task=None,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+        verbose_display_state=display_state,
+    )
+
+    assert runtime.app.bot.deleted == []
+
+
+@pytest.mark.asyncio
 async def test_cleanup_interactive_feedback_propagates_queue_worker_cancellation():
     runtime = _runtime()
     child_started = asyncio.Event()
@@ -1243,13 +1631,21 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     ]
     assert feedback.placeholder.message_id == 77
     assert feedback.typing_task is not None
-    assert feedback.escalation_task is None
+    assert feedback.escalation_task is not None
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
+    assert feedback.think_flush_task is not None
+    assert feedback.preference_event is not None
     assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
 
 @pytest.mark.asyncio
@@ -1338,7 +1734,8 @@ async def test_her_message_audit_preserves_exact_commentary_and_transport_status
     assert records[0]["text_sha256"] == records[1]["text_sha256"]
     assert records[0]["provenance"] == "persona_renderer"
     assert records[0]["detail"] == "persona_renderer_fallback=false"
-    assert audit_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert audit_path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio
@@ -1852,7 +2249,7 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
     runtime.telegram_connected = True
     runtime.startup_success = True
     runtime.token = "token-kasumi"
-    runtime.app.bot = _Bot(send_error=RetryAfter(60))
+    runtime.app.bot = _Bot(send_error=RetryAfter(timedelta(seconds=60)))
     _set_stream_policy(runtime, placeholder=True)
 
     failover_runtime = SimpleNamespace(
@@ -1877,7 +2274,7 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
         audit_collector=None,
     )
 
-    feedback.stop_typing.set()
+    assert feedback.stop_typing is None
     assert feedback.typing_task is None
 
     saved = failover.load_health_state(runtime)
@@ -1976,15 +2373,25 @@ async def test_typing_off_skips_typing_ui_and_uses_final_delivery_once():
         audit_collector=None,
     )
 
-    assert feedback.stop_typing is None
+    assert feedback.stop_typing is not None
     assert feedback.typing_task is None
-    assert feedback.escalation_task is None
+    assert feedback.escalation_task is not None
     assert feedback.answer_preview_task is None
     assert feedback.placeholder is None
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
+    assert feedback.think_flush_task is not None
+    assert feedback.preference_event is not None
     assert callable(feedback.on_stream_event)
     assert runtime.app.bot.sent == []
     assert runtime.app.bot.edits == []
+
+    feedback.stop_typing.set()
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
     await runtime_pipeline.handle_success_delivery(
         runtime,
@@ -2082,12 +2489,18 @@ async def test_typing_only_does_not_route_answer_deltas_or_edit_placeholder():
         audit_collector=None,
     )
 
-    assert feedback.stream_callback is None
+    assert feedback.stream_callback is not None
     assert callable(feedback.on_stream_event)
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
     assert runtime.app.bot.edits == []
 
 
@@ -2182,7 +2595,7 @@ async def test_answer_preview_disables_after_retry_after():
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
     }
-    runtime.app.bot = _Bot(edit_error=RetryAfter(123))
+    runtime.app.bot = _Bot(edit_error=RetryAfter(timedelta(seconds=123)))
     stream_state = runtime_pipeline.StreamedAnswerState(
         request_id="req-1",
         chat_id=123,
@@ -2395,11 +2808,17 @@ async def test_legacy_preview_flag_stays_inactive_without_verbose():
 
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
-    assert feedback.escalation_task is None
-    assert feedback.stream_callback is None
+    assert feedback.escalation_task is not None
+    assert feedback.stream_callback is not None
     assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
 
 
 @pytest.mark.asyncio
@@ -2504,6 +2923,96 @@ async def test_verbose_alone_forces_placeholder_and_progress_stream():
 
 
 @pytest.mark.asyncio
+async def test_live_verbose_and_think_changes_apply_without_replaying_hidden_events():
+    runtime = _runtime()
+    runtime.telegram_connected = True
+    make_stream_callback = FlexibleAgentRuntime._make_stream_callback.__get__(
+        runtime,
+        FlexibleAgentRuntime,
+    )
+
+    def _capturing_stream_callback(**kwargs):
+        runtime.stream_callbacks.append(kwargs)
+        return make_stream_callback(**kwargs)
+
+    runtime._make_stream_callback = _capturing_stream_callback
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    stream_queue = runtime.stream_callbacks[0]["event_queue"]
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="hidden before On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="hidden reasoning before On")
+    )
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, True)
+    FlexibleAgentRuntime._set_think_enabled(runtime, True)
+    for _ in range(50):
+        if runtime.streaming_loops:
+            break
+        await asyncio.sleep(0.01)
+    assert len(runtime.streaming_loops) == 1
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="visible after On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="R" * 160)
+    )
+    assert stream_queue.qsize() == 1
+    assert runtime._think_buffer == ["R" * 160]
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, False)
+    FlexibleAgentRuntime._set_think_enabled(runtime, False)
+    for _ in range(50):
+        if runtime.app.bot.deleted:
+            break
+        await asyncio.sleep(0.01)
+    assert runtime.app.bot.deleted
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, True)
+    FlexibleAgentRuntime._set_think_enabled(runtime, True)
+    for _ in range(50):
+        if len(runtime.streaming_loops) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert len(runtime.streaming_loops) == 2
+    assert stream_queue.empty()
+    assert runtime._think_buffer == []
+
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_PROGRESS, summary="visible after second On")
+    )
+    await feedback.stream_callback(
+        StreamEvent(kind=KIND_THINKING, summary="N" * 160)
+    )
+    assert stream_queue.qsize() == 1
+    assert runtime._think_buffer == ["N" * 160]
+
+    FlexibleAgentRuntime._set_verbose_enabled(runtime, False)
+    FlexibleAgentRuntime._set_think_enabled(runtime, False)
+    feedback.stop_typing.set()
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
+
+
+@pytest.mark.asyncio
 async def test_setup_interactive_feedback_creates_audit_stream_for_silent_item():
     runtime = _runtime()
 
@@ -2571,6 +3080,34 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
     ]
     assert runtime.listener_payloads[0]["text"] == "wrapped:core text"
     assert runtime.listener_payloads[0]["wrapped"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_successful_response_normalizes_paths_before_user_observers(
+    monkeypatch,
+):
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(text="Saved to `/home/tester/report.md`.")
+    monkeypatch.setattr(
+        runtime_pipeline,
+        "normalize_user_visible_paths",
+        lambda text: text.replace(
+            "/home/tester/report.md", r"C:\Users\tester\report.md"
+        ),
+    )
+
+    result = await runtime_pipeline.prepare_successful_response(
+        runtime,
+        item,
+        response,
+        completion_path="foreground",
+    )
+
+    expected = r"wrapped:Saved to `C:\Users\tester\report.md`."
+    assert result.visible_text == expected
+    assert runtime.transcripts[0]["visible_text"] == expected
+    assert runtime.listener_payloads[0]["text"] == expected
 
 
 @pytest.mark.asyncio
@@ -2710,6 +3247,17 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
         }
     ]
     assert event["section_chars"] == {"Workzone": 8}
+    assert event["budget_limit_tokens"] == 64_000
+    assert event["budget_unit"] == "estimated_tokens"
+    assert event["budget_provenance"] == "hashi_pcm_non_her_64k_tokens_v1"
+    assert event["budget_unresolved"] is False
+    assert event["context_tokens_before_budget"] == 65_000
+    assert event["final_prompt_tokens_before_budget"] == 65_100
+    assert event["final_prompt_tokens_after_budget"] == 63_000
+    assert event["history_requested"] == 8
+    assert event["history_included"] == 7
+    assert event["history_omitted_count"] == 1
+    assert event["history_capsule"] == {"present": True, "item_count": 1}
     assert event["wrapper_applied"] is True
 
 
@@ -2818,6 +3366,30 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
         retry_after_s=2.5,
         tool_call_count=3,
         side_effects_possible=True,
+        stream_metadata={
+            "her_v2": {
+                "failure_chain": {
+                    "primary_failure": {
+                        "code": "PROVIDER_CAPACITY_UNAVAILABLE",
+                        "description": "Selected model is at capacity.",
+                        "side_effects_possible": True,
+                        "details": {
+                            "provider_http_failure": {
+                                "response": {
+                                    "status": 503,
+                                    "body": '{"error":{"code":"capacity"}}',
+                                },
+                                "transport_audit_refs": [
+                                    "hashi-transport:test:response"
+                                ],
+                            }
+                        },
+                    },
+                    "recovery_decision": {},
+                    "foreground_cleanup": {},
+                }
+            }
+        },
     )
 
     await runtime_pipeline.handle_backend_error(
@@ -2838,6 +3410,22 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
     assert payload["tool_call_count"] == 3
     assert payload["side_effects_possible"] is True
     assert runtime.sent_message["text"] == response.error
+    assert runtime.sent_message["error_context"] == {
+        "error_code": "PROVIDER_CAPACITY_UNAVAILABLE",
+        "error_retryable": True,
+        "http_status": 503,
+        "provider_request_id": "req_provider_1",
+        "retry_after_s": 2.5,
+        "tool_call_count": 3,
+        "side_effects_possible": True,
+    }
+    diagnostic_log = next(
+        message
+        for message in runtime.error_logger.messages
+        if message.startswith("Backend failure diagnostics")
+    )
+    assert '{\\"error\\":{\\"code\\":\\"capacity\\"}}' in diagnostic_log
+    assert "hashi-transport:test:response" in diagnostic_log
 
 
 @pytest.mark.asyncio
@@ -2900,6 +3488,10 @@ async def test_handle_backend_error_keeps_non_deliverable_silent_request_interna
     )
 
     assert not hasattr(runtime, "sent_message")
+    assert any(
+        "internal scheduled failure" in message
+        for message in runtime.error_logger.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -2919,13 +3511,22 @@ async def test_handle_backend_error_buffers_transfer_without_delivery():
 
     assert runtime.suppressed == {"success": False, "error": "buffer me"}
     assert not hasattr(runtime, "sent_message")
+    assert any("buffer me" in message for message in runtime.error_logger.messages)
 
 
 @pytest.mark.asyncio
-async def test_handle_success_delivery_sends_response_and_routes_hchat():
+async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypatch):
     runtime = _runtime()
     item = _item(prompt="user text")
     response = SimpleNamespace(text="core text")
+    delivery_outcomes = []
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda current_runtime, current_item, **fields: delivery_outcomes.append(
+            (current_runtime, current_item, fields)
+        ),
+    )
 
     await runtime_pipeline.handle_success_delivery(
         runtime,
@@ -2947,6 +3548,60 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat():
     assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"
+    assert delivery_outcomes == [
+        (
+            runtime,
+            item,
+            {
+                "delivered": True,
+                "assistant_text": "visible text",
+                "transport": "telegram",
+                "completion_path": "foreground",
+                "disposition": "transport_delivered",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_records_failed_transport_outcome(monkeypatch):
+    runtime = _runtime()
+    item = _item(prompt="user text")
+    outcomes = []
+
+    async def no_transport_receipt(**kwargs):
+        return 0.0, 0
+
+    runtime.send_long_message = no_transport_receipt
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda current_runtime, current_item, **fields: outcomes.append(fields),
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="backend output"),
+        visible_text="visible output",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert outcomes == [
+        {
+            "delivered": False,
+            "assistant_text": "visible output",
+            "transport": "telegram",
+            "completion_path": "foreground",
+            "disposition": "transport_returned_no_receipt",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -3782,6 +4437,13 @@ async def test_finalize_streamed_answer_without_deltas_deletes_placeholder_and_f
 async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_text():
     runtime = _runtime()
     item = _item(prompt="user text")
+    meter_tails = []
+
+    async def _send_meter_cost_tail(item, **timing):
+        meter_tails.append((item.request_id, timing))
+
+    runtime._send_meter_cost_tail = _send_meter_cost_tail
+    queued_monotonic = time.monotonic() - 1.0
     stream_state = runtime_pipeline.StreamedAnswerState(
         request_id=item.request_id,
         chat_id=item.chat_id,
@@ -3796,7 +4458,18 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
     await runtime_pipeline.handle_success_delivery(
         runtime,
         item,
-        SimpleNamespace(text="core text"),
+        SimpleNamespace(
+            text="core text",
+            stream_metadata={
+                "her_v2": {
+                    "stage_timings_s": {
+                        "triage": 0.2,
+                        "execution": 0.7,
+                        "invalid": "not-a-number",
+                    }
+                }
+            },
+        ),
         visible_text="wrapped final text",
         wrapper_result={"mode": "wrapper"},
         is_bridge_request=False,
@@ -3806,12 +4479,19 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
         backend_elapsed_s=0.3,
         audit_collector="audit",
         answer_stream_state=stream_state,
+        queued_monotonic=queued_monotonic,
     )
 
     assert runtime.app.bot.edits[-1]["text"] == "wrapped final text"
     assert not hasattr(runtime, "sent_message")
     assert runtime.voice_replies == [(123, "wrapped final text", "req-1")]
     assert runtime.hchat_routes == [("req-1", "wrapped final text")]
+    assert meter_tails[0][0] == "req-1"
+    assert meter_tails[0][1]["total_elapsed_s"] >= 1.0
+    assert meter_tails[0][1]["stage_timings_s"] == {
+        "triage": 0.2,
+        "execution": 0.7,
+    }
 
 
 @pytest.mark.asyncio

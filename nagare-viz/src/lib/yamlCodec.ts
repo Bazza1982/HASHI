@@ -4,6 +4,7 @@ import { validateWorkflowGraph, type GraphValidationResult } from "./dagValidato
 const CANONICAL_TOP_LEVEL_KEYS = new Set([
   "workflow",
   "meta",
+  "changelog",
   "pre_flight",
   "agents",
   "steps",
@@ -15,6 +16,7 @@ const CANONICAL_TOP_LEVEL_KEYS = new Set([
 ]);
 
 const TOP_LEVEL_BLOCK_PATTERN = /^(?<key>[A-Za-z0-9_-]+):(?!\S)/gm;
+export const SUPPORTED_WORKER_BACKENDS = ["claude-cli", "codex-cli", "callable"] as const;
 
 export type Severity = "warning" | "error";
 export type CompatibilityClass = "A" | "B" | "C";
@@ -31,7 +33,6 @@ export type DraftStep = {
   agent: string;
   depends: string[];
   prompt: string;
-  timeoutSeconds: number | null;
   raw: Record<string, unknown>;
   unsupportedFields: Record<string, unknown>;
 };
@@ -150,17 +151,7 @@ export function createDraftFromDocument(document: WorkflowDocument): WorkflowDra
 }
 
 export function applyDraftToDocument(_document: WorkflowDocument, draft: WorkflowDraft): WorkflowDocument {
-  const nextData = deepClone(draft.data);
-  nextData.steps = draft.steps.map(denormalizeStep);
-  const normalizedEditorMetadata = normalizeEditorMetadata(
-    draft.editorMetadata,
-    draft.steps.map((step) => step.id),
-  );
-  if (Object.keys(normalizedEditorMetadata).length > 0) {
-    nextData["x-nagare-viz"] = normalizedEditorMetadata;
-  } else {
-    delete nextData["x-nagare-viz"];
-  }
+  const nextData = materializeDraftData(draft);
 
   const nextSource = dump(nextData, {
     noRefs: true,
@@ -175,24 +166,21 @@ export function exportWorkflowDocument(
   draft: WorkflowDraft,
   intent: ExportIntent,
 ): string {
-  const nextData = deepClone(draft.data);
-  nextData.steps = draft.steps.map(denormalizeStep);
+  const nextData = materializeDraftData(draft);
   const normalizedEditorMetadata = normalizeEditorMetadata(
     draft.editorMetadata,
     draft.steps.map((step) => step.id),
   );
-
-  if (Object.keys(normalizedEditorMetadata).length > 0) {
-    nextData["x-nagare-viz"] = normalizedEditorMetadata;
-  } else {
-    delete nextData["x-nagare-viz"];
-  }
 
   const safeForStructuralEdits =
     document.compatibilityClass === "A" &&
     !document.warnings.some((warning) => warning.severity === "error");
 
   if (intent.structuralEdits) {
+    const runtimeProblems = validateRuntimeContract(nextData);
+    if (runtimeProblems.length > 0) {
+      throw new Error(`Runtime contract validation failed: ${runtimeProblems.join("; ")}`);
+    }
     if (!safeForStructuralEdits) {
       throw new Error(
         "This workflow is not safe for structural export from form mode. Use raw YAML or metadata-only edits.",
@@ -210,6 +198,21 @@ export function exportWorkflowDocument(
   });
 }
 
+export function materializeDraftData(draft: WorkflowDraft): Record<string, unknown> {
+  const nextData = deepClone(draft.data);
+  nextData.steps = draft.steps.map(denormalizeStep);
+  const normalizedEditorMetadata = normalizeEditorMetadata(
+    draft.editorMetadata,
+    draft.steps.map((step) => step.id),
+  );
+  if (Object.keys(normalizedEditorMetadata).length > 0) {
+    nextData["x-nagare-viz"] = normalizedEditorMetadata;
+  } else {
+    delete nextData["x-nagare-viz"];
+  }
+  return nextData;
+}
+
 export function getUnsupportedScopes(document: WorkflowDocument, draft: WorkflowDraft) {
   const topLevel = document.unknownTopLevelKeys.map((key) => ({
     scope: key,
@@ -223,7 +226,7 @@ export function getUnsupportedScopes(document: WorkflowDocument, draft: Workflow
       value: step.unsupportedFields,
     }));
 
-  const workers = collectWorkerUnsupportedFields(document.data);
+  const workers = collectWorkerUnsupportedFields(draft.data);
   return [...topLevel, ...workers, ...steps];
 }
 
@@ -236,7 +239,7 @@ function collectWorkerUnsupportedFields(
     .filter(isRecord)
     .map((worker) => {
       const unsupportedEntries = Object.entries(worker).filter(([key]) => {
-        return !["id", "role", "agent_md", "backend", "model", "workspace"].includes(key);
+        return !["id", "role", "agent_md", "backend", "model"].includes(key);
       });
       if (unsupportedEntries.length === 0 || typeof worker.id !== "string") {
         return null;
@@ -250,7 +253,7 @@ function collectWorkerUnsupportedFields(
 }
 
 function normalizeStep(step: Record<string, unknown>): DraftStep {
-  const supportedKeys = new Set(["id", "name", "agent", "depends", "prompt", "timeout_seconds"]);
+  const supportedKeys = new Set(["id", "name", "agent", "depends", "prompt"]);
   const unsupportedFields = Object.fromEntries(
     Object.entries(step).filter(([key]) => !supportedKeys.has(key)),
   );
@@ -261,7 +264,6 @@ function normalizeStep(step: Record<string, unknown>): DraftStep {
     agent: typeof step.agent === "string" ? step.agent : "",
     depends: Array.isArray(step.depends) ? step.depends.filter((value): value is string => typeof value === "string") : [],
     prompt: typeof step.prompt === "string" ? step.prompt : "",
-    timeoutSeconds: typeof step.timeout_seconds === "number" ? step.timeout_seconds : null,
     raw: deepClone(step),
     unsupportedFields,
   };
@@ -274,11 +276,6 @@ function denormalizeStep(step: DraftStep): Record<string, unknown> {
   nextStep.agent = step.agent;
   nextStep.depends = [...step.depends];
   nextStep.prompt = step.prompt;
-  if (step.timeoutSeconds === null || Number.isNaN(step.timeoutSeconds)) {
-    delete nextStep.timeout_seconds;
-  } else {
-    nextStep.timeout_seconds = step.timeoutSeconds;
-  }
   for (const [key, value] of Object.entries(step.unsupportedFields)) {
     nextStep[key] = deepClone(value);
   }
@@ -368,6 +365,149 @@ function sourceHasComments(source: string): boolean {
 
 function isLegacyWorkflowShape(parsed: Record<string, unknown>): boolean {
   return !("workflow" in parsed) && ("tasks" in parsed || "workers" in parsed);
+}
+
+export function validateRuntimeContract(data: Record<string, unknown>): string[] {
+  const problems: string[] = [];
+  const safeComponent = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+  const supportedBackends = new Set<string>(SUPPORTED_WORKER_BACKENDS);
+  const supportedArtifactTypes = new Set([
+    "json",
+    "file",
+    "directory",
+    "text",
+    "markdown",
+    "binary",
+  ]);
+
+  const workflow = isRecord(data.workflow) ? data.workflow : null;
+  if (!workflow) {
+    problems.push("missing workflow mapping");
+  } else {
+    if (typeof workflow.id !== "string" || !safeComponent.test(workflow.id)) {
+      problems.push("workflow.id must be a safe identifier");
+    }
+    if (typeof workflow.name !== "string" || workflow.name.length === 0) {
+      problems.push("workflow.name must be a non-empty string");
+    }
+    if (typeof workflow.version !== "string" || !/^\d+\.\d+\.\d+$/.test(workflow.version)) {
+      problems.push("workflow.version must use numeric MAJOR.MINOR.PATCH format");
+    }
+  }
+
+  const agents = isRecord(data.agents) ? data.agents : null;
+  const orchestrator = agents && isRecord(agents.orchestrator) ? agents.orchestrator : null;
+  if (!orchestrator || typeof orchestrator.id !== "string" || !safeComponent.test(orchestrator.id)) {
+    problems.push("agents.orchestrator.id must be a safe identifier");
+  }
+
+  const workers = agents && Array.isArray(agents.workers) ? agents.workers : [];
+  const workerIds = new Set<string>();
+  for (const value of workers) {
+    if (!isRecord(value)) {
+      problems.push("worker entries must be mappings");
+      continue;
+    }
+    const workerId = typeof value.id === "string" ? value.id : "";
+    if (!safeComponent.test(workerId)) {
+      problems.push("worker.id must be a safe identifier");
+      continue;
+    }
+    if (workerIds.has(workerId)) problems.push(`duplicate worker id: ${workerId}`);
+    workerIds.add(workerId);
+    if (typeof value.role !== "string" || value.role.length === 0) {
+      problems.push(`worker ${workerId} must declare a non-empty role`);
+    }
+    if (typeof value.backend !== "string" || !supportedBackends.has(value.backend)) {
+      problems.push(`worker ${workerId} has unsupported backend: ${String(value.backend)}`);
+    }
+    if (value.backend !== "callable" && (typeof value.agent_md !== "string" || value.agent_md.length === 0)) {
+      problems.push(`worker ${workerId} must declare agent_md`);
+    }
+    if (value.model !== undefined && (typeof value.model !== "string" || value.model.length === 0)) {
+      problems.push(`worker ${workerId} model must be a non-empty string`);
+    }
+  }
+
+  const steps = Array.isArray(data.steps) ? data.steps : [];
+  if (steps.length === 0) problems.push("steps must contain at least one executable step");
+  for (const value of steps) {
+    if (!isRecord(value)) {
+      problems.push("step entries must be mappings");
+      continue;
+    }
+    const stepId = typeof value.id === "string" ? value.id : "";
+    if (!safeComponent.test(stepId)) problems.push("step.id must be a safe identifier");
+    if (typeof value.name !== "string" || value.name.length === 0) {
+      problems.push(`step ${stepId || "<unknown>"} must declare a non-empty name`);
+    }
+    if (typeof value.prompt !== "string") {
+      problems.push(`step ${stepId || "<unknown>"} must declare a string prompt`);
+    }
+    if (typeof value.agent !== "string" || !workerIds.has(value.agent)) {
+      problems.push(`step ${stepId || "<unknown>"} references an unknown worker`);
+    }
+    const strategy = value.strategy ?? "sequential";
+    if (strategy !== "sequential" && strategy !== "parallel") {
+      problems.push(`step ${stepId || "<unknown>"} has unsupported strategy`);
+    }
+    if (value.wait_for_human === true && strategy === "parallel") {
+      problems.push(`step ${stepId || "<unknown>"} cannot wait for human in parallel`);
+    }
+
+    if (value.output !== undefined && !isRecord(value.output)) {
+      problems.push(`step ${stepId || "<unknown>"} output must be a mapping`);
+    } else if (isRecord(value.output) && value.output.artifacts !== undefined) {
+      if (!Array.isArray(value.output.artifacts)) {
+        problems.push(`step ${stepId || "<unknown>"} output.artifacts must be a list`);
+      } else {
+        for (const artifact of value.output.artifacts) {
+          if (!isRecord(artifact)) {
+            problems.push(`step ${stepId || "<unknown>"} artifact must be a mapping`);
+            continue;
+          }
+          if (typeof artifact.key !== "string" || !safeComponent.test(artifact.key)) {
+            problems.push(`step ${stepId || "<unknown>"} artifact key is invalid`);
+          }
+          if (typeof artifact.path !== "string" || artifact.path.length === 0) {
+            problems.push(`step ${stepId || "<unknown>"} artifact path is required`);
+          }
+          if (typeof artifact.type !== "string" || !supportedArtifactTypes.has(artifact.type)) {
+            problems.push(`step ${stepId || "<unknown>"} artifact type is unsupported`);
+          }
+        }
+      }
+    }
+  }
+
+  const retired = new Set([
+    "auto_apply",
+    "improvement_threshold",
+    "max_attempts",
+    "max_retries",
+    "max_total_attempts",
+    "on_max_exceeded",
+    "retry_strategy",
+    "timeout_seconds",
+    "wait_for_human_timeout_seconds",
+    "workspace",
+    "controllable_by",
+  ]);
+  const walk = (value: unknown, prefix = "") => {
+    if (Array.isArray(value)) {
+      value.forEach((child, index) => walk(child, `${prefix}[${index}]`));
+      return;
+    }
+    if (!isRecord(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (retired.has(key)) problems.push(`retired workflow field: ${path}`);
+      walk(child, path);
+    }
+  };
+  walk(data);
+
+  return problems;
 }
 
 function maxCompatibilityClass(left: CompatibilityClass, right: CompatibilityClass): CompatibilityClass {

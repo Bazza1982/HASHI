@@ -53,4 +53,9 @@ Lifecycle controls:
 
 Install provenance is local runtime state. Packages without a HASHI install/link record are treated as protected project content, so a missing registry can never make repository Skills deletable.
 
+Machine- or owner-specific Skills belong in ignored local directories or an
+external Skill package. The shared HASHI release contains only reusable
+templates; npm and Portable Windows contracts reject known instance-local
+packages.
+
 Legacy underscore IDs such as `memory_consolidation` resolve to their kebab-case package during the transition, but new packages and new Jobs definitions must use kebab-case.

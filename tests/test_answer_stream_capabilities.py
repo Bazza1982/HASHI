@@ -50,9 +50,7 @@ def test_stream_json_cli_backends_advertise_answer_stream(tmp_path):
     assert getattr(grok.capabilities, "supports_answer_stream", False) is True
 
 
-def test_cli_backends_do_not_advertise_answer_stream_by_default(tmp_path):
-    cfg = _agent_config(tmp_path)
-
+def test_cli_backends_do_not_advertise_answer_stream_by_default():
     codex_capabilities = CodexCLIAdapter._define_capabilities(
         CodexCLIAdapter.__new__(CodexCLIAdapter)
     )

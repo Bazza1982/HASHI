@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
 from fastapi.testclient import TestClient
 
-from remote.api.server import create_app
+from remote.api.server import _request_workbench_reboot, create_app
 from remote.local_http import local_http_url
 from remote.protocol_manager import ProtocolManager, build_default_capabilities
 from remote.security.pairing import PairingManager
@@ -311,7 +312,158 @@ def test_hashi_rescue_start_returns_structured_windows_launcher_fields(tmp_path,
 def test_rescue_capabilities_advertise_start_only_when_l3_enabled():
     assert "rescue_control" in build_default_capabilities(rescue_start_enabled=False)
     assert "rescue_start" not in build_default_capabilities(rescue_start_enabled=False)
-    assert "rescue_start" in build_default_capabilities(rescue_start_enabled=True)
+    enabled = build_default_capabilities(rescue_start_enabled=True)
+    assert "rescue_start" in enabled
+    assert "rescue_restart" in enabled
+    assert "rescue_reboot" in enabled
+
+
+def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    states = iter(
+        (
+            {"ok": True, "state": "starting_or_stuck", "hashi_running": False},
+            {"ok": True, "state": "running", "hashi_running": True},
+        )
+    )
+    monkeypatch.setattr(
+        "remote.api.server._restart_hashi_process",
+        lambda: {
+            "pid": 5252,
+            "command": [str(tmp_path / "bin" / "bridge-u.sh"), "--force"],
+            "log_path": str(tmp_path / "logs" / "remote_rescue_hashi_restart.log"),
+            "launcher_kind": "bridge-u.sh",
+            "platform": "linux",
+        },
+    )
+    monkeypatch.setattr("remote.api.server._hashi_control_status", lambda: next(states))
+
+    response = client.post(
+        "/control/hashi/restart",
+        json={"reason": "stuck provider loop"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["restart_launched"] is True
+    assert body["pid"] == 5252
+    assert body["status"]["hashi_running"] is True
+    audit_path = tmp_path / "logs" / "remote_rescue_audit.jsonl"
+    record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["operation"] == "restart"
+    assert record["outcome"] == "restart_launched"
+
+
+def test_request_workbench_reboot_uses_authenticated_admin_endpoint(monkeypatch):
+    captured = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read():
+            return b'{"ok":true,"action":"reboot_min"}'
+
+    def urlopen(request, *, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["headers"] = {
+            key.casefold(): value for key, value in request.header_items()
+        }
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(
+        "remote.api.server.local_http_hosts", lambda: ["127.0.0.1"]
+    )
+    monkeypatch.setattr(
+        "remote.api.server._workbench_admin_token", lambda: "admin-secret"
+    )
+    monkeypatch.setattr("remote.api.server.urllib_request.urlopen", urlopen)
+
+    status, payload = _request_workbench_reboot(
+        agent="zhaojun", mode="min", timeout=2.5
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert captured["url"].endswith("/api/admin/command")
+    assert captured["body"] == {
+        "agent": "zhaojun",
+        "command": "/reboot min",
+    }
+    assert captured["headers"]["x-workbench-token"] == "admin-secret"
+    assert captured["timeout"] == 2.5
+
+
+def test_hashi_rescue_reboot_prefers_hot_reboot_without_fallback(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(
+        "remote.api.server._request_workbench_reboot",
+        lambda **_kwargs: (200, {"ok": True, "action": "reboot_min"}),
+    )
+    monkeypatch.setattr(
+        "remote.api.server._restart_hashi_process",
+        lambda: pytest.fail("healthy Workbench must not trigger hard recovery"),
+    )
+
+    response = client.post(
+        "/control/hashi/reboot",
+        json={"agent": "zhaojun", "mode": "min", "reason": "test"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["hot_reboot_requested"] is True
+    assert body["fallback_restart_launched"] is False
+
+
+def test_hashi_rescue_reboot_can_recover_when_workbench_is_unreachable(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+
+    def unavailable(**_kwargs):
+        raise ConnectionError("Workbench timed out")
+
+    monkeypatch.setattr("remote.api.server._request_workbench_reboot", unavailable)
+    monkeypatch.setattr(
+        "remote.api.server._restart_hashi_process",
+        lambda: {
+            "pid": 6262,
+            "command": [str(tmp_path / "bin" / "bridge-u.sh"), "--force"],
+            "log_path": str(tmp_path / "logs" / "remote_rescue_hashi_restart.log"),
+            "launcher_kind": "bridge-u.sh",
+            "platform": "linux",
+        },
+    )
+
+    response = client.post(
+        "/control/hashi/reboot",
+        json={"agent": "zhaojun", "mode": "min", "reason": "stuck core"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["hot_reboot_requested"] is False
+    assert body["fallback_restart_launched"] is True
+    assert body["pid"] == 6262
+    audit_path = tmp_path / "logs" / "remote_rescue_audit.jsonl"
+    record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["operation"] == "reboot"
+    assert record["agent"] == "zhaojun"
+    assert record["mode"] == "min"
+    assert record["fallback_used"] is True
 
 
 def test_protocol_status_reports_dynamic_rescue_capabilities(tmp_path):

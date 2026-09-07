@@ -1,6 +1,7 @@
-from types import SimpleNamespace
 import json
 import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -69,6 +70,13 @@ def test_load_settings_reads_default_on_lifecycle(tmp_path):
     assert settings.disabled_path == tmp_path / "state" / "remote_disabled.json"
 
 
+def test_load_settings_defaults_remote_and_supervisor_on(tmp_path):
+    settings = remote_lifecycle.load_settings(tmp_path)
+
+    assert settings.enabled is True
+    assert settings.supervised is True
+
+
 def test_load_settings_prefers_instance_registry_port(tmp_path):
     (tmp_path / "remote").mkdir()
     (tmp_path / "remote" / "config.yaml").write_text(
@@ -97,6 +105,8 @@ def test_load_settings_prefers_instance_registry_port(tmp_path):
     assert settings.port == 8766
 
 
+@pytest.mark.platform
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd user-unit contract")
 def test_remote_supervisor_info_is_per_instance_and_root_bound(tmp_path, monkeypatch):
     root = tmp_path / "hashi one"
     root.mkdir()
@@ -130,6 +140,8 @@ def test_remote_supervisor_info_is_per_instance_and_root_bound(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd user-unit contract")
 async def test_control_remote_supervisor_refuses_unit_owned_by_other_root(
     tmp_path,
     monkeypatch,
@@ -248,6 +260,40 @@ def test_build_child_command_pins_hashi_root(monkeypatch, tmp_path):
 
     assert "--hashi-root" in cmd
     assert str(tmp_path) in cmd
+
+
+def test_find_python_prefers_current_approved_runtime(monkeypatch, tmp_path):
+    current = tmp_path / "approved" / "python3"
+    legacy = tmp_path / ".venv" / "bin" / "python3"
+    current.parent.mkdir(parents=True)
+    legacy.parent.mkdir(parents=True)
+    current.write_text("", encoding="utf-8")
+    legacy.write_text("", encoding="utf-8")
+    monkeypatch.setattr(remote_lifecycle.sys, "executable", str(current))
+
+    assert remote_lifecycle.find_python(tmp_path) == current
+
+
+def test_build_child_command_supports_separate_portable_control_root(monkeypatch, tmp_path):
+    python = tmp_path / "python"
+    python.write_text("", encoding="utf-8")
+    control_root = tmp_path / "app" / "hashi"
+    control_root.mkdir(parents=True)
+    monkeypatch.setattr(remote_lifecycle, "find_python", lambda root: python)
+    monkeypatch.setenv("HASHI_REMOTE_CONTROL_ROOT", str(control_root))
+    settings = remote_lifecycle.RemoteLifecycleSettings(
+        root=tmp_path,
+        enabled=True,
+        supervised=False,
+        disabled_path=tmp_path / "state" / "remote_disabled.json",
+        port=8766,
+        use_tls=False,
+        backend="lan",
+    )
+
+    cmd = remote_lifecycle.build_child_command(settings)
+
+    assert cmd[cmd.index("--control-hashi-root") + 1] == str(control_root.resolve())
 
 
 @pytest.mark.asyncio
@@ -392,6 +438,233 @@ async def test_ensure_remote_started_uses_per_instance_supervisor(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_ensure_remote_started_activates_missing_supervisor_by_default(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    async def fake_control(root, *, action):
+        calls.append(("control", root, action))
+        return {
+            "ok": False,
+            "action": "supervisor_unavailable",
+            "reason": "supervisor is not registered",
+            "service_name": "hashi-remote-hashi.service",
+        }
+
+    async def fake_activate(root):
+        calls.append(("activate", root))
+        return {
+            "ok": True,
+            "action": "supervisor_activated",
+            "service_name": "hashi-remote-hashi.service",
+        }
+
+    health_results = iter(
+        [
+            None,
+            {
+                "port": 8766,
+                "health": {"ok": True},
+                "health_host": "127.0.0.1",
+            },
+        ]
+    )
+
+    async def fake_owned(_settings):
+        return next(health_results)
+
+    monkeypatch.setattr(remote_lifecycle, "control_remote_supervisor", fake_control)
+    monkeypatch.setattr(remote_lifecycle, "activate_remote_supervisor", fake_activate)
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(remote_lifecycle, "_SUPERVISOR_HEALTH_INTERVAL_SECONDS", 0)
+
+    result = await remote_lifecycle.ensure_remote_started(tmp_path)
+
+    assert calls == [
+        ("control", tmp_path, "start"),
+        ("activate", tmp_path),
+    ]
+    assert result["ok"] is True
+    assert result["action"] == "started_supervisor"
+    assert result["service_name"] == "hashi-remote-hashi.service"
+
+
+@pytest.mark.asyncio
+async def test_ensure_remote_started_refreshes_healthy_supervisor_registration(
+    monkeypatch,
+    tmp_path,
+):
+    write_runtime_claim(
+        root=tmp_path,
+        instance_id="HASHI",
+        port=8766,
+        bind_host="0.0.0.0",
+        code_root=tmp_path,
+        supervised=True,
+    )
+    activation_calls = []
+
+    async def fake_owned(_settings):
+        return {"port": 8766, "health": {"ok": True}, "health_host": "127.0.0.1"}
+
+    async def fake_activate(root):
+        activation_calls.append(root)
+        return {"ok": True, "action": "supervisor_activated"}
+
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(remote_lifecycle, "activate_remote_supervisor", fake_activate)
+
+    result = await remote_lifecycle.ensure_remote_started(tmp_path)
+
+    assert result["ok"] is True
+    assert result["action"] == "already_running"
+    assert result["supervisor_refresh"]["ok"] is True
+    assert activation_calls == [tmp_path]
+
+
+@pytest.mark.asyncio
+async def test_ensure_remote_started_falls_back_to_bundled_child(
+    monkeypatch,
+    tmp_path,
+):
+    supervisor_failure = {
+        "ok": False,
+        "action": "supervisor_activation_failed",
+        "reason": "systemd user service is unavailable",
+        "service_name": "hashi-remote-hashi.service",
+    }
+
+    async def fake_control(_root, *, action):
+        assert action == "start"
+        return {
+            "ok": False,
+            "action": "supervisor_unavailable",
+            "reason": "supervisor is not registered",
+            "service_name": "hashi-remote-hashi.service",
+        }
+
+    async def fake_activate(_root):
+        return supervisor_failure
+
+    async def fake_owned(_settings):
+        return None
+
+    async def fake_start_child(settings, *, supervisor_fallback=None):
+        assert supervisor_fallback is supervisor_failure
+        return {
+            "ok": True,
+            "action": "started_child_fallback",
+            "settings": settings,
+            "process": SimpleNamespace(pid=321),
+            "supervisor_fallback": supervisor_fallback,
+        }
+
+    monkeypatch.setattr(remote_lifecycle, "control_remote_supervisor", fake_control)
+    monkeypatch.setattr(remote_lifecycle, "activate_remote_supervisor", fake_activate)
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(remote_lifecycle, "_start_child_remote", fake_start_child)
+
+    result = await remote_lifecycle.ensure_remote_started(tmp_path)
+
+    assert result["ok"] is True
+    assert result["action"] == "started_child_fallback"
+    assert result["supervisor_fallback"]["reason"] == (
+        "systemd user service is unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_activate_remote_supervisor_uses_enable_action(monkeypatch, tmp_path):
+    helper = tmp_path / "bin" / "hashi-remote-ctl.sh"
+    helper.parent.mkdir()
+    helper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    calls = []
+
+    class _Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"activated", b""
+
+    async def fake_subprocess(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _Process()
+
+    monkeypatch.setattr(remote_lifecycle.asyncio, "create_subprocess_exec", fake_subprocess)
+
+    result = await remote_lifecycle.activate_remote_supervisor(tmp_path)
+
+    assert result["ok"] is True
+    assert result["action"] == "supervisor_activated"
+    assert calls[0][0] == ("bash", str(helper), "enable")
+    assert calls[0][1]["cwd"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_stop_remote_uses_registered_supervisor(monkeypatch, tmp_path):
+    calls = []
+
+    async def fake_owned(_settings):
+        return None
+
+    async def fake_control(root, *, action):
+        calls.append((root, action))
+        return {"ok": True, "action": "supervisor_stopped"}
+
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(
+        remote_lifecycle,
+        "remote_supervisor_info",
+        lambda _root: SimpleNamespace(installed=True, owns_root=True),
+    )
+    monkeypatch.setattr(remote_lifecycle, "control_remote_supervisor", fake_control)
+
+    result = await remote_lifecycle.stop_remote(tmp_path)
+
+    assert result["ok"] is True
+    assert result["action"] == "supervisor_stopped"
+    assert calls == [(tmp_path, "stop")]
+
+
+@pytest.mark.asyncio
+async def test_stop_remote_signals_only_matching_owned_child(monkeypatch, tmp_path):
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "HASHI2"}}),
+        encoding="utf-8",
+    )
+    write_runtime_claim(
+        root=tmp_path,
+        instance_id="HASHI2",
+        port=8767,
+        bind_host="0.0.0.0",
+        code_root=tmp_path,
+        supervised=False,
+    )
+    claim_path = runtime_claim_path(tmp_path)
+    claim = json.loads(claim_path.read_text(encoding="utf-8"))
+    claim["pid"] = 4321
+    claim_path.write_text(json.dumps(claim), encoding="utf-8")
+    signals = []
+    liveness = iter([True, False])
+
+    async def fake_owned(_settings):
+        return {"port": 8767, "health": {"ok": True}, "health_host": "127.0.0.1"}
+
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(remote_lifecycle.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(remote_lifecycle, "pid_is_alive", lambda _pid: next(liveness))
+    monkeypatch.setattr(remote_lifecycle.asyncio, "sleep", AsyncMock())
+
+    result = await remote_lifecycle.stop_remote(tmp_path)
+
+    assert result["ok"] is True
+    assert result["action"] == "child_stopped"
+    assert signals == [(4321, remote_lifecycle.signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
 async def test_startup_manager_runs_remote_lifecycle(monkeypatch, tmp_path):
     calls = []
 
@@ -406,3 +679,22 @@ async def test_startup_manager_runs_remote_lifecycle(monkeypatch, tmp_path):
     await manager._ensure_remote_lifecycle()
 
     assert calls == [tmp_path]
+
+
+@pytest.mark.asyncio
+async def test_startup_manager_uses_portable_remote_root(monkeypatch, tmp_path):
+    calls = []
+    portable_root = tmp_path / "data"
+
+    async def fake_ensure(root):
+        calls.append(root)
+        return {"ok": True, "action": "already_running", "settings": SimpleNamespace(port=8766)}
+
+    monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", fake_ensure)
+    monkeypatch.setenv("HASHI_REMOTE_ROOT", str(portable_root))
+    kernel = SimpleNamespace(global_config=SimpleNamespace(project_root=tmp_path / "code"))
+    manager = StartupManager(kernel, console_handler=None)
+
+    await manager._ensure_remote_lifecycle()
+
+    assert calls == [str(portable_root)]

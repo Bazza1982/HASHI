@@ -18,12 +18,46 @@ SKIP_DIRS = {".obsidian", ".git", "__pycache__", "System Volume Information"}
 SKIP_FILES = {MEMO_FILENAME, "desktop.ini", ".DS_Store", "Thumbs.db"}
 
 SENSITIVE_KEYWORDS = [
-    "bank", "tax", "statement", "invoice", "receipt", "passport", "id",
-    "license", "licence", "medicare", "tfn", "abn", "acn", "salary",
-    "payslip", "super", "superfund", "insurance", "policy", "contract",
-    "legal", "deed", "will", "trust", "nude", "private", "confidential",
-    "password", "secret", "credit", "loan", "mortgage", "证件", "护照",
-    "身份证", "税", "银行", "工资", "合同", "律师"
+    "bank",
+    "tax",
+    "statement",
+    "invoice",
+    "receipt",
+    "passport",
+    "id",
+    "license",
+    "licence",
+    "medicare",
+    "tfn",
+    "abn",
+    "acn",
+    "salary",
+    "payslip",
+    "super",
+    "superfund",
+    "insurance",
+    "policy",
+    "contract",
+    "legal",
+    "deed",
+    "will",
+    "trust",
+    "nude",
+    "private",
+    "confidential",
+    "password",
+    "secret",
+    "credit",
+    "loan",
+    "mortgage",
+    "证件",
+    "护照",
+    "身份证",
+    "税",
+    "银行",
+    "工资",
+    "合同",
+    "律师",
 ]
 
 OLD_YEARS_THRESHOLD = 3  # years since last modified = "old"
@@ -31,7 +65,17 @@ OLD_YEARS_THRESHOLD = 3  # years since last modified = "old"
 EXT_CATEGORIES = {
     "📄 文档": {".pdf", ".doc", ".docx", ".odt", ".txt", ".rtf", ".pages"},
     "📊 表格": {".xls", ".xlsx", ".csv", ".numbers", ".ods"},
-    "🖼️ 图片": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".heic", ".webp", ".svg"},
+    "🖼️ 图片": {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".tiff",
+        ".heic",
+        ".webp",
+        ".svg",
+    },
     "🎬 视频": {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v"},
     "🎵 音频": {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"},
     "📦 压缩包": {".zip", ".rar", ".7z", ".tar", ".gz"},
@@ -42,12 +86,14 @@ EXT_CATEGORIES = {
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def format_size(bytes_val):
     for unit in ["B", "KB", "MB", "GB"]:
         if bytes_val < 1024:
             return f"{bytes_val:.1f} {unit}"
         bytes_val /= 1024
     return f"{bytes_val:.1f} TB"
+
 
 def get_category(ext):
     ext = ext.lower()
@@ -56,14 +102,17 @@ def get_category(ext):
             return cat
     return "📎 其他"
 
+
 def is_sensitive(name):
     name_lower = name.lower()
     return any(kw in name_lower for kw in SENSITIVE_KEYWORDS)
+
 
 def years_ago(ts):
     now = datetime.now(timezone.utc)
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     return (now - dt).days / 365
+
 
 def file_size_key(path):
     try:
@@ -71,7 +120,9 @@ def file_size_key(path):
     except OSError:
         return 0
 
+
 # ── Core: scan one folder ──────────────────────────────────────────────────────
+
 
 def scan_folder(folder_path: Path):
     files = []
@@ -79,18 +130,21 @@ def scan_folder(folder_path: Path):
         if item.is_file() and item.name not in SKIP_FILES:
             try:
                 stat = item.stat()
-                files.append({
-                    "name": item.name,
-                    "ext": item.suffix.lower(),
-                    "size": stat.st_size,
-                    "mtime": stat.st_mtime,
-                    "ctime": stat.st_ctime,
-                    "sensitive": is_sensitive(item.name),
-                    "old": years_ago(stat.st_mtime) >= OLD_YEARS_THRESHOLD,
-                })
+                files.append(
+                    {
+                        "name": item.name,
+                        "ext": item.suffix.lower(),
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                        "ctime": stat.st_ctime,
+                        "sensitive": is_sensitive(item.name),
+                        "old": years_ago(stat.st_mtime) >= OLD_YEARS_THRESHOLD,
+                    }
+                )
             except OSError:
                 pass
     return files
+
 
 def detect_duplicates(files):
     """Flag files with same name (case-insensitive) or same size as possible duplicates."""
@@ -101,11 +155,17 @@ def detect_duplicates(files):
         if f["size"] > 0:
             size_counts[f["size"]].append(f["name"])
 
-    dup_names = {name for names in name_counts.values() if len(names) > 1 for name in names}
-    dup_sizes = {name for names in size_counts.values() if len(names) > 1 for name in names}
+    dup_names = {
+        name for names in name_counts.values() if len(names) > 1 for name in names
+    }
+    dup_sizes = {
+        name for names in size_counts.values() if len(names) > 1 for name in names
+    }
     return dup_names | dup_sizes
 
+
 # ── Core: generate markdown ────────────────────────────────────────────────────
+
 
 def generate_memo(folder_path: Path, files, subfolders):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -153,8 +213,8 @@ def generate_memo(folder_path: Path, files, subfolders):
 
     # Summary
     lines.append("## 概览\n")
-    lines.append(f"| 项目 | 数值 |")
-    lines.append(f"|------|------|")
+    lines.append("| 项目 | 数值 |")
+    lines.append("|------|------|")
     lines.append(f"| 文件数 | {len(files)} |")
     lines.append(f"| 子文件夹数 | {len(subfolders)} |")
     lines.append(f"| 总大小 | {format_size(total_size)} |")
@@ -200,7 +260,9 @@ def generate_memo(folder_path: Path, files, subfolders):
         lines.append(f"## ⏰ 旧文件（{OLD_YEARS_THRESHOLD}年以上未修改）\n")
         for f in sorted(old_files, key=lambda x: x["mtime"]):
             mtime = datetime.fromtimestamp(f["mtime"]).strftime("%Y-%m-%d")
-            lines.append(f"- `{f['name']}` — {format_size(f['size'])} — 最后修改：{mtime}")
+            lines.append(
+                f"- `{f['name']}` — {format_size(f['size'])} — 最后修改：{mtime}"
+            )
         lines.append("")
 
     # Duplicate suspects
@@ -218,9 +280,12 @@ def generate_memo(folder_path: Path, files, subfolders):
         mtime = datetime.fromtimestamp(f["mtime"]).strftime("%Y-%m-%d")
         cat = get_category(f["ext"])
         flags = ""
-        if f["sensitive"]: flags += "⚠️"
-        if f["old"]: flags += "⏰"
-        if f["name"] in dup_names: flags += "🔁"
+        if f["sensitive"]:
+            flags += "⚠️"
+        if f["old"]:
+            flags += "⏰"
+        if f["name"] in dup_names:
+            flags += "🔁"
         name_col = f"{flags} `{f['name']}`" if flags else f"`{f['name']}`"
         lines.append(f"| {name_col} | {cat} | {format_size(f['size'])} | {mtime} |")
     lines.append("")
@@ -230,7 +295,9 @@ def generate_memo(folder_path: Path, files, subfolders):
 
     return "\n".join(lines)
 
+
 # ── Walk and generate ──────────────────────────────────────────────────────────
+
 
 def process_tree(root: Path, dry_run=False):
     total_folders = 0
@@ -238,7 +305,9 @@ def process_tree(root: Path, dry_run=False):
 
     for dirpath, dirnames, filenames in os.walk(root):
         # Skip hidden/system dirs
-        dirnames[:] = [d for d in sorted(dirnames) if d not in SKIP_DIRS and not d.startswith(".")]
+        dirnames[:] = [
+            d for d in sorted(dirnames) if d not in SKIP_DIRS and not d.startswith(".")
+        ]
 
         folder = Path(dirpath)
         files = scan_folder(folder)
@@ -263,7 +332,9 @@ def process_tree(root: Path, dry_run=False):
 
     return total_folders, total_files
 
+
 # ── Entry point ────────────────────────────────────────────────────────────────
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -292,7 +363,7 @@ def main() -> int:
 
     folders, files = process_tree(target, dry_run=args.dry_run)
 
-    print(f"\n✅ 完成！")
+    print("\n✅ 完成！")
     print(f"   扫描文件夹：{folders}")
     print(f"   扫描文件：  {files}")
     if not args.dry_run:

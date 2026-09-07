@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from orchestrator.config import (
     LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
     SESSION_MODE_BACKENDS,
     ConfigManager,
+    resolve_access_root,
 )
 from orchestrator.flexible_backend_registry import normalize_allowed_backends
 from orchestrator.her_v2.config import HERv2Config
@@ -16,6 +18,28 @@ from orchestrator.pcm import load_pcm_document
 
 ROOT = Path(__file__).resolve().parent.parent
 CORE_HER_V2_PROVIDERS = {"hashi-api", "deepseek-api", "openrouter-api"}
+
+
+@pytest.mark.platform
+@pytest.mark.skipif(os.name == "nt", reason="WSL mount-scope contract")
+def test_wsl_drive_scope_resolves_only_the_mounted_windows_drive(monkeypatch):
+    monkeypatch.setattr("orchestrator.process_execution.is_wsl", lambda: True)
+
+    project_drive = resolve_access_root(
+        "drive",
+        Path("/home/operator/.hashi/workspaces/agent"),
+        Path("/mnt/c/Users/operator/project"),
+    )
+    workspace_drive = resolve_access_root(
+        "drive",
+        Path("/mnt/d/HASHI/workspaces/agent"),
+        Path("/home/operator/HASHI"),
+    )
+
+    assert project_drive == Path("/mnt/c")
+    assert workspace_drive == Path("/mnt/d")
+    assert project_drive != Path("/")
+    assert workspace_drive != Path("/")
 
 
 def _materialize_legacy_pcm(config_path, root):

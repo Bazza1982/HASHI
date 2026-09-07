@@ -6,11 +6,12 @@ import hashlib as _hashlib
 import html
 import inspect
 import json
+import math
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +29,13 @@ from orchestrator import (
     ui_language,
 )
 from orchestrator.command_ui import card_title
+from orchestrator.canonical_audit import CanonicalAuditConfigurationError
 from orchestrator.flexible_backend_registry import canonical_backend_engine
 from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
     is_memory_plus_enabled,
 )
+from orchestrator.path_presentation import normalize_user_visible_paths
 from orchestrator.runtime_common import (
     _md_to_html,
     _print_final_response,
@@ -44,6 +47,8 @@ EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
     "Please check that all required API keys (e.g. brave_api_key for web search) are configured in secrets.json."
 )
 INTERACTIVE_FEEDBACK_CLEANUP_TIMEOUT_SECONDS = 5.0
+CANONICAL_STREAM_BATCH_MAX_AGE_S = 0.2
+CANONICAL_STREAM_BATCH_MAX_CHARS = 8 * 1024
 
 SESSION_SCOPE_PERSISTENT = "persistent"
 SESSION_SCOPE_ISOLATED = "isolated_per_run"
@@ -101,7 +106,9 @@ def _canonical_record(
     request_id: str = "",
     provenance: dict[str, Any] | None = None,
 ) -> None:
-    store = getattr(runtime, "canonical_audit", None)
+    store = getattr(runtime, "canonical_audit_buffer", None) or getattr(
+        runtime, "canonical_audit", None
+    )
     if store is None:
         return
     try:
@@ -118,6 +125,221 @@ def _canonical_record(
             event_type,
             exc,
         )
+        raise
+
+
+class _CanonicalStreamAuditBatch:
+    """Losslessly group high-frequency provider stream evidence commits."""
+
+    _HIGH_FREQUENCY_KINDS = frozenset(
+        {"thinking", "text_delta", "provider_activity"}
+    )
+
+    def __init__(self, runtime: Any, request_id: str):
+        self.runtime = runtime
+        self.request_id = str(request_id)
+        self.store = getattr(runtime, "canonical_audit", None)
+        self._records: list[dict[str, Any]] = []
+        self._pending_chars = 0
+        self._started_monotonic: float | None = None
+        self._flush_handle: asyncio.TimerHandle | None = None
+        self._reasoning_chunks = 0
+        self._reasoning_chars = 0
+        self._reasoning_first_sequence: int | None = None
+        self._reasoning_last_sequence: int | None = None
+        self._reasoning_recorded_at = ""
+        self._reasoning_source = ""
+        self._reasoning_provider_provenance = ""
+        self._stream_sequence = 0
+        self._batch_sequence = 1
+        self._failure: Exception | None = None
+
+    def _require_healthy(self) -> None:
+        if self._failure is None:
+            return
+        raise CanonicalAuditConfigurationError(
+            f"canonical stream audit is unavailable for {self.request_id}: "
+            f"{self._failure}"
+        ) from self._failure
+
+    def _schedule_deadline_flush(self) -> None:
+        if self._flush_handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        def _flush_on_deadline() -> None:
+            self._flush_handle = None
+            try:
+                self.flush(reason="time_threshold")
+            except Exception:
+                # ``flush`` records the durable failure. The next stream event
+                # or provider/stage boundary raises it into request control.
+                return
+
+        self._flush_handle = loop.call_later(
+            CANONICAL_STREAM_BATCH_MAX_AGE_S,
+            _flush_on_deadline,
+        )
+
+    def capture(self, event: Any) -> None:
+        if self.store is None:
+            return
+        self._require_healthy()
+        now_monotonic = time.monotonic()
+        if self._started_monotonic is None:
+            self._started_monotonic = now_monotonic
+            self._schedule_deadline_flush()
+        self._stream_sequence += 1
+        stream_sequence = self._stream_sequence
+        captured_at = datetime.now(timezone.utc).isoformat()
+        kind = str(getattr(event, "kind", "") or "")
+        origin = str(getattr(event, "origin", "") or "active_backend")
+        provider_provenance = str(getattr(event, "provenance", "") or "")
+        payload = (
+            dict(vars(event))
+            if hasattr(event, "__dict__")
+            else {"repr": repr(event)}
+        )
+        payload["_canonical_capture"] = {
+            "captured_at": captured_at,
+            "stream_sequence": stream_sequence,
+        }
+        self._records.append(
+            {
+                "event_type": "provider_stream_event",
+                "payload": payload,
+                "request_id": self.request_id,
+                "recorded_at": captured_at,
+                "provenance": {
+                    "source": origin,
+                    "provider_provenance": provider_provenance,
+                },
+            }
+        )
+        raw_delta = str(getattr(event, "raw_delta", "") or "")
+        summary = str(getattr(event, "summary", "") or "")
+        detail = str(getattr(event, "detail", "") or "")
+        self._pending_chars += len(raw_delta or summary) + len(detail)
+
+        if kind == "thinking":
+            seen = getattr(self.runtime, "_canonical_reasoning_seen", None)
+            if not isinstance(seen, set):
+                seen = set()
+                self.runtime._canonical_reasoning_seen = seen
+            seen.add(self.request_id)
+            self._reasoning_chunks += 1
+            self._reasoning_chars += len(raw_delta)
+            if self._reasoning_first_sequence is None:
+                self._reasoning_first_sequence = stream_sequence
+                self._reasoning_source = origin
+                self._reasoning_provider_provenance = provider_provenance
+            self._reasoning_last_sequence = stream_sequence
+            self._reasoning_recorded_at = captured_at
+
+        age = now_monotonic - self._started_monotonic
+        if kind not in self._HIGH_FREQUENCY_KINDS:
+            self.flush(reason=f"event_boundary:{kind or 'unknown'}")
+        elif self._pending_chars >= CANONICAL_STREAM_BATCH_MAX_CHARS:
+            self.flush(reason="character_threshold")
+        elif age >= CANONICAL_STREAM_BATCH_MAX_AGE_S:
+            self.flush(reason="time_threshold")
+
+    def flush(self, *, reason: str) -> int:
+        self._require_healthy()
+        if not self._records or self.store is None:
+            return 0
+        records = list(self._records)
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        batch_id = f"{self.request_id}:stream-batch:{self._batch_sequence}"
+        reasoning_chunks = self._reasoning_chunks
+        if reasoning_chunks:
+            # Raw deltas already live losslessly in the stream records. One
+            # semantic record references the batch instead of duplicating one
+            # reasoning record (and its payload) for every provider token.
+            records.append(
+                {
+                    "event_type": "provider_reasoning",
+                    "payload": {
+                        "availability": "available",
+                        "stream_batch_ref": {
+                            "audit_batch_id": batch_id,
+                            "request_id": self.request_id,
+                            "first_stream_sequence": self._reasoning_first_sequence,
+                            "last_stream_sequence": self._reasoning_last_sequence,
+                            "event_kind": "thinking",
+                        },
+                        "chunk_count": reasoning_chunks,
+                        "raw_delta_char_count": self._reasoning_chars,
+                    },
+                    "request_id": self.request_id,
+                    "recorded_at": self._reasoning_recorded_at,
+                    "provenance": {
+                        "source": self._reasoning_source,
+                        "provider_provenance": (
+                            self._reasoning_provider_provenance
+                        ),
+                        "fabricated": False,
+                        "payload_reference": "provider_stream_event_batch",
+                    },
+                }
+            )
+        for index, record in enumerate(records, start=1):
+            provenance = dict(record.get("provenance") or {})
+            provenance.update(
+                {
+                    "audit_batch_id": batch_id,
+                    "audit_batch_index": index,
+                    "audit_batch_size": len(records),
+                    "audit_batch_reason": str(reason),
+                    "reasoning_chunk_count": reasoning_chunks,
+                }
+            )
+            record["provenance"] = provenance
+        try:
+            recorder = getattr(self.store, "record_many", None)
+            if callable(recorder):
+                recorder(records)
+            else:
+                for record in records:
+                    self.store.record(
+                        record["event_type"],
+                        record.get("payload"),
+                        request_id=self.request_id,
+                        provenance=record.get("provenance"),
+                    )
+        except Exception as exc:
+            self._failure = exc
+            self.runtime.error_logger.error(
+                "Canonical stream audit batch failed for %s/%s: %s",
+                self.request_id,
+                batch_id,
+                exc,
+            )
+            raise
+        self._records = []
+        self._pending_chars = 0
+        self._started_monotonic = None
+        self._reasoning_chunks = 0
+        self._reasoning_chars = 0
+        self._reasoning_first_sequence = None
+        self._reasoning_last_sequence = None
+        self._reasoning_recorded_at = ""
+        self._reasoning_source = ""
+        self._reasoning_provider_provenance = ""
+        self._batch_sequence += 1
+        return len(records)
+
+
+def _flush_canonical_stream_callback(callback: Any, *, reason: str) -> int:
+    flush = getattr(callback, "flush_canonical_audit", None)
+    if not callable(flush):
+        return 0
+    return int(flush(reason=reason) or 0)
 
 
 @dataclass
@@ -305,10 +527,10 @@ def _store_context_compaction_warnings(
 def request_context_warning_fields(runtime, request_id: str) -> dict[str, Any]:
     meta = request_meta_for(runtime, request_id)
     result: dict[str, Any] = {}
-    for field in ("context_compaction_warnings", "wip_recovery_warnings"):
-        warnings = meta.get(field)
+    for warning_field in ("context_compaction_warnings", "wip_recovery_warnings"):
+        warnings = meta.get(warning_field)
         if isinstance(warnings, list) and warnings:
-            result[field] = list(warnings)
+            result[warning_field] = list(warnings)
     return result
 
 
@@ -540,6 +762,28 @@ def _her_v2_delivery_metadata(response: Any) -> dict[str, Any]:
     }
 
 
+def _her_v2_stage_timings_s(response: Any) -> dict[str, float]:
+    """Read validated, optional stage wall times from HER v2 metadata."""
+
+    metadata = getattr(response, "stream_metadata", None)
+    her_v2 = metadata.get("her_v2") if isinstance(metadata, Mapping) else None
+    raw_timings = (
+        her_v2.get("stage_timings_s") if isinstance(her_v2, Mapping) else None
+    )
+    if not isinstance(raw_timings, Mapping):
+        return {}
+    timings: dict[str, float] = {}
+    for raw_stage, raw_elapsed_s in raw_timings.items():
+        try:
+            elapsed_s = float(raw_elapsed_s)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(elapsed_s) or elapsed_s < 0:
+            continue
+        timings[str(raw_stage)] = elapsed_s
+    return timings
+
+
 async def record_her_v2_transport_receipt(
     runtime: Any,
     item: Any,
@@ -604,12 +848,89 @@ def _resolve_session_scope(item) -> str:
             and task_id
             and trigger in {"scheduled", "manual", "recovery"}
         ):
-            # Scheduled prompt work is a standalone invocation. Sharing the
-            # ordinary Session timeline lets the immediately preceding job
-            # masquerade as context for the next job, even though the new job
-            # prompt is the authoritative request.
+            # A typed scheduler invocation is a standalone request.  Sharing
+            # the ordinary chat timeline would let a preceding job masquerade
+            # as context for the current authoritative task prompt.
             return SESSION_SCOPE_ISOLATED
     return SESSION_SCOPE_PERSISTENT
+
+
+@dataclass(frozen=True)
+class ProviderSessionIsolation:
+    backend: Any | None = None
+    original_session_id: str | None = None
+    active: bool = False
+
+
+def _begin_provider_session_isolation(
+    runtime: Any,
+    item: Any,
+) -> ProviderSessionIsolation:
+    """Start one fixed-backend request without resuming its owning Session.
+
+    Scheduled work is admitted through the ordinary HASHI Session so delivery,
+    auditing, and reply binding retain their normal ownership.  A fixed CLI
+    backend must nevertheless use a fresh provider thread for the run; otherwise
+    the provider can see the previous chat even after HASHI prompt history has
+    been removed.
+    """
+
+    request_meta = request_meta_for(runtime, item.request_id)
+    if (
+        str(request_meta.get("session_scope") or SESSION_SCOPE_PERSISTENT)
+        != SESSION_SCOPE_ISOLATED
+        or str(getattr(runtime.backend_manager, "agent_mode", "") or "").lower()
+        != "fixed"
+    ):
+        return ProviderSessionIsolation()
+
+    backend = getattr(runtime.backend_manager, "current_backend", None)
+    supports_sessions = bool(
+        getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+    )
+    if not supports_sessions:
+        return ProviderSessionIsolation()
+    if backend is None or not hasattr(backend, "_session_id"):
+        raise RuntimeError(
+            "Fixed session backend cannot isolate scheduled work because its "
+            "provider session binding is unavailable."
+        )
+
+    original_session_id = getattr(backend, "_session_id", None)
+    backend._session_id = None
+    runtime.logger.info(
+        "Provider session isolated for scheduled request %s via %s "
+        "(original_session_present=%s)",
+        item.request_id,
+        runtime.config.active_backend,
+        bool(original_session_id),
+    )
+    return ProviderSessionIsolation(
+        backend=backend,
+        original_session_id=original_session_id,
+        active=True,
+    )
+
+
+def _restore_provider_session_isolation(
+    runtime: Any,
+    item: Any,
+    isolation: ProviderSessionIsolation,
+) -> None:
+    """Discard an isolated run thread and restore the owning provider thread."""
+
+    if not isolation.active or isolation.backend is None:
+        return
+    isolated_session_id = getattr(isolation.backend, "_session_id", None)
+    isolation.backend._session_id = isolation.original_session_id
+    runtime.logger.info(
+        "Provider session restored after scheduled request %s via %s "
+        "(isolated_session_created=%s, original_session_present=%s)",
+        item.request_id,
+        runtime.config.active_backend,
+        bool(isolated_session_id),
+        bool(isolation.original_session_id),
+    )
 
 
 @dataclass(frozen=True)
@@ -672,6 +993,8 @@ class VerboseDisplayState:
     current_message: Any
     message_ids: list[int]
     rollover_count: int = 0
+    deleted_message_ids: set[int] = field(default_factory=set)
+    ever_activated: bool = False
 
 
 @dataclass(frozen=True)
@@ -696,6 +1019,32 @@ class InteractiveFeedback:
     on_stream_event: Any | None
     her_message_router: Any | None
     verbose_display_state: VerboseDisplayState | None = None
+    preference_event: asyncio.Event | None = None
+
+
+def _display_preference_events(runtime) -> set[asyncio.Event]:
+    events = getattr(runtime, "_display_preference_events", None)
+    if not isinstance(events, set):
+        events = set()
+        runtime._display_preference_events = events
+    return events
+
+
+def notify_display_preference_change(runtime) -> None:
+    """Wake every in-flight presentation session for this Agent."""
+
+    for event in tuple(_display_preference_events(runtime)):
+        event.set()
+
+
+def release_display_preference_event(
+    runtime,
+    event: asyncio.Event | None,
+) -> None:
+    if event is None:
+        return
+    _display_preference_events(runtime).discard(event)
+    event.set()
 
 
 def begin_queue_item(runtime, item) -> QueueItemStart:
@@ -897,6 +1246,12 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         and "recent_exchanges" in inspect.signature(prompt_builder).parameters
     ):
         prompt_kwargs["recent_exchanges"] = session_history
+    if "prompt_budget_tokens" in inspect.signature(prompt_builder).parameters:
+        backend_extra = getattr(getattr(backend, "config", None), "extra", None)
+        if isinstance(backend_extra, dict):
+            configured_budget = backend_extra.get("pcm_prompt_token_budget")
+            if configured_budget is not None:
+                prompt_kwargs["prompt_budget_tokens"] = configured_budget
     compaction_snapshot = None
     history_compaction_enabled = False
     cross_session_timeline_entries: list[dict[str, Any]] = []
@@ -1060,8 +1415,13 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     prompt_audit = prompt_payload.get("audit", {})
     runtime._last_prompt_audit = prompt_audit
     runtime._thinking_chars_this_req = 0
-    if runtime.config.active_backend != "her-v2" or incremental:
-        runtime._last_full_prompt_tokens = len(final_prompt) // 4
+    if runtime.config.active_backend != "her-v2":
+        runtime._last_full_prompt_tokens = int(
+            prompt_audit.get("final_prompt_tokens_after_budget")
+            or max(1, len(final_prompt) // 4)
+        )
+    elif incremental:
+        runtime._last_full_prompt_tokens = max(1, len(final_prompt) // 4)
     terminal_console.observe_estimated_usage(
         runtime.name,
         item.request_id,
@@ -1122,7 +1482,7 @@ async def run_backend_generation(
     audit_active: bool,
 ) -> BackendGeneration:
     extra = runtime.config.extra or {}
-    background_mode = (
+    background_mode_requested = (
         extra.get("background_mode", False)
         and not item.silent
         and item.deliver_to_telegram
@@ -1146,54 +1506,86 @@ async def run_backend_generation(
     if request_content is not None:
         generation_kwargs["request_content"] = copy.deepcopy(request_content)
 
-    if background_mode:
-        generation_task = asyncio.create_task(
-            runtime.backend_manager.generate_response(
+    provider_isolation = _begin_provider_session_isolation(runtime, item)
+    # Fixed CLI adapters keep their provider thread on the adapter object.
+    # Keeping an isolated run in the foreground makes the temporary swap
+    # atomic and prevents a detached task from overwriting a later chat's
+    # restored binding when it completes.
+    background_mode = background_mode_requested and not provider_isolation.active
+    try:
+        if background_mode:
+            generation_task = asyncio.create_task(
+                runtime.backend_manager.generate_response(
+                    final_prompt,
+                    item.request_id,
+                    **generation_kwargs,
+                )
+            )
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.shield(generation_task),
+                    timeout=detach_after_s,
+                )
+                detached = False
+            except asyncio.TimeoutError:
+                response = None
+                detached = True
+            except asyncio.CancelledError:
+                generation_task.cancel()
+                try:
+                    await generation_task
+                except asyncio.CancelledError:
+                    pass
+                raise
+            finally:
+                runtime.is_generating = False
+                if generation_task.done():
+                    _flush_canonical_stream_callback(
+                        on_stream_event, reason="provider_request_end"
+                    )
+                else:
+                    _flush_canonical_stream_callback(
+                        on_stream_event, reason="provider_detached"
+                    )
+
+                    def _flush_detached_stream(_task: asyncio.Task) -> None:
+                        _flush_canonical_stream_callback(
+                            on_stream_event,
+                            reason="detached_provider_request_end",
+                        )
+
+                    generation_task.add_done_callback(_flush_detached_stream)
+            return BackendGeneration(
+                response=response,
+                detached=detached,
+                backend_started_monotonic=backend_started_monotonic,
+                detach_after_s=detach_after_s,
+                generation_task=generation_task,
+            )
+
+        try:
+            response = await runtime.backend_manager.generate_response(
                 final_prompt,
                 item.request_id,
                 **generation_kwargs,
             )
-        )
-        try:
-            response = await asyncio.wait_for(
-                asyncio.shield(generation_task),
-                timeout=detach_after_s,
-            )
-            detached = False
-        except asyncio.TimeoutError:
-            response = None
-            detached = True
-        except asyncio.CancelledError:
-            generation_task.cancel()
-            try:
-                await generation_task
-            except asyncio.CancelledError:
-                pass
-            raise
         finally:
             runtime.is_generating = False
+            _flush_canonical_stream_callback(
+                on_stream_event, reason="provider_request_end"
+            )
         return BackendGeneration(
             response=response,
-            detached=detached,
+            detached=False,
             backend_started_monotonic=backend_started_monotonic,
             detach_after_s=detach_after_s,
-            generation_task=generation_task,
-        )
-
-    try:
-        response = await runtime.backend_manager.generate_response(
-            final_prompt,
-            item.request_id,
-            **generation_kwargs,
         )
     finally:
-        runtime.is_generating = False
-    return BackendGeneration(
-        response=response,
-        detached=False,
-        backend_started_monotonic=backend_started_monotonic,
-        detach_after_s=detach_after_s,
-    )
+        _restore_provider_session_isolation(
+            runtime,
+            item,
+            provider_isolation,
+        )
 
 
 def log_backend_finished(
@@ -1331,9 +1723,13 @@ async def cleanup_interactive_feedback(
     placeholder,
     delete_placeholder: bool = True,
     verbose_display_state: VerboseDisplayState | None = None,
+    preference_event: asyncio.Event | None = None,
 ) -> None:
     if stop_typing:
         stop_typing.set()
+    # Detach from command notifications before awaiting child shutdown so a
+    # cancelled cleanup cannot leave a stale per-request Event registered.
+    release_display_preference_event(runtime, preference_event)
     await settle_interactive_feedback_task(runtime, typing_task, label="typing")
     await settle_interactive_feedback_task(runtime, escalation_task, label="escalation")
     await settle_interactive_feedback_task(
@@ -1355,12 +1751,20 @@ async def cleanup_interactive_feedback(
             label="thinking-flush-final",
         )
 
-    active_placeholder = (
-        verbose_display_state.current_message
-        if verbose_display_state is not None
-        else placeholder
+    if verbose_display_state is None:
+        active_placeholder = placeholder
+    elif verbose_display_state.current_message is not None:
+        active_placeholder = verbose_display_state.current_message
+    elif verbose_display_state.ever_activated:
+        active_placeholder = None
+    else:
+        active_placeholder = placeholder
+    active_message_id = getattr(active_placeholder, "message_id", None)
+    already_deleted = bool(
+        verbose_display_state is not None
+        and active_message_id in verbose_display_state.deleted_message_ids
     )
-    if active_placeholder and delete_placeholder:
+    if active_placeholder and delete_placeholder and not already_deleted:
         delete_started = time.monotonic()
         deleted = await _run_interactive_feedback_cleanup_step(
             runtime,
@@ -1371,6 +1775,8 @@ async def cleanup_interactive_feedback(
             label="placeholder-delete",
         )
         if deleted:
+            if verbose_display_state is not None and active_message_id is not None:
+                verbose_display_state.deleted_message_ids.add(active_message_id)
             delete_elapsed_s = max(0.0, time.monotonic() - delete_started)
             runtime.telegram_logger.info(
                 f"Deleted placeholder for {item.request_id} "
@@ -1437,7 +1843,7 @@ async def answer_preview_loop(
     assurance_status_kinds = {KIND_REVIEW, KIND_TESTING, KIND_VALIDATION}
 
     def _preview_text() -> str:
-        text = "".join(chunks).strip()
+        text = normalize_user_visible_paths("".join(chunks).strip())
         if len(text) > max_chars:
             text = "...\n" + text[-max_chars:]
         elapsed = max(0, int(loop.time() - started))
@@ -1533,7 +1939,7 @@ async def answer_preview_loop(
             elif kind in status_kinds and summary and (
                 not chunks or kind in assurance_status_kinds
             ):
-                latest_status = summary[:240]
+                latest_status = normalize_user_visible_paths(summary)[:240]
                 latest_status_visible_with_text = kind in assurance_status_kinds
                 dirty = True
         except asyncio.TimeoutError:
@@ -1652,7 +2058,9 @@ def wrap_her_persona_stream(
                     purpose=purpose,
                 )
             )
-        raw_text = str(getattr(event, "summary", "") or "").strip()
+        raw_text = normalize_user_visible_paths(
+            str(getattr(event, "summary", "") or "").strip()
+        )
         if has_audio and reply_policy == "audio_only":
             raw_text = ""
         if not raw_text and audio_task is None:
@@ -1793,7 +2201,9 @@ def wrap_her_persona_stream(
                 )
                 provisional_messages.pop(target_event_id, None)
                 return True
-            raw_text = str(getattr(event, "summary", "") or "").strip()
+            raw_text = normalize_user_visible_paths(
+                str(getattr(event, "summary", "") or "").strip()
+            )
             if not raw_text:
                 return False
             if resolution == "commentary" and not raw_text.startswith("💬"):
@@ -1968,6 +2378,188 @@ def wrap_her_persona_stream(
     return callback
 
 
+async def _send_live_verbose_placeholder(runtime, item):
+    try:
+        if await telegram_delivery_failover.handle_blocked_send(
+            runtime,
+            chat_id=item.chat_id,
+            request_id=item.request_id,
+            purpose="placeholder",
+        ):
+            return None
+        text, parse_mode = runtime.get_progress_placeholder()
+        message = await runtime.app.bot.send_message(
+            chat_id=item.chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            disable_notification=telegram_notifications.disable_notification(
+                runtime,
+                purpose="placeholder",
+            ),
+        )
+        runtime.telegram_logger.info(
+            "Started live verbose display for %s after preference activation.",
+            item.request_id,
+        )
+        return message
+    except RetryAfter as exc:
+        await telegram_delivery_failover.handle_retry_after(
+            runtime,
+            exc=exc,
+            chat_id=item.chat_id,
+            request_id=item.request_id,
+            purpose="placeholder",
+        )
+        runtime.telegram_logger.warning(
+            "Live verbose display blocked by flood control for %s: %s",
+            item.request_id,
+            exc,
+        )
+    except Exception as exc:
+        runtime.telegram_logger.warning(
+            "Live verbose display could not start for %s: %s",
+            item.request_id,
+            exc,
+        )
+    return None
+
+
+async def _delete_live_verbose_placeholder(runtime, item, message) -> bool:
+    if message is None:
+        return True
+    try:
+        await runtime.app.bot.delete_message(
+            chat_id=item.chat_id,
+            message_id=message.message_id,
+        )
+        return True
+    except Exception as exc:
+        debug = getattr(runtime.telegram_logger, "debug", None)
+        if callable(debug):
+            debug(
+                "Live verbose placeholder cleanup will be retried for %s: %s",
+                item.request_id,
+                type(exc).__name__,
+            )
+        return False
+
+
+def _drain_stream_queue(event_queue: asyncio.Queue) -> None:
+    while not event_queue.empty():
+        try:
+            event_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
+
+async def live_verbose_display_loop(
+    runtime,
+    item,
+    *,
+    request_stop: asyncio.Event,
+    preference_event: asyncio.Event,
+    event_queue: asyncio.Queue,
+    backend,
+    display_state: VerboseDisplayState,
+    seed_placeholder=None,
+) -> None:
+    """Lazily start and stop the current turn's verbose presentation.
+
+    Provider events are never replayed: the stream callback admits technical
+    events only while ``runtime._verbose`` is true, and every Off transition
+    drains anything already queued at that visibility boundary.
+    """
+
+    active_task: asyncio.Task | None = None
+    active_stop: asyncio.Event | None = None
+    available_placeholder = seed_placeholder
+
+    async def deactivate(*, delete_message: bool) -> None:
+        nonlocal active_task, active_stop, available_placeholder
+        if delete_message:
+            # Off is a visibility boundary.  Drop admitted-but-not-yet-rendered
+            # events before asking the child display loop to stop.
+            _drain_stream_queue(event_queue)
+        if active_stop is not None:
+            active_stop.set()
+        if active_task is not None:
+            await settle_interactive_feedback_task(
+                runtime,
+                active_task,
+                label="live-verbose-display",
+            )
+        active_task = None
+        active_stop = None
+        current = display_state.current_message
+        if delete_message and current is not None:
+            deleted = await _delete_live_verbose_placeholder(runtime, item, current)
+            if deleted:
+                display_state.deleted_message_ids.add(current.message_id)
+                if available_placeholder is current:
+                    available_placeholder = None
+                display_state.current_message = None
+        _drain_stream_queue(event_queue)
+
+    async def activate() -> None:
+        nonlocal active_task, active_stop, available_placeholder
+        if active_task is not None and not active_task.done():
+            return
+        message = display_state.current_message or available_placeholder
+        if message is None:
+            message = await _send_live_verbose_placeholder(runtime, item)
+        if message is None:
+            return
+        available_placeholder = None
+        display_state.ever_activated = True
+        display_state.current_message = message
+        if message.message_id not in display_state.message_ids:
+            display_state.message_ids.append(message.message_id)
+        active_stop = asyncio.Event()
+        active_task = asyncio.create_task(
+            runtime._streaming_display_loop(
+                item.chat_id,
+                message,
+                item.request_id,
+                active_stop,
+                event_queue,
+                backend=backend,
+                display_state=display_state,
+            ),
+            name=f"live-verbose-{item.request_id}",
+        )
+
+    try:
+        while not request_stop.is_set():
+            preference_event.clear()
+            if bool(getattr(runtime, "_verbose", False)):
+                await activate()
+            else:
+                await deactivate(delete_message=True)
+
+            stop_wait = asyncio.create_task(request_stop.wait())
+            preference_wait = asyncio.create_task(preference_event.wait())
+            done: set[asyncio.Task] = set()
+            try:
+                done, _pending = await asyncio.wait(
+                    {stop_wait, preference_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                pending = {stop_wait, preference_wait} - done
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+        await deactivate(delete_message=False)
+    except asyncio.CancelledError:
+        if active_stop is not None:
+            active_stop.set()
+        if active_task is not None:
+            active_task.cancel()
+            await asyncio.gather(active_task, return_exceptions=True)
+        raise
+
+
 async def setup_interactive_feedback(
     runtime,
     item,
@@ -1984,6 +2576,7 @@ async def setup_interactive_feedback(
     answer_preview_task = None
     answer_stream_state = None
     verbose_display_state = None
+    preference_event = None
     delivery_requested = not item.silent and item.deliver_to_telegram
     display_policy = telegram_stream_policy.get_display_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
@@ -2005,9 +2598,6 @@ async def setup_interactive_feedback(
             f"think={think_delivery_enabled}, source={display_policy.source}, "
             f"blocked={delivery_blocked}"
         )
-
-    if typing_delivery_enabled or verbose_delivery_enabled or think_delivery_enabled:
-        stop_typing = asyncio.Event()
 
     if typing_delivery_enabled or verbose_delivery_enabled:
         if typing_delivery_enabled:
@@ -2057,51 +2647,74 @@ async def setup_interactive_feedback(
         typing_delivery_enabled = typing_delivery_enabled and not delivery_blocked
         verbose_delivery_enabled = verbose_delivery_enabled and not delivery_blocked
         think_delivery_enabled = think_delivery_enabled and not delivery_blocked
-        if typing_delivery_enabled and stop_typing is not None:
-            typing_task = asyncio.create_task(runtime.typing_loop(item.chat_id, stop_typing))
+    capabilities = getattr(backend, "capabilities", None)
+    runtime.logger.info(
+        f"Verbose event eligibility {item.request_id}: enabled={verbose_delivery_enabled}, "
+        f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
+        f"progress={bool(getattr(capabilities, 'supports_progress_stream', False))}, "
+        f"tools={bool(getattr(capabilities, 'supports_tool_stream', False))}"
+    )
 
-        capabilities = getattr(backend, "capabilities", None)
-        runtime.logger.info(
-            f"Verbose event eligibility {item.request_id}: enabled={verbose_delivery_enabled}, "
-            f"backend={getattr(runtime.config, 'active_backend', 'unknown')}, "
-            f"progress={bool(getattr(capabilities, 'supports_progress_stream', False))}, "
-            f"tools={bool(getattr(capabilities, 'supports_tool_stream', False))}"
-        )
-        if verbose_delivery_enabled and placeholder is not None and stop_typing is not None:
-            verbose_display_state = VerboseDisplayState(
-                current_message=placeholder,
-                message_ids=[placeholder.message_id],
-            )
-            stream_queue = asyncio.Queue(maxsize=200)
-            stream_callback = runtime._make_stream_callback(
-                event_queue=stream_queue,
-                think_buffer=runtime._think_buffer if think_delivery_enabled else None,
-                audit_collector=None if is_her_backend else audit_collector,
-            )
-            escalation_task = asyncio.create_task(
-                runtime._streaming_display_loop(
-                    item.chat_id,
-                    placeholder,
-                    item.request_id,
-                    stop_typing,
-                    stream_queue,
-                    backend=backend,
-                    display_state=verbose_display_state,
-                )
+    # Presentation receivers remain attached for the lifetime of the request.
+    # The live flags admit only events emitted after the user's menu choice;
+    # no disabled interval is buffered for later replay.
+    if delivery_requested and not delivery_blocked:
+        runtime._verbose = bool(getattr(runtime, "_verbose", False))
+        runtime._think = bool(getattr(runtime, "_think", False))
+        if not isinstance(getattr(runtime, "_think_buffer", None), list):
+            runtime._think_buffer = []
+        if not isinstance(getattr(runtime, "_openrouter_think_chunk", None), str):
+            runtime._openrouter_think_chunk = ""
+        if not hasattr(runtime, "_last_openrouter_think_snippet"):
+            runtime._last_openrouter_think_snippet = None
+        stop_typing = asyncio.Event()
+        preference_event = asyncio.Event()
+        _display_preference_events(runtime).add(preference_event)
+        if typing_delivery_enabled:
+            typing_task = asyncio.create_task(
+                runtime.typing_loop(item.chat_id, stop_typing)
             )
 
-    if think_delivery_enabled and stop_typing is not None:
         runtime._think_buffer.clear()
         runtime._openrouter_think_chunk = ""
         runtime._last_openrouter_think_snippet = None
-        if stream_callback is None:
-            stream_callback = runtime._make_stream_callback(
-                think_buffer=runtime._think_buffer,
-                audit_collector=None if is_her_backend else audit_collector,
-            )
-        think_flush_task = asyncio.create_task(
-            runtime._thinking_flush_loop(item.chat_id, stop_typing)
+        stream_queue = asyncio.Queue(maxsize=200)
+        stream_callback = runtime._make_stream_callback(
+            event_queue=stream_queue,
+            think_buffer=runtime._think_buffer,
+            audit_collector=None if is_her_backend else audit_collector,
         )
+        verbose_display_state = VerboseDisplayState(
+            current_message=(placeholder if verbose_delivery_enabled else None),
+            message_ids=(
+                [placeholder.message_id]
+                if verbose_delivery_enabled and placeholder is not None
+                else []
+            ),
+            ever_activated=bool(verbose_delivery_enabled and placeholder is not None),
+        )
+        escalation_task = asyncio.create_task(
+            live_verbose_display_loop(
+                runtime,
+                item,
+                request_stop=stop_typing,
+                preference_event=preference_event,
+                event_queue=stream_queue,
+                backend=backend,
+                display_state=verbose_display_state,
+                seed_placeholder=placeholder,
+            ),
+            name=f"live-verbose-supervisor-{item.request_id}",
+        )
+        think_flush_task = asyncio.create_task(
+            runtime._thinking_flush_loop(item.chat_id, stop_typing),
+            name=f"live-think-{item.request_id}",
+        )
+        if verbose_delivery_enabled:
+            # Preserve the old guarantee that a request which starts in
+            # verbose mode has its display consumer active before generation
+            # begins.  Later menu changes are woken by ``preference_event``.
+            await asyncio.sleep(0)
 
     if stream_callback is None and audit_active and not is_her_backend:
         stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
@@ -2129,7 +2742,7 @@ async def setup_interactive_feedback(
 
         async def _activity_callback(event):
             activity_store.publish_stream(item.request_id, event)
-            if downstream_callback is not None:
+            if callable(downstream_callback):
                 result = downstream_callback(event)
                 if inspect.isawaitable(result):
                     await result
@@ -2137,42 +2750,11 @@ async def setup_interactive_feedback(
         stream_callback = _activity_callback
 
     presentation_callback = stream_callback
+    canonical_stream_batch = _CanonicalStreamAuditBatch(runtime, item.request_id)
 
     async def _canonical_stream_callback(event):
         terminal_console.record_stream_event(runtime.name, item.request_id, event)
-        payload = dict(vars(event)) if hasattr(event, "__dict__") else {"repr": repr(event)}
-        _canonical_record(
-            runtime,
-            "provider_stream_event",
-            payload,
-            request_id=item.request_id,
-            provenance={
-                "source": str(getattr(event, "origin", "") or "active_backend"),
-                "provider_provenance": str(getattr(event, "provenance", "") or ""),
-            },
-        )
-        if str(getattr(event, "kind", "") or "") == "thinking":
-            seen = getattr(runtime, "_canonical_reasoning_seen", None)
-            if not isinstance(seen, set):
-                seen = set()
-                runtime._canonical_reasoning_seen = seen
-            seen.add(item.request_id)
-            _canonical_record(
-                runtime,
-                "provider_reasoning",
-                {
-                    "availability": "available",
-                    "raw_delta": str(getattr(event, "raw_delta", "") or ""),
-                    "summary": str(getattr(event, "summary", "") or ""),
-                    "detail": str(getattr(event, "detail", "") or ""),
-                },
-                request_id=item.request_id,
-                provenance={
-                    "source": str(getattr(event, "origin", "") or "active_backend"),
-                    "provider_provenance": str(getattr(event, "provenance", "") or ""),
-                    "fabricated": False,
-                },
-            )
+        canonical_stream_batch.capture(event)
         if presentation_callback is not None:
             result = presentation_callback(event)
             if inspect.isawaitable(result):
@@ -2202,6 +2784,11 @@ async def setup_interactive_feedback(
                     getattr(presentation_callback, attribute),
                 )
     setattr(_canonical_stream_callback, "presentation_callback", presentation_callback)
+    setattr(
+        _canonical_stream_callback,
+        "flush_canonical_audit",
+        canonical_stream_batch.flush,
+    )
 
     # Canonical evidence collection is independent of Telegram visibility and
     # the sanitised operational audit toggle.
@@ -2218,6 +2805,7 @@ async def setup_interactive_feedback(
         on_stream_event=on_stream_event,
         her_message_router=her_message_router,
         verbose_display_state=verbose_display_state,
+        preference_event=preference_event,
     )
 
 
@@ -2398,6 +2986,7 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         response.stream_metadata = metadata
         display_text = fallback
         visible_text = fallback
+    visible_text = normalize_user_visible_paths(visible_text)
     has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
     if not visible_text.strip() and not has_typed_audio:
         return SuccessfulResponse(
@@ -2611,7 +3200,29 @@ def record_foreground_usage_audit(
                 "tool_max_loops": 0,
                 "budget_applied": bool(prompt_audit.get("budget_applied")),
                 "budget_limit_chars": prompt_audit.get("budget_limit_chars"),
+                "budget_limit_tokens": prompt_audit.get("budget_limit_tokens"),
+                "budget_unit": prompt_audit.get("budget_unit"),
+                "budget_provenance": prompt_audit.get("budget_provenance"),
+                "budget_unresolved": bool(prompt_audit.get("budget_unresolved")),
                 "context_chars_before_budget": prompt_audit.get("context_chars_before_budget", 0),
+                "context_tokens_before_budget": prompt_audit.get(
+                    "context_tokens_before_budget",
+                    0,
+                ),
+                "final_prompt_tokens_before_budget": prompt_audit.get(
+                    "final_prompt_tokens_before_budget",
+                    0,
+                ),
+                "final_prompt_tokens_after_budget": prompt_audit.get(
+                    "final_prompt_tokens_after_budget",
+                    0,
+                ),
+                "history_requested": prompt_audit.get("history_requested", 0),
+                "history_included": prompt_audit.get("history_included", 0),
+                "history_omitted_count": len(
+                    prompt_audit.get("history_omitted") or []
+                ),
+                "history_capsule": dict(prompt_audit.get("history_capsule") or {}),
                 "time_fyi_chars": prompt_audit.get("time_fyi_chars", 0),
                 "context_expansion_ratio": round(len(final_prompt) / max(len(item.prompt), 1), 3),
                 "context_fingerprint": prompt_audit.get("context_fingerprint", ""),
@@ -2750,6 +3361,37 @@ def backend_failure_fields(response: Any) -> dict[str, Any]:
     if bool(getattr(response, "side_effects_possible", False)):
         fields["side_effects_possible"] = True
     return fields
+
+
+def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
+    """Return the complete local diagnostic envelope for an errors.log record."""
+
+    metadata = getattr(response, "stream_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return {}
+    her = metadata.get("her_v2")
+    if isinstance(her, Mapping):
+        chain = her.get("failure_chain")
+        primary = chain.get("primary_failure") if isinstance(chain, Mapping) else None
+        details = primary.get("details") if isinstance(primary, Mapping) else None
+        if isinstance(details, Mapping) and details:
+            return {
+                "primary_failure": dict(primary),
+                "recovery_decision": (
+                    dict(chain.get("recovery_decision") or {})
+                    if isinstance(chain, Mapping)
+                    else {}
+                ),
+                "foreground_cleanup": (
+                    dict(chain.get("foreground_cleanup") or {})
+                    if isinstance(chain, Mapping)
+                    else {}
+                ),
+            }
+    provider_http_failure = metadata.get("provider_http_failure")
+    if isinstance(provider_http_failure, Mapping) and provider_http_failure:
+        return {"provider_http_failure": dict(provider_http_failure)}
+    return {}
 
 
 def _typed_capacity_recovery_is_safe(response: Any) -> bool:
@@ -2930,6 +3572,9 @@ async def recover_typed_context_capacity_rejection(
         )
     finally:
         runtime.is_generating = False
+        _flush_canonical_stream_callback(
+            on_stream_event, reason="capacity_recovery_request_end"
+        )
     state["final_prompt"] = retry_prompt
     state["prompt_tokens"] = retry_tokens
     request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
@@ -3003,6 +3648,31 @@ async def handle_backend_error(
         return
 
     runtime._mark_error(err_msg)
+    runtime.error_logger.error(
+        "Flex Backend error for %s (%s, source=%s, code=%s, retryable=%s, "
+        "status=%s, provider_request_id=%s, side_effects=%s): %s",
+        item.request_id,
+        runtime.config.active_backend,
+        item.source,
+        failure_fields.get("error_code") or "untyped",
+        failure_fields.get("error_retryable"),
+        failure_fields.get("http_status"),
+        failure_fields.get("provider_request_id") or "none",
+        failure_fields.get("side_effects_possible", False),
+        err_msg,
+    )
+    failure_diagnostics = backend_failure_diagnostics(response)
+    if failure_diagnostics:
+        runtime.error_logger.error(
+            "Backend failure diagnostics for %s: %s",
+            item.request_id,
+            json.dumps(
+                failure_diagnostics,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ),
+        )
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
     await runtime._notify_request_listeners(
@@ -3032,19 +3702,6 @@ async def handle_backend_error(
             completion_path="foreground",
         )
         return
-    runtime.error_logger.error(
-        "Flex Backend error for %s (%s, source=%s, code=%s, retryable=%s, "
-        "status=%s, provider_request_id=%s, side_effects=%s): %s",
-        item.request_id,
-        runtime.config.active_backend,
-        item.source,
-        failure_fields.get("error_code") or "untyped",
-        failure_fields.get("error_retryable"),
-        failure_fields.get("http_status"),
-        failure_fields.get("provider_request_id") or "none",
-        failure_fields.get("side_effects_possible", False),
-        err_msg,
-    )
     if runtime._should_retry_codex_scheduler_failure(item, err_msg):
         runtime._schedule_codex_scheduler_retry(item)
     if not item.deliver_to_telegram:
@@ -3072,6 +3729,7 @@ async def handle_backend_error(
         text=err_msg,
         request_id=item.request_id,
         purpose="error",
+        error_context=failure_fields,
     )
     total_elapsed_s = (
         max(0.0, time.monotonic() - queued_monotonic)
@@ -3193,6 +3851,7 @@ async def handle_success_delivery(
             response_text = cos_result["response"]
         else:
             cos_handled = True
+    response_text = normalize_user_visible_paths(response_text)
     _print_final_response(runtime.name, response_text)
     her_delivery = _her_v2_delivery_metadata(response)
     delivered_at_initial_resolution = bool(
@@ -3338,6 +3997,15 @@ async def handle_success_delivery(
             else ""
         ),
     )
+    runtime_session.record_assistant_delivery(
+        runtime,
+        item,
+        delivered=final_delivered,
+        assistant_text=response_text,
+        transport="telegram",
+        completion_path="foreground",
+        disposition=receipt_disposition,
+    )
     runtime_cross_session.record_turn_result(
         runtime,
         item,
@@ -3381,7 +4049,16 @@ async def handle_success_delivery(
                 item.chat_id, response_text, item.request_id
             )
     if final_delivered and callable(getattr(runtime, "_send_meter_cost_tail", None)):
-        await runtime._send_meter_cost_tail(item)
+        meter_elapsed_s = (
+            max(0.0, time.monotonic() - queued_monotonic)
+            if queued_monotonic is not None
+            else max(0.0, (datetime.now() - queued_at).total_seconds())
+        )
+        await runtime._send_meter_cost_tail(
+            item,
+            total_elapsed_s=meter_elapsed_s,
+            stage_timings_s=_her_v2_stage_timings_s(response),
+        )
     runtime._schedule_audit_followup(
         item,
         core_raw=safe_core_raw,

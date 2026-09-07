@@ -66,6 +66,86 @@ async def test_personal_health_keeps_legacy_shape_without_enterprise_block(tmp_p
     assert "enterprise" not in payload
 
 
+@pytest.mark.asyncio
+async def test_health_exposes_runtime_contract_and_active_generation(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    runtime = SimpleNamespace(
+        runtime_id="cpython-3.12/core-2/function-2/worker-1/cpython-312/x86_64",
+        python="3.12.13",
+        platform_abi="cpython-312-x86_64-linux-gnu",
+        core_api=2,
+        function_api=2,
+        worker_model="per-agent-process",
+        worker_protocol=1,
+        generation_schema=2,
+        dependency_digest="sha256:" + "a" * 64,
+        core_source_digest="sha256:" + "b" * 64,
+    )
+    worker = SimpleNamespace(
+        name="agent1",
+        startup_success=True,
+        is_function_worker_proxy=True,
+        worker_pid=2468,
+        generation_id="sha256:" + "c" * 64,
+        metadata={"worker_phase": "ACTIVE", "worker_accepting": True},
+        client=SimpleNamespace(process=SimpleNamespace(is_alive=lambda: True)),
+    )
+    server.orchestrator = SimpleNamespace(
+        instance_id="HASHI3",
+        api_gateway=None,
+        runtime_fingerprint=runtime,
+        runtimes=[worker],
+        function_workers=SimpleNamespace(
+            telegram_ingress_snapshot=lambda _name: {
+                "running": True,
+                "connected": True,
+                "offset": 99,
+            }
+        ),
+        function_generation={
+            "generation_id": "sha256:" + "c" * 64,
+            "worker_model": "per-agent-process",
+            "worker_protocol": 1,
+        },
+    )
+
+    response = await server.handle_health(_FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["runtime"] == {
+        "id": runtime.runtime_id,
+        "python": "3.12.13",
+        "platform_abi": "cpython-312-x86_64-linux-gnu",
+        "core_api": 2,
+        "function_api": 2,
+        "worker_model": "per-agent-process",
+        "worker_protocol": 1,
+        "generation_schema": 2,
+        "dependency_digest": "sha256:" + "a" * 64,
+        "core_source_digest": "sha256:" + "b" * 64,
+    }
+    assert payload["function_generation"] == {
+        "generation_id": "sha256:" + "c" * 64,
+        "worker_model": "per-agent-process",
+        "worker_protocol": 1,
+    }
+    assert payload["function_workers"] == [
+        {
+            "agent": "agent1",
+            "pid": 2468,
+            "generation_id": "sha256:" + "c" * 64,
+            "phase": "ACTIVE",
+            "accepting": True,
+            "alive": True,
+            "telegram_ingress": {
+                "running": True,
+                "connected": True,
+                "offset": 99,
+            },
+        }
+    ]
+
+
 def test_whatsapp_channel_health_uses_transport_connection_state(tmp_path):
     server = _server(tmp_path, profile="personal")
     transport = SimpleNamespace(
@@ -78,3 +158,80 @@ def test_whatsapp_channel_health_uses_transport_connection_state(tmp_path):
 
     transport.is_connected = lambda: True
     assert server._is_whatsapp_available() is True
+
+
+@pytest.mark.asyncio
+async def test_health_distinguishes_core_liveness_from_complete_startup(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    server.orchestrator = SimpleNamespace(
+        instance_id="HASHI3",
+        api_gateway=None,
+        runtimes=[],
+        startup_status={
+            "phase": "starting_workers",
+            "ready": False,
+            "completed": 2,
+            "ready_agents": 2,
+            "total": 6,
+            "agent_percent": 33,
+            "percent": 40,
+            "elapsed_seconds": 8.4,
+        },
+    )
+
+    response = await server.handle_health(_FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert payload["ready"] is False
+    assert payload["degraded"] is False
+    assert payload["status"] == "starting_workers"
+    assert payload["issues"] == []
+    assert payload["startup"]["completed"] == 2
+    assert payload["startup"]["total"] == 6
+    assert payload["startup"]["percent"] == 40
+
+
+@pytest.mark.asyncio
+async def test_health_explains_degraded_remote_without_failing_liveness(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    issue = {
+        "code": "remote_supervisor_unavailable",
+        "component": "remote",
+        "severity": "warning",
+        "summary": "HASHI2 Remote/HChat is unavailable; local startup will continue.",
+        "impact": "Remote/HChat cannot connect to HASHI2.",
+        "automatic_retry": False,
+        "actions": ["Install and start the instance supervisor."],
+    }
+    remote = {
+        "available": False,
+        "enabled": True,
+        "supervised": True,
+        "action": "supervisor_unavailable",
+        "port": 8767,
+        "service_name": "hashi-remote-hashi2.service",
+    }
+    server.orchestrator = SimpleNamespace(
+        instance_id="HASHI2",
+        api_gateway=None,
+        runtimes=[],
+        startup_status={
+            "phase": "degraded",
+            "ready": False,
+            "degraded": True,
+            "services_ready": True,
+            "issues": [issue],
+        },
+        remote_lifecycle_status=remote,
+    )
+
+    response = await server.handle_health(_FakeRequest())
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert payload["ready"] is False
+    assert payload["degraded"] is True
+    assert payload["status"] == "degraded"
+    assert payload["issues"] == [issue]
+    assert payload["remote"] == remote

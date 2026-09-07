@@ -21,6 +21,35 @@ function resolveWorkflowsRoot(): string {
 }
 
 const WORKFLOWS_ROOT = resolveWorkflowsRoot();
+const WORKFLOWS_ROOT_REAL = fs.realpathSync(WORKFLOWS_ROOT);
+const ALLOWED_EDITOR_ORIGINS = new Set([
+  "http://127.0.0.1:5380",
+  "http://localhost:5380",
+]);
+
+function isInsideRoot(candidate: string, root = WORKFLOWS_ROOT_REAL): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+export function resolveWorkflowFile(
+  filePath: string,
+  forWrite = false,
+  root = WORKFLOWS_ROOT_REAL,
+): string | null {
+  if (!filePath.endsWith(".yaml") && !filePath.endsWith(".yml")) return null;
+  const resolved = path.resolve(root, filePath);
+  if (!isInsideRoot(resolved, root)) return null;
+
+  try {
+    const realTarget = forWrite && !fs.existsSync(resolved)
+      ? path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved))
+      : fs.realpathSync(resolved);
+    return isInsideRoot(realTarget, root) ? realTarget : null;
+  } catch {
+    return null;
+  }
+}
 
 interface FileEntry {
   name: string;
@@ -80,11 +109,10 @@ export function fileServerPlugin(): Plugin {
             return;
           }
 
-          // Security: prevent directory traversal
-          const resolved = path.resolve(WORKFLOWS_ROOT, filePath);
-          if (!resolved.startsWith(WORKFLOWS_ROOT)) {
+          const resolved = resolveWorkflowFile(filePath);
+          if (!resolved) {
             res.statusCode = 403;
-            res.end(JSON.stringify({ error: "path traversal denied" }));
+            res.end(JSON.stringify({ error: "workflow path denied" }));
             return;
           }
 
@@ -102,6 +130,11 @@ export function fileServerPlugin(): Plugin {
 
         // POST /api/workflows/write — save a file back to disk
         if (req.url === "/api/workflows/write" && req.method === "POST") {
+          if (!ALLOWED_EDITOR_ORIGINS.has(req.headers.origin ?? "")) {
+            res.statusCode = 403;
+            res.end(JSON.stringify({ error: "origin denied" }));
+            return;
+          }
           let body = "";
           req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
           req.on("end", () => {
@@ -112,10 +145,10 @@ export function fileServerPlugin(): Plugin {
                 res.end(JSON.stringify({ error: "path and content required" }));
                 return;
               }
-              const resolved = path.resolve(WORKFLOWS_ROOT, filePath);
-              if (!resolved.startsWith(WORKFLOWS_ROOT)) {
+              const resolved = resolveWorkflowFile(filePath, true);
+              if (!resolved) {
                 res.statusCode = 403;
-                res.end(JSON.stringify({ error: "path traversal denied" }));
+                res.end(JSON.stringify({ error: "workflow path denied" }));
                 return;
               }
               fs.writeFileSync(resolved, content, "utf-8");

@@ -1,12 +1,12 @@
 # HASHI Flow — Academic Paragraph Writing Workflow
-# Version: 1.0.0
+# Version: 1.1.0
 # Task: Design the perfect academic paragraph (150-300 words)
 # Critic revision: gate logic fixed, evidence-mode branching, score mapping clarified
 
 workflow:
   id: academic-writing-paragraph
   name: "Academic Paragraph Writing"
-  version: "1.0.0"
+  version: "1.1.0"
   description: |
     Generates a single polished academic paragraph (150-300 words) through a
     structured pipeline: outline → draft → review → polish → final output.
@@ -25,6 +25,9 @@ changelog:
   - version: "1.0.0"
     date: "2026-03-28"
     changes: "Initial version: outline → draft → review → polish → final_output. Critic fixes applied: non-blocking review gate, explicit score mapping, evidence-aware mode."
+  - version: "1.1.0"
+    date: "2026-09-06"
+    changes: "Aligned agent, artifact, quality-gate, and unrecoverable handling fields with the enforced Nagare runtime contract."
 
 # =============================================================================
 # Pre-flight: collect writing requirements from user at runtime
@@ -86,34 +89,26 @@ agents:
     - id: writer_01
       role: "Academic Writer & Structure Architect"
       agent_md: "flow/agents/academic-writing-paragraph/writer_01/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/writer_01"
       backend: claude-cli
       model: claude-opus-4-6
-      controllable_by: [orchestrator, human]
 
     - id: reviewer_01
       role: "Academic Reviewer & Quality Gatekeeper"
       agent_md: "flow/agents/academic-writing-paragraph/reviewer_01/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/reviewer_01"
       backend: claude-cli
       model: claude-opus-4-6
-      controllable_by: [orchestrator, human]
 
     - id: editor_01
       role: "Language Editor & Final Polish"
       agent_md: "flow/agents/academic-writing-paragraph/editor_01/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/editor_01"
       backend: claude-cli
       model: claude-sonnet-4-6
-      controllable_by: [orchestrator, human]
 
     - id: debug_01
       role: "Debug Agent"
-      agent_md: "flow/agents/academic-writing-paragraph/debug_01/AGENT.md"
-      workspace: "flow/runs/{run_id}/workers/debug_01"
+      agent_md: "flow/agents/debug/AGENT.md"
       backend: claude-cli
       model: claude-sonnet-4-6
-      controllable_by: [orchestrator]
 
 # =============================================================================
 # Workflow Steps (fully automatic after pre-flight)
@@ -175,7 +170,6 @@ steps:
         - key: paragraph_outline
           path: paragraph_outline.json
           type: json
-    timeout_seconds: 300
 
   # Step 2: Write full draft based on skeleton
   - id: draft_writing
@@ -230,7 +224,6 @@ steps:
         - key: draft_metadata
           path: draft_metadata.json
           type: json
-    timeout_seconds: 360
 
   # Step 3: Academic quality review (NON-BLOCKING — always passes output forward)
   - id: academic_review
@@ -309,7 +302,6 @@ steps:
           type: json
     # NOTE: No quality_gate here — review is advisory, not blocking.
     # Final gate is on step 5 (final_output) only.
-    timeout_seconds: 360
 
   # Step 4: Language polish
   - id: language_polish
@@ -362,7 +354,6 @@ steps:
         - key: polish_report
           path: polish_report.json
           type: json
-    timeout_seconds: 300
 
   # Step 5: Final output with self-assessment
   - id: final_output
@@ -434,7 +425,6 @@ steps:
       criteria:
         - "final_package.quality_passed == true"
         - "final_package.quality_score >= 0.7"
-    timeout_seconds: 300
 
 # =============================================================================
 # Error Handling
@@ -442,15 +432,10 @@ steps:
 
 error_handling:
   debug_agent: debug_01
-  max_attempts: 3
-  retry_strategy:
-    attempt_1: "Analyze error via debug_01. If prompt interpretation issue, clarify ambiguous instructions and retry. If artifact format issue, add explicit format examples."
-    attempt_2: "If step timed out, simplify prompt (remove optional requirements). If output was truncated, reduce target length to 120-200 words. If source_materials caused issues, switch to argument-only mode."
-    attempt_3: "Minimal viable attempt: reduce to core claim + 1 supporting point, relaxed quality threshold (total >= 16), notify user of degraded output."
-  on_max_exceeded:
+  on_unrecoverable:
     action: notify_human_interface
     target: akane
-    message: "Academic paragraph workflow failed after 3 attempts. Step: {failed_step_id}, Error: {error}"
+    message: "Academic paragraph workflow cannot recover step {failed_step_id}. Error: {error}"
 
 # =============================================================================
 # Success Criteria (tiered)
@@ -502,5 +487,3 @@ evaluation:
     - model_cost_estimate
     - error_retries
     - human_interventions
-  improvement_threshold: 5
-  auto_apply: false

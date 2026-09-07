@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from orchestrator.file_permissions import tighten_fd_permissions
+
 
 PCM_FILENAME: Final = "agent.md"
 PCM_BLOCKS: Final[tuple[str, ...]] = ("persona", "sys", "memory")
@@ -339,7 +341,7 @@ def atomic_write_pcm(path: str | Path, content: str) -> Path:
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(fd, 0o600)
+        tighten_fd_permissions(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()

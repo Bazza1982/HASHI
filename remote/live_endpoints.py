@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from remote.peer.base import is_valid_instance_id, normalize_instance_id
 
+LIVE_ENDPOINTS_PATH_ENV = "HASHI_REMOTE_LIVE_ENDPOINTS_PATH"
+
 
 def live_endpoints_path(root: Path | str) -> Path:
+    configured = str(os.environ.get(LIVE_ENDPOINTS_PATH_ENV) or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
     return Path(root).expanduser().resolve() / "state" / "remote_live_endpoints.json"
 
 

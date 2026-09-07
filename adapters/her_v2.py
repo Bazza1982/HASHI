@@ -176,6 +176,7 @@ class HERv2Adapter(BaseBackend):
         self._session_coordinator: HerBackendSessionCoordinator | None = None
         self._fixed_transport_audit: dict[str, dict[str, Any]] = {}
         self._canonical_active_turns: dict[str, AcceptedHerTurn] = {}
+        self._maintenance_accounting_sessions: dict[str, str] = {}
 
     @property
     def _extra(self) -> dict[str, Any]:
@@ -899,14 +900,7 @@ class HERv2Adapter(BaseBackend):
         revoked_resources = request_meta.get("revoked_attachment_ids")
         if not isinstance(revoked_resources, (list, tuple, set, frozenset)):
             revoked_resources = ()
-        conversation_id = str(
-            request_meta.get("hashi_session_id")
-            or f"legacy:{self.config.name}"
-        )
-        workzone = str(
-            request_meta.get("session_workspace")
-            or self.config.workspace_dir
-        )
+        binding = self._fixed_session_binding(request_meta)
         encoded, audit = self._session_coordinator.prepare_transport(
             session_id=self._session_id,
             sections=sections,
@@ -914,20 +908,35 @@ class HERv2Adapter(BaseBackend):
             user_message=str(user_message),
             request_id=str(request_id),
             message_id=str(request_meta.get("hashi_message_id") or request_id),
-            instance_id=str(
-                getattr(self.global_config, "instance_id", "") or ""
-            ),
-            agent_id=str(self.config.name),
-            owner_id=str(request_meta.get("owner_id") or ""),
-            hashi_conversation_id=conversation_id,
-            context_generation=int(request_meta.get("context_generation") or 1),
-            workzone_identity=workzone,
+            **binding,
             revoked_resource_ids=[str(item) for item in revoked_resources],
         )
         self._fixed_transport_audit[str(request_id)] = dict(audit)
         while len(self._fixed_transport_audit) > 512:
             self._fixed_transport_audit.pop(next(iter(self._fixed_transport_audit)))
         return encoded, audit
+
+    def _fixed_session_binding(
+        self, request_meta: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "instance_id": str(
+                getattr(self.global_config, "instance_id", "") or ""
+            ),
+            "agent_id": str(self.config.name),
+            "owner_id": str(request_meta.get("owner_id") or ""),
+            "hashi_conversation_id": str(
+                request_meta.get("hashi_session_id")
+                or f"legacy:{self.config.name}"
+            ),
+            "context_generation": int(
+                request_meta.get("context_generation") or 1
+            ),
+            "workzone_identity": str(
+                request_meta.get("session_workspace")
+                or self.config.workspace_dir
+            ),
+        }
 
     def can_resume_fixed_session(self) -> bool:
         """Confirm that an outer HASHI binding has durable HER state behind it."""
@@ -941,6 +950,10 @@ class HERv2Adapter(BaseBackend):
             return False
         if str(current.get("status") or "") == "open":
             return True
+        if str(current.get("status") or "") == "accounting":
+            # A pre-Turn accounting shell must retain its opaque ID so the
+            # first Fixed envelope can promote it without orphaning usage.
+            return False
         # A closed epoch is never resumed under the old ID.
         self._session_id = None
         return False
@@ -967,9 +980,6 @@ class HERv2Adapter(BaseBackend):
             runtime_context=self._runtime_context(),
             usage_observer=usage_observer,
             default_recovery_kind=default_recovery_kind,
-            cognitive_control_enabled=bool(
-                self._v2_config and self._v2_config.cognitive_control_enabled
-            ),
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:
@@ -1926,6 +1936,12 @@ class HERv2Adapter(BaseBackend):
                 "evidence_refs": list(result.evidence_refs),
                 "limitations": list(result.limitations),
                 "task_state": dict(result.task_state) if result.task_state else None,
+                "stage_timings_s": {
+                    str(stage): float(elapsed_s)
+                    for stage, elapsed_s in dict(
+                        getattr(result, "stage_timings_s", {}) or {}
+                    ).items()
+                },
                 "shadow_mode": self._v2_config.shadow_mode,
                 "effort": effort_resolution.metadata(),
             }
@@ -2094,6 +2110,32 @@ class HERv2Adapter(BaseBackend):
                 )
                 serialized_line_items.append(payload)
             metadata.setdefault("meter", {})["line_items"] = serialized_line_items
+        primary_failure = (
+            dict(result.primary_failure)
+            if isinstance(result.primary_failure, Mapping)
+            else {}
+        )
+        failure_details = (
+            dict(primary_failure.get("details") or {})
+            if isinstance(primary_failure.get("details"), Mapping)
+            else {}
+        )
+        tool_call_count = max(
+            int(getattr(provider, "tool_call_count", 0) or 0),
+            int(failure_details.get("tool_call_count") or 0),
+        )
+        tool_loop_count = max(
+            int(getattr(provider, "tool_loop_count", 0) or 0),
+            int(failure_details.get("tool_loop_count") or 0),
+        )
+        raw_http_status = primary_failure.get("http_status")
+        http_status = (
+            int(raw_http_status) if raw_http_status is not None else None
+        )
+        raw_retry_after = primary_failure.get("retry_after_s")
+        retry_after_s = (
+            float(raw_retry_after) if raw_retry_after is not None else None
+        )
         return BackendResponse(
             text=result.text,
             duration_ms=duration_ms,
@@ -2102,11 +2144,19 @@ class HERv2Adapter(BaseBackend):
             stop_reason=result.terminal_state.value.lower(),
             usage=getattr(provider, "usage", None),
             cost_usd=(float(getattr(provider, "cost_usd", 0.0) or 0.0) or None),
-            tool_call_count=int(getattr(provider, "tool_call_count", 0) or 0),
-            tool_loop_count=int(getattr(provider, "tool_loop_count", 0) or 0),
+            tool_call_count=tool_call_count,
+            tool_loop_count=tool_loop_count,
             stream_metadata=metadata,
             error_code=terminal_error_code or None,
             error_retryable=False if technical_error else None,
+            http_status=http_status,
+            provider_request_id=(
+                str(primary_failure.get("provider_request_id") or "") or None
+            ),
+            retry_after_s=retry_after_s,
+            side_effects_possible=bool(
+                primary_failure.get("side_effects_possible")
+            ),
             content=tuple(result.content),
         )
 
@@ -2164,18 +2214,101 @@ class HERv2Adapter(BaseBackend):
     def record_maintenance_provider_requests(
         self, line_items: list[Mapping[str, Any]]
     ) -> int:
-        """Attach non-Turn maintenance usage to the current fixed Session."""
+        """Attach non-Turn usage to its preflight-bound HER Session."""
 
-        if not self._session_id or self._session_coordinator is None:
+        if self._session_coordinator is None:
+            return 0
+        items = [dict(item) for item in line_items]
+        parent_refs = {
+            str(item.get("parent_request_id") or "").strip()
+            for item in items
+            if str(item.get("parent_request_id") or "").strip()
+        }
+        mapped_session_ids = {
+            self._maintenance_accounting_sessions[request_ref]
+            for request_ref in parent_refs
+            if request_ref in self._maintenance_accounting_sessions
+        }
+        mapped_parent_refs = parent_refs.intersection(
+            self._maintenance_accounting_sessions
+        )
+        if mapped_session_ids and mapped_parent_refs != parent_refs:
+            raise RuntimeError(
+                "Maintenance provider batch mixes bound and unbound requests"
+            )
+        if len(mapped_session_ids) > 1:
+            raise RuntimeError(
+                "Maintenance provider batch spans more than one HER Session"
+            )
+        target_session_id = (
+            next(iter(mapped_session_ids))
+            if mapped_session_ids
+            else self._session_id
+        )
+        if not target_session_id:
             return 0
         return self._session_coordinator.store.record_provider_requests(
-            session_id=self._session_id,
+            session_id=target_session_id,
             turn_id="",
-            line_items=[dict(item) for item in line_items],
+            line_items=items,
         )
 
+    def ensure_maintenance_provider_accounting(self, request_ref: str) -> bool:
+        """Bind Compact usage durably before any maintenance Provider call."""
+
+        if self._session_coordinator is None:
+            return False
+        request_id = str(request_ref or "").strip()
+        request_meta = self._runtime_request_meta(request_id)
+        if not request_meta:
+            # A provider call without an authoritative outer Session binding
+            # must remain blocked rather than being charged to guessed state.
+            return False
+        if not self._session_id:
+            self._session_id = f"her-{uuid.uuid4().hex}"
+        self._session_coordinator.store.ensure_accounting_session(
+            session_id=self._session_id,
+            **self._fixed_session_binding(request_meta),
+        )
+        # Persist HASHI conversation -> HER shell before Compact reaches its
+        # Provider.  A process replacement can then recover the same ledger.
+        runtime = self._runtime_context()
+        if runtime is None:
+            return False
+        from orchestrator import runtime_session
+
+        runtime_session.capture_backend_binding(runtime, request_id=request_id)
+        runtime_config = getattr(runtime, "config", None)
+        backend_id = str(
+            getattr(runtime_config, "active_backend", None)
+            or getattr(runtime_config, "engine", None)
+            or "her-v2"
+        )
+        outer_binding = runtime_session.ensure_store(runtime).backend_binding(
+            agent_id=str(self.config.name),
+            session_id=str(request_meta.get("hashi_session_id") or ""),
+            context_generation=int(request_meta.get("context_generation") or 1),
+            backend_id=backend_id,
+        )
+        if str(outer_binding or "") != str(self._session_id):
+            raise RuntimeError(
+                "HASHI conversation did not durably retain the HER accounting binding"
+            )
+        self._maintenance_accounting_sessions[request_id] = self._session_id
+        while len(self._maintenance_accounting_sessions) > 512:
+            self._maintenance_accounting_sessions.pop(
+                next(iter(self._maintenance_accounting_sessions))
+            )
+        return self.can_record_maintenance_provider_requests()
+
     def can_record_maintenance_provider_requests(self) -> bool:
-        return bool(self._session_id and self._session_coordinator is not None)
+        if not self._session_id or self._session_coordinator is None:
+            return False
+        current = self._session_coordinator.store.session(self._session_id)
+        return bool(
+            current
+            and str(current.get("status") or "") in {"accounting", "open"}
+        )
 
     def durable_meter_summary(self, *, turn_only: bool = False) -> dict[str, Any]:
         if not self._session_id or self._session_coordinator is None:
@@ -2186,6 +2319,24 @@ class HERv2Adapter(BaseBackend):
             self._session_id,
             turn_id=turn_id,
         )
+
+    def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
+        """Interrupt active HER turns without depending on their asyncio loop."""
+
+        try:
+            active = tuple(self._active_runtimes.values())
+        except RuntimeError:
+            active = tuple(
+                runtime
+                for key in tuple(self._active_runtimes)
+                if (runtime := self._active_runtimes.get(key)) is not None
+            )
+        interrupted = 0
+        for runtime in active:
+            interrupt = getattr(runtime, "interrupt_nowait", None)
+            if callable(interrupt):
+                interrupted += int(interrupt(reason) or 0)
+        return interrupted
 
     async def shutdown(self):
         runtime_context = self._runtime_context()

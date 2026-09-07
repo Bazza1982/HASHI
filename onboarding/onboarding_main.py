@@ -1,18 +1,18 @@
-import textwrap
-import os
-import sys
 import json
-import time
-import subprocess
+import os
 import shutil
+import subprocess
+import sys
+import time
 import traceback
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
 
 # ── Crash log setup ──────────────────────────────────────────────────────────
 _LOG_PATH = Path(__file__).parent.parent / "onboarding_crash.log"
+
 
 def _log(msg: str):
     ts = datetime.now().strftime("%H:%M:%S")
@@ -23,11 +23,16 @@ def _log(msg: str):
     except Exception:
         pass
 
+
 def _clear_log():
     try:
-        _LOG_PATH.write_text(f"=== Onboarding run: {datetime.now().isoformat()} ===\n", encoding="utf-8")
+        _LOG_PATH.write_text(
+            f"=== Onboarding run: {datetime.now().isoformat()} ===\n", encoding="utf-8"
+        )
     except Exception:
         pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Colors mimicking bridge-u.sh
@@ -45,21 +50,33 @@ C_LABEL = "\033[38;5;109m"
 C_TEXT = "\033[97m"
 C_RAIL = "\033[38;5;61m"
 
+
 def load_languages():
     langs = []
     lang_dir = Path(__file__).parent / "languages"
-    order = ["english.json", "japanese.json", "chinese_sim.json", "chinese_trad.json", "korean.json", "german.json", "french.json", "russian.json", "arabic.json"]
+    order = [
+        "english.json",
+        "japanese.json",
+        "chinese_sim.json",
+        "chinese_trad.json",
+        "korean.json",
+        "german.json",
+        "french.json",
+        "russian.json",
+        "arabic.json",
+    ]
     found_files = list(lang_dir.glob("*.json"))
     found_files.sort(key=lambda x: order.index(x.name) if x.name in order else 99)
     for f in found_files:
         try:
-            with open(f, 'r', encoding='utf-8') as fh:
+            with open(f, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-                data['_file'] = f.name
+                data["_file"] = f.name
                 langs.append(data)
-        except:
+        except (OSError, json.JSONDecodeError, TypeError):
             pass
     return langs
+
 
 def audit_environment():
     checks = [
@@ -73,34 +90,44 @@ def audit_environment():
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
                 if res.returncode == 0:
                     return name, engine
-        except:
+        except (OSError, subprocess.SubprocessError):
             pass
     return None, None
 
+
 def verify_openrouter(key):
     import http.client
+
     try:
         conn = http.client.HTTPSConnection("openrouter.ai")
         headers = {"Authorization": f"Bearer {key}"}
         conn.request("GET", "/api/v1/models", headers=headers)
         res = conn.getresponse()
         return res.status == 200
-    except:
+    except (OSError, http.client.HTTPException):
         return False
+
 
 def print_rich_banner():
     os.system("")
     print(f"\n{C_RAIL}│{C_RESET} {C_TITLE}{_BOLD}HASHI ハシ 橋{C_RESET}")
     print(f"{C_RAIL}│{C_RESET}")
-    print(f"{C_RAIL}│{C_RESET}  {C_ACCENT}「橋」は「知」を繋ぎ、「知」は未来を拓く。{C_RESET}")
-    print(f"{C_RAIL}│{C_RESET}  {C_MUTED}The Bridge connects Intellect; Intellect opens the future.{C_RESET}")
+    print(
+        f"{C_RAIL}│{C_RESET}  {C_ACCENT}「橋」は「知」を繋ぎ、「知」は未来を拓く。{C_RESET}"
+    )
+    print(
+        f"{C_RAIL}│{C_RESET}  {C_MUTED}The Bridge connects Intellect; Intellect opens the future.{C_RESET}"
+    )
     print(f"{C_RAIL}│{C_RESET}")
-    print(f"{C_RAIL}│{C_RESET}  HASHI is a Universal Flexible Safe AI Agents powered by CLI backends.")
+    print(
+        f"{C_RAIL}│{C_RESET}  HASHI is a Universal Flexible Safe AI Agents powered by CLI backends."
+    )
     print(f"{C_RAIL}│{C_RESET}  This is the onboarding program.")
     print(f"{C_RAIL}│{C_RESET}")
     print(f"{C_RAIL}│{C_RESET}  Please select your preferred language to continue:")
     print(f"{C_RAIL}│{C_RESET}  継続するには、使用する言語を選択してください：")
     print(f"{C_RAIL}│{C_RESET}")
+
 
 def run_onboarding():
     _clear_log()
@@ -117,33 +144,48 @@ def run_onboarding():
     lang = None
     while True:
         print_rich_banner()
-        for i, l in enumerate(langs, 1):
-            print(f"  {C_ACCENT}[{i}]{C_RESET} {C_TEXT}{l['displayName']}{C_RESET}")
+        for i, language_option in enumerate(langs, 1):
+            print(
+                f"  {C_ACCENT}[{i}]{C_RESET} "
+                f"{C_TEXT}{language_option['displayName']}{C_RESET}"
+            )
         choice = input(f"\n{C_MUTED}> {C_RESET}").strip()
         try:
             idx = int(choice) - 1
             if 0 <= idx < len(langs):
                 lang = langs[idx]
-                _log(f"Language selected: {lang.get('displayName')} (file: {lang.get('_file')})")
+                _log(
+                    f"Language selected: {lang.get('displayName')} (file: {lang.get('_file')})"
+                )
                 break
             else:
-                print(f"\n{C_WARN}Invalid choice. Please select a number between 1 and {len(langs)}.{C_RESET}")
+                print(
+                    f"\n{C_WARN}Invalid choice. Please select a number between 1 and {len(langs)}.{C_RESET}"
+                )
                 time.sleep(1.5)
         except ValueError:
             print(f"\n{C_WARN}Invalid input. Please enter a number.{C_RESET}")
             time.sleep(1.5)
 
     # Language mapping
-    lang_file = lang.get('_file', '').lower()
-    l_code = 'en'
-    if 'chinese_sim' in lang_file: l_code = 'zh'
-    elif 'chinese_trad' in lang_file: l_code = 'zh-tw'
-    elif 'japanese' in lang_file: l_code = 'ja'
-    elif 'korean' in lang_file: l_code = 'ko'
-    elif 'german' in lang_file: l_code = 'de'
-    elif 'french' in lang_file: l_code = 'fr'
-    elif 'russian' in lang_file: l_code = 'ru'
-    elif 'arabic' in lang_file: l_code = 'ar'
+    lang_file = lang.get("_file", "").lower()
+    l_code = "en"
+    if "chinese_sim" in lang_file:
+        l_code = "zh"
+    elif "chinese_trad" in lang_file:
+        l_code = "zh-tw"
+    elif "japanese" in lang_file:
+        l_code = "ja"
+    elif "korean" in lang_file:
+        l_code = "ko"
+    elif "german" in lang_file:
+        l_code = "de"
+    elif "french" in lang_file:
+        l_code = "fr"
+    elif "russian" in lang_file:
+        l_code = "ru"
+    elif "arabic" in lang_file:
+        l_code = "ar"
 
     _log(f"Language code: {l_code}")
 
@@ -154,14 +196,16 @@ def run_onboarding():
         disclaimer_file = disclaimer_dir / "disclaimer_en.md"
     if disclaimer_file.exists():
         content_md = disclaimer_file.read_text(encoding="utf-8")
-        print(f"\n{C_WARN}{'='*72}{C_RESET}")
+        print(f"\n{C_WARN}{'=' * 72}{C_RESET}")
         print(f"{C_TITLE}{_BOLD}  LEGAL NOTICE & RISK ACKNOWLEDGEMENT  {C_RESET}")
-        print(f"{C_WARN}{'='*72}{C_RESET}\n")
+        print(f"{C_WARN}{'=' * 72}{C_RESET}\n")
         for line in content_md.splitlines():
             print(f"  {C_TEXT}{line}{C_RESET}")
-        print(f"\n{C_WARN}{'='*72}{C_RESET}")
+        print(f"\n{C_WARN}{'=' * 72}{C_RESET}")
         while True:
-            print(f"\n{C_WARN}{_BOLD}Type \"I AGREE\" in all caps to confirm and proceed:{C_RESET}")
+            print(
+                f'\n{C_WARN}{_BOLD}Type "I AGREE" in all caps to confirm and proceed:{C_RESET}'
+            )
             consent = input(f"{C_MUTED}> {C_RESET}").strip()
             if consent == "I AGREE":
                 _log("User consented to legal terms.")
@@ -170,7 +214,9 @@ def run_onboarding():
                 print(f"\n{C_ERR}Consent not provided. Exiting...{C_RESET}\n")
                 sys.exit(0)
             else:
-                print(f"{C_WARN}Invalid input. You must type \"I AGREE\" (exactly as shown) to continue.{C_RESET}")
+                print(
+                    f'{C_WARN}Invalid input. You must type "I AGREE" (exactly as shown) to continue.{C_RESET}'
+                )
     # Immediate Hatchery Initialization
     project_root = Path(__file__).parent.parent
     _log(f"project_root: {project_root}")
@@ -179,7 +225,9 @@ def run_onboarding():
     _log(f"workspace_dir created: {workspace_dir}")
     shutil.copy(project_root / "docs" / "initial.md", workspace_dir / "initial.md")
     shutil.copy(project_root / "docs" / "AGENT_FYI.md", workspace_dir / "AGENT_FYI.md")
-    initial_guidance = (project_root / "docs" / "initial.md").read_text(encoding="utf-8")
+    initial_guidance = (project_root / "docs" / "initial.md").read_text(
+        encoding="utf-8"
+    )
     atomic_write_pcm(
         workspace_dir / "agent.md",
         render_pcm_document(
@@ -191,7 +239,7 @@ def run_onboarding():
 
     # 1. Prime the canonical Flex transcript
     log_path = workspace_dir / "transcript.jsonl"
-    welcome_prompt = lang.get('welcomePrompt', "Hello! I am ready to assist you.")
+    welcome_prompt = lang.get("welcomePrompt", "Hello! I am ready to assist you.")
 
     if log_path.exists():
         log_path.unlink()
@@ -200,14 +248,14 @@ def run_onboarding():
         "timestamp": datetime.now().isoformat(),
         "role": "user",
         "source": "system",
-        "text": welcome_prompt
+        "text": welcome_prompt,
     }
-    with open(log_path, 'a', encoding='utf-8') as f:
+    with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(first_entry, ensure_ascii=True) + "\n")
 
     # 2. Write the one-time wakeup trigger
     wakeup_path = workspace_dir / "WAKEUP.prompt"
-    with open(wakeup_path, 'w', encoding='utf-8') as f:
+    with open(wakeup_path, "w", encoding="utf-8") as f:
         f.write(welcome_prompt)
 
     # Phase 1.5: Completion Detection
@@ -222,22 +270,24 @@ def run_onboarding():
     is_completed = False
     if agents_path.exists():
         try:
-            with open(agents_path, 'r', encoding='utf-8') as f:
+            with open(agents_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-                if any(a.get('name') == 'hashiko' for a in cfg.get('agents', [])):
+                if any(a.get("name") == "hashiko" for a in cfg.get("agents", [])):
                     is_completed = True
-        except:
+        except (OSError, json.JSONDecodeError, TypeError):
             pass
 
     if is_completed:
         print(f"\n{C_WARN}{lang['alreadyCompleted']}{C_RESET}")
         confirm = input(f"{C_LABEL}{lang['resetConfirm']}{C_RESET}").strip().lower()
-        if confirm != 'y':
+        if confirm != "y":
             print(f"\n{C_OK}{lang['enjoyMessage']}{C_RESET}")
             sys.exit(0)
 
     # Phase 1.8: Pre-Hatch Warm Prompt
-    print(f"\n{C_OK}{lang['continueToHatch'].format(style=_BOLD+_BLINK+_BRIGHT_WHITE, reset=C_RESET+C_OK)}{C_RESET}")
+    print(
+        f"\n{C_OK}{lang['continueToHatch'].format(style=_BOLD + _BLINK + _BRIGHT_WHITE, reset=C_RESET + C_OK)}{C_RESET}"
+    )
     input()
 
     # Phase 2: System Audit
@@ -253,7 +303,8 @@ def run_onboarding():
         print(f"{C_WARN}{lang['auditNoSignal']}{C_RESET}")
         while True:
             or_key = input(f"{C_LABEL}{lang['openRouterPrompt']}{C_RESET}").strip()
-            if not or_key: continue
+            if not or_key:
+                continue
             print(f"{C_MUTED}{lang['openRouterVerifying']}{C_RESET}")
             if verify_openrouter(or_key):
                 print(f"{C_OK}{lang['openRouterSuccess']}{C_RESET}")
@@ -264,12 +315,12 @@ def run_onboarding():
 
     # Phase 4: Determine agent display name by language (no user-specific content)
     _display_names = {
-        "zh":    "小乔",
+        "zh": "小乔",
         "zh-tw": "小喬",
-        "ja":    "ハシコ",
-        "ko":    "하시코",
-        "ru":    "Хашико",
-        "ar":    "هاشيكو",
+        "ja": "ハシコ",
+        "ko": "하시코",
+        "ru": "Хашико",
+        "ar": "هاشيكو",
     }
     agent_name_local = _display_names.get(l_code, "Hashiko")
 
@@ -303,33 +354,35 @@ def run_onboarding():
     agents_cfg = {"global": {"authorized_id": 0}, "agents": [new_agent]}
     if agents_path.exists():
         try:
-            with open(agents_path, 'r', encoding='utf-8') as f:
+            with open(agents_path, "r", encoding="utf-8") as f:
                 old_cfg = json.load(f)
-                agents_cfg['global'] = old_cfg.get('global', agents_cfg['global'])
-                old_agents = [a for a in old_cfg.get('agents', []) if a.get('name') != 'hashiko']
-                agents_cfg['agents'] = [new_agent] + old_agents
-        except:
+                agents_cfg["global"] = old_cfg.get("global", agents_cfg["global"])
+                old_agents = [
+                    a for a in old_cfg.get("agents", []) if a.get("name") != "hashiko"
+                ]
+                agents_cfg["agents"] = [new_agent] + old_agents
+        except (OSError, json.JSONDecodeError, TypeError):
             pass
-    with open(agents_path, 'w', encoding='utf-8') as f:
+    with open(agents_path, "w", encoding="utf-8") as f:
         json.dump(agents_cfg, f, indent=2, ensure_ascii=False)
     _log(f"agents.json written: {agents_path}")
 
     secrets = {}
     if secrets_path.exists():
         try:
-            with open(secrets_path, 'r', encoding='utf-8') as f:
+            with open(secrets_path, "r", encoding="utf-8") as f:
                 secrets = json.load(f)
-        except:
+        except (OSError, json.JSONDecodeError, TypeError):
             pass
-    if 'hashiko' not in secrets:
-        secrets['hashiko'] = "WORKBENCH_ONLY_NO_TOKEN"
+    if "hashiko" not in secrets:
+        secrets["hashiko"] = "WORKBENCH_ONLY_NO_TOKEN"
     if or_key:
-        secrets['openrouter_key'] = or_key
-    with open(secrets_path, 'w', encoding='utf-8') as f:
+        secrets["openrouter_key"] = or_key
+    with open(secrets_path, "w", encoding="utf-8") as f:
         json.dump(secrets, f, indent=2, ensure_ascii=False)
 
     last_agents_path = project_root / ".bridge_u_last_agents.txt"
-    with open(last_agents_path, 'w', encoding='utf-8') as f:
+    with open(last_agents_path, "w", encoding="utf-8") as f:
         f.write("selected|hashiko\n")
 
     print(f"\n{C_OK}{lang['hatcheryComplete']}{C_RESET}")
@@ -348,7 +401,15 @@ def run_onboarding():
         # shutdown. Onboarding must never scan or kill machine-wide processes.
         if os.name == "nt":
             main_bat = project_root / "bin" / "bridge-u.bat"
-            args = ["cmd", "/d", "/c", "call", str(main_bat), "--resume-last", "--force"]
+            args = [
+                "cmd",
+                "/d",
+                "/c",
+                "call",
+                str(main_bat),
+                "--resume-last",
+                "--force",
+            ]
             _log(f"Launching bridge-u.bat via subprocess: {args}")
         else:
             args = ["bash", str(main_sh), "--resume-last", "--force"]
@@ -367,6 +428,7 @@ def run_onboarding():
         _log(f"bridge-u.sh exited with code: {exit_code}")
         if exit_code != 0:
             import signal as _sig
+
             # Decode signal number (exit code 128+N or raw N)
             sig_num = exit_code - 128 if exit_code > 128 else exit_code
             try:
@@ -378,6 +440,7 @@ def run_onboarding():
     else:
         _log("ERROR: bridge-u.sh not found!")
         print(f"\n{C_ERR}Error: bridge-u.sh not found.{C_RESET}")
+
 
 if __name__ == "__main__":
     try:

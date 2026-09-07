@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+import pytest
 
 from nagare.api.app import NagareApiServer
 from nagare.api.runs import RunSnapshotService
@@ -71,7 +74,7 @@ def test_run_snapshot_service_returns_immutable_views_and_logs_requests(tmp_path
     }
 
 
-def test_api_server_exposes_read_only_run_endpoints(tmp_path: Path) -> None:
+def test_api_server_exposes_run_inspection_endpoints_with_exact_cors(tmp_path: Path) -> None:
     run_id = "run-api-http"
     runs_root = tmp_path / "runs"
 
@@ -87,6 +90,7 @@ def test_api_server_exposes_read_only_run_endpoints(tmp_path: Path) -> None:
         base_url = f"http://127.0.0.1:{server.server_port}"
         with urlopen(f"{base_url}/runs/{run_id}") as response:
             payload = json.loads(response.read().decode("utf-8"))
+            assert response.headers.get("Access-Control-Allow-Origin") is None
         assert payload["run"]["status"] == "COMPLETED"
 
         with urlopen(f"{base_url}/runs/{run_id}/events?limit=5") as response:
@@ -97,7 +101,64 @@ def test_api_server_exposes_read_only_run_endpoints(tmp_path: Path) -> None:
             artifact_payload = json.loads(response.read().decode("utf-8"))
         assert artifact_payload["run_id"] == run_id
         assert artifact_payload["count"] == 0
+
+        allowed_request = Request(
+            f"{base_url}/runs/{run_id}",
+            headers={"Origin": "http://127.0.0.1:5380"},
+        )
+        with urlopen(allowed_request) as response:
+            assert response.headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:5380"
+
+        untrusted_request = Request(
+            f"{base_url}/runs/{run_id}",
+            headers={"Origin": "https://example.invalid"},
+        )
+        with urlopen(untrusted_request) as response:
+            assert response.headers.get("Access-Control-Allow-Origin") is None
+
+        blocked_post = Request(
+            f"{base_url}/runs",
+            data=b"{}",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "https://example.invalid",
+            },
+        )
+        with pytest.raises(HTTPError) as blocked:
+            urlopen(blocked_post)
+        assert blocked.value.code == 403
     finally:
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def test_api_server_rejects_non_loopback_bind_addresses(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        NagareApiServer(("0.0.0.0", 0), runs_root=tmp_path / "runs")
+
+
+def test_run_snapshot_service_rejects_traversal_and_honours_zero_event_limit(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-api-limits"
+    runs_root = tmp_path / "runs"
+    state = TaskState(run_id, runs_root=runs_root)
+    state.set_workflow_status("running")
+    RunEventLogger(
+        run_id=run_id,
+        trace_id="trace-limits",
+        workflow_id="limits",
+        workflow_path=None,
+        runs_root=runs_root,
+    ).emit("run.started", message="started")
+    service = RunSnapshotService(runs_root=runs_root)
+
+    response = service.get_run_events(run_id, limit=0)
+    assert response["count"] == 0
+    assert response["events"] == []
+    with pytest.raises(ValueError, match="run_id"):
+        service.get_run_snapshot("../escape")
+    with pytest.raises(ValueError, match="zero or greater"):
+        service.get_run_events(run_id, limit=-1)

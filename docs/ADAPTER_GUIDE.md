@@ -11,7 +11,7 @@ Core package responsibilities:
 - run state persistence
 - artifact registration
 - stable event stream
-- read-only runtime inspection API
+- loopback runtime inspection and trusted-local run/callable control API
 
 Host adapter responsibilities:
 
@@ -36,6 +36,8 @@ The compatibility entrypoint is `flow.engine.flow_runner.FlowRunner`, which wrap
 - Preserve `run_id`, `trace_id`, `workflow_id`, and `request_id` across boundaries.
 - Emit adapter-scoped events so host failures are visible without changing core event names.
 - Prefer composition over inheritance: wrap core protocols rather than modifying engine internals.
+- Treat callable delivery as trusted code execution. Do not expose the loopback API through an
+  unauthenticated proxy.
 
 ## Recommended Bind Pattern
 

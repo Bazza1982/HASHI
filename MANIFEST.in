@@ -1,49 +1,20 @@
-# Include documentation and metadata
+# Minimal source distribution for the published Nagare/Flow Python artifact.
 include README.md
 include LICENSE
-include requirements.txt
-include requirements-dev.txt
+recursive-include nagare *.py
+recursive-include flow *.py
 
-# Include configuration examples
-include *.json.example
-include *.json.sample
-include *.md
-
-# Include onboarding language files
-recursive-include onboarding/languages *.json
-recursive-include onboarding/languages *.md
-
-# Include agent seed prompts
-recursive-include agent_seeds *.md
-
-# Include skills
-recursive-include skills *.md
-recursive-include skills *.py
-recursive-include skills *.sh
-
-# Include documentation
-recursive-include docs *.md
-recursive-include doc *.md
-
-# Include scripts
-recursive-include scripts *.py
-recursive-include scripts *.sh
-
-# Include text-only EXP guidebooks and asset-pack metadata. Large binary assets
-# are distributed independently and restored on demand.
-recursive-include exp *.md *.json *.jsonl *.py *.ps1 .gitignore .gitkeep
-
-# Exclude runtime and build artifacts
-global-exclude __pycache__
-global-exclude *.pyc
-global-exclude *.pyo
-global-exclude *.log
-global-exclude *.lock
-global-exclude *.pid
-global-exclude .DS_Store
-global-exclude *:Zone.Identifier
-
-# Exclude runtime directories
+# The Python artifact is not the full HASHI source checkout. Keep project and
+# runtime content in the Git/npm/Portable publication channels.
+prune docs
+prune exp
+prune packaging
+prune scripts
+prune skills
+prune superloops
+prune tests
+prune tools
+prune workbench
 prune logs
 prune state
 prune media

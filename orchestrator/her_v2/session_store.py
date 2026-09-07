@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.storage_profile import removable_storage_profile
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -43,6 +45,42 @@ def _array(value: str | bytes | None) -> list[Any]:
 
 def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _binding_workzone_identity(
+    value: object,
+    *,
+    hashi_conversation_id: object,
+    context_generation: object,
+) -> str:
+    """Return a relocation-stable identity for HASHI-managed Session workspaces.
+
+    A Session workspace lives below the instance data root, so its absolute
+    path legitimately changes when a portable instance is copied from a USB
+    drive to a local disk.  The conversation id and context generation are
+    already authoritative parts of the HER binding; use those logical values
+    for this one managed path shape while retaining exact matching for every
+    ordinary user/workzone path.
+    """
+
+    raw = str(value or "")
+    conversation_id = str(hashi_conversation_id or "")
+    try:
+        generation = max(1, int(context_generation))
+    except (TypeError, ValueError):
+        return raw
+    parts = [part for part in raw.replace("\\", "/").rstrip("/").split("/") if part]
+    expected_tail = [
+        "state",
+        "session_workspaces",
+        conversation_id,
+        f"generation_{generation}",
+    ]
+    if len(parts) >= len(expected_tail) and [
+        part.casefold() for part in parts[-len(expected_tail) :]
+    ] == [part.casefold() for part in expected_tail]:
+        return f"hashi-session-workspace:{conversation_id}:generation:{generation}"
+    return raw
 
 
 def _resource_key(resource: Mapping[str, Any]) -> str:
@@ -96,6 +134,8 @@ class HerSessionStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
+        if removable_storage_profile():
+            connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
     @contextmanager
@@ -112,6 +152,8 @@ class HerSessionStore:
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
+            if removable_storage_profile():
+                connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS her_sessions (
@@ -408,13 +450,23 @@ class HerSessionStore:
         context_generation: int,
         workzone_identity: str,
     ) -> None:
+        expected_workzone = _binding_workzone_identity(
+            workzone_identity,
+            hashi_conversation_id=hashi_conversation_id,
+            context_generation=context_generation,
+        )
+        observed_workzone = _binding_workzone_identity(
+            row["workzone_identity"],
+            hashi_conversation_id=row["hashi_conversation_id"],
+            context_generation=row["context_generation"],
+        )
         expected = (
             str(instance_id).casefold(),
             str(agent_id).casefold(),
             str(owner_id),
             str(hashi_conversation_id),
             int(context_generation),
-            str(workzone_identity),
+            expected_workzone,
         )
         observed = (
             str(row["instance_id"]).casefold(),
@@ -422,13 +474,104 @@ class HerSessionStore:
             str(row["owner_id"]),
             str(row["hashi_conversation_id"]),
             int(row["context_generation"]),
-            str(row["workzone_identity"]),
+            observed_workzone,
         )
         if observed != expected:
             raise HerSessionStoreError(
                 "session_binding_conflict",
                 "HER session binding does not match the authoritative HASHI conversation.",
             )
+
+    def ensure_accounting_session(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        agent_id: str,
+        owner_id: str,
+        hashi_conversation_id: str,
+        context_generation: int,
+        workzone_identity: str,
+    ) -> dict[str, Any]:
+        """Durably bind maintenance usage before the first HER Turn exists.
+
+        Context compaction may legitimately run before Fixed transport is
+        materialised.  The accounting shell supplies the foreign-key anchor
+        required by ``her_provider_requests`` without pretending that a Turn
+        or PCM snapshot has already been accepted.  ``open_session`` promotes
+        this same row atomically and preserves any maintenance usage.
+        """
+
+        now = _utc_now()
+        empty_pcm: dict[str, Any] = {}
+        empty_resource_map: dict[str, Any] = {}
+        empty_resources = {
+            "attachments": [],
+            "digest": _digest(empty_resource_map),
+        }
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM her_sessions WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+            if existing is not None:
+                self._assert_binding(
+                    existing,
+                    instance_id=instance_id,
+                    agent_id=agent_id,
+                    owner_id=owner_id,
+                    hashi_conversation_id=hashi_conversation_id,
+                    context_generation=context_generation,
+                    workzone_identity=workzone_identity,
+                )
+                if str(existing["status"]) not in {"accounting", "open"}:
+                    raise HerSessionStoreError(
+                        "closed_session",
+                        "Maintenance usage cannot be attached to a closed HER Session.",
+                    )
+                return self._session_dict(existing) or {}
+
+            connection.execute(
+                """
+                INSERT INTO her_sessions(
+                    session_id, schema_version, instance_id, agent_id, owner_id,
+                    hashi_conversation_id,
+                    context_generation, workzone_identity, epoch,
+                    state_version, canonical_sequence, pcm_revision,
+                    resource_revision, pcm_digest, resource_digest,
+                    pcm_json, resources_json, status,
+                    last_turn_id, created_at, updated_at
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, ?, ?, ?, ?,
+                          'accounting', NULL, ?, ?)
+                """,
+                (
+                    str(session_id),
+                    str(instance_id).casefold(),
+                    str(agent_id).casefold(),
+                    str(owner_id),
+                    str(hashi_conversation_id),
+                    max(1, int(context_generation)),
+                    str(workzone_identity),
+                    _digest(empty_pcm),
+                    empty_resources["digest"],
+                    _json(empty_pcm),
+                    _json(empty_resources),
+                    now,
+                    now,
+                ),
+            )
+            self._next_event(
+                connection,
+                session_id=str(session_id),
+                event_id=f"{session_id}:accounting-bound",
+                kind="accounting_session_bound",
+                payload={"status": "accounting"},
+            )
+            row = connection.execute(
+                "SELECT * FROM her_sessions WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+            return self._session_dict(row) or {}
 
     @staticmethod
     def _next_event(
@@ -573,43 +716,77 @@ class HerSessionStore:
                         "turn": self._turn_dict(duplicate),
                         "duplicate": True,
                     }
-                raise HerSessionStoreError(
-                    "state_version_conflict",
-                    "HER session already exists; append or resume it instead of reopening.",
+                if str(existing["status"]) != "accounting":
+                    raise HerSessionStoreError(
+                        "state_version_conflict",
+                        "HER session already exists; append or resume it instead of reopening.",
+                    )
+                turn_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM her_turns WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()[0]
                 )
-
-            connection.execute(
-                """
-                INSERT INTO her_sessions(
-                    session_id, schema_version, instance_id, agent_id, owner_id,
-                    hashi_conversation_id,
-                    context_generation, workzone_identity, epoch,
-                    state_version, canonical_sequence, pcm_revision,
-                    resource_revision, pcm_digest, resource_digest,
-                    pcm_json, resources_json, status,
-                    last_turn_id, created_at, updated_at
-                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    str(instance_id).casefold(),
-                    str(agent_id).casefold(),
-                    str(owner_id),
-                    hashi_conversation_id,
-                    int(context_generation),
-                    workzone_identity,
-                    int(epoch),
-                    int(pcm_revision),
-                    int(resource_revision),
-                    pcm_digest,
-                    resource_digest,
-                    _json(pcm_state),
-                    _json(resource_state),
-                    turn_id,
-                    now,
-                    now,
-                ),
-            )
+                if turn_count:
+                    raise HerSessionStoreError(
+                        "state_version_conflict",
+                        "HER accounting Session already contains a Turn and cannot be promoted.",
+                    )
+                connection.execute(
+                    """
+                    UPDATE her_sessions
+                    SET epoch = ?, state_version = 1, pcm_revision = ?,
+                        resource_revision = ?, pcm_digest = ?, resource_digest = ?,
+                        pcm_json = ?, resources_json = ?, status = 'open',
+                        last_turn_id = ?, updated_at = ?
+                    WHERE session_id = ? AND status = 'accounting'
+                    """,
+                    (
+                        int(epoch),
+                        int(pcm_revision),
+                        int(resource_revision),
+                        pcm_digest,
+                        resource_digest,
+                        _json(pcm_state),
+                        _json(resource_state),
+                        turn_id,
+                        now,
+                        session_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO her_sessions(
+                        session_id, schema_version, instance_id, agent_id, owner_id,
+                        hashi_conversation_id,
+                        context_generation, workzone_identity, epoch,
+                        state_version, canonical_sequence, pcm_revision,
+                        resource_revision, pcm_digest, resource_digest,
+                        pcm_json, resources_json, status,
+                        last_turn_id, created_at, updated_at
+                    ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        str(instance_id).casefold(),
+                        str(agent_id).casefold(),
+                        str(owner_id),
+                        hashi_conversation_id,
+                        int(context_generation),
+                        workzone_identity,
+                        int(epoch),
+                        int(pcm_revision),
+                        int(resource_revision),
+                        pcm_digest,
+                        resource_digest,
+                        _json(pcm_state),
+                        _json(resource_state),
+                        turn_id,
+                        now,
+                        now,
+                    ),
+                )
             connection.execute(
                 """
                 INSERT INTO her_turns(

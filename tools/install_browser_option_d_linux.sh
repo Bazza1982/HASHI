@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 host_name="${HASHI_BROWSER_BRIDGE_HOST_NAME:-com.hashi.browser_bridge.wsl}"
 extension_id="jdeaedmoejdapldleofeggedgenogpka"
-socket_path="${HASHI_BROWSER_BRIDGE_SOCKET:-/tmp/hashi-browser-bridge-wsl.sock}"
+socket_path="${HASHI_BROWSER_BRIDGE_SOCKET:-$(PYTHONPATH="$repo_root" python3 -c 'from tools.browser_bridge_transport import DEFAULT_UNIX_SOCKET; print(DEFAULT_UNIX_SOCKET)')}"
 
 install_root="${HASHI_BROWSER_BRIDGE_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/hashi/browser_bridge_wsl}"
 extension_install_dir="$install_root/extension"

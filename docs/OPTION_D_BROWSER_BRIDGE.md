@@ -43,7 +43,7 @@ The installer uses `.venv\Scripts\python.exe` when present, otherwise the `pytho
 From WSL for Windows Chrome (legacy WSL-backed transport):
 
 ```bash
-cd /home/lily/projects/hashi
+cd /path/to/HASHI
 bash tools/install_browser_option_d.sh
 ```
 
@@ -63,7 +63,7 @@ jdeaedmoejdapldleofeggedgenogpka
 For Linux Chrome running inside WSL/X11:
 
 ```bash
-cd /home/lily/projects/hashi
+cd /path/to/HASHI
 bash tools/install_browser_option_d_linux.sh
 ```
 

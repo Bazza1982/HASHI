@@ -32,11 +32,12 @@ import uvicorn
 # Add parent to path if running as script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from orchestrator.agent_move.package import AGENT_MOVE_CAPABILITY
 from orchestrator.remote_lifecycle import read_disabled_state
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from orchestrator.stable_port_allocator import (
-    PortAllocationError,
     SERVICE_HASHI_REMOTE,
+    PortAllocationError,
     StablePortAllocator,
 )
 from remote.api.server import create_app
@@ -44,14 +45,22 @@ from remote.live_endpoints import remove_live_endpoint, write_live_endpoint
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery, build_local_network_profile
 from remote.peer.registry import PeerRegistry
-from remote.port_selection import DEFAULT_PORT
 from remote.peer.tailscale import TailscaleDiscovery
-from remote.protocol_manager import ProtocolManager, PROTOCOL_VERSION, build_default_capabilities
-from remote.runtime_identity import remove_runtime_claim, validate_launch_context, write_runtime_claim
+from remote.port_selection import DEFAULT_PORT
+from remote.protocol_manager import (
+    PROTOCOL_VERSION,
+    ProtocolManager,
+    build_default_capabilities,
+)
+from remote.runtime_identity import (
+    remove_runtime_claim,
+    validate_launch_context,
+    write_runtime_claim,
+)
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import load_shared_token
 from remote.security.tls import load_or_generate_cert
-from remote.terminal.executor import TerminalExecutor, AuthLevel
+from remote.terminal.executor import AuthLevel, TerminalExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -73,18 +82,28 @@ def _load_remote_config(hashi_root: Path) -> dict:
             continue
         if ":" not in line or not current:
             continue
-        key, value = [part.strip() for part in line.split(":", 1)]
-        value = value.strip("\"'")
+        key, raw_value = [part.strip() for part in line.split(":", 1)]
+        quoted = (
+            len(raw_value) >= 2
+            and raw_value[0] in {"\"", "'"}
+            and raw_value[-1] == raw_value[0]
+        )
+        value = raw_value[1:-1] if quoted else raw_value
         target = {"server": server, "security": security, "discovery": discovery}.get(current)
         if target is None:
             continue
-        if value.lower() in {"true", "false"}:
-            target[key] = value.lower() == "true"
-        else:
+        normalized_value = value.lower()
+        if not quoted and normalized_value in {"null", "none", "~"}:
+            target[key] = None
+        elif not quoted and normalized_value in {"true", "false"}:
+            target[key] = normalized_value == "true"
+        elif not quoted:
             try:
                 target[key] = int(value)
             except ValueError:
                 target[key] = value
+        else:
+            target[key] = value
     return {"server": server, "security": security, "discovery": discovery}
 
 
@@ -208,6 +227,8 @@ class HashiRemoteApplication:
         port: int = DEFAULT_PORT,
         use_tls: bool = True,
         lan_mode: bool = False,
+        pairing_auto_approve: bool | None = None,
+        pairing_token_ttl_seconds: int | None = None,
         max_terminal_level: str = "L2_WRITE",
         discovery_backend: str = "lan",
         supervised: bool = False,
@@ -223,6 +244,10 @@ class HashiRemoteApplication:
         self._port = port
         self._use_tls = use_tls
         self._lan_mode = lan_mode
+        self._pairing_auto_approve = (
+            lan_mode if pairing_auto_approve is None else bool(pairing_auto_approve)
+        )
+        self._pairing_token_ttl_seconds = pairing_token_ttl_seconds
         self._max_terminal_level = AuthLevel[max_terminal_level]
         self._discovery_backend = discovery_backend
         self._supervised = supervised
@@ -312,6 +337,18 @@ class HashiRemoteApplication:
         logger.info("  Platform : %s", instance_info["platform"])
         logger.info("  Peer port: %d  |  Backend API: %d", self._port, workbench_port)
         logger.info("  LAN mode : %s", "on" if self._lan_mode else "off")
+        logger.info(
+            "  Pairing  : %s",
+            "one-click" if self._pairing_auto_approve else "approval-required",
+        )
+        logger.info(
+            "  Pair TTL : %s",
+            (
+                f"{self._pairing_token_ttl_seconds}s"
+                if self._pairing_token_ttl_seconds is not None
+                else "unlimited"
+            ),
+        )
         logger.info("  Discovery: %s", self._discovery_backend)
         shared_token = load_shared_token(self._hashi_root)
         logger.info("  Auth     : %s", "shared-token" if shared_token else "discovery-only")
@@ -322,7 +359,11 @@ class HashiRemoteApplication:
             logger.warning("Legacy LAN mode is enabled; pairing-auth endpoints remain permissive on trusted LANs")
 
         # Components
-        pairing_manager = PairingManager(lan_mode=self._lan_mode)
+        pairing_manager = PairingManager(
+            lan_mode=self._lan_mode,
+            token_ttl_seconds=self._pairing_token_ttl_seconds,
+            auto_approve=self._pairing_auto_approve,
+        )
         terminal_executor = TerminalExecutor(
             lan_mode=self._lan_mode,
             max_allowed_level=self._max_terminal_level,
@@ -330,7 +371,11 @@ class HashiRemoteApplication:
         local_capabilities = build_default_capabilities(
             rescue_start_enabled=terminal_executor.allows_level(AuthLevel.L3_RESTART)
         )
-        for capability in ("file_transfer_hmac_v1", "message_attachments_v1"):
+        for capability in (
+            "file_transfer_hmac_v1",
+            "message_attachments_v1",
+            AGENT_MOVE_CAPABILITY,
+        ):
             if capability not in local_capabilities:
                 local_capabilities.append(capability)
         instance_info["remote_supervisor"] = {
@@ -530,6 +575,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-tls", action="store_true", help="Disable TLS (dev/debug only)")
     parser.add_argument("--no-lan-mode", action="store_true",
                         help="Require token auth even on LAN (for internet deployments)")
+    parser.add_argument(
+        "--pairing-token-ttl-seconds",
+        type=int,
+        default=None,
+        help="Expire bearer pairing tokens after this many seconds; omitted means unlimited",
+    )
+    parser.add_argument(
+        "--pairing-auto-approve",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Approve pairing requests immediately while still requiring the issued token",
+    )
     parser.add_argument("--discovery", choices=["lan", "tailscale", "both"], default=None,
                         help="Peer discovery backend")
     parser.add_argument("--max-terminal-level", default=None,
@@ -618,6 +675,18 @@ def main() -> int:
         )
     use_tls = not args.no_tls if args.no_tls else server_cfg.get("use_tls", True)
     lan_mode = not args.no_lan_mode if args.no_lan_mode else security_cfg.get("lan_mode", False)
+    pairing_auto_approve = (
+        args.pairing_auto_approve
+        if args.pairing_auto_approve is not None
+        else security_cfg.get("pairing_auto_approve")
+    )
+    pairing_token_ttl_seconds = (
+        args.pairing_token_ttl_seconds
+        if args.pairing_token_ttl_seconds is not None
+        else security_cfg.get("pairing_token_ttl_seconds")
+    )
+    if pairing_token_ttl_seconds is not None:
+        pairing_token_ttl_seconds = int(pairing_token_ttl_seconds)
     discovery_backend = args.discovery or os.getenv("HASHI_REMOTE_DISCOVERY") or discovery_cfg.get("backend", "lan")
     max_terminal_level = args.max_terminal_level or security_cfg.get("max_terminal_level", "L2_WRITE")
     supervised = args.supervised or os.getenv("HASHI_REMOTE_SUPERVISED", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -628,6 +697,8 @@ def main() -> int:
         port=port,
         use_tls=use_tls,
         lan_mode=lan_mode,
+        pairing_auto_approve=pairing_auto_approve,
+        pairing_token_ttl_seconds=pairing_token_ttl_seconds,
         max_terminal_level=max_terminal_level,
         discovery_backend=discovery_backend,
         supervised=supervised,

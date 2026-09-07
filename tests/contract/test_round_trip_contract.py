@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
-from nagare.engine.runner import FlowRunner
-from nagare.yaml.codec import load_workflow_document, load_workflow_file, validate_workflow_graph
+import pytest
+from yaml.constructor import ConstructorError
 
+from nagare.engine.runner import FlowRunner
+from nagare.yaml.codec import (
+    load_workflow_document,
+    load_workflow_file,
+    validate_workflow_graph,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_DIR = ROOT / "tests" / "fixtures"
 MANIFEST_PATH = FIXTURES_DIR / "manifest.json"
-RUNS_ROOT = ROOT / "flow" / "runs"
 
 
 def load_manifest() -> dict:
@@ -22,7 +26,7 @@ def test_fixture_manifest_references_existing_files() -> None:
     manifest = load_manifest()
 
     assert manifest["version"] == 1
-    assert manifest["fixtures"], "Phase 0 requires a non-empty fixture corpus."
+    assert manifest["fixtures"], "The preservation contract requires a non-empty fixture corpus."
 
     for fixture in manifest["fixtures"]:
         fixture_path = ROOT / fixture["path"]
@@ -30,6 +34,8 @@ def test_fixture_manifest_references_existing_files() -> None:
         assert fixture_path.read_text(encoding="utf-8").strip(), (
             f"Fixture is empty: {fixture['path']}"
         )
+        source_path = ROOT / fixture["source"]
+        assert source_path.exists(), f"Missing fixture source: {fixture['source']}"
 
 
 def test_round_trip_must_preserve_unknown_fields_and_editor_metadata() -> None:
@@ -41,7 +47,7 @@ def test_round_trip_must_preserve_unknown_fields_and_editor_metadata() -> None:
     assert "x-worker-extension:" in exported
     assert "x-step-note:" in exported
     assert "x-nagare-viz:" in exported
-    assert "Phase 0 fixture: explicit round-trip preservation coverage." in exported
+    assert "Preservation fixture: explicit round-trip coverage" in exported
     assert exported == source
     assert document.compatibility_class == "B"
     assert {warning.code for warning in document.warnings} >= {
@@ -65,7 +71,7 @@ def test_editor_metadata_update_preserves_unknown_fields_and_comments() -> None:
         }
     )
 
-    assert "Phase 0 fixture: explicit round-trip preservation coverage." in exported
+    assert "Preservation fixture: explicit round-trip coverage" in exported
     assert "x-team-note:" in exported
     assert "x-worker-extension:" in exported
     assert "x-step-note:" in exported
@@ -73,7 +79,7 @@ def test_editor_metadata_update_preserves_unknown_fields_and_comments() -> None:
     reloaded = load_workflow_document(exported)
     assert reloaded.data["x-nagare-viz"]["nodes"]["draft"]["position"] == {"x": 360, "y": 240}
     assert reloaded.data["x-nagare-viz"]["nodes"]["review"]["position"] == {"x": 600, "y": 240}
-    assert reloaded.data["x-team-note"]["ticket"] == "PHASE0-RT-001"
+    assert reloaded.data["x-team-note"]["ticket"] == "ROUNDTRIP-001"
 
 
 def test_legacy_fixture_is_downgraded_to_raw_yaml_mode() -> None:
@@ -82,6 +88,23 @@ def test_legacy_fixture_is_downgraded_to_raw_yaml_mode() -> None:
     assert document.compatibility_class == "C"
     assert "legacy-dialect" in {warning.code for warning in document.warnings}
     assert document.export() == document.source
+
+
+def test_workflow_loader_rejects_duplicate_yaml_keys_instead_of_overwriting() -> None:
+    source = """
+workflow:
+  id: duplicate-key
+  name: First name
+  name: Silently overwritten name
+  version: 1.0.0
+agents:
+  orchestrator:
+    id: orchestrator
+steps: []
+"""
+
+    with pytest.raises(ConstructorError, match="duplicate key 'name'"):
+        load_workflow_document(source)
 
 
 def test_dag_validator_detects_cycles_missing_references_and_duplicates() -> None:
@@ -113,14 +136,13 @@ class FixtureStepHandler:
         agent_id: str,
         task_message: dict,
         agent_md_path: str,
-        timeout_seconds: int = 600,
         backend: str = "claude-cli",
         model: str = "",
     ) -> dict:
         step_id = task_message["payload"]["step_id"]
         if step_id == "step_write":
             output_path = self.tmp_path / "output.txt"
-            output_path.write_text("phase 4 export check", encoding="utf-8")
+            output_path.write_text("round-trip export check", encoding="utf-8")
             return {
                 "status": "completed",
                 "artifacts_produced": {"quote": str(output_path)},
@@ -128,7 +150,7 @@ class FixtureStepHandler:
             }
 
         review_path = self.tmp_path / "review.txt"
-        review_path.write_text("phase 4 review", encoding="utf-8")
+        review_path.write_text("round-trip review", encoding="utf-8")
         return {
             "status": "completed",
             "artifacts_produced": {"review": str(review_path)},
@@ -139,7 +161,7 @@ class FixtureStepHandler:
 def test_exported_yaml_still_executes_in_engine(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(ROOT)
     run_id = "run-contract-round-trip-export"
-    shutil.rmtree(RUNS_ROOT / run_id, ignore_errors=True)
+    runs_root = tmp_path / "runs"
 
     source = (FIXTURES_DIR / "smoke_test.yaml").read_text(encoding="utf-8")
     document = load_workflow_document(source, workflow_path=FIXTURES_DIR / "smoke_test.yaml")
@@ -158,7 +180,7 @@ def test_exported_yaml_still_executes_in_engine(tmp_path, monkeypatch) -> None:
     runner = FlowRunner(
         str(exported_path),
         run_id=run_id,
-        runs_root=RUNS_ROOT,
+        runs_root=runs_root,
         repo_root=ROOT,
         step_handler=FixtureStepHandler(tmp_path),
     )

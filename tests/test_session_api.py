@@ -39,6 +39,7 @@ class _Runtime:
     def __init__(self):
         self.server = None
         self.last_request_metadata = None
+        self.api_request_metadata = []
         self._safevoice_enabled = False
         self._native_voice_transcripts = {}
         self.voice_manager = SimpleNamespace(
@@ -89,8 +90,26 @@ class _Runtime:
         )
         return accepted.request_id
 
+    async def enqueue_api_text(
+        self,
+        _text,
+        source="api",
+        *,
+        deliver_to_telegram=True,
+        request_metadata,
+        idempotency_key=None,
+    ):
+        del source
+        del idempotency_key
+        assert deliver_to_telegram is False
+        self.api_request_metadata.append(dict(request_metadata))
+        return f"req-api-{len(self.api_request_metadata)}"
 
-def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _Runtime]:
+def _server(
+    tmp_path: Path,
+    *,
+    reconcile_session_runs: bool = True,
+) -> tuple[WorkbenchApiServer, _Runtime]:
     config_path = tmp_path / "agents.json"
     config_path.write_text(
         json.dumps({"global": {}, "agents": [{"name": "lily"}]}),
@@ -109,6 +128,7 @@ def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _Runtime]:
             deployment_profile="personal",
         ),
         runtimes=[runtime],
+        reconcile_session_runs=reconcile_session_runs,
     )
     runtime.server = server
     return server, runtime
@@ -151,6 +171,88 @@ async def test_qualified_capability_is_client_neutral_and_limit_driven(
     )
 
 
+@pytest.mark.asyncio
+async def test_tui_and_workbench_legacy_chat_share_default_conversation_binding(
+    tmp_path,
+):
+    server, runtime = _server(tmp_path)
+    tui_request = _Request({"agent": "lily", "text": "from TUI"})
+    tui_request.content_type = "application/json"
+    workbench_request = _Request(
+        {
+            "agent": "lily",
+            "text": "from Workbench",
+            "source": "workbench_ui_chat",
+            "client_session_id": "workbench:lily",
+            "reply_target": {
+                "type": "ui_chat",
+                "surface": "workbench",
+                "conversation_id": "workbench:lily",
+            },
+        }
+    )
+    workbench_request.content_type = "application/json"
+
+    assert (await server.handle_chat(tui_request)).status == 200
+    assert (await server.handle_chat(workbench_request)).status == 200
+
+    assert runtime.api_request_metadata == [
+        {
+            "session_id": None,
+            "owner_id": "user:7",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+        },
+        {
+            "session_id": None,
+            "owner_id": "user:7",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tui_legacy_transcript_reads_shared_canonical_session(tmp_path):
+    server, runtime = _server(tmp_path)
+    session = server.session_store.resolve_session(
+        owner_id="user:7",
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+    )
+    transcript_path = (
+        server.session_store.session_workspace(
+            session["session_id"], session["context_generation"]
+        )
+        / "transcript.jsonl"
+    )
+    transcript_path.write_text(
+        json.dumps({"role": "user", "text": "ping", "source": "api"})
+        + "\n"
+        + json.dumps({"role": "assistant", "text": "pong", "source": "api"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    legacy_path = tmp_path / "legacy-transcript.jsonl"
+    legacy_path.write_text(
+        json.dumps({"role": "assistant", "text": "stale"}) + "\n",
+        encoding="utf-8",
+    )
+    runtime.transcript_log_path = legacy_path
+
+    response = await server.handle_transcript_recent(
+        _Request(match_info={"name": "lily"})
+    )
+    payload = json.loads(response.text)
+
+    assert [message["text"] for message in payload["messages"]] == [
+        "ping",
+        "pong",
+    ]
+
+
 def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
     server, _runtime = _server(tmp_path)
     session = server.session_store.ensure_default_session(
@@ -177,6 +279,32 @@ def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
     assert [row["run_id"] for row in restarted.reconciled_session_runs] == [
         accepted.run_id
     ]
+
+
+def test_workbench_service_refresh_preserves_runs_owned_by_live_workers(tmp_path):
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.ensure_default_session(
+        owner_id="user:7", agent_id="lily"
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="req-live-during-service-refresh",
+        text="still executing in a live Function Worker",
+        source="test",
+        idempotency_key="live-during-service-refresh",
+    )
+    server.session_store.mark_request_running(
+        accepted.request_id,
+        worker_id="function-worker-live",
+    )
+
+    refreshed, _runtime = _server(tmp_path, reconcile_session_runs=False)
+
+    run = refreshed.session_store.get_run(accepted.run_id, owner_id="user:7")
+    assert run["state"] == "running"
+    assert refreshed.reconciled_session_runs == []
 
 
 @pytest.mark.asyncio

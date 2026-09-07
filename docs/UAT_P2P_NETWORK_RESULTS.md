@@ -40,7 +40,7 @@ Full round-trip confirmed: `INTEL -> HASHI1 -> HASHI2 -> INTEL`
 | Test ID | Direction | Timestamp | Result |
 |---------|-----------|-----------|--------|
 | UAT 2146 | HASHI2 -> INTEL | 21:46 | PASS |
-| UAT ACK | INTEL -> HASHI2 (reply) | 21:48 | PASS (Remote fallback, 192.168.0.211:8767) |
+| UAT ACK | INTEL -> HASHI2 (reply) | 21:48 | PASS (Remote fallback, 192.168.50.21:8767) |
 | UAT 2151 | INTEL -> HASHI2 | 21:51 | PASS |
 
 ---
@@ -61,6 +61,6 @@ Full round-trip confirmed: `INTEL -> HASHI1 -> HASHI2 -> INTEL`
 - Cross-LAN + cross-instance + central exchange relay: **fully operational**
 - Daytime and evening sessions both passed: **persistently online, not intermittent**
 - Bidirectional ACK evidence obtained for all legs
-- Remote fallback (192.168.0.211:8767) also confirmed functional
+- Remote fallback (192.168.50.21:8767) also confirmed functional
 
 **Verdict: PASS — network ready for production use**

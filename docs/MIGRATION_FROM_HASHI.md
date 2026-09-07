@@ -1,33 +1,73 @@
-# Migration From HASHI
+# Migrating Between HASHI Flow Imports and Nagare
 
-Phase 3 establishes HASHI as a host application around the extracted `nagare` core instead of keeping HASHI-specific behavior inside the engine package.
+Nagare is the reusable workflow core. HASHI remains the host that supplies HChat delivery, worker
+routing, and post-run evaluation. Compatibility imports are retained so existing HASHI code can
+migrate without a flag day.
 
-## Current boundary
+## Current Boundary
 
-- `nagare.engine.runner.FlowRunner` owns workflow loading, DAG execution, state persistence, artifact registration, and the stable event stream.
-- `flow.adapters.hashi.HASHIStepHandler` owns HASHI worker dispatch and emits adapter-scoped events before and after each worker invocation.
-- `flow.adapters.hashi.HChatNotifier` owns HChat delivery and logs notification attempts with the same run-scoped correlation metadata.
-- `flow.adapters.hashi.HASHIEvaluator` owns the optional HASHI evaluator hook and keeps it outside `nagare-core`.
-- `flow.engine.flow_runner.FlowRunner` is now a compatibility wrapper that binds those adapters to the core runner.
+| Responsibility | Current owner |
+|---|---|
+| YAML loading and validation | `nagare.yaml` and `nagare.engine.FlowRunner` |
+| DAG execution, state, artifacts, signals | `nagare.engine` |
+| Subprocess and callable execution | `nagare.handlers` |
+| Stable run events | `nagare.logging` |
+| HChat, HASHI routing, HASHI evaluator | `flow.adapters.hashi` |
+| Legacy import compatibility | `flow.engine` |
 
-## Maintainer expectations
+`flow.engine.flow_runner.FlowRunner` wraps the core runner with HASHI adapters.
+`flow.engine.task_state` and `flow.engine.worker_dispatcher` remain compatibility imports.
+New reusable engine behavior belongs under `nagare/`; new HASHI-specific integration belongs under
+`flow/adapters/`.
 
-- New HASHI-specific integrations should be added in `flow.adapters`, not inside `nagare/`.
-- Changes to worker dispatch, notification semantics, or evaluator behavior should preserve the Phase 1 event contract in [`docs/LOGGING.md`](/home/lily/projects/hashi/docs/LOGGING.md).
-- Compatibility work should be verified through the HASHI wrapper path, not only by instantiating `nagare.engine.runner.FlowRunner` directly.
-- When adding host-specific dependencies, keep the protocol boundary narrow enough that `nagare-core` can still run without importing HASHI modules.
+## Import Migration
 
-## Verification target
+Reusable code should prefer:
 
-Phase 3 is considered healthy when representative workflows still execute through `flow.engine.flow_runner.FlowRunner`, the adapter events appear in `flow/runs/{run_id}/events.jsonl`, and the run can still be inspected through the existing HASHI CLI.
+```python
+from nagare.engine.runner import FlowRunner
+from nagare.engine.state import TaskState
+from nagare.handlers import RoutingStepHandler
+```
 
-## Install and development note
+HASHI-hosted callers that require HChat or the HASHI evaluator should continue to use:
 
-Phase 8 keeps Nagare in the HASHI monorepo while making the extracted package path usable:
+```python
+from flow.engine.flow_runner import FlowRunner
+```
 
-- Python package entrypoint: `nagare`
-- Editor app: [`nagare-viz/`](/home/lily/projects/hashi/nagare-viz)
-- Core install path: `pip install .`
-- Core smoke command: `python -m nagare.cli --help`
+Do not import HASHI modules from inside `nagare`. A publication contract scans the package AST and
+rejects dependencies on `flow`, `hashi`, or `tools`.
 
-This is release-ready inside the monorepo, but it is not yet a separately published `nagare-core` distribution with its own repository lifecycle.
+## Behavioral Differences to Account For
+
+- Workflow definitions are validated at load time and reject duplicate YAML keys, unsafe IDs,
+  invalid DAGs, unsupported backends, artifact-contract errors, and retired runtime fields.
+- CLI worker `model` is optional. Omitting it delegates model selection to the installed CLI.
+- Subprocess artifacts must be relative to the run-scoped worker workspace.
+- Free-form top-level `success_criteria` and `output` are host-facing metadata. Required artifacts
+  and supported automatic quality gates enforce core completion.
+- `nagare resume` clears a pause signal for a live process. It does not reconstruct a dead run.
+- Evaluation is an injected protocol; standalone Nagare does not advertise an evaluator CLI.
+
+## Package and Data Boundary
+
+The Python wheel/sdist contains the Nagare package and required Flow assets only. Run directories,
+callable deliveries, evaluator scores, improvement proposals, candidate history, private skills,
+operator configuration, and Workbench data are excluded.
+
+The editor is a separate npm workspace. Its source is published; generated TypeScript/Vite output,
+dependencies, coverage, and local caches are not.
+
+## Verification
+
+Before removing a compatibility import, verify both paths:
+
+```bash
+python -m pytest -q tests/contract/test_nagare_core_contract.py
+python -m pytest -q tests/contract/test_hashi_adapter_contract.py
+python -m nagare.cli --help
+```
+
+The migration is complete for a caller only when it does not rely on HASHI notification or
+evaluation side effects. Compatibility modules remain supported for host callers.

@@ -10,7 +10,6 @@ import pytest
 from tools.enterprise_k8s_ha_rehearsal_plan import main as ha_plan_main
 from tools.enterprise_production_validation_plan import main as production_plan_main
 
-
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.contract
 

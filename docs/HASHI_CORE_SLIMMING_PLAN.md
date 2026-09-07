@@ -1,6 +1,9 @@
 # HASHI v3.2 Core Slimming Plan
 
-Status: accepted for `v3.2.0` on 2026-05-02. See the implementation status and validation record at the end of this document.
+Status: historical `v3.2.0` migration record, accepted on 2026-05-02. Its
+in-place reload design was superseded on HASHI3 by
+`HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`; do not use the steps below as the
+current `/reboot` contract.
 
 ## Goal
 
@@ -21,13 +24,16 @@ All frequently changed behavior should move into hot-reloadable modules under `o
 
 `main.py` is currently about 1570 lines and contains both process bootstrap and feature logic.
 
-The `/reboot` hot reload path currently reloads project modules such as:
+The historical `/reboot` path reloaded project modules such as:
 
 ```python
 ("adapters.", "orchestrator.")
 ```
 
-Logic that remains inside `main.py` is not hot-reloaded. This means changes to agent lifecycle, reboot behavior, service startup, WhatsApp control, config administration, and other logic still require restarting the whole `main.py` process.
+The current HASHI3 path stages an isolated candidate and fresh module objects;
+it never applies `importlib.reload()` to a live module. Protected Core changes
+are planned Core migrations, while function changes use transactional
+generations.
 
 ## Desired Final Shape
 

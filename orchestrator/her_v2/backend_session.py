@@ -184,7 +184,7 @@ class HerBackendSessionCoordinator:
         turn_id = str(request_id)
         resolved_message_id = str(message_id or request_id)
         idempotency_key = f"{session_id}:{resolved_message_id}"
-        if current is None:
+        if current is None or str(current.get("status") or "") == "accounting":
             payload = {
                 "protocol": HER_FIXED_PROTOCOL,
                 "operation": "open_session",

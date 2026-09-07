@@ -11,9 +11,11 @@ local_doc/
 __pycache__/
 *.pyc
 .venv/
+.venv-wsl/
 
 # Runtime state
 *.lock
+!constraints/standard-py312.lock
 *.pid
 .claw/
 .bridge_u_f.lock
@@ -73,6 +75,9 @@ workspaces/*/bridge-u-root/
 workspaces/*/skill_state.json
 
 state/
+
+# Retired embedded Workbench. The supported successor frontend is external.
+/workbench/
 
 # Temp and stress test artifacts
 .tmp_*/
@@ -137,7 +142,6 @@ tickets/
 
 # Flow — runtime output and private project content
 flow/runs/
-flow/workflows/library/
 flow/agents/translator/
 flow/agents/reviewer/
 flow/_trigger_logs/
@@ -156,6 +160,7 @@ dist/
 *.spec
 *.egg-info/
 *.tsbuildinfo
+nagare-viz/.tsbuild/
 
 contacts.json
 docs/local_minato.md
@@ -195,3 +200,16 @@ exp/barry/aonsw_data_analysis/
 # Local Remote/HChat health-check action (machine-specific configuration and bytecode)
 /skills/remote_guard/
 /skills/remote-guard/
+
+# Instance-local operator Skills. These can remain installed in a working
+# checkout, but must not enter the shared source or release artifacts.
+/skills/agent-audit/
+/skills/hermes-memory-import/
+/skills/library-pick/
+/skills/memory-consolidation/
+
+# EXP is context-specific to an owner, machine, and evidence history. Keep
+# local owner directories out of the shared product tree; only deliberately
+# sanitized examples may be published.
+/exp/*/
+!/exp/examples/

@@ -1,0 +1,8 @@
+# Reviewed 2026-09-06: public xAI OAuth client identifier, not a credential.
+adapters/xai_oauth_credentials.py:generic-api-key:20
+
+# Reviewed 2026-09-06: deliberately inert unit-test shared-token value.
+tests/test_remote_rescue_tool.py:generic-api-key:152
+
+# Reviewed 2026-09-06: Chrome Manifest V3 public key used for a stable extension ID.
+tools/chrome_extension/hashi_browser_bridge_recovery/manifest.json:generic-api-key:6

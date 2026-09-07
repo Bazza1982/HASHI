@@ -16,6 +16,7 @@ from nagare.api.models import (
 from nagare.engine.artifacts import ArtifactStore
 from nagare.engine.state import TaskState
 from nagare.logging.events import RunEventLogger, utc_now
+from nagare.paths import validate_path_component
 
 
 class RunNotFoundError(FileNotFoundError):
@@ -30,6 +31,7 @@ class RunSnapshotService:
         return f"api-{uuid.uuid4()}"
 
     def get_run_snapshot(self, run_id: str, *, request_id: str | None = None) -> dict[str, Any]:
+        run_id = validate_path_component(run_id, label="run_id")
         started_at = time.perf_counter()
         request_id = request_id or self.new_request_id()
         retrieved_at = utc_now()
@@ -69,14 +71,17 @@ class RunSnapshotService:
         request_id: str | None = None,
         limit: int | None = None,
     ) -> dict[str, Any]:
+        run_id = validate_path_component(run_id, label="run_id")
         started_at = time.perf_counter()
         request_id = request_id or self.new_request_id()
         retrieved_at = utc_now()
         self._ensure_run_exists(run_id)
         events_path = self.runs_root / run_id / "events.jsonl"
         events = self._read_jsonl(events_path)
-        if limit is not None and limit >= 0:
-            events = events[-limit:]
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("limit must be zero or greater")
+            events = [] if limit == 0 else events[-limit:]
         response = envelope(
             request_id=request_id,
             retrieved_at=retrieved_at,
@@ -92,6 +97,7 @@ class RunSnapshotService:
         return response
 
     def get_run_artifacts(self, run_id: str, *, request_id: str | None = None) -> dict[str, Any]:
+        run_id = validate_path_component(run_id, label="run_id")
         started_at = time.perf_counter()
         request_id = request_id or self.new_request_id()
         retrieved_at = utc_now()

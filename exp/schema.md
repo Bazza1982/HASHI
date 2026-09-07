@@ -14,7 +14,7 @@ Each EXP domain must include:
 
 ```json
 {
-  "id": "barry/office_desktop",
+  "id": "sample-user/office_desktop",
   "type": "exp",
   "version": 1,
   "owner": "barry",

@@ -2,8 +2,10 @@
 Nagare RoutingStepHandler — routes steps to callable or subprocess handlers
 based on the `backend` field declared in the workflow.
 
-backend: callable  → CallableStepHandler (in-process Python function)
-everything else    → fallback_handler (SubprocessStepHandler by default)
+backend: callable             → CallableStepHandler (in-process Python function)
+declared subprocess backend   → fallback_handler (SubprocessStepHandler by default)
+
+The default subprocess handler rejects unsupported backend names.
 """
 
 from __future__ import annotations

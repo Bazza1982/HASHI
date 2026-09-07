@@ -1,0 +1,99 @@
+name: Windows runtime contract
+
+on:
+  push:
+    paths:
+      - "adapters/claude_cli.py"
+      - "adapters/codex_app_server.py"
+      - "adapters/codex_cli.py"
+      - "adapters/gemini_cli.py"
+      - "adapters/grok_cli.py"
+      - "adapters/her_v2_provider.py"
+      - "orchestrator/background_jobs.py"
+      - "orchestrator/canonical_audit.py"
+      - "orchestrator/config.py"
+      - "orchestrator/function_generation.py"
+      - "orchestrator/her_v2/**"
+      - "orchestrator/hot_reload.py"
+      - "orchestrator/process_resources.py"
+      - "orchestrator/process_execution.py"
+      - "orchestrator/reboot_manager.py"
+      - "orchestrator/runtime_contract.py"
+      - "orchestrator/runtime_pipeline.py"
+      - "orchestrator/workzone.py"
+      - "tools/builtins.py"
+      - "tools/her_verification.py"
+      - "tools/registry.py"
+      - "tools/schemas.py"
+      - "tests/test_process_execution.py"
+      - "tests/test_function_generation.py"
+      - "tests/test_runtime_contract.py"
+      - "constraints/standard-py312.lock"
+      - "pyproject.toml"
+      - ".github/workflows/windows-runtime-contract.yml"
+  pull_request:
+    paths:
+      - "adapters/claude_cli.py"
+      - "adapters/codex_app_server.py"
+      - "adapters/codex_cli.py"
+      - "adapters/gemini_cli.py"
+      - "adapters/grok_cli.py"
+      - "adapters/her_v2_provider.py"
+      - "orchestrator/background_jobs.py"
+      - "orchestrator/canonical_audit.py"
+      - "orchestrator/config.py"
+      - "orchestrator/function_generation.py"
+      - "orchestrator/her_v2/**"
+      - "orchestrator/hot_reload.py"
+      - "orchestrator/process_resources.py"
+      - "orchestrator/process_execution.py"
+      - "orchestrator/reboot_manager.py"
+      - "orchestrator/runtime_contract.py"
+      - "orchestrator/runtime_pipeline.py"
+      - "orchestrator/workzone.py"
+      - "tools/builtins.py"
+      - "tools/her_verification.py"
+      - "tools/registry.py"
+      - "tools/schemas.py"
+      - "tests/test_process_execution.py"
+      - "tests/test_function_generation.py"
+      - "tests/test_runtime_contract.py"
+      - "constraints/standard-py312.lock"
+      - "pyproject.toml"
+      - ".github/workflows/windows-runtime-contract.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12.13"]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Managed CPython also supplies Windows security-only patch releases
+      # that are absent from actions/python-versions.
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare the declared Python runtime
+        shell: bash
+        run: |
+          uv venv --seed --python "${{ matrix.python-version }}" .venv
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install runtime and test dependencies
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      - name: Verify native Windows audit, shell, path, argv, and process contracts
+        run: >-
+          python -m pytest -q
+          tests/test_runtime_contract.py
+          tests/test_function_generation.py
+          tests/test_process_execution.py
+          tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_record_many_uses_one_durable_commit_and_keeps_chain
+          tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_fails_fast_when_durable_store_is_unavailable
+          tests/test_runtime_pipeline.py::test_reasoning_stream_audit_batches_without_copying_raw_delta

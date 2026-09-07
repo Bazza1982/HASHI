@@ -22,7 +22,7 @@ def build_live_bundle(
     rollback_commit: str,
 ) -> dict[str, Any]:
     runbook = write_live_acceptance_runbook(root_dir, rollback_commit=rollback_commit)
-    probe_plan = write_live_probe_plan(root_dir, rollback_commit=rollback_commit)
+    write_live_probe_plan(root_dir, rollback_commit=rollback_commit)
     readiness = write_live_readiness_report(root_dir, repo_root=repo_root)
     probe_report = execute_live_probe_plan(root_dir, dry_run=True)
 

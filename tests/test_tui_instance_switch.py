@@ -117,3 +117,23 @@ async def test_failed_instance_switch_keeps_existing_connection(tmp_path):
         assert app.current_instance_id == "HASHI1"
         assert app.api is original_api
         assert app._connection_generation == 0
+
+
+def test_tui_keeps_code_root_separate_from_portable_state_root(tmp_path):
+    bridge_home = tmp_path / "data"
+    code_root = tmp_path / "app" / "hashi"
+    bridge_home.mkdir(parents=True)
+    code_root.mkdir(parents=True)
+    (bridge_home / "agents.json").write_text(
+        '{"global":{"instance_id":"HASHI-PORTABLE","workbench_port":18800},"agents":[]}',
+        encoding="utf-8",
+    )
+
+    app = _QuietTui(
+        bridge_home=bridge_home,
+        code_root=code_root,
+        launch_instance_id="HASHI-PORTABLE",
+    )
+
+    assert app.bridge_home == bridge_home.resolve()
+    assert app.code_root == code_root.resolve()

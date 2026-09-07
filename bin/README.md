@@ -53,19 +53,18 @@ bin\restart_bridge_u_f.bat           # Windows
 
 ### Manage Hashi Remote as a Side Program
 ```bash
-./bin/hashi-remote-ctl.sh install    # Linux/WSL systemd --user
-./bin/hashi-remote-ctl.sh start
+./bin/hashi-remote-ctl.sh enable     # Register, enable, and activate systemd --user
 ./bin/hashi-remote-ctl.sh status
 ```
 
 ```powershell
-.\bin\hashi_remote_ctl.ps1 install   # Windows Task Scheduler
-.\bin\hashi_remote_ctl.ps1 start
+.\bin\hashi_remote_ctl.ps1 enable    # Register, enable, and activate Task Scheduler
 .\bin\hashi_remote_ctl.ps1 status
 ```
 
-These helpers start Remote with `--supervised` so it can outlive the HASHI core
-process and support remote rescue workflows. The default supervisor identity is
+Hashi Remote is already included with HASHI. These helpers only register and
+enable its OS supervisor so Remote can outlive the HASHI core process and
+support remote rescue workflows. The default supervisor identity is
 derived from `global.instance_id`: for example, HASHI1 and HASHI2 use
 `hashi-remote-hashi1.service` and `hashi-remote-hashi2.service` on Linux/WSL,
 or `HashiRemote-hashi1` and `HashiRemote-hashi2` in Windows Task Scheduler.

@@ -147,7 +147,8 @@ Quality Control & Exception Management Lead — Responsible for executing QC che
 - **Reconciliation Failure**: Manual reconciliation review required (step 05 retry)
 - **Testing Gap**: Request additional procedures (steps 09-12 retry)
 - **Analytical Unexplained**: Request detailed management explanation (steps 14-17 retry)
-- **QC Rework**: Return prior step to executing agent with feedback (max 3 attempts)
+- **QC Rework**: Return prior step to the executing agent with evidence-based feedback;
+  stop only when the issue is explicitly unrecoverable or an authorized operator stops it
 
 ## Performance Metrics
 

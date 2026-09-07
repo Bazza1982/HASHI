@@ -115,6 +115,7 @@ async def test_media_read_required_ocr_fails_closed_when_models_are_missing(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
 async def test_media_read_rejects_extension_mismatch_and_symlink_escape(tmp_path):
     disguised = tmp_path / "not-really.png"
     disguised.write_bytes(b"%PDF-1.7\n")
@@ -227,6 +228,7 @@ def test_media_probe_rejects_nonfinite_duration(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
 async def test_audio_fallback_really_normalizes_before_transcription(tmp_path, monkeypatch):
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         pytest.skip("ffmpeg/ffprobe are unavailable")
@@ -260,6 +262,7 @@ async def test_audio_fallback_really_normalizes_before_transcription(tmp_path, m
 
 
 @pytest.mark.asyncio
+@pytest.mark.platform
 async def test_video_returns_deterministic_bounded_frames(tmp_path):
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         pytest.skip("ffmpeg/ffprobe are unavailable")

@@ -5,7 +5,6 @@ import contextlib
 import hashlib
 import json
 import logging
-import os
 import re
 import tempfile
 import time
@@ -21,6 +20,10 @@ from adapters.stream_events import (
     KIND_TEXT_DELTA,
     StreamCallback,
     StreamEvent,
+)
+from orchestrator.process_execution import (
+    process_group_kwargs,
+    resolve_argv_invocation,
 )
 
 _APP_SERVER_READ_LIMIT = 8 * 1024 * 1024
@@ -405,13 +408,11 @@ def _toml_key_segment(value: str) -> str:
 
 
 def disabled_mcp_override(server_name: str) -> str:
-    # Codex CLI config overrides replace an MCP table rather than deep-merging
-    # it. Supply a complete, inert transport so the replacement remains valid
-    # while carrying no configured endpoint, command, headers, or credentials.
+    # Disable the configured server without changing its transport.  A synthetic
+    # HTTP ``url`` is invalid when Codex combines the override with an existing
+    # stdio ``command`` (for example the built-in node_repl server).
     key = _toml_key_segment(server_name)
-    return (
-        f'mcp_servers.{key}={{url="http://127.0.0.1/",enabled=false}}'
-    )
+    return f"mcp_servers.{key}.enabled=false"
 
 
 class CodexAppServerToolBridge:
@@ -693,11 +694,13 @@ class CodexAppServerToolBridge:
             # Keep the existing scoped block, but defer directory deletion until
             # after app-server exits. Windows cannot remove a live process cwd.
             with contextlib.nullcontext(cwd_value) as cwd:
-                extra_kwargs: dict[str, Any] = {"limit": _APP_SERVER_READ_LIMIT}
-                if os.name != "nt":
-                    extra_kwargs["start_new_session"] = True
+                extra_kwargs: dict[str, Any] = {
+                    "limit": _APP_SERVER_READ_LIMIT,
+                    **process_group_kwargs(),
+                }
+                invocation = resolve_argv_invocation(self._command())
                 proc = await asyncio.create_subprocess_exec(
-                    *self._command(),
+                    *invocation.argv,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,

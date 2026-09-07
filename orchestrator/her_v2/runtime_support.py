@@ -36,6 +36,39 @@ if TYPE_CHECKING:
     from .runtime import _TurnState
 
 
+def _merged_stage_timings_s(state: _TurnState) -> dict[str, float]:
+    """Return per-stage wall time with overlapping invocations counted once."""
+
+    result: dict[str, float] = {}
+    raw_by_stage = getattr(state, "stage_timing_intervals", None)
+    if not isinstance(raw_by_stage, Mapping):
+        return result
+    for stage, raw_intervals in raw_by_stage.items():
+        intervals: list[tuple[float, float]] = []
+        for raw in raw_intervals if isinstance(raw_intervals, (list, tuple)) else ():
+            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+                continue
+            try:
+                started_at, completed_at = float(raw[0]), float(raw[1])
+            except (TypeError, ValueError):
+                continue
+            if completed_at < started_at:
+                continue
+            intervals.append((started_at, completed_at))
+        if not intervals:
+            continue
+        intervals.sort()
+        merged: list[list[float]] = []
+        for started_at, completed_at in intervals:
+            if not merged or started_at > merged[-1][1]:
+                merged.append([started_at, completed_at])
+            else:
+                merged[-1][1] = max(merged[-1][1], completed_at)
+        elapsed_s = sum(end - start for start, end in merged)
+        result[str(stage)] = round(max(0.0, elapsed_s), 3)
+    return result
+
+
 class RuntimeSupportMixin:
     async def _publish_activity(
         self,
@@ -661,6 +694,10 @@ class RuntimeSupportMixin:
                 "description": failure.human_description,
                 "attempts": failure.attempts,
                 "side_effects_possible": failure.side_effects_possible,
+                "http_status": failure.http_status,
+                "provider_request_id": failure.provider_request_id or None,
+                "retry_after_s": failure.retry_after_s,
+                "details": dict(failure.details),
             }
             if failure is not None
             else {}
@@ -706,6 +743,7 @@ class RuntimeSupportMixin:
                 else {}
             ),
             content=content,
+            stage_timings_s=_merged_stage_timings_s(state),
         )
 
 

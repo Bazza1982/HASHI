@@ -1,11 +1,13 @@
 from __future__ import annotations
+
+import importlib
 import json
 import logging
 import os
 import tempfile
-from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, Any, List
+from pathlib import Path
+from typing import Any
 
 from orchestrator.enterprise.profile import (
     parse_profile_context,
@@ -20,11 +22,9 @@ from orchestrator.pcm import (
     load_pcm_document,
     parse_pcm_text,
 )
-from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
-from orchestrator.flexible_backend_registry import (
-    canonical_backend_engine,
-    normalize_allowed_backends,
-    migrate_provider_only_active_backend,
+from orchestrator.runtime_defaults import (
+    DEFAULT_HASHI_REMOTE_PORT,
+    DEFAULT_WORKBENCH_PORT,
 )
 
 # Valid access_scope values:
@@ -43,10 +43,21 @@ LEGACY_PCM_CONFIG_BACKUP_SUFFIX = ".pre-pcm-migration.bak"
 config_logger = logging.getLogger("BridgeU.Config")
 
 
+def _backend_registry():
+    # The registry belongs to the active function generation. Core config code
+    # resolves it at call time instead of retaining a previous-generation
+    # module or function binding.
+    return importlib.import_module("orchestrator.flexible_backend_registry")
+
+
+def _is_wsl() -> bool:
+    return bool(importlib.import_module("orchestrator.process_execution").is_wsl())
+
+
 def default_agent_mode_for_backend(engine: str | None) -> str:
     """Return the product default while respecting backend capabilities."""
 
-    canonical = canonical_backend_engine(engine)
+    canonical = _backend_registry().canonical_backend_engine(engine)
     return (
         DEFAULT_AGENT_MODE
         if canonical in SESSION_MODE_BACKENDS
@@ -67,6 +78,28 @@ def resolve_access_root(scope: str, workspace_dir: Path, project_root: Path) -> 
     elif scope == "project":
         return project_root if project_root is not None else workspace_dir
     elif scope == "drive":
+        if _is_wsl():
+            # WSL's filesystem anchor is '/', not the mounted Windows drive.
+            # Prefer the drive containing the task/project and never turn a
+            # Windows "drive" grant into the whole Linux root filesystem.
+            for candidate in (workspace_dir, project_root):
+                if candidate is None:
+                    continue
+                resolved = Path(candidate).expanduser().resolve()
+                parts = resolved.parts
+                if (
+                    len(parts) >= 3
+                    and parts[0] == "/"
+                    and parts[1] == "mnt"
+                    and len(parts[2]) == 1
+                    and parts[2].isalpha()
+                ):
+                    return Path("/mnt") / parts[2].lower()
+            return (
+                Path(project_root).expanduser().resolve()
+                if project_root is not None
+                else Path(workspace_dir).expanduser().resolve()
+            )
         return Path(workspace_dir.anchor)
     # Safe fallback
     return workspace_dir
@@ -98,10 +131,10 @@ class GlobalConfig:
     hermes_home: str | None = None
     xai_api_base_url: str = "https://api.x.ai/v1"
     xai_use_responses_api: bool = False
-    xai_oauth: Dict[str, Any] = field(default_factory=dict)
+    xai_oauth: dict[str, Any] = field(default_factory=dict)
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
-    her_providers: Dict[str, Any] = field(default_factory=dict)
-    enterprise_auth_providers: List[Dict[str, Any]] = field(default_factory=list)
+    her_providers: dict[str, Any] = field(default_factory=dict)
+    enterprise_auth_providers: list[dict[str, Any]] = field(default_factory=list)
     enterprise_database_url: str | None = None
     enterprise_scheduler_lease_enabled: bool = False
     enterprise_scheduler_lease_backend: str = "db"
@@ -114,9 +147,9 @@ class GlobalConfig:
     enterprise_scheduler_lease_pool_enabled: bool = False
     enterprise_scheduler_lease_pool_min_size: int = 1
     enterprise_scheduler_lease_pool_max_size: int = 4
-    wiki_provider: Dict[str, Any] = field(default_factory=dict)
-    central_memory: Dict[str, Any] = field(default_factory=dict)
-    canonical_audit: Dict[str, Any] = field(default_factory=dict)
+    wiki_provider: dict[str, Any] = field(default_factory=dict)
+    central_memory: dict[str, Any] = field(default_factory=dict)
+    canonical_audit: dict[str, Any] = field(default_factory=dict)
     # Additive, fail-closed protocol gates.  Existing installations retain
     # their current text/STT/TTS behaviour until both are explicitly enabled.
     persistent_session_v1: bool = False
@@ -134,7 +167,7 @@ class AgentConfig:
     model: str
     is_active: bool
     access_scope: str = "project"
-    extra: Dict[str, Any] = None
+    extra: dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
 
     def resolve_access_root(self) -> Path:
@@ -152,13 +185,13 @@ class FlexibleAgentConfig:
     workspace_dir: Path
     system_md: Path
     telegram_token_key: str
-    allowed_backends: List[Dict[str, Any]]
+    allowed_backends: list[dict[str, Any]]
     active_backend: str
     is_active: bool = True
     type: str = "flex"
     default_mode: str = DEFAULT_AGENT_MODE
     access_scope: str = "project"
-    extra: Dict[str, Any] = None
+    extra: dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
 
     def resolve_access_root(self) -> Path:
@@ -191,7 +224,9 @@ class ConfigManager:
                 continue
             row = dict(original)
             name = str(row.get("name") or f"agent-{index}")
-            engine = canonical_backend_engine(row.pop("engine", None))
+            engine = _backend_registry().canonical_backend_engine(
+                row.pop("engine", None)
+            )
             if not engine:
                 raise ValueError(
                     f"Agent '{name}' uses legacy type='fixed' but has no engine to migrate."
@@ -305,8 +340,9 @@ class ConfigManager:
                     "global.canonical_audit.root must be outside every mutable "
                     f"Agent workspace; it is inside Agent '{name}'."
                 )
-            allowed = normalize_allowed_backends(row.get("allowed_backends"))
-            active = migrate_provider_only_active_backend(
+            registry = _backend_registry()
+            allowed = registry.normalize_allowed_backends(row.get("allowed_backends"))
+            active = registry.migrate_provider_only_active_backend(
                 row.get("active_backend"), allowed
             )
             if active == "claw-cli" or any(
@@ -731,8 +767,11 @@ class ConfigManager:
             system_md = canonical_agent_md(workspace_dir)
             load_pcm_document(system_md, workspace_dir=workspace_dir)
             telegram_token_key = a_raw.pop("telegram_token_key", name)
-            allowed_backends = normalize_allowed_backends(a_raw.pop("allowed_backends"))
-            active_backend = migrate_provider_only_active_backend(
+            registry = _backend_registry()
+            allowed_backends = registry.normalize_allowed_backends(
+                a_raw.pop("allowed_backends")
+            )
+            active_backend = registry.migrate_provider_only_active_backend(
                 a_raw.pop("active_backend"), allowed_backends
             )
             if active_backend == "claw-cli":

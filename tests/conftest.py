@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import inspect
+import os
 
 import pytest
+
+# Exercise python-telegram-bot's announced next-major RetryAfter type now. HASHI
+# accepts both numeric seconds and timedelta, so this keeps the suite on the
+# forward-compatible branch instead of emitting one deprecation per retry.
+os.environ.setdefault("PTB_TIMEDELTA", "1")
 
 
 @pytest.fixture(scope="session")

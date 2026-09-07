@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
@@ -408,13 +409,46 @@ class TurnControl:
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     reason: str = ""
     _active_tasks: set[asyncio.Task] = field(default_factory=set)
+    _thread_stop_event: threading.Event = field(
+        default_factory=threading.Event,
+        repr=False,
+    )
+    _thread_lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        repr=False,
+    )
+    _owner_loop: asyncio.AbstractEventLoop | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     @property
     def stopped(self) -> bool:
-        return self.stop_event.is_set()
+        return self._thread_stop_event.is_set() or self.stop_event.is_set()
 
     def stop(self, reason: str) -> None:
-        self.reason = str(reason or "USER_STOP")
+        """Request cancellation safely from either runtime or control thread."""
+
+        with self._thread_lock:
+            self.reason = str(reason or "USER_STOP")
+            self._thread_stop_event.set()
+            owner_loop = self._owner_loop
+        if owner_loop is None or not owner_loop.is_running():
+            return
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is owner_loop:
+            self._apply_stop()
+            return
+        try:
+            owner_loop.call_soon_threadsafe(self._apply_stop)
+        except RuntimeError:
+            return
+
+    def _apply_stop(self) -> None:
         self.stop_event.set()
         for task in tuple(self._active_tasks):
             task.cancel()
@@ -425,7 +459,12 @@ class TurnControl:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def run_cancellable(self, operation: Awaitable[StageResponse]) -> StageResponse:
+        loop = asyncio.get_running_loop()
+        with self._thread_lock:
+            self._owner_loop = loop
         if self.stopped:
+            if hasattr(operation, "close"):
+                operation.close()
             raise TurnStopped(self.reason)
         task = asyncio.create_task(operation)
         self._active_tasks.add(task)

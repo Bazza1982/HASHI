@@ -21,21 +21,19 @@ def _write_skill(
     )
 
 
-def test_repository_catalog_is_standard_and_keeps_high_autonomy_templates():
+def test_repository_catalog_contains_only_publishable_standard_templates():
     project_root = Path(__file__).resolve().parents[1]
     manager = SkillManager(project_root, project_root / "tasks.json")
 
     ids = {skill.id for skill in manager.list_skills()}
 
     assert {
-        "agent-audit",
         "claude",
         "codex",
         "debug",
         "gemini",
-        "hermes-memory-import",
-        "library-pick",
-        "memory-consolidation",
+        "inspect-images",
+        "memory-search",
         "msn",
         "ngr",
     } <= ids

@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from tools.browser_audit import append_audit_record, default_audit_path
 from tools.browser_bridge_transport import (
+    DEFAULT_UNIX_SOCKET,
     DEFAULT_WINDOWS_AUTH_FILE,
     DEFAULT_WINDOWS_PIPE,
     is_windows_pipe,
@@ -28,9 +29,7 @@ from tools.browser_bridge_transport import (
 HOST_NAME = "com.hashi.browser_bridge"
 HOST_VERSION = "0.1.0"
 EXPECTED_EXTENSION_ORIGIN = "chrome-extension://jdeaedmoejdapldleofeggedgenogpka/"
-DEFAULT_SOCKET_PATH = Path(
-    os.environ.get("HASHI_BROWSER_BRIDGE_SOCKET", "/tmp/hashi-browser-bridge.sock")
-)
+DEFAULT_SOCKET_PATH = DEFAULT_UNIX_SOCKET
 DEFAULT_ENDPOINT: str | Path = (
     os.environ.get("HASHI_BROWSER_BRIDGE_ENDPOINT")
     or os.environ.get("HASHI_BROWSER_BRIDGE_SOCKET")

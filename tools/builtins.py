@@ -7,12 +7,12 @@ All file operations are sandboxed to access_root.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import os
 import re
 import signal
-import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +21,12 @@ from urllib.parse import quote, urlencode
 
 import aiohttp
 
+from orchestrator.process_execution import (
+    decode_process_output,
+    process_group_kwargs,
+    resolve_shell_invocation,
+    terminate_windows_process_tree,
+)
 from tools.workbench_client import request_workbench_json, workbench_endpoint
 
 # ---------------------------------------------------------------------------
@@ -28,7 +34,11 @@ from tools.workbench_client import request_workbench_json, workbench_endpoint
 # ---------------------------------------------------------------------------
 
 def _access_roots(value: Path | Sequence[Path]) -> tuple[Path, ...]:
-    raw_roots = value if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Path)) else (value,)
+    raw_roots = (
+        value
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Path))
+        else (value,)
+    )
     roots: list[Path] = []
     for raw in raw_roots:
         root = Path(raw).expanduser().resolve()
@@ -129,10 +139,7 @@ def _bash_timeout(
 
 
 def _bash_process_kwargs() -> dict[str, Any]:
-    if os.name == "posix":
-        return {"start_new_session": True}
-    creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    return {"creationflags": creation_flag} if creation_flag else {}
+    return process_group_kwargs()
 
 
 def _bash_process_group_id(proc: asyncio.subprocess.Process) -> int | None:
@@ -190,15 +197,30 @@ async def _cleanup_bash_process(
 ) -> dict[str, Any]:
     """Terminate and reap only the exact foreground process group."""
 
-    scope = "process_group" if pgid is not None else "process_only_fallback"
+    scope = (
+        "process_tree"
+        if os.name == "nt"
+        else "process_group" if pgid is not None else "process_only_fallback"
+    )
     forced = False
     errors: list[str] = []
 
-    def signal_process(*, force: bool) -> None:
+    async def signal_process(*, force: bool) -> None:
         nonlocal forced
         forced = forced or force
         try:
-            if pgid is not None:
+            if os.name == "nt" and proc.pid:
+                # Windows has no safe tree-wide graceful signal for arbitrary
+                # console descendants. A non-forced taskkill can broadcast a
+                # console interrupt beyond the child tree, including HASHI.
+                # Use the OS-targeted forced tree termination from the outset.
+                outcome = await terminate_windows_process_tree(proc.pid, force=True)
+                forced = True
+                if outcome.get("returncode") not in {0, 128} and proc.returncode is None:
+                    errors.append(
+                        "taskkill: " + str(outcome.get("output") or outcome.get("returncode"))
+                    )
+            elif pgid is not None:
                 os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
             elif proc.returncode is None:
                 proc.kill() if force else proc.terminate()
@@ -207,14 +229,14 @@ async def _cleanup_bash_process(
         except Exception as exc:  # cleanup truth is reported, never hidden
             errors.append(f"{type(exc).__name__}: {exc}")
 
-    signal_process(force=False)
+    await signal_process(force=False)
     complete = await _wait_for_bash_cleanup(
         communicate_task,
         pgid=pgid,
         timeout=grace_seconds,
     )
     if not complete:
-        signal_process(force=True)
+        await signal_process(force=True)
         complete = await _wait_for_bash_cleanup(
             communicate_task,
             pgid=pgid,
@@ -265,7 +287,7 @@ async def _shield_bash_cleanup(cleanup) -> dict[str, Any]:
 def _seconds_label(value: float) -> str:
     return f"{value:g}"
 
-async def execute_bash(
+async def execute_shell(
     args: dict,
     workspace_dir: Path,
     timeout_max: float | None = None,
@@ -288,9 +310,12 @@ async def execute_bash(
     proc: asyncio.subprocess.Process | None = None
     communicate_task: asyncio.Task | None = None
     pgid: int | None = None
+    invocation = None
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
+        invocation = resolve_shell_invocation(command, args.get("shell"))
+        proc = await asyncio.create_subprocess_exec(
+            *invocation.argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace_dir),
@@ -316,6 +341,12 @@ async def execute_bash(
                     f"Error: command timed out after {_seconds_label(timeout)}s",
                     {
                         **timeout_details,
+                        "shell": invocation.shell,
+                        "shell_executable": invocation.executable,
+                        "launcher": invocation.launcher,
+                        "launcher_executable": invocation.launcher_executable,
+                        "cwd": str(Path(workspace_dir).resolve()),
+                        "encoding": invocation.encoding,
                         "exit_code": proc.returncode,
                         "foreground_cleanup": cleanup,
                     },
@@ -324,9 +355,14 @@ async def execute_bash(
 
         output_parts = []
         if stdout:
-            output_parts.append(stdout.decode("utf-8", errors="replace"))
+            output_parts.append(
+                decode_process_output(stdout, encoding=invocation.encoding)
+            )
         if stderr:
-            output_parts.append(f"[stderr]\n{stderr.decode('utf-8', errors='replace')}")
+            output_parts.append(
+                "[stderr]\n"
+                + decode_process_output(stderr, encoding=invocation.encoding)
+            )
 
         result = "\n".join(output_parts).strip()
         if proc.returncode != 0:
@@ -343,7 +379,11 @@ async def execute_bash(
         else:
             completion_cleanup = {
                 "status": "normal_completion",
-                "scope": "process_group" if pgid is not None else "process_only_fallback",
+                "scope": (
+                    "process_tree"
+                    if os.name == "nt"
+                    else "process_group" if pgid is not None else "process_only_fallback"
+                ),
                 "pgid": pgid,
                 "forced": False,
                 "process_reaped": proc.returncode is not None,
@@ -354,6 +394,12 @@ async def execute_bash(
             result or "(no output)",
             {
                 **timeout_details,
+                "shell": invocation.shell,
+                "shell_executable": invocation.executable,
+                "launcher": invocation.launcher,
+                "launcher_executable": invocation.launcher_executable,
+                "cwd": str(Path(workspace_dir).resolve()),
+                "encoding": invocation.encoding,
                 "exit_code": proc.returncode,
                 "foreground_cleanup": completion_cleanup,
             },
@@ -367,6 +413,16 @@ async def execute_bash(
             )
         details = {
             **timeout_details,
+            "shell": invocation.shell if invocation is not None else None,
+            "shell_executable": (
+                invocation.executable if invocation is not None else None
+            ),
+            "launcher": invocation.launcher if invocation is not None else None,
+            "launcher_executable": (
+                invocation.launcher_executable if invocation is not None else None
+            ),
+            "cwd": str(Path(workspace_dir).resolve()),
+            "encoding": invocation.encoding if invocation is not None else None,
             "exit_code": proc.returncode if proc is not None else None,
             "foreground_cleanup": cleanup or {
                 "status": "not_started",
@@ -386,6 +442,18 @@ async def execute_bash(
             f"Error executing command: {exc}",
             {
                 **timeout_details,
+                "shell": invocation.shell if invocation is not None else None,
+                "shell_executable": (
+                    invocation.executable if invocation is not None else None
+                ),
+                "launcher": invocation.launcher if invocation is not None else None,
+                "launcher_executable": (
+                    invocation.launcher_executable
+                    if invocation is not None
+                    else None
+                ),
+                "cwd": str(Path(workspace_dir).resolve()),
+                "encoding": invocation.encoding if invocation is not None else None,
                 "exit_code": proc.returncode if proc is not None else None,
                 "foreground_cleanup": cleanup or {
                     "status": "not_started",
@@ -394,6 +462,24 @@ async def execute_bash(
                 },
             },
         )
+
+
+async def execute_bash(
+    args: dict,
+    workspace_dir: Path,
+    timeout_max: float | None = None,
+    blocked_patterns: Optional[list[str]] = None,
+) -> str | BuiltinExecutionResult:
+    """Compatibility alias that always invokes a real Bash executable."""
+
+    compatibility_args = dict(args)
+    compatibility_args["shell"] = "bash"
+    return await execute_shell(
+        compatibility_args,
+        workspace_dir=workspace_dir,
+        timeout_max=timeout_max,
+        blocked_patterns=blocked_patterns,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +631,6 @@ async def execute_file_list(
     recursive = bool(args.get("recursive", False))
 
     try:
-        import fnmatch
         entries = []
         if recursive:
             all_paths = sorted(path.rglob(pattern))
@@ -662,7 +747,8 @@ async def execute_process_kill(args: dict) -> str:
     pid = int(pid)
 
     try:
-        import psutil, signal as _signal
+        import psutil
+
         try:
             proc = psutil.Process(pid)
             name = proc.name()
@@ -671,9 +757,20 @@ async def execute_process_kill(args: dict) -> str:
         except psutil.AccessDenied:
             name = "?"
 
-        import os
-        os.kill(pid, signal_num)
-        sig_name = {15: "SIGTERM", 9: "SIGKILL", 2: "SIGINT"}.get(signal_num, f"signal {signal_num}")
+        if signal_num == 9:
+            proc.kill()
+        elif signal_num == 15:
+            proc.terminate()
+        elif os.name == "nt":
+            return (
+                "Error: native Windows process_kill supports only "
+                "signal 15 (terminate) or 9 (force kill)"
+            )
+        else:
+            os.kill(pid, signal_num)
+        sig_name = {15: "SIGTERM", 9: "SIGKILL", 2: "SIGINT"}.get(
+            signal_num, f"signal {signal_num}"
+        )
         return f"OK: sent {sig_name} to PID {pid} ({name})"
     except PermissionError:
         return f"Error: permission denied to signal PID {pid}"
@@ -772,6 +869,7 @@ async def execute_background_job_start(
 ) -> str:
     command = str(args.get("command") or "").strip()
     argv = args.get("argv")
+    shell = str(args.get("shell") or "").strip() or None
     if argv is not None:
         if not isinstance(argv, list) or not all(isinstance(item, str) and item for item in argv):
             return "Error: argv must be a non-empty list of strings"
@@ -779,6 +877,8 @@ async def execute_background_job_start(
         return "Error: command or argv is required"
     if command and argv:
         return "Error: provide command or argv, not both"
+    if argv and shell:
+        return "Error: shell is valid only with command mode"
 
     raw_cwd = str(args.get("cwd") or ".").strip() or "."
     try:
@@ -808,6 +908,7 @@ async def execute_background_job_start(
                 "cwd": str(cwd),
                 "argv": argv,
                 "command": command or None,
+                "shell": shell,
                 "origin": origin,
                 "notify_on_complete": bool(args.get("notify_on_complete", True)),
                 "notify_on_failure": bool(args.get("notify_on_failure", True)),
@@ -834,6 +935,7 @@ async def execute_background_job_start(
         cwd=cwd,
         argv=argv,
         command=command or None,
+        shell=shell,
         origin=origin,
         notify_on_complete=bool(args.get("notify_on_complete", True)),
         notify_on_failure=bool(args.get("notify_on_failure", True)),
@@ -867,6 +969,8 @@ async def execute_background_job_status(args: dict, audit_context: dict | None =
             return "Error: HASHI BackgroundJob API returned an invalid job record"
         return json.dumps(_job_summary(record), ensure_ascii=False, indent=2)
     record = manager.get(job_id)
+    if inspect.isawaitable(record):
+        record = await record
     if record is None:
         return f"Error: background job not found: {job_id}"
     return json.dumps(_job_summary(record), ensure_ascii=False, indent=2)
@@ -896,6 +1000,8 @@ async def execute_background_job_tail(args: dict, audit_context: dict | None = N
         return text or "(no output yet)"
     try:
         text = manager.tail(job_id, stream=stream, lines=max(1, lines))
+        if inspect.isawaitable(text):
+            text = await text
     except KeyError:
         return f"Error: background job not found: {job_id}"
     return text or "(no output yet)"
@@ -952,6 +1058,8 @@ async def execute_background_job_list(args: dict, audit_context: dict | None = N
             indent=2,
         )
     records = manager.list(agent=str(agent) if agent else None, limit=bounded_limit)
+    if inspect.isawaitable(records):
+        records = await records
     return json.dumps([_job_summary(record) for record in records], ensure_ascii=False, indent=2)
 
 
@@ -1136,7 +1244,6 @@ async def execute_web_fetch(
         ) as client:
             response = await client.get(url)
             response.raise_for_status()
-            content_type = response.headers.get("content-type", "")
             html = response.text
 
         # Convert HTML to Markdown if html2text is available

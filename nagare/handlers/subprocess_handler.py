@@ -7,12 +7,14 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from nagare.logging.events import RunEventLogger
+from nagare.paths import resolve_relative_path, validate_path_component
 
 
 def utc_now() -> str:
@@ -45,6 +47,8 @@ class SubprocessStepHandler:
         self.workers_base = workers_base or (self.runs_root / run_id / "workers")
         self.logger = logging.getLogger(f"nagare.dispatcher.{run_id}")
         self.event_logger = event_logger
+        self._correlation_lock = threading.Lock()
+        self._step_id_by_task: dict[str, str] = {}
 
     def execute(self, agent_id: str, task_message: dict, agent_md_path: str,
                 backend: str = "claude-cli", model: str = "") -> dict:
@@ -53,7 +57,7 @@ class SubprocessStepHandler:
 
         Args:
             agent_id: worker 标识符
-            task_message: 符合 agent.schema.yaml 的任务消息
+            task_message: 符合 Nagare StepHandler 协议的任务消息
             agent_md_path: worker AGENT.md 文件路径（相对于 hashi root）
             backend: 后端类型 ("claude-cli" 或 "codex-cli")
             model: 模型标识符（如 "claude-opus-4-6", "gpt-5.4"）
@@ -61,7 +65,17 @@ class SubprocessStepHandler:
         Returns:
             {"status": "completed"|"failed", "artifacts_produced": {}, "summary": "", ...}
         """
-        task_id = task_message.get("task_id", f"task-{agent_id}-{int(time.time())}")
+        agent_id = validate_path_component(agent_id, label="agent_id")
+        task_id = validate_path_component(
+            task_message.get("task_id", f"task-{agent_id}-{int(time.time())}"),
+            label="task_id",
+        )
+        step_id = validate_path_component(
+            task_message.get("payload", {}).get("step_id"),
+            label="step_id",
+        )
+        with self._correlation_lock:
+            self._step_id_by_task[task_id] = step_id
         worker_dir = self.workers_base / agent_id
         inbox_dir = worker_dir / "inbox"
         outbox_dir = worker_dir / "outbox"
@@ -115,8 +129,7 @@ class SubprocessStepHandler:
     def _load_agent_md(self, agent_md_path: Path) -> str:
         if agent_md_path.exists():
             return agent_md_path.read_text(encoding="utf-8")
-        self.logger.warning(f"[Dispatch] AGENT.md 不存在: {agent_md_path}")
-        return "You are a helpful worker agent."
+        raise FileNotFoundError(f"Worker AGENT.md does not exist: {agent_md_path}")
 
     def _build_worker_prompt(self, task_message: dict, worker_dir: Path) -> str:
         """将 task_assign 消息转为 worker 可执行的 prompt"""
@@ -126,14 +139,14 @@ class SubprocessStepHandler:
         params = payload.get("params", {})
 
         lines = [
-            f"# Task Assignment",
-            f"",
+            "# Task Assignment",
+            "",
             f"**Task ID**: {task_message.get('task_id', 'unknown')}",
             f"**Workflow**: {task_message.get('workflow_id', 'unknown')}",
             f"**Run**: {task_message.get('run_id', 'unknown')}",
-            f"",
-            f"## Your Task",
-            f"",
+            "",
+            "## Your Task",
+            "",
             prompt,
         ]
 
@@ -187,10 +200,13 @@ class SubprocessStepHandler:
         log_file = log_dir / f"{task_id}.log"
         started_at = time.time()
         if self.event_logger:
+            with self._correlation_lock:
+                step_id = self._step_id_by_task.get(task_id, task_id)
             self.event_logger.emit(
                 "handler.invoke.started",
                 component="engine.dispatcher",
-                step_id=task_id,
+                request_id=task_id,
+                step_id=step_id,
                 message=f"Invoking worker handler for {agent_id}",
                 data={"agent_id": agent_id, "backend": backend, "model": model},
             )
@@ -198,18 +214,31 @@ class SubprocessStepHandler:
         # 根据 backend 构建命令
         if backend == "codex-cli":
             # Codex CLI（OpenAI）— 使用 exec 子命令非交互运行
-            cmd = ["codex", "exec",
-                   "--model", model or "o4-mini",
-                   "--full-auto"]
+            cmd = ["codex", "exec"]
+            if model:
+                cmd.extend(["--model", model])
+            cmd.append("--full-auto")
             # codex exec 用 prompt 作为最后一个参数，合并 system + user prompt
             full_prompt = f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nTASK:\n{user_prompt}"
             cmd.append(full_prompt)
-        else:
+        elif backend == "claude-cli":
             # Claude CLI（默认）
             cmd = ["claude", "--print", "--dangerously-skip-permissions"]
             if model:
                 cmd.extend(["--model", model])
             cmd.extend(["--system-prompt", system_prompt, user_prompt])
+        else:
+            result = {
+                "status": "failed",
+                "error_type": "unsupported_backend",
+                "error_message": (
+                    f"Unsupported subprocess backend '{backend}'. "
+                    "Supported values are 'claude-cli' and 'codex-cli'."
+                ),
+                "ts": utc_now(),
+            }
+            self._emit_handler_result(agent_id, task_id, backend, model, started_at, result)
+            return result
 
         self.logger.info(f"[{backend}] 启动 worker {agent_id}, task={task_id}, model={model}")
 
@@ -219,27 +248,57 @@ class SubprocessStepHandler:
         child_env["CLAUDE_FLOW_RUN"] = self.run_id
 
         try:
-            process = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 cwd=str(worker_dir),
                 env=child_env,
             )
+            cancelled = False
+            while True:
+                try:
+                    stdout, stderr = process.communicate(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    if (self.runs_root / self.run_id / "_stop").exists():
+                        cancelled = True
+                        try:
+                            process.terminate()
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            stdout, stderr = process.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            stdout, stderr = process.communicate()
+                        break
 
-            stdout = process.stdout or ""
-            stderr = process.stderr or ""
+            stdout = stdout or ""
+            stderr = stderr or ""
 
             # 记录日志
             with open(log_file, "w", encoding="utf-8") as f:
                 f.write(f"=== STDOUT ===\n{stdout}\n\n=== STDERR ===\n{stderr}\n")
 
+            if cancelled:
+                result = {
+                    "status": "failed",
+                    "error_type": "cancelled",
+                    "error_message": "Worker stopped by the workflow _stop signal",
+                    "raw_output": stdout[:2000],
+                    "ts": utc_now(),
+                }
+                self._emit_handler_result(agent_id, task_id, backend, model, started_at, result)
+                return result
+
             if process.returncode != 0:
                 result = {
                     "status": "failed",
                     "error_type": "cli_error",
-                    "error_message": f"claude CLI exited with code {process.returncode}: {stderr[:500]}",
-                    "suggested_fix": "检查 claude CLI 是否安装，model 是否可访问",
+                    "error_message": f"{backend} exited with code {process.returncode}: {stderr[:500]}",
+                    "suggested_fix": f"检查 {backend} 是否安装，以及 model 是否可访问",
                     "raw_output": stdout[:2000],
                     "ts": utc_now(),
                 }
@@ -248,44 +307,82 @@ class SubprocessStepHandler:
 
             # 提取 JSON 结果块（最后一个 ```json ... ``` 块）
             parsed = self._extract_json_result(stdout)
-            if parsed:
+            if isinstance(parsed, dict):
+                status = parsed.get("status")
+                if status not in {"completed", "failed", "recovered", "unrecoverable"}:
+                    result = {
+                        "status": "failed",
+                        "error_type": "invalid_worker_output",
+                        "error_message": (
+                            "Worker JSON must declare status as completed, failed, "
+                            "recovered, or unrecoverable"
+                        ),
+                        "raw_output": stdout[:2000],
+                        "ts": utc_now(),
+                    }
+                    self._emit_handler_result(
+                        agent_id, task_id, backend, model, started_at, result
+                    )
+                    return result
+                artifacts = parsed.get("artifacts_produced", {})
+                if not isinstance(artifacts, dict):
+                    result = {
+                        "status": "failed",
+                        "error_type": "invalid_worker_output",
+                        "error_message": "Worker artifacts_produced must be a mapping",
+                        "raw_output": stdout[:2000],
+                        "ts": utc_now(),
+                    }
+                    self._emit_handler_result(
+                        agent_id, task_id, backend, model, started_at, result
+                    )
+                    return result
                 parsed["ts"] = utc_now()
                 parsed["raw_output_preview"] = stdout[:500]
                 # 展开 artifacts 相对路径为绝对路径（支持单文件和文件列表）
-                resolved = {}
-                for k, v in parsed.get("artifacts_produced", {}).items():
-                    if isinstance(v, list):
-                        resolved[k] = [str(worker_dir / f) if not Path(f).is_absolute() else f for f in v]
-                    elif isinstance(v, str):
-                        resolved[k] = str(worker_dir / v) if not Path(v).is_absolute() else v
-                    else:
-                        resolved[k] = v
+                try:
+                    resolved = {
+                        key: self._resolve_artifact_value(worker_dir, key, value)
+                        for key, value in artifacts.items()
+                    }
+                except ValueError as exc:
+                    result = {
+                        "status": "failed",
+                        "error_type": "invalid_worker_output",
+                        "error_message": str(exc),
+                        "raw_output": stdout[:2000],
+                        "ts": utc_now(),
+                    }
+                    self._emit_handler_result(
+                        agent_id, task_id, backend, model, started_at, result
+                    )
+                    return result
                 parsed["artifacts_produced"] = resolved
                 self._emit_handler_result(agent_id, task_id, backend, model, started_at, parsed)
                 return parsed
             else:
-                # 没有找到结构化 JSON — 视为完成但无工件
-                self.logger.warning(f"[Claude] {agent_id} 未输出结构化 JSON 结果")
+                self.logger.warning("[%s] %s 未输出结构化 JSON 结果", backend, agent_id)
                 result = {
-                    "status": "completed",
-                    "artifacts_produced": {},
-                    "summary": stdout[-500:],
-                    "quality_notes": "Worker 未输出结构化 JSON，已保存原始输出",
+                    "status": "failed",
+                    "error_type": "invalid_worker_output",
+                    "error_message": "Worker did not return a structured JSON result",
+                    "raw_output": stdout[:2000],
                     "ts": utc_now(),
                 }
                 self._emit_handler_result(agent_id, task_id, backend, model, started_at, result)
                 return result
 
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
             result = {
                 "status": "failed",
                 "error_type": "cli_not_found",
-                "error_message": "claude CLI 未找到，请确保已安装 Claude Code CLI",
-                "suggested_fix": "安装 claude CLI: npm install -g @anthropic-ai/claude-code",
+                "error_message": str(exc),
+                "suggested_fix": f"检查 {backend} 可执行文件与 worker AGENT.md 路径",
                 "ts": utc_now(),
             }
             self._emit_handler_result(agent_id, task_id, backend, model, started_at, result)
             return result
+
         except Exception as e:
             result = {
                 "status": "failed",
@@ -296,6 +393,21 @@ class SubprocessStepHandler:
             }
             self._emit_handler_result(agent_id, task_id, backend, model, started_at, result)
             return result
+
+    @staticmethod
+    def _resolve_artifact_value(worker_dir: Path, key: object, value: object):
+        """Resolve worker-reported files without accepting workspace escapes."""
+        label = f"artifact '{key}' path"
+        if isinstance(value, list):
+            if not value:
+                raise ValueError(f"{label} list must not be empty")
+            return [
+                str(resolve_relative_path(worker_dir, item, label=label))
+                for item in value
+            ]
+        if isinstance(value, str):
+            return str(resolve_relative_path(worker_dir, value, label=label))
+        raise ValueError(f"{label} must be a relative string or a non-empty list of strings")
 
     def _emit_handler_result(
         self,
@@ -308,15 +420,18 @@ class SubprocessStepHandler:
     ) -> None:
         if not self.event_logger:
             return
+        with self._correlation_lock:
+            step_id = self._step_id_by_task.pop(task_id, task_id)
         event_name = (
             "handler.invoke.completed"
-            if result.get("status") == "completed"
+            if result.get("status") in {"completed", "recovered"}
             else "handler.invoke.failed"
         )
         self.event_logger.emit(
             event_name,
             component="engine.dispatcher",
-            step_id=task_id,
+            request_id=task_id,
+            step_id=step_id,
             message=f"Worker handler finished for {agent_id}",
             duration_ms=(time.time() - started_at) * 1000,
             error_code=result.get("error_type"),

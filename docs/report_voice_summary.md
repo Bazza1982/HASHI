@@ -25,8 +25,8 @@ Generate OGG from a full report that contains `🎙️ 语音摘要稿`, and sen
 Barry on Telegram:
 
 ```bash
-cd /home/lily/projects/hashi
-/home/lily/projects/hashi/.venv/bin/python3 tools/report_voice_summary_ogg.py \
+cd /path/to/HASHI
+.venv/bin/python tools/report_voice_summary_ogg.py \
   --input /path/to/report.md \
   --send-telegram \
   --telegram-chat-id 7430217666
@@ -35,8 +35,8 @@ cd /home/lily/projects/hashi
 Or synthesize exact text directly:
 
 ```bash
-cd /home/lily/projects/hashi
-/home/lily/projects/hashi/.venv/bin/python3 tools/report_voice_summary_ogg.py \
+cd /path/to/HASHI
+.venv/bin/python tools/report_voice_summary_ogg.py \
   --summary-only \
   --text "爸爸，小夏给您快速报一下今天的重点。今天没有需要马上处理的事项。" \
   --send-telegram \
@@ -47,7 +47,7 @@ The command prints the generated `.ogg` path and sends it as a Telegram voice
 message by default. By default it writes to:
 
 ```text
-/home/lily/projects/hashi/media/sunny/report_voice_summaries/
+<HASHI_ROOT>/media/<agent>/report_voice_summaries/
 ```
 
 ## Design Rules

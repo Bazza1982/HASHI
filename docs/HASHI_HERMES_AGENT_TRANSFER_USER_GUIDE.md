@@ -35,7 +35,7 @@ JSON error to stderr.
 
 ```bash
 python3 scripts/hermes_transfer.py plan-hashi-export \
-  --hashi-root /home/lily/projects/hashi \
+  --hashi-root /path/to/HASHI \
   --agent zelda \
   --output /tmp/zelda.hashi-hermes-agent
 ```
@@ -50,7 +50,7 @@ Review:
 
 ```bash
 python3 scripts/hermes_transfer.py export-hashi \
-  --hashi-root /home/lily/projects/hashi \
+  --hashi-root /path/to/HASHI \
   --agent zelda \
   --output /tmp/zelda.hashi-hermes-agent
 ```
@@ -99,7 +99,7 @@ Only for move mode, after the Hermes target is manually verified:
 python3 scripts/hermes_transfer.py finalize-move-source \
   --direction hashi-to-hermes \
   --target-verified \
-  --hashi-root /home/lily/projects/hashi \
+  --hashi-root /path/to/HASHI \
   --agent zelda \
   --package-id <package_id>
 ```
@@ -140,7 +140,7 @@ python3 scripts/hermes_transfer.py export-hermes \
 
 ```bash
 python3 scripts/hermes_transfer.py plan-hashi-import \
-  --hashi-root /home/lily/projects/hashi \
+  --hashi-root /path/to/HASHI \
   --package /tmp/xiaoye.hashi-hermes-agent
 ```
 
@@ -150,7 +150,7 @@ The default target HASHI agent is disabled and marked `import_review_required`.
 
 ```bash
 python3 scripts/hermes_transfer.py import-hashi \
-  --hashi-root /home/lily/projects/hashi \
+  --hashi-root /path/to/HASHI \
   --package /tmp/xiaoye.hashi-hermes-agent
 ```
 
