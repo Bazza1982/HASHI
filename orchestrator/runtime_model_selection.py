@@ -12,11 +12,10 @@ from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     HER_V2_ENGINE,
     get_backend_label,
-    get_provider_reasoning_efforts,
     is_selectable_backend,
-    normalize_effort,
     normalize_model,
 )
+from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
 from orchestrator.her_v2.models import Route
 from orchestrator.memory_plus_mode import set_memory_plus_enabled
 
@@ -613,7 +612,10 @@ def her_v2_routes_keyboard(runtime) -> InlineKeyboardMarkup:
 def _her_v2_route_reasoning_choices(runtime, route: Route) -> tuple[str, list[str]]:
     current = _her_v2_route_effective_reasoning(runtime, route)
     target = _her_v2_edit_configuration(runtime).target_for_route(route)
-    choices = get_provider_reasoning_efforts(target.provider, target.model)
+    choices = get_available_efforts(
+        target.provider, target.model,
+        allowed_backends=runtime.config.allowed_backends, provider=True,
+    )
     choices.append("inherit")
     return current, choices
 
@@ -739,7 +741,10 @@ def _her_v2_execution_reasoning_choices(runtime) -> list[str]:
     choices: list[str] | None = None
     for route in HER_V2_EXECUTION_ROUTES:
         target = selected.target_for_route(route)
-        supported = get_provider_reasoning_efforts(target.provider, target.model)
+        supported = get_available_efforts(
+            target.provider, target.model,
+            allowed_backends=runtime.config.allowed_backends, provider=True,
+        )
         if choices is None:
             choices = list(supported)
         else:
@@ -1000,7 +1005,10 @@ def save_her_v2_candidate(runtime, selected) -> str | None:
 
 
 def set_backend_model(runtime, engine: str, requested: str) -> None:
-    normalized = normalize_model(engine, requested)
+    normalized = (
+        requested if requested in runtime._get_available_models_for(engine)
+        else normalize_model(engine, requested)
+    )
     if not normalized:
         return
     backend_cfg = runtime._get_backend_cfg(engine)
@@ -1014,7 +1022,10 @@ def set_backend_model(runtime, engine: str, requested: str) -> None:
         current_effort = getattr(
             runtime.backend_manager.current_backend, "effort", None
         )
-        normalized_effort = normalize_effort(engine, current_effort, normalized)
+        normalized_effort = normalize_effort(
+            engine, current_effort, normalized,
+            allowed_backends=runtime.config.allowed_backends,
+        )
         if normalized_effort:
             runtime.backend_manager.current_backend.effort = normalized_effort
             if backend_cfg is not None:

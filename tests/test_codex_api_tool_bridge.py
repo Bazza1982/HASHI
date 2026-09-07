@@ -669,7 +669,7 @@ async def test_codex_app_server_captures_all_calls_without_executing_them(monkey
         model="gpt-5.6-luna",
         effort="medium",
         idle_timeout_sec=5,
-        disabled_mcp_servers=("github", "openaiDeveloperDocs"),
+        disabled_mcp_servers=("node_repl", "openaiDeveloperDocs"),
     )
 
     response = await bridge.run(
@@ -711,13 +711,9 @@ async def test_codex_app_server_captures_all_calls_without_executing_them(monkey
     assert len(deferred) == 2
     assert all("DEFERRED" in item["result"]["contentItems"][0]["text"] for item in deferred)
     command = bridge._command()
-    assert (
-        'mcp_servers.github={url="http://127.0.0.1/",enabled=false}' in command
-    )
-    assert (
-        "mcp_servers.openaiDeveloperDocs="
-        '{url="http://127.0.0.1/",enabled=false}' in command
-    )
+    assert "mcp_servers.node_repl.enabled=false" in command
+    assert "mcp_servers.openaiDeveloperDocs.enabled=false" in command
+    assert not any("node_repl={url=" in argument for argument in command)
     assert "api.githubcopilot.com" not in " ".join(command)
 
 

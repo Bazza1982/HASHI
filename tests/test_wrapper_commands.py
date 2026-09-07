@@ -320,7 +320,7 @@ async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
     assert enqueued[0]["deliver_to_telegram"] is True
     assert "[HCHAT TASK]" in enqueued[0]["prompt"]
     assert "--to akane --from zelda" in enqueued[0]["prompt"]
-    assert "tools/hchat_send.py" in enqueued[0]["prompt"]
+    assert str(Path("tools") / "hchat_send.py") in enqueued[0]["prompt"]
 
 
 @pytest.mark.asyncio
@@ -2695,6 +2695,72 @@ def test_set_backend_model_persists_new_active_model_over_existing_override(tmp_
     assert manager.current_backend.config.model == "gpt-5.5"
     assert manager._active_model_override == "gpt-5.5"
     assert state["active_model"] == "gpt-5.5"
+
+
+def _astra_runtime(workspace):
+    manager = _make_manager(workspace)
+    manager.config.allowed_backends[0].update(
+        model="gpt-6-astra",
+        models=["gpt-6-astra"],
+        model_efforts={"gpt-6-astra": ["low", "medium", "high", "xhigh", "max"]},
+    )
+    manager._active_model_override = "gpt-6-astra"
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="gpt-6-astra"), effort="high"
+    )
+    runtime, _ = _make_runtime(manager)
+    return runtime, manager
+
+
+def test_instance_effort_menu_selection_and_restore(tmp_path):
+    runtime, manager = _astra_runtime(tmp_path / "agent")
+    assert "effort:max" in str(runtime._effort_keyboard())
+    runtime._set_active_effort("max")
+    assert manager.current_backend.effort == "max"
+    assert _read_state(manager.config.workspace_dir)["backend_efforts"]["codex-cli"] == "max"
+    restored = FlexibleBackendManager(manager.config, manager.global_config, secrets={})
+    assert restored.config.allowed_backends[0]["effort"] == "max"
+    ordinary, _ = _make_runtime(_make_manager(tmp_path / "ordinary"))
+    ordinary.get_current_model = lambda: "gpt-6-astra"
+    assert "max" not in ordinary._get_available_efforts()
+
+
+def test_instance_model_reselection_preserves_model_and_effort(tmp_path):
+    runtime, manager = _astra_runtime(tmp_path / "agent")
+    manager.current_backend.effort = "max"
+    assert "gpt-6-astra" in runtime._get_available_models()
+    runtime._set_backend_model("codex-cli", "gpt-6-astra")
+    assert manager.current_backend.config.model == "gpt-6-astra"
+    assert manager.current_backend.effort == "max"
+    assert _read_state(manager.config.workspace_dir)["active_model"] == "gpt-6-astra"
+    runtime._set_backend_model("codex-cli", "gpt-5.6-terra")
+    assert manager.current_backend.effort == "medium"
+    assert "gpt-6-astra" in runtime._get_available_models()
+    runtime._set_backend_model("codex-cli", "gpt-6-astra")
+    assert manager.current_backend.config.model == "gpt-6-astra"
+
+
+def test_her_provider_reasoning_uses_instance_gateway_efforts(tmp_path):
+    runtime, manager = _astra_runtime(tmp_path / "agent")
+    manager.config.active_backend = "her-v2"
+    manager.config.allowed_backends.append({
+        "engine": "her-v2", "model": "role-configured",
+        "model_efforts": {"role-configured": ["max"]},
+    })
+    target = SimpleNamespace(provider="hashi-api", model="gpt-6-astra")
+    selected = SimpleNamespace(
+        target_for_route=lambda route: target,
+        reasoning_for_route=lambda route: "high",
+        route_reasoning={},
+    )
+    manager.get_her_v2_configuration = lambda: selected
+    manager.get_her_v2_edit_configuration = lambda: selected
+    assert runtime_model_selection._her_v2_execution_reasoning_choices(runtime) == [
+        "low", "medium", "high", "xhigh", "max", "inherit"
+    ]
+    assert runtime._get_available_efforts_for("her-v2", "role-configured") == [
+        "zero", "low", "medium"
+    ]
 
 
 @pytest.mark.asyncio

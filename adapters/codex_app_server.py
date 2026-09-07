@@ -408,13 +408,11 @@ def _toml_key_segment(value: str) -> str:
 
 
 def disabled_mcp_override(server_name: str) -> str:
-    # Codex CLI config overrides replace an MCP table rather than deep-merging
-    # it. Supply a complete, inert transport so the replacement remains valid
-    # while carrying no configured endpoint, command, headers, or credentials.
+    # Disable the configured server without changing its transport.  A synthetic
+    # HTTP ``url`` is invalid when Codex combines the override with an existing
+    # stdio ``command`` (for example the built-in node_repl server).
     key = _toml_key_segment(server_name)
-    return (
-        f'mcp_servers.{key}={{url="http://127.0.0.1/",enabled=false}}'
-    )
+    return f"mcp_servers.{key}.enabled=false"
 
 
 class CodexAppServerToolBridge:

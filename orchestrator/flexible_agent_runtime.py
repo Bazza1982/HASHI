@@ -100,14 +100,13 @@ from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     HER_V2_ENGINE,
     canonical_backend_engine,
-    get_available_efforts,
     get_available_models,
     allows_custom_models,
     get_backend_label,
     is_selectable_backend,
-    normalize_effort,
     normalize_model,
 )
+from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.memory_search_mode import apply_memory_search_preference
 from orchestrator.handoff_builder import HandoffBuilder
@@ -6377,7 +6376,7 @@ class FlexibleAgentRuntime:
             selected = self.backend_manager.get_her_v2_configuration()
             option = self.backend_manager._her_v2_provider_option(selected.provider)
             return list(option["models"]) if option and option["available"] else []
-        return get_available_models(self.config.active_backend)
+        return self._get_available_models_for(self.config.active_backend)
 
     def _get_available_models_for(
         self,
@@ -6417,10 +6416,10 @@ class FlexibleAgentRuntime:
         return normalize_model(engine, configured)
 
     def _get_available_efforts(self) -> list[str]:
-        return get_available_efforts(self.config.active_backend, self.get_current_model())
+        return self._get_available_efforts_for(self.config.active_backend, self.get_current_model())
 
     def _get_available_efforts_for(self, engine: str, model: str | None = None) -> list[str]:
-        return get_available_efforts(engine, model)
+        return get_available_efforts(engine, model, allowed_backends=self.config.allowed_backends)
 
     def _get_backend_cfg(
         self,
@@ -6446,6 +6445,7 @@ class FlexibleAgentRuntime:
             self.config.active_backend,
             requested,
             self.get_current_model(),
+            allowed_backends=self.config.allowed_backends,
         )
         if not normalized:
             return
