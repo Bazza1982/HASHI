@@ -685,7 +685,6 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
 
     if action in {"commit", "abort"} and len(parts) >= 3:
         package_id = parts[2]
-        global_config = getattr(runtime, "global_config", None)
         project_root = instance_root(runtime)
         instances = await load_move_instances(runtime)
         await query.edit_message_text(
