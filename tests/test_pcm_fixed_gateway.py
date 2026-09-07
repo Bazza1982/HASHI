@@ -94,8 +94,8 @@ def test_codex_fixed_command_connects_only_the_per_invocation_hashi_gateway(tmp_
     ]
     assert len(overrides) == 3
     assert overrides[:2] == [
-        'mcp_servers.github={url="http://127.0.0.1/",enabled=false}',
-        'mcp_servers.openaiDeveloperDocs={url="http://127.0.0.1/",enabled=false}',
+        "mcp_servers.github.enabled=false",
+        "mcp_servers.openaiDeveloperDocs.enabled=false",
     ]
     assert overrides[2].startswith("mcp_servers.hashi_tools={command=")
     assert "args=" in overrides[2] and "cwd=" in overrides[2]
