@@ -23,6 +23,7 @@ from orchestrator.pcm import (
     parse_pcm_text,
 )
 from orchestrator.runtime_defaults import (
+    DEFAULT_API_GATEWAY_PORT,
     DEFAULT_HASHI_REMOTE_PORT,
     DEFAULT_WORKBENCH_PORT,
 )
@@ -44,9 +45,8 @@ config_logger = logging.getLogger("BridgeU.Config")
 
 
 def _backend_registry():
-    # The registry belongs to the active function generation. Core config code
-    # resolves it at call time instead of retaining a previous-generation
-    # module or function binding.
+    # Shared compatibility defaults are protected Core. Instance model and
+    # effort opt-ins are resolved by the Function layer from configuration.
     return importlib.import_module("orchestrator.flexible_backend_registry")
 
 
@@ -122,7 +122,7 @@ class GlobalConfig:
     config_path: Path = None
     secrets_path: Path = None
     workbench_port: int = DEFAULT_WORKBENCH_PORT
-    api_gateway_port: int = 18801
+    api_gateway_port: int = DEFAULT_API_GATEWAY_PORT
     gemini_cmd: str = "gemini"
     claude_cmd: str = "claude"
     codex_cmd: str = "codex"

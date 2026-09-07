@@ -1,0 +1,18 @@
+#!/bin/sh
+# Fast local checks only. Core authorization must already exist in the task.
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+if [ -n "${HASHI_CHECK_PYTHON:-}" ]; then
+    check_python=$HASHI_CHECK_PYTHON
+elif [ -x .venv/Scripts/python.exe ]; then
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) check_python=.venv/Scripts/python.exe ;;
+        *) check_python=python3 ;;
+    esac
+elif [ -x .venv/bin/python ]; then
+    check_python=.venv/bin/python
+else
+    check_python=python3
+fi
+"$check_python" scripts/check_protected_core_changes.py --cached
+git diff --cached --check

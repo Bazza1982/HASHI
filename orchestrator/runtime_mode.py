@@ -78,8 +78,8 @@ async def cmd_mode(runtime: Any, update: Any, context: Any) -> None:
         runtime.reload_post_turn_observers()
         await runtime._reply_text(
             update,
-            ui_language.tr("mode.memory.enabled", mode=current),
-            parse_mode="Markdown",
+            ui_language.tr("mode.memory.enabled", mode=escape(str(current))),
+            parse_mode="HTML",
         )
         return
 
@@ -107,8 +107,8 @@ async def cmd_mode(runtime: Any, update: Any, context: Any) -> None:
     if args == current:
         await runtime._reply_text(
             update,
-            ui_language.tr("mode.already", mode=current),
-            parse_mode="Markdown",
+            ui_language.tr("mode.already", mode=escape(str(current))),
+            parse_mode="HTML",
         )
         return
 
@@ -128,9 +128,9 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
                 update,
                 ui_language.tr(
                     "mode.fixed.requires_session",
-                    backend=runtime.config.active_backend,
+                    backend=escape(str(runtime.config.active_backend)),
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
             return
         runtime.backend_manager.agent_mode = target_mode
@@ -140,7 +140,7 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
         await runtime._reply_text(
             update,
             ui_language.tr("mode.fixed.switched"),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         return
 
@@ -149,7 +149,7 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
         await runtime._reply_text(
             update,
             ui_language.tr("mode.flex.switched"),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         return
 

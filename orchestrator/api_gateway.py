@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
+from orchestrator.runtime_defaults import DEFAULT_API_GATEWAY_PORT
 from orchestrator import multimodal_contract, terminal_console
 from adapters.xai_imagine import (
     DEFAULT_IMAGINE_MODEL,
@@ -980,7 +981,7 @@ class APIGatewayServer:
     def __init__(self, global_config, secrets: dict, workspace_root: Path, default_model: str | None = None):
         self.global_config = global_config
         self._secrets = secrets
-        self.port: int = getattr(global_config, "api_gateway_port", 18801)
+        self.port: int = getattr(global_config, "api_gateway_port", DEFAULT_API_GATEWAY_PORT)
         self.bind_host: str | None = None
         gateway_config = load_api_gateway_config(global_config)
         self.enabled: bool = bool(gateway_config.get("enabled", False))

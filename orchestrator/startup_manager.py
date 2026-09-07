@@ -739,7 +739,7 @@ class StartupManager:
 
         from orchestrator.banner import (
             AgentBannerStatus,
-            ServiceBannerStatus,
+            service_banner_statuses,
             show_startup_status,
         )
 
@@ -781,21 +781,13 @@ class StartupManager:
                 )
             )
 
-        service_rows = []
         registry = getattr(self.kernel, "endpoint_registry", None)
         snapshot = getattr(registry, "snapshot", None)
         try:
             services = dict((snapshot() if callable(snapshot) else {}).get("services") or {})
         except Exception:
             services = {}
-        for key, label in (
-            ("workbench", "Workbench"),
-            ("api_gateway", "API Gateway"),
-        ):
-            endpoint = dict(services.get(key) or {})
-            url = str(endpoint.get("base_url") or "").strip()
-            if url:
-                service_rows.append(ServiceBannerStatus(name=label, url=url))
+        service_rows = service_banner_statuses(services)
 
         instance_name, instance_path = self._presentation_identity()
         show_startup_status(

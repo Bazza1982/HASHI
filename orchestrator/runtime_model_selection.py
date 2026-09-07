@@ -6,7 +6,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator import runtime_menu_views, runtime_mode, ui_language
+from orchestrator import runtime_menu_views, ui_language
 from orchestrator.command_ui import back_label, selected_label, setting_card
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
@@ -17,7 +17,6 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
 from orchestrator.her_v2.models import Route
-from orchestrator.memory_plus_mode import set_memory_plus_enabled
 
 HER_V2_STAGE_ROUTE_ORDER = (
     Route.DIRECT,
@@ -1495,9 +1494,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         return
     try:
         if data == "backend_mode_confirm":
-            if runtime.backend_manager.agent_mode == "memory+":
-                set_memory_plus_enabled(runtime.workspace_dir, True)
-            runtime_mode.activate_flex_mode(runtime)
+            # Old Telegram cards remain usable without changing working mode.
             await query.edit_message_text(
                 runtime._build_backend_menu_text(),
                 parse_mode="HTML",
@@ -2262,21 +2259,13 @@ async def callback_model(runtime, update, context: Any) -> None:
                 target_model=model,
                 with_context=with_context,
             )
-            if not success and "busy" in message.lower():
+            if not success:
                 await query.answer(message, show_alert=True)
                 return
-            if success:
-                text, reply_markup = runtime._configuration_followup("backend")
-                await query.edit_message_text(
-                    text, parse_mode="HTML", reply_markup=reply_markup
-                )
-            else:
-                await query.edit_message_text(
-                    message,
-                    reply_markup=runtime._backend_model_keyboard(
-                        target_engine, with_context, model
-                    ),
-                )
+            text, reply_markup = runtime._configuration_followup("backend")
+            await query.edit_message_text(
+                text, parse_mode="HTML", reply_markup=reply_markup
+            )
         elif data.startswith("effort:"):
             parts = data.split(":")
             source = parts[1] if len(parts) == 3 else None

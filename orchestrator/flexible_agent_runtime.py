@@ -1576,12 +1576,19 @@ class FlexibleAgentRuntime:
     def _build_fyi_request_prompt(self, prompt_text: str = "") -> str:
         primer = build_agent_fyi_primer(
             self.agent_fyi_path,
-            context_line="This is an explicit FYI refresh. Re-orient to the local bridge environment before responding.",
+            context_line=(
+                "Explicit FYI refresh. Apply current engineering guidance within the user's scope. "
+                "Do not execute operational examples or reboot/restart. "
+                f"Runtime instance: {self._detect_instance_name()}; "
+                f"backend: {self.config.active_backend}; "
+                f"working mode: {self.backend_manager.agent_mode}. "
+                "These are live runtime values; the reference may describe newer source."
+            ),
         )
         request = (
             prompt_text.strip()
             if prompt_text.strip()
-            else "Acknowledge the AGENT FYI catalog and briefly summarize the key bridge systems, commands, and capabilities you should remember."
+            else "Briefly acknowledge the current FYI revision, the engineering boundaries, and the reported runtime mode. Do not claim a deployment or live verification."
         )
         if not primer:
             return request
@@ -5928,16 +5935,6 @@ class FlexibleAgentRuntime:
     async def cmd_backend(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        current_mode = self.backend_manager.agent_mode
-        if current_mode != "flex":
-            await self._reply_text(
-                update,
-                self._backend_flex_confirmation_text(current_mode),
-                parse_mode="HTML",
-                reply_markup=self._backend_flex_confirmation_keyboard(current_mode),
-            )
-            return
-
         args = context.args
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
 
@@ -6456,57 +6453,6 @@ class FlexibleAgentRuntime:
             backend_cfg["effort"] = normalized
         self.backend_manager.persist_state()
 
-    def _backend_flex_confirmation_text(self, current_mode: str) -> str:
-        consequence_key = {
-            "fixed": "menu.backend.flex_consequence.fixed",
-            "memory+": "menu.backend.flex_consequence.memory_plus",
-            "wrapper": "menu.backend.flex_consequence.wrapper",
-            "audit": "menu.backend.flex_consequence.audit",
-            "dual-brain": "menu.backend.flex_consequence.dual_brain",
-        }.get(
-            current_mode, "menu.backend.flex_consequence.default"
-        )
-        consequence = ui_language.tr(consequence_key)
-        continuity = get_memory_plus_status(self.workspace_dir)
-        facts = [
-            f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
-            f"<code>{html.escape(self.config.active_backend)}</code>"
-        ]
-        if continuity["enabled"] or current_mode == "memory+":
-            facts.append(
-                f"<b>Memory+</b> · {ui_language.tr('menu.backend.memory_remains')}"
-            )
-        return setting_card(
-            "🧠",
-            "Switch backend",
-            current=f"<code>{html.escape(current_mode)}</code>",
-            facts=facts,
-            consequence=ui_language.tr(
-                "menu.backend.flex_required", consequence=consequence
-            ),
-            action=ui_language.tr("menu.backend.flex_action"),
-        )
-
-    def _backend_flex_confirmation_keyboard(self, current_mode: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        ui_language.tr("menu.backend.flex_confirm"),
-                        callback_data="backend_mode_confirm",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        ui_language.tr(
-                            "menu.backend.flex_keep", mode=current_mode
-                        ),
-                        callback_data=f"backend_mode_cancel:{current_mode}",
-                    )
-                ],
-            ]
-        )
-
     _backend_keyboard = runtime_model_selection.backend_keyboard
 
     def _model_keyboard(self, current_model: Optional[str] = None, engine: Optional[str] = None) -> InlineKeyboardMarkup:
@@ -6682,7 +6628,7 @@ class FlexibleAgentRuntime:
     ) -> tuple[bool, str]:
         allowed_engines = [b["engine"] for b in self.config.allowed_backends]
         if target_engine not in allowed_engines:
-            return False, f"Backend not allowed: {target_engine}"
+            return False, ui_language.tr("backend.switch.not_allowed", backend=target_engine)
 
         policy = self._evaluate_enterprise_policy(
             "backend.switch",
@@ -6694,11 +6640,11 @@ class FlexibleAgentRuntime:
         )
         if not policy.allowed:
             if policy.decision.value == "approval_required":
-                return False, f"Backend switch requires approval: {target_engine}"
-            return False, f"Backend switch blocked by policy: {target_engine}"
+                return False, ui_language.tr("backend.switch.approval", backend=target_engine)
+            return False, ui_language.tr("backend.switch.policy", backend=target_engine)
 
         if self._backend_busy():
-            return False, "Backend switch blocked while a request is running or queued."
+            return False, ui_language.tr("backend.switch.busy")
 
         selected_session = runtime_session.current_session(
             self, surface="telegram", channel_key=str(chat_id)
@@ -6712,19 +6658,12 @@ class FlexibleAgentRuntime:
             target_provider=target_provider,
         )
         if not switch_ok:
-            return False, f"Failed to switch backend to: {target_engine}"
+            return False, ui_language.tr("backend.switch.failed", backend=target_engine)
         self._sync_workzone_to_backend_config()
         backend = self.backend_manager.current_backend
         supports_sessions = bool(
             backend and getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
         )
-        if backend and hasattr(backend, "set_session_mode"):
-            # Every backend switch is a one-shot/Flex-style transition. Fixed
-            # mode never switches backend in place; it must be left first.
-            backend.set_session_mode(False)
-        if backend and supports_sessions:
-            await backend.handle_new_session()
-
         if with_context:
             with suppress(Exception):
                 handoff_builder = runtime_session.session_handoff_builder(
@@ -6768,17 +6707,14 @@ class FlexibleAgentRuntime:
                     skip_memory_injection=True,
                 )
 
-        model = self.get_current_model()
-        provider = self.get_current_provider()
-        effort = self._get_current_effort()
-        mode_text = "with handoff context" if with_context else "without handoff context"
-        message = f"Backend switched to: {target_engine}\n"
-        if provider:
-            message += f"Provider: {provider}\n"
-        message += f"Model: {model}\nMode: {mode_text}"
-        if effort:
-            message += f"\nEffort: {effort}"
-        return True, message
+        return True, runtime_menu_views.backend_switch_notice_text(
+            backend=target_engine,
+            model=self.get_current_model(),
+            provider=self.get_current_provider(),
+            mode=self.backend_manager.agent_mode,
+            effort=self._get_current_effort(),
+            with_context=with_context,
+        )
 
     cmd_model = runtime_model_selection.cmd_model
 

@@ -5,6 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.runtime_defaults import DEFAULT_API_GATEWAY_PORT
 from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label
 from orchestrator.api_gateway_config import (
@@ -55,7 +56,7 @@ def _api_address(runtime: Any) -> str:
     global_config = getattr(runtime, "global_config", None)
     status = _status(runtime)
     host = status.get("bind_host") or getattr(global_config, "api_host", None) or "127.0.0.1"
-    port = status.get("port") or getattr(global_config, "api_gateway_port", None) or 18801
+    port = status.get("port") or getattr(global_config, "api_gateway_port", None) or DEFAULT_API_GATEWAY_PORT
     return f"http://{host}:{port}"
 
 

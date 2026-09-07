@@ -3,19 +3,33 @@
 
 from __future__ import annotations
 
-# ruff: noqa: E402 -- repository root is established before Core import.
-
 import argparse
+import ast
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPOSITORY_ROOT))
-from orchestrator.runtime_contract import CORE_SOURCE_PATHS
+MANIFEST_PATH = "orchestrator/runtime_contract.py"
 
-PROTECTED_CORE_PATHS = CORE_SOURCE_PATHS
+
+def _parse_manifest(source: str) -> tuple[str, ...]:
+    # Read data, never execute code from the branch being checked.
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "CORE_SOURCE_PATHS"
+            for target in node.targets
+        ):
+            paths = ast.literal_eval(node.value)
+            if isinstance(paths, (tuple, list)) and all(isinstance(p, str) for p in paths):
+                return tuple(paths)
+    raise ValueError("CORE_SOURCE_PATHS must be a literal sequence of paths")
+
+
+PROTECTED_CORE_PATHS = _parse_manifest(
+    (REPOSITORY_ROOT / MANIFEST_PATH).read_text(encoding="utf-8")
+)
 
 
 def _repo_root() -> Path:
@@ -29,7 +43,7 @@ def _repo_root() -> Path:
 
 
 def _changed_files(args: argparse.Namespace) -> set[str]:
-    cmd = ["git", "diff", "--name-only"]
+    cmd = ["git", "diff", "--name-only", "--no-renames"]
     if args.cached:
         cmd.append("--cached")
     if args.base:
@@ -41,6 +55,11 @@ def _changed_files(args: argparse.Namespace) -> set[str]:
         if line.strip()
     }
     if not args.cached and not args.base:
+        staged = subprocess.run(
+            ["git", "diff", "--name-only", "--no-renames", "--cached"],
+            check=True, capture_output=True, text=True,
+        )
+        changed.update(line.strip() for line in staged.stdout.splitlines() if line.strip())
         untracked = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
             check=True,
@@ -53,6 +72,29 @@ def _changed_files(args: argparse.Namespace) -> set[str]:
             if line.strip()
         )
     return changed
+
+
+def _protected_paths(root: Path, args: argparse.Namespace) -> set[str]:
+    current = root / MANIFEST_PATH
+    protected = set(
+        _parse_manifest(current.read_text(encoding="utf-8"))
+        if current.is_file() else PROTECTED_CORE_PATHS
+    )
+    # A candidate cannot erase protection by editing its own manifest. Keep
+    # HEAD, the branch baseline and (for commits) the exact index view too.
+    refs = ["HEAD"]
+    if args.base:
+        refs.append(args.base)
+    if args.cached:
+        refs.append("")
+    for ref in dict.fromkeys(refs):
+        result = subprocess.run(
+            ["git", "show", f"{ref}:{MANIFEST_PATH}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            protected.update(_parse_manifest(result.stdout))
+    return protected
 
 
 def _is_authorized(args: argparse.Namespace) -> bool:
@@ -90,7 +132,11 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         print("protected core manifest: ok")
     changed = _changed_files(args)
-    protected = sorted(path for path in changed if path in PROTECTED_CORE_PATHS)
+    try:
+        protected = sorted(changed & _protected_paths(root, args))
+    except (ValueError, SyntaxError, OSError) as exc:
+        print(f"protected core manifest: invalid: {exc}", file=sys.stderr)
+        return 3
 
     if not protected:
         print("protected core check: ok")
@@ -107,8 +153,9 @@ def main(argv: list[str] | None = None) -> int:
     for path in protected:
         print(f"- {path}", file=sys.stderr)
     print(
-        "\nAsk the user for explicit core-edit authorization, then rerun with "
-        "`--authorized` or HASHI_CORE_EDIT_AUTHORIZED=1.",
+        "\nIf the current task already explicitly authorizes these Core edits, rerun "
+        "with `--authorized` or a command-scoped HASHI_CORE_EDIT_AUTHORIZED=1. "
+        "Otherwise obtain authorization before changing Core. Do not request it twice.",
         file=sys.stderr,
     )
     return 2

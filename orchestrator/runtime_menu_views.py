@@ -694,6 +694,26 @@ def her_v2_route_text(
     )
 
 
+def backend_switch_notice_text(
+    *, backend: str, model: str, mode: str, provider: str | None,
+    effort: str | None, with_context: bool,
+) -> str:
+    """Plain result for command consumers; selection menus use HTML cards."""
+    lines = [_tr("backend.switch.success", backend=backend)]
+    if provider:
+        lines.append(f"{_tr('common.provider')}: {provider}")
+    lines.extend([
+        f"{_tr('common.model')}: {model}",
+        f"{_tr('common.mode')}: {mode}",
+        f"{_tr('common.context')}: " + _tr(
+            "menu.backend.with_handoff" if with_context else "menu.backend.without_handoff"
+        ),
+    ])
+    if effort:
+        lines.append(f"{_tr('common.effort')}: {effort}")
+    return "\n".join(lines)
+
+
 def her_v2_backend_selected_text(*, with_context: bool) -> str:
     return setting_card(
         "✅",

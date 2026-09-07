@@ -510,36 +510,24 @@ async def test_failed_her_alias_switch_never_rolls_back_to_retired_her(tmp_path)
             extra={},
         )
     )
-    initialize_calls: list[tuple[str, str | None, str | None]] = []
+    original_backend = manager.current_backend
+    manager._save_state()
+    before = _read_state(workspace)
+    initialize_calls = []
 
-    async def fake_shutdown():
-        manager.current_backend = None
+    async def fake_create(engine, target_model=None, target_provider=None):
+        initialize_calls.append((engine, target_model, target_provider))
+        return None
 
-    async def fake_initialize(target_model=None, target_provider=None):
-        initialize_calls.append(
-            (manager.config.active_backend, target_model, target_provider)
-        )
-        return len(initialize_calls) > 1
+    manager._create_initialized_backend = fake_create
 
-    manager.shutdown = fake_shutdown
-    manager.initialize_active_backend = fake_initialize
-
-    switched = await manager.switch_backend(
-        "her",
-        target_model="role-configured",
-    )
+    switched = await manager.switch_backend("her", target_model="role-configured")
 
     assert switched is False
-    assert initialize_calls == [
-        ("her-v2", "role-configured", None),
-        ("codex-cli", "gpt-test", None),
-    ]
+    assert initialize_calls == [("her-v2", "role-configured", None)]
+    assert manager.current_backend is original_backend
     assert manager.config.active_backend == "codex-cli"
-    assert manager._active_model_override == "gpt-test"
-    state = _read_state(workspace)
-    assert state["active_backend"] == "codex-cli"
-    assert "active_provider" not in state
-    assert state["active_model"] == "gpt-test"
+    assert _read_state(workspace) == before
 
 
 def test_save_state_recovers_from_invalid_existing_json(tmp_path):

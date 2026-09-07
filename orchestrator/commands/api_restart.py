@@ -8,6 +8,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator.runtime_defaults import DEFAULT_API_GATEWAY_PORT
 from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
@@ -52,7 +53,7 @@ def _gateway_status_text(runtime: Any) -> str:
         return ui_language.tr("api.control_unavailable")
     snapshot = service_manager.api_gateway_state_snapshot()
     state_icon = "🟢" if snapshot["running"] else ("🟡" if snapshot["enabled"] else "⚪")
-    base_url = snapshot.get("base_url") or "http://127.0.0.1:18801"
+    base_url = snapshot.get("base_url") or f"http://127.0.0.1:{DEFAULT_API_GATEWAY_PORT}"
     return "\n".join(
         [
             card_title("🔌", "Hashi API gateway"),

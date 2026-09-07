@@ -5,6 +5,9 @@ The canonical engineering rule is:
 > Design for high cohesion, low coupling, a single source of truth, and
 > localized change.
 
+Agents start with [`AGENTS.md`](AGENTS.md). Enable the fast local staged checks
+once with `python scripts/install_engineering_hooks.py`; custom hooks are preserved.
+
 Before editing, read [`ARCHITECTURE.md`](ARCHITECTURE.md), the Level 0 system
 architecture. It defines the four functional modules, canonical terminology,
 authority boundaries, and the rule that every capability has one functional
@@ -65,3 +68,13 @@ live checks require explicit authority.
 Protected core edits require explicit authorization and focused regression
 tests. On GitHub, an authorized core pull request also needs the
 `core-change-approved` label.
+
+The Core guard checks unstaged, staged and untracked changes by default. Commit
+hooks check the index, and branch checks include the baseline's protected paths.
+`--authorized` only acknowledges explicit authorization already given for this
+change; never install a permanent authorization environment variable.
+
+Keep decision status scoped: approved design, source implementation, offline
+validation and live adoption are distinct. Record evidence in the owning decision
+instead of treating test counts or a merged document as live verification.
+See [Engineering safeguard decision](docs/ENGINEERING_SAFEGUARDS_2026-09-07.md).

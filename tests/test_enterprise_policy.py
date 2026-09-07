@@ -310,7 +310,7 @@ async def test_runtime_backend_switch_honors_enterprise_policy_deny(tmp_path):
     ok, message = await FlexibleAgentRuntime._switch_backend_mode(runtime, 123, "claude-cli")
 
     assert ok is False
-    assert message == "Backend switch blocked by policy: claude-cli"
+    assert message.endswith("Backend switch blocked by policy: claude-cli")
 
 
 @pytest.mark.asyncio
@@ -326,4 +326,4 @@ async def test_runtime_backend_switch_blocks_approval_required_policy(tmp_path):
     ok, message = await FlexibleAgentRuntime._switch_backend_mode(runtime, 123, "claude-cli")
 
     assert ok is False
-    assert message == "Backend switch requires approval: claude-cli"
+    assert message.endswith("Backend switch requires approval: claude-cli")

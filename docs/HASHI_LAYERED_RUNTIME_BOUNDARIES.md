@@ -58,7 +58,8 @@ Current authoritative owners include:
 
 | Knowledge or lifecycle rule | Authoritative owner |
 |---|---|
-| Engine/Model Provider compatibility entries, models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
+| Shared Engine/Model Provider compatibility baseline, models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
+| Instance model/effort opt-ins and effective Function-side choices | ignored `allowed_backends` configuration, resolved by `orchestrator/runtime_effort_options.py` |
 | built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
 | stable Core manager construction | `orchestrator/manager_registry.py` |
 | Python, ABI, dependency and protected-Core identity | `orchestrator/runtime_contract.py` and `[tool.hashi.runtime]` |
@@ -78,7 +79,12 @@ registry contains compatibility representations of both Engine Providers and
 Model Provider adapters; that physical shape must not erase the distinction.
 
 When adding a fact covered by this table, extend its owner and derive consumer
-views. Do not create another literal list or direct file writer.
+views. Do not create another literal list or direct file writer. The shared
+registry remains a protected compatibility baseline: an ordinary instance model
+opt-in belongs in instance configuration and the existing Function-side resolver.
+Changing the shared baseline is planned Core work. Moving it to a replaceable
+catalogue also requires migrating long-lived Core consumers; merely removing it
+from the manifest is not a valid Function migration.
 
 ## Layer 1: HASHI Core
 
@@ -132,8 +138,9 @@ those services must route through an `AgentRuntimeHandle` rather than being
 implemented in the stable ingress layer. Changing a Core manager or service is
 a planned Core migration.
 
-The manifest is enforced by agent instructions first and by a local preflight
-check:
+The manifest is enforced through `AGENTS.md`, a local preflight and the optional
+installed pre-commit hook. Default preflight includes staged, unstaged and
+untracked changes; commit/branch checks also retain baseline protection:
 
 ```bash
 python scripts/check_protected_core_changes.py

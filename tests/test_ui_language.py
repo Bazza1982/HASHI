@@ -317,3 +317,95 @@ def test_scheduler_notice_is_english_by_default_and_chinese_when_selected() -> N
     assert chinese.startswith("⏰ HASHI 离线恢复")
     assert "内容：test task" in chinese
     assert "全部补跑" in chinese
+
+
+@pytest.mark.asyncio
+async def test_backend_busy_notice_uses_selected_ui_language():
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(allowed_backends=[{"engine": "codex-cli"}]),
+        _evaluate_enterprise_policy=lambda *a, **kw: SimpleNamespace(allowed=True),
+        _backend_busy=lambda: True,
+    )
+    with ui_language.language_scope(runtime, locale="zh-CN"):
+        ok, message = await FlexibleAgentRuntime._switch_backend_mode(runtime, 0, "codex-cli")
+    assert not ok
+    assert "正在运行或排队" in message
+    assert "Backend switch" not in message
+
+
+@pytest.mark.asyncio
+async def test_backend_busy_callback_keeps_selection_card_in_chinese():
+    from unittest.mock import AsyncMock
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace(allowed_backends=[{"engine": "codex-cli"}])
+    runtime._is_authorized_user = lambda _user: True
+    runtime._evaluate_enterprise_policy = lambda *a, **kw: SimpleNamespace(allowed=True)
+    runtime._backend_busy = lambda: True
+    runtime.error_logger = SimpleNamespace(exception=lambda *a: None)
+    query = SimpleNamespace(
+        data="bmodel:codex-cli:p:gpt-5.4", from_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(chat_id=42), answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    with ui_language.language_scope(runtime, locale="zh-CN"):
+        await runtime.callback_model(SimpleNamespace(callback_query=query), SimpleNamespace())
+    query.edit_message_text.assert_not_awaited()
+    query.answer.assert_awaited_once()
+    assert query.answer.await_args.kwargs["show_alert"] is True
+    assert "正在运行或排队" in query.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_backend_success_notice_reports_saved_mode_in_selected_language(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from orchestrator import runtime_session
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace(allowed_backends=[{"engine": "codex-cli"}])
+    runtime.backend_manager = SimpleNamespace(
+        agent_mode="fixed", switch_backend=AsyncMock(return_value=True),
+        current_backend=SimpleNamespace(capabilities=SimpleNamespace(supports_sessions=True)),
+    )
+    runtime._evaluate_enterprise_policy = lambda *a, **kw: SimpleNamespace(allowed=True)
+    runtime._backend_busy = lambda: False
+    runtime._sync_workzone_to_backend_config = Mock()
+    runtime._clear_handoff_state = Mock()
+    runtime._arm_session_primer = Mock()
+    runtime.get_current_model = lambda: "gpt-5.4"
+    runtime.get_current_provider = lambda: None
+    runtime._get_current_effort = lambda: "high"
+    monkeypatch.setattr(runtime_session, "current_session", lambda *a, **kw: {"session_id": "test"})
+    monkeypatch.setattr(runtime_session, "apply_session_workzones", lambda *a, **kw: None)
+    with ui_language.language_scope(runtime, locale="zh-CN"):
+        ok, message = await runtime._switch_backend_mode(42, "codex-cli")
+    assert ok
+    assert "模式: fixed" in message
+    assert "模型: gpt-5.4" in message
+    assert "不携带交接上下文" in message
+    assert "Backend switched" not in message
+
+
+@pytest.mark.asyncio
+async def test_mode_notice_uses_escaped_html_and_keeps_backend_available():
+    from orchestrator import runtime_mode
+    from unittest.mock import AsyncMock, Mock
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(active_backend="test<&>"),
+        backend_manager=SimpleNamespace(
+            agent_mode="flex", _save_state=Mock(),
+            current_backend=SimpleNamespace(capabilities=SimpleNamespace(supports_sessions=False)),
+        ),
+        _reply_text=AsyncMock(),
+    )
+    with ui_language.language_scope(runtime, locale="en"):
+        await runtime_mode.switch_mode_from_command(runtime, None, "fixed")
+        call = runtime._reply_text.await_args
+        assert call.kwargs["parse_mode"] == "HTML"
+        assert "test&lt;&amp;&gt;" in call.args[1]
+        runtime.backend_manager.current_backend.capabilities.supports_sessions = True
+        await runtime_mode.switch_mode_from_command(runtime, None, "fixed")
+        assert "<code>/backend</code> remains available" in runtime._reply_text.await_args.args[1]

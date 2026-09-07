@@ -20,7 +20,7 @@ def test_changed_files_supports_cached_and_base(monkeypatch) -> None:
     changed = checker._changed_files(args)
 
     assert changed == {"main.py", "remote/main.py"}
-    assert calls == [["git", "diff", "--name-only", "--cached", "main", "--"]]
+    assert calls == [["git", "diff", "--name-only", "--no-renames", "--cached", "main", "--"]]
 
 
 def test_changed_files_includes_untracked_new_core_files(monkeypatch) -> None:
@@ -42,7 +42,8 @@ def test_changed_files_includes_untracked_new_core_files(monkeypatch) -> None:
 
     assert changed == {"main.py", "orchestrator/runtime_contract.py"}
     assert calls == [
-        ["git", "diff", "--name-only"],
+        ["git", "diff", "--name-only", "--no-renames"],
+        ["git", "diff", "--name-only", "--no-renames", "--cached"],
         ["git", "ls-files", "--others", "--exclude-standard"],
     ]
 

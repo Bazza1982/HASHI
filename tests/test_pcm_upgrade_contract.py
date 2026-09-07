@@ -659,6 +659,7 @@ async def test_backend_plus_delivers_one_continuation_payload_to_fixed_target(tm
     runtime.backend_manager = SimpleNamespace(
         current_backend=backend,
         switch_backend=AsyncMock(return_value=True),
+        agent_mode="fixed",
     )
     runtime.handoff_builder = SimpleNamespace(
         refresh_recent_context=Mock(),

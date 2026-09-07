@@ -1420,7 +1420,7 @@ async def test_legacy_mode_memory_plus_enables_continuity_without_changing_mode(
     assert manager.agent_mode == "fixed"
     assert state["agent_mode"] == "fixed"
     assert state["memory_plus"]["enabled"] is True
-    assert "Working mode remains **fixed**" in messages[-1]
+    assert "Working mode remains <b>fixed</b>" in messages[-1]
 
 
 @pytest.mark.asyncio
@@ -1502,7 +1502,7 @@ async def test_retired_mode_callback_does_not_mutate_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_backend_confirms_flex_while_model_guides_wrapper_mode(tmp_path):
+async def test_backend_opens_menu_while_model_guides_legacy_wrapper_mode(tmp_path):
     manager = _make_manager(tmp_path / "agent")
     manager.agent_mode = "wrapper"
     manager.current_backend = SimpleNamespace(config=SimpleNamespace(model="gpt-5.5"))
@@ -1510,9 +1510,8 @@ async def test_backend_confirms_flex_while_model_guides_wrapper_mode(tmp_path):
 
     update, context = _update([])
     await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
-    assert "SWITCH BACKEND" in messages[-1]
-    assert "core-and-wrapper response flow will stop" in messages[-1]
-    assert "backend_mode_confirm" in str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "HASHI BACKEND" in messages[-1]
+    assert "backend_mode_confirm" not in str(runtime._reply_payloads[-1]["reply_markup"])
     assert manager.agent_mode == "wrapper"
 
     await FlexibleAgentRuntime.cmd_model(runtime, update, context)
@@ -1521,21 +1520,21 @@ async def test_backend_confirms_flex_while_model_guides_wrapper_mode(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_backend_fixed_mode_offers_confirmation_without_mutating(tmp_path):
+@pytest.mark.parametrize("mode", ["fixed", "flex"])
+async def test_backend_opens_menu_without_mutating(tmp_path, mode):
     manager = _make_manager(tmp_path / "fixed")
-    manager.agent_mode = "fixed"
+    manager.agent_mode = mode
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
     await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
 
-    assert "SWITCH BACKEND" in messages[-1]
-    assert "<code>fixed</code>" in messages[-1]
-    assert "Switch to Flex and continue" in messages[-1]
+    assert "HASHI BACKEND" in messages[-1]
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
-    assert "backend_mode_confirm" in markup
-    assert "backend_mode_cancel:fixed" in markup
-    assert manager.agent_mode == "fixed"
+    assert "backend:codex-cli:plain" in markup
+    assert "backend_mode_confirm" not in markup
+    assert "backend_mode_cancel" not in markup
+    assert manager.agent_mode == mode
     assert not (manager.config.workspace_dir / "state.json").exists()
 
 
@@ -2467,9 +2466,10 @@ async def test_her_v2_effort_menu_uses_execution_mode_names(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_backend_confirmation_switches_to_flex_and_opens_backend_menu(tmp_path):
+@pytest.mark.parametrize("mode", ["fixed", "flex"])
+async def test_stale_backend_confirmation_opens_menu_without_mutation(tmp_path, mode):
     manager = _make_manager(tmp_path / "agent")
-    manager.agent_mode = "memory+"
+    manager.agent_mode = mode
     set_session_mode = Mock()
     manager.current_backend = SimpleNamespace(
         config=SimpleNamespace(model="gpt-5.4"),
@@ -2480,11 +2480,9 @@ async def test_backend_confirmation_switches_to_flex_and_opens_backend_menu(tmp_
 
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
-    assert manager.agent_mode == "flex"
-    state = _read_state(tmp_path / "agent")
-    assert state["agent_mode"] == "flex"
-    assert state["memory_plus"]["enabled"] is True
-    set_session_mode.assert_called_once_with(False)
+    assert manager.agent_mode == mode
+    assert not (manager.config.workspace_dir / "state.json").exists()
+    set_session_mode.assert_not_called()
     assert "HASHI BACKEND" in edits[-1]["text"]
     assert "backend:codex-cli:plain" in str(edits[-1]["reply_markup"])
     assert answers[-1]["text"] is None
@@ -2506,7 +2504,7 @@ async def test_backend_confirmation_from_fixed_keeps_memory_plus_enabled(tmp_pat
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
     state = _read_state(tmp_path / "agent")
-    assert state["agent_mode"] == "flex"
+    assert state["agent_mode"] == "fixed"
     assert state["memory_plus"]["enabled"] is True
     assert "HASHI BACKEND" in edits[-1]["text"]
 

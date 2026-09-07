@@ -417,7 +417,9 @@ def run_onboarding():
 
         # Pass HASHI_BRIDGE_PORT through so the correct instance port is used
         launch_env = os.environ.copy()
-        bridge_port = launch_env.get("HASHI_BRIDGE_PORT", "18800")
+        from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
+
+        bridge_port = launch_env.get("HASHI_BRIDGE_PORT", str(DEFAULT_WORKBENCH_PORT))
         launch_env["HASHI_BRIDGE_PORT"] = bridge_port
         _log(f"HASHI_BRIDGE_PORT={bridge_port}")
 

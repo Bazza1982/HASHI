@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import logging
@@ -86,8 +87,6 @@ def _additional_access_roots_from_environment() -> tuple[Path, ...]:
     return tuple(roots)
 
 
-AGENT_MODE_POLICY_VERSION_STATE_KEY = "agent_mode_policy_version"
-CURRENT_AGENT_MODE_POLICY_VERSION = 1
 
 
 class FlexibleBackendManager:
@@ -1366,16 +1365,32 @@ class FlexibleBackendManager:
         target_model: str | None = None,
         target_provider: str | None = None,
     ) -> bool:
-        engine = self.config.active_backend
+        backend = await self._create_initialized_backend(
+            self.config.active_backend,
+            target_model=target_model or getattr(self, "_active_model_override", None),
+            target_provider=target_provider,
+        )
+        if backend is None:
+            return False
+        self.current_backend = backend
+        return True
+
+    async def _create_initialized_backend(
+        self,
+        engine: str,
+        target_model: str | None = None,
+        target_provider: str | None = None,
+    ):
+        """Prepare an adapter without replacing the live backend or saved state."""
         self.logger.info(f"Initializing active backend: {engine}")
         try:
             require_level_available(self.privacy_level)
             require_backend_compatibility(engine, self.privacy_level)
         except PrivacyPolicyError as exc:
             self.logger.error("Backend blocked by privacy policy: %s", exc)
-            return False
+            return None
 
-        resolved_model = target_model or getattr(self, "_active_model_override", None)
+        resolved_model = target_model
         resolved_provider = target_provider
         backend_cfg_raw = self._select_backend_cfg(
             engine,
@@ -1384,7 +1399,7 @@ class FlexibleBackendManager:
         )
         if not backend_cfg_raw:
             self.logger.error(f"Active backend {engine} not found in allowed_backends.")
-            return False
+            return None
 
         adapter_cfg = self._build_adapter_config(
             engine,
@@ -1393,14 +1408,16 @@ class FlexibleBackendManager:
             target_provider=resolved_provider,
         )
 
+        backend = None
+        initialized = False
         try:
             from adapters.registry import get_backend_class
             BackendClass = get_backend_class(engine)
             api_key = self._resolve_api_key(engine, backend_cfg_raw)
             self._attach_runtime_context(adapter_cfg)
 
-            self.current_backend = BackendClass(adapter_cfg, self.global_config, api_key)
-            self.current_backend.privacy_level = self.privacy_level
+            backend = BackendClass(adapter_cfg, self.global_config, api_key)
+            backend.privacy_level = self.privacy_level
 
             # V2.2+: inject the canonical ToolRegistry into tool-capable backends.
             # API adapters consume it directly; HER exposes it through the
@@ -1418,12 +1435,22 @@ class FlexibleBackendManager:
             ):
                 tools_cfg = self._resolve_tools_config(backend_cfg_raw)
                 if tools_cfg:
-                    self._attach_tool_registry(tools_cfg, adapter_cfg)
+                    self._attach_tool_registry(tools_cfg, adapter_cfg, backend=backend)
 
-            return await self.current_backend.initialize()
+            initialized = bool(await backend.initialize())
+            return backend if initialized else None
         except Exception as e:
             self.logger.error(f"Failed to initialize backend {engine}: {e}")
-            return False
+            return None
+        finally:
+            if backend is not None and not initialized:
+                await self._dispose_backend(backend)
+
+    async def _dispose_backend(self, backend) -> None:
+        try:
+            await backend.shutdown()
+        except Exception:
+            self.logger.exception("Failed to shut down discarded backend")
 
     def _resolve_tools_config(self, backend_cfg_raw: dict) -> dict | None:
         """Merge global default_tools with per-backend tools config.
@@ -1480,7 +1507,7 @@ class FlexibleBackendManager:
         merged["allowed"] = merged_allowed
         return merged
 
-    def _attach_tool_registry(self, tools_cfg: dict, adapter_cfg) -> None:
+    def _attach_tool_registry(self, tools_cfg: dict, adapter_cfg, *, backend=None) -> None:
         """Create and attach the canonical ToolRegistry to a tool-capable backend."""
         try:
             from tools.registry import ToolRegistry
@@ -1545,7 +1572,8 @@ class FlexibleBackendManager:
                 ),
                 access_roots=list(access_roots),
             )
-            self.current_backend.tool_registry = registry
+            target = backend if backend is not None else self.current_backend
+            target.tool_registry = registry
             self.logger.info(
                 "ToolRegistry attached with unbounded tool rounds: allowed=%s",
                 allowed,
@@ -1576,6 +1604,21 @@ class FlexibleBackendManager:
         target_model: str | None = None,
         target_provider: str | None = None,
     ) -> bool:
+        # Serialize selections while an adapter is being prepared. The live
+        # backend remains usable until the replacement is ready to commit.
+        if not hasattr(self, "_backend_switch_lock"):
+            self._backend_switch_lock = asyncio.Lock()
+        async with self._backend_switch_lock:
+            return await self._switch_backend_transaction(
+                target_engine, target_model, target_provider
+            )
+
+    async def _switch_backend_transaction(
+        self,
+        target_engine: str,
+        target_model: str | None,
+        target_provider: str | None,
+    ) -> bool:
         target_engine = canonical_backend_engine(target_engine)
         resolved_provider = target_provider
         resolved_model = target_model
@@ -1598,39 +1641,52 @@ class FlexibleBackendManager:
             self.logger.error("Target backend blocked by privacy policy: %s", exc)
             return False
 
-        previous_engine = self.config.active_backend
-        previous_backend_config = getattr(self.current_backend, "config", None)
-        previous_model = (
-            getattr(self, "_active_model_override", None)
-            or getattr(previous_backend_config, "model", None)
-        )
-        # Cleanly shut down current backend
-        if self.current_backend:
-            await self.shutdown()
-
-        # Update config and state
-        self.config.active_backend = target_engine
-        self._active_model_override = resolved_model
-        self._save_state()
-
-        # Initialize target backend — rollback on failure
-        if not await self.initialize_active_backend(
-            target_model=resolved_model,
-            target_provider=resolved_provider,
-        ):
-            self.logger.error(
-                f"Failed to initialize {target_engine}; rolling back to {previous_engine}"
+        candidate = None
+        committed = False
+        try:
+            candidate = await self._create_initialized_backend(
+                target_engine,
+                target_model=resolved_model,
+                target_provider=resolved_provider,
             )
-            self.config.active_backend = previous_engine
-            self._active_model_override = previous_model
-            self._save_state()
-            if not await self.initialize_active_backend(
-                target_model=previous_model,
-            ):
-                self.logger.critical(
-                    f"Rollback to {previous_engine} also failed. Agent has no active backend."
-                )
+            if candidate is None:
+                return False
+            supports_sessions = bool(candidate.capabilities.supports_sessions)
+            target_mode = "fixed" if supports_sessions else "flex"
+            if hasattr(candidate, "set_session_mode"):
+                candidate.set_session_mode(supports_sessions)
+            if supports_sessions and not await candidate.handle_new_session():
+                raise RuntimeError("Target backend could not start a new session")
+
+            previous_backend = self.current_backend
+            previous_engine = self.config.active_backend
+            previous_model = self._active_model_override
+            previous_mode = self.agent_mode
+            # No await between updating the live fields and the atomic write.
+            # State-store exceptions must propagate here; _save_state swallows
+            # them and therefore cannot establish a successful switch.
+            self.config.active_backend = target_engine
+            self._active_model_override = resolved_model
+            self.agent_mode = target_mode
+            try:
+                self.state_store.update(self._apply_managed_state_fields)
+            except Exception:
+                self.config.active_backend = previous_engine
+                self._active_model_override = previous_model
+                self.agent_mode = previous_mode
+                raise
+            self.current_backend = candidate
+            committed = True
+        except Exception:
+            self.logger.exception("Backend switch failed; original backend retained")
             return False
+        finally:
+            if candidate is not None and not committed:
+                await self._dispose_backend(candidate)
+
+        # Retirement cannot turn an already committed switch into a failure.
+        if previous_backend is not None:
+            await self._dispose_backend(previous_backend)
         return True
 
     async def shutdown(self):

@@ -58,6 +58,16 @@ class ServiceBannerStatus:
     url: str
 
 
+def service_banner_statuses(services: dict) -> list[ServiceBannerStatus]:
+    """Map stable service identifiers to user-facing labels in the renderer."""
+    rows = []
+    for key, label in (("workbench", "Backend API"), ("api_gateway", "API Gateway")):
+        url = str((services.get(key) or {}).get("base_url") or "").strip()
+        if url:
+            rows.append(ServiceBannerStatus(name=label, url=url))
+    return rows
+
+
 @dataclass(frozen=True)
 class StartupAnimationResult:
     """Observable outcome of the best-effort startup animation."""
