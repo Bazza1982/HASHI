@@ -86,7 +86,7 @@ class ConversationRouter:
         request_id = await runtime.enqueue_api_text(
             bridge_prompt,
             source=f"bridge:{message['message_id']}",
-            deliver_to_telegram=False,
+            deliver_to_telegram=True,
         )
         if request_id is None:
             failure = "failed to enqueue bridge request"

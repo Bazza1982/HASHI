@@ -101,7 +101,7 @@ class _Runtime:
     ):
         del source
         del idempotency_key
-        assert deliver_to_telegram is False
+        assert deliver_to_telegram is True
         self.api_request_metadata.append(dict(request_metadata))
         return f"req-api-{len(self.api_request_metadata)}"
 

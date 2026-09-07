@@ -959,7 +959,7 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
                     runtime_retry.RETRY_HANDOFF_SOURCE,
                     f"Retry handoff restore [{handoff.exchange_count} exchanges]",
                     is_retry=True,
-                    deliver_to_telegram=False,
+                    deliver_to_telegram=True,
                     skip_memory_injection=True,
                 )
                 handoff_queued = bool(handoff_request_id)

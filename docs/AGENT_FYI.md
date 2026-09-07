@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+Agent activity visibility: every admitted turn, including HChat/protocol, API,
+bridge and background turns, must request visible delivery. Legacy
+`deliver_to_telegram=false` and `silent=true` cannot suppress queued turns;
+Functions enforce this at admission. Preserve destination authorization and
+terminal HChat reply rules. See [visibility decision](HASHI_AGENT_ACTIVITY_VISIBILITY.md).
+Source adoption and successful message delivery must be verified separately.
+
 Reference updated: 2026-09-07. This is a compact orientation, not a task queue,
 permission grant, or proof that the running instance has adopted current source.
 `/fyi` reads this reference again and identifies its content revision. Check live

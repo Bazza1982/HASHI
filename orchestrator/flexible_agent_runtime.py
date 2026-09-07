@@ -795,6 +795,11 @@ class FlexibleAgentRuntime:
         request_content: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
     ):
+        # Agent turns are always observable, including legacy IPC callers that
+        # request hidden delivery. Keep the wire arguments for compatibility;
+        # enforce policy here in Functions before any admission/queue side effects.
+        deliver_to_telegram = True
+        silent = False
         normalized_request_content = None
         manifest = ()
         if request_content is not None:
@@ -6611,7 +6616,7 @@ class FlexibleAgentRuntime:
                     "handoff",
                     f"Backend continuation [{exchange_count} exchanges]",
                     silent=True,
-                    deliver_to_telegram=False,
+                    deliver_to_telegram=True,
                     skip_memory_injection=True,
                 )
 
