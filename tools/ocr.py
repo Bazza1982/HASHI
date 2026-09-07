@@ -319,7 +319,43 @@ def _paddle_routes_for_languages(
     )
 
 
+def _paddle_python_override() -> str:
+    python = str(os.environ.get("HASHI_PADDLE_OCR_PYTHON") or "").strip()
+    if python:
+        return python
+    bridge_home = str(os.environ.get("BRIDGE_HOME") or "").strip()
+    if not bridge_home:
+        return ""
+    config_path = Path(bridge_home) / "state" / "platform" / "ocr.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return ""
+    python = config.get("paddle_python", "")
+    if not isinstance(python, str):
+        raise ValueError("OCR platform paddle_python must be a string")
+    return python.strip()
+
+
 def _paddle_runtime_ready() -> bool:
+    # Paddle may need an isolated environment when its pins differ from Core.
+    python = _paddle_python_override()
+    if python:
+        try:
+            result = subprocess.run(
+                [
+                    python, "-I", "-c",
+                    "import importlib.util; "
+                    "raise SystemExit(0 if all(importlib.util.find_spec(name) "
+                    "is not None for name in ('paddleocr', 'paddle')) else 1)",
+                ],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     return importlib.util.find_spec("paddleocr") is not None and importlib.util.find_spec(
         "paddle"
     ) is not None
@@ -388,7 +424,7 @@ def _extract_with_paddle(
         )
 
     command = [
-        sys.executable,
+        _paddle_python_override() or sys.executable,
         "-m",
         "tools.ocr_worker",
         "--image",
