@@ -568,3 +568,86 @@ def test_status_summary_reports_delivery_block_and_typing(tmp_path):
     assert "via <code>lin_yueru</code>" in text
     assert "<b>Typing</b> · <code>ON</code>" in text
     assert "<b>Preview</b>" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("availability", ["source", "fallback", "blocked", "none"])
+async def test_runtime_notice_uses_original_bot_without_worker_then_same_destination_fallback(
+    tmp_path, monkeypatch, availability
+):
+    from orchestrator.reboot_ui import render_notice
+
+    calls, closed = [], []
+
+    class DirectBot:
+        def __init__(self, token):
+            self.token = token
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            closed.append(self.token)
+
+        async def send_message(self, **kwargs):
+            calls.append((self.token, kwargs))
+            if availability == "none" or (
+                availability == "fallback" and self.token == "source-test-token"
+            ):
+                raise OSError("unavailable")
+            return SimpleNamespace(message_id=19)
+
+    monkeypatch.setattr("telegram.Bot", DirectBot)
+    config = {
+        "agents": [
+            {"name": "source", "telegram_token_key": "s"},
+            {"name": "source_alias", "telegram_token_key": "s"},
+            {"name": "backup", "telegram_token_key": "b"},
+        ]
+    }
+    kernel = SimpleNamespace(
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+        _runtime_map=lambda: {},  # no Worker exists, including the initiator
+        _load_raw_config=lambda: config,
+        secrets={"s": "source-test-token", "b": "backup-test-token"},
+    )
+    if availability == "blocked":
+        _write_delivery_state(
+            tmp_path,
+            "source",
+            {
+                "status": "blocked",
+                "blocked_until": "2999-01-01T00:00:00+00:00",
+                "token_key": "telegram:s",
+            },
+        )
+    record = {
+        "source_agent": "source",
+        "mode": "min",
+        "targets": ["source"],
+        "display_names": {"source": "显示<&>名称"},
+        "status": "succeeded",
+        "locale": "zh-CN",
+    }
+    result = await failover.send_runtime_notice(
+        kernel,
+        source_agent="source",
+        chat_id=-42,
+        thread_id=7,
+        render_text=lambda name, display: render_notice(
+            record, sender=name, sender_display=display
+        ),
+    )
+    assert result["sent"] is (availability != "none")
+    if availability in {"fallback", "blocked"}:
+        assert result["sender"] == "backup" and "backup" in calls[-1][1]["text"]
+    elif availability == "source":
+        assert result["sender"] == "source" and len(calls) == 1
+    else:
+        assert len(calls) == 2  # aliases sharing a token are tried once
+    for _token, kwargs in calls:
+        assert (kwargs["chat_id"], kwargs["message_thread_id"]) == (-42, 7)
+        assert (
+            "显示&lt;&amp;&gt;名称" in kwargs["text"] and kwargs["parse_mode"] == "HTML"
+        )
+    assert len(closed) == len(calls)

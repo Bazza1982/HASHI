@@ -375,6 +375,98 @@ async def _send_direct(runtime: Any, *, chat_id: int, text: str) -> None:
     await runtime.app.bot.send_message(chat_id=chat_id, text=text)
 
 
+async def send_runtime_notice(
+    kernel, *, source_agent, chat_id, thread_id=None, render_text
+):
+    """Send an operational notice without depending on any Agent Worker.
+
+    Keep the original destination across fallback. Only this instance's known
+    bot credentials are considered; no model, poller or Agent is started.
+    """
+    from telegram import Bot
+
+    workers = getattr(kernel, "function_workers", None)
+    ingresses = getattr(workers, "_telegram_ingress", {})
+    runtime_map = kernel._runtime_map()
+    raw = kernel._load_raw_config() if hasattr(kernel, "_load_raw_config") else {}
+    configs = {str(a["name"]): a for a in raw.get("agents", [])}
+    preferred = (raw.get("global", {}).get("telegram_delivery_failover") or {}).get(
+        "default_agent"
+    )
+    names = list(
+        dict.fromkeys(
+            [source_agent, *([preferred] if preferred else []), *ingresses, *configs]
+        )
+    )
+    health = load_health_state(kernel)
+    blocked = {
+        name
+        for name, record in health.get("agents", {}).items()
+        if _record_has_active_block(record)
+    }
+    blocked_keys = {
+        record.get("token_key")
+        for record in health.get("agents", {}).values()
+        if _record_has_active_block(record)
+    }
+
+    def token_for(name):
+        return str(
+            getattr(ingresses.get(name), "token", "")
+            or (getattr(kernel, "secrets", {}) or {}).get(
+                configs.get(name, {}).get("telegram_token_key"), ""
+            )
+        )
+
+    tried_tokens = {
+        token_for(name)
+        for name in names
+        if name in blocked
+        or f"telegram:{configs.get(name, {}).get('telegram_token_key', name)}"
+        in blocked_keys
+    }
+    retry_delay = 5
+    try:
+        async with asyncio.timeout(15):
+            for name in names:
+                if name in blocked:
+                    continue
+                token = token_for(name)
+                if (
+                    not token
+                    or token in tried_tokens
+                    or token == "WORKBENCH_ONLY_NO_TOKEN"
+                ):
+                    continue
+                tried_tokens.add(token)
+                handle = runtime_map.get(name)
+                display = handle.get_display_name() if handle else name
+                try:
+                    async with asyncio.timeout(5):
+                        async with Bot(token) as bot:
+                            message = await bot.send_message(
+                                chat_id=chat_id,
+                                message_thread_id=thread_id,
+                                text=render_text(name, display),
+                                parse_mode="HTML",
+                            )
+                    return {
+                        "sent": True,
+                        "sender": name,
+                        "message_id": message.message_id,
+                    }
+                except RetryAfter as exc:
+                    retry_delay = max(retry_delay, retry_after_seconds(exc))
+                except Exception as exc:
+                    # Raw transport errors may contain the bot's request URL.
+                    logger.warning(
+                        "Runtime notice via %s failed (%s)", name, type(exc).__name__
+                    )
+    except TimeoutError:
+        pass
+    return {"sent": False, "retry_after": retry_delay}
+
+
 async def _prepare_warning(
     source_runtime: Any,
     *,

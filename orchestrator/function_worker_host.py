@@ -649,6 +649,12 @@ class WorkerKernelFacade:
             )
         )
 
+    async def request_reboot(self, **request):
+        return await self.peer.request("core.reboot.submit", request)
+
+    async def reboot_status(self, **origin):
+        return await self.peer.request("core.reboot.status", origin)
+
     async def start_whatsapp_transport(
         self,
         persist_enabled: bool = True,

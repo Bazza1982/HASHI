@@ -124,42 +124,51 @@ async def test_reboot_command_rejects_unknown_target_without_requesting_restart(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["0", "3", "unexpected"])
 async def test_reboot_callback_rejects_invalid_target_without_requesting_restart(
-    value,
+    value, tmp_path
 ):
+    import asyncio
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.reboot_manager import RebootManager
 
-    answers = []
     edits = []
-    restart_requests = []
 
     class Query:
         data = f"tgl:reboot:{value}"
         from_user = SimpleNamespace(id=42)
 
-        async def answer(self, text=None, **kwargs):
-            answers.append((text, kwargs))
+        async def answer(self, *_args, **_kwargs):
+            pass
 
         async def edit_message_text(self, text, **kwargs):
             edits.append((text, kwargs))
 
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(bridge_home=tmp_path),
+        configured_agent_names=lambda: ["zelda", "sunny"],
+        _runtime_map=lambda: {},
+        runtimes=[],
+        _restart_request=None,
+        shutdown_event=asyncio.Event(),
+    )
+    manager = RebootManager(kernel, None)
+
+    async def submit(**request):
+        return manager.submit(request)
+
     runtime = SimpleNamespace(
         name="zelda",
-        orchestrator=SimpleNamespace(
-            configured_agent_names=lambda: ["zelda", "sunny"],
-            request_restart=lambda **kwargs: restart_requests.append(kwargs),
-        ),
+        orchestrator=SimpleNamespace(request_reboot=submit),
+        global_config=SimpleNamespace(project_root=tmp_path),
         _is_authorized_user=lambda _user_id: True,
     )
-
     await FlexibleAgentRuntime.callback_toggle(
         runtime,
         SimpleNamespace(callback_query=Query()),
         SimpleNamespace(),
     )
-
-    assert restart_requests == []
-    assert edits == []
-    assert answers[-1][1] == {"show_alert": True}
+    assert kernel._restart_request is None and not kernel.shutdown_event.is_set()
+    assert manager.receipts.records() == []
+    assert len(edits) == 1 and edits[0][0]
 
 
 def test_skill_callback_binding_includes_nudge_buttons():

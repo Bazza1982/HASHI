@@ -36,6 +36,21 @@ Health reports Core, shared and per-Agent process generations separately. Read
 Core changes require a planned cold adoption. Neither action is implicit in a
 request to fix code. If operational testing is forbidden, report that clearly.
 
+## Reboot outcome notifications
+
+Runtime acknowledges `/reboot` before executing it and persists the actual
+result before sending a concise start/result notice. The initiating Bot is
+preferred even when its Agent Worker is unavailable; same-instance fallback
+keeps the original chat/thread. `/reboot status` or refresh retrieves the latest
+result for the same actor/chat/thread through any available Agent. No final
+message means unconfirmed, not proven failure. Notification retries never rerun
+a reboot. See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
+
+This requires the new shared and Agent Function generations. Source and offline
+checks are complete only when recorded for that branch/instance; production
+adoption and real delivery require separate evidence. Do not claim an Agent-only
+reboot upgrades the shared receipt coordinator.
+
 ## System ownership
 
 - **PCM** owns Persona, Context and Memory sources, authority, retrieval and

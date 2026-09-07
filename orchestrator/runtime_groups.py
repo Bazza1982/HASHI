@@ -350,17 +350,9 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
             + "\n"
         ]
         if action == "reboot" and orchestrator:
-            all_names = orchestrator.configured_agent_names()
-            for name in members:
-                if name in all_names:
-                    orchestrator.request_restart(
-                        mode="number",
-                        agent_name=runtime.name,
-                        agent_number=all_names.index(name) + 1,
-                    )
-                    lines.append(f"  🔄 {name} — {ui_language.tr('group.reboot_queued')}")
-                else:
-                    lines.append(f"  ⚠️ {name} — {ui_language.tr('group.not_found')}")
+            from orchestrator.runtime_reboot import submit
+            await submit(runtime, update, mode="group", targets=members, query=query)
+            return
         elif action == "start" and orchestrator:
             for name in members:
                 ok, message = await orchestrator.start_agent(name)

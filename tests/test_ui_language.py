@@ -261,36 +261,6 @@ def test_backend_wrapper_is_localized_but_exact_provider_error_is_unchanged() ->
     assert raw in text
 
 
-@pytest.mark.asyncio
-async def test_reboot_system_message_uses_formal_chinese_agent_word() -> None:
-    replies = []
-    restart_requests = []
-
-    async def reply_text(_update, text, **_kwargs):
-        replies.append(text)
-
-    runtime = SimpleNamespace(
-        name="zelda",
-        orchestrator=SimpleNamespace(
-            request_restart=lambda **kwargs: restart_requests.append(kwargs),
-        ),
-        _is_authorized_user=lambda _user_id: True,
-        _reply_text=reply_text,
-    )
-    update = SimpleNamespace(effective_user=SimpleNamespace(id=42))
-
-    with ui_language.language_scope(runtime, locale="zh-CN"):
-        await FlexibleAgentRuntime.cmd_reboot(
-            runtime,
-            update,
-            SimpleNamespace(args=["max"]),
-        )
-
-    assert replies == ["正在重启所有已启用的代理……"]
-    assert restart_requests == [
-        {"mode": "max", "agent_name": "zelda", "agent_number": None}
-    ]
-
 
 def test_scheduler_notice_is_english_by_default_and_chinese_when_selected() -> None:
     from orchestrator.scheduler_recovery import render_notice

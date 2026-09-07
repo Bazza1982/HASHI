@@ -1410,7 +1410,7 @@ class FunctionWorkerSupervisor:
         client.start()
         try:
             await client.wait_ready()
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             await client.shutdown(force=True)
             self._candidates.discard(client)
             raise
@@ -1609,6 +1609,14 @@ class FunctionWorkerSupervisor:
         method: str,
         params: dict[str, Any],
     ) -> Any:
+        if method in {"core.reboot.submit", "core.reboot.status"}:
+            handle = self.kernel._runtime_map().get(client.agent_name)
+            if handle is None or handle.client is not client:
+                raise FunctionWorkerProtocolError("Reboot request came from an inactive Worker")
+            if method == "core.reboot.status":
+                return self.kernel.reboot_manager.latest(actor_id=params.get("actor_id"), chat_id=params.get("chat_id"), thread_id=params.get("thread_id"), surface=params.get("surface") or "telegram")
+            allowed = {key: params[key] for key in ("mode", "agent_number", "targets", "origin", "locale", "request_key") if key in params}
+            return self.kernel.reboot_manager.submit({**allowed, "agent_name": client.agent_name})
         if method == "core.start_agent":
             return list(await self.kernel.start_agent(str(params["agent_name"])))
         if method == "core.stop_agent":

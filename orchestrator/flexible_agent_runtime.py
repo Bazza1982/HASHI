@@ -41,6 +41,7 @@ from orchestrator.browser_mode import (
 )
 from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator import runtime_control
+from orchestrator import runtime_reboot
 from orchestrator import runtime_cross_session
 from orchestrator import runtime_delivery
 from orchestrator import runtime_delivery_order
@@ -3174,40 +3175,7 @@ class FlexibleAgentRuntime:
             await query.answer()
 
         elif target == "reboot":
-            orchestrator = getattr(self, "orchestrator", None)
-            if orchestrator is None:
-                await query.answer(ui_language.tr("reboot.unavailable"), show_alert=True)
-                return
-            if value == "min":
-                mode, label = "min", ui_language.tr(
-                    "reboot.restarting_this",
-                    agent=f"<b>{html.escape(self.name)}</b>",
-                )
-            elif value == "max":
-                mode, label = "max", ui_language.tr("reboot.restarting_all_active")
-            elif value.isdigit():
-                all_names = orchestrator.configured_agent_names()
-                num = int(value)
-                if num < 1 or num > len(all_names):
-                    await query.answer(ui_language.tr("reboot.invalid_number_short"), show_alert=True)
-                    return
-                mode, label = (
-                    "number",
-                    ui_language.tr(
-                        "reboot.restarting_number",
-                        number=num,
-                        agent=f"<b>{html.escape(all_names[num - 1])}</b>",
-                    ),
-                )
-            elif value == "same":
-                mode, label = "same", ui_language.tr("reboot.restarting_all_running")
-            else:
-                await query.answer(ui_language.tr("reboot.invalid_target_short"), show_alert=True)
-                return
-            await query.edit_message_text(label, parse_mode="HTML")
-            await query.answer()
-            orchestrator.request_restart(mode=mode, agent_name=self.name,
-                                          agent_number=int(value) if value.isdigit() else None)
+            await runtime_reboot.callback(self, update, query, value)
         else:
             await query.answer()
 
@@ -3288,77 +3256,7 @@ class FlexibleAgentRuntime:
         asyncio.create_task(orchestrator.stop_agent(self.name))
 
     async def cmd_reboot(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        orchestrator = getattr(self, "orchestrator", None)
-        if orchestrator is None:
-            await self._reply_text(update, ui_language.tr("reboot.unavailable"))
-            return
-        arg = " ".join(context.args).strip().lower() if context.args else ""
-        if not arg or arg == "help":
-            all_names = orchestrator.configured_agent_names()
-            running_names = {rt.name for rt in orchestrator.runtimes}
-            lines = [
-                card_title("🔄", "Reboot agents"),
-                "",
-                f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
-                f"<code>{html.escape(ui_language.tr('reboot.current', count=len(running_names)))}</code>",
-                f"<b>{html.escape(ui_language.tr('reboot.agent'))}</b> · "
-                f"<code>{html.escape(self.name)}</code>",
-                f"<b>{html.escape(ui_language.tr('common.effect'))}</b> · "
-                f"{html.escape(ui_language.tr('reboot.effect'))}",
-                "",
-                html.escape(ui_language.tr("reboot.warning")),
-                "",
-                f"<b>{html.escape(ui_language.tr('reboot.agents_heading'))}</b>",
-            ]
-            for i, name in enumerate(all_names, 1):
-                running = name in running_names
-                marker = "●" if running else "○"
-                lines.append(f"{i}. {marker} <code>{html.escape(name)}</code>")
-            rows = [
-                [
-                    InlineKeyboardButton(ui_language.tr("reboot.this_agent"), callback_data="tgl:reboot:min"),
-                    InlineKeyboardButton(ui_language.tr("reboot.all_active"), callback_data="tgl:reboot:max"),
-                ],
-                [InlineKeyboardButton(ui_language.tr("reboot.all_running"), callback_data="tgl:reboot:same")],
-            ]
-            for i, name in enumerate(all_names, 1):
-                rows.append([InlineKeyboardButton(f"#{i} {name}", callback_data=f"tgl:reboot:{i}")])
-            markup = InlineKeyboardMarkup(rows)
-            await self._reply_text(update, "\n".join(lines), parse_mode="HTML", reply_markup=markup)
-            return
-        if arg == "min":
-            mode, label = "min", ui_language.tr(
-                "reboot.restarting_this",
-                agent=f"<b>{html.escape(self.name)}</b>",
-            )
-        elif arg == "max":
-            mode, label = "max", ui_language.tr("reboot.restarting_all_active")
-        elif arg.isdigit():
-            num = int(arg)
-            all_names = orchestrator.configured_agent_names()
-            if num < 1 or num > len(all_names):
-                await self._reply_text(
-                    update,
-                    ui_language.tr("reboot.invalid_number", count=len(all_names)),
-                )
-                return
-            mode, label = "number", ui_language.tr(
-                "reboot.restarting_number",
-                number=num,
-                agent=f"<b>{html.escape(all_names[num - 1])}</b>",
-            )
-        elif arg == "same":
-            mode, label = "same", ui_language.tr("reboot.restarting_all_running")
-        else:
-            await self._reply_text(
-                update,
-                ui_language.tr("reboot.invalid_target"),
-            )
-            return
-        await self._reply_text(update, label, parse_mode="HTML")
-        orchestrator.request_restart(mode=mode, agent_name=self.name, agent_number=int(arg) if arg.isdigit() else None)
+        await runtime_reboot.command(self, update, context)
 
     # ── /move command ────────────────────────────────────────────────────────
     def _load_instances(self) -> dict:

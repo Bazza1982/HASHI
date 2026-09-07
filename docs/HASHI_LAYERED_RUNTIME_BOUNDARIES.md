@@ -66,6 +66,8 @@ Current authoritative owners include:
 | Function generation qualification and manifests | `orchestrator/function_generation.py` |
 | per-Agent Worker lifecycle, IPC routing and crash recovery | `orchestrator/function_worker_supervisor.py` |
 | transactional target switching and rollback | `orchestrator/reboot_manager.py` |
+| reboot acceptance, outcome receipts and delivery recovery | shared PAO Functions: `reboot_manager.py`, `reboot_receipts.py`; [decision](HASHI_REBOOT_RECEIPTS.md) |
+| reboot commands, result wording and Bot fallback | Frontend Functions: `runtime_reboot.py`, `reboot_ui.py`, `telegram_delivery_failover.py`, runtime language catalogs |
 | function discovery, ordering, and public contract | `orchestrator/function_contract.py` |
 | shared workspace `state.json` persistence | `orchestrator/workspace_state.py` |
 | Core process supervision and instance lock/PID paths | `orchestrator/kernel_process.py`, `main.py` and `orchestrator/instance_lock.py` |

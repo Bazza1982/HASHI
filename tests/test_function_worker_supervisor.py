@@ -678,3 +678,54 @@ async def test_cancelled_gate_acquisition_reopens_the_route():
     with pytest.raises(asyncio.CancelledError):
         await cutover
     assert not handle._cutover
+
+
+@pytest.mark.asyncio
+async def test_cancelled_worker_preparation_retires_unready_process(
+    tmp_path, monkeypatch
+):
+    kernel = _Kernel()
+    kernel.paths = SimpleNamespace(code_root=tmp_path, bridge_home=tmp_path)
+    kernel.runtime_fingerprint = SimpleNamespace(to_dict=lambda: {})
+    supervisor = FunctionWorkerSupervisor(kernel)
+    monkeypatch.setattr(supervisor, "topology_snapshot", lambda **kwargs: {})
+    process = SimpleNamespace(start=lambda: None)
+    connection = SimpleNamespace(close=lambda: None)
+    context = SimpleNamespace(
+        Pipe=lambda **kwargs: (connection, connection), Process=lambda **kwargs: process
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.multiprocessing.get_context",
+        lambda *args: context,
+    )
+    ready_wait = asyncio.Event()
+    retired = []
+
+    class Candidate:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        async def wait_ready(self):
+            ready_wait.set()
+            await asyncio.Event().wait()
+
+        async def shutdown(self, **kwargs):
+            retired.append(self)
+
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.FunctionWorkerClient", Candidate
+    )
+    generation = SimpleNamespace(
+        manifest=SimpleNamespace(generation_id="sha256:" + "a" * 64, to_dict=lambda: {})
+    )
+    task = asyncio.create_task(
+        supervisor.prepare_worker("alpha", generation, generation_root=tmp_path)
+    )
+    await asyncio.wait_for(ready_wait.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(retired) == 1 and not supervisor._candidates

@@ -274,6 +274,7 @@ class RuntimeAppHost:
             self.task is None
             or self.task.done()
             or app._restart_request is not None
+            or getattr(getattr(app, "reboot_manager", None), "active_operation", None)
             or any(not task.done() for task in app._startup_tasks.values())
         ):
             raise RuntimeError("shared Functions cannot drain in this lifecycle phase")

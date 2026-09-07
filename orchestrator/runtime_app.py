@@ -132,17 +132,17 @@ class UniversalOrchestrator:
         self.shutdown_event.set()
 
     def request_restart(self, mode: str = "same", agent_name: str | None = None, agent_number: int | None = None):
-        """Signal a hot restart. Modes: same, min, max, number."""
-        if getattr(self, "_handoff_draining", False):
-            raise RuntimeError("Shared Functions are draining; retry after handoff")
-        self._restart_request = {"mode": mode, "agent_name": agent_name, "agent_number": agent_number}
-        main_logger.info(f"Restart requested (mode={mode}, agent={agent_name}, number={agent_number}).")
-        bridge_logger.warning(
-            f"Restart requested (mode={mode}, agent={agent_name or '-'}, "
-            f"number={agent_number if agent_number is not None else '-'}"
-            ")"
-        )
-        self.shutdown_event.set()
+        """Compatibility entry; new command callers await request_reboot()."""
+        result = self.reboot_manager.submit({"mode": mode, "agent_name": agent_name, "agent_number": agent_number})
+        if not result["accepted"]:
+            raise RuntimeError("Reboot was not accepted: " + result["reason"])
+        return result
+
+    async def request_reboot(self, **request):
+        return self.reboot_manager.submit(request)
+
+    async def reboot_status(self, **origin):
+        return self.reboot_manager.latest(**origin)
 
     def _runtime_map(self):
         return {rt.name: rt for rt in self.runtimes}
@@ -401,8 +401,8 @@ class UniversalOrchestrator:
 
             if restart is not None:
                 # --- Hot restart: stop agents only, keep services alive ---
-                await self._do_hot_restart(restart)
                 self.shutdown_event.clear()
+                await self._do_hot_restart(restart)
                 continue
 
             await self.shutdown_manager.full_shutdown()

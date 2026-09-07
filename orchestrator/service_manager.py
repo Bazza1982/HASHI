@@ -440,6 +440,9 @@ class ServiceManager:
         self.start_scheduler(global_cfg)
         self.start_delivery_health_watcher()
         await self.start_background_jobs()
+        reboot_manager = getattr(self.kernel, "reboot_manager", None)
+        if reboot_manager is not None:
+            reboot_manager.start_delivery()
         workers = getattr(self.kernel, "function_workers", None)
         if workers is not None:
             await workers.broadcast_topology()
@@ -522,6 +525,9 @@ class ServiceManager:
             return True
 
     async def stop_runtime_services(self):
+        reboot_manager = getattr(self.kernel, "reboot_manager", None)
+        if reboot_manager is not None:
+            await reboot_manager.stop_delivery()
         await self.stop_scheduler()
         await self.stop_delivery_health_watcher()
         await self.stop_background_jobs()
