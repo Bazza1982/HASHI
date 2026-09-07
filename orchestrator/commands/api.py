@@ -83,7 +83,7 @@ def _keyboard(runtime: Any) -> InlineKeyboardMarkup:
 def _model_keyboard(runtime: Any) -> InlineKeyboardMarkup:
     current = load_api_gateway_config(runtime.global_config)["default_model"]
     rows: list[list[InlineKeyboardButton]] = []
-    for model in available_api_models():
+    for model in available_api_models(runtime.global_config):
         label = selected_label(model, model == current)
         rows.append([InlineKeyboardButton(label, callback_data=f"api:model:{model}")])
     rows.append([InlineKeyboardButton(back_label(), callback_data="api:status")])
@@ -192,7 +192,7 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
 
     if sub == "model":
         if len(args) >= 2:
-            model = normalize_api_model(args[1])
+            model = normalize_api_model(args[1], runtime.global_config)
             if model is None:
                 await _send(
                     runtime,
@@ -273,7 +273,7 @@ async def api_callback(runtime: Any, update: Any, context: Any) -> None:
             )
         elif data.startswith("api:model:"):
             model = data.split(":", 2)[2]
-            normalized = normalize_api_model(model)
+            normalized = normalize_api_model(model, runtime.global_config)
             if normalized is None:
                 await query.answer(
                     ui_language.tr("api.unknown_model", model=model), show_alert=True

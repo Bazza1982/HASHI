@@ -10,8 +10,8 @@ import traceback
 from contextlib import suppress
 from pathlib import Path
 from orchestrator.agent_directory import AgentDirectory
-from orchestrator.api_gateway import available_gateway_models
 from orchestrator.api_gateway_config import (
+    available_api_models,
     config_path_for,
     load_api_gateway_config,
     save_api_gateway_config,
@@ -117,7 +117,7 @@ class ServiceManager:
             "enabled": state["enabled"],
             "running": self.kernel.api_gateway is not None,
             "default_model": state["default_model"],
-            "available_models": available_gateway_models(),
+            "available_models": available_api_models(self.kernel.paths),
             "base_url": self.api_gateway_base_url(),
             "port": getattr(self.kernel.global_cfg, "api_gateway_port", None) if self.kernel.global_cfg else None,
         }
@@ -266,11 +266,15 @@ class ServiceManager:
 
     def set_api_gateway_default_model(self, model: str) -> tuple[bool, str]:
         normalized = str(model or "").strip()
-        if normalized not in available_gateway_models():
+        if normalized not in available_api_models(self.kernel.paths):
             return False, f"Unknown API gateway model: {model}"
+        running = self.kernel.api_gateway
+        configured_models = getattr(running, "configured_models", None)
+        if callable(configured_models) and normalized not in configured_models():
+            return False, "Restart the API Gateway to load newly configured models before selecting this default."
         self._save_api_gateway_state(default_model=normalized)
-        if self.kernel.api_gateway is not None:
-            self.kernel.api_gateway.set_default_model(normalized)
+        if running is not None:
+            running.set_default_model(normalized)
         return True, f"API Gateway default model set to {normalized}."
 
     def _resolve_enterprise_database_path(self, raw_url: str | None) -> Path:

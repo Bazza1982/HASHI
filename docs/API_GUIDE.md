@@ -125,6 +125,28 @@ Run `GET /v1/models` to see the current list. Models whose backend failed
 preflight (missing CLI binary, no Hermes OAuth, etc.) are omitted until the
 backend becomes available.
 
+### Instance-configured models
+
+An active Agent's `allowed_backends` can opt this instance into additional
+Gateway models, such as `gpt-6-astra` on `codex-cli`. The backend must support
+Gateway requests. Its `model`, `default_model`, `fast_model`, `pro_model` and
+`models` entries supply the model names; `model_efforts` supplies permitted
+request-level reasoning choices, including `max` when explicitly configured.
+Conflicting Engine assignments or effort sets across Agents are rejected.
+
+The Function-layer configuration reader uses the live instance's `agents.json`,
+including UTF-8 BOM files and installations with separate source and instance
+directories. It does not load Agent personas or mutate the shared model catalog.
+The `/api` model menu, persisted default and Gateway request routes use these
+instance opt-ins. Other instances retain their own model lists.
+
+The Gateway snapshots model and effort opt-ins when it starts. Restart the
+Gateway after changing these entries. Selecting a newly configured model before
+the running Gateway has loaded it leaves the previous default unchanged and
+returns a restart instruction. The API remains owned by the shared Function
+process; no Core or dedicated legacy sidecar change is required. Engine preflight
+still controls which models appear in `/v1/models`.
+
 Grok CLI is maintained separately from the `xai-api` backend. HASHI's Grok
 CLI catalog follows the logged-in CLI's advertised model list; at Grok CLI
 `0.2.93`, `grok-4.5` is the default and `grok-composer-2.5-fast` remains

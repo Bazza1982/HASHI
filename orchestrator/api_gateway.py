@@ -28,7 +28,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
 from aiohttp import web
@@ -50,7 +50,7 @@ from orchestrator.model_catalog import (
     default_gateway_model as catalog_default_gateway_model,
     gateway_engine_for_model,
 )
-from orchestrator.api_gateway_config import load_api_gateway_config
+from orchestrator.api_gateway_config import instance_gateway_model_overrides, load_api_gateway_config
 from orchestrator.api_gateway_preflight import check_gateway_engines
 from orchestrator.flexible_backend_registry import get_available_efforts
 from orchestrator.multimodal_contract import (
@@ -580,6 +580,7 @@ def _validate_reasoning_effort(
     *,
     engine: str,
     model: str,
+    configured_efforts: Sequence[str] | None = None,
 ) -> tuple[str | None, web.Response | None]:
     """Validate a request-scoped Codex effort before acquiring an adapter."""
 
@@ -594,7 +595,15 @@ def _validate_reasoning_effort(
         )
 
     normalized = raw.strip().casefold()
-    allowed = get_available_efforts(engine, model)
+    allowed = (
+        [
+            str(value).strip().casefold()
+            for value in configured_efforts
+            if str(value).strip()
+        ]
+        if configured_efforts is not None
+        else get_available_efforts(engine, model)
+    )
     if normalized not in allowed:
         supported = ", ".join(allowed) or "none"
         return None, _external_tool_error(
@@ -978,15 +987,64 @@ class _AdapterPool:
 # ── Gateway server ────────────────────────────────────────────────────────────
 
 class APIGatewayServer:
-    def __init__(self, global_config, secrets: dict, workspace_root: Path, default_model: str | None = None):
+    def __init__(
+        self,
+        global_config,
+        secrets: dict,
+        workspace_root: Path,
+        default_model: str | None = None,
+        *,
+        configured_model_engines: Mapping[str, str] | None = None,
+        configured_model_efforts: Mapping[str, Sequence[str]] | None = None,
+    ):
         self.global_config = global_config
         self._secrets = secrets
         self.port: int = getattr(global_config, "api_gateway_port", DEFAULT_API_GATEWAY_PORT)
         self.bind_host: str | None = None
+        instance_engines, instance_efforts = instance_gateway_model_overrides(global_config)
+        if configured_model_engines is None:
+            configured_model_engines = instance_engines
+        if configured_model_efforts is None:
+            configured_model_efforts = instance_efforts
+        self._engine_for_model = dict(_ENGINE_FOR_MODEL)
+        for raw_model, raw_engine in (configured_model_engines or {}).items():
+            model = str(raw_model or "").strip()
+            engine = str(raw_engine or "").strip()
+            if not model or not engine:
+                raise ValueError(
+                    "configured API gateway models require a model and engine"
+                )
+            if engine not in _GATEWAY_ENGINES:
+                raise ValueError(
+                    f"configured API gateway model '{model}' uses unsupported "
+                    f"engine '{engine}'"
+                )
+            existing = self._engine_for_model.get(model)
+            if existing is not None and existing != engine:
+                raise ValueError(
+                    f"configured API gateway model '{model}' conflicts with "
+                    f"engine '{existing}'"
+                )
+            self._engine_for_model[model] = engine
+        self._all_models = list(self._engine_for_model)
+        self._gateway_engines = sorted(set(self._engine_for_model.values()))
+        self._configured_model_efforts = {
+            str(model).strip(): tuple(
+                str(value).strip().casefold()
+                for value in efforts
+                if str(value).strip()
+            )
+            for model, efforts in (configured_model_efforts or {}).items()
+            if str(model).strip() in self._engine_for_model
+        }
         gateway_config = load_api_gateway_config(global_config)
         self.enabled: bool = bool(gateway_config.get("enabled", False))
         selected_default = str(default_model or gateway_config.get("default_model") or "").strip()
-        self.default_model = selected_default if selected_default in _ENGINE_FOR_MODEL else DEFAULT_API_MODEL
+        self.default_model = (
+            selected_default
+            if selected_default in self._engine_for_model
+            else DEFAULT_API_MODEL
+        )
         self._workspace_root = Path(workspace_root).resolve()
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
@@ -1143,14 +1201,17 @@ class APIGatewayServer:
         self._engine_status = check_gateway_engines(
             self.global_config,
             self._secrets,
-            _GATEWAY_ENGINES,
+            self._gateway_engines,
         )
         return self._engine_status
 
+    def configured_models(self) -> list[str]:
+        return list(self._all_models)
+
     def _available_models(self) -> list[str]:
         models: list[str] = []
-        for model in _ALL_MODELS:
-            engine = _ENGINE_FOR_MODEL[model]
+        for model in self._all_models:
+            engine = self._engine_for_model[model]
             status = self._engine_status.get(engine) or {}
             if status.get("available", True):
                 models.append(model)
@@ -1458,7 +1519,7 @@ class APIGatewayServer:
 
     def set_default_model(self, model: str) -> None:
         normalized = str(model or "").strip()
-        if normalized not in _ENGINE_FOR_MODEL:
+        if normalized not in self._engine_for_model:
             raise ValueError(f"unknown API gateway model: {model}")
         self.default_model = normalized
 
@@ -1476,7 +1537,7 @@ class APIGatewayServer:
                 "id": model,
                 "object": "model",
                 "created": now,
-                "owned_by": _engine_owned_by(_ENGINE_FOR_MODEL[model]),
+                "owned_by": _engine_owned_by(self._engine_for_model[model]),
             }
             for model in self._available_models()
         ]
@@ -1548,7 +1609,7 @@ class APIGatewayServer:
         self._set_validation_stage(request, "model_resolution")
         model = str(body.get("model") or "").strip() or self.default_model
 
-        engine = _ENGINE_FOR_MODEL.get(model)
+        engine = self._engine_for_model.get(model)
         if engine is None:
             return web.json_response(
                 {"error": f"unknown model '{model}'. Use GET /v1/models to list available models."},
@@ -1583,6 +1644,7 @@ class APIGatewayServer:
             body,
             engine=engine,
             model=model,
+            configured_efforts=self._configured_model_efforts.get(model),
         )
         if reasoning_error is not None:
             return reasoning_error
@@ -1991,7 +2053,7 @@ class APIGatewayServer:
         return str(self._secrets.get("xai_oauth_refresh_token") or "").strip() or None
 
     def _validate_xai_media_model(self, model: str, *, kind: str) -> web.Response | None:
-        engine = _ENGINE_FOR_MODEL.get(model)
+        engine = self._engine_for_model.get(model)
         if engine != "xai-api":
             return web.json_response(
                 {"error": f"unknown {kind} model '{model}'. Use GET /v1/models to list available models."},

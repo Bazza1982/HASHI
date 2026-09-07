@@ -25,6 +25,13 @@ view. The shared catalogue is now Functions; neither kind of model change
 requires a Core edit. Core never imports model/UI/provider/task policy.
 Before edits name the owner, layer and focused check; use the existing Core guard.
 
+API Gateway model menus, saved defaults and request routing also read active
+Agents' instance opt-ins, including configured reasoning efforts. Model/effort
+conflicts are rejected. The shared Function Gateway loads that catalog at start;
+new opt-ins require Gateway reload before selection. This does not widen another
+instance's models or replace the current shared-service architecture. See the
+[API Guide](API_GUIDE.md#instance-configured-models).
+
 Source implementation, offline verification and live adoption are separate.
 An immutable Function Worker keeps its installed generation until an authorized
 replacement. `/reboot min` replaces one Agent Worker; `same`/`max` retain their

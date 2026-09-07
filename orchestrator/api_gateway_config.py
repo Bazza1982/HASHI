@@ -15,19 +15,106 @@ LEGACY_API_GATEWAY_STATE_NAME = "api_gateway_state.json"
 logger = logging.getLogger("BridgeU.ApiGatewayConfig")
 
 
-def available_api_models() -> list[str]:
-    return available_gateway_models()
+def configured_gateway_model_overrides(
+    agent_configs,
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    """Return instance-authorised Gateway models without widening Core catalogues."""
+
+    from orchestrator.flexible_backend_registry import (
+        canonical_backend_engine,
+        get_backend_entry,
+    )
+    from orchestrator.runtime_effort_options import configured_model_efforts
+
+    model_engines: dict[str, str] = {}
+    model_efforts: dict[str, tuple[str, ...]] = {}
+    for agent in agent_configs or ():
+        backends = (
+            agent.get("allowed_backends", ())
+            if isinstance(agent, dict)
+            else getattr(agent, "allowed_backends", ())
+        )
+        for raw_backend in backends or ():
+            backend = {"engine": raw_backend} if isinstance(raw_backend, str) else dict(raw_backend)
+            engine = canonical_backend_engine(backend.get("engine"))
+            if not engine or not get_backend_entry(engine).get("gateway_enabled"):
+                continue
+
+            candidates: list[str] = []
+            for key in ("model", "default_model", "fast_model", "pro_model"):
+                value = str(backend.get(key) or "").strip()
+                if value and value not in candidates:
+                    candidates.append(value)
+            raw_models = backend.get("models") or ()
+            if isinstance(raw_models, str):
+                raw_models = (raw_models,)
+            for raw_model in raw_models:
+                value = str(raw_model or "").strip()
+                if value and value not in candidates:
+                    candidates.append(value)
+
+            for model in candidates:
+                existing = model_engines.get(model)
+                if existing is not None and existing != engine:
+                    raise ValueError(
+                        f"configured API gateway model '{model}' maps to both "
+                        f"'{existing}' and '{engine}'"
+                    )
+                model_engines[model] = engine
+
+            configured_efforts = backend.get("model_efforts") or {}
+            if not isinstance(configured_efforts, dict):
+                continue
+            for raw_model in configured_efforts:
+                model = str(raw_model or "").strip()
+                if model_engines.get(model) != engine:
+                    continue
+                efforts = tuple(configured_model_efforts(backend, raw_model) or ())
+                existing = model_efforts.get(model)
+                if existing is not None and set(existing) != set(efforts):
+                    raise ValueError(f"conflicting model_efforts for '{model}'")
+                model_efforts[model] = efforts
+    return model_engines, model_efforts
 
 
-def normalize_api_model(value: str | None) -> str | None:
+def instance_gateway_model_overrides(
+    global_config: Any,
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    """Read opt-ins from live configuration without loading PCM or runtime state."""
+    if global_config is None:
+        return {}, {}
+    config_path = getattr(global_config, "config_path", None)
+    path = Path(config_path) if config_path else _bridge_home_for(global_config) / "agents.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return {}, {}
+    if not isinstance(data, dict) or not isinstance(data.get("agents", []), list):
+        raise ValueError("Invalid instance Agent configuration")
+    agents = data.get("agents", [])
+    if any(not isinstance(agent, dict) for agent in agents):
+        raise ValueError("Invalid instance Agent entry")
+    return configured_gateway_model_overrides(
+        agent for agent in agents if agent.get("is_active", True)
+    )
+
+
+def available_api_models(global_config: Any = None) -> list[str]:
+    models = available_gateway_models()
+    configured, _efforts = instance_gateway_model_overrides(global_config)
+    return list(dict.fromkeys([*models, *configured]))
+
+
+def normalize_api_model(value: str | None, global_config: Any = None) -> str | None:
     requested = str(value or "").strip()
     if not requested:
         return None
-    for model in available_api_models():
+    models = available_api_models(global_config)
+    for model in models:
         if requested == model:
             return model
     lower = requested.lower()
-    for model in available_api_models():
+    for model in models:
         if lower == model.lower():
             return model
     return None
@@ -81,7 +168,7 @@ def migrate_legacy_api_gateway_state(global_config: Any) -> bool:
 
     migrated = {
         "enabled": bool(loaded.get("enabled", False)),
-        "default_model": normalize_api_model(loaded.get("default_model")) or default_api_model(),
+        "default_model": normalize_api_model(loaded.get("default_model"), global_config) or default_api_model(),
         "updated_at": str(loaded.get("updated_at") or datetime.now(timezone.utc).isoformat()),
         "updated_by": str(loaded.get("updated_by") or "legacy-state-migration"),
     }
@@ -110,7 +197,7 @@ def load_api_gateway_config(global_config: Any) -> dict[str, Any]:
     enabled = data.get("enabled")
     if not isinstance(enabled, bool):
         enabled = False
-    model = normalize_api_model(data.get("default_model")) or default_api_model()
+    model = normalize_api_model(data.get("default_model"), global_config) or default_api_model()
     return {
         "enabled": enabled,
         "default_model": model,
@@ -130,7 +217,7 @@ def save_api_gateway_config(
     if enabled is not None:
         current["enabled"] = bool(enabled)
     if default_model is not None:
-        normalized = normalize_api_model(default_model)
+        normalized = normalize_api_model(default_model, global_config)
         if normalized is None:
             raise ValueError(f"Unknown API model: {default_model}")
         current["default_model"] = normalized
