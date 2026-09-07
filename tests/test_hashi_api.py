@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -748,7 +749,10 @@ async def test_hashi_api_typed_modality_drift_replays_once_without_media(tmp_pat
     }
     assert replay_content[1] == {"type": "text", "text": "Describe it."}
     assert "attachment-1" in replay_content[2]["text"]
-    assert str(image) in replay_content[2]["text"]
+    attachment, _ = json.JSONDecoder().raw_decode(
+        replay_content[2]["text"].removeprefix("LOCAL_MEDIA_ATTACHMENT ")
+    )
+    assert Path(attachment["local_ref"]) == image
     assert replay_payload["reasoning_effort"] == "high"
     assert {
         item["route"] for item in response.stream_metadata["multimodal_routing"]

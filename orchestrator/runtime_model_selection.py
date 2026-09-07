@@ -2259,13 +2259,21 @@ async def callback_model(runtime, update, context: Any) -> None:
                 target_model=model,
                 with_context=with_context,
             )
-            if not success:
+            if not success and runtime._backend_busy():
                 await query.answer(message, show_alert=True)
                 return
-            text, reply_markup = runtime._configuration_followup("backend")
-            await query.edit_message_text(
-                text, parse_mode="HTML", reply_markup=reply_markup
-            )
+            if success:
+                text, reply_markup = runtime._configuration_followup("backend")
+                await query.edit_message_text(
+                    text, parse_mode="HTML", reply_markup=reply_markup
+                )
+            else:
+                await query.edit_message_text(
+                    message,
+                    reply_markup=runtime._backend_model_keyboard(
+                        target_engine, with_context, model
+                    ),
+                )
         elif data.startswith("effort:"):
             parts = data.split(":")
             source = parts[1] if len(parts) == 3 else None

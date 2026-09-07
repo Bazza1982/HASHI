@@ -47,6 +47,14 @@ control are unavailable.
 
 ## Rolling Upgrade Order
 
+Windows supervisors registered by `bin/hashi_remote_ctl.ps1` pass Python arguments
+as a Base64-encoded JSON array to the task runner. This preserves module flags,
+ports and instance paths containing spaces or non-ASCII characters. The runner
+also accepts older `-PythonArgs` registrations. Native stderr is logged without
+terminating a healthy Remote; the Python exit status is preserved. Updating a
+script alone does not replace an existing scheduled-task action: re-register it
+as part of an authorized Remote deployment.
+
 1. Upgrade one instance and start Remote.
 2. Check local status:
 

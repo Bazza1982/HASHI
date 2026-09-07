@@ -41,6 +41,15 @@ from adapters.hashi_mcp import prepare_hashi_mcp
 _CODEX_REQUEST_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max"}
 )
+# OpenAI's GPT-6 Astra model page documents a 1,050,000-token context
+# window, a 922,000-token maximum input, and 128,000 maximum output tokens.
+HASHI_MODEL_CAPACITY_PROFILES = {
+    "gpt-6-astra": {
+        "context_window_tokens": 1_050_000,
+        "response_headroom_tokens": 128_000,
+        "capacity_provenance": "official_openai_model_docs_2026-09-07",
+    },
+}
 _CODEX_TOOL_ITEM_TYPES = frozenset(
     {
         "collab_tool_call",

@@ -164,6 +164,12 @@ injected into an active backend.
 
 ### GPT-5.6 through Codex CLI
 
+For an instance opting into GPT-6 Astra, the Codex CLI adapter also declares its
+context capacity to the compaction resolver: a 1,050,000-token window with
+128,000 tokens of response headroom. Explicit instance/profile capacity settings
+retain precedence. This capacity declaration neither enables the model nor
+changes the compaction trigger policy.
+
 HASHI supports the smoke-tested Codex CLI variants below. The bare `gpt-5.6`
 alias is deliberately not advertised because it was rejected by the configured
 ChatGPT-account Codex access path.

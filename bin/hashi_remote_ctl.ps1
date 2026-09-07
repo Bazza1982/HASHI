@@ -50,7 +50,7 @@ if ($TaskName -match '[\\/]') {
 
 $LogDir = Join-Path $HashiRoot "logs"
 $LogPath = Join-Path $LogDir "hashi-remote-supervisor.log"
-$ArgsList = @("-m", "remote", "--hashi-root", "`"$HashiRoot`"", "--supervised")
+$ArgsList = @("-m", "remote", "--hashi-root", [string]$HashiRoot, "--supervised")
 $TaskRunner = Join-Path $PSScriptRoot "hashi_remote_task_runner.ps1"
 
 if ($NoTls -or $env:HASHI_REMOTE_NO_TLS -eq "1") {
@@ -85,7 +85,10 @@ function Register-HashiRemoteSupervisor {
         "-LogPath", "`"$LogPath`""
     )
     if ($ArgsList.Count -gt 0) {
-        $RunnerArgs += @("-PythonArgs", "`"$($ArgsList -join " ")`"")
+        # Pass argv as data; nested command-line quotes lose paths and flags.
+        $ArgsJson = ConvertTo-Json -InputObject @($ArgsList) -Compress
+        $ArgsBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ArgsJson))
+        $RunnerArgs += @("-PythonArgsBase64", $ArgsBase64)
     }
     $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ($RunnerArgs -join " ") -WorkingDirectory $HashiRoot
     $Trigger = New-ScheduledTaskTrigger -AtLogOn

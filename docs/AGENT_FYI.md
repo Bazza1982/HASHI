@@ -32,6 +32,13 @@ new opt-ins require Gateway reload before selection. This does not widen another
 instance's models or replace the current shared-service architecture. See the
 [API Guide](API_GUIDE.md#instance-configured-models).
 
+Codex CLI declares Astra context capacity to the compaction resolver; explicit
+capacity overrides retain precedence. Failed backend selection preserves the
+existing selection and offers model buttons for retry; a busy Agent receives an
+alert. Windows Remote task registration now preserves Python argv and logs native
+stderr without aborting the process. These are Function/adapter/platform changes;
+running services require separately authorized adoption.
+
 Source implementation, offline verification and live adoption are separate.
 An immutable Function Worker keeps its installed generation until an authorized
 replacement. `/reboot min` replaces one Agent Worker; `same`/`max` retain their

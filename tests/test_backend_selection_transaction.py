@@ -139,6 +139,39 @@ async def test_failed_selection_keeps_live_session_mode_and_saved_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("busy", [False, True])
+async def test_failed_backend_button_preserves_selection_and_allows_retry(tmp_path, monkeypatch, busy):
+    manager, original, candidate, before = make_selection(tmp_path, monkeypatch)
+    candidate.initialize.return_value = False
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.config = manager.config
+    runtime.backend_manager = manager
+    runtime.workspace_dir = tmp_path
+    runtime._is_authorized_user = lambda user: user == 1
+    runtime._backend_busy = lambda: busy
+    runtime._evaluate_enterprise_policy = lambda *a, **kw: SimpleNamespace(allowed=True)
+    runtime.get_current_model = lambda: manager.current_backend.config.model
+    monkeypatch.setattr(runtime_session, "current_session", lambda *a, **kw: {"session_id": "test"})
+    monkeypatch.setattr(runtime_session, "apply_session_workzones", lambda *a, **kw: None)
+    query = SimpleNamespace(
+        data="bmodel:claude-cli:p:claude-haiku-4-5", from_user=SimpleNamespace(id=1),
+        message=SimpleNamespace(chat_id=42), answer=AsyncMock(), edit_message_text=AsyncMock(),
+    )
+    await runtime.callback_model(SimpleNamespace(callback_query=query), SimpleNamespace())
+    assert manager.current_backend is original
+    assert (tmp_path / "state.json").read_bytes() == before
+    if busy:
+        candidate.initialize.assert_not_awaited()
+        query.edit_message_text.assert_not_awaited()
+        assert query.answer.await_args.kwargs["show_alert"] is True
+    else:
+        candidate.initialize.assert_awaited_once()
+        query.edit_message_text.assert_awaited_once()
+        markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+        assert query.data in [button.callback_data for row in markup.inline_keyboard for button in row]
+
+
+@pytest.mark.asyncio
 async def test_retirement_error_does_not_undo_committed_selection(tmp_path, monkeypatch):
     manager, original, candidate, _ = make_selection(tmp_path, monkeypatch)
     original.shutdown.side_effect = RuntimeError("old cleanup failed")

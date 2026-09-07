@@ -42,6 +42,7 @@ from orchestrator.context_compaction import (
     load_route_config,
     render_history,
     resolve_compact_route,
+    resolve_capacity_profile,
     resolve_target_capacity,
     resolve_trigger_budget,
     schedule_execution_stage,
@@ -67,6 +68,18 @@ class _StateStore:
         candidate = callback(deepcopy(self.value))
         self.value = deepcopy(candidate)
         return deepcopy(self.value)
+
+
+def test_codex_astra_capacity_is_available_to_compaction_without_instance_override(tmp_path):
+    runtime = _Runtime(tmp_path)
+    before = runtime.state_store.read()
+    capacity = resolve_capacity_profile(runtime, "codex-cli", "gpt-6-astra")
+    assert capacity is not None
+    assert capacity.context_window_tokens - capacity.response_headroom_tokens == 922_000
+    override = resolve_capacity_profile(runtime, "codex-cli", "gpt-6-astra",
+        profile_options={"context_window_tokens": 800_000, "response_headroom_tokens": 80_000})
+    assert override.context_window_tokens - override.response_headroom_tokens == 720_000
+    assert runtime.state_store.read() == before
 
 
 class _Manager:

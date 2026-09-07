@@ -91,6 +91,9 @@ are never forced into Fixed.
 - Target initialization and fresh-session setup finish before committing the
   selection. If preparation or persistence fails, the original live backend,
   native session, working mode, and saved selection remain intact.
+- Failed model-button selection keeps model choices available for retry. Busy
+  Agents keep the existing menu and receive an alert; this decision uses runtime
+  state rather than matching an English word in a translated failure message.
 - Memory+ is independent and remains unchanged. Old confirmation buttons only
   reopen backend selection; they no longer change the mode.
 - Plain and `+` (continuity) selection retain their handoff semantics; continuity
