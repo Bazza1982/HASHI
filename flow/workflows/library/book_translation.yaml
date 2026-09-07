@@ -84,19 +84,19 @@ agents:
 
     - id: translator_01
       role: "主翻译员（前半部分）"
-      agent_md: "flow/agents/translator/AGENT.md"
+      agent_md: "flow/agents/translation_worker/AGENT.md"
       backend: claude-cli
       model: claude-sonnet-4-6
 
     - id: translator_02
       role: "主翻译员（后半部分）"
-      agent_md: "flow/agents/translator/AGENT.md"
+      agent_md: "flow/agents/translation_worker/AGENT.md"
       backend: claude-cli
       model: claude-sonnet-4-6
 
     - id: reviewer_01
       role: "翻译审校员"
-      agent_md: "flow/agents/reviewer/AGENT.md"
+      agent_md: "flow/agents/artifact_reviewer/AGENT.md"
       backend: claude-cli
       model: claude-sonnet-4-6
 

@@ -69,7 +69,7 @@ agents:
       backend: claude-cli
     - id: reviewer_01
       role: "独立发布审查"
-      agent_md: "flow/agents/reviewer/AGENT.md"
+      agent_md: "flow/agents/artifact_reviewer/AGENT.md"
       backend: codex-cli
     - id: debug_01
       role: "故障诊断与恢复"
