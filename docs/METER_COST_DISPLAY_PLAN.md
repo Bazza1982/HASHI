@@ -156,5 +156,45 @@
 本节只记录源码与离线回归结果；运行实例采用和真实 Telegram 展示尚未
 验证，不能据此宣称实机交付。
 
+## 10. 新模型自动价格事实（2026-09-08）
+
+PAO Functions 现在通过 `tools/pricing_sources.py` 提供唯一的派生价格事实，
+`tools/token_tracker.py` 仍是计费消费者的公开入口。该实现没有修改 Core，
+也没有在模型兼容目录、Agent 配置或实例配置中复制价格表。
+
+当前只有 OpenRouter 的公开单 route 模型接口达到启用标准：
+
+- 缓存键严格区分 `openrouter_route + openrouter-api + exact route id`；响应的
+  `data.id` 必须与请求 route ID 完全一致。`canonical_slug` 作为独立 canonical
+  ID 保存，不能反向污染 Anthropic、OpenAI 等直连 provider。
+- `https://openrouter.ai/openapi.json` 是币种与计价单位契约来源；其
+  `PublicPricing` 把 prompt/completion 定义为必填 USD/token 字段，其他维度
+  按响应存在性记录。价格事实保留来源 URL、获取时间、完整响应 SHA-256 和
+  `content_sha256` revision；该 revision 只是证据内容版本，不冒充供应商发布
+  版本。
+- 只有本次用量涉及的维度都有费率才生成估值。使用 cache read 或独立
+  reasoning、但相应费率缺失时保持未知；当前不支持的条件 `overrides` 阶梯
+  整体 fail closed，绝不按默认档猜价。全零只有明确的 `:free` route 才能标为
+  `known_zero`。
+- provider 实报金额（包括真实 `0.0`）始终优先；明确本地模型其次；新 route
+  只使用未过期的精确缓存事实。查不到、响应异常、过期或维度不全均保留
+  `cost_usd: null`，且不阻止模型正常使用。
+
+模型配置成功后会异步、尽力预热价格；配置事务不等待查价，也不会因查价
+失败回滚。首次用量若发现 OpenRouter 精确 route 缺价，只把本次记为未知并
+安排一次去重的后台补查。成功事实 TTL 为 24 小时，失败负缓存为 15 分钟；
+用量收尾只读缓存，不在响应完成路径同步联网。缓存位于实例
+`tmp/pricing-facts-v1.json`，
+使用进程锁、原子替换、64 KiB 流式响应硬上限、HTTPS 域名白名单、5 秒连接
+与 15 秒总超时、MIME/status/schema 校验，并拒绝 redirect、非有限数字和
+被篡改的缓存事实。
+
+每条采用估值的 usage line item 固化当时的精确 revision，之后刷新不会重写
+旧账。直连 OpenAI、Anthropic、Google、DeepSeek 与 xAI 仍未启用自动来源；
+在各自精确 API model ID、单位及可审计 revision 证据合格前继续显示未知。
+
+本节已完成离线回归和一次有界真实 OpenRouter 单模型 GET；三实例 Functions
+采用与真实“选择模型 → 查价 → 用量展示”终端验收仍须在最终部署阶段完成。
+
 ---
-_更新时间：2026-09-08 · v2.2 未知成本汇总展示校准_
+_更新时间：2026-09-08 · v2.3 自动价格事实与未知成本校准_

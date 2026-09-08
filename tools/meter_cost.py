@@ -254,30 +254,34 @@ class UsageReceipt:
             return None
         # Lazy import avoids a module cycle: token_tracker imports this module
         # only while constructing a structured receipt.
-        from tools.token_tracker import calc_cost, model_has_pricing
+        from tools.token_tracker import resolve_usage_cost
 
         total = 0.0
         for item in self.line_items:
             if getattr(item, "cost_source", "unknown") == "local_zero":
                 continue
             model = str(getattr(item, "model", "") or "")
-            if not model_has_pricing(model):
-                return None
+            engine = str(getattr(item, "engine", "") or "")
             cached_tokens = (
                 int(getattr(item, "prompt_cache_hit_tokens", 0) or 0)
                 if use_observed_cache
                 else 0
             )
-            total += calc_cost(
-                int(getattr(item, "input_tokens", 0) or 0),
-                int(getattr(item, "output_tokens", 0) or 0),
-                model,
-                int(getattr(item, "thinking_tokens", 0) or 0),
+            cost, source, _revision = resolve_usage_cost(
+                cost_usd=None,
+                model=model,
+                engine=engine,
+                input_tokens=int(getattr(item, "input_tokens", 0) or 0),
+                output_tokens=int(getattr(item, "output_tokens", 0) or 0),
+                thinking_tokens=int(getattr(item, "thinking_tokens", 0) or 0),
                 cached_tokens=cached_tokens,
                 thinking_in_output=bool(
                     getattr(item, "thinking_in_output", False)
                 ),
             )
+            if cost is None or source != "pricing_table":
+                return None
+            total += cost
         return round(total, 6)
 
     @property
@@ -318,7 +322,7 @@ class UsageReceipt:
         )
         if revisions:
             return tuple(revisions)
-        if self.no_cache_cost_usd is not None or self.dominant_cost_source() == "pricing_table":
+        if self.dominant_cost_source() == "pricing_table":
             from tools.token_tracker import PRICING_REVISION
 
             return (PRICING_REVISION,)

@@ -184,9 +184,29 @@ def _is_local_engine(engine: str) -> bool:
     return any(marker in normalized for marker in LOCAL_ENGINE_MARKERS)
 
 
-def model_has_pricing(model: str) -> bool:
-    """True when *model* resolves to an explicit pricing row (not ``default``)."""
+def _static_model_has_pricing(model: str) -> bool:
     return bool(str(model or "").strip()) and _pricing_key(model) != "default"
+
+
+def _cached_dynamic_fact(engine: str, model: str):
+    if not str(engine or "").strip() or not str(model or "").strip():
+        return None
+    try:
+        from tools.pricing_sources import get_cached_pricing_fact
+
+        fact = get_cached_pricing_fact(engine, model)
+    except Exception:
+        return None
+    return fact
+
+
+def model_has_pricing(model: str, *, engine: str = "") -> bool:
+    """True for an explicit static row or a fresh exact provider/model fact."""
+
+    fact = _cached_dynamic_fact(engine, model)
+    if fact is not None and fact.status in {"known", "known_zero"}:
+        return True
+    return _static_model_has_pricing(model)
 
 
 def classify_token_source(usage_is_provider: bool) -> str:
@@ -212,9 +232,93 @@ def resolve_cost_source(
         return float(cost_usd), "provider"
     if _is_local_engine(engine):
         return 0.0, "local_zero"
-    if model_has_pricing(model):
+    # Legacy classification has no usage dimensions or revision return value;
+    # keep it on the static table. New call sites use ``resolve_usage_cost`` so
+    # a cached fact can be applied without losing its immutable revision.
+    if _static_model_has_pricing(model):
         return None, "pricing_table"
     return None, "unknown"
+
+
+def resolve_usage_cost(
+    *,
+    cost_usd: float | None,
+    model: str,
+    engine: str,
+    input_tokens: int,
+    output_tokens: int,
+    thinking_tokens: int = 0,
+    cached_tokens: int = 0,
+    thinking_in_output: bool = False,
+    schedule_missing: bool = False,
+) -> tuple[float | None, str, str]:
+    """Resolve one immutable usage valuation and its exact price revision.
+
+    Provider-reported amounts (including zero) always win.  A dynamic lookup is
+    cache-only here; it never performs network I/O in the response-finalization
+    path.  Static historical rows remain available for their existing models.
+    """
+
+    if cost_usd is not None:
+        if _is_local_engine(engine):
+            return float(cost_usd), "local_zero", "unknown"
+        return float(cost_usd), "provider", "unknown"
+    if _is_local_engine(engine):
+        return 0.0, "local_zero", "unknown"
+
+    fact = _cached_dynamic_fact(engine, model)
+    if fact is not None and fact.status in {"known", "known_zero"}:
+        try:
+            from tools.pricing_sources import calculate_cost as calculate_dynamic_cost
+
+            dynamic_cost = calculate_dynamic_cost(
+                fact,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+                thinking_tokens=thinking_tokens,
+                thinking_in_output=thinking_in_output,
+            )
+        except Exception:
+            dynamic_cost = None
+        if dynamic_cost is not None:
+            return dynamic_cost, "pricing_table", str(
+                fact.source_revision or "unknown"
+            )
+        # A present exact fact with incomplete dimensions must remain unknown;
+        # it must not silently fall through to a differently scoped old row.
+        return None, "unknown", "unknown"
+
+    if (
+        schedule_missing
+        and fact is not None
+        and fact.status == "unknown"
+        and fact.scope == "openrouter_route"
+        and fact.unknown_reason in {"cache_miss", "stale_cache"}
+    ):
+        try:
+            from tools.pricing_sources import schedule_prewarm
+
+            # The current usage remains unknown. The refresh happens only in a
+            # daemon thread so response finalization never performs network I/O.
+            schedule_prewarm(engine, model)
+        except Exception:
+            pass
+
+    if _static_model_has_pricing(model):
+        return (
+            calc_cost(
+                input_tokens,
+                output_tokens,
+                model,
+                thinking_tokens,
+                cached_tokens=cached_tokens,
+                thinking_in_output=thinking_in_output,
+            ),
+            "pricing_table",
+            PRICING_REVISION,
+        )
+    return None, "unknown", "unknown"
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────
@@ -252,11 +356,6 @@ def record_usage(
     """
     from tools.meter_cost import PerCallUsageLineItem, UsageReceipt
 
-    resolved_cost, cost_source = resolve_cost_source(
-        cost_usd=cost_usd,
-        model=model,
-        engine=engine or backend,
-    )
     normalized_token_source = str(token_source or "").strip().casefold()
     if normalized_token_source in {"api", "provider"}:
         normalized_token_source = "provider"
@@ -266,15 +365,17 @@ def record_usage(
         # explicit source even when provider cost is unavailable.
         normalized_token_source = classify_token_source(cost_usd is not None)
     thinking_in_output = normalized_token_source == "provider"
-    if resolved_cost is None and cost_source == "pricing_table":
-        resolved_cost = calc_cost(
-            input_tokens,
-            output_tokens,
-            model,
-            thinking_tokens,
-            thinking_in_output=thinking_in_output,
-        )
     if line_items is None:
+        resolved_cost, cost_source, pricing_revision = resolve_usage_cost(
+            cost_usd=cost_usd,
+            model=model,
+            engine=engine or backend,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            thinking_tokens=thinking_tokens,
+            thinking_in_output=thinking_in_output,
+            schedule_missing=True,
+        )
         line_items = [
             PerCallUsageLineItem(
                 request_id=str(request_id or ""),
@@ -289,9 +390,7 @@ def record_usage(
                 thinking_in_output=thinking_in_output,
                 cost_usd=resolved_cost,
                 cost_source=cost_source,
-                pricing_revision=(
-                    PRICING_REVISION if cost_source == "pricing_table" else "unknown"
-                ),
+                pricing_revision=pricing_revision,
             )
         ]
     receipt = UsageReceipt(

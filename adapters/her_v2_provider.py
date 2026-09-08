@@ -108,7 +108,7 @@ from orchestrator.multimodal_contract import (
 from orchestrator.voice_transcript_gate import await_authorized_transcript
 from tools.meter_cost import PerCallUsageLineItem
 from tools.smart_tools import smart_tool_spec
-from tools.token_tracker import resolve_cost_source
+from tools.token_tracker import resolve_usage_cost
 
 _HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
 _PERSONA_COMMENTARY_AGENT_FAILED_FIELD = "persona_commentary_agent_failed"
@@ -2627,8 +2627,6 @@ class HashiStageProvider(StageProvider):
             # payload construction failed before any Provider request began.
             return
 
-        from tools.token_tracker import calc_cost
-
         observed_provider_request_ids = getattr(
             self, "_observed_provider_request_ids", None
         )
@@ -2667,21 +2665,22 @@ class HashiStageProvider(StageProvider):
                 # A request without a Provider receipt may still have been
                 # processed and billed. Zero-token table pricing would falsely
                 # turn that uncertainty into a known $0.00 charge.
-                resolved_cost, cost_source = None, "unknown"
+                resolved_cost, cost_source, pricing_revision = (
+                    None,
+                    "unknown",
+                    "unknown",
+                )
             else:
-                resolved_cost, cost_source = resolve_cost_source(
+                resolved_cost, cost_source, pricing_revision = resolve_usage_cost(
                     cost_usd=call.get("cost_usd"),
                     model=model,
                     engine=engine,
-                )
-            if resolved_cost is None and cost_source == "pricing_table":
-                resolved_cost = calc_cost(
-                    input_tokens,
-                    output_tokens,
-                    model,
-                    thinking_tokens,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    thinking_tokens=thinking_tokens,
                     cached_tokens=prompt_cache_hit_tokens or 0,
                     thinking_in_output=thinking_in_output,
+                    schedule_missing=True,
                 )
             per_call = len(calls) > 1 or bool(raw_calls)
             call_identity = "|".join(
@@ -2745,6 +2744,7 @@ class HashiStageProvider(StageProvider):
                 ),
                 compact=bool(call.get("compact", False)),
                 status=status,
+                pricing_revision=pricing_revision,
             )
             # /reboot min may retain the already-imported meter dataclass.
             # Dynamic attachment keeps mixed old/new module shapes safe.

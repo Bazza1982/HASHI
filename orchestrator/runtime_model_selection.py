@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 from hashlib import blake2s
+from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -60,6 +61,55 @@ def _her_v2_callback_token(value: Any) -> str:
     # Two tokens plus the longest route ID must remain within Telegram's
     # 64-byte callback_data limit. Forty bits is ample for stale-menu guards.
     return blake2s(str(value).encode("utf-8"), digest_size=5).hexdigest()
+
+
+def _schedule_pricing_prewarm(runtime, *targets: tuple[str, str]) -> None:
+    """Warm PAO's derived price cache after configuration succeeds.
+
+    This stays asynchronous and best-effort: price discovery must never roll
+    back a valid model selection, and response finalization remains cache-only.
+    """
+
+    try:
+        from tools.pricing_sources import schedule_prewarm
+
+        bridge_home = getattr(
+            getattr(runtime, "global_config", None), "bridge_home", None
+        )
+        cache_path = (
+            Path(bridge_home) / "tmp" / "pricing-facts-v1.json"
+            if bridge_home
+            else None
+        )
+        normalized = (
+            (str(provider or "").strip(), str(model or "").strip())
+            for provider, model in targets
+        )
+        for provider, model in dict.fromkeys(
+            target for target in normalized if all(target)
+        ):
+            schedule_prewarm(provider, model, cache_path=cache_path)
+    except Exception:
+        # Pricing is advisory metering metadata, never model availability.
+        return
+
+
+def _schedule_her_v2_pricing_prewarm(runtime, selected) -> None:
+    targets: list[tuple[str, str]] = []
+    for prefix in ("fast", "pro"):
+        provider = getattr(selected, f"{prefix}_provider", "")
+        model = getattr(selected, f"{prefix}_model", "")
+        if provider and model:
+            targets.append((str(provider), str(model)))
+    for target in (getattr(selected, "route_targets", None) or {}).values():
+        if isinstance(target, dict):
+            provider, model = target.get("provider"), target.get("model")
+        else:
+            provider = getattr(target, "provider", "")
+            model = getattr(target, "model", "")
+        if provider and model:
+            targets.append((str(provider), str(model)))
+    _schedule_pricing_prewarm(runtime, *targets)
 
 
 def _her_v2_indexed_choice(values, raw_index: str):
@@ -982,6 +1032,7 @@ def apply_her_v2_configuration(runtime, selected) -> str | None:
         runtime.backend_manager.apply_her_v2_configuration(selected)
     except (OSError, TypeError, ValueError) as exc:
         return str(exc)
+    _schedule_her_v2_pricing_prewarm(runtime, selected)
     return None
 
 
@@ -1000,6 +1051,7 @@ def save_her_v2_candidate(runtime, selected) -> str | None:
             runtime.backend_manager.apply_her_v2_configuration(selected)
     except (OSError, TypeError, ValueError) as exc:
         return str(exc)
+    _schedule_her_v2_pricing_prewarm(runtime, selected)
     return None
 
 
@@ -1036,6 +1088,7 @@ def set_backend_model(runtime, engine: str, requested: str) -> None:
     runtime.backend_manager.persist_state(
         active_model=normalized,
     )
+    _schedule_pricing_prewarm(runtime, (engine, normalized))
 
 
 async def cmd_provider(runtime, update, context: Any) -> None:
@@ -1186,6 +1239,9 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
     if action == "apply" and len(args) == 1:
         try:
             runtime.backend_manager.apply_her_v2_configuration_draft()
+            _schedule_her_v2_pricing_prewarm(
+                runtime, _her_v2_edit_configuration(runtime)
+            )
         except (OSError, TypeError, ValueError) as exc:
             await runtime._reply_text(
                 update,

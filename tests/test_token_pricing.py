@@ -1,6 +1,10 @@
+import json
+from datetime import datetime, timezone
+
 import pytest
 
-from tools.token_tracker import PRICING, calc_cost, get_price
+from tools import pricing_sources
+from tools.token_tracker import PRICING, calc_cost, get_price, record_usage
 
 
 def test_qwen37_flash_uses_exact_openrouter_slug_and_base_price():
@@ -117,3 +121,164 @@ def test_deepseek_flash_vision_uses_flash_pricing():
     assert get_price("deepseek-v4-flash-vision-exp") == PRICING[
         "deepseek-v4-flash"
     ]
+
+
+def _dynamic_evidence(model="vendor/new-model", *, cache_read="0.0000002"):
+    body = json.dumps(
+        {
+            "data": {
+                "id": model,
+                "canonical_slug": model,
+                "pricing": {
+                    "prompt": "0.000002",
+                    "completion": "0.000006",
+                    "request": "0",
+                    "input_cache_read": cache_read,
+                    "input_cache_write": "0.0000025",
+                },
+            }
+        }
+    ).encode()
+    return pricing_sources.HttpEvidence(
+        status=200,
+        content_type="application/json",
+        body=body,
+        fetched_at=datetime.now(timezone.utc),
+        url=f"https://openrouter.ai/api/v1/model/{model}",
+    )
+
+
+def test_record_usage_reads_dynamic_price_cache_and_links_exact_revision(
+    tmp_path, monkeypatch
+):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    fact = pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence(),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="vendor/new-model",
+        backend="openrouter-api",
+        engine="openrouter-api",
+        input_tokens=1_000,
+        output_tokens=100,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd == 0.0026
+    assert receipt.dominant_cost_source() == "pricing_table"
+    assert receipt.pricing_revisions == (fact.source_revision,)
+    [record] = [json.loads(line) for line in (tmp_path / "token_usage.jsonl").read_text().splitlines()]
+    assert record["pricing_revisions"] == [fact.source_revision]
+
+
+def test_provider_reported_zero_beats_dynamic_estimate(tmp_path, monkeypatch):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence(),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="vendor/new-model",
+        backend="openrouter-api",
+        engine="openrouter-api",
+        input_tokens=1_000,
+        output_tokens=100,
+        cost_usd=0.0,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd == 0.0
+    assert receipt.dominant_cost_source() == "provider"
+    assert receipt.pricing_revisions == ()
+
+
+def test_dynamic_route_price_is_not_used_for_direct_provider(tmp_path, monkeypatch):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence(),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="vendor/new-model",
+        backend="vendor-api",
+        engine="vendor-api",
+        input_tokens=1_000,
+        output_tokens=100,
+        cost_usd=None,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd is None
+    assert receipt.dominant_cost_source() == "unknown"
+
+
+def test_usage_finalization_is_cache_only(tmp_path, monkeypatch):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence(),
+    )
+    monkeypatch.setattr(
+        pricing_sources,
+        "bounded_https_get",
+        lambda _url: pytest.fail("usage finalization must not access the network"),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="vendor/new-model",
+        backend="openrouter-api",
+        engine="openrouter-api",
+        input_tokens=10,
+        output_tokens=1,
+        token_source="provider",
+    )
+    assert receipt.cost_usd is not None
+
+
+def test_first_unknown_openrouter_usage_schedules_nonblocking_price_supplement(
+    tmp_path, monkeypatch
+):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    scheduled = []
+    monkeypatch.setattr(
+        pricing_sources,
+        "schedule_prewarm",
+        lambda engine, model, *, cache_path=None: scheduled.append(
+            (engine, model, cache_path)
+        ),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="vendor/brand-new-model",
+        backend="openrouter-api",
+        engine="openrouter-api",
+        input_tokens=10,
+        output_tokens=1,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd is None
+    assert receipt.dominant_cost_source() == "unknown"
+    assert scheduled == [("openrouter-api", "vendor/brand-new-model", None)]
