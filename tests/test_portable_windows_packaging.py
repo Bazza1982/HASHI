@@ -865,6 +865,14 @@ def test_portable_installer_has_update_rollback_lineage_and_language_contract():
     assert "Rollback-Previous.ps1" in elevated
     assert "identity_lineage_id" in rollback
     assert "Move-Item -LiteralPath $script:PreviousRoot" in rollback
+    assert "@((Get-Item" not in rollback
+    assert re.search(
+        r"foreach \(\$item in @\(\s*"
+        r"Get-Item -LiteralPath \$Root -Force\s*"
+        r"Get-ChildItem -LiteralPath \$Root -Recurse -Force\s*"
+        r"\)\)",
+        rollback,
+    )
     assert "HASHI_PORTABLE_LANGUAGE" in common
 
 

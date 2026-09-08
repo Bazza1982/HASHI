@@ -74,7 +74,13 @@ function Assert-OrdinaryTree {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
         throw "$Description is missing: $Root"
     }
-    foreach ($item in @((Get-Item -LiteralPath $Root -Force), (Get-ChildItem -LiteralPath $Root -Recurse -Force))) {
+    # Keep each provider result on its own statement.  A comma between the two
+    # parenthesized commands creates a nested Object[] for the recursive result,
+    # which cannot be used with the FileAttributes bitwise check below.
+    foreach ($item in @(
+        Get-Item -LiteralPath $Root -Force
+        Get-ChildItem -LiteralPath $Root -Recurse -Force
+    )) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "$Description contains a link or reparse point: $($item.FullName)"
         }
