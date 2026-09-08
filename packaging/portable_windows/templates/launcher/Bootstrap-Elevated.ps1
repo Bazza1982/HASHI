@@ -1,9 +1,10 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Start', 'Stop', 'Diagnose', 'Uninstall')]
+    [ValidateSet('Install', 'Update', 'Rollback', 'Start', 'Stop', 'Diagnose', 'Uninstall')]
     [string]$Action = 'Start',
     [ValidateSet('TUI')]
-    [string]$Surface = 'TUI'
+    [string]$Surface = 'TUI',
+    [string]$InstallRoot = ''
 )
 
 Set-StrictMode -Version Latest
@@ -21,6 +22,14 @@ try {
     }
     $desktopPath = [Environment]::GetFolderPath('Desktop')
     if (-not $desktopPath) { throw 'The current user desktop path is unavailable.' }
+    if (-not $InstallRoot) {
+        $candidateRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+        if (Test-Path -LiteralPath (Join-Path $candidateRoot '.hashi-local-install.json') -PathType Leaf) {
+            $InstallRoot = $candidateRoot
+        } else {
+            $InstallRoot = 'C:\HASHI-Portable'
+        }
+    }
     $arguments = @(
         '-NoLogo',
         '-NoProfile',
@@ -33,7 +42,9 @@ try {
         '-Surface',
         $Surface,
         '-DesktopPath',
-        (Quote-BootstrapArgument $desktopPath)
+        (Quote-BootstrapArgument $desktopPath),
+        '-InstallRoot',
+        (Quote-BootstrapArgument ([System.IO.Path]::GetFullPath($InstallRoot)))
     )
     Start-Process `
         -FilePath (Join-Path $PSHOME 'powershell.exe') `

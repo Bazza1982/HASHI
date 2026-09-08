@@ -6,21 +6,27 @@ write to or format a USB device.
 
 The USB is installation and transfer media, not the runtime disk. The user
 runs `Install_HASHI_On_This_PC.bat`, approves Windows administrator access, and
-the installer copies and verifies the complete bundle—including program,
-private Python runtime, configuration, secrets, and current user data—to:
+the installer copies and verifies the complete program, private Python runtime,
+and clean configuration templates to:
 
 ```text
 C:\HASHI-Portable\
 ```
 
-Copying uses a unique staging directory on `C:`. The installer verifies the
-static program image against `SHA256SUMS.txt`, verifies mutable `data` files
-against their live USB sources, writes an identity-bound ownership marker, and
-only then atomically moves the staging directory into place. It never
-overwrites an existing directory. If a valid matching installation already
-exists, no files are copied; the desktop shortcuts are repaired and the local
-installation is launched. An invalid, incomplete, linked, or differently owned
-destination fails closed.
+Copying uses a unique staging directory on the selected destination drive. The
+installer verifies the static program image against `SHA256SUMS.txt`, verifies
+mutable files against their authoritative source, writes an identity-bound
+ownership marker, and only then activates the staging directory. A valid older
+installation is moved to the rollback slot; the new version adopts a verified
+copy of its local data. The same bundle performs no copy and only repairs
+shortcuts. An invalid, incomplete, linked, or differently owned destination
+fails closed.
+
+The public image contains no concrete HASHI instance identity, conversation,
+credential, or source-machine path. First installation generates the local
+instance identity and identity-lineage ID on the destination PC, creates fresh
+local and Remote authentication tokens, and asks for the installation/initial
+runtime language. Runtime language changes remain in the local data tree.
 
 The installer creates two Windows shortcuts on the invoking user's desktop:
 `Start HASHI` and `Stop HASHI`. Each shortcut targets
@@ -42,8 +48,8 @@ record; they do not scan adapters, guess WSL gateways, or fall back to a
 `172.x` address. Logs are always resolved from the local copy at
 `data\logs\bridge.log`.
 
-`Uninstall_HASHI_From_This_PC.bat` must be run from the original matching USB.
-It requests confirmation, stops only processes whose executable or dedicated
+`Uninstall_HASHI_From_This_PC.bat` may be run from the transfer image or the
+verified local installation. It requests confirmation, stops only processes whose executable or dedicated
 browser profile belongs to the validated local installation, removes the two
 known shortcuts, and deletes only the exact marked local directory. A marker,
 Portable identity, build identity, target path, or reparse-point mismatch stops
@@ -84,10 +90,22 @@ hash lock contains every dependency from the runtime policy's standard lock
 at the exact approved version. It checks the source identity again before the
 staging directory is published.
 
-The source `secrets.json` must contain `deepseek_api_key`. Only the DeepSeek,
-optional DashScope/OpenRouter, and Remote shared credentials are copied. Secret
-values are never printed. The generated Backend API admin token (stored under
-its compatibility key) and 128-bit Portable identity are unique to the image.
+The default build is public and contains no credentials. To privately finalize
+an image with one user-supplied DeepSeek key, put only that key in a protected
+file and pass `--private-deepseek-key-file <path>`. The key is never accepted as
+a command-line value and is never printed. No source `secrets.json`,
+DashScope/OpenRouter key, Remote shared token, identity, or conversation is
+copied. Private finalization creates independent local authentication tokens;
+first installation rotates the local tokens again for the destination PC.
+
+Re-running Install with a different verified bundle performs an update. Static
+program/runtime files come from the new bundle while the complete authoritative
+local `data` tree—identity, lineage, language, settings, credentials, and
+conversations—is verified and preserved. The former program version is kept at
+`<install-root>.previous`; `Rollback_HASHI_On_This_PC.bat` swaps versions while
+carrying forward the latest user data. Any activation failure automatically
+restores the former installation. `Update_HASHI_On_This_PC.bat` requires an
+existing installation and never silently creates a new identity.
 
 The build fails closed if the result exceeds 957,000,000 bytes or if a CLI
 Engine adaptor/package manager is present. Every downloaded asset is pinned by

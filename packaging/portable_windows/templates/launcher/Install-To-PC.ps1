@@ -1,7 +1,13 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$DesktopPath
+    [string]$DesktopPath,
+    [string]$InstallRoot = 'C:\HASHI-Portable',
+    [ValidateSet('InstallOrUpdate', 'UpdateOnly')]
+    [string]$Operation = 'InstallOrUpdate',
+    [ValidateSet('Auto', 'en', 'zh-CN')]
+    [string]$Language = 'Auto',
+    [switch]$NonInteractive
 )
 
 Set-StrictMode -Version Latest
@@ -16,9 +22,15 @@ try {
 } catch {}
 
 $script:SourceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$script:InstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
+$script:InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+$script:InstallParent = [System.IO.Path]::GetDirectoryName($script:InstallRoot.TrimEnd('\'))
+$script:InstallLeaf = [System.IO.Path]::GetFileName($script:InstallRoot.TrimEnd('\'))
+$script:PreviousRoot = Join-Path $script:InstallParent ($script:InstallLeaf + '.previous')
 $script:StageRoot = ''
 $script:ActivatedThisRun = $false
+$script:WasUpdate = $false
+$script:MovedCurrentToPrevious = $false
+$script:DisplacedPreviousRoot = ''
 $script:InstallLog = Join-Path $env:TEMP 'HASHI-Portable-install.log'
 $script:LastConsolePercent = -10
 $script:ShortcutNames = @(
@@ -109,19 +121,38 @@ function Assert-OrdinaryDirectory {
     }
 }
 
-function Get-PortableIdentity {
+function Get-PortableTemplate {
+    param([string]$Root)
+    $identity = Read-JsonObject -Path (Join-Path $Root 'data\portable-instance.json')
+    if (
+        $null -eq $identity -or
+        [int]$identity.schema_version -ne 2 -or
+        [string]$identity.product -ne 'HASHI Portable Windows x64' -or
+        [string]$identity.provisioning_state -ne 'unprovisioned' -or
+        $null -ne $identity.portable_instance_id -or
+        $null -ne $identity.identity_lineage_id
+    ) {
+        throw "The HASHI public provisioning template is invalid in $Root."
+    }
+    return $identity
+}
+
+function Get-ProvisionedIdentity {
     param([string]$Root)
     $identity = Read-JsonObject -Path (Join-Path $Root 'data\portable-instance.json')
     $instanceId = if ($null -eq $identity) { '' } else { [string]$identity.portable_instance_id }
+    $lineageId = if ($null -eq $identity) { '' } else { [string]$identity.identity_lineage_id }
     if (
         $null -eq $identity -or
-        [int]$identity.schema_version -ne 1 -or
+        [int]$identity.schema_version -ne 2 -or
         [string]$identity.product -ne 'HASHI Portable Windows x64' -or
-        $instanceId -notmatch '^[0-9a-f]{32}$'
+        [string]$identity.provisioning_state -ne 'provisioned' -or
+        $instanceId -notmatch '^[0-9a-f]{32}$' -or
+        $lineageId -notmatch '^[0-9a-f]{32}$'
     ) {
-        throw "The HASHI portable identity is invalid in $Root."
+        throw "The installed HASHI identity is invalid in $Root."
     }
-    return $instanceId
+    return $identity
 }
 
 function Get-BundleId {
@@ -133,9 +164,8 @@ function Get-BundleId {
     return Get-Sha256 -Path $buildInfo
 }
 
-function Test-ExistingLocalInstallation {
-    param([string]$SourceInstanceId)
-    if (-not (Test-Path -LiteralPath $script:InstallRoot)) { return $false }
+function Get-ExistingLocalInstallation {
+    if (-not (Test-Path -LiteralPath $script:InstallRoot)) { return $null }
     Assert-OrdinaryDirectory -Path $script:InstallRoot -Description 'The existing HASHI installation folder'
     $marker = Read-JsonObject -Path (Join-Path $script:InstallRoot '.hashi-local-install.json')
     if ($null -eq $marker) {
@@ -143,20 +173,22 @@ function Test-ExistingLocalInstallation {
     }
     $markedRoot = [System.IO.Path]::GetFullPath([string]$marker.install_root)
     if (
-        [int]$marker.schema_version -ne 1 -or
+        [int]$marker.schema_version -ne 2 -or
         [string]$marker.product -ne 'HASHI Portable Local Installation' -or
-        [string]$marker.portable_instance_id -ne $SourceInstanceId -or
         -not [string]::Equals(
             $markedRoot.TrimEnd('\'),
             $script:InstallRoot.TrimEnd('\'),
             [System.StringComparison]::OrdinalIgnoreCase
         )
     ) {
-        throw 'The local installation folder belongs to a different or invalid HASHI instance. It was not changed.'
+        throw 'The local installation folder has an invalid HASHI ownership marker. It was not changed.'
     }
-    $localInstanceId = Get-PortableIdentity -Root $script:InstallRoot
-    if ($localInstanceId -ne $SourceInstanceId) {
-        throw 'The local installation identity does not match this USB. It was not changed.'
+    $identity = Get-ProvisionedIdentity -Root $script:InstallRoot
+    if (
+        [string]$marker.portable_instance_id -ne [string]$identity.portable_instance_id -or
+        [string]$marker.identity_lineage_id -ne [string]$identity.identity_lineage_id
+    ) {
+        throw 'The local installation identity and lineage marker disagree. It was not changed.'
     }
     if ([string]$marker.bundle_id -ne (Get-BundleId -Root $script:InstallRoot)) {
         throw 'The local installation build identity does not match its ownership marker. It was not changed.'
@@ -174,7 +206,11 @@ function Test-ExistingLocalInstallation {
             throw "The existing HASHI installation is incomplete: $relative"
         }
     }
-    return $true
+    return [PSCustomObject]@{
+        Marker = $marker
+        Identity = $identity
+        BundleId = [string]$marker.bundle_id
+    }
 }
 
 function Test-ExcludedRelativePath {
@@ -302,6 +338,205 @@ function Assert-StaticManifestCoverage {
     }
 }
 
+function Assert-TreeHasNoReparsePoints {
+    param(
+        [string]$Root,
+        [string]$Description
+    )
+    Assert-OrdinaryDirectory -Path $Root -Description $Description
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force)) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Description contains an unsupported link: $($item.FullName)"
+        }
+    }
+}
+
+function Copy-VerifiedMutableTree {
+    param(
+        [string]$SourceData,
+        [string]$DestinationData
+    )
+    Assert-TreeHasNoReparsePoints -Root $SourceData -Description 'The existing HASHI data folder'
+    if (Test-Path -LiteralPath $DestinationData) {
+        Remove-Item -LiteralPath $DestinationData -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $DestinationData | Out-Null
+    foreach ($source in @(Get-ChildItem -LiteralPath $SourceData -Recurse -Force -File)) {
+        $relative = $source.FullName.Substring($SourceData.Length).TrimStart('\')
+        if (Test-ExcludedRelativePath -RelativePath ("data\$relative")) { continue }
+        $destination = Join-Path $DestinationData $relative
+        $parent = [System.IO.Path]::GetDirectoryName($destination)
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        [System.IO.File]::Copy($source.FullName, $destination, $false)
+        if ((Get-Sha256 -Path $destination) -ne (Get-Sha256 -Path $source.FullName)) {
+            throw "Preserved local data failed SHA-256 verification: $relative"
+        }
+    }
+}
+
+function Preserve-LocalData {
+    param([string]$StageRoot)
+    Copy-VerifiedMutableTree `
+        -SourceData (Join-Path $script:InstallRoot 'data') `
+        -DestinationData (Join-Path $StageRoot 'data')
+}
+
+function Select-InstallLanguage {
+    param([bool]$IsUpdate)
+    if ($Language -ne 'Auto') { return $Language }
+    if ($IsUpdate) { return '' }
+    if ($NonInteractive) {
+        if ([Globalization.CultureInfo]::CurrentUICulture.Name -like 'zh*') {
+            return 'zh-CN'
+        }
+        return 'en'
+    }
+    Write-Host ''
+    Write-Host 'Choose setup and initial HASHI language:' -ForegroundColor Cyan
+    Write-Host '请选择安装及首次启动语言：' -ForegroundColor Cyan
+    Write-Host '  [1] English'
+    Write-Host '  [2] 简体中文'
+    $answer = (Read-Host '1 / 2').Trim()
+    if ($answer -eq '2') { return 'zh-CN' }
+    return 'en'
+}
+
+function Set-StagedLanguage {
+    param(
+        [string]$StageRoot,
+        [string]$SelectedLanguage
+    )
+    if (-not $SelectedLanguage) { return }
+    $configPath = Join-Path $StageRoot 'data\agents.json'
+    $config = Read-JsonObject -Path $configPath
+    if ($null -eq $config -or $null -eq $config.global) {
+        throw 'The staged HASHI configuration is unreadable.'
+    }
+    $config.global.ui_language = $SelectedLanguage
+    Write-Utf8Json -Path $configPath -Value $config
+    $preferencePath = Join-Path $StageRoot 'data\state\ui_language.json'
+    $preferenceParent = [System.IO.Path]::GetDirectoryName($preferencePath)
+    New-Item -ItemType Directory -Force -Path $preferenceParent | Out-Null
+    Write-Utf8Json -Path $preferencePath -Value ([ordered]@{
+        version = 1
+        users = [ordered]@{ '0' = $SelectedLanguage }
+    })
+}
+
+function Initialize-StagedLocalIdentity {
+    param(
+        [string]$StageRoot,
+        [string]$SelectedLanguage
+    )
+    $identityPath = Join-Path $StageRoot 'data\portable-instance.json'
+    $identity = Read-JsonObject -Path $identityPath
+    if (
+        $null -eq $identity -or
+        [int]$identity.schema_version -ne 2 -or
+        [string]$identity.provisioning_state -ne 'unprovisioned'
+    ) {
+        throw 'The staged public identity template is invalid.'
+    }
+    $instanceId = [Guid]::NewGuid().ToString('N')
+    $lineageId = [Guid]::NewGuid().ToString('N')
+    Write-Utf8Json -Path $identityPath -Value ([ordered]@{
+        schema_version = 2
+        product = 'HASHI Portable Windows x64'
+        provisioning_state = 'provisioned'
+        portable_instance_id = $instanceId
+        identity_lineage_id = $lineageId
+        created_at_utc = [DateTime]::UtcNow.ToString('o')
+    })
+
+    $secretsPath = Join-Path $StageRoot 'data\secrets.json'
+    $secrets = Read-JsonObject -Path $secretsPath
+    if ($null -eq $secrets) { throw 'The staged HASHI secrets template is unreadable.' }
+    # Public images are blank; private finalization may contain only DeepSeek.
+    # Every PC still receives independent local and Remote authentication tokens.
+    $secrets.workbench_admin_token = New-RandomToken -ByteCount 32
+    $secrets.hashi_remote_shared_token = New-RandomToken -ByteCount 48
+    Write-Utf8Json -Path $secretsPath -Value $secrets
+
+    $configPath = Join-Path $StageRoot 'data\agents.json'
+    $config = Read-JsonObject -Path $configPath
+    if ($null -eq $config -or $null -eq $config.global) {
+        throw 'The staged HASHI configuration is unreadable.'
+    }
+    $config.global.instance_id = "HASHI-PORTABLE-$($instanceId.Substring(0, 8))"
+    Write-Utf8Json -Path $configPath -Value $config
+    Set-StagedLanguage -StageRoot $StageRoot -SelectedLanguage $SelectedLanguage
+    return Get-ProvisionedIdentity -Root $StageRoot
+}
+
+function New-RandomToken {
+    param([int]$ByteCount)
+    $bytes = New-Object byte[] $ByteCount
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function Set-InstallMarkerRoot {
+    param(
+        [string]$Root,
+        [string]$MarkedRoot,
+        [string]$State
+    )
+    $path = Join-Path $Root '.hashi-local-install.json'
+    $marker = Read-JsonObject -Path $path
+    if ($null -eq $marker -or [string]$marker.product -ne 'HASHI Portable Local Installation') {
+        throw "Cannot update an invalid HASHI marker in $Root."
+    }
+    $marker.install_root = [System.IO.Path]::GetFullPath($MarkedRoot)
+    $marker.install_state = $State
+    Write-Utf8Json -Path $path -Value $marker
+}
+
+function Assert-PreviousInstallationOwned {
+    param(
+        [string]$Root,
+        [string]$LineageId
+    )
+    Assert-OrdinaryDirectory -Path $Root -Description 'The previous HASHI installation'
+    $identity = Get-ProvisionedIdentity -Root $Root
+    $marker = Read-JsonObject -Path (Join-Path $Root '.hashi-local-install.json')
+    if (
+        $null -eq $marker -or
+        [int]$marker.schema_version -ne 2 -or
+        [string]$marker.product -ne 'HASHI Portable Local Installation' -or
+        [string]$marker.identity_lineage_id -ne $LineageId -or
+        [string]$identity.identity_lineage_id -ne $LineageId
+    ) {
+        throw 'The previous-version folder does not belong to this HASHI lineage.'
+    }
+    Assert-TreeHasNoReparsePoints -Root $Root -Description 'The previous HASHI installation'
+}
+
+function Restore-PreviousInstallation {
+    if (-not $script:WasUpdate -or -not $script:MovedCurrentToPrevious) { return }
+    $failedRoot = Join-Path $script:InstallParent (
+        ".{0}.failed-update.{1}" -f $script:InstallLeaf, [Guid]::NewGuid().ToString('N')
+    )
+    if (Test-Path -LiteralPath $script:InstallRoot -PathType Container) {
+        Move-Item -LiteralPath $script:InstallRoot -Destination $failedRoot
+    }
+    if (-not (Test-Path -LiteralPath $script:PreviousRoot -PathType Container)) {
+        throw 'The previous HASHI version is unavailable for automatic recovery.'
+    }
+    Move-Item -LiteralPath $script:PreviousRoot -Destination $script:InstallRoot
+    Set-InstallMarkerRoot -Root $script:InstallRoot -MarkedRoot $script:InstallRoot -State 'active'
+    $script:MovedCurrentToPrevious = $false
+    if (Test-Path -LiteralPath $failedRoot -PathType Container) {
+        $failedMarker = Read-JsonObject -Path (Join-Path $failedRoot '.hashi-local-install.json')
+        if (
+            $null -ne $failedMarker -and
+            [string]$failedMarker.install_transaction_id -eq [string]$script:InstallTransactionId
+        ) {
+            Remove-Item -LiteralPath $failedRoot -Recurse -Force
+        }
+    }
+}
+
 function New-DesktopShortcut {
     param(
         [object]$Shell,
@@ -359,19 +594,35 @@ function Remove-NewInstallationSafely {
 try {
     Remove-Item -LiteralPath $script:InstallLog -Force -ErrorAction SilentlyContinue
     if (-not (Test-IsAdministrator)) {
-        throw 'Administrator permission is required to install HASHI.'
+        throw 'Administrator permission is required to install or update HASHI.'
+    }
+    if (-not $script:InstallParent -or -not (Test-Path -LiteralPath $script:InstallParent -PathType Container)) {
+        throw "The installation parent folder is unavailable: $script:InstallParent"
+    }
+    if ([string]::Equals(
+        $script:SourceRoot.TrimEnd('\'),
+        $script:InstallRoot.TrimEnd('\'),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'The USB bundle and local installation folder must be different.'
     }
     Assert-OrdinaryDirectory -Path $script:SourceRoot -Description 'The HASHI USB bundle'
     if (-not (Test-Path -LiteralPath (Join-Path $script:SourceRoot '.hashi-portable-bundle') -PathType Leaf)) {
         throw 'The HASHI USB bundle marker is missing.'
     }
-    $sourceInstanceId = Get-PortableIdentity -Root $script:SourceRoot
-    if (Test-ExistingLocalInstallation -SourceInstanceId $sourceInstanceId) {
+    [void](Get-PortableTemplate -Root $script:SourceRoot)
+    $sourceBundleId = Get-BundleId -Root $script:SourceRoot
+    $existing = Get-ExistingLocalInstallation
+    $script:WasUpdate = $null -ne $existing
+    if ($Operation -eq 'UpdateOnly' -and -not $script:WasUpdate) {
+        throw 'HASHI is not installed at the selected destination; run the installer first.'
+    }
+    if ($script:WasUpdate -and [string]$existing.BundleId -eq $sourceBundleId) {
         Install-DesktopShortcuts
         Write-InstallProgress `
             -Percent 100 `
-            -English 'HASHI is already installed. No files were copied.' `
-            -Chinese 'HASHI 已安装，无需再次复制文件。' `
+            -English 'The same bundle is already installed. No files were copied.' `
+            -Chinese '相同版本已安装，无需复制文件。' `
             -ForceConsole
         Write-Progress -Activity 'HASHI Setup / HASHI 安装' -Completed
         exit 10
@@ -382,32 +633,41 @@ try {
         -English 'Checking system requirements' `
         -Chinese '正在检查系统要求' `
         -ForceConsole
-    if (Test-Path -LiteralPath $script:InstallRoot) {
-        throw 'The local destination already exists and was not changed.'
-    }
-    $sourceBundleId = Get-BundleId -Root $script:SourceRoot
+    $selectedLanguage = Select-InstallLanguage -IsUpdate $script:WasUpdate
     $manifest = Read-StaticManifest
     Assert-BundleTreesHaveNoReparsePoints -Manifest $manifest
     $records = @(Get-SourceFiles -Manifest $manifest)
     Assert-StaticManifestCoverage -Records $records -Manifest $manifest
     $totalBytes = [long](($records | Measure-Object -Property Length -Sum).Sum)
-    $drive = [System.IO.DriveInfo]::new('C:\')
+    if ($script:WasUpdate) {
+        $localDataBytes = [long]((Get-ChildItem -LiteralPath (Join-Path $script:InstallRoot 'data') -Recurse -Force -File | Measure-Object -Property Length -Sum).Sum)
+        $totalBytes = [Math]::Max($totalBytes, $totalBytes - [long]0 + $localDataBytes)
+    }
+    $driveRoot = [System.IO.Path]::GetPathRoot($script:InstallRoot)
+    $drive = [System.IO.DriveInfo]::new($driveRoot)
     $requiredFree = $totalBytes + 256MB
     if ($drive.AvailableFreeSpace -lt $requiredFree) {
-        throw "Not enough free space on C:. HASHI needs at least $([Math]::Ceiling($requiredFree / 1MB)) MB free."
+        throw "Not enough free space on $driveRoot. HASHI needs at least $([Math]::Ceiling($requiredFree / 1MB)) MB free."
     }
 
     $script:InstallTransactionId = [Guid]::NewGuid().ToString('N')
-    $script:StageRoot = "C:\.HASHI-Portable.installing.$($script:InstallTransactionId)"
+    if ([string]::Equals($script:InstallRoot, 'C:\HASHI-Portable', [StringComparison]::OrdinalIgnoreCase)) {
+        $script:StageRoot = "C:\.HASHI-Portable.installing.$($script:InstallTransactionId)"
+    } else {
+        $script:StageRoot = Join-Path $script:InstallParent (
+            ".{0}.installing.{1}" -f $script:InstallLeaf, $script:InstallTransactionId
+        )
+    }
     if (Test-Path -LiteralPath $script:StageRoot) {
         throw 'The new installation staging folder unexpectedly already exists.'
     }
     New-Item -ItemType Directory -Path $script:StageRoot | Out-Null
     Write-Utf8Json -Path (Join-Path $script:StageRoot '.hashi-install-stage.json') -Value ([ordered]@{
-        schema_version = 1
+        schema_version = 2
         product = 'HASHI Portable Installation Stage'
         install_transaction_id = $script:InstallTransactionId
-        portable_instance_id = $sourceInstanceId
+        operation = if ($script:WasUpdate) { 'update' } else { 'install' }
+        source_bundle_id = $sourceBundleId
     })
 
     Write-InstallProgress `
@@ -426,7 +686,7 @@ try {
         [System.IO.File]::SetLastWriteTimeUtc($destination, [DateTime]$record.LastWriteTimeUtc)
         $copiedBytes += [long]$record.Length
         $fraction = if ($totalBytes -gt 0) { [double]$copiedBytes / [double]$totalBytes } else { 1.0 }
-        $percent = 10 + [int][Math]::Floor(55 * $fraction)
+        $percent = 10 + [int][Math]::Floor(55 * [Math]::Min(1.0, $fraction))
         $copiedMiB = [Math]::Round(([double]$copiedBytes / 1MB), 1)
         $totalMiB = [Math]::Round(([double]$totalBytes / 1MB), 1)
         Write-InstallProgress `
@@ -465,11 +725,29 @@ try {
         }
         $verifiedBytes += [long]$record.Length
         $fraction = if ($totalBytes -gt 0) { [double]$verifiedBytes / [double]$totalBytes } else { 1.0 }
-        $percent = 65 + [int][Math]::Floor(30 * $fraction)
+        $percent = 65 + [int][Math]::Floor(25 * [Math]::Min(1.0, $fraction))
         Write-InstallProgress `
             -Percent $percent `
             -English "Verifying files: $verifyIndex of $($records.Count)" `
             -Chinese "正在验证文件：$verifyIndex / $($records.Count)"
+    }
+
+    if ($script:WasUpdate) {
+        Write-InstallProgress `
+            -Percent 91 `
+            -English 'Preserving settings, language, credentials, and conversations' `
+            -Chinese '正在保留设置、语言、凭据和对话' `
+            -ForceConsole
+        Preserve-LocalData -StageRoot $script:StageRoot
+        $stagedIdentity = Get-ProvisionedIdentity -Root $script:StageRoot
+        if ([string]$stagedIdentity.identity_lineage_id -ne [string]$existing.Identity.identity_lineage_id) {
+            throw 'The staged update changed the installation identity lineage.'
+        }
+        Set-StagedLanguage -StageRoot $script:StageRoot -SelectedLanguage $selectedLanguage
+    } else {
+        $stagedIdentity = Initialize-StagedLocalIdentity `
+            -StageRoot $script:StageRoot `
+            -SelectedLanguage $selectedLanguage
     }
 
     Write-InstallProgress `
@@ -480,33 +758,81 @@ try {
     Remove-Item -LiteralPath (Join-Path $script:StageRoot 'data\state\local-endpoint.json') -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $script:StageRoot 'data\state\launcher') -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path (Join-Path $script:StageRoot 'data\state\launcher') | Out-Null
+    $installedAt = if ($script:WasUpdate) {
+        [string]$existing.Marker.installed_at_utc
+    } else {
+        [DateTime]::UtcNow.ToString('o')
+    }
     $installMarker = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         product = 'HASHI Portable Local Installation'
         install_root = $script:InstallRoot
-        portable_instance_id = $sourceInstanceId
+        portable_instance_id = [string]$stagedIdentity.portable_instance_id
+        identity_lineage_id = [string]$stagedIdentity.identity_lineage_id
         bundle_id = $sourceBundleId
+        previous_bundle_id = if ($script:WasUpdate) { [string]$existing.BundleId } else { $null }
         install_transaction_id = $script:InstallTransactionId
-        installed_at_utc = [DateTime]::UtcNow.ToString('o')
+        installed_at_utc = $installedAt
+        updated_at_utc = [DateTime]::UtcNow.ToString('o')
         source_root = $script:SourceRoot
         desktop_path = [System.IO.Path]::GetFullPath($DesktopPath)
+        install_state = 'active'
         complete_copy = $true
         authoritative_data = 'local:data'
     }
     Write-Utf8Json -Path (Join-Path $script:StageRoot '.hashi-local-install.json') -Value $installMarker
     Remove-Item -LiteralPath (Join-Path $script:StageRoot '.hashi-install-stage.json') -Force
-    if (Test-Path -LiteralPath $script:InstallRoot) {
+
+    if ($script:WasUpdate) {
+        $stopScript = Join-Path $script:InstallRoot 'launcher\Stop-HASHI.ps1'
+        & (Join-Path $PSHOME 'powershell.exe') `
+            -NoLogo -NoProfile -ExecutionPolicy Bypass -File $stopScript
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The running HASHI instance could not be stopped for update.'
+        }
+        if (Test-Path -LiteralPath $script:PreviousRoot) {
+            Assert-PreviousInstallationOwned `
+                -Root $script:PreviousRoot `
+                -LineageId ([string]$existing.Identity.identity_lineage_id)
+            $script:DisplacedPreviousRoot = Join-Path $script:InstallParent (
+                ".{0}.previous.replacing.{1}" -f $script:InstallLeaf, $script:InstallTransactionId
+            )
+            Move-Item -LiteralPath $script:PreviousRoot -Destination $script:DisplacedPreviousRoot
+        }
+        Move-Item -LiteralPath $script:InstallRoot -Destination $script:PreviousRoot
+        $script:MovedCurrentToPrevious = $true
+        Set-InstallMarkerRoot -Root $script:PreviousRoot -MarkedRoot $script:PreviousRoot -State 'previous'
+    } elseif (Test-Path -LiteralPath $script:InstallRoot) {
         throw 'The local destination appeared while HASHI was being installed; no existing folder was overwritten.'
     }
+
     Move-Item -LiteralPath $script:StageRoot -Destination $script:InstallRoot
     $script:StageRoot = ''
     $script:ActivatedThisRun = $true
     Install-DesktopShortcuts
 
+    if ($script:DisplacedPreviousRoot -and (Test-Path -LiteralPath $script:DisplacedPreviousRoot -PathType Container)) {
+        Assert-PreviousInstallationOwned `
+            -Root $script:DisplacedPreviousRoot `
+            -LineageId ([string]$stagedIdentity.identity_lineage_id)
+        Remove-Item -LiteralPath $script:DisplacedPreviousRoot -Recurse -Force
+        $script:DisplacedPreviousRoot = ''
+    }
+
+    $completionEnglish = if ($script:WasUpdate) {
+        'HASHI was updated and verified. The previous version is available for rollback.'
+    } else {
+        'HASHI is installed and verified on this PC.'
+    }
+    $completionChinese = if ($script:WasUpdate) {
+        'HASHI 已完成更新和验证，前一版本可用于回退。'
+    } else {
+        'HASHI 已在这台电脑上完成安装并通过验证。'
+    }
     Write-InstallProgress `
         -Percent 100 `
-        -English 'HASHI is installed and verified on this PC.' `
-        -Chinese 'HASHI 已在这台电脑上完成安装并通过验证。' `
+        -English $completionEnglish `
+        -Chinese $completionChinese `
         -ForceConsole
     Write-Progress -Activity 'HASHI Setup / HASHI 安装' -Completed
     try {
@@ -514,7 +840,16 @@ try {
     } catch {}
     exit 0
 } catch {
+    $failureMessage = $_.Exception.Message
     Write-Progress -Activity 'HASHI Setup / HASHI 安装' -Completed
+    if ($script:WasUpdate -and $script:MovedCurrentToPrevious) {
+        try {
+            Restore-PreviousInstallation
+            $script:ActivatedThisRun = $false
+        } catch {
+            $failureMessage = "$failureMessage Automatic recovery also failed: $($_.Exception.Message)"
+        }
+    }
     if ($script:StageRoot -and (Test-Path -LiteralPath $script:StageRoot -PathType Container)) {
         $stageMarker = Read-JsonObject -Path (Join-Path $script:StageRoot '.hashi-install-stage.json')
         if (
@@ -525,11 +860,18 @@ try {
             Remove-Item -LiteralPath $script:StageRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    Remove-DesktopShortcuts
-    Remove-NewInstallationSafely
+    if ($script:DisplacedPreviousRoot -and (Test-Path -LiteralPath $script:DisplacedPreviousRoot -PathType Container)) {
+        if (-not (Test-Path -LiteralPath $script:PreviousRoot)) {
+            Move-Item -LiteralPath $script:DisplacedPreviousRoot -Destination $script:PreviousRoot -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $script:WasUpdate) {
+        Remove-DesktopShortcuts
+        Remove-NewInstallationSafely
+    }
     Write-BilingualMessage `
-        -English "Installation failed: $($_.Exception.Message)" `
-        -Chinese "安装失败：$($_.Exception.Message)" `
+        -English "Installation or update failed: $failureMessage" `
+        -Chinese "安装或更新失败：$failureMessage" `
         -ForegroundColor Red
     Write-BilingualMessage `
         -English "Installation log: $script:InstallLog" `

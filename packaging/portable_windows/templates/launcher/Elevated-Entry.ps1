@@ -1,11 +1,12 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Start', 'Stop', 'Diagnose', 'Uninstall')]
+    [ValidateSet('Install', 'Update', 'Rollback', 'Start', 'Stop', 'Diagnose', 'Uninstall')]
     [string]$Action = 'Start',
     [ValidateSet('TUI')]
     [string]$Surface = 'TUI',
     [Parameter(Mandatory = $true)]
-    [string]$DesktopPath
+    [string]$DesktopPath,
+    [string]$InstallRoot = 'C:\HASHI-Portable'
 )
 
 Set-StrictMode -Version Latest
@@ -20,7 +21,7 @@ try {
 } catch {}
 
 $script:SourceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$script:InstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
+$script:InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 $script:InstallCompleted = $false
 
 function Write-BilingualMessage {
@@ -56,19 +57,6 @@ function Get-Sha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-function Get-SourceInstanceId {
-    $identity = Read-JsonObject -Path (Join-Path $script:SourceRoot 'data\portable-instance.json')
-    $instanceId = if ($null -eq $identity) { '' } else { [string]$identity.portable_instance_id }
-    if (
-        $null -eq $identity -or
-        [string]$identity.product -ne 'HASHI Portable Windows x64' -or
-        $instanceId -notmatch '^[0-9a-f]{32}$'
-    ) {
-        throw 'The HASHI source identity is invalid.'
-    }
-    return $instanceId
-}
-
 function Test-LocalInstallationReady {
     if (-not (Test-Path -LiteralPath $script:InstallRoot -PathType Container)) { return $false }
     $rootItem = Get-Item -LiteralPath $script:InstallRoot -Force
@@ -81,12 +69,18 @@ function Test-LocalInstallationReady {
     } catch {
         return $false
     }
-    $sourceInstanceId = Get-SourceInstanceId
+    $instanceId = [string]$identity.portable_instance_id
+    $lineageId = [string]$identity.identity_lineage_id
     if (
-        [int]$marker.schema_version -ne 1 -or
+        [int]$marker.schema_version -ne 2 -or
         [string]$marker.product -ne 'HASHI Portable Local Installation' -or
-        [string]$marker.portable_instance_id -ne $sourceInstanceId -or
-        [string]$identity.portable_instance_id -ne $sourceInstanceId -or
+        [string]$marker.install_state -ne 'active' -or
+        [int]$identity.schema_version -ne 2 -or
+        [string]$identity.provisioning_state -ne 'provisioned' -or
+        $instanceId -notmatch '^[0-9a-f]{32}$' -or
+        $lineageId -notmatch '^[0-9a-f]{32}$' -or
+        [string]$marker.portable_instance_id -ne $instanceId -or
+        [string]$marker.identity_lineage_id -ne $lineageId -or
         -not [string]::Equals(
             $markedRoot.TrimEnd('\'),
             $script:InstallRoot.TrimEnd('\'),
@@ -170,18 +164,34 @@ try {
             -NoProfile `
             -ExecutionPolicy Bypass `
             -File $uninstaller `
-            -DesktopPath $DesktopPath
+            -DesktopPath $DesktopPath `
+            -InstallRoot $script:InstallRoot
         exit $LASTEXITCODE
     }
 
-    if ($Action -eq 'Install') {
+    if ($Action -eq 'Rollback') {
+        $rollback = Join-Path $PSScriptRoot 'Rollback-Previous.ps1'
+        & (Join-Path $PSHOME 'powershell.exe') `
+            -NoLogo `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File $rollback `
+            -InstallRoot $script:InstallRoot
+        $rollbackExitCode = $LASTEXITCODE
+        Wait-ForDismissKey
+        exit $rollbackExitCode
+    }
+
+    if ($Action -eq 'Install' -or $Action -eq 'Update') {
         $installer = Join-Path $PSScriptRoot 'Install-To-PC.ps1'
         & (Join-Path $PSHOME 'powershell.exe') `
             -NoLogo `
             -NoProfile `
             -ExecutionPolicy Bypass `
             -File $installer `
-            -DesktopPath $DesktopPath
+            -DesktopPath $DesktopPath `
+            -InstallRoot $script:InstallRoot `
+            -Operation $(if ($Action -eq 'Update') { 'UpdateOnly' } else { 'InstallOrUpdate' })
         $installExitCode = $LASTEXITCODE
         if ($installExitCode -eq 0) {
             $script:InstallCompleted = $true
@@ -247,7 +257,7 @@ try {
     }
     exit 0
 } catch {
-    if ($Action -eq 'Install' -and -not $script:InstallCompleted) {
+    if (($Action -eq 'Install' -or $Action -eq 'Update') -and -not $script:InstallCompleted) {
         Write-BilingualMessage `
             -English 'Installation failed.' `
             -Chinese '安装失败。' `

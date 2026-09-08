@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$DesktopPath
+    [string]$DesktopPath,
+    [string]$InstallRoot = 'C:\HASHI-Portable'
 )
 
 Set-StrictMode -Version Latest
@@ -16,7 +17,10 @@ try {
 } catch {}
 
 $script:SourceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$script:InstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
+$script:InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+$script:InstallParent = [System.IO.Path]::GetDirectoryName($script:InstallRoot.TrimEnd('\'))
+$script:InstallLeaf = [System.IO.Path]::GetFileName($script:InstallRoot.TrimEnd('\'))
+$script:PreviousRoot = Join-Path $script:InstallParent ($script:InstallLeaf + '.previous')
 $script:ShortcutNames = @(
     'Start HASHI.lnk',
     'Stop HASHI.lnk'
@@ -55,25 +59,26 @@ function Get-Sha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-function Get-PortableInstanceId {
+function Get-PortableIdentity {
     param([string]$Root)
     $identity = Read-JsonObject -Path (Join-Path $Root 'data\portable-instance.json')
     $instanceId = if ($null -eq $identity) { '' } else { [string]$identity.portable_instance_id }
     if (
         $null -eq $identity -or
-        [int]$identity.schema_version -ne 1 -or
+        [int]$identity.schema_version -ne 2 -or
         [string]$identity.product -ne 'HASHI Portable Windows x64' -or
-        $instanceId -notmatch '^[0-9a-f]{32}$'
+        [string]$identity.provisioning_state -ne 'provisioned' -or
+        $instanceId -notmatch '^[0-9a-f]{32}$' -or
+        [string]$identity.identity_lineage_id -notmatch '^[0-9a-f]{32}$'
     ) {
         throw "The HASHI portable identity is invalid in $Root."
     }
-    return $instanceId
+    return $identity
 }
 
 function Assert-OwnedLocalInstallation {
-    param([string]$SourceInstanceId)
     if (-not (Test-Path -LiteralPath $script:InstallRoot -PathType Container)) {
-        return $false
+        return $null
     }
     $rootItem = Get-Item -LiteralPath $script:InstallRoot -Force
     if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -85,9 +90,9 @@ function Assert-OwnedLocalInstallation {
     }
     $markedRoot = [System.IO.Path]::GetFullPath([string]$marker.install_root)
     if (
-        [int]$marker.schema_version -ne 1 -or
+        [int]$marker.schema_version -ne 2 -or
         [string]$marker.product -ne 'HASHI Portable Local Installation' -or
-        [string]$marker.portable_instance_id -ne $SourceInstanceId -or
+        [string]$marker.install_state -ne 'active' -or
         -not [string]::Equals(
             $markedRoot.TrimEnd('\'),
             $script:InstallRoot.TrimEnd('\'),
@@ -95,10 +100,14 @@ function Assert-OwnedLocalInstallation {
         ) -or
         [string]$marker.authoritative_data -ne 'local:data'
     ) {
-        throw 'The local HASHI ownership marker does not match this USB. Nothing was deleted.'
+        throw 'The local HASHI ownership marker is invalid. Nothing was deleted.'
     }
-    if ((Get-PortableInstanceId -Root $script:InstallRoot) -ne $SourceInstanceId) {
-        throw 'The local HASHI identity does not match this USB. Nothing was deleted.'
+    $identity = Get-PortableIdentity -Root $script:InstallRoot
+    if (
+        [string]$marker.portable_instance_id -ne [string]$identity.portable_instance_id -or
+        [string]$marker.identity_lineage_id -ne [string]$identity.identity_lineage_id
+    ) {
+        throw 'The local HASHI identity does not match its ownership marker. Nothing was deleted.'
     }
     $buildInfo = Join-Path $script:InstallRoot 'BUILD_INFO.json'
     if (
@@ -114,6 +123,28 @@ function Assert-OwnedLocalInstallation {
     )
     if ($reparse.Count -gt 0) {
         throw "The local HASHI folder contains a link or reparse point. Nothing was deleted: $($reparse[0].FullName)"
+    }
+    return $identity
+}
+
+function Assert-OwnedPreviousInstallation {
+    param([string]$LineageId)
+    if (-not (Test-Path -LiteralPath $script:PreviousRoot)) { return $false }
+    $rootItem = Get-Item -LiteralPath $script:PreviousRoot -Force
+    if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The previous HASHI path is a link or reparse point. Nothing was deleted.'
+    }
+    $marker = Read-JsonObject -Path (Join-Path $script:PreviousRoot '.hashi-local-install.json')
+    $identity = Get-PortableIdentity -Root $script:PreviousRoot
+    if (
+        $null -eq $marker -or
+        [int]$marker.schema_version -ne 2 -or
+        [string]$marker.product -ne 'HASHI Portable Local Installation' -or
+        [string]$marker.install_state -ne 'previous' -or
+        [string]$marker.identity_lineage_id -ne $LineageId -or
+        [string]$identity.identity_lineage_id -ne $LineageId
+    ) {
+        throw 'The previous HASHI folder does not belong to the target instance. Nothing was deleted.'
     }
     return $true
 }
@@ -162,29 +193,23 @@ try {
     if (-not (Test-IsAdministrator)) {
         throw 'Administrator permission is required to uninstall HASHI.'
     }
-    if ([string]::Equals(
-        $script:SourceRoot.TrimEnd('\'),
-        $script:InstallRoot.TrimEnd('\'),
-        [System.StringComparison]::OrdinalIgnoreCase
-    )) {
-        throw 'Run Uninstall_HASHI_From_This_PC.bat from the original USB drive so the local folder can be removed safely.'
-    }
-    $sourceInstanceId = Get-PortableInstanceId -Root $script:SourceRoot
-    if (-not (Assert-OwnedLocalInstallation -SourceInstanceId $sourceInstanceId)) {
+    $localIdentity = Assert-OwnedLocalInstallation
+    if ($null -eq $localIdentity) {
         Write-BilingualMessage `
             -English 'HASHI is not installed on this PC. Nothing was changed.' `
             -Chinese '这台电脑尚未安装 HASHI，未进行任何更改。' `
             -ForegroundColor Yellow
         exit 0
     }
+    $hasPrevious = Assert-OwnedPreviousInstallation -LineageId ([string]$localIdentity.identity_lineage_id)
 
     Write-BilingualMessage `
         -English 'This will permanently delete the local HASHI copy, including conversations, settings, logs, and API tokens.' `
         -Chinese '此操作将永久删除本机 HASHI 副本，包括对话、设置、日志和 API 密钥。' `
         -ForegroundColor Yellow
     Write-BilingualMessage `
-        -English 'The original USB bundle will not be changed.' `
-        -Chinese '原始 USB 程序包不会被更改。' `
+        -English 'The transfer USB bundle will not be changed.' `
+        -Chinese '传输用 USB 程序包不会被更改。' `
         -ForegroundColor Green
     $confirmation = (Read-Host 'Type REMOVE to continue / 输入 REMOVE 继续').Trim()
     if ($confirmation -cne 'REMOVE') {
@@ -214,11 +239,23 @@ try {
         throw "HASHI processes are still running: $details. Nothing was deleted."
     }
 
-    $removalRoot = "C:\.HASHI-Portable.removing.$([Guid]::NewGuid().ToString('N'))"
+    $removalId = [Guid]::NewGuid().ToString('N')
+    if ([string]::Equals($script:InstallRoot, 'C:\HASHI-Portable', [StringComparison]::OrdinalIgnoreCase)) {
+        $removalRoot = "C:\.HASHI-Portable.removing.$removalId"
+    } else {
+        $removalRoot = Join-Path $script:InstallParent (".{0}.removing.{1}" -f $script:InstallLeaf, $removalId)
+    }
+    $previousRemovalRoot = $removalRoot + '.previous'
     Move-Item -LiteralPath $script:InstallRoot -Destination $removalRoot
+    if ($hasPrevious) {
+        Move-Item -LiteralPath $script:PreviousRoot -Destination $previousRemovalRoot
+    }
     Remove-DesktopShortcuts
     try {
         Remove-Item -LiteralPath $removalRoot -Recurse -Force
+        if (Test-Path -LiteralPath $previousRemovalRoot -PathType Container) {
+            Remove-Item -LiteralPath $previousRemovalRoot -Recurse -Force
+        }
         if (Test-Path -LiteralPath $removalRoot) {
             throw 'The local HASHI folder could not be completely deleted.'
         }

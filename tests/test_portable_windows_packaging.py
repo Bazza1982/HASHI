@@ -230,7 +230,7 @@ def test_portable_full_local_install_is_admin_atomic_verified_and_idempotent():
     assert ".hashi-local-install.json" in installer
     assert "authoritative_data = 'local:data'" in installer
     assert "complete_copy = $true" in installer
-    assert "HASHI is already installed. No files were copied." in installer
+    assert "The same bundle is already installed. No files were copied." in installer
     assert "exit 10" in installer
     assert "CreateShortcut" in installer
     assert "Start HASHI.lnk" in installer
@@ -267,18 +267,16 @@ def test_portable_local_install_and_uninstall_are_scoped_to_one_random_identity(
     tmp_path,
 ):
     builder = _load_builder()
-    secrets_path = tmp_path / "source-secrets.json"
-    secrets_path.write_text(
-        json.dumps({"deepseek_api_key": "test-key"}), encoding="utf-8"
-    )
-    builder.configure_data(tmp_path, secrets_path, allow_missing_key=False)
+    builder.configure_data(tmp_path, private_deepseek_key="test-key")
 
     identity = json.loads(
         (tmp_path / "data" / "portable-instance.json").read_text(encoding="utf-8")
     )
-    assert identity["schema_version"] == 1
+    assert identity["schema_version"] == 2
     assert identity["product"] == "HASHI Portable Windows x64"
-    assert re.fullmatch(r"[0-9a-f]{32}", identity["portable_instance_id"])
+    assert identity["provisioning_state"] == "unprovisioned"
+    assert identity["portable_instance_id"] is None
+    assert identity["identity_lineage_id"] is None
 
     common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
     installer = (TEMPLATES / "launcher" / "Install-To-PC.ps1").read_text(
@@ -291,7 +289,8 @@ def test_portable_local_install_and_uninstall_are_scoped_to_one_random_identity(
         assert "portable-instance.json" in source
         assert "C:\\HASHI-Portable" in source
     assert ".hashi-local-install.json" in installer
-    assert "portable_instance_id = $sourceInstanceId" in installer
+    assert "portable_instance_id = [string]$stagedIdentity.portable_instance_id" in installer
+    assert "identity_lineage_id = [string]$stagedIdentity.identity_lineage_id" in installer
     assert ".hashi-local-install.json" in uninstaller
     assert "Get-CimInstance Win32_Process" in uninstaller
     assert "Test-PathInsideRoot" in uninstaller
@@ -726,3 +725,98 @@ def test_portable_bundle_does_not_ship_or_launch_retired_workbench():
     assert "Start-Workbench" not in common
     assert "Start HASHI Workbench.lnk" not in installer
     assert "retired Workbench frontend and Node server are not included" in readme
+
+
+def test_public_portable_data_has_no_identity_or_credentials(tmp_path):
+    builder = _load_builder()
+
+    builder.configure_data(tmp_path, private_deepseek_key=None)
+
+    identity = json.loads(
+        (tmp_path / "data" / "portable-instance.json").read_text(encoding="utf-8")
+    )
+    secrets = json.loads(
+        (tmp_path / "data" / "secrets.json").read_text(encoding="utf-8")
+    )
+    assert identity == {
+        "schema_version": 2,
+        "product": "HASHI Portable Windows x64",
+        "provisioning_state": "unprovisioned",
+        "portable_instance_id": None,
+        "identity_lineage_id": None,
+        "created_at_utc": None,
+    }
+    assert secrets["deepseek_api_key"] == ""
+    assert secrets["workbench_admin_token"] == ""
+    assert secrets["hashi_remote_shared_token"] == ""
+
+
+def test_private_portable_finalization_injects_only_named_deepseek_key(tmp_path):
+    builder = _load_builder()
+
+    builder.configure_data(tmp_path, private_deepseek_key="private-deepseek")
+
+    secrets = json.loads(
+        (tmp_path / "data" / "secrets.json").read_text(encoding="utf-8")
+    )
+    assert secrets["deepseek_api_key"] == "private-deepseek"
+    assert re.fullmatch(r"[A-Za-z0-9_-]{32,}", secrets["workbench_admin_token"])
+    assert re.fullmatch(r"[A-Za-z0-9_-]{48,}", secrets["hashi_remote_shared_token"])
+    assert "dashscope_api_key" not in secrets
+    assert "openrouter_key" not in secrets
+
+
+def test_portable_build_cli_keeps_private_key_out_of_process_arguments(tmp_path):
+    builder = _load_builder()
+    key_file = tmp_path / "deepseek.key"
+    key_file.write_text("secret-value\n", encoding="utf-8")
+
+    public = builder.parse_args([])
+    private = builder.parse_args(["--private-deepseek-key-file", str(key_file)])
+
+    assert public.private_deepseek_key_file is None
+    assert private.private_deepseek_key_file == key_file
+    assert not hasattr(public, "secrets")
+    assert not hasattr(public, "allow_missing_deepseek_key")
+
+
+def test_portable_installer_has_update_rollback_lineage_and_language_contract():
+    installer = (TEMPLATES / "launcher" / "Install-To-PC.ps1").read_text(
+        encoding="utf-8"
+    )
+    rollback = (TEMPLATES / "launcher" / "Rollback-Previous.ps1").read_text(
+        encoding="utf-8"
+    )
+    common = (TEMPLATES / "launcher" / "Common.ps1").read_text(encoding="utf-8")
+    elevated = (TEMPLATES / "launcher" / "Elevated-Entry.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[string]$InstallRoot = 'C:\\HASHI-Portable'" in installer
+    assert "identity_lineage_id" in installer
+    assert "portable_instance_id" in installer
+    assert "Preserve-LocalData" in installer
+    assert "authoritative_data = 'local:data'" in installer
+    assert ".previous" in installer
+    assert "Restore-PreviousInstallation" in installer
+    assert "same bundle is already installed" in installer
+    assert "Select-InstallLanguage" in installer
+    assert "ui_language" in installer
+    assert "ui_language.json" in installer
+    assert "Update" in elevated
+    assert "Rollback" in elevated
+    assert "Rollback-Previous.ps1" in elevated
+    assert "identity_lineage_id" in rollback
+    assert "Move-Item -LiteralPath $script:PreviousRoot" in rollback
+    assert "HASHI_PORTABLE_LANGUAGE" in common
+
+
+def test_portable_launcher_set_includes_explicit_update_and_rollback_entries():
+    for name, action in (
+        ("Update_HASHI_On_This_PC.bat", "-Action Update"),
+        ("Rollback_HASHI_On_This_PC.bat", "-Action Rollback"),
+    ):
+        source = (TEMPLATES / name).read_text(encoding="utf-8")
+        assert "chcp 65001" in source
+        assert "%~dp0" in source
+        assert action in source

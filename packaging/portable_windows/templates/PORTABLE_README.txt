@@ -8,6 +8,11 @@ Quick start / 快速开始
 
    Install_HASHI_On_This_PC.bat
 
+   Setup asks for English or Simplified Chinese. That choice is used for the
+   first launch and stored with the local HASHI data.
+   安装程序会询问使用英文或简体中文；选择会用于首次启动，并保存在本机
+   HASHI 数据中。
+
 2. Approve the Windows administrator request. HASHI copies its complete working
    folder to the local PC and verifies every file. The window shows real copy
    and verification percentages. Do not remove the USB until installation is
@@ -52,15 +57,19 @@ Stop HASHI
 The shortcuts point to launchers inside the local installation, not the USB.
 快捷方式指向本机安装目录内的启动文件，而不是 USB。
 
-Running the installer again / 再次运行安装程序
-------------------------------------------------
-If the matching local installation is already valid, no files are copied. The
-desktop shortcuts are repaired and HASHI opens from the existing local copy.
-If the destination exists but its identity or ownership marker is invalid, the
-installer stops without overwriting it.
-如果匹配的本机安装已经有效，则不会再次复制文件；安装程序只会修复桌面快捷
-方式，并从已有本机副本打开 HASHI。如果目标目录存在但身份或所有权标记无效，
-安装程序会停止，绝不会覆盖该目录。
+Update and rollback / 更新与回退
+---------------------------------
+Use Update_HASHI_On_This_PC.bat from a newer transfer image. HASHI verifies the
+new image, preserves the local identity lineage, language, credentials,
+settings, and conversations, and keeps the previous program version. If
+activation fails, the previous installation is restored automatically. Use
+Rollback_HASHI_On_This_PC.bat to return to the previous version while carrying
+forward the latest user data. Running the same bundle again only repairs the
+desktop shortcuts and copies nothing.
+请从较新的传输介质运行 Update_HASHI_On_This_PC.bat。HASHI 会验证新映像，保留
+本机身份谱系、语言、凭据、设置及对话，并保存前一程序版本。激活失败时会自动
+恢复旧安装。运行 Rollback_HASHI_On_This_PC.bat 可回到前一版本，同时保留最新
+用户数据。重复运行相同版本只会修复桌面快捷方式，不会复制文件。
 
 Local address and logs / 本机地址与日志
 -----------------------------------------
@@ -93,8 +102,8 @@ Diagnose_HASHI.bat 会检查本机安装，且不会发送模型请求。
 
 Uninstall / 卸载
 ------------------
-Run this file from the original matching USB:
-请从原始且身份匹配的 USB 运行：
+Run this file from the transfer image or the verified local installation:
+请从传输介质或经过验证的本机安装运行：
 
 Uninstall_HASHI_From_This_PC.bat
 

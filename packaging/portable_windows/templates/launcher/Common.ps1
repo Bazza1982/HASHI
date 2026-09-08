@@ -9,8 +9,12 @@ try {
     $Host.UI.RawUI.WindowTitle = 'HASHI Portable'
 } catch {}
 
-$script:ExpectedInstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
 $script:PortableRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$script:DefaultInstallRoot = [System.IO.Path]::GetFullPath('C:\HASHI-Portable')
+# A custom installation root (including a path with spaces or another drive)
+# remains self-describing through its ownership marker.  The ordinary launcher
+# always trusts the directory it was launched from, then verifies the marker.
+$script:ExpectedInstallRoot = $script:PortableRoot
 $script:AppRoot = Join-Path $script:PortableRoot 'app'
 $script:HashiRoot = Join-Path $script:AppRoot 'hashi'
 $script:DataRoot = Join-Path $script:PortableRoot 'data'
@@ -122,18 +126,22 @@ function Initialize-LocalInstallation {
         throw 'The HASHI local installation marker is missing or unreadable.'
     }
     $instanceId = [string]$identity.portable_instance_id
+    $lineageId = [string]$identity.identity_lineage_id
     if (
-        [int]$identity.schema_version -ne 1 -or
+        [int]$identity.schema_version -ne 2 -or
         [string]$identity.product -ne 'HASHI Portable Windows x64' -or
-        $instanceId -notmatch '^[0-9a-f]{32}$'
+        [string]$identity.provisioning_state -ne 'provisioned' -or
+        $instanceId -notmatch '^[0-9a-f]{32}$' -or
+        $lineageId -notmatch '^[0-9a-f]{32}$'
     ) {
         throw 'The HASHI portable identity is invalid.'
     }
     $markedRoot = [System.IO.Path]::GetFullPath([string]$marker.install_root)
     if (
-        [int]$marker.schema_version -ne 1 -or
+        [int]$marker.schema_version -ne 2 -or
         [string]$marker.product -ne 'HASHI Portable Local Installation' -or
         [string]$marker.portable_instance_id -ne $instanceId -or
+        [string]$marker.identity_lineage_id -ne $lineageId -or
         -not [string]::Equals(
             $markedRoot.TrimEnd('\'),
             $script:ExpectedInstallRoot.TrimEnd('\'),
@@ -203,6 +211,11 @@ function Initialize-PortableEnvironment {
     $env:HASHI_REMOTE_LIVE_ENDPOINTS_PATH = Join-Path $script:DataRoot 'state\remote_live_endpoints.json'
     $env:HASHI_PORTABLE_ROOT = $script:PortableRoot
     $env:HASHI_PORTABLE_EXECUTION_MODE = 'local-install'
+    $config = Get-PortableConfig
+    $portableLanguage = [string]$config.global.ui_language
+    if ($portableLanguage -notin @('en', 'zh-CN', 'zh')) { $portableLanguage = 'en' }
+    if ($portableLanguage -eq 'zh') { $portableLanguage = 'zh-CN' }
+    $env:HASHI_PORTABLE_LANGUAGE = $portableLanguage
     $env:HASHI_WINDOWS_NATIVE_ONLY = '1'
     Remove-Item Env:HASHI_PORTABLE_STORAGE_PROFILE -ErrorAction SilentlyContinue
     $env:HASHI_LOCAL_ENDPOINT_FILE = $script:EndpointPath

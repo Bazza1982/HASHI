@@ -756,8 +756,30 @@ def require_clean_tracked_worktree(root: Path, *, label: str) -> None:
         )
 
 
+def read_private_deepseek_key(path: Path | None) -> str | None:
+    """Read the one credential allowed in a privately finalized image.
+
+    The key is deliberately accepted only through a file.  Putting it directly
+    on the command line would expose it in shell history and process listings.
+    """
+
+    if path is None:
+        return None
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise RuntimeError(f"private DeepSeek key file is missing: {path}")
+    if path.stat().st_size > 16 * 1024:
+        raise RuntimeError("private DeepSeek key file is unexpectedly large")
+    value = path.read_text(encoding="utf-8-sig").strip()
+    if not value:
+        raise RuntimeError("private DeepSeek key file is empty")
+    if "\x00" in value or "\r" in value or "\n" in value:
+        raise RuntimeError("private DeepSeek key file must contain exactly one key")
+    return value
+
+
 def configure_data(
-    image_root: Path, source_secrets: Path, *, allow_missing_key: bool
+    image_root: Path, *, private_deepseek_key: str | None
 ) -> None:
     data = image_root / "data"
     for relative in (
@@ -771,11 +793,17 @@ def configure_data(
     ):
         (data / relative).mkdir(parents=True, exist_ok=True)
     shutil.copy2(TEMPLATES / "agents.json", data / "agents.json")
+    # A public transfer image is not an installed HASHI instance.  Concrete
+    # identity and lineage are generated on the destination PC, never at
+    # public build time.  This makes a new-image first install and an update of
+    # an existing lineage unambiguous.
     portable_identity = {
-        "schema_version": 1,
+        "schema_version": 2,
         "product": "HASHI Portable Windows x64",
-        "portable_instance_id": secrets_module.token_hex(16),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "provisioning_state": "unprovisioned",
+        "portable_instance_id": None,
+        "identity_lineage_id": None,
+        "created_at_utc": None,
     }
     (data / "portable-instance.json").write_text(
         json.dumps(portable_identity, ensure_ascii=False, indent=2, sort_keys=True)
@@ -790,26 +818,22 @@ def configure_data(
     shutil.copy2(TEMPLATES / "agent.md", data / "workspaces" / "portable" / "agent.md")
     shutil.copy2(TEMPLATES / "remote-config.yaml", data / "remote" / "config.yaml")
 
-    source = (
-        json.loads(source_secrets.read_text(encoding="utf-8-sig"))
-        if source_secrets.is_file()
-        else {}
-    )
-    deepseek_key = str(source.get("deepseek_api_key") or "").strip()
-    if not deepseek_key and not allow_missing_key:
-        raise RuntimeError("deepseek_api_key is missing from the source secrets file")
-    remote_token = str(source.get("hashi_remote_shared_token") or "").strip()
+    deepseek_key = str(private_deepseek_key or "").strip()
+    private_finalized = bool(deepseek_key)
     portable_secrets = {
         "authorized_telegram_id": 0,
         "agent": "WORKBENCH_ONLY_NO_TOKEN",
         "deepseek_api_key": deepseek_key,
-        "workbench_admin_token": secrets_module.token_urlsafe(32),
-        "hashi_remote_shared_token": remote_token or secrets_module.token_urlsafe(48),
+        # Public builds carry no credential.  First install provisions fresh
+        # local tokens.  A private finalization also gets its own tokens and
+        # never inherits a source instance's Remote credential.
+        "workbench_admin_token": (
+            secrets_module.token_urlsafe(32) if private_finalized else ""
+        ),
+        "hashi_remote_shared_token": (
+            secrets_module.token_urlsafe(48) if private_finalized else ""
+        ),
     }
-    for optional in ("dashscope_api_key", "openrouter_key"):
-        value = str(source.get(optional) or "").strip()
-        if value:
-            portable_secrets[optional] = value
     (data / "secrets.json").write_text(
         json.dumps(portable_secrets, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -820,6 +844,8 @@ def copy_launchers(image_root: Path) -> None:
     for name in (
         "Start_HASHI_TUI.bat",
         "Install_HASHI_On_This_PC.bat",
+        "Update_HASHI_On_This_PC.bat",
+        "Rollback_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
         "Stop_HASHI.bat",
         "Diagnose_HASHI.bat",
@@ -887,16 +913,38 @@ def validate_image(image_root: Path) -> None:
         (image_root / "data" / "portable-instance.json").read_text(encoding="utf-8")
     )
     if (
-        portable_identity.get("schema_version") != 1
+        portable_identity.get("schema_version") != 2
         or portable_identity.get("product") != "HASHI Portable Windows x64"
-        or not isinstance(portable_identity.get("portable_instance_id"), str)
-        or len(portable_identity["portable_instance_id"]) != 32
-        or any(
-            character not in "0123456789abcdef"
-            for character in portable_identity["portable_instance_id"]
-        )
+        or portable_identity.get("provisioning_state") != "unprovisioned"
+        or portable_identity.get("portable_instance_id") is not None
+        or portable_identity.get("identity_lineage_id") is not None
+        or portable_identity.get("created_at_utc") is not None
     ):
-        raise RuntimeError("portable instance identity is invalid")
+        raise RuntimeError("portable public provisioning template is invalid")
+    portable_secrets = json.loads(
+        (image_root / "data" / "secrets.json").read_text(encoding="utf-8")
+    )
+    permitted_secret_keys = {
+        "authorized_telegram_id",
+        "agent",
+        "deepseek_api_key",
+        "workbench_admin_token",
+        "hashi_remote_shared_token",
+    }
+    unexpected_secret_keys = set(portable_secrets) - permitted_secret_keys
+    if unexpected_secret_keys:
+        raise RuntimeError(
+            "portable image contains credentials outside private finalization: "
+            + ", ".join(sorted(unexpected_secret_keys))
+        )
+    deepseek_key = str(portable_secrets.get("deepseek_api_key") or "")
+    local_token = str(portable_secrets.get("workbench_admin_token") or "")
+    remote_token = str(portable_secrets.get("hashi_remote_shared_token") or "")
+    if deepseek_key:
+        if len(local_token) < 32 or len(remote_token) < 48:
+            raise RuntimeError("private finalization did not create independent tokens")
+    elif local_token or remote_token:
+        raise RuntimeError("public portable image contains generated credentials")
     config = json.loads(
         (image_root / "data" / "agents.json").read_text(encoding="utf-8")
     )
@@ -942,11 +990,14 @@ def validate_image(image_root: Path) -> None:
         "app/hashi/voice_models/piper/zh_CN-huayan-medium.onnx",
         "app/hashi/hashi_assets/ocr/bin/windows-x86_64/tesseract.exe",
         "Install_HASHI_On_This_PC.bat",
+        "Update_HASHI_On_This_PC.bat",
+        "Rollback_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
         "launcher/Install-To-PC.ps1",
         "launcher/Bootstrap-Elevated.ps1",
         "launcher/Elevated-Entry.ps1",
         "launcher/Uninstall-From-PC.ps1",
+        "launcher/Rollback-Previous.ps1",
         "launcher/Common.ps1",
         "launcher/Start-TUI.ps1",
         "launcher/Stop-HASHI.ps1",
@@ -991,6 +1042,9 @@ def build(args: argparse.Namespace) -> Path:
         expected_tree=getattr(args, "expected_tree", None),
     )
     validate_portable_dependency_generation()
+    private_deepseek_key = read_private_deepseek_key(
+        getattr(args, "private_deepseek_key_file", None)
+    )
     output = args.output.resolve()
     if output.exists():
         marker = output / ".hashi-portable-bundle"
@@ -1021,11 +1075,7 @@ def build(args: argparse.Namespace) -> Path:
         install_piper(runtime_python, app_hashi, licenses, args.cache)
         install_ffmpeg(runtime_bin, licenses, args.cache)
         install_tesseract(app_hashi, licenses, args.cache, build_temp)
-        configure_data(
-            staging,
-            args.secrets.resolve(),
-            allow_missing_key=args.allow_missing_deepseek_key,
-        )
+        configure_data(staging, private_deepseek_key=private_deepseek_key)
         copy_launchers(staging)
         validate_image(staging)
 
@@ -1048,6 +1098,9 @@ def build(args: argparse.Namespace) -> Path:
             "pairing_token_ttl_seconds": PAIRING_TOKEN_TTL_SECONDS,
             "maximum_image_bytes": MAX_IMAGE_BYTES,
             "target_image_bytes": TARGET_IMAGE_BYTES,
+            "provisioning": (
+                "private-deepseek" if private_deepseek_key else "public"
+            ),
             "category_bytes_before_manifest": categories,
             "features": {
                 "engine": "her-v2",
@@ -1142,7 +1195,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=HASHI_ROOT / "build" / "portable-cache",
     )
-    parser.add_argument("--secrets", type=Path, default=HASHI_ROOT / "secrets.json")
+    parser.add_argument(
+        "--private-deepseek-key-file",
+        type=Path,
+        help=(
+            "privately finalize the image with the DeepSeek key read from this "
+            "file; public builds omit all credentials"
+        ),
+    )
     parser.add_argument(
         "--expected-revision",
         help="require this full HASHI source commit ID before building",
@@ -1151,7 +1211,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--expected-tree",
         help="require this full HASHI source tree ID before building",
     )
-    parser.add_argument("--allow-missing-deepseek-key", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)
 
