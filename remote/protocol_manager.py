@@ -1400,6 +1400,13 @@ class ProtocolManager:
                     None,
                     lambda u=url: self._post_json(u, payload, timeout=10),
                 )
+                if self._response_confirms_terminal_duplicate(result, payload):
+                    logger.info(
+                        "Reply %s was already terminal at %s; accepting duplicate rejection as delivery success",
+                        payload["message_id"],
+                        route.get("instance_id"),
+                    )
+                    return True
                 if self._response_is_error(result):
                     raise RuntimeError(result)
                 return bool(result.get("ok", True))
@@ -1521,6 +1528,27 @@ class ProtocolManager:
         if result.get("message_type") == "error":
             return True
         return result.get("ok", True) is False
+
+    @staticmethod
+    def _response_confirms_terminal_duplicate(result: dict, payload: dict) -> bool:
+        """Recognize an authenticated peer's idempotent terminal reply receipt."""
+        if not isinstance(result, dict) or not isinstance(payload, dict):
+            return False
+        try:
+            status = int(result.get("__http_status") or 200)
+        except (TypeError, ValueError):
+            return False
+        body = result.get("body")
+        if status != 409 or result.get("message_type") != "error" or not isinstance(body, dict):
+            return False
+        return (
+            body.get("code") == "duplicate_message"
+            and body.get("retryable") is False
+            and str(body.get("failed_message_id") or "")
+            == str(payload.get("message_id") or "")
+            and str(body.get("conversation_id") or "")
+            == str(payload.get("conversation_id") or "")
+        )
 
     def _candidate_urls(self, host: str, port: int, path: str) -> list[str]:
         try:

@@ -2682,6 +2682,44 @@ def test_agent_reply_dedupes_terminal_reply_without_second_enqueue(tmp_path):
     assert not hasattr(manager, "_last_enqueue")
 
 
+def test_agent_reply_sender_accepts_terminal_duplicate_as_delivery_success():
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI2"}
+    manager._max_allowed_ttl = 8
+    manager._peer_registry = None
+    manager._resolve_peer_route = lambda _instance_id: {
+        "instance_id": "HASHI3",
+        "host": "peer.example",
+        "port": 8769,
+    }
+    manager._candidate_urls = lambda host, port, path: [
+        f"http://{host}:{port}{path}"
+    ]
+    manager._post_json = lambda _url, _payload, timeout: {
+        "ok": False,
+        "message_type": "error",
+        "body": {
+            "code": "duplicate_message",
+            "message": "Reply message already terminal",
+            "retryable": False,
+            "failed_message_id": "msg-1:reply",
+            "conversation_id": "conv-1",
+        },
+        "__http_status": 409,
+    }
+    item = {
+        "message_id": "msg-1",
+        "conversation_id": "conv-1",
+        "from_instance": "HASHI3",
+        "from_agent": "agent1",
+        "to_agent": "zhao_ling",
+        "reply_target_agent": "agent1",
+        "ttl": 8,
+    }
+
+    assert asyncio.run(manager._send_agent_reply(item, "done")) is True
+
+
 def test_agent_reply_accepts_and_records_legacy_missing_correlation(tmp_path):
     manager = _reply_manager(tmp_path)
 
