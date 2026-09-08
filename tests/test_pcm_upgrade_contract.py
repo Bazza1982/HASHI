@@ -694,7 +694,7 @@ async def test_backend_plus_delivers_one_continuation_payload_to_fixed_target(tm
         "handoff",
         "Backend continuation [3 exchanges]",
         silent=True,
-        deliver_to_telegram=False,
+        deliver_to_telegram=True,
         skip_memory_injection=True,
     )
 

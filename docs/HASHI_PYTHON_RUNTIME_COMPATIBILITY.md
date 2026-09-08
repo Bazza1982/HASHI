@@ -223,6 +223,15 @@ and must be removed with those APIs.
 
 ## Promotion gate
 
+`scripts/check_function_worker_runtime.py` may be given a validated live
+service-endpoint snapshot with `--service-endpoints` when a configured CLI
+backend needs the Backend API route to construct its Tool Gateway.  The probe
+rejects a snapshot owned by another instance and republishes the validated
+endpoints only inside its isolated `bridge_home`.  This qualifies a real
+backend and Worker through READY; it does not start a shared service, activate
+the Worker, call a model, or establish live adoption.  Endpoint health remains
+a separate observable check.
+
 HASHI3 may be promoted to HASHI1/HASHI2 only after:
 
 - focused runtime, generation, protocol, supervisor, lifecycle, service and

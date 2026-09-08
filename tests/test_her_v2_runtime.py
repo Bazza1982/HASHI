@@ -3365,11 +3365,14 @@ async def test_high_volume_parallel_groups_run_as_ordered_waves(tmp_path):
         )
     )
 
-    await asyncio.wait_for(first_wave_started.wait(), timeout=1)
+    # This timeout is a deadlock guard, not a scheduler-latency assertion.  A
+    # one-second bound flakes when the release suite has already exercised a
+    # large number of async runtimes on a loaded host.
+    await asyncio.wait_for(first_wave_started.wait(), timeout=5)
     await asyncio.sleep(0)
     assert second_wave_started.is_set() is False
     release_first_wave.set()
-    result = await asyncio.wait_for(turn, timeout=2)
+    result = await asyncio.wait_for(turn, timeout=5)
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert second_wave_started.is_set() is True

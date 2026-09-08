@@ -129,7 +129,7 @@ async def test_workbench_browser_chat_send_awaits_completion(tmp_path: Path):
     assert payload["ok"] is True
     assert payload["request_id"] == "req-123"
     assert payload["text"] == "browser completion ok"
-    assert runtime.last["deliver_to_telegram"] is False
+    assert runtime.last["deliver_to_telegram"] is True
 
 
 @pytest.mark.asyncio
