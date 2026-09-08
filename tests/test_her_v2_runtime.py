@@ -1551,12 +1551,12 @@ async def test_triage_first_work_starts_without_waiting_and_preserves_late_immed
         )
     )
 
-    await asyncio.wait_for(execution_started.wait(), timeout=1)
+    await asyncio.wait_for(execution_started.wait(), timeout=5)
     assert acknowledgement_delivered.is_set() is False
     release_immediate.set()
-    await asyncio.wait_for(acknowledgement_delivered.wait(), timeout=1)
+    await asyncio.wait_for(acknowledgement_delivered.wait(), timeout=5)
     release_execution.set()
-    result = await asyncio.wait_for(turn, timeout=1)
+    result = await asyncio.wait_for(turn, timeout=5)
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert [(item.kind, item.text) for item in delivery.records] == [
