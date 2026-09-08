@@ -94,3 +94,36 @@ exit $LASTEXITCODE
     data = log.read_bytes()
     text = data.decode("utf-16") if data.startswith(b"\xff\xfe") else data.decode("utf-8-sig")
     assert "usage:" in text
+
+
+def test_restart_retires_only_exact_instance_remote_processes(tmp_path):
+    root = tmp_path / "hashi space 测试"
+    other = tmp_path / "other instance"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-TEST"}}), encoding="utf-8"
+    )
+    shutil.copyfile(ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py")
+    stopped = tmp_path / "stopped.jsonl"
+    started = tmp_path / "started.txt"
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+$global:RemoteRows = @(
+    [pscustomobject]@{{ProcessId=101; ParentProcessId=100; Name='python.exe'; CommandLine='python -m remote --hashi-root "{root}" --supervised'}},
+    [pscustomobject]@{{ProcessId=100; ParentProcessId=99; Name='powershell.exe'; CommandLine='powershell -File "{ROOT / "bin/hashi_remote_task_runner.ps1"}" -HashiRoot "{root}"'}},
+    [pscustomobject]@{{ProcessId=202; ParentProcessId=201; Name='python.exe'; CommandLine='python -m remote --hashi-root "{other}" --supervised'}}
+)
+function Get-CimInstance {{ param($ClassName) @($global:RemoteRows) }}
+function Stop-ScheduledTask {{ param($TaskName) }}
+function Start-ScheduledTask {{ param($TaskName) Set-Content -LiteralPath {_ps_string(started)} -Value $TaskName }}
+function Stop-Process {{
+    param([int]$Id, [switch]$Force)
+    Add-Content -LiteralPath {_ps_string(stopped)} -Value $Id
+    $global:RemoteRows = @($global:RemoteRows | Where-Object {{ [int]$_.ProcessId -ne $Id }})
+}}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+""")
+    assert result.returncode == 0, result.stderr
+    assert stopped.read_text(encoding="utf-8-sig").splitlines() == ["101", "100"]
+    assert started.read_text(encoding="utf-8-sig").strip() == "HashiRemote-supervisor-test"

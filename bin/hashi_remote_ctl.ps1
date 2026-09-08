@@ -114,6 +114,74 @@ function Get-RemotePort {
     return 8766
 }
 
+function Test-OwnedRemoteCommandLine {
+    param([string]$CommandLine)
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+    $isRemote = $CommandLine -match '(?i)(^|\s)-m\s+remote(\s|$)'
+    $isTaskRunner = $CommandLine -match [regex]::Escape($TaskRunner)
+    if (-not ($isRemote -or $isTaskRunner)) {
+        return $false
+    }
+    if ($CommandLine -notmatch '(?i)(?:--hashi-root|-HashiRoot)\s+(?:"([^"]+)"|(\S+))') {
+        return $false
+    }
+    $Candidate = if ($matches[1]) { $matches[1] } else { $matches[2] }
+    try {
+        $Resolved = ([System.IO.Path]::GetFullPath($Candidate)).TrimEnd('\')
+    } catch {
+        return $false
+    }
+    return $Resolved.Equals(
+        ([System.IO.Path]::GetFullPath($HashiRoot)).TrimEnd('\'),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Get-OwnedRemoteProcesses {
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        [int]$_.ProcessId -ne $PID -and (Test-OwnedRemoteCommandLine ([string]$_.CommandLine))
+    })
+}
+
+function Stop-OwnedRemoteProcesses {
+    param([int]$GraceSeconds = 3)
+
+    for ($i = 0; $i -lt ($GraceSeconds * 4); $i++) {
+        if (@(Get-OwnedRemoteProcesses).Count -eq 0) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    # Task Scheduler can report Ready after Stop-ScheduledTask while the runner's
+    # native child remains alive. Match the exact --hashi-root and retire only
+    # that instance's Python/runner chain. Repeat so an orphan exposed after its
+    # parent exits is included in the next snapshot.
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $Owned = @(Get-OwnedRemoteProcesses)
+        if ($Owned.Count -eq 0) {
+            return $true
+        }
+        $Owned | Sort-Object `
+            @{ Expression = { if ([string]$_.Name -match '(?i)^python') { 0 } else { 1 } }; Ascending = $true }, `
+            @{ Expression = 'ProcessId'; Descending = $true } | ForEach-Object {
+            Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return @(Get-OwnedRemoteProcesses).Count -eq 0
+}
+
+function Stop-RemoteSupervisor {
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not (Stop-OwnedRemoteProcesses)) {
+        throw "Remote processes for '$HashiRoot' did not stop"
+    }
+}
+
 function Show-RemoteDoctor {
     $EffectivePort = Get-RemotePort
     $FirewallRules = Get-NetFirewallRule -Direction Inbound -Enabled True -ErrorAction SilentlyContinue |
@@ -146,11 +214,12 @@ switch ($Action) {
         Write-Host "Activated Remote supervisor task '$TaskName'"
     }
     "disable" {
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Stop-RemoteSupervisor
         Disable-ScheduledTask -TaskName $TaskName | Out-Null
         Write-Host "Disabled Remote supervisor task '$TaskName'"
     }
     { $_ -in "unregister", "uninstall" } {
+        Stop-RemoteSupervisor
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         Write-Host "Unregistered Remote supervisor task '$TaskName'"
     }
@@ -158,10 +227,10 @@ switch ($Action) {
         Start-ScheduledTask -TaskName $TaskName
     }
     "stop" {
-        Stop-ScheduledTask -TaskName $TaskName
+        Stop-RemoteSupervisor
     }
     "restart" {
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Stop-RemoteSupervisor
         Start-ScheduledTask -TaskName $TaskName
     }
     "status" {
