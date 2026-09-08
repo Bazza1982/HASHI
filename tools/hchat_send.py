@@ -40,7 +40,6 @@ if __name__ == "__main__":
 
 from remote.delivery_results import format_delivery_result  # noqa: E402
 from remote.security.client_auth import build_client_auth_headers  # noqa: E402
-from orchestrator.bootstrap_logging import configure_console_encoding  # noqa: E402
 from orchestrator.runtime_defaults import (  # noqa: E402
     DEFAULT_HASHI_REMOTE_PORT,
     DEFAULT_WORKBENCH_PORT,
@@ -71,6 +70,30 @@ HCHAT_TERMINAL_REPLY_INSTRUCTION = (
     "[hchat reply from ...] marker. Do not answer the peer, summarize the "
     "body, acknowledge, confirm, or send another HChat/protocol message."
 )
+
+
+def _configure_cli_console_encoding() -> None:
+    """Keep Unicode CLI receipts printable on legacy Windows consoles."""
+    os.environ["PYTHONUTF8"] = "1"
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleCP(65001)
+            kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
 
 
 def _load_json_object_with_salvage(path: Path) -> dict | None:
@@ -1468,7 +1491,7 @@ def check_hchat_route(
 
 
 def main() -> None:
-    configure_console_encoding()
+    _configure_cli_console_encoding()
     parser = argparse.ArgumentParser(description="Send a Hchat message to another agent")
     parser.add_argument("--to", help="Target agent name or @group_name (e.g. lily or @staff)")
     parser.add_argument("--from", dest="from_agent", help="Sender agent name (e.g. rain)")

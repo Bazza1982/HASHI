@@ -220,7 +220,7 @@ def test_hchat_cli_configures_console_encoding_before_delivery(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(
         hchat_send,
-        "configure_console_encoding",
+        "_configure_cli_console_encoding",
         lambda: calls.append("configure"),
     )
     monkeypatch.setattr(

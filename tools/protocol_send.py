@@ -26,9 +26,9 @@ if str(ROOT) not in sys.path:
 
 from remote.delivery_results import format_delivery_result
 from remote.security.client_auth import build_client_auth_headers
-from orchestrator.bootstrap_logging import configure_console_encoding
 from tools.remote_capabilities import fetch_remote_protocol_capabilities
 from tools.hchat_send import (
+    _configure_cli_console_encoding,
     _find_remote_instance,
     _get_instance_id,
     _load_instances,
@@ -537,7 +537,7 @@ def send_protocol_message(
 
 
 def main() -> int:
-    configure_console_encoding()
+    _configure_cli_console_encoding()
     parser = argparse.ArgumentParser(description="Send a Hashi Remote protocol message")
     parser.add_argument("--to", required=True, help="Target agent@INSTANCE")
     parser.add_argument("--from", dest="from_agent", required=True, help="Source agent")
