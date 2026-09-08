@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -429,6 +430,10 @@ async def test_dream_repairs_beyond_removed_validation_attempt_cap(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 async def test_dream_uses_exact_canonical_pcm_persona_and_keeps_sys_separate(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
@@ -500,6 +505,10 @@ async def test_dream_complete_body_can_be_rendered_in_configured_persona(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 async def test_missing_configured_persona_surfaces_exact_local_error_without_fallback(
     tmp_path,
 ):
@@ -549,6 +558,10 @@ async def test_dream_persona_provider_failure_surfaces_exact_error_without_fallb
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 async def test_dream_undo_uses_same_canonical_pcm_without_editing_it(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend

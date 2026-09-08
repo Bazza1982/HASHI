@@ -153,7 +153,7 @@ def _created_timestamp(value: Any, *, fallback: float) -> float:
         return float(value)
     try:
         return datetime.fromisoformat(str(value)).timestamp()
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OSError, OverflowError):
         return fallback
 
 

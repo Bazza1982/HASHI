@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from orchestrator.enterprise import (
@@ -346,7 +348,12 @@ def test_execution_scope_blocks_symlink_escape(tmp_path):
     workspace.mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (workspace / "escape").symlink_to(outside, target_is_directory=True)
+    try:
+        (workspace / "escape").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symbolic-link privilege is unavailable")
+        raise
     scope = ExecutionScope.from_project(svc["project"])
 
     decision = scope.check_path("escape/leak.txt")

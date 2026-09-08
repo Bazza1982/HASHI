@@ -4,7 +4,8 @@ import hashlib
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,8 +123,19 @@ class SessionStore:
             connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """Commit or roll back, then deterministically release the file handle."""
+
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
@@ -660,7 +672,7 @@ class SessionStore:
         agent_id = str(agent_id).strip().lower()
         if not owner_id or not agent_id:
             raise ValueError("owner_id and agent_id are required")
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if is_default:
                 row = connection.execute(
@@ -746,7 +758,7 @@ class SessionStore:
             params.append(str(agent_id).lower())
         if not include_deleted:
             clauses.append("status != 'deleted'")
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 f"SELECT * FROM sessions WHERE {' AND '.join(clauses)}", params
             ).fetchone()
@@ -770,7 +782,7 @@ class SessionStore:
         if not include_archived:
             clauses.append("status = 'active'")
         params.append(max(1, min(int(limit), 500)))
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 f"""
                 SELECT * FROM sessions WHERE {" AND ".join(clauses)}
@@ -798,7 +810,7 @@ class SessionStore:
         if session["status"] != "active":
             raise SessionConflict("only active Sessions can be selected")
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO channel_bindings(
@@ -841,7 +853,7 @@ class SessionStore:
                 agent_id=agent_id,
                 include_deleted=False,
             )
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT s.* FROM channel_bindings AS b
@@ -897,7 +909,7 @@ class SessionStore:
                 and str(block.get("text") or "").strip()
             ).strip()
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
                 """
@@ -1119,7 +1131,7 @@ class SessionStore:
 
     def mark_request_running(self, request_id: str, *, worker_id: str) -> int | None:
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM runs WHERE request_id = ?", (str(request_id),)
@@ -1239,7 +1251,7 @@ class SessionStore:
             part.get("type") == "audio" and str(part.get("asset_id") or "").strip()
             for part in normalized_content
         )
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
                 "SELECT * FROM runs WHERE request_id = ?", (str(request_id),)
@@ -1415,7 +1427,7 @@ class SessionStore:
         if not normalized_surface or not normalized_channel:
             return None
         route_phase = f"transport:{normalized_surface}:{normalized_channel}"
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
                 """
@@ -1491,7 +1503,7 @@ class SessionStore:
         if not normalized_surface or not normalized_channel:
             return None
         route_phase = f"transport:{normalized_surface}:{normalized_channel}"
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT e.detail_json, m.text
@@ -1532,7 +1544,7 @@ class SessionStore:
         if not normalized_surface or not normalized_channel:
             return False
         route_phase = f"transport:{normalized_surface}:{normalized_channel}"
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM run_events AS e
@@ -1550,7 +1562,7 @@ class SessionStore:
         self, run_id: str, *, owner_id: str, reason: str = "cancelled_by_user"
     ) -> dict[str, Any]:
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
                 """SELECT r.* FROM runs r JOIN sessions s ON s.session_id=r.session_id
@@ -1628,7 +1640,7 @@ class SessionStore:
             raise ValueError("semantic_role is only supported for audio attachments")
         requires_upload = is_audio if upload_required is None else bool(upload_required)
         attachment_id, now = _new_id("att"), _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 """INSERT INTO session_attachments(attachment_id,session_id,owner_id,filename,
                    media_type,size_bytes,sha256,semantic_role,duration_ms,
@@ -1671,7 +1683,7 @@ class SessionStore:
 
         if not isinstance(payload, bytes):
             raise ValueError("attachment payload must be bytes")
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 """SELECT * FROM session_attachments
                    WHERE attachment_id=? AND session_id=? AND owner_id=?""",
@@ -1721,7 +1733,7 @@ class SessionStore:
             correlation={"attachment_id": str(attachment_id)},
         )
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 """UPDATE session_attachments SET asset_id=?, uploaded_at=?,
                        duration_ms=COALESCE(duration_ms, ?)
@@ -1743,7 +1755,7 @@ class SessionStore:
         self, *, session_id: str, owner_id: str, attachment_id: str
     ) -> dict[str, Any]:
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM session_attachments WHERE attachment_id=? AND session_id=? AND owner_id=?",
@@ -1778,7 +1790,7 @@ class SessionStore:
     def attachment_bytes(
         self, *, session_id: str, owner_id: str, attachment_id: str
     ) -> tuple[dict[str, Any], bytes]:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 """SELECT * FROM session_attachments
                    WHERE attachment_id=? AND session_id=? AND owner_id=?
@@ -1800,7 +1812,7 @@ class SessionStore:
         item_index: int,
         semantic_role: str | None = None,
     ) -> dict[str, Any]:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 """SELECT * FROM session_attachments
                    WHERE attachment_id=? AND session_id=? AND owner_id=?
@@ -1932,7 +1944,7 @@ class SessionStore:
         expired = self.audio_assets.cleanup()
         if not expired:
             return []
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for asset in expired:
                 asset_id = str(asset["asset_id"])
@@ -1996,7 +2008,7 @@ class SessionStore:
             raise ValueError("voice transcript cannot be empty")
         now = _utc_now()
         transcript_id = _new_id("transcript")
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
                 "SELECT * FROM runs WHERE request_id=?", (str(request_id),)
@@ -2129,7 +2141,7 @@ class SessionStore:
     ) -> dict[str, Any]:
         """Move deferred native STT to Safe Voice only when a stage needs it."""
 
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """SELECT vt.* FROM voice_transcripts AS vt
@@ -2191,7 +2203,7 @@ class SessionStore:
     ) -> dict[str, Any]:
         """Release STT after native chat completes without another consumer."""
 
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """SELECT vt.*, r.user_message_id FROM voice_transcripts AS vt
@@ -2259,7 +2271,7 @@ class SessionStore:
         completed Run with a durable assistant audio part.
         """
 
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """SELECT vt.*, r.user_message_id, r.state AS run_state
@@ -2399,7 +2411,7 @@ class SessionStore:
             for part in parts
         )
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """SELECT e.* FROM runtime_event_correlations AS c
@@ -2536,7 +2548,7 @@ class SessionStore:
     def decide_voice_transcript(
         self, *, request_id: str, confirmed: bool
     ) -> dict[str, Any]:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """SELECT vt.*, r.user_message_id FROM voice_transcripts AS vt
@@ -2608,7 +2620,7 @@ class SessionStore:
     ) -> dict[str, Any]:
         """Apply an authenticated generic-client Safe Voice decision."""
 
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """SELECT vt.*, r.user_message_id, r.request_id
@@ -2677,7 +2689,7 @@ class SessionStore:
         if int(run["fencing_token"]) != int(fencing_token) or run["state"] != "running":
             raise StaleFencingToken("approval origin is no longer authoritative")
         approval_id, now = _new_id("approval"), _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 """INSERT INTO run_approvals(approval_id,session_id,run_id,owner_id,attempt,
                    fencing_token,scope_json,created_at) VALUES(?,?,?,?,?,?,?,?)""",
@@ -2706,7 +2718,7 @@ class SessionStore:
         if resolved not in {"approved", "denied"}:
             raise ValueError("decision must be approved or denied")
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM run_approvals WHERE approval_id=? AND owner_id=?",
@@ -2768,7 +2780,7 @@ class SessionStore:
         now = _utc_now()
         target_agent_id = str(agent_id or "").strip().lower() or None
         reconciled_ids: list[str] = []
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             agent_clause = " AND r.agent_id = ?" if target_agent_id else ""
             params: tuple[str, ...] = (
@@ -2889,7 +2901,7 @@ class SessionStore:
         if owner_id is not None:
             clauses.append("s.owner_id = ?")
             params.append(str(owner_id))
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 f"""
                 SELECT r.* FROM runs AS r JOIN sessions AS s ON s.session_id = r.session_id
@@ -2916,7 +2928,7 @@ class SessionStore:
         if agent_id is not None:
             clauses.append("r.agent_id = ?")
             params.append(str(agent_id).lower())
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 f"""
                 SELECT r.* FROM runs AS r
@@ -2941,7 +2953,7 @@ class SessionStore:
         if title is not None and not clean_title:
             raise ValueError("title cannot be empty")
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
@@ -2976,7 +2988,7 @@ class SessionStore:
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         self.get_session(session_id, owner_id=owner_id)
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM messages WHERE session_id = ? AND ordinal > ?
@@ -2999,7 +3011,7 @@ class SessionStore:
     ) -> list[dict[str, Any]]:
         session = self.get_session(session_id)
         generation = int(context_generation or session["context_generation"])
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT r.run_id, u.ordinal AS sequence, u.message_id AS user_message_id,
@@ -3066,7 +3078,7 @@ class SessionStore:
             *source_params,
             max(1, min(int(limit), 100)),
         ]
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 f"""
                 SELECT r.run_id, r.session_id, r.context_generation,
@@ -3116,7 +3128,7 @@ class SessionStore:
         if owner_id is not None:
             clauses.append("s.owner_id = ?")
             params.append(str(owner_id))
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 f"""
                 SELECT MAX(m.created_at) AS created_at
@@ -3133,7 +3145,7 @@ class SessionStore:
         self, session_id: str, *, reason: str = "fresh"
     ) -> dict[str, Any]:
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM sessions WHERE session_id = ? AND status = 'active'",
@@ -3227,7 +3239,7 @@ class SessionStore:
     def get_workzone_set(self, session_id: str) -> dict[str, Any]:
         """Return the Session-scoped, revisioned Workzone slot collection."""
 
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             return self._workzone_set_from_connection(connection, str(session_id))
 
     @staticmethod
@@ -3266,7 +3278,7 @@ class SessionStore:
 
         slot = self._require_workzone_slot(slot_id)
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
                 """
@@ -3382,7 +3394,7 @@ class SessionStore:
 
         slot = self._require_workzone_slot(slot_id)
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
                 """
@@ -3451,7 +3463,7 @@ class SessionStore:
         """Disable every configured slot in one revisioned transaction."""
 
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
                 """
@@ -3497,7 +3509,7 @@ class SessionStore:
     ) -> None:
         """Audit a revalidation/rebind that deliberately leaves state unchanged."""
 
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
                 "SELECT status FROM sessions WHERE session_id = ? AND instance_id = ?",
@@ -3541,7 +3553,7 @@ class SessionStore:
             )
             return self.get_session(session_id)
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             updated = connection.execute(
                 """
                 UPDATE sessions SET workzone = NULL, revision = revision + 1, updated_at = ?
@@ -3558,7 +3570,7 @@ class SessionStore:
     ) -> dict[str, Any]:
         now = _utc_now()
         target = "deleted" if deleted else "archived"
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM sessions WHERE session_id = ?", (str(session_id),)
@@ -3603,7 +3615,7 @@ class SessionStore:
         context_generation: int,
         backend_id: str,
     ) -> str | None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT backend_thread_id FROM backend_bindings
@@ -3628,7 +3640,7 @@ class SessionStore:
         backend_id: str,
         backend_thread_id: str | None,
     ) -> None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             if not backend_thread_id:
                 connection.execute(
                     """
@@ -3672,7 +3684,7 @@ class SessionStore:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         self.get_session(session_id, owner_id=owner_id)
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM run_events WHERE session_id = ? AND sequence > ?
@@ -3701,7 +3713,7 @@ class SessionStore:
         self.get_session(session_id, owner_id=owner_id)
         resolved_id = str(consumer_id or _new_id("consumer"))
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             existing = connection.execute(
                 "SELECT * FROM event_consumers WHERE consumer_id = ?",
                 (resolved_id,),
@@ -3736,7 +3748,7 @@ class SessionStore:
         limit: int = 500,
     ) -> dict[str, Any]:
         self.get_session(session_id, owner_id=owner_id)
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             consumer = connection.execute(
                 """
@@ -3803,7 +3815,7 @@ class SessionStore:
         sequence: int,
     ) -> dict[str, Any]:
         requested = max(0, int(sequence))
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
@@ -3839,7 +3851,7 @@ class SessionStore:
         self, session_id: str, *, owner_id: str | None = None
     ) -> dict[str, Any]:
         session = self.get_session(session_id, owner_id=owner_id)
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             projections = connection.execute(
                 """
                 SELECT projection_json FROM run_projection_records
@@ -3881,7 +3893,7 @@ class SessionStore:
             clauses.append(f"r.session_id IN ({','.join('?' for _ in selected)})")
             params.extend(selected)
         params.append(max(1, min(int(limit), 5000)))
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 f"""
                 SELECT r.run_id, r.session_id, r.user_message_id,
@@ -3909,7 +3921,7 @@ class SessionStore:
 
     def record_promoted(self, *, agent_id: str, candidate: Mapping[str, Any]) -> bool:
         now = _utc_now()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             inserted = connection.execute(
                 """
@@ -3948,7 +3960,7 @@ class SessionStore:
             return True
 
     def promotion_status(self, *, agent_id: str) -> dict[str, Any]:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             schedule = connection.execute(
                 "SELECT * FROM memory_promotion_schedules WHERE agent_id = ?",
                 (str(agent_id).lower(),),
@@ -3994,7 +4006,7 @@ class SessionStore:
             raise ValueError("promotion time must be HH:MM")
         resolved_time = f"{hour:02d}:{minute:02d}"
         resolved_timezone = str(timezone_name or current.get("timezone") or "local")
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO memory_promotion_schedules(
@@ -4018,7 +4030,7 @@ class SessionStore:
         return self.promotion_status(agent_id=agent_id)["schedule"]
 
     def mark_promotion_schedule_ran(self, *, agent_id: str, local_date: str) -> None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 """
                 UPDATE memory_promotion_schedules

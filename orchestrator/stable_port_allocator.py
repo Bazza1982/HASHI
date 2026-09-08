@@ -98,8 +98,6 @@ def read_linux_ephemeral_range(
     range_path: Path = Path("/proc/sys/net/ipv4/ip_local_port_range"),
     read_text: Callable[[Path], str] | None = None,
 ) -> set[int]:
-    if sys.platform == "win32":
-        return set()
     reader = read_text or (lambda path: path.read_text(encoding="utf-8"))
     try:
         raw = reader(range_path).strip()

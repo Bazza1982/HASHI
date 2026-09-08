@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -47,6 +48,37 @@ class SkillDefinition:
 
 class SkillValidationError(ValueError):
     """Raised when a HASHI Skill package violates the public package contract."""
+
+
+def _is_directory_link(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(callable(is_junction) and is_junction())
+
+
+def _create_directory_link(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    except OSError as exc:
+        if os.name != "nt" or getattr(exc, "winerror", None) != 1314:
+            raise
+    completed = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "mklink failed").strip()
+        raise OSError(f"could not create Windows Skill junction: {detail}")
+
+
+def _unlink_directory_link(path: Path) -> None:
+    if path.is_symlink():
+        path.unlink()
+    else:
+        path.rmdir()
 
 
 class SkillManager:
@@ -157,7 +189,18 @@ class SkillManager:
         *,
         registry_entry: dict[str, Any] | None = None,
     ) -> SkillDefinition:
-        skill_md = skill_dir / "SKILL.md"
+        skill_md = next(
+            (
+                entry
+                for entry in skill_dir.iterdir()
+                if entry.name == "SKILL.md" and entry.is_file()
+            ),
+            None,
+        )
+        if skill_md is None:
+            raise SkillValidationError(
+                f"{skill_dir / 'SKILL.md'}: exact-case SKILL.md is required"
+            )
         frontmatter, body = self._parse_frontmatter(
             self._read_text(skill_md), source=skill_md
         )
@@ -190,7 +233,7 @@ class SkillManager:
             managed = source_type in {"installed", "linked"}
             installed_at = str(registry_entry.get("installed_at") or "") or None
             content_sha256 = str(registry_entry.get("content_sha256") or "") or None
-        elif skill_dir.is_symlink():
+        elif _is_directory_link(skill_dir):
             source_type = "linked"
             try:
                 source = str(skill_dir.resolve(strict=True))
@@ -280,8 +323,10 @@ class SkillManager:
         skills: list[SkillDefinition] = []
         errors: list[str] = []
         for skill_dir in sorted(p for p in self.skills_dir.iterdir() if p.is_dir()):
-            skill_md = skill_dir / "SKILL.md"
-            if not skill_md.exists():
+            if not any(
+                entry.name == "SKILL.md" and entry.is_file()
+                for entry in skill_dir.iterdir()
+            ):
                 continue
             try:
                 skills.append(
@@ -684,7 +729,7 @@ class SkillManager:
         try:
             if link:
                 temporary_link = self.skills_dir / f".link-{uuid4().hex}"
-                temporary_link.symlink_to(source_path, target_is_directory=True)
+                _create_directory_link(temporary_link, source_path)
                 os.replace(temporary_link, destination)
             else:
                 temporary_root = Path(
@@ -697,8 +742,8 @@ class SkillManager:
             registry["skills"][source_skill.id] = registry_entry
             self._save_skill_registry(registry)
         except Exception as exc:
-            if destination.is_symlink():
-                destination.unlink(missing_ok=True)
+            if _is_directory_link(destination):
+                _unlink_directory_link(destination)
             elif destination.exists():
                 rollback_root = self.skill_recovery_dir / "failed-installs"
                 rollback_root.mkdir(parents=True, exist_ok=True)
@@ -749,9 +794,9 @@ class SkillManager:
         recovery_path: Path | None = None
         linked_target: Path | None = None
         try:
-            if skill.skill_dir.is_symlink():
+            if _is_directory_link(skill.skill_dir):
                 linked_target = skill.skill_dir.resolve(strict=False)
-                skill.skill_dir.unlink()
+                _unlink_directory_link(skill.skill_dir)
             else:
                 self.skill_recovery_dir.mkdir(parents=True, exist_ok=True)
                 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -762,7 +807,7 @@ class SkillManager:
             self._save_skill_registry(registry)
         except Exception as exc:
             if linked_target is not None and not skill.skill_dir.exists():
-                skill.skill_dir.symlink_to(linked_target, target_is_directory=True)
+                _create_directory_link(skill.skill_dir, linked_target)
             elif (
                 recovery_path is not None
                 and recovery_path.exists()

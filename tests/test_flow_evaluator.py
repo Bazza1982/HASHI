@@ -166,6 +166,7 @@ def test_flow_cli_does_not_advertise_unimplemented_resume_command() -> None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=30,
     )
 
@@ -191,6 +192,7 @@ def test_flow_cli_rejects_run_id_path_traversal() -> None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=30,
     )
 

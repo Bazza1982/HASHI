@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import tarfile
 from pathlib import Path
 
@@ -129,7 +130,12 @@ def test_exp_asset_pack_rejects_existing_parent_symlink_escape(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (project / "exp").mkdir(parents=True)
-    (project / "exp" / "owner").symlink_to(outside, target_is_directory=True)
+    try:
+        (project / "exp" / "owner").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symbolic-link privilege is unavailable")
+        raise
 
     with pytest.raises(ExpAssetError, match="Unsafe EXP asset target"):
         install_pack(

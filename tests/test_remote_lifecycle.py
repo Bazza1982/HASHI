@@ -496,6 +496,7 @@ async def test_ensure_remote_started_refreshes_healthy_supervisor_registration(
     monkeypatch,
     tmp_path,
 ):
+    monkeypatch.setattr(remote_lifecycle.sys, "platform", "linux")
     write_runtime_claim(
         root=tmp_path,
         instance_id="HASHI",
@@ -577,6 +578,7 @@ async def test_ensure_remote_started_falls_back_to_bundled_child(
 
 @pytest.mark.asyncio
 async def test_activate_remote_supervisor_uses_enable_action(monkeypatch, tmp_path):
+    monkeypatch.setattr(remote_lifecycle.sys, "platform", "linux")
     helper = tmp_path / "bin" / "hashi-remote-ctl.sh"
     helper.parent.mkdir()
     helper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")

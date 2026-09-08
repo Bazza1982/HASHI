@@ -106,6 +106,6 @@ def test_ledger_context_is_json_safe(tmp_path):
 
     payload = event.to_dict()
     json.dumps(payload, ensure_ascii=False)
-    assert payload["context"]["path"].startswith("PosixPath(")
+    assert payload["context"]["path"] == repr(tmp_path / "report.md")
     assert payload["context"]["tuple"] == ["a", 1]
     assert sorted(payload["context"]["nested"]["items"]) == [1, 2]

@@ -10,6 +10,7 @@ import re
 import sqlite3
 import struct
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
@@ -23,6 +24,21 @@ CURRENT_REQUEST_SEPARATOR = "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\
 
 sys_prompt_logger = logging.getLogger("BridgeU.SysPrompt")
 memory_logger = logging.getLogger("BridgeU.Memory")
+
+
+def _retry_transient_file_access(operation):
+    """Retry short-lived Windows sharing violations without hiding real I/O errors."""
+
+    delays = (0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.25)
+    for attempt in range(len(delays) + 1):
+        try:
+            return operation()
+        except PermissionError:
+            if os.name != "nt" or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
 def _sys_prompt_path_lock(path: Path) -> threading.RLock:
     return process_path_lock(path)
 
@@ -1171,7 +1187,11 @@ class SysPromptManager:
         if not self.state_path.exists():
             return self._empty_slots()
         try:
-            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            payload = json.loads(
+                _retry_transient_file_access(
+                    lambda: self.state_path.read_text(encoding="utf-8")
+                )
+            )
             return self._normalize(payload)
         except Exception as exc:
             sys_prompt_logger.error(
@@ -1200,7 +1220,9 @@ class SysPromptManager:
                 json.dumps(self._data, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
-            os.replace(temporary, self.state_path)
+            _retry_transient_file_access(
+                lambda: os.replace(temporary, self.state_path)
+            )
         finally:
             temporary.unlink(missing_ok=True)
 

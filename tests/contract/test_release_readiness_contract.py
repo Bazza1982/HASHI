@@ -206,6 +206,7 @@ def test_python_module_and_cli_help_resolve() -> None:
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert import_result.returncode == 0, import_result.stderr
@@ -216,6 +217,7 @@ def test_python_module_and_cli_help_resolve() -> None:
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert cli_result.returncode == 0, cli_result.stderr

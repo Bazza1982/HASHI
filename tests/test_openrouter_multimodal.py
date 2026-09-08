@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,6 +11,13 @@ import pytest
 
 from adapters.openrouter_api import OpenRouterAdapter, _APIResult
 from orchestrator.multimodal_contract import canonical_request_content
+
+
+def _fallback_descriptor(text: str) -> dict:
+    descriptor, _ = json.JSONDecoder().raw_decode(
+        text.removeprefix("LOCAL_MEDIA_ATTACHMENT ")
+    )
+    return descriptor
 
 
 class _FallbackRegistry:
@@ -277,8 +286,12 @@ async def test_typed_modality_drift_replays_once_through_local_fallback(tmp_path
         False,
     ]
     assert "attachment-2" in replay_content[3]["text"]
-    assert str(tmp_path / "one.png") in replay_content[2]["text"]
-    assert str(tmp_path / "two.png") in replay_content[3]["text"]
+    assert Path(_fallback_descriptor(replay_content[2]["text"])["local_ref"]) == (
+        tmp_path / "one.png"
+    )
+    assert Path(_fallback_descriptor(replay_content[3]["text"])["local_ref"]) == (
+        tmp_path / "two.png"
+    )
     assert {
         item["route"] for item in response.stream_metadata["multimodal_routing"]
     } == {"local_fallback"}
@@ -413,9 +426,13 @@ async def test_openrouter_text_model_uses_local_fallback(tmp_path):
     }
     assert fallback_content[1] == {"type": "text", "text": "Compare both."}
     assert "attachment-1" in fallback_content[2]["text"]
-    assert str(tmp_path / "one.png") in fallback_content[2]["text"]
+    assert Path(_fallback_descriptor(fallback_content[2]["text"])["local_ref"]) == (
+        tmp_path / "one.png"
+    )
     assert "attachment-2" in fallback_content[3]["text"]
-    assert str(tmp_path / "two.png") in fallback_content[3]["text"]
+    assert Path(_fallback_descriptor(fallback_content[3]["text"])["local_ref"]) == (
+        tmp_path / "two.png"
+    )
     assert {
         item["route"] for item in response.stream_metadata["multimodal_routing"]
     } == {"local_fallback"}
@@ -499,7 +516,7 @@ async def test_openrouter_mixed_image_audio_routes_each_attachment_separately(
         "text",
     ]
     assert "attachment-audio" in user_content[2]["text"]
-    assert str(audio) in user_content[2]["text"]
+    assert Path(_fallback_descriptor(user_content[2]["text"])["local_ref"]) == audio
     assert [
         (item["attachment_id"], item["route"])
         for item in response.stream_metadata["multimodal_routing"]

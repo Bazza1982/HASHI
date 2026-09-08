@@ -175,7 +175,7 @@ def test_linked_skill_unlinks_without_touching_source(tmp_path: Path):
 
     assert ok is True, message
     assert linked is not None and linked.source_type == "linked"
-    assert linked.skill_dir.is_symlink()
+    assert linked.skill_dir.is_symlink() or linked.skill_dir.is_junction()
 
     removed, remove_message, recovery_path = manager.uninstall_skill("linked-skill")
 

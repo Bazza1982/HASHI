@@ -113,6 +113,7 @@ def test_python_build_artifacts_match_the_nagare_flow_publication_boundary(
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert install.returncode == 0, install.stdout + install.stderr
@@ -184,6 +185,7 @@ runpy.run_module("nagare.cli", run_name="__main__")
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert smoke.returncode == 0, smoke.stdout + smoke.stderr

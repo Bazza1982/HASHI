@@ -13,7 +13,7 @@ import tarfile
 import tempfile
 import urllib.parse
 import urllib.request
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -82,16 +82,20 @@ def _resolve_source(
 
 
 def _materialize_source(source: str, destination: Path) -> Path:
-    parsed = urllib.parse.urlparse(source)
-    if parsed.scheme == "https":
+    windows_path = os.name == "nt" and PureWindowsPath(source).is_absolute()
+    parsed = urllib.parse.urlparse(source) if not windows_path else None
+    if parsed is not None and parsed.scheme == "https":
         with urllib.request.urlopen(source, timeout=120) as response, destination.open(
             "wb"
         ) as output:
             shutil.copyfileobj(response, output)
         return destination
-    if parsed.scheme == "file":
-        source_path = Path(urllib.request.url2pathname(parsed.path))
-    elif parsed.scheme:
+    if parsed is not None and parsed.scheme == "file":
+        uri_path = parsed.path
+        if parsed.netloc and parsed.netloc != "localhost":
+            uri_path = f"//{parsed.netloc}{uri_path}"
+        source_path = Path(urllib.request.url2pathname(uri_path))
+    elif parsed is not None and parsed.scheme:
         raise ExpAssetError(f"Unsupported asset source scheme: {parsed.scheme}")
     else:
         source_path = Path(source).expanduser()

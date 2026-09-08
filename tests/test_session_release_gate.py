@@ -1,5 +1,5 @@
 import json
-import subprocess
+import tarfile
 
 import pytest
 
@@ -44,8 +44,7 @@ def test_qualification_refuses_missing_external_identity(tmp_path):
 
 def test_release_package_verifier_rejects_unexpected_members(tmp_path):
     package = tmp_path / "bad.tar.gz"
-    subprocess.run(
-        ["tar", "-czf", str(package), "--files-from", "/dev/null"], check=True
-    )
+    with tarfile.open(package, "w:gz"):
+        pass
     with pytest.raises(RuntimeError, match="members"):
         verify_package(package)

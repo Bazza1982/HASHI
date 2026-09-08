@@ -33,3 +33,13 @@ def test_workspace_state_lock_is_owned_by_stable_core_registry(tmp_path):
     path = tmp_path / "state.json"
 
     assert workspace_state._path_lock(path) is process_path_lock(path)
+
+
+def test_process_path_lock_is_stable_when_target_appears(tmp_path):
+    path = tmp_path / "new-parent" / "state.json"
+    before = process_path_lock(path)
+
+    path.parent.mkdir()
+    path.write_text("{}\n", encoding="utf-8")
+
+    assert process_path_lock(path) is before

@@ -39,6 +39,7 @@ def test_nagare_cli_smoke_handler_executes_fixture_end_to_end(tmp_path) -> None:
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 

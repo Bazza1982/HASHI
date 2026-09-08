@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +32,13 @@ def _image_part(path, *, index: int = 2, attachment_id: str = "attachment-1"):
         "sha256": hashlib.sha256(payload).hexdigest(),
         "transport": {"message_id": index},
     }
+
+
+def _fallback_descriptor(text: str) -> dict:
+    descriptor, _ = json.JSONDecoder().raw_decode(
+        text.removeprefix("LOCAL_MEDIA_ATTACHMENT ")
+    )
+    return descriptor
 
 
 def _write_png(path) -> None:
@@ -93,7 +102,7 @@ def test_local_fallback_materialisation_exposes_ordered_tool_references(tmp_path
     assert [part["type"] for part in parts] == ["text", "text"]
     assert parts[0]["text"] == "Inspect it."
     assert "attachment-1" in parts[1]["text"]
-    assert str(image) in parts[1]["text"]
+    assert Path(_fallback_descriptor(parts[1]["text"])["local_ref"]) == image
     assert "media bytes were not sent natively" in parts[1]["text"]
     assert decisions[0].route == "local_fallback"
 

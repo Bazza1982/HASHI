@@ -241,7 +241,7 @@ async def test_recall_ignores_unauthorized_user():
 
 @pytest.mark.asyncio
 async def test_recall_count_selects_newest_across_ready_and_delayed(tmp_path):
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     from orchestrator.scheduler import TaskScheduler
 
@@ -254,7 +254,7 @@ async def test_recall_count_selects_newest_across_ready_and_delayed(tmp_path):
     await queue.put(
         SimpleNamespace(
             request_id="ready-old",
-            created_at=datetime.fromtimestamp(1_000).isoformat(),
+            created_at=datetime.fromtimestamp(1_000, timezone.utc).isoformat(),
         )
     )
     runtime = SimpleNamespace(

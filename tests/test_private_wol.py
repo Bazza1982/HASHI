@@ -1,3 +1,5 @@
+import json
+import sys
 from pathlib import Path
 
 from orchestrator.private_wol import describe_wol_targets, private_wol_available, run_private_wol
@@ -62,18 +64,22 @@ def test_private_wol_rejects_unknown_target(tmp_path: Path):
 def test_private_wol_runs_command_target(tmp_path: Path):
     _write_config(
         tmp_path,
-        """
-        {
-          "allowed_instances": ["HASHI1"],
-          "targets": {
-            "msi": {
-              "label": "MSI",
-              "runner": "command",
-              "command": ["echo", "magic-packet"]
+        json.dumps(
+            {
+                "allowed_instances": ["HASHI1"],
+                "targets": {
+                    "msi": {
+                        "label": "MSI",
+                        "runner": "command",
+                        "command": [
+                            sys.executable,
+                            "-c",
+                            "print('magic-packet')",
+                        ],
+                    }
+                },
             }
-          }
-        }
-        """,
+        ),
     )
 
     result = run_private_wol(tmp_path, "msi")

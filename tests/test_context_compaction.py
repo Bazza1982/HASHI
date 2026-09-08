@@ -229,9 +229,9 @@ def test_recent_history_merges_turns_and_receipts_by_completion_time(tmp_path):
     rendered = sections[0][1]
     assert rendered.index("user-0:u") < rendered.index("receipt-user")
     assert rendered.index("receipt-user") < rendered.index("user-1:u")
-    assert "+10:00 AEST" in rendered
-    assert "turn:1 | recorded_at=2026-08-22T00:00:00+10:00 AEST" in rendered
-    assert "turn:2 | recorded_at=2026-08-22T00:00:01+10:00 AEST" in rendered
+    assert "+10:00" in rendered
+    assert "turn:1 | recorded_at=2026-08-22T00:00:00+10:00 " in rendered
+    assert "turn:2 | recorded_at=2026-08-22T00:00:01+10:00 " in rendered
     immediate = rendered.rindex("IMMEDIATE PREVIOUS")
     assert immediate < rendered.rindex("user-1:u")
     assert "CROSS-SESSION TURN RECEIPTS" not in rendered

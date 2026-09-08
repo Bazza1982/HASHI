@@ -893,8 +893,8 @@ async def test_native_audio_direct_disables_tools_in_request_and_audit(tmp_path)
 @pytest.mark.parametrize(
     "delays",
     [
-        {Stage.IMMEDIATE_RESPONSE: 0.005, Stage.TRIAGE: 0.03},
-        {Stage.IMMEDIATE_RESPONSE: 0.03, Stage.TRIAGE: 0.005},
+        {Stage.IMMEDIATE_RESPONSE: 0.001, Stage.TRIAGE: 0.3},
+        {Stage.IMMEDIATE_RESPONSE: 0.3, Stage.TRIAGE: 0.001},
     ],
 )
 async def test_direct_response_race_delivers_exactly_one_answer(tmp_path, delays):
@@ -1866,7 +1866,7 @@ async def test_early_immediate_is_promoted_to_clarification_without_duplication(
     )
     provider = ScriptedProvider(
         scripts,
-        delays={Stage.IMMEDIATE_RESPONSE: 0.005, Stage.TRIAGE: 0.03},
+        delays={Stage.IMMEDIATE_RESPONSE: 0.001, Stage.TRIAGE: 0.3},
     )
 
     result = await _runtime(tmp_path, provider).run_turn(
@@ -1898,7 +1898,7 @@ async def test_deferred_clarification_resolution_is_deduplicated_by_delivery_sta
     )
     provider = ScriptedProvider(
         scripts,
-        delays={Stage.IMMEDIATE_RESPONSE: 0.005, Stage.TRIAGE: 0.03},
+        delays={Stage.IMMEDIATE_RESPONSE: 0.001, Stage.TRIAGE: 0.3},
     )
 
     result = await _runtime(

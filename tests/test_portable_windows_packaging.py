@@ -157,7 +157,9 @@ def test_portable_profile_has_one_her_engine_and_configurable_regional_providers
         bridge_home=tmp_path,
     ).load()
     manager = FlexibleBackendManager(agent, global_config, secrets)
-    [profile] = json.loads((tmp_path / "agents.json").read_text())["agents"]
+    [profile] = json.loads(
+        (tmp_path / "agents.json").read_text(encoding="utf-8")
+    )["agents"]
 
     assert agent.name == "agent"
     assert profile["display_name"] == "智能体"
@@ -181,7 +183,9 @@ def test_portable_profile_has_one_her_engine_and_configurable_regional_providers
 
 
 def test_portable_remote_is_one_click_with_seven_day_tokens():
-    config = yaml.safe_load((TEMPLATES / "remote-config.yaml").read_text())
+    config = yaml.safe_load(
+        (TEMPLATES / "remote-config.yaml").read_text(encoding="utf-8")
+    )
 
     assert config["security"]["lan_mode"] is False
     assert config["security"]["pairing_auto_approve"] is True

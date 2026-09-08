@@ -35,6 +35,18 @@ from nagare.paths import validate_path_component  # noqa: E402
 RUNS_ROOT = ROOT / "flow" / "runs"
 
 
+def _configure_text_output() -> None:
+    """Keep CLI diagnostics usable on legacy Windows code pages."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
 def _run_dir(run_id: str) -> Path:
     run_id = validate_path_component(run_id, label="run_id")
     return RUNS_ROOT / run_id
@@ -292,6 +304,7 @@ def cmd_eval(args):
 # =============================================================================
 
 def main():
+    _configure_text_output()
     parser = argparse.ArgumentParser(
         prog="hashi-flow",
         description="HASHI Flow — 工作流管理 CLI",

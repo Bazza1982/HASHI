@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 
 import pytest
 
@@ -18,6 +19,10 @@ def _write_pcm(path, *, persona="Fictional Persona: 星砂守望者。"):
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_exact_lowercase_agent_md_is_the_only_persona_source(tmp_path):
     configured = tmp_path / "agent.md"
     _write_pcm(configured)
