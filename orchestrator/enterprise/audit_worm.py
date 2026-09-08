@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from orchestrator.enterprise.audit_anchor import AuditLedgerAnchor, load_audit_ledger_anchor
 
@@ -81,7 +83,7 @@ class FilesystemAuditAnchorSink:
                 content_sha256=str(receipt["content_sha256"]),
                 existed=bool(receipt.get("existed", False)),
             )
-        path = Path(receipt.uri.removeprefix("file://"))
+        path = _path_from_file_uri(receipt.uri)
         if not path.exists() or path.stat().st_size != receipt.bytes_written:
             return False
         return hashlib.sha256(path.read_bytes()).hexdigest() == receipt.content_sha256
@@ -96,3 +98,13 @@ class FilesystemAuditAnchorSink:
 def _safe_path_part(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value or "").strip())
     return cleaned or "unknown"
+
+
+def _path_from_file_uri(uri: str) -> Path:
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        raise ValueError(f"audit anchor receipt URI must use file://: {uri}")
+    uri_path = parsed.path
+    if parsed.netloc and parsed.netloc != "localhost":
+        uri_path = f"//{parsed.netloc}{uri_path}"
+    return Path(url2pathname(uri_path))

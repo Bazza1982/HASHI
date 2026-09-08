@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -138,6 +139,10 @@ def test_preview_is_disposable_and_does_not_create_outbound_state(
     assert not (root / "state" / "agent_moves" / "outbound").exists()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_preview_reports_non_authoritative_retained_identity(tmp_path, monkeypatch):
     root = _source(tmp_path)
     retained = root / "workspaces" / "zelda" / "AGENT.md"
@@ -440,6 +445,10 @@ def test_confirm_rejects_stale_source_snapshot_and_rolls_back_target(
     assert source_move_guard_state(root, "zelda") is None
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_confirm_rejects_changed_retained_identity_and_rolls_back_target(
     tmp_path, monkeypatch
 ):

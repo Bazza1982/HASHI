@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -263,9 +264,16 @@ def test_multi_workzone_prompt_lists_only_enabled_slots(tmp_path: Path):
     section = build_workzone_prompt(state, workspace)
 
     assert section is not None and section[0] == "WORKZONES"
-    assert str(main.resolve()) in section[1]
-    assert str(attached.resolve()) in section[1]
-    assert str(disabled.resolve()) not in section[1]
+    entries = [
+        json.loads(line.removeprefix("- "))
+        for line in section[1].splitlines()
+        if line.startswith("- {")
+    ]
+    assert {entry["path"] for entry in entries} == {
+        str(main.resolve()),
+        str(attached.resolve()),
+    }
+    assert str(disabled.resolve()) not in {entry["path"] for entry in entries}
     assert "revision" not in section[1].lower()
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,7 +40,8 @@ def test_gateway_context_is_owner_only_and_reconstructs_registry(tmp_path):
     path = tmp_path / "context.json"
     context = write_gateway_context(_registry(tmp_path), path)
 
-    assert (path.stat().st_mode & 0o777) == 0o600
+    if os.name != "nt":
+        assert (path.stat().st_mode & 0o777) == 0o600
     assert context.agent == "momo"
     # The retired HER v1 gateway owns its isolated historical circuit breaker;
     # ToolRegistry.max_loops is no longer a source of active execution limits.
@@ -127,6 +129,10 @@ def test_gateway_namespaces_hashi_filesystem_and_hides_unqualified_authorities(t
     assert "access_root scoped" in definitions["hashi_file_read"]["description"]
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows stat modes do not represent the installer-owned NTFS DACL",
+)
 def test_gateway_context_rejects_group_readable_secret_snapshot(tmp_path):
     path = tmp_path / "context.json"
     write_gateway_context(_registry(tmp_path), path)

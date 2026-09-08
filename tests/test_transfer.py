@@ -51,29 +51,37 @@ class TransferTests(unittest.TestCase):
 
     def test_transfer_store_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = TransferStore(Path(tmp) / "bridge_transfers.sqlite")
-            package = {
-                "transfer_id": "trf-456",
-                "source_agent": "lily",
-                "source_instance": "HASHI1",
-                "target_agent": "hashiko",
-                "target_instance": "HASHI9",
-                "created_at": "2026-03-27T14:20:00",
-                "recent_context_block": "ctx",
-                "last_user_message": "u",
-                "last_assistant_message": "a",
-            }
-            store.create_transfer(package, status="received")
-            store.append_event("trf-456", "received", {"step": 1})
-            store.update_transfer("trf-456", status="accepted", request_id="req-0010", ack_text="TRANSFER_ACCEPTED trf-456")
-            record = store.get_transfer("trf-456")
-            self.assertIsNotNone(record)
-            self.assertEqual(record["status"], "accepted")
-            self.assertEqual(record["request_id"], "req-0010")
-            self.assertEqual(record["events"][0]["event_type"], "received")
-            store.update_package("trf-456", {**package, "handoff_summary": "summary"})
-            record = store.get_transfer("trf-456")
-            self.assertEqual(record["package"]["handoff_summary"], "summary")
+            with TransferStore(Path(tmp) / "bridge_transfers.sqlite") as store:
+                package = {
+                    "transfer_id": "trf-456",
+                    "source_agent": "lily",
+                    "source_instance": "HASHI1",
+                    "target_agent": "hashiko",
+                    "target_instance": "HASHI9",
+                    "created_at": "2026-03-27T14:20:00",
+                    "recent_context_block": "ctx",
+                    "last_user_message": "u",
+                    "last_assistant_message": "a",
+                }
+                store.create_transfer(package, status="received")
+                store.append_event("trf-456", "received", {"step": 1})
+                store.update_transfer(
+                    "trf-456",
+                    status="accepted",
+                    request_id="req-0010",
+                    ack_text="TRANSFER_ACCEPTED trf-456",
+                )
+                record = store.get_transfer("trf-456")
+                self.assertIsNotNone(record)
+                self.assertEqual(record["status"], "accepted")
+                self.assertEqual(record["request_id"], "req-0010")
+                self.assertEqual(record["events"][0]["event_type"], "received")
+                store.update_package(
+                    "trf-456", {**package, "handoff_summary": "summary"}
+                )
+                record = store.get_transfer("trf-456")
+                self.assertEqual(record["package"]["handoff_summary"], "summary")
+            store.close()
 
     def test_supported_commands_includes_transfer(self):
         commands = supported_commands(_TransferRuntime())

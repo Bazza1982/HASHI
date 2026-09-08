@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -151,6 +152,10 @@ def test_stage_commit_activate_and_recoverable_rollback(tmp_path):
     assert (source / "workspaces" / "zelda").is_dir()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_schema2_retained_identity_is_persisted_outside_workspace_and_survives_rollback(
     tmp_path,
 ):
@@ -202,6 +207,10 @@ def test_schema2_retained_identity_is_persisted_outside_workspace_and_survives_r
     ]
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_schema2_stage_failure_removes_only_incomplete_transaction(tmp_path, monkeypatch):
     source, target, _ = _roots(tmp_path)
     (source / "workspaces" / "zelda" / "AGENT.md").write_text(

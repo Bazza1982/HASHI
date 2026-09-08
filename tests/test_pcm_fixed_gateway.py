@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -117,7 +118,8 @@ def test_claude_fixed_config_is_owner_only_and_strictly_scoped(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert list(payload["mcpServers"]) == ["hashi_tools"]
     assert payload["mcpServers"]["hashi_tools"]["cwd"] == "/repo"
-    assert path.stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o077 == 0
 
 
 def test_modern_mcp_jsonl_and_legacy_content_length_framing_are_both_supported():

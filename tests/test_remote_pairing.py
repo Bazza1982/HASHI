@@ -1,5 +1,6 @@
 import hmac
 import json
+import os
 import stat
 
 from remote.security.pairing import PairingManager
@@ -25,9 +26,11 @@ def test_paired_instances_file_is_owner_only(tmp_path):
     manager = PairingManager(storage_dir=tmp_path)
     manager.approve_request_direct("client-1", "Client One")
 
-    mode = stat.S_IMODE((tmp_path / "paired_instances.json").stat().st_mode)
+    path = tmp_path / "paired_instances.json"
+    assert path.is_file()
 
-    assert mode == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_pairing_token_expires_at_configured_ttl(monkeypatch, tmp_path):

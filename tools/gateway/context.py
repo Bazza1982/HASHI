@@ -312,11 +312,16 @@ def write_gateway_context(
 
 def load_gateway_context(path: Path) -> GatewayContext:
     path = Path(path)
-    mode = path.stat().st_mode & 0o777
-    if mode & 0o077:
-        raise PermissionError(
-            f"gateway context must be owner-only (0600): {path} mode={mode:o}"
-        )
+    if os.name != "nt":
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            raise PermissionError(
+                f"gateway context must be owner-only (0600): {path} mode={mode:o}"
+            )
+    # Windows' stat result exposes synthetic POSIX bits (normally 0666) and
+    # cannot describe the NTFS DACL.  The portable installer owns the local
+    # data-tree ACL, so rejecting that synthetic mode would make every fixed
+    # Tool Gateway context unreadable on the supported Windows runtime.
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema_version") not in _COMPATIBLE_CONTEXT_SCHEMA_VERSIONS:
         raise ValueError(

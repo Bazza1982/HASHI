@@ -487,7 +487,9 @@ def test_task_message_substitutes_prompt_output_and_exposes_worker_workspace(tmp
 
     assert message["payload"]["prompt"] == "Write about auditability."
     assert message["payload"]["output_spec"][0]["path"] == "result.txt"
-    assert message["worker_workspace"].endswith("run-task-message/workers/writer")
+    assert Path(message["worker_workspace"]) == (
+        tmp_path / "runs" / "run-task-message" / "workers" / "writer"
+    )
 
 
 def test_artifact_store_copies_directories_and_serializes_parallel_index_updates(tmp_path) -> None:

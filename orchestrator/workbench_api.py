@@ -1283,6 +1283,10 @@ class WorkbenchApiServer:
             self._audio_transcript_tasks.clear()
         if self.runner:
             await self.runner.cleanup()
+        transfer_store = getattr(self, "transfer_store", None)
+        close_transfer_store = getattr(transfer_store, "close", None)
+        if callable(close_transfer_store):
+            await asyncio.to_thread(close_transfer_store)
 
     async def handle_auth_login(self, request):
         if not self._is_governed_profile():

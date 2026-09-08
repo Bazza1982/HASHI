@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pytest
 
@@ -23,12 +25,16 @@ def _anchor(tmp_path):
 
 
 def _path_from_uri(uri: str) -> Path:
-    return Path(uri.removeprefix("file://"))
+    parsed = urlparse(uri)
+    uri_path = parsed.path
+    if parsed.netloc and parsed.netloc != "localhost":
+        uri_path = f"//{parsed.netloc}{uri_path}"
+    return Path(url2pathname(uri_path))
 
 
 def test_filesystem_anchor_sink_writes_readonly_hash_named_anchor(tmp_path):
     anchor = _anchor(tmp_path)
-    sink = FilesystemAuditAnchorSink(tmp_path / "worm")
+    sink = FilesystemAuditAnchorSink(tmp_path / "worm anchors")
 
     receipt = sink.write_anchor(anchor)
     path = _path_from_uri(receipt.uri)

@@ -31,6 +31,18 @@ REPO_ROOT = Path(os.environ.get("NAGARE_REPO_ROOT", Path.cwd()))
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
+def _configure_text_output() -> None:
+    """Keep the standalone CLI usable on legacy Windows code pages."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
 def _runs_root(args=None) -> Path:
     return Path(getattr(args, "runs_root", None) or RUNS_ROOT)
 
@@ -249,6 +261,7 @@ def cmd_api(args):
 
 
 def main():
+    _configure_text_output()
     parser = argparse.ArgumentParser(
         prog="nagare",
         description="Nagare workflow CLI",

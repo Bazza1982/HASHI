@@ -2420,7 +2420,7 @@ def test_registry_missing_legacy_instances_file_keeps_live_cache_without_warning
         "HASHI2": PeerInfo(
             instance_id="HASHI2",
             display_name="HASHI2",
-            host="192.168.0.211",
+            host="192.0.2.211",
             port=8767,
             workbench_port=18802,
             platform="wsl",

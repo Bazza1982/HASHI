@@ -23,6 +23,26 @@ class TransferStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._init_schema()
 
+    def close(self) -> None:
+        """Close the persistent SQLite handle exactly once.
+
+        Windows prevents deletion or replacement of an open SQLite file, so
+        deterministic shutdown is part of the store's cross-platform
+        lifecycle rather than optional test cleanup.
+        """
+
+        with self._lock:
+            if self._conn is None:
+                return
+            self._conn.close()
+            self._conn = None
+
+    def __enter__(self) -> TransferStore:
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
     def _init_schema(self) -> None:
         self._conn.executescript(
             """

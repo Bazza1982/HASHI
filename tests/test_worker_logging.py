@@ -124,7 +124,8 @@ def test_worker_warnings_use_shared_animation_filter_and_keep_file_diagnostics(
     assert "library warning diagnostic" in diagnostic
     assert "123456789:abcdefghijklmnopqrstuvwxyz_ABCD" not in diagnostic
     assert "[REDACTED_BOT_TOKEN]" in diagnostic
-    assert files[0].stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert files[0].stat().st_mode & 0o077 == 0
     events = [
         json.loads(line)
         for line in (tmp_path / "events.jsonl").read_text().splitlines()

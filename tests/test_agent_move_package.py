@@ -326,6 +326,10 @@ def test_package_reserves_canonical_agent_md_name(tmp_path):
         )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_package_schema2_preserves_exact_uppercase_identity_as_attachment(tmp_path):
     root = _source_root(tmp_path)
     workspace = root / "workspaces" / "zelda"
@@ -361,6 +365,10 @@ def test_package_schema2_preserves_exact_uppercase_identity_as_attachment(tmp_pa
 
 
 @pytest.mark.parametrize("name", ["Agent.md", "aGeNt.Md"])
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="case-variant identity fixtures overwrite agent.md on Windows",
+)
 def test_package_rejects_other_case_variants_of_reserved_identity(tmp_path, name):
     root = _source_root(tmp_path)
     workspace = root / "workspaces" / "zelda"
@@ -374,6 +382,10 @@ def test_package_rejects_other_case_variants_of_reserved_identity(tmp_path, name
         )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="AGENT.md cannot coexist with agent.md on a case-insensitive Windows tree",
+)
 def test_package_rejects_uppercase_identity_symlink(tmp_path):
     root = _source_root(tmp_path)
     workspace = root / "workspaces" / "zelda"
@@ -390,6 +402,10 @@ def test_package_rejects_uppercase_identity_symlink(tmp_path):
         )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="AGENT.md cannot coexist with agent.md on a case-insensitive Windows tree",
+)
 def test_package_rejects_uppercase_identity_directory(tmp_path):
     root = _source_root(tmp_path)
     (root / "workspaces" / "zelda" / "AGENT.md").mkdir()
@@ -417,6 +433,10 @@ def test_package_rejects_nested_identity_names(tmp_path, relative):
         )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_schema2_snapshot_fingerprint_detects_retained_identity_change(tmp_path):
     root = _source_root(tmp_path)
     retained_path = root / "workspaces" / "zelda" / "AGENT.md"
@@ -438,6 +458,10 @@ def test_schema2_snapshot_fingerprint_detects_retained_identity_change(tmp_path)
     assert archive_snapshot_fingerprint(second) != first_fingerprint
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_schema2_rejects_retained_identity_metadata_mismatch(tmp_path):
     root = _source_root(tmp_path)
     (root / "workspaces" / "zelda" / "AGENT.md").write_text(

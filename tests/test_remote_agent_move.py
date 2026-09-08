@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -281,6 +282,10 @@ def test_remote_agent_move_rejects_plaintext_package_transport(tmp_path):
     assert "Encrypted Agent move transport is required" in response.json()["error"]
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
+)
 def test_schema2_upload_is_refused_clearly_by_schema1_receiver(tmp_path, monkeypatch):
     source = _root(tmp_path, "source", "HASHI1", with_agent=True)
     (source / "workspaces" / "zelda" / "AGENT.md").write_text(
