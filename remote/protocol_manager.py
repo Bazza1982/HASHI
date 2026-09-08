@@ -1265,9 +1265,6 @@ class ProtocolManager:
         from orchestrator.superloop_store import SuperloopStore
 
         receipts = [dict(item) for item in self._inflight.values() if item.get("state") == "reply_delivered_locally"]
-        if not receipts:
-            return
-
         def enqueue(payload: dict) -> str | None:
             for host, port in self._local_workbench_routes():
                 if not self._probe_local_workbench(host, port):
@@ -1280,24 +1277,28 @@ class ProtocolManager:
                     continue
             return None
 
-        def resolve_session(agent: str, request_id: str) -> str | None:
+        def activity(agent: str, request_id: str) -> dict | None:
             path = f"/api/agents/{quote(agent, safe='')}/requests/{quote(request_id, safe='')}/activity?limit=1"
             for host, port in self._local_workbench_routes():
                 if not self._probe_local_workbench(host, port):
                     continue
                 try:
                     result = self._get_json(local_http_url(port, path, host=host), timeout=10)
-                    if result.get("ok") and result.get("session_id"):
-                        return str(result["session_id"])
+                    if result.get("ok"):
+                        return result
                 except Exception:
                     continue
             return None
+
+        def resolve_session(agent: str, request_id: str) -> str | None:
+            result = activity(agent, request_id) or {}
+            return str(result["session_id"]) if result.get("session_id") else None
 
         try:
             service = SuperloopReceiptService(
                 SuperloopStore(root / "superloops"), local_instance=str(self._instance_info.get("instance_id") or ""),
             )
-            await asyncio.get_running_loop().run_in_executor(None, service.process, receipts, enqueue, resolve_session)
+            await asyncio.get_running_loop().run_in_executor(None, service.process, receipts, enqueue, resolve_session, activity)
         except Exception:
             logger.exception("Superloop receipt review deferred; durable receipt retained")
 

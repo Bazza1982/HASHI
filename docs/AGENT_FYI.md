@@ -235,3 +235,14 @@ storage. `/voice`, `/say` and `/whisper` control the configured media paths.
 Use `/status` and configured service/Worker metadata for present-state evidence.
 Do not claim a successful live test based only on a green unit test, a source
 file, a saved setting or an old transcript.
+
+## 2026-09-08 — Superloop controller follow-through
+
+PAO Functions now reconcile admitted controller Runs independently of retained
+Remote receipts. Whole-board disposition omissions after successful completion
+can cause one durable, idempotent recovery Run; failures/cancellations and
+exhausted recovery remain explicit attention items. No Core change, new cron or
+scheduler task-start authority. See `SUPERLOOP_FUNCTION_CONTRACT.md` for the
+record contract and its evidence limits. Scope authorized by the user's request
+to fix proactive management mechanisms; source/test/merge/live adoption must be
+reported separately in instance evidence.

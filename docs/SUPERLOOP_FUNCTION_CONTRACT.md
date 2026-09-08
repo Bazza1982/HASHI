@@ -345,3 +345,41 @@ stable unattended automation
 fully autonomous superloop production release
 human-free long-running execution
 ```
+
+## Controller receipt follow-through (2026-09-08)
+
+Owner: PAO; engineering placement: Functions, with Remote as the replaceable
+adapter. Receipt admission must remain distinct from execution, independent
+review, next-action disposition, runtime adoption and user delivery.
+
+The existing Remote tick reconciles persisted `receipt_reviews.json` against
+the owner-scoped request activity API, even after transport receipt cleanup.
+It preserves the original admission status and records observed execution and
+`followthrough_state` separately. Unavailable or mismatched activity is unknown,
+not successful execution. Failed/cancelled runs require explicit attention and
+are never automatically replayed.
+
+A successfully completed controller run with missing review evidence or missing
+whole-board dispositions receives at most one logical recovery Run. Its exact
+request, original Session and suffixed idempotency key are persisted before
+admission. Response-loss retries reuse that request. Recovery cannot recursively
+create recovery; pause, stop and opt-out block admission. Exhaustion remains
+`needs_attention` for the existing controller/maintenance review, without adding
+another recurring scheduler job.
+
+The original review row records `review_verified`, a loop-local existing
+`review_evidence_ref`, and `dispositions` covering every nonterminal board task:
+
+- `active_dispatch`: task ID, accepted nonterminal dispatch ID and a local
+  execution-observation `evidence_ref`;
+- `action`: task ID and local action `evidence_ref`;
+- `blocked` or `deferred`: task ID, concrete reason, responsible owner and release
+  trigger (including intentional priority/capacity deferral).
+
+These checks detect omissions and absent evidence. They cannot judge whether a
+human or agent's evidence is truthful, whether a blocker is justified, or whether
+an accepted dispatch really executed. The controller must independently verify
+those facts. A reviewed row is historical evidence for that turn, not a perpetual
+certification of tasks created later. Existing heartbeat supervision remains the
+fallback for failures and later changes. Scheduler auto-advance still does not
+dispatch work and must not be enabled as a substitute for controller execution.

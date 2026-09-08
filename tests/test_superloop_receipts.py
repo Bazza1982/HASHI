@@ -221,7 +221,8 @@ def test_response_loss_replays_real_api_admission_after_restart_and_session_swit
         return result
 
     def get(url, timeout):
-        receipt_request = manager._inflight["msg-work:reply"]["request_id"]
+        from urllib.parse import unquote
+        receipt_request = unquote(url.split("/requests/")[1].split("/activity")[0])
         request = SimpleNamespace(match_info={"name": "manager", "request_id": receipt_request}, query={"limit": "1"})
         return json.loads(asyncio.run(server.handle_request_activity(request)).body)
 
@@ -247,3 +248,180 @@ def test_response_loss_replays_real_api_admission_after_restart_and_session_swit
     assert admissions[-1].session_id == first_review.session_id != other["session_id"]
     asyncio.run(restarted._process_inflight_once())
     assert len(admissions) == 3
+    runtime.session_store.mark_request_running(first_review.request_id, worker_id="test")
+    runtime.session_store.finish_request(first_review.request_id, success=True, assistant_text="Stopped after reporting")
+    lost = []
+    def recovery_post(url, request_payload, timeout):
+        result = post(url, request_payload, timeout)
+        if request_payload.get("idempotency_key", "").endswith(":followthrough:1") and not lost:
+            lost.append(True)
+            raise TimeoutError("recovery accepted; response lost")
+        return result
+    restarted._post_json = recovery_post
+    restarted._inflight = {}
+    monkeypatch.setattr("orchestrator.superloop_receipts.time.time", lambda: 10**12 + 31)
+    asyncio.run(restarted._process_inflight_once())
+    recovery_run = admissions[-1]
+    assert recovery_run.replayed is False
+    assert recovery_run.session_id == first_review.session_id
+    monkeypatch.setattr("orchestrator.superloop_receipts.time.time", lambda: 10**12 + 62)
+    asyncio.run(restarted._process_inflight_once())
+    assert admissions[-1].replayed is True
+    assert admissions[-1].request_id == recovery_run.request_id
+    assert len(admissions) == 5
+
+
+@pytest.mark.parametrize('run_state', ['running', 'completed', 'failed', 'cancelled'])
+def test_review_execution_survives_receipt_cleanup_and_never_replays(receipt_case, monkeypatch, run_state):
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    manager._inflight = {}  # Transport retention is not the review lifecycle.
+    manager._get_json = lambda *_a, **_k: {
+        'ok': True, 'request_id': 'req-superloop:receipt', 'agent_id': 'manager',
+        'session_id': 'ses-manager', 'state': run_state,
+        'terminal': run_state != 'running',
+    }
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12)
+    asyncio.run(manager._process_inflight_once())
+    rows = store.load_loop_json_list(store.loop_dir('sl-review') / 'receipt_reviews.json')
+    assert rows[0]['execution_state'] == run_state
+    assert rows[0]['review_verified'] is False
+    if run_state != 'running':
+        assert rows[0]['followthrough_state'] == ('recovery_queued' if run_state == 'completed' else 'needs_attention')
+    asyncio.run(manager._process_inflight_once())
+    assert len(calls) == (3 if run_state == 'completed' else 2)
+
+
+def test_review_requires_evidence_and_rejects_wrong_activity_identity(receipt_case, monkeypatch):
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    path = store.loop_dir('sl-review') / 'receipt_reviews.json'
+    rows = store.load_loop_json_list(path)
+    (store.loop_dir('sl-review') / 'review.md').write_text('Independent review and next action evidence')
+    rows[0].update(review_verified=True, review_evidence_ref='review.md', dispositions=[{
+        'task_id': 'fix', 'kind': 'active_dispatch', 'dispatch_instance_id': 'msg-work', 'evidence_ref': 'review.md',
+    }])
+    store.save_loop_json_list(path, rows)
+    activity = dict(ok=True, request_id='wrong', agent_id='manager',
+                    session_id='ses-manager', state='completed', terminal=True)
+    manager._get_json = lambda *_a, **_k: activity
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12)
+    asyncio.run(manager._process_inflight_once())
+    assert store.load_loop_json_list(path)[0].get('followthrough_state') != 'reviewed'
+    activity['request_id'] = 'req-superloop:receipt'
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12 + 31)
+    asyncio.run(manager._process_inflight_once())
+    assert store.load_loop_json_list(path)[0]['followthrough_state'] == 'reviewed'
+    assert len(calls) == 2
+
+
+def test_single_recovery_is_durable_and_board_omission_is_not_reviewed(receipt_case, monkeypatch):
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    path = store.loop_dir('sl-review') / 'receipt_reviews.json'
+    rows = store.load_loop_json_list(path)
+    (store.loop_dir('sl-review') / 'review.md').write_text('Review done but next work forgotten')
+    rows[0].update(review_verified=True, review_evidence_ref='review.md')
+    store.save_loop_json_list(path, rows)
+    def activity(url, **_kwargs):
+        from urllib.parse import unquote
+        request_id = unquote(url.split('/requests/')[1].split('/activity')[0])
+        return dict(ok=True, request_id=request_id, agent_id='manager',
+                    session_id='ses-manager', state='completed', terminal=True)
+    manager._get_json = activity
+    original_post = manager._post_json
+    def uncertain_post(url, request, timeout):
+        original_post(url, request, timeout)
+        raise TimeoutError('accepted, response lost')
+    manager._post_json = uncertain_post
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12)
+    asyncio.run(manager._process_inflight_once())
+    first = calls[-1]
+    assert first['idempotency_key'].endswith(':followthrough:1')
+    assert store.load_loop_json_list(path)[0]['review_gaps'] == ['fix']
+    manager._inflight = {}
+    manager._post_json = original_post
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12 + 31)
+    asyncio.run(manager._process_inflight_once())
+    assert calls[-1] == first
+    assert len(calls) == 4  # retry same logical admission
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12 + 62)
+    asyncio.run(manager._process_inflight_once())
+    assert len(calls) == 4  # recovery cannot spawn another recovery
+    assert store.load_loop_json_list(path)[0]['followthrough_state'] == 'needs_attention'
+    rows = store.load_loop_json_list(path)
+    rows[0]['dispositions'] = [dict(task_id='fix', kind='blocked', reason='worker busy',
+                                    owner='manager', trigger='original worker receipt')]
+    store.save_loop_json_list(path, rows)
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12 + 93)
+    asyncio.run(manager._process_inflight_once())
+    assert store.load_loop_json_list(path)[0]['followthrough_state'] == 'reviewed'
+
+
+@pytest.mark.parametrize('mode', ['paused', 'opt_out'])
+def test_missing_review_does_not_recover_when_paused_or_disabled(receipt_case, monkeypatch, mode):
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    state = store.load_loop_state('sl-review')
+    if mode == 'paused':
+        state['status'] = 'paused'
+    else:
+        state['receipt_continuation_enabled'] = False
+    store.save_loop_state('sl-review', state)
+    manager._get_json = lambda *_a, **_k: dict(ok=True, request_id='req-superloop:receipt',
+        agent_id='manager', session_id='ses-manager', state='completed', terminal=True)
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12)
+    asyncio.run(manager._process_inflight_once())
+    assert len(calls) == 2
+
+
+def test_accepted_dispatch_without_execution_evidence_leaves_gap(receipt_case):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    _, store, _, _ = receipt_case
+    (store.loop_dir('sl-review') / 'review.md').write_text('Review')
+    row = dict(review_verified=True, review_evidence_ref='review.md', dispositions=[
+        dict(task_id='fix', kind='active_dispatch', dispatch_instance_id='msg-work')])
+    service = SuperloopReceiptService(store, local_instance='HASHI2')
+    assert service.review_gaps('sl-review', row) == ['fix']
+    row['dispositions'][0]['evidence_ref'] = '../outside.md'
+    assert service.review_gaps('sl-review', row) == ['fix']
+    row['dispositions'][0]['evidence_ref'] = 'review.md'
+    assert service.review_gaps('sl-review', row) == []
+
+
+def test_stale_poll_cannot_overwrite_new_recovery_or_concurrent_review(receipt_case, monkeypatch):
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    path = store.loop_dir('sl-review') / 'receipt_reviews.json'
+    def poll(*_args, **_kwargs):
+        rows = store.load_loop_json_list(path)
+        rows[0]['recovery'] = {'controller_request_id': 'req-new-recovery'}
+        rows[0]['followthrough_state'] = 'recovery_queued'
+        store.save_loop_json_list(path, rows)
+        return dict(ok=True, request_id='req-superloop:receipt', agent_id='manager',
+                    session_id='ses-manager', state='completed', terminal=True)
+    manager._get_json = poll
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12)
+    asyncio.run(manager._process_inflight_once())
+    assert store.load_loop_json_list(path)[0]['followthrough_state'] == 'recovery_queued'
+    assert len(calls) == 2
+
+
+def test_malformed_row_does_not_starve_valid_review(receipt_case, monkeypatch):
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    path = store.loop_dir('sl-review') / 'receipt_reviews.json'
+    rows = store.load_loop_json_list(path)
+    store.save_loop_json_list(path, [dict(status='queued', recovery=['bad'], request={})] + rows)
+    manager._get_json = lambda *_a, **_k: dict(ok=True, request_id='req-superloop:receipt',
+        agent_id='manager', session_id='ses-manager', state='failed', terminal=True)
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12)
+    asyncio.run(manager._process_inflight_once())
+    assert store.load_loop_json_list(path)[1]['execution_state'] == 'failed'
+    assert len(calls) == 2

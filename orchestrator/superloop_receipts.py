@@ -33,7 +33,10 @@ class SuperloopReceiptService:
     def process(
         self, receipts: Iterable[dict[str, Any]], enqueue: Callable[[dict], str | None],
         resolve_session: Callable[[str, str], str | None],
+        activity: Callable[[str, str], dict | None] | None = None,
     ) -> None:
+        if activity is not None:
+            self.reconcile(enqueue, activity)
         for receipt in receipts:
             if receipt.get("state") != "reply_delivered_locally" or not receipt.get("request_id"):
                 continue
@@ -57,6 +60,158 @@ class SuperloopReceiptService:
                 self._admit(loop_id, task_id, receipt, enqueue, resolve_session)
             except (OSError, ValueError, TypeError):
                 logger.exception("Superloop receipt admission deferred for %s", loop_id)
+
+    def _evidence_exists(self, loop_id: str, ref: Any) -> bool:
+        if not isinstance(ref, str) or not ref.strip():
+            return False
+        root = self.store.loop_dir(loop_id).resolve()
+        path = (root / ref).resolve()
+        return path.is_relative_to(root) and path.is_file()
+
+    def review_gaps(self, loop_id: str, row: dict) -> list[str]:
+        """Validate recorded dispositions, not the truth of a manager's claims."""
+        gaps = []
+        if row.get("review_verified") is not True or not self._evidence_exists(loop_id, row.get("review_evidence_ref")):
+            gaps.append("review_evidence")
+        state = self.store.load_loop_state(loop_id)
+        tasks = self.store.load_loop_json_list(self.store.resolve_loop_path(loop_id, state.get("taskboard_path"), "taskboard.json"))
+        dispositions = row.get("dispositions") or []
+        if not isinstance(dispositions, list):
+            return gaps + ["dispositions"]
+        by_task = {d.get("task_id"): d for d in dispositions if isinstance(d, dict)}
+        latest = {}
+        for dispatch in self.ledger.load_rows(loop_id):
+            latest[dispatch.get("dispatch_instance_id")] = dispatch
+        for task in tasks:
+            if task.get("status") in {"completed", "cancelled", "canceled", "aborted", "failed"}:
+                continue
+            d = by_task.get(task.get("task_id"), {})
+            valid = False
+            if d.get("kind") == "active_dispatch":
+                dispatch = latest.get(d.get("dispatch_instance_id"), {})
+                valid = (dispatch.get("task_id") == task.get("task_id")
+                         and dispatch.get("status") == "accepted" and dispatch.get("terminal") is False
+                         and self._evidence_exists(loop_id, d.get("evidence_ref")))
+            elif d.get("kind") == "action":
+                valid = self._evidence_exists(loop_id, d.get("evidence_ref"))
+            elif d.get("kind") in {"blocked", "deferred"}:
+                valid = all(isinstance(d.get(k), str) and d[k].strip()
+                            for k in ("reason", "owner", "trigger"))
+            if not valid:
+                gaps.append(str(task.get("task_id")))
+        return gaps
+
+    def reconcile(self, enqueue: Callable[[dict], str | None], activity: Callable[[str, str], dict | None]) -> None:
+        # Independent of transport retention and task collection. HTTP reads run
+        # outside the lock; reload before writing so a concurrent review survives.
+        for path in sorted(self.store.loops_dir.glob("*/receipt_reviews.json")):
+            loop_id = path.parent.name
+            try:
+                state = self.store.load_loop_state(loop_id)
+                controller = state.get("controller") or {}
+                if not isinstance(controller, dict) or _identity(controller.get("instance")) != self.local_instance:
+                    continue
+                for snapshot in self.store.load_loop_json_list(path):
+                    if not isinstance(snapshot, dict) or snapshot.get("status") != "queued":
+                        continue
+                    if snapshot.get("followthrough_state") == "reviewed":
+                        continue
+                    now = time.time()
+                    if float(snapshot.get("check_after") or 0) > now:
+                        continue
+                    if not isinstance(snapshot.get("request"), dict) or not isinstance(snapshot.get("recovery", {}), dict):
+                        continue
+                    recovery = snapshot.get("recovery") or {}
+                    target = recovery if recovery.get("controller_request_id") else snapshot
+                    request_id = target.get("controller_request_id")
+                    if not request_id:
+                        continue
+                    try:
+                        observed = activity(str(controller.get("agent") or ""), str(request_id))
+                    except Exception:
+                        observed = None
+                    with loop_dispatch_lock(self.store, loop_id):
+                        rows = self.store.load_loop_json_list(path)
+                        row = next((r for r in rows if r.get("idempotency_key") == snapshot.get("idempotency_key")), None)
+                        if row is None or row.get("followthrough_state") == "reviewed":
+                            continue
+                        if not isinstance(row.get("request"), dict) or not isinstance(row.get("recovery", {}), dict):
+                            continue
+                        current_recovery = row.get("recovery") or {}
+                        current_target = current_recovery if current_recovery.get("controller_request_id") else row
+                        current_state = self.store.load_loop_state(loop_id)
+                        if (current_target.get("controller_request_id") != request_id
+                                or current_state.get("controller") != controller
+                                or row.get("controller_agent") != controller.get("agent")
+                                or (row.get("request") or {}).get("agent") != controller.get("agent")):
+                            continue
+                        row["check_after"] = now + RETRY_SECONDS
+                        expected_session = (row.get("request") or {}).get("session_id")
+                        if not (isinstance(observed, dict) and observed.get("ok") is True
+                                and observed.get("request_id") == request_id
+                                and observed.get("agent_id") == controller.get("agent")
+                                and observed.get("session_id") == expected_session):
+                            row["observation_error"] = "activity_unavailable_or_identity_mismatch"
+                            self.store.save_loop_json_list(path, rows)
+                            continue
+                        row.pop("observation_error", None)
+                        row["execution_state"] = observed.get("state")
+                        row["observed_request_id"] = request_id
+                        gaps = self.review_gaps(loop_id, row)
+                        row["review_gaps"] = gaps
+                        if observed.get("terminal") is not True:
+                            row["followthrough_state"] = "awaiting_execution"
+                        elif observed.get("state") != "completed":
+                            row["followthrough_state"] = "needs_attention"
+                        elif not gaps:
+                            row["followthrough_state"] = "reviewed"
+                        else:
+                            row["followthrough_state"] = "needs_attention"
+                            state = self.store.load_loop_state(loop_id)
+                            permitted = (state.get("receipt_continuation_enabled") is True
+                                and evaluate_dispatch_interlock(self.store, loop_id, check_work_blockers=False).allowed)
+                            recovery = row.get("recovery")
+                            if permitted and not (recovery or {}).get("controller_request_id"):
+                                if recovery is None:
+                                    request = dict(row["request"])
+                                    request["idempotency_key"] = row["idempotency_key"] + ":followthrough:1"
+                                    request["text"] = (
+                                        f"Superloop follow-through recovery: {loop_id}. The prior controller run "
+                                        "completed but its review or whole-board dispositions are incomplete. "
+                                        "Read receipt_reviews.json and the current board. This is the single bounded "
+                                        "recovery for that receipt; do not resend original work or ACK peers. "
+                                        + self._closeout_policy()
+                                    )
+                                    recovery = row["recovery"] = {"request": request, "attempts": 0}
+                                recovery["attempts"] += 1
+                                self.store.save_loop_json_list(path, rows)
+                                try:
+                                    admitted = enqueue(recovery["request"])
+                                    if admitted:
+                                        recovery["controller_request_id"] = admitted
+                                        row["followthrough_state"] = "recovery_queued"
+                                except Exception:
+                                    recovery["last_error"] = "admission_unconfirmed"
+                        self.store.save_loop_json_list(path, rows)
+            except (OSError, ValueError, TypeError, KeyError):
+                logger.exception("Superloop review reconciliation deferred for %s", loop_id)
+
+    @staticmethod
+    def _closeout_policy() -> str:
+        return (
+            "Review the entire taskboard and current worker activity, queues and scheduled work, not only "
+            "the triggering task. Take every currently authorized, conflict-free next action now; "
+            "a runtime adoption wait must not block independent development or review. Before ending, "
+            "record review_verified and a local review_evidence_ref in the ORIGINAL receipt_reviews row, "
+            "plus dispositions for every nonterminal task: {task_id, kind: active_dispatch, dispatch_instance_id, evidence_ref} "
+            "with a local recent execution observation for existing work; {task_id, kind: action, evidence_ref} for actual work performed; or "
+            "{task_id, kind: blocked|deferred, reason, owner, trigger} for a concrete dependency, capacity, "
+            "priority or approval wait. Use existing SuperloopStore persistence. Evidence paths are files "
+            "relative to this loop. A task label, runner state change or promise is not execution evidence. "
+            "Verify dispatch execution separately, reuse existing receipt/deadline triggers and do not add "
+            "recurring polling. Report user outcomes, unresolved impact and next responsibility visibly. "
+            "Review records never prove runtime adoption or terminal delivery."
+        )
 
     def _match(self, loop_id: str, receipt: dict) -> str | None:
         state = self.store.load_loop_state(loop_id)
@@ -144,7 +299,8 @@ class SuperloopReceiptService:
                     "Independently inspect the evidence and take the next authorized action, or record "
                     "the concrete blocker, owner and release trigger. Receipt admission and worker claims "
                     "do not prove review, merge, runtime adoption or user delivery. Do not acknowledge "
-                    "the peer or resend the original assignment. Report progress visibly to the user."
+                    "the peer or resend the original assignment. Report progress visibly to the user. "
+                    + self._closeout_policy()
                 ),
             }
             # Session-scoped API deduplication needs the original Session and
