@@ -510,6 +510,37 @@ def _add(acc: dict, record: dict) -> None:
     acc["requests"] += 1
 
 
+def format_usage_cost(data: dict[str, Any]) -> str:
+    """Format a summary cost without treating an unknown subtotal as a total.
+
+    ``get_summary`` deliberately keeps ``cost_usd`` numeric for backwards
+    compatibility: it is the sum of known records, while
+    ``unknown_cost_requests`` counts records missing a cost.  Display callers
+    must therefore render that amount as a known subtotal whenever any request
+    remains unknown.  A genuine provider/local zero has an unknown count of
+    zero and remains an exact ``$0.0000``.
+    """
+
+    from orchestrator import ui_language
+
+    cost = float(data.get("cost_usd") or 0.0)
+    unknown_requests = max(0, int(data.get("unknown_cost_requests") or 0))
+    if unknown_requests == 0:
+        return f"${cost:.4f}"
+
+    total_requests = max(0, int(data.get("requests") or 0))
+    known_requests = max(0, total_requests - unknown_requests)
+    if known_requests == 0 and cost == 0.0:
+        return ui_language.tr("usage.cost.unknown")
+
+    key = (
+        "usage.cost.partial.one"
+        if unknown_requests == 1
+        else "usage.cost.partial.many"
+    )
+    return ui_language.tr(key, cost=f"${cost:.4f}", count=unknown_requests)
+
+
 def format_summary_text(
     summary: dict,
     agent_name: str = "",
@@ -530,7 +561,6 @@ def format_summary_text(
             data.get("total_tokens")
             or (data["input"] + data["output"] + data["thinking"])
         )
-        cost = data["cost_usd"]
         req = data["requests"]
         thinking_note = (
             f" + {_fmt_tokens(data['thinking'])} {label('thinking', 'thinking')}"
@@ -542,7 +572,8 @@ def format_summary_text(
             f"  {_fmt_tokens(data['input'])} {label('input', 'in')} + "
             f"{_fmt_tokens(data['output'])} {label('output', 'out')}{thinking_note}\n"
             f"  {_fmt_tokens(tokens)} {label('total', 'total')} · "
-            f"{label('requests', '{count} requests').format(count=req)} · <b>${cost:.4f}</b>"
+            f"{label('requests', '{count} requests').format(count=req)} · "
+            f"<b>{format_usage_cost(data)}</b>"
         )
 
     all_t = summary.get("all_time", {})
@@ -567,7 +598,7 @@ def format_summary_text(
             tokens = data["input"] + data["output"]
             lines.append(
                 f"  <code>{model}</code>  {_fmt_tokens(tokens)} "
-                f"{label('tokens', 'tokens')}  ${data['cost_usd']:.4f}"
+                f"{label('tokens', 'tokens')}  {format_usage_cost(data)}"
             )
 
     return "\n".join(lines)
@@ -575,15 +606,29 @@ def format_summary_text(
 
 def format_status_line(summary: dict) -> str:
     """One-line usage summary for /status full."""
+    from orchestrator import ui_language
+
     all_t = summary.get("all_time", {})
     sess = summary.get("session")
     if all_t.get("requests", 0) == 0:
         return "no data"
     all_tokens = all_t["input"] + all_t["output"]
-    parts = [f"all-time {_fmt_tokens(all_tokens)} tokens (${all_t['cost_usd']:.4f})"]
+    parts = [
+        ui_language.tr(
+            "usage.status.all_time",
+            tokens=_fmt_tokens(all_tokens),
+            cost=format_usage_cost(all_t),
+        )
+    ]
     if sess and sess.get("requests", 0) > 0:
         sess_tokens = sess["input"] + sess["output"]
-        parts.append(f"session {_fmt_tokens(sess_tokens)} (${sess['cost_usd']:.4f})")
+        parts.append(
+            ui_language.tr(
+                "usage.status.session",
+                tokens=_fmt_tokens(sess_tokens),
+                cost=format_usage_cost(sess),
+            )
+        )
     return " · ".join(parts)
 
 

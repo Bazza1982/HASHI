@@ -12,6 +12,7 @@ _USAGE_TOTAL_NUMERIC_FIELDS = (
     "thinking",
     "total_tokens",
     "cost_usd",
+    "unknown_cost_requests",
     "requests",
     "provider_requests",
     "provider_metrics_records",
@@ -140,6 +141,8 @@ async def cmd_usage(runtime: Any, update: Any, context: Any) -> None:
     show_all = bool(args and args[0] == "all")
 
     if show_all:
+        from tools.token_tracker import format_usage_cost
+
         orchestrator = getattr(runtime, "orchestrator", None)
         if orchestrator is None:
             await runtime._reply_text(
@@ -147,7 +150,7 @@ async def cmd_usage(runtime: Any, update: Any, context: Any) -> None:
             )
             return
         lines = [f"<b>{ui_language.tr('usage.title_all')}</b>\n"]
-        total_cost = 0.0
+        total_usage = _empty_usage_total()
         for agent_runtime in orchestrator.runtimes:
             summary = get_summary(
                 agent_runtime.workspace_dir,
@@ -157,22 +160,22 @@ async def cmd_usage(runtime: Any, update: Any, context: Any) -> None:
             if all_time.get("requests", 0) == 0:
                 continue
             tokens = all_time["input"] + all_time["output"]
-            cost = all_time["cost_usd"]
-            total_cost += cost
+            _merge_usage_total(total_usage, all_time)
             session = summary.get("session", {}) or {}
             session_tokens = session.get("input", 0) + session.get("output", 0)
-            session_cost = session.get("cost_usd", 0.0)
             lines.append(
                 f"<b>{agent_runtime.name}</b>  "
                 + ui_language.tr(
-                    "usage.agent_line", tokens=f"{tokens // 1000}K", cost=f"{cost:.4f}"
+                    "usage.agent_line",
+                    tokens=f"{tokens // 1000}K",
+                    cost=format_usage_cost(all_time),
                 )
                 + (
                     "  ("
                     + ui_language.tr(
                         "usage.session_suffix",
                         tokens=f"{session_tokens // 1000}K",
-                        cost=f"{session_cost:.4f}",
+                        cost=format_usage_cost(session),
                     )
                     + ")"
                     if session.get("requests")
@@ -180,7 +183,7 @@ async def cmd_usage(runtime: Any, update: Any, context: Any) -> None:
                 )
             )
         lines.append(
-            f"\n<b>{ui_language.tr('usage.total_cost', cost=f'{total_cost:.4f}')}</b>"
+            f"\n<b>{ui_language.tr('usage.total_cost', cost=format_usage_cost(total_usage))}</b>"
         )
         await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
         return
@@ -217,7 +220,11 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     try:
-        from tools.token_tracker import fmt_tokens, get_summary_extended
+        from tools.token_tracker import (
+            fmt_tokens,
+            format_usage_cost,
+            get_summary_extended,
+        )
     except ImportError:
         await runtime._reply_text(update, ui_language.tr("usage.tracker_unavailable"))
         return
@@ -287,7 +294,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
                 session_part = (
                     "  <i>("
                     + ui_language.tr(
-                        "usage.session_cost", cost=f"{session['cost_usd']:.4f}"
+                        "usage.session_cost", cost=format_usage_cost(session)
                     )
                     + ")</i>"
                     if session.get("requests", 0) > 0
@@ -298,7 +305,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
                     f"  {ui_language.tr('usage.input_short')}:{fmt_tokens(all_time['input'])}"
                     f"  {ui_language.tr('usage.output_short')}:{fmt_tokens(all_time['output'])}"
                     f"{thinking}"
-                    f"  <b>${all_time['cost_usd']:.4f}</b>{session_part}"
+                    f"  <b>{format_usage_cost(all_time)}</b>{session_part}"
                 )
                 metrics = _format_usage_metrics(all_time, fmt_tokens)
                 if metrics:
@@ -311,7 +318,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
                     f"{ui_language.tr('usage.input_short')}:{fmt_tokens(backend_total['input'])}"
                     f"  {ui_language.tr('usage.output_short')}:{fmt_tokens(backend_total['output'])}"
                     f"{_format_reasoning_annotation(backend_total, fmt_tokens)}"
-                    f"  <b>${backend_total['cost_usd']:.4f}</b>"
+                    f"  <b>{format_usage_cost(backend_total)}</b>"
                 )
                 metrics = _format_usage_metrics(backend_total, fmt_tokens)
                 if metrics:
@@ -325,7 +332,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
         f"  {ui_language.tr('usage.input_short')}:{fmt_tokens(all_time['input'])}"
         f"  {ui_language.tr('usage.output_short')}:{fmt_tokens(all_time['output'])}"
         + _format_reasoning_annotation(all_time, fmt_tokens)
-        + f"  <b>${all_time['cost_usd']:.4f}</b>"
+        + f"  <b>{format_usage_cost(all_time)}</b>"
         f"  ({ui_language.tr('usage.requests_short', count=all_time['requests'])})"
     )
     all_time_metrics = _format_usage_metrics(all_time, fmt_tokens)
@@ -339,7 +346,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
             f"{ui_language.tr('usage.input_short')}:{fmt_tokens(session['input'])}"
             f"  {ui_language.tr('usage.output_short')}:{fmt_tokens(session['output'])}"
             + _format_reasoning_annotation(session, fmt_tokens)
-            + f"  <b>${session['cost_usd']:.4f}</b>"
+            + f"  <b>{format_usage_cost(session)}</b>"
         )
         session_metrics = _format_usage_metrics(session, fmt_tokens)
         if session_metrics:
@@ -356,7 +363,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
             f"  {ui_language.tr('usage.input_short')}:{fmt_tokens(weekly['input'])}"
             f"  {ui_language.tr('usage.output_short')}:{fmt_tokens(weekly['output'])}"
             + _format_reasoning_annotation(weekly, fmt_tokens)
-            + f"  <b>${weekly['cost_usd']:.4f}</b>"
+            + f"  <b>{format_usage_cost(weekly)}</b>"
         )
         weekly_metrics = _format_usage_metrics(weekly, fmt_tokens)
         if weekly_metrics:
@@ -371,7 +378,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
             f"  {ui_language.tr('usage.input_short')}:{fmt_tokens(monthly['input'])}"
             f"  {ui_language.tr('usage.output_short')}:{fmt_tokens(monthly['output'])}"
             + _format_reasoning_annotation(monthly, fmt_tokens)
-            + f"  <b>${monthly['cost_usd']:.4f}</b>"
+            + f"  <b>{format_usage_cost(monthly)}</b>"
         )
         monthly_metrics = _format_usage_metrics(monthly, fmt_tokens)
         if monthly_metrics:

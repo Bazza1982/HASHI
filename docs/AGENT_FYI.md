@@ -204,6 +204,13 @@ activity supplies detailed events without becoming another status owner.
 Do not claim a successful live test based only on a green unit test, a source
 file, a saved setting or an old transcript.
 
+Usage summaries preserve two distinct facts: `cost_usd` is the known subtotal,
+while `unknown_cost_requests` counts requests without a cost. `/usage`, `/token`
+and `/status` must use the shared formatter: show “cost unknown” when every cost
+is unknown, or a known subtotal plus the missing-request count when only part is
+known. A zero with no unknown requests remains an exact provider/local zero.
+Never turn an unknown or partial cost into a complete `$0.0000` total.
+
 ## Superloop controller follow-through
 
 PAO rechecks the latest receipt against the whole board; recovery is once only.
