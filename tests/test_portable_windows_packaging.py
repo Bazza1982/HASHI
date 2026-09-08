@@ -893,6 +893,8 @@ def test_portable_installer_has_update_rollback_lineage_and_language_contract():
     assert "identity_lineage_id" in rollback
     assert "Move-Item -LiteralPath $script:PreviousRoot" in rollback
     assert "@((Get-Item" not in rollback
+    assert "-NotePropertyName 'rolled_back_at_utc'" in rollback
+    assert "$marker.rolled_back_at_utc =" not in rollback
     assert re.search(
         r"foreach \(\$item in @\(\s*"
         r"Get-Item -LiteralPath \$Root -Force\s*"

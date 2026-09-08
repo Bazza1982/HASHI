@@ -138,7 +138,14 @@ function Set-MarkerLocation {
     if ($null -eq $marker) { throw "The HASHI marker is unreadable in $Root." }
     $marker.install_root = [System.IO.Path]::GetFullPath($Root)
     $marker.install_state = $State
-    $marker.rolled_back_at_utc = [DateTime]::UtcNow.ToString('o')
+    # ConvertFrom-Json returns a fixed-shape PSCustomObject.  The initial
+    # install marker intentionally has no rollback timestamp, so assigning a
+    # new property fails under StrictMode.  Add-Member handles both the first
+    # rollback and later rollbacks without weakening marker validation.
+    $marker | Add-Member `
+        -NotePropertyName 'rolled_back_at_utc' `
+        -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) `
+        -Force
     Write-Utf8Json -Path $path -Value $marker
 }
 
