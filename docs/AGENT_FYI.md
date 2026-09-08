@@ -1,61 +1,52 @@
 # HASHI Agent FYI
 
-All admitted turns, including protocol/API/background work, request visible
-delivery; legacy `silent=true` or `deliver_to_telegram=false` cannot suppress
-it. Preserve destination authorization and terminal reply rules.
-HChat shows exact final payloads: queue admission is `queued`; `sent` needs a
-confirmed Connector receipt. `reply_sent`/`completed` alone prove no delivery;
-failure wins over contradictory success flags. Terminal replies display the
-body verbatim, without ACK loops. See [visibility](HASHI_AGENT_ACTIVITY_VISIBILITY.md)
-and [delivery](HCHAT_DELIVERY_BOUNDARY_PLAN.md). Source adoption and delivery
-require separate evidence.
+Every admitted turn, including protocol/API/background work, requires visible
+delivery; legacy suppression flags cannot override it. Preserve destination
+authorization and terminal-reply rules. HChat exposes exact final payloads:
+admission is `queued`, while `sent` requires a confirmed Connector receipt.
+`reply_sent`/`completed` alone are not delivery proof, and failure wins over
+contradictory success flags. Terminal replies are verbatim and never create ACK
+loops. Source adoption and delivery need separate evidence; see
+[visibility](HASHI_AGENT_ACTIVITY_VISIBILITY.md) and
+[delivery](HCHAT_DELIVERY_BOUNDARY_PLAN.md).
 
 Superloop receipt review requires opt-in, matching identities and Session-pinned
-idempotency; pause/stop blocks admission. No ACK loops. Delivery needs scoped,
-versioned checks and reviewed original evidence at every closeout entry. Give
-each remaining check its own next step; adoption waits cannot hide independent
-work. Derive outcome reports from taskboard facts; report content is not delivery.
-See [contract](SUPERLOOP_FUNCTION_CONTRACT.md).
+idempotency; pause/stop blocks admission. Closeout requires scoped, versioned
+checks and reviewed original evidence. Keep an independent next step for every
+remaining check. Reports derive from taskboard facts but are not delivery. See
+the [contract](SUPERLOOP_FUNCTION_CONTRACT.md).
 
-Reference updated: 2026-09-08. This is a compact orientation, not a task queue,
-permission grant, or proof that the running instance has adopted current source.
-`/fyi` reads this reference again and identifies its content revision. Check live
-configuration/status before claiming an Engine, model, tool, or route is available.
+Reference updated: 2026-09-08. This orientation is neither a task queue,
+permission grant, nor live-adoption proof. `/fyi` reloads it and identifies the
+revision. Verify live status before claiming any Engine, model, tool, or route.
 
-Codex token backfill derives prices from the shared metering table. Missing
-models/prices stay unknown; explicitly provider-reported costs retain their
-values. Preview shows incomplete totals without a numeric cost delta. Review
-the legacy sequential event matching before any real backfill; merging this
-tool does not repair history or adopt a running usage renderer. See
+Codex token backfill uses the shared metering table. Missing prices remain
+unknown and provider-reported costs are retained. Preview marks incomplete
+totals without inventing a delta. Review legacy event matching before real
+backfill; merging the tool repairs neither history nor live renderers. See the
 [cost contract](METER_COST_DISPLAY_PLAN.md).
 
-Portable Windows derives its Python release and standard dependency lock from
-the shared runtime policy. Its tracked source payload includes `__main__.py`,
-`pyproject.toml`, the policy-selected lock, and the complete protected Core
-manifest. Release builds pass exact commit/tree expectations, keep the source
-clean and unchanged, and run the shared runtime checker against the bundled
-interpreter before publication. A source checkpoint does not prove a complete
-bundle, installation, or running adoption; see the
-[Portable builder](../packaging/portable_windows/README.md).
+Portable Windows derives Python and its standard dependency lock from shared
+runtime policy. Its source payload includes `__main__.py`, `pyproject.toml`, the
+selected lock and full protected-Core manifest. Releases require an exact clean
+commit/tree plus the shared runtime check on the bundled interpreter. A source
+checkpoint proves no bundle, install, or adoption; see the
+[builder](../packaging/portable_windows/README.md).
 
 ## Engineering rules and authority
 
-Before changing HASHI, read [AGENTS.md](../AGENTS.md), the
-[System Architecture](../ARCHITECTURE.md), and
-[Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md). Use the
-[Command UI Style Guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) for user surfaces and
-[Testing Policy](TESTING_POLICY.md) for verification.
+Before changing HASHI, read [AGENTS.md](../AGENTS.md),
+[Architecture](../ARCHITECTURE.md), and
+[runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md). Follow the
+[UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) and [test policy](TESTING_POLICY.md).
 
-Current user limits on restart, publication, messaging, or other operations
-remain binding. Catalogs, old approvals, examples, and history do not grant new
-authority.
+Current user limits on restart, publication, messaging and other operations
+remain binding; catalogs, examples, history and old approvals grant no authority.
 
-Core protection derives only from
-`orchestrator.runtime_contract.CORE_SOURCE_PATHS`. Normal behavior belongs in
-Functions or configuration. Resolve instance model/effort choices through
-`allowed_backends` and the Function-owned options view; do not duplicate
-catalogs or move product behavior into Core. Run the Core guard before edits and
-before completion.
+Core protection derives only from `orchestrator.runtime_contract.CORE_SOURCE_PATHS`.
+Normal behavior belongs in Functions or configuration. Resolve model/effort via
+`allowed_backends` and the Function-owned options view; never duplicate catalogs
+or put product behavior in Core. Run its guard before edits and completion.
 
 API Gateway menus and routing use active Agents' configured opt-ins. Selection
 conflicts fail closed; failed initialization preserves the prior selection.
@@ -66,121 +57,105 @@ Scheduler Function actions propagate typed unsuccessful results instead of
 treating a completed RPC as successful work. For Wiki maintenance, a due-time
 record is only an attempt; the dated consolidation embed event remains the
 completion fact. Operator automation packages remain instance-local.
-The shared PCM evidence gate requires the latest same-local-day clean scan to
-precede the latest clean embed outcome; newer scan/embed failures and malformed
-evidence block Wiki consumers, while a clean zero-pending embed is completion.
+The PCM evidence gate requires today's latest clean scan before the latest clean
+embed. Newer failures or malformed evidence block Wiki consumers; a clean
+zero-pending embed completes the work.
 Remote routing uses its Remote-owned live endpoint cache when the optional
 legacy `instances.json` view is absent; that valid pre-state is quiet and does
 not cause Remote to invent instance configuration.
 
-Source, immutable artifacts, running generations, and terminal delivery are
-separate evidence. `/reboot min` replaces one Agent Worker;
-`/reboot same|max` keeps its declared Agent scope. Broad shared replacement
-uses `python main.py --replace-functions`, requires operational authority, and
-cannot cross a Core/Python/API fingerprint change. Read
-[Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) before changing lifecycle
-boundaries.
+Source, immutable artifacts, running generations and terminal delivery are
+separate evidence. `/reboot min` replaces one Agent Worker; `/reboot same|max`
+keeps its declared scope. Shared replacement uses
+`python main.py --replace-functions`, needs authority, and cannot cross a
+Core/Python/API fingerprint change. See [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md).
 
-Startup qualification includes configured post-Turn observer factories and
-their dependencies. Connector readiness is derived after actual activation.
-Worker warnings remain in per-process files and enter the shared terminal only
-when the supervisor advertises log-relay support. Older peers ignore the
-optional field safely. These repairs need the matching shared and Agent
-generations; offline tests do not prove adoption.
+Startup qualification covers configured post-Turn observers and dependencies;
+Connector readiness follows activation. Worker warnings stay per-process and
+reach the shared terminal only with advertised log relay. Older peers safely
+ignore that optional field. Matching shared and Agent generations—not offline
+tests—prove adoption.
 
 ## Reboot outcome notifications
 
-Reboot acknowledges, saves outcomes, and notifies via same-instance Bot fallback.
-`/reboot status` is actor/chat/thread-scoped. Delivery retries never rerun reboot.
-Busy/unreadable activity rejects early; bounded route/drain failures report their
-stage and verified recovery. Shared and Agent Functions both need adoption.
+Reboot acknowledges, saves outcomes and notifies through a same-instance Bot
+fallback. `/reboot status` is actor/chat/thread-scoped; delivery retries never
+rerun reboot. Busy or unreadable activity rejects early. Route/drain failures
+report their stage and verified recovery. Both Function scopes need adoption.
 See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
 ## System ownership
 
 - **PCM** owns Persona, Context and Memory sources, authority, retrieval and
-  projection. It does not grant tools or own conversation control state.
+  projection—not tools or conversation control.
 - **PAO** owns Agents, HASHI Conversation Sessions, Runs, Engine binding,
   Workzones, jobs, scheduling, routing and outer recovery.
-- **HER v2** is HASHI's native Engine (Harness). It owns its durable Engine
-  Sessions, Turns, internal Model Provider routing, recovery and metering.
-- **Frontend Connectors** expose HASHI via Telegram, WhatsApp, the built-in TUI,
-  Backend API and Remote contracts. Workbench is retired; legacy configuration
-  names such as `workbench_port` refer to Backend API compatibility.
+- **HER v2**, HASHI's native Engine, owns durable Engine Sessions and Turns,
+  internal Model Provider routing, recovery and metering.
+- **Frontend Connectors** expose Telegram, WhatsApp, TUI, Backend API and Remote.
+  Workbench is retired; names such as `workbench_port` are API compatibility.
 
-Qualify Engine Provider versus Model Provider and HASHI Conversation Session
-versus Engine Session when ambiguous. Frontend history is a projection, not a
-second authoritative chat archive. See the owning architecture documents.
+Distinguish Engine from Model Provider and HASHI Conversation from Engine
+Session. Frontend history is a projection, not another authoritative archive.
 
 ## Configuration and discovery
 
-`/move` derives destinations and capabilities from the trusted live Remote
-peer directory and refreshes it before staging or confirmation. It rejects
-offline, unknown, or unsupported targets and never starts a reboot itself.
-Migration state belongs to `bridge_home`; see
-[Agent Move](HASHI_AGENT_MOVE_V1.md).
+`/move` refreshes trusted live Remote peers before staging/confirmation, rejects
+offline, unknown or unsupported targets, and never starts reboot itself.
+Migration state belongs to `bridge_home`; see [Agent Move](HASHI_AGENT_MOVE_V1.md).
 
-Read the active instance's configuration and registry for identity, workspaces,
-Agents, endpoints, and ports. Never infer them from folder names or old memory.
-Keep credentials in configured secret stores and out of replies, tests, logs,
-and tracked files.
+Read active configuration/registry for identities, workspaces, Agents, endpoints
+and ports; never infer them from paths or memory. Keep credentials only in
+configured stores and out of replies, tests, logs and tracked files.
 
-Agent identity uses the exact lower-case
-`workspaces/<agent_id>/agent.md` with strict `[persona]`, `[sys]`, and
-optional `[memory]` blocks. Move packaging rejects case-folded aliases and
-closes SQLite snapshots before cleanup. Seeds live in `agent_seeds/`. Local Agent
-creation or adoption needs the user's operational authority.
+Agent identity is the exact lower-case `workspaces/<agent_id>/agent.md`, with
+strict `[persona]`, `[sys]` and optional `[memory]` blocks. Move rejects
+case-folded aliases and closes SQLite snapshots before cleanup. Seeds live in
+`agent_seeds/`; local creation/adoption requires operational authority.
 
 ## Working modes and Engine selection
 
-Configured `type: "flex"` names the supported runtime container. The user's
-working mode is separately **Fixed** or **Flex**; never infer it from `type`.
+Configured `type: "flex"` names a runtime container, not the separately selected
+**Fixed** or **Flex** working mode.
 
-- `/mode` shows the effective mode; `/mode fixed` uses persistent Engine sessions.
-- `/mode flex` explicitly chooses full context assembly for each request.
-- `/backend` opens selection directly in either mode. Successful selection saves
-  Fixed for a session-capable target and Flex for a stateless target. Failed
-  initialization/session setup/persistence retains the original selection.
-- Plain selection and `+` continuity selection have the same mode policy.
-- Memory+ is an independent continuity setting, preserved across backend changes.
-- Retired Wrapper, Audit and Dual-brain modes are not selectable product choices.
+- `/mode` shows it; Fixed uses persistent Engine sessions, while Flex assembles
+  full context per request.
+- `/backend` works in either mode. Success chooses Fixed for session-capable and
+  Flex for stateless targets; any setup/persistence failure preserves the old
+  selection. Plain and `+` continuity selection share this policy.
+- Memory+ is independent and survives backend changes. Retired Wrapper, Audit
+  and Dual-brain modes are not choices.
 
-Inspect `/mode` and the loaded generation for the live contract. See
-[Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
+Inspect `/mode` and loaded generation for the live contract; see
+[working modes](FIXED_FLEX_WORKING_MODES.md).
 
-HER's execution modes are a different setting: Direct (`zero`), Strategic
-(`low`) and Planned (`medium`). Higher retained policies are not public modes.
-`/model` configures Quick/Pro targets, routing, reasoning and Advanced/Compact
-settings. `/effort` means HER execution mode on HER and model effort elsewhere.
-Use the selected Engine/provider's actual capability choices rather than a
-remembered global list. `/habit` manages the default-off HER Habit/Meditation path.
+HER execution is separate: Direct (`zero`), Strategic (`low`) or Planned
+(`medium`); higher retained policies are not public. `/model` configures
+Quick/Pro routing, reasoning and Advanced/Compact. `/effort` means HER mode on
+HER and model effort elsewhere. Use live provider capabilities, not a remembered
+global list. `/habit` manages the default-off Habit/Meditation path.
 
-HER Review uses Git evidence for normal workspaces and bounded filesystem
-content hashes when the root is Git-ignored or outside Git. Equal-size edits are
-detected; stability applies only to covered bytes and Git observations.
+HER Review uses Git evidence normally and bounded content hashes for ignored or
+non-Git roots. Equal-size edits are detected; stability covers only observed data.
 
 ## Conversation, memory and recovery
 
-- `/new` creates/selects a new HASHI Conversation Session; `/fresh` advances its
-  context generation without deleting stored logs or memories.
-- `/handoff` restores up to the latest ten completed exchanges into a fresh
-  Engine Session. `/compact` compacts eligible history and recovers pending HER
-  WIP evidence into a bounded recovery capsule before clearing that journal.
-  WIP recovery and normal history compaction have independent eligibility rules.
-- `/memory` controls ordinary memory injection and `/memory plus on|off` controls
-  Memory+ independently. `/notepad` exposes Today, Carryover, History and Find.
-  Open items are background, not automatically queued tasks.
-- `/stop` preserves interrupted task evidence. A subsequent explicit continuation
-  resumes that task; unrelated input remains unrelated.
-- `/retry` retries using the defined recovery flow; `/resend` replays saved output
-  without model work. `/steer` changes direction during execution; `/focus`
-  narrows the task while preserving progress.
-- `/delay`, `/queue` and `/recall` manage queued/future requests without confusing
-  them with cron/heartbeat records. An isolated Worker's `/delay` mutation uses
-  the shared Scheduler RPC; the Supervisor binds it to that Worker's Agent
-  identity, while the existing Scheduler remains the only persistent state
-  owner. Never replay scheduler-recovery batches without the user's explicit
-  choice.
+- `/new` creates/selects a HASHI Conversation Session; `/fresh` advances context
+  generation without deleting logs or memories.
+- `/handoff` restores up to ten completed exchanges into a fresh Engine Session.
+  `/compact` compacts eligible history and capsules pending HER WIP before
+  clearing its journal; the two eligibility rules are independent.
+- `/memory` and `/memory plus on|off` independently control ordinary memory and
+  Memory+. `/notepad` exposes Today, Carryover, History and Find; open items are
+  background, not queued tasks.
+- `/stop` preserves interrupted evidence. Explicit continuation resumes it;
+  unrelated input stays unrelated.
+- `/retry` uses defined recovery; `/resend` replays output without model work.
+  `/steer` redirects execution; `/focus` narrows it while preserving progress.
+- `/delay`, `/queue` and `/recall` manage requests, not cron/heartbeat records.
+  Isolated Workers mutate delay through Scheduler RPC bound by the Supervisor to
+  their Agent; Scheduler alone owns persistence. Never replay recovery batches
+  without the user's explicit choice.
 
 ## Tools, background work and communication
 
