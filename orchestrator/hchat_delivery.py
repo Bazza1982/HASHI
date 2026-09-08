@@ -112,7 +112,7 @@ def deliver_hchat_draft(
     if not success and error is None:
         error = "send_hchat returned false"
     latency_ms = (time.perf_counter() - start) * 1000
-    status = "delivered" if success else "failed"
+    status = "queued" if success else "failed"
 
     return HChatDeliveryResult(
         success=success,
@@ -131,6 +131,45 @@ def deliver_hchat_draft(
 def _load_send_hchat() -> SendHChatCallable:
     module = importlib.import_module("tools.hchat_send")
     return module.send_hchat
+
+
+def hchat_delivery_receipt_text(
+    result: HChatDeliveryResult,
+    *,
+    locale: str | None = None,
+) -> str:
+    from orchestrator import ui_language
+
+    if result.delivery_status == "sent":
+        title = ui_language.tr(
+            "hchat.delivery.sent", locale=locale, target=result.target
+        )
+    elif result.success:
+        title = ui_language.tr(
+            "hchat.delivery.queued", locale=locale, target=result.target
+        )
+    else:
+        title = ui_language.tr(
+            "hchat.delivery.failed", locale=locale, target=result.target
+        )
+    parts = [
+        title,
+        "",
+        ui_language.tr("hchat.delivery.message", locale=locale),
+        result.message,
+    ]
+    if not result.success:
+        parts.extend(
+            [
+                "",
+                ui_language.tr(
+                    "hchat.delivery.reason",
+                    locale=locale,
+                    error=result.error or "unknown error",
+                ),
+            ]
+        )
+    return "\n".join(parts)
 
 
 def draft_parse_error_text(exc: HChatDraftParseError) -> str:
@@ -207,6 +246,7 @@ __all__ = [
     "HChatDraftParseError",
     "deliver_hchat_draft",
     "draft_parse_error_text",
+    "hchat_delivery_receipt_text",
     "hchat_delivery_log_fields",
     "hchat_draft_parsed_log_fields",
     "parse_hchat_draft",

@@ -110,7 +110,7 @@ def test_deliver_hchat_draft_delegates_routing_to_send_hchat():
 
     assert calls == [("rika@HASHI2", "zelda", "check the route", {})]
     assert result.success is True
-    assert result.delivery_status == "delivered"
+    assert result.delivery_status == "queued"
     assert result.attempt_id == "attempt-1"
     assert result.retry_count == 0
     assert result.user_report == "sent"

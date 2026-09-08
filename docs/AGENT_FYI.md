@@ -5,7 +5,14 @@ bridge and background turns, must request visible delivery. Legacy
 `deliver_to_telegram=false` and `silent=true` cannot suppress queued turns;
 Functions enforce this at admission. Preserve destination authorization and
 terminal HChat reply rules. See [visibility decision](HASHI_AGENT_ACTIVITY_VISIBILITY.md).
-Source adoption and successful message delivery must be verified separately.
+HChat receipts show the exact final payload. A destination queue acknowledgement
+is `queued`; `sent` requires a confirmed Frontend Connector transport receipt.
+Protocol states such as `reply_sent` and `completed` do not provide that receipt.
+Errors and failure states are `failed`, even beside a contradictory success flag.
+Terminal HChat/protocol replies show their body verbatim in one normal response
+and must not start an acknowledgement loop. See the
+[HChat delivery decision](HCHAT_DELIVERY_BOUNDARY_PLAN.md).
+Source adoption and successful terminal delivery must be verified separately.
 
 Superloop receipt review is opt-in via `receipt_continuation_enabled=true`.
 The existing Remote cycle may admit a separate controller review only for a
@@ -16,7 +23,7 @@ Session-pinned idempotency. Pause/stop blocks admission. `queued` is not reviewe
 merged, adopted or user-delivered; close already-reviewed dispatches before
 enabling the feature. See [receipt review contract](SUPERLOOP_PLAN.md#correlated-receipt-review-admission-2026-09-08).
 
-Reference updated: 2026-09-07. This is a compact orientation, not a task queue,
+Reference updated: 2026-09-08. This is a compact orientation, not a task queue,
 permission grant, or proof that the running instance has adopted current source.
 `/fyi` reads this reference again and identifies its content revision. Check live
 configuration/status before claiming an Engine, model, tool, or route is available.

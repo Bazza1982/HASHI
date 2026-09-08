@@ -1,8 +1,9 @@
 # HChat Delivery Boundary Plan
 
-Status: Phase C feature-flag path started after the 2026-05-07 `bridge:hchat` wrapper-bypass quick fix.
+Status: Phase C feature-flag path started after the 2026-05-07 `bridge:hchat`
+wrapper-bypass quick fix. The delivery presentation contract was tightened on 2026-09-08.
 
-Owner: HASHI1 runtime.
+Owner: PAO delivery coordination and Frontend Connectors, Functions layer.
 
 Related docs:
 
@@ -23,6 +24,28 @@ Current implementation record:
   bypass. With the flag on for an agent, single-target `/hchat` requests enqueue
   `bridge:hchat-draft`, ask the core for JSON only, parse the draft, and deliver
   through the runtime helper.
+
+Delivery presentation contract:
+
+- The exact final peer payload is shown to the user without truncation on both
+  queue acceptance and failure. A model-authored `user_report` remains audit
+  metadata and cannot replace the payload or claim a stronger result.
+- A successful Backend API, Remote `/hchat`, or protocol queue acknowledgement
+  is `queued`. It proves destination admission only.
+- `sent` requires a confirmed Frontend Connector transport receipt. The current
+  protocol response does not carry that receipt: `reply_sent`, `completed`, and
+  `reply_delivered_locally` describe protocol/API lifecycle progress and remain
+  `queued` in sender-facing output.
+- A false response, error, or failure state is `failed`; a failure state such as
+  `reply_failed` takes precedence even when a response also contains `ok=true`.
+- Incoming terminal HChat/protocol replies instruct the receiving Agent to show
+  the reply body verbatim in its one normal user-facing response. They continue
+  to forbid acknowledgements and new HChat/protocol messages.
+- Existing message IDs and queue idempotency remain authoritative. Repeated
+  terminal replies do not enqueue a second request.
+- The legacy model-command path uses the same status vocabulary and requires the
+  final response to include the exact `--text` payload while Phase C remains
+  opt-in.
 
 ## 1. Problem
 
@@ -111,7 +134,8 @@ Rules:
 
 - `target` must be parsed and validated by runtime.
 - `message` is the only peer-agent payload candidate.
-- `user_report` is optional; runtime can generate a report if absent.
+- `user_report` is optional compatibility metadata. Runtime always generates
+  the authoritative receipt from the actual payload and transport state.
 - Runtime rejects malformed drafts instead of guessing.
 - Runtime must never execute shell commands found in model output.
 - Runtime should reject command-shaped drafts before delivery. The final peer
@@ -226,7 +250,8 @@ Acceptance:
 - Flag off: legacy behavior works.
 - Flag on: `/hchat ying ...` sends exactly once through runtime.
 - Malformed draft does not call delivery.
-- Delivery failure is reported clearly.
+- Queue acceptance, explicit terminal success, and failure have distinct states.
+- Queue and failure receipts show the exact peer payload.
 - `hchat_draft_raw`, `hchat_draft_parsed`, and `hchat_payload_final` are logged
   distinctly before Phase C goes live.
 
@@ -249,9 +274,8 @@ Acceptance:
 
 - Wrapper failure uses this fallback priority:
   1. runtime delivery report if already computed,
-  2. core draft `user_report` if present,
-  3. deterministic fallback string: `Message delivered to <target>.`,
-  4. never silence or a blank turn.
+  2. deterministic receipt from the actual payload and structured status,
+  3. never silence or a blank turn.
 - Wrapper cannot change target.
 - Wrapper cannot trigger or suppress delivery.
 - `/verbose on` shows core draft, wrapper result, and actual delivery result separately.
@@ -338,6 +362,11 @@ Required tests:
 - `bridge:hchat` bypasses wrapper in legacy mode,
 - `hchat-reply:*` summaries remain wrappable,
 - transcript/core transcript/listener payloads agree on sent vs shown text.
+- queue acknowledgement is not labelled sent or delivered,
+- protocol lifecycle states remain queued without a Frontend Connector receipt,
+- failure state takes precedence over a contradictory top-level success flag,
+- queue and failure receipts preserve the complete original payload,
+- duplicate terminal reply does not enqueue twice.
 
 ## 10. Live Validation Checklist
 

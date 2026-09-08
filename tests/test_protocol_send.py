@@ -73,7 +73,94 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
     assert headers["x-hashi-from-instance"] == "HASHI1"
     assert request["body"]["body"]["text"] == "hello there"
     assert request["body"]["to_agent"] == "lily"
-    assert "Protocol message delivered" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Protocol message queued" in output
+    assert "Message:\nhello there" in output
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"ok": True, "state": "accepted"}, "queued"),
+        ({"ok": True, "state": "delivered_to_local_queue"}, "queued"),
+        ({"ok": True, "state": "reply_delivered_locally"}, "queued"),
+        ({"ok": True, "state": "reply_sent"}, "queued"),
+        ({"ok": True, "state": "completed"}, "queued"),
+        ({"ok": False, "state": "reply_failed"}, "failed"),
+        ({"ok": True, "state": "reply_failed"}, "failed"),
+        ({"ok": True, "state": "timed_out"}, "failed"),
+    ],
+)
+def test_protocol_delivery_disposition_keeps_protocol_lifecycle_success_queued(result, expected):
+    assert protocol_send._delivery_disposition(result) == expected
+
+
+@pytest.mark.parametrize("state", ["reply_sent", "completed"])
+def test_protocol_lifecycle_terminal_receipt_stays_queued_and_shows_original_body(
+    state, capsys
+):
+    protocol_send._print_delivery_receipt(
+        result={"ok": True, "state": state},
+        from_agent="rika",
+        target="zelda@HASHI1",
+        text="Done.\nEvidence retained.",
+    )
+
+    output = capsys.readouterr().out
+    assert "Protocol message queued" in output
+    assert "Protocol terminal message sent" not in output
+    assert "Message:\nDone.\nEvidence retained." in output
+
+
+def test_send_protocol_message_failure_state_overrides_ok(monkeypatch, tmp_path, capsys):
+    def fake_urlopen(req, timeout=0):
+        return _FakeResponse(
+            {
+                "ok": True,
+                "state": "reply_failed",
+                "error": "peer could not return the reply",
+            }
+        )
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        protocol_send,
+        "_load_config",
+        lambda: {"global": {"instance_id": "HASHI1"}},
+    )
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {
+            "remote_host": "10.0.0.9",
+            "remote_port": 8766,
+        },
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v1"}, None),
+    )
+
+    ok = protocol_send.send_protocol_message(
+        "lily@HASHI9",
+        "zelda",
+        "Please report the result.",
+        shared_token="shared-secret",
+    )
+
+    assert ok is False
+    captured = capsys.readouterr()
+    assert "Protocol message failed" in captured.err
+    assert "Message:\nPlease report the result." in captured.err
+    assert "Protocol message queued" not in captured.out
+    assert "Protocol terminal message sent" not in captured.out
+    state_path = tmp_path / ".hashi-remote" / "protocol_outbound_hashi1.json"
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    [item] = list(data["messages"].values())
+    assert item["state"] == "failed"
 
 
 def test_send_protocol_message_records_outbound_correlation(monkeypatch, tmp_path):
@@ -414,3 +501,4 @@ def test_send_protocol_message_prints_operator_delivery_result(monkeypatch, caps
     err = capsys.readouterr().err
     assert "Delivery result: target_not_found:" in err
     assert "Target agent 'lily' not found" in err
+    assert "Message:\nhello there" in err

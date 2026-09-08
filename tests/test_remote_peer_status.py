@@ -2515,7 +2515,9 @@ def test_flex_hchat_cross_instance_reply_is_tagged(monkeypatch):
     assert sent["to_agent"] == "rika"
     assert sent["from_agent"] == "sakura"
     assert sent["target_instance"] == "HASHI2"
-    assert sent["text"] == "[hchat reply from sakura] Roger that"
+    assert sent["text"].startswith("[hchat reply from sakura] Roger that\n\n")
+    assert "show the reply body above verbatim" in sent["text"]
+    assert sent["text"].count("[hchat reply from sakura]") == 1
 
 
 def test_flex_hchat_reply_body_is_not_replied_again(monkeypatch):
@@ -2678,8 +2680,8 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
     manager._probe_local_workbench = lambda _host, _port: True
     captured = []
 
-    def post(_url, payload, timeout):
-        captured.append((payload, timeout))
+    def post(url, payload, timeout):
+        captured.append((url, payload, timeout))
         return {"ok": True, "request_id": "req-terminal"}
 
     manager._post_json = post
@@ -2701,7 +2703,10 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
     )
 
     assert request_id == "req-terminal"
-    payload = captured[0][0]
+    # /api/chat acknowledges queue admission with a request id. It does not
+    # return the later Telegram transport receipt.
+    assert captured[0][0] == "http://127.0.0.1:18804/api/chat"
+    payload = captured[0][1]
     assert payload["source"] == "protocol:reply"
     assert payload["idempotency_key"] == "protocol:reply:reply-1"
     assert payload["request_metadata"]["system_exchange_terminal"] is True
@@ -2730,9 +2735,25 @@ def test_protocol_message_prompt_forbids_side_channel_ack():
         {"text": "please inspect this"},
     )
 
+    assert "System exchange message from rika@HASHI2:\nplease inspect this" in prompt
     assert "respond once" in prompt
     assert "Do not send Hchat" in prompt
     assert "protocol returns this response automatically" in prompt
+
+
+def test_protocol_terminal_reply_prompt_requires_verbatim_body_presentation():
+    manager = ProtocolManager.__new__(ProtocolManager)
+    body = "Review complete.\n\n- one\n- two"
+
+    prompt = manager._render_remote_reply_prompt(
+        "rika",
+        "HASHI2",
+        {"text": body},
+    )
+
+    assert prompt.startswith(f"System exchange reply from rika@HASHI2:\n{body}\n\n")
+    assert "show the reply body above verbatim in your normal assistant response" in prompt
+    assert "do not answer the peer" in prompt.lower()
 
 
 def test_agent_reply_marks_existing_correlation_terminal(tmp_path):

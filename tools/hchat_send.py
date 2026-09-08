@@ -64,6 +64,12 @@ HCHAT_AUTOREPLY_INSTRUCTION = (
     "sender; the runtime will route your response automatically. Use explicit "
     "HChat only when the user asks you to contact a third party or broadcast."
 )
+HCHAT_TERMINAL_REPLY_INSTRUCTION = (
+    "HChat terminal reply notice: show the reply body above verbatim in your "
+    "normal assistant response. The reply body is the text after the "
+    "[hchat reply from ...] marker. Do not answer the peer, summarize the "
+    "body, acknowledge, confirm, or send another HChat/protocol message."
+)
 
 
 def _load_json_object_with_salvage(path: Path) -> dict | None:
@@ -410,6 +416,17 @@ def _is_hchat_reply_body(text: str) -> bool:
     return (text or "").lstrip().lower().startswith("[hchat reply from ")
 
 
+def _with_terminal_reply_instruction(text: str) -> str:
+    if HCHAT_TERMINAL_REPLY_INSTRUCTION in text:
+        return text
+    return f"{text}\n\n{HCHAT_TERMINAL_REPLY_INSTRUCTION}"
+
+
+def format_hchat_terminal_reply(from_agent: str, text: str) -> str:
+    reply = f"[hchat reply from {from_agent}] {text}"
+    return _with_terminal_reply_instruction(reply)
+
+
 def format_hchat_message(
     from_agent: str,
     source_instance: str,
@@ -418,9 +435,22 @@ def format_hchat_message(
     include_autoreply_instruction: bool = True,
 ) -> str:
     body = text
-    if include_autoreply_instruction and not _is_hchat_reply_body(text):
-        body = f"{HCHAT_AUTOREPLY_INSTRUCTION}\n\n{text}"
+    if include_autoreply_instruction:
+        if _is_hchat_reply_body(text):
+            body = _with_terminal_reply_instruction(text)
+        else:
+            body = f"{HCHAT_AUTOREPLY_INSTRUCTION}\n\n{text}"
     return f"[hchat from {from_agent}@{source_instance}] {body}"
+
+
+def _print_hchat_queue_receipt(
+    label: str,
+    from_agent: str,
+    target: str,
+    text: str,
+) -> None:
+    print(f"🟡 Hchat queued ({label}): {from_agent} → {target}")
+    print(f"   Message:\n{text}")
 
 
 def _load_remote_agents(instance_id: str, instance_info: dict) -> list[str]:
@@ -927,8 +957,12 @@ def _send_via_workbench(
         with urllib_request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             if result.get("ok"):
-                print(f"✅ Hchat delivered ({label} API, {host}:{port}): {from_agent} → {to_agent}")
-                print(f"   Message: {text[:80]}{'...' if len(text) > 80 else ''}")
+                _print_hchat_queue_receipt(
+                    f"{label} API, {host}:{port}",
+                    from_agent,
+                    to_agent,
+                    text,
+                )
                 return True
             print(f"❌ Hchat API error: {result.get('error', 'unknown')}", file=sys.stderr)
             return False
@@ -982,8 +1016,12 @@ def _send_via_remote(
             with urllib_request.urlopen(req, **kwargs) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
                 if result.get("ok"):
-                    print(f"✅ Hchat delivered (Remote, {url}): {from_agent} → {to_agent}")
-                    print(f"   Message: {text[:80]}{'...' if len(text) > 80 else ''}")
+                    _print_hchat_queue_receipt(
+                        f"Remote, {url}",
+                        from_agent,
+                        to_agent,
+                        text,
+                    )
                     return True
                 print(f"❌ Remote /hchat error via {url}: {result.get('error', 'unknown')}", file=sys.stderr)
         except URLError as e:
@@ -1087,9 +1125,11 @@ def _send_via_exchange(
             with urllib_request.urlopen(req, timeout=10) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
                 if result.get("ok"):
-                    print(
-                        f"✅ Hchat delivered ({exchange_instance} exchange API, "
-                        f"{host}:{workbench_port}): {from_agent} → {to_agent}@{target_instance}"
+                    _print_hchat_queue_receipt(
+                        f"{exchange_instance} exchange API, {host}:{workbench_port}",
+                        from_agent,
+                        f"{to_agent}@{target_instance}",
+                        text,
                     )
                     return True
         except Exception as e:
@@ -1141,7 +1181,7 @@ def send_hchat(
             return False
         results = [send_hchat(member, from_agent, text, target_instance=target_instance) for member in members]
         succeeded = sum(results)
-        print(f"📢 Group @{group_name}: {succeeded}/{len(members)} delivered.")
+        print(f"📢 Group @{group_name}: {succeeded}/{len(members)} queued.")
         return succeeded > 0
 
     if not _hchat_channel_egress_allowed(
@@ -1446,6 +1486,12 @@ def main() -> None:
         parser.error("--to, --from, and --text are required for sending messages")
 
     success = send_hchat(args.to, args.from_agent, args.text, target_instance=args.instance)
+    if not success:
+        target = args.to
+        if args.instance and "@" not in target:
+            target = f"{target}@{args.instance}"
+        print(f"❌ Hchat delivery failed for {target}.", file=sys.stderr)
+        print(f"   Message:\n{args.text}", file=sys.stderr)
     sys.exit(0 if success else 1)
 
 

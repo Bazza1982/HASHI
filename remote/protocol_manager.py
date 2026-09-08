@@ -1170,8 +1170,10 @@ class ProtocolManager:
         text = str((body or {}).get("text") or "").strip()
         return (
             f"System exchange reply from {from_agent}@{from_instance}:\n{text}\n\n"
-            "Terminal protocol notice: do not reply, acknowledge, confirm, or "
-            "send any Hchat/protocol message. This reply closes the exchange."
+            "Terminal protocol notice: show the reply body above verbatim in "
+            "your normal assistant response so the user can see it. Do not answer "
+            "the peer, summarize the body, acknowledge, confirm, or send any "
+            "Hchat/protocol message. This reply closes the exchange."
         )
 
     async def _enqueue_local_prompt(
