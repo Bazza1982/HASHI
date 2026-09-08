@@ -23,7 +23,7 @@ def test_refresh_rereads_reference_and_engineering_guidance(tmp_path):
 def test_shipped_reference_and_rules_fit_without_truncation():
     root = Path(__file__).resolve().parents[1]
     path = root / "docs" / "AGENT_FYI.md"
-    assert load_agent_fyi_text(path) == path.read_text().strip()
+    assert load_agent_fyi_text(path) == path.read_text(encoding="utf-8").strip()
     assert "[fyi trimmed]" not in build_agent_fyi_primer(path)
     assert len(build_agent_fyi_primer(path)) <= 16000
 
