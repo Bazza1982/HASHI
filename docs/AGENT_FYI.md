@@ -197,6 +197,11 @@ sound. `/terminal` controls local console verbosity without changing transcript
 storage. `/voice`, `/say` and `/whisper` control the configured media paths.
 
 Use `/status` and configured service/Worker metadata for present-state evidence.
+For isolated Workers, Agent-list busy/queue fields are event-driven projections
+of the owning runtime. Queue admission, request start, provider-generation end,
+and terminal cleanup republish the existing Worker metadata event; normal,
+failed, and cancelled requests clear the cached current-request view. Request
+activity remains the bounded detailed event stream, not a second status owner.
 Do not claim a successful live test based only on a green unit test, a source
 file, a saved setting or an old transcript.
 

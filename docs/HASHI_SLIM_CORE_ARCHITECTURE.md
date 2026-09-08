@@ -157,6 +157,32 @@ feature to newer Workers, while older Workers ignore the additional bootstrap
 field. This preserves all four old/new Supervisor–Worker combinations during a
 rolling Functions adoption.
 
+Worker request status is a disposable PAO Functions projection, not another
+queue or Run store. The Worker continues to derive `is_generating`, queue depth,
+and current-request metadata from the owning runtime. Its queue lifecycle
+republishes those values through the existing `worker.metadata` event when a
+request starts, when provider generation ends, and after terminal cleanup.
+Normal completion, backend failure, and queue-processor cancellation therefore
+all leave the Supervisor's stable Agent handle and the Backend API Agent list at
+the same idle/empty boundary. Publication failure is logged but cannot rewrite
+or fail the owning request. No polling loop, duplicate status writer, Core
+change, or Worker protocol version was added.
+
+The HASHI2 checkpoint on 2026-09-08 records these boundaries separately:
+
+- Approval: the user authorized only the PAO Functions metadata reconciliation
+  on `fix/worker-status-review-20260908`, based on `da43bf12`; Core and live
+  adoption remained forbidden.
+- Implementation: the existing host publication callback and
+  `worker.metadata` event now follow the owning request lifecycle. No queue,
+  request-activity, or list state is persisted by this projection.
+- Offline evidence: the pre-fix process/IPC/list scenarios were `4 failed`;
+  after the fix they were `4 passed`. Direct consumers were `166 passed`, the
+  Worker lifecycle gate was `116 passed`, and the deterministic Core gate was
+  `608 passed`.
+- Live verification: no running Worker or shared Functions generation was
+  replaced, so live adoption and frontend refresh timing remain unverified.
+
 Local desktop wrappers should select the instance/distro and delegate to the
 existing `bin/bridge-u.sh` menu. The menu obtains Agent choices and service ports
 from the existing launcher configuration view. Wrappers must not copy those

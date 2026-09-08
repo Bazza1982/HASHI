@@ -31,6 +31,23 @@ RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 RUNTIME_TELEGRAM_UPDATER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
+async def _publish_worker_metadata(runtime: Any, *, transition: str) -> None:
+    """Republish Worker-owned runtime state without becoming its state owner."""
+
+    publisher = getattr(runtime, "_publish_worker_metadata", None)
+    if not callable(publisher):
+        return
+    try:
+        await publisher()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        runtime.error_logger.warning(
+            "Worker metadata publication failed after "
+            f"{transition}: {type(exc).__name__}: {exc}"
+        )
+
+
 def _consume_shutdown_task_result(task: asyncio.Future) -> None:
     try:
         task.result()
@@ -305,6 +322,10 @@ async def process_queue(runtime: Any) -> None:
                 runtime.logger.debug(f"Skipping empty prompt in queue (source={item.source}, id={item.request_id})")
                 continue
             queue_start = runtime_pipeline.begin_queue_item(runtime, item)
+            await _publish_worker_metadata(
+                runtime,
+                transition="request start",
+            )
             is_bridge_request = queue_start.is_bridge_request
             queued_at = queue_start.queued_at
             queued_monotonic = queue_start.queued_monotonic
@@ -362,6 +383,10 @@ async def process_queue(runtime: Any) -> None:
                 final_prompt,
                 on_stream_event=feedback.on_stream_event,
                 audit_active=audit_active,
+            )
+            await _publish_worker_metadata(
+                runtime,
+                transition="generation end",
             )
             response = generation.response
             backend_started_monotonic = generation.backend_started_monotonic
@@ -559,6 +584,7 @@ async def process_queue(runtime: Any) -> None:
                 )
 
         except asyncio.CancelledError:
+            runtime.is_generating = False
             break
         except Exception as exc:
             runtime._mark_error(str(exc))
@@ -586,6 +612,8 @@ async def process_queue(runtime: Any) -> None:
             runtime.error_logger.exception(f"Error in flex queue processing: {exc}")
             runtime.is_generating = False
         finally:
+            if item is not None:
+                runtime.is_generating = False
             if (
                 feedback is not None
                 and not feedback_cleaned
@@ -627,6 +655,11 @@ async def process_queue(runtime: Any) -> None:
                 runtime.queue.task_done()
             else:
                 runtime.current_request_meta = None
+            if item is not None:
+                await _publish_worker_metadata(
+                    runtime,
+                    transition="request cleanup",
+                )
 
 
 async def _cancel_tasks(

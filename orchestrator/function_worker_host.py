@@ -866,6 +866,10 @@ class FunctionWorkerHost:
         self.generation_finder = finder
 
     def _bridge_request_completions(self, runtime: Any) -> None:
+        # The runtime remains the sole owner of queue/generation state.  Give
+        # its lifecycle a narrow way to republish that live state through the
+        # existing Worker metadata event whenever those values transition.
+        runtime._publish_worker_metadata = self.publish_metadata
         original = runtime._notify_request_listeners
 
         async def notify(request_id: str, payload: dict) -> None:
@@ -877,7 +881,7 @@ class FunctionWorkerHost:
                     "result": json_value(payload),
                 },
             )
-            await self.emit_metadata()
+            await self.publish_metadata()
 
         runtime._notify_request_listeners = notify
 
@@ -989,6 +993,21 @@ class FunctionWorkerHost:
 
     async def emit_metadata(self) -> None:
         await self.peer.emit("worker.metadata", self.metadata())
+
+    async def publish_metadata(self) -> None:
+        """Best-effort lifecycle publication over the existing metadata event."""
+
+        try:
+            await self.emit_metadata()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Worker metadata publication dropped for %s: %s: %s",
+                self.agent_name,
+                type(exc).__name__,
+                exc,
+            )
 
     async def _prepare_telegram_application(self) -> bool:
         """Validate and start handlers; Core alone owns long polling."""
