@@ -1672,7 +1672,7 @@ class FunctionWorkerSupervisor:
         if method.startswith("core.route."):
             return await self._route_worker_request(method, params)
         if method.startswith("core.scheduler."):
-            return await self._scheduler_request(method, params)
+            return await self._scheduler_request(client, method, params)
         if method.startswith("core.capability."):
             return await self._capability_request(client, method, params)
         raise FunctionWorkerProtocolError(
@@ -1953,13 +1953,42 @@ class FunctionWorkerSupervisor:
             )
         raise FunctionWorkerProtocolError(f"Unknown Agent route method: {method}")
 
-    async def _scheduler_request(self, method: str, params: dict[str, Any]) -> Any:
+    async def _scheduler_request(
+        self,
+        client: FunctionWorkerClient,
+        method: str,
+        params: dict[str, Any],
+    ) -> Any:
+        agent_name = str(params.get("agent_name") or "")
+        if agent_name != client.agent_name:
+            raise FunctionWorkerProtocolError(
+                f"Worker {client.agent_name!r} cannot access Scheduler state "
+                f"for Agent {agent_name!r}"
+            )
         scheduler = getattr(self.kernel, "scheduler", None)
         if scheduler is None:
             if method == "core.scheduler.handle_recovery_reply":
                 return None
+            if method == "core.scheduler.schedule_delayed_message":
+                raise FunctionWorkerError("Scheduler is unavailable")
             return []
-        agent_name = str(params.get("agent_name") or "")
+        if method == "core.scheduler.schedule_delayed_message":
+            options = {
+                key: params[key]
+                for key in (
+                    "chat_id",
+                    "prompt",
+                    "delay_minutes",
+                    "idempotency_key",
+                    "request_metadata",
+                    "deliver_to_telegram",
+                )
+                if key in params
+            }
+            return await scheduler.schedule_delayed_message(
+                agent_name=agent_name,
+                **options,
+            )
         if method == "core.scheduler.list_delayed_messages":
             call = getattr(scheduler, "list_delayed_messages", None)
             if not callable(call):

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import multiprocessing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +18,11 @@ from orchestrator.function_generation import (
     build_source_manifest,
     verify_qualified_manifest_bytes,
 )
-from orchestrator.function_worker_protocol import FunctionWorkerDisconnected
+from orchestrator.function_worker_protocol import (
+    FunctionWorkerDisconnected,
+    FunctionWorkerRemoteError,
+    JsonConnectionPeer,
+)
 from orchestrator.function_worker_features import WORKER_LOG_RELAY_FEATURE
 from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
@@ -27,11 +33,12 @@ from orchestrator.function_worker_supervisor import (
     persist_qualified_generation_cache,
     verify_generation_artifact,
 )
-from orchestrator.function_worker_host import FunctionWorkerHost
+from orchestrator.function_worker_host import FunctionWorkerHost, WorkerSchedulerFacade
 from orchestrator.runtime_contract import (
     current_runtime_fingerprint,
     load_runtime_policy,
 )
+from orchestrator.scheduler import TaskScheduler
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -122,6 +129,96 @@ def _metadata(name: str, pid: int) -> dict:
 
 def _handle(kernel: _Kernel, client: _Client) -> AgentRuntimeHandle:
     return AgentRuntimeHandle(kernel, client, _metadata(client.agent_name, client.pid))
+
+
+def _scheduler_rpc_stack(tmp_path: Path, *, worker_agent: str):
+    kernel = _Kernel()
+    state_path = tmp_path / "scheduler_state.json"
+    kernel.scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=state_path,
+        runtimes=[],
+        authorized_id=7,
+    )
+    supervisor = FunctionWorkerSupervisor(kernel)
+    client = _Client(worker_agent, 101)
+    core_connection, worker_connection = multiprocessing.Pipe(duplex=True)
+
+    async def handle_request(method, params):
+        return await supervisor.handle_worker_request(client, method, params)
+
+    core_peer = JsonConnectionPeer(
+        core_connection,
+        label="scheduler-core",
+        request_handler=handle_request,
+    )
+    worker_peer = JsonConnectionPeer(worker_connection, label="scheduler-worker")
+    core_peer.start()
+    worker_peer.start()
+    facade = WorkerSchedulerFacade(worker_peer, worker_agent)
+    return kernel.scheduler, state_path, facade, core_peer, worker_peer
+
+
+@pytest.mark.asyncio
+async def test_worker_scheduler_facade_creates_via_rpc_in_scheduler_owned_state(
+    tmp_path,
+):
+    scheduler, state_path, facade, core_peer, worker_peer = _scheduler_rpc_stack(
+        tmp_path,
+        worker_agent="zelda",
+    )
+    try:
+        record = await facade.schedule_delayed_message(
+            agent_name="zelda",
+            chat_id=42,
+            prompt="follow up later",
+            delay_minutes=5,
+            idempotency_key="delay-request-1",
+            request_metadata={"session_id": "session-1", "surface": "telegram"},
+            deliver_to_telegram=False,
+        )
+
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert persisted["delayed_messages"][record["id"]] == record
+        assert record["agent"] == "zelda"
+        assert record["chat_id"] == 42
+        assert record["prompt"] == "follow up later"
+        assert record["due_at"] - record["created_at"] == 300
+        assert record["request_metadata"] == {
+            "session_id": "session-1",
+            "surface": "telegram",
+        }
+        assert record["deliver_to_telegram"] is False
+        assert await scheduler.list_delayed_messages("zelda") == [record]
+    finally:
+        await asyncio.gather(core_peer.close(), worker_peer.close())
+
+
+@pytest.mark.asyncio
+async def test_worker_scheduler_rpc_rejects_cross_agent_creation_without_state_write(
+    tmp_path,
+):
+    scheduler, state_path, facade, core_peer, worker_peer = _scheduler_rpc_stack(
+        tmp_path,
+        worker_agent="zelda",
+    )
+    try:
+        with pytest.raises(
+            FunctionWorkerRemoteError,
+            match="Worker 'zelda' cannot access Scheduler state for Agent 'sunny'",
+        ):
+            await facade.schedule_delayed_message(
+                agent_name="sunny",
+                chat_id=42,
+                prompt="must not cross the Worker boundary",
+                delay_minutes=5,
+            )
+
+        assert await scheduler.list_delayed_messages("zelda") == []
+        assert await scheduler.list_delayed_messages("sunny") == []
+        assert not state_path.exists()
+    finally:
+        await asyncio.gather(core_peer.close(), worker_peer.close())
 
 
 @pytest.mark.asyncio

@@ -159,8 +159,11 @@ remembered global list. `/habit` manages the default-off HER Habit/Meditation pa
   without model work. `/steer` changes direction during execution; `/focus`
   narrows the task while preserving progress.
 - `/delay`, `/queue` and `/recall` manage queued/future requests without confusing
-  them with cron/heartbeat records. Never replay scheduler-recovery batches
-  without the user's explicit choice.
+  them with cron/heartbeat records. An isolated Worker's `/delay` mutation uses
+  the shared Scheduler RPC; the Supervisor binds it to that Worker's Agent
+  identity, while the existing Scheduler remains the only persistent state
+  owner. Never replay scheduler-recovery batches without the user's explicit
+  choice.
 
 ## Tools, background work and communication
 
@@ -197,13 +200,10 @@ Use `/status` and configured service/Worker metadata for present-state evidence.
 Do not claim a successful live test based only on a green unit test, a source
 file, a saved setting or an old transcript.
 
-## 2026-09-08 — Superloop controller follow-through
+## Superloop controller follow-through
 
-PAO Functions now reconcile admitted controller Runs independently of retained
-Remote receipts. Whole-board disposition omissions after successful completion
-can cause one durable, idempotent recovery Run; failures/cancellations and
-exhausted recovery remain explicit attention items. No Core change, new cron or
-scheduler task-start authority. See `SUPERLOOP_FUNCTION_CONTRACT.md` for the
-record contract and its evidence limits. Scope authorized by the user's request
-to fix proactive management mechanisms; source/test/merge/live adoption must be
-reported separately in instance evidence.
+PAO Functions check admitted controller Runs independently of Remote receipts.
+Missing whole-board dispositions after completion permit one durable idempotent
+recovery; failed, cancelled or exhausted attempts require attention. This grants
+no Core, cron or task-start authority. See `SUPERLOOP_FUNCTION_CONTRACT.md`.
+Keep source, tests, merge, adoption and delivery evidence separate.
