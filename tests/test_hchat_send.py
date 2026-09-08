@@ -216,6 +216,38 @@ def test_hchat_cli_failure_shows_original_body(monkeypatch, capsys):
     assert "Message:\nPlease review.\nKeep this exact line." in capsys.readouterr().err
 
 
+def test_hchat_cli_configures_console_encoding_before_delivery(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        hchat_send,
+        "configure_console_encoding",
+        lambda: calls.append("configure"),
+    )
+    monkeypatch.setattr(
+        hchat_send,
+        "send_hchat",
+        lambda *args, **kwargs: calls.append("send") or True,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hchat_send.py",
+            "--to",
+            "akane",
+            "--from",
+            "zelda",
+            "--text",
+            "hello",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        hchat_send.main()
+
+    assert calls == ["configure", "send"]
+
+
 def test_probe_http_returns_false_on_unexpected_exception(monkeypatch):
     def fake_urlopen(_req, **_kwargs):
         raise RuntimeError("boom")

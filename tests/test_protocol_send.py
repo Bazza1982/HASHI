@@ -27,6 +27,36 @@ class _FakeResponse:
         return False
 
 
+def test_protocol_cli_configures_console_encoding_before_delivery(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        protocol_send,
+        "configure_console_encoding",
+        lambda: calls.append("configure"),
+    )
+    monkeypatch.setattr(
+        protocol_send,
+        "send_protocol_message",
+        lambda *args, **kwargs: calls.append("send") or True,
+    )
+    monkeypatch.setattr(
+        protocol_send.sys,
+        "argv",
+        [
+            "protocol_send.py",
+            "--to",
+            "akane@HASHI2",
+            "--from",
+            "zelda",
+            "--text",
+            "hello",
+        ],
+    )
+
+    assert protocol_send.main() == 0
+    assert calls == ["configure", "send"]
+
+
 def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeypatch, capsys):
     captured: list[dict] = []
 

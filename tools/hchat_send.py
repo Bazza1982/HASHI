@@ -40,6 +40,7 @@ if __name__ == "__main__":
 
 from remote.delivery_results import format_delivery_result  # noqa: E402
 from remote.security.client_auth import build_client_auth_headers  # noqa: E402
+from orchestrator.bootstrap_logging import configure_console_encoding  # noqa: E402
 from orchestrator.runtime_defaults import (  # noqa: E402
     DEFAULT_HASHI_REMOTE_PORT,
     DEFAULT_WORKBENCH_PORT,
@@ -1467,6 +1468,7 @@ def check_hchat_route(
 
 
 def main() -> None:
+    configure_console_encoding()
     parser = argparse.ArgumentParser(description="Send a Hchat message to another agent")
     parser.add_argument("--to", help="Target agent name or @group_name (e.g. lily or @staff)")
     parser.add_argument("--from", dest="from_agent", help="Sender agent name (e.g. rain)")
