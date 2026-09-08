@@ -50,6 +50,9 @@ Scheduler Function actions propagate typed unsuccessful results instead of
 treating a completed RPC as successful work. For Wiki maintenance, a due-time
 record is only an attempt; the dated consolidation embed event remains the
 completion fact. Operator automation packages remain instance-local.
+The shared PCM evidence gate requires the latest same-local-day clean scan to
+precede the latest clean embed outcome; newer scan/embed failures and malformed
+evidence block Wiki consumers, while a clean zero-pending embed is completion.
 Remote routing uses its Remote-owned live endpoint cache when the optional
 legacy `instances.json` view is absent; that valid pre-state is quiet and does
 not cause Remote to invent instance configuration.
