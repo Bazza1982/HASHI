@@ -105,6 +105,33 @@ def test_portable_builder_bootstraps_pinned_7zip_on_windows(tmp_path, monkeypatc
     assert re.fullmatch(r"[0-9a-f]{64}", builder.ASSETS["7zip"].sha256)
 
 
+def test_bundled_runtime_check_cannot_add_source_bytecode(tmp_path, monkeypatch):
+    builder = _load_builder()
+    runtime = tmp_path / "runtime"
+    app_hashi = tmp_path / "app" / "hashi"
+    commands = []
+    monkeypatch.setattr(builder, "run", lambda command: commands.append(command))
+
+    builder.validate_bundled_runtime_contract(runtime, app_hashi)
+
+    assert commands == [
+        [
+            str(runtime / "python.exe"),
+            "-B",
+            str(app_hashi / "scripts" / "check_runtime_contract.py"),
+            "--code-root",
+            str(app_hashi),
+            "--json",
+        ]
+    ]
+
+    bytecode = app_hashi / "orchestrator" / "__pycache__" / "runtime_contract.pyc"
+    bytecode.parent.mkdir(parents=True)
+    bytecode.write_bytes(b"generated")
+    with pytest.raises(RuntimeError, match="forbidden source bytecode"):
+        builder.validate_bundled_runtime_contract(runtime, app_hashi)
+
+
 def test_portable_profile_has_one_her_engine_and_configurable_regional_providers(
     tmp_path,
 ):

@@ -573,12 +573,23 @@ def validate_bundled_runtime_contract(runtime_python: Path, app_hashi: Path) -> 
     run(
         [
             str(runtime_python / "python.exe"),
+            "-B",
             str(app_hashi / "scripts" / "check_runtime_contract.py"),
             "--code-root",
             str(app_hashi),
             "--json",
         ]
     )
+    generated_bytecode = sorted(
+        path.relative_to(app_hashi).as_posix()
+        for path in app_hashi.rglob("*")
+        if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}
+    )
+    if generated_bytecode:
+        raise RuntimeError(
+            "bundled runtime validation generated forbidden source bytecode: "
+            + ", ".join(generated_bytecode[:20])
+        )
 
 
 def install_piper(
