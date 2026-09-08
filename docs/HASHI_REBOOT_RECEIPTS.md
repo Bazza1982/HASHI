@@ -126,3 +126,30 @@ The lifecycle/Worker minimum, direct UI/transport consumers, curated Core gate,
 and isolated shared Functions/minimal-Core tests are required by
 [Testing Policy](TESTING_POLICY.md). Verification counts are recorded in the
 implementation commit. These checks are not live acceptance evidence.
+
+
+## Interactive recovery feedback (2026-09-08)
+
+User scope: repair misleading two-minute reboot failures and explain recovery
+when a user suspects a stuck agent. PAO Functions now reads live Worker activity
+before qualification. Busy/queued work or unreadable metadata rejects without
+cancelling work or touching routes. This observation is not an idle reservation.
+The subsequent route wait and Worker drain each have a 10-second PAO reboot
+budget; generic lifecycle timeouts are unchanged. RPC transport adds its existing
+10-second allowance to drain. Preparation, delivery and rollback have separate
+budgets, so 10 seconds is not an end-to-end reboot promise.
+
+Start notices acknowledge checking/preparation. Persisted failure reasons distinguish
+route admission, Worker drain, source verification and activation. Recovery state
+is independently verified and rendered even when rollback fails. Busy and drain
+responses suggest /stop on the affected agent and queue inspection for stuck
+work; /reboot status remains available from another agent for the same destination.
+No forced cancellation, automatic retry or widening of targets is introduced.
+Unresponsive activity rejects with a targeted recovery suggestion, not a claim
+that the agent is healthy. New behavior requires shared Functions adoption;
+an already updated Agent Worker does not establish coordinator adoption.
+
+Validation: five focused regression cases failed on the preceding patch (generic
+switch reason and missing actionable status guidance), then passed. Real manager,
+route gate, persistent receipts and renderer are exercised with deterministic
+process boundaries. Live restart and terminal delivery remain separate acceptance.

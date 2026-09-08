@@ -70,11 +70,10 @@ generations; offline tests do not prove adoption.
 
 ## Reboot outcome notifications
 
-Reboot acknowledges first, persists its result, then sends start/result notices
-through the initiating Bot or same-instance fallback, retaining chat/thread.
-`/reboot status` retrieves the same actor/chat/thread result. Missing delivery is
-unconfirmed; notification retries never rerun reboot. Both shared and Agent
-Functions need adoption; an Agent reboot alone cannot upgrade the coordinator.
+Reboot acknowledges, saves outcomes, and notifies via same-instance Bot fallback.
+`/reboot status` is actor/chat/thread-scoped. Delivery retries never rerun reboot.
+Busy/unreadable activity rejects early; bounded route/drain failures report their
+stage and verified recovery. Shared and Agent Functions both need adoption.
 See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
 ## System ownership

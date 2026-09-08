@@ -117,6 +117,8 @@ def _metadata(
         "startup_success": True,
         "backend_ready": True,
         "online": True,
+        "is_generating": False,
+        "queue_depth": 0,
         "telegram_connected": telegram,
     }
 
@@ -505,6 +507,9 @@ async def test_old_worker_drain_failure_discards_candidate_and_reopens_route():
     assert old._cutover is False
     assert old._offline_error is None
     assert candidates["zelda"].shutdown_calls == 1
+    record = manager.receipts.records()[-1]
+    assert record["reason"] == "drain_failed"
+    assert record["restored"] is True
 
 
 @pytest.mark.asyncio
@@ -614,13 +619,14 @@ async def test_route_gate_timeout_discards_candidate_and_releases_route(
     handle._route_inflight = 1
     candidates = kernel.queue_generation("a", names=("zelda",))
     monkeypatch.setattr(
-        "orchestrator.reboot_manager.WORKER_DRAIN_TIMEOUT_SECONDS", 0.01
+        "orchestrator.reboot_manager.REBOOT_DRAIN_TIMEOUT_SECONDS", 0.01
     )
     manager.submit(request)
     assert not await asyncio.wait_for(manager.hot_restart(kernel._restart_request), 1)
     assert not handle._cutover and handle.client.process.is_alive()
     assert candidates["zelda"].shutdown_calls == 1
     assert manager.receipts.records()[-1]["restored"] is True
+    assert manager.receipts.records()[-1]["reason"] == "route_busy"
 
 
 @pytest.mark.asyncio
@@ -952,3 +958,48 @@ async def test_other_frontend_destination_is_never_reinterpreted_as_telegram_cha
     assert not sends
     assert manager.latest(**origin)["status"] == "succeeded"
     assert manager.latest(actor_id="42", chat_id=12345) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activity", [{"is_generating": True}, {"queue_depth": 2}])
+async def test_busy_target_rejected_before_preparation_then_idle_retry(tmp_path, activity):
+    kernel = _Kernel()
+    kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    kernel.queue_generation("a", names=("zelda",))
+    handle = kernel._runtime_map()["zelda"]
+    old = handle.client
+    # Cached proxy metadata remains idle; the live RPC must decide.
+    old.metadata.update(activity)
+    manager = RebootManager(kernel, None)
+    request = {"mode": "min", "agent_name": "zelda"}
+    assert not await manager.hot_restart(request)
+    record = manager.receipts.records()[-1]
+    assert (record["status"], record["reason"]) == ("rejected", "target_busy")
+    assert handle.client is old and old.process.alive
+    assert all(old.metadata[key] == value for key, value in activity.items())
+    assert not any("worker.quiesce" in event or "shutdown" in event for event in kernel.events)
+    assert len(kernel.function_workers.rounds) == 1
+    old.metadata.update(is_generating=False, queue_depth=0)
+    assert await manager.hot_restart(request)
+    assert handle.client is not old
+    assert manager.receipts.records()[-1]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", [None, {"is_generating": False}, {"is_generating": False, "queue_depth": -1}, TimeoutError("metadata timeout"), ConnectionError("worker disconnected")])
+async def test_unreadable_activity_retains_worker_and_actionable_receipt(tmp_path, state):
+    from orchestrator.reboot_ui import render_status
+    kernel = _Kernel(names=("zelda",))
+    kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    old = kernel.runtimes[0].client
+    async def metadata(*args, **kwargs):
+        if isinstance(state, Exception):
+            raise state
+        return state
+    old.call = metadata
+    manager = RebootManager(kernel, None)
+    assert not await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+    record = RebootManager(kernel, None).receipts.records()[-1]
+    assert record["reason"] == "activity_unavailable"
+    assert old.process.alive and not kernel.events
+    assert "/reboot status" in render_status(record, locale="en")

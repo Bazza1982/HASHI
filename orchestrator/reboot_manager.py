@@ -15,11 +15,14 @@ from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
     FunctionWorkerClient,
     FunctionWorkerError,
-    WORKER_DRAIN_TIMEOUT_SECONDS,
 )
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
+# Interactive recovery must not wait two minutes for a stuck task.
+# This Functions policy does not alter generic Worker lifecycle timeouts.
+REBOOT_DRAIN_TIMEOUT_SECONDS = 10.0
+
 TARGETED_REBOOT_MODES = frozenset({"min", "number"})
 BROAD_REBOOT_MODES = frozenset({"same", "max"})
 
@@ -485,6 +488,31 @@ class RebootManager:
             self._finish(record, "rejected", reason="invalid_scope")
             return False
 
+        # Read the owning Worker, not the asynchronously updated route cache.
+        # This is a preflight, not an idle reservation: the transactional drain
+        # below still handles work arriving after this observation.
+        observations = await asyncio.gather(
+            *(handle.client.call("worker.metadata", timeout=10) for handle in handles.values()),
+            return_exceptions=True,
+        )
+        for name, state in zip(selected_targets, observations, strict=True):
+            if (
+                not isinstance(state, dict)
+                or type(state.get("is_generating")) is not bool
+                or type(state.get("queue_depth")) is not int
+                or state["queue_depth"] < 0
+            ):
+                bridge_logger.warning("Reboot activity unavailable: target=%s", name)
+                self._finish(record, "rejected", reason="activity_unavailable")
+                return False
+            if state["is_generating"] or state["queue_depth"]:
+                bridge_logger.info(
+                    "Reboot target busy: target=%s generating=%s queued=%s",
+                    name, state["is_generating"], state["queue_depth"],
+                )
+                self._finish(record, "rejected", reason="target_busy")
+                return False
+
         try:
             candidates = await self._prepare_candidates(selected_targets)
         except Exception as exc:
@@ -502,20 +530,22 @@ class RebootManager:
 
         old_clients: dict[str, FunctionWorkerClient] = {}
         quiesced: set[str] = set()
+        failure_reason = "route_busy"
         try:
             self.receipts.update(record["id"], phase="switching")
             for name in selected_targets:
                 old_clients[name] = await asyncio.wait_for(
                     handles[name].begin_cutover(),
-                    timeout=WORKER_DRAIN_TIMEOUT_SECONDS,
+                    timeout=REBOOT_DRAIN_TIMEOUT_SECONDS,
                 )
 
+            failure_reason = "drain_failed"
             drain_results = await asyncio.gather(
                 *(
                     old_clients[name].call(
                         "worker.quiesce",
-                        {"timeout": WORKER_DRAIN_TIMEOUT_SECONDS},
-                        timeout=WORKER_DRAIN_TIMEOUT_SECONDS + 10.0,
+                        {"timeout": REBOOT_DRAIN_TIMEOUT_SECONDS},
+                        timeout=REBOOT_DRAIN_TIMEOUT_SECONDS + 10.0,
                     )
                     for name in selected_targets
                 ),
@@ -534,6 +564,7 @@ class RebootManager:
 
             # The source and Core contract are checked after every old Worker
             # is quiescent and immediately before candidates can receive work.
+            failure_reason = "source_changed"
             generation = next(iter(candidates.values())).generation
             verify = getattr(
                 generation,
@@ -542,6 +573,7 @@ class RebootManager:
             )
             await asyncio.to_thread(verify, self.kernel.runtime_fingerprint)
 
+            failure_reason = "activation_failed"
             activation_results = await asyncio.gather(
                 *(
                     self.kernel.function_workers.activate_new_worker(candidates[name])
@@ -598,7 +630,7 @@ class RebootManager:
                 "failed",
                 restored=restored,
                 online=restored_states,
-                reason="switch_failed" if restored else "restore_failed",
+                reason=failure_reason,
             )
             print(
                 "\033[38;5;203m  ✗ reboot failed — candidate Workers were "
