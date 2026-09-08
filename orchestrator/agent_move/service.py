@@ -51,6 +51,13 @@ from .transport_crypto import ENVELOPE_SCHEME
 MAX_PACKAGE_BYTES = 256 * 1024 * 1024
 MOVE_STATE_SCHEMA_VERSION = 1
 _ACCESS_RANK = {"workspace": 0, "project": 1, "drive": 2}
+_SOURCE_TRANSFER_FIELDS = (
+    "transfer_import_state",
+    "transfer_package_id",
+    "transfer_source_instance",
+    "transfer_state",
+    "transfer_target",
+)
 
 
 def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
@@ -528,8 +535,44 @@ def deactivate_source_agent(
         )
         if row is None:
             raise AgentMoveError(f"source Agent '{agent_id}' was not found")
-        if row.get("transfer_package_id") not in {None, package_id}:
-            raise AgentMoveError("source Agent is already associated with another move")
+        current_owner = row.get("transfer_package_id")
+        previous_transfer_fields = {
+            key: row[key] for key in _SOURCE_TRANSFER_FIELDS if key in row
+        }
+        if state is not None:
+            previous_transfer_fields = {
+                key: value
+                for key, value in dict(
+                    state.get("previous_transfer_fields") or {}
+                ).items()
+                if key in _SOURCE_TRANSFER_FIELDS
+            }
+        if current_owner not in {None, package_id}:
+            previous_owner = previous_transfer_fields.get("transfer_package_id")
+            imported_record = (
+                _move_root(root)
+                / "incoming"
+                / str(current_owner)
+                / "state.json"
+            )
+            imported_state = (
+                _load_json(imported_record) if imported_record.is_file() else {}
+            )
+            is_completed_import = (
+                str(previous_owner or "") == str(current_owner)
+                and not row.get("transfer_state")
+                and row.get("transfer_import_state")
+                in {"committed_inactive", "activated_pending_reboot"}
+                and str(imported_state.get("package_id") or "")
+                == str(current_owner)
+                and str(imported_state.get("agent_id") or "") == agent_id
+                and imported_state.get("status")
+                in {"committed_inactive", "activated_pending_reboot"}
+            )
+            if not is_completed_import:
+                raise AgentMoveError(
+                    "source Agent is already associated with another move"
+                )
 
         tasks = _load_json_or_default(
             tasks_path,
@@ -551,6 +594,7 @@ def deactivate_source_agent(
                 "agent_id": agent_id,
                 "target_instance": _normalize_instance(target_instance),
                 "previous_active": bool(row.get("is_active", True)),
+                "previous_transfer_fields": previous_transfer_fields,
                 "schedule_states": schedule_states,
                 "status": "source_disabling",
                 "disable_started_at": utc_now_iso(),
@@ -559,6 +603,8 @@ def deactivate_source_agent(
             }
             _atomic_json(state_path, state, mode=0o600)
 
+        for key in _SOURCE_TRANSFER_FIELDS:
+            row.pop(key, None)
         row["is_active"] = False
         row["transfer_state"] = "moved_out_pending_reboot"
         row["transfer_package_id"] = package_id
@@ -619,11 +665,30 @@ def restore_source_agent(hashi_root: Path | str, package_id: str) -> dict[str, A
         if row is None:
             raise AgentMoveError("source Agent config no longer exists")
         owner = row.get("transfer_package_id")
+        previous_transfer_fields = {
+            key: value
+            for key, value in dict(
+                state.get("previous_transfer_fields") or {}
+            ).items()
+            if key in _SOURCE_TRANSFER_FIELDS
+        }
+        already_restored = (
+            bool(row.get("is_active", True))
+            == bool(state.get("previous_active", True))
+            and all(
+                (key in row) == (key in previous_transfer_fields)
+                and row.get(key) == previous_transfer_fields.get(key)
+                for key in _SOURCE_TRANSFER_FIELDS
+            )
+        )
         if owner == package_id:
             row["is_active"] = bool(state.get("previous_active", True))
-            for key in ("transfer_state", "transfer_package_id", "transfer_target"):
+            for key in _SOURCE_TRANSFER_FIELDS:
                 row.pop(key, None)
-        elif owner is not None or state.get("status") != "source_restoring":
+            row.update(previous_transfer_fields)
+        elif state.get("status") == "source_restoring" and already_restored:
+            pass
+        else:
             raise AgentMoveError("source Agent config no longer belongs to this move")
 
         tasks = _load_json_or_default(

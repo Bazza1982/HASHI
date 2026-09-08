@@ -325,6 +325,142 @@ def test_source_deactivation_disables_schedules_and_restore_is_lossless(tmp_path
     )
 
 
+def test_imported_source_can_move_again_and_restore_import_ownership(tmp_path):
+    source, _, _ = _roots(tmp_path)
+    old_package_id = "imported-package-id"
+    new_package_id = "return-package-id"
+    agents = json.loads((source / "agents.json").read_text())
+    imported = agents["agents"][0]
+    imported.update(
+        {
+            "transfer_import_state": "activated_pending_reboot",
+            "transfer_package_id": old_package_id,
+            "transfer_source_instance": "HASHI2",
+        }
+    )
+    _write_json(source / "agents.json", agents)
+    _write_json(
+        source
+        / "state"
+        / "agent_moves"
+        / "incoming"
+        / old_package_id
+        / "state.json",
+        {
+            "package_id": old_package_id,
+            "agent_id": "zelda",
+            "status": "activated_pending_reboot",
+        },
+    )
+
+    disabled = deactivate_source_agent(
+        source,
+        "zelda",
+        new_package_id,
+        target_instance="HASHI2",
+    )
+
+    assert disabled["previous_transfer_fields"] == {
+        "transfer_import_state": "activated_pending_reboot",
+        "transfer_package_id": old_package_id,
+        "transfer_source_instance": "HASHI2",
+    }
+    moved = json.loads((source / "agents.json").read_text())["agents"][0]
+    assert moved["transfer_package_id"] == new_package_id
+    assert moved["transfer_state"] == "moved_out_pending_reboot"
+    assert "transfer_import_state" not in moved
+    assert "transfer_source_instance" not in moved
+
+    restored = restore_source_agent(source, new_package_id)
+
+    assert restored["status"] == "source_restored_pending_reboot"
+    restored_agent = json.loads((source / "agents.json").read_text())["agents"][0]
+    assert restored_agent["is_active"] is True
+    assert restored_agent["transfer_import_state"] == "activated_pending_reboot"
+    assert restored_agent["transfer_package_id"] == old_package_id
+    assert restored_agent["transfer_source_instance"] == "HASHI2"
+    assert "transfer_state" not in restored_agent
+    assert "transfer_target" not in restored_agent
+
+
+def test_source_with_unproven_prior_move_owner_stays_blocked(tmp_path):
+    source, _, _ = _roots(tmp_path)
+    agents = json.loads((source / "agents.json").read_text())
+    agents["agents"][0].update(
+        {
+            "transfer_import_state": "activated_pending_reboot",
+            "transfer_package_id": "unproven-package",
+            "transfer_source_instance": "HASHI2",
+        }
+    )
+    _write_json(source / "agents.json", agents)
+
+    with pytest.raises(AgentMoveError, match="already associated"):
+        deactivate_source_agent(
+            source,
+            "zelda",
+            "new-package",
+            target_instance="HASHI2",
+        )
+
+
+def test_imported_source_restore_retry_recognises_restored_owner(
+    tmp_path, monkeypatch
+):
+    source, _, _ = _roots(tmp_path)
+    old_package_id = "imported-package-retry"
+    new_package_id = "return-package-retry"
+    agents = json.loads((source / "agents.json").read_text())
+    agents["agents"][0].update(
+        {
+            "transfer_import_state": "activated_pending_reboot",
+            "transfer_package_id": old_package_id,
+            "transfer_source_instance": "HASHI2",
+        }
+    )
+    _write_json(source / "agents.json", agents)
+    _write_json(
+        source
+        / "state"
+        / "agent_moves"
+        / "incoming"
+        / old_package_id
+        / "state.json",
+        {
+            "package_id": old_package_id,
+            "agent_id": "zelda",
+            "status": "activated_pending_reboot",
+        },
+    )
+    deactivate_source_agent(
+        source,
+        "zelda",
+        new_package_id,
+        target_instance="HASHI2",
+    )
+    original_atomic = service._atomic_json
+    interrupted = False
+
+    def _interrupt_tasks(path, value, **kwargs):
+        nonlocal interrupted
+        if path.name == "tasks.json" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("simulated process exit")
+        return original_atomic(path, value, **kwargs)
+
+    monkeypatch.setattr(service, "_atomic_json", _interrupt_tasks)
+    with pytest.raises(KeyboardInterrupt, match="simulated process exit"):
+        restore_source_agent(source, new_package_id)
+    monkeypatch.setattr(service, "_atomic_json", original_atomic)
+
+    restored = restore_source_agent(source, new_package_id)
+
+    assert restored["status"] == "source_restored_pending_reboot"
+    restored_agent = json.loads((source / "agents.json").read_text())["agents"][0]
+    assert restored_agent["transfer_package_id"] == old_package_id
+    assert restored_agent["transfer_import_state"] == "activated_pending_reboot"
+
+
 def test_source_deactivation_journal_recovers_interrupted_write(tmp_path, monkeypatch):
     source, _, _ = _roots(tmp_path)
     package_id = "12345678-journal"
