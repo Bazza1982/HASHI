@@ -6,13 +6,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import secrets as secrets_module
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -28,10 +28,21 @@ HERE = Path(__file__).resolve().parent
 HASHI_ROOT = HERE.parents[1]
 TEMPLATES = HERE / "templates"
 
-with (HASHI_ROOT / "pyproject.toml").open("rb") as _policy_file:
-    _RUNTIME_POLICY = tomllib.load(_policy_file)["tool"]["hashi"]["runtime"]
-PYTHON_VERSION = str(_RUNTIME_POLICY["python"])
-PYTHON_BUILD_DATE = str(_RUNTIME_POLICY["portable-build-date"])
+if str(HASHI_ROOT) not in sys.path:
+    sys.path.insert(0, str(HASHI_ROOT))
+
+from orchestrator.runtime_contract import (  # noqa: E402
+    CORE_SOURCE_PATHS,
+    RuntimePolicy,
+    core_source_digest,
+    load_runtime_policy,
+    locked_standard_dependencies,
+)
+
+_RUNTIME_POLICY = load_runtime_policy(HASHI_ROOT)
+PYTHON_VERSION = _RUNTIME_POLICY.python_text
+PYTHON_BUILD_DATE = _RUNTIME_POLICY.portable_build_date
+STANDARD_LOCK_RELATIVE = Path(_RUNTIME_POLICY.standard_lock)
 
 
 @dataclass(frozen=True)
@@ -39,6 +50,12 @@ class Asset:
     filename: str
     url: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class SourceIdentity:
+    revision: str
+    tree: str
 
 
 ASSETS = {
@@ -109,7 +126,8 @@ SOURCE_DIRS = (
     "tui",
     "veritas",
 )
-ROOT_SOURCE_FILES = ("main.py", "tui.py", "LICENSE")
+ROOT_SOURCE_FILES = ("__main__.py", "main.py", "tui.py", "pyproject.toml", "LICENSE")
+RUNTIME_POLICY_FILES = (_RUNTIME_POLICY.standard_lock,)
 ROOT_PACKAGE_FILES = (
     "exp/__init__.py",
     "exp/loader.py",
@@ -179,6 +197,8 @@ IGNORED_SOURCE_NAMES = {
     "recordings",
     "runs",
 }
+
+
 def status(message: str) -> None:
     print(f"[portable] {message}", flush=True)
 
@@ -240,6 +260,8 @@ def remove_path(path: Path) -> None:
 
 
 def ignored_tracked_source(relative: Path) -> bool:
+    if relative == STANDARD_LOCK_RELATIVE:
+        return False
     for part in relative.parts:
         if (
             part in IGNORED_SOURCE_NAMES
@@ -253,7 +275,12 @@ def ignored_tracked_source(relative: Path) -> bool:
 def copy_hashi_source(destination: Path) -> None:
     status("copy allowlisted, Git-tracked HASHI source")
     destination.mkdir(parents=True, exist_ok=True)
-    requested = (*SOURCE_DIRS, *ROOT_SOURCE_FILES, *ROOT_PACKAGE_FILES)
+    requested = (
+        *SOURCE_DIRS,
+        *ROOT_SOURCE_FILES,
+        *ROOT_PACKAGE_FILES,
+        *RUNTIME_POLICY_FILES,
+    )
     result = subprocess.run(
         ["git", "-C", str(HASHI_ROOT), "ls-files", "-z", "--", *requested],
         check=False,
@@ -281,10 +308,207 @@ def copy_hashi_source(destination: Path) -> None:
             continue
         source = HASHI_ROOT / relative
         if source.is_symlink() or not source.is_file():
-            raise RuntimeError(f"Git-tracked source is missing or not a file: {relative}")
+            raise RuntimeError(
+                f"Git-tracked source is missing or not a file: {relative}"
+            )
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+
+
+def _runtime_input_paths(policy: RuntimePolicy) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(("pyproject.toml", policy.standard_lock, *CORE_SOURCE_PATHS))
+    )
+
+
+def validate_portable_runtime_inputs(
+    app_hashi: Path,
+    *,
+    source_root: Path | None = None,
+) -> RuntimePolicy:
+    """Require the copied image to carry the authoritative runtime inputs."""
+
+    source_root = HASHI_ROOT if source_root is None else Path(source_root).resolve()
+    app_hashi = Path(app_hashi).resolve()
+    source_policy = load_runtime_policy(source_root)
+    copied_policy = load_runtime_policy(app_hashi)
+    if copied_policy != source_policy:
+        raise RuntimeError(
+            "portable runtime policy differs from the selected HASHI source"
+        )
+
+    mismatched: list[str] = []
+    for relative in _runtime_input_paths(source_policy):
+        source = source_root / relative
+        copied = app_hashi / relative
+        if not source.is_file() or not copied.is_file():
+            mismatched.append(relative)
+            continue
+        if sha256_file(source) != sha256_file(copied):
+            mismatched.append(relative)
+    if mismatched:
+        raise RuntimeError(
+            "portable runtime contract inputs are missing or changed: "
+            + ", ".join(mismatched)
+        )
+
+    locked_standard_dependencies(app_hashi, copied_policy)
+    if core_source_digest(app_hashi) != core_source_digest(source_root):
+        raise RuntimeError("portable protected Core source digest differs from source")
+    return copied_policy
+
+
+_LOCKED_PORTABLE_REQUIREMENT = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s;\\]+)")
+
+
+def _normalized_distribution_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _hashed_portable_dependencies(lock_path: Path) -> dict[str, str]:
+    try:
+        raw_lines = lock_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(
+            f"portable dependency lock is unavailable: {lock_path}: {exc}"
+        ) from exc
+
+    dependencies: dict[str, str] = {}
+    missing_hashes: list[str] = []
+    logical = ""
+    for raw in raw_lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        logical = f"{logical} {stripped}".strip()
+        if logical.endswith("\\"):
+            logical = logical[:-1].rstrip()
+            continue
+        match = _LOCKED_PORTABLE_REQUIREMENT.match(logical)
+        if match is not None:
+            name = _normalized_distribution_name(match.group(1))
+            version = match.group(2)
+            previous = dependencies.get(name)
+            if previous is not None and previous != version:
+                raise RuntimeError(
+                    f"portable dependency lock has conflicting pins for {name}: "
+                    f"{previous}, {version}"
+                )
+            dependencies[name] = version
+            if "--hash=sha256:" not in logical:
+                missing_hashes.append(name)
+        logical = ""
+    if logical:
+        raise RuntimeError("portable dependency lock ends with an incomplete entry")
+    if not dependencies:
+        raise RuntimeError("portable dependency lock is empty")
+    if missing_hashes:
+        raise RuntimeError(
+            "portable dependency lock has unhashed entries: "
+            + ", ".join(sorted(missing_hashes))
+        )
+    return dependencies
+
+
+def _requirement_directive_paths(input_path: Path, option: str) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for raw in input_path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        pieces = line.split(maxsplit=1)
+        if len(pieces) == 2 and pieces[0] == option:
+            paths.append((input_path.parent / pieces[1]).resolve())
+    return tuple(paths)
+
+
+def _portable_input_dependencies(input_path: Path) -> dict[str, str]:
+    dependencies: dict[str, str] = {}
+    for line_number, raw in enumerate(
+        input_path.read_text(encoding="utf-8-sig").splitlines(), start=1
+    ):
+        line = raw.strip()
+        if not line or line.startswith(("#", "-c ", "-r ")):
+            continue
+        match = _LOCKED_PORTABLE_REQUIREMENT.fullmatch(line)
+        if match is None:
+            raise RuntimeError(
+                "portable-only dependencies must use exact pins in "
+                f"requirements.in:{line_number}: {line}"
+            )
+        name = _normalized_distribution_name(match.group(1))
+        version = match.group(2)
+        previous = dependencies.get(name)
+        if previous is not None and previous != version:
+            raise RuntimeError(
+                f"portable requirements.in has conflicting pins for {name}: "
+                f"{previous}, {version}"
+            )
+        dependencies[name] = version
+    if not dependencies:
+        raise RuntimeError("portable requirements.in has no portable-only dependencies")
+    return dependencies
+
+
+def validate_portable_dependency_generation(
+    *,
+    source_root: Path = HASHI_ROOT,
+    portable_root: Path = HERE,
+) -> dict[str, str]:
+    """Fail closed unless the portable lock contains the standard generation."""
+
+    source_root = Path(source_root).resolve()
+    portable_root = Path(portable_root).resolve()
+    policy = load_runtime_policy(source_root)
+    standard = locked_standard_dependencies(source_root, policy)
+    input_path = portable_root / "requirements.in"
+    standard_lock = (source_root / policy.standard_lock).resolve()
+    root_requirements = (source_root / "requirements.txt").resolve()
+    try:
+        constraints = _requirement_directive_paths(input_path, "-c")
+        requirements = _requirement_directive_paths(input_path, "-r")
+    except OSError as exc:
+        raise RuntimeError(
+            f"portable dependency input is unavailable: {input_path}: {exc}"
+        ) from exc
+    if constraints != (standard_lock,):
+        raise RuntimeError(
+            "portable requirements.in must constrain exactly the runtime policy lock: "
+            f"{policy.standard_lock}"
+        )
+    if requirements != (root_requirements,):
+        raise RuntimeError(
+            "portable requirements.in must include exactly the standard requirements.txt"
+        )
+    if not root_requirements.is_file():
+        raise RuntimeError(
+            f"standard requirements input is unavailable: {root_requirements}"
+        )
+
+    portable_inputs = _portable_input_dependencies(input_path)
+    portable = _hashed_portable_dependencies(portable_root / "requirements.lock")
+    mismatches = [
+        f"{name}: portable={portable.get(name, 'missing')}, standard={version}"
+        for name, version in sorted(standard.items())
+        if portable.get(name) != version
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "portable dependency generation does not match the standard runtime lock: "
+            + "; ".join(mismatches[:20])
+        )
+    input_mismatches = [
+        f"{name}: lock={portable.get(name, 'missing')}, input={version}"
+        for name, version in sorted(portable_inputs.items())
+        if portable.get(name) != version
+    ]
+    if input_mismatches:
+        raise RuntimeError(
+            "portable dependency generation does not match its direct inputs: "
+            + "; ".join(input_mismatches)
+        )
+    return portable
 
 
 def extract_python(runtime_python: Path, cache: Path) -> None:
@@ -292,7 +516,9 @@ def extract_python(runtime_python: Path, cache: Path) -> None:
     status(f"extract Python {PYTHON_VERSION}")
     runtime_python.parent.mkdir(parents=True, exist_ok=True)
     if runtime_python.exists():
-        raise RuntimeError(f"Python runtime destination already exists: {runtime_python}")
+        raise RuntimeError(
+            f"Python runtime destination already exists: {runtime_python}"
+        )
     extraction_root = Path(
         tempfile.mkdtemp(prefix="hashi-python-extract-", dir=runtime_python.parent)
     )
@@ -334,6 +560,19 @@ def install_python_dependencies(runtime_python: Path) -> None:
     for compiled in site_packages.rglob("*.py[co]"):
         compiled.unlink()
     remove_path(site_packages / "bin")
+
+
+def validate_bundled_runtime_contract(runtime_python: Path, app_hashi: Path) -> None:
+    status("validate bundled Python and HASHI runtime contract")
+    run(
+        [
+            str(runtime_python / "python.exe"),
+            str(app_hashi / "scripts" / "check_runtime_contract.py"),
+            "--code-root",
+            str(app_hashi),
+            "--json",
+        ]
+    )
 
 
 def install_piper(
@@ -436,15 +675,67 @@ def install_tesseract(
         shutil.copy2(cached, model_root / name)
 
 
-def git_revision(root: Path) -> str:
+def git_source_identity(root: Path) -> SourceIdentity:
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        ["git", "show", "-s", "--format=%H%n%T", "HEAD"],
         cwd=root,
-        check=True,
+        check=False,
         text=True,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    return result.stdout.strip()
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"could not resolve HASHI source identity: {result.stderr.strip()}"
+        )
+    object_ids = result.stdout.splitlines()
+    if len(object_ids) != 2:
+        raise RuntimeError("Git returned an incomplete HASHI source identity")
+    return SourceIdentity(revision=object_ids[0].strip(), tree=object_ids[1].strip())
+
+
+def _expected_object_id(value: str | None, *, label: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40,64}", normalized) is None:
+        raise RuntimeError(f"expected {label} must be a full Git object ID")
+    return normalized
+
+
+def require_expected_source_identity(
+    root: Path,
+    *,
+    expected_revision: str | None = None,
+    expected_tree: str | None = None,
+) -> SourceIdentity:
+    identity = git_source_identity(root)
+    revision = _expected_object_id(expected_revision, label="revision")
+    tree = _expected_object_id(expected_tree, label="tree")
+    if revision is not None and identity.revision.lower() != revision:
+        raise RuntimeError(
+            f"HASHI source does not match expected revision: "
+            f"actual={identity.revision}, expected={revision}"
+        )
+    if tree is not None and identity.tree.lower() != tree:
+        raise RuntimeError(
+            f"HASHI source does not match expected tree: "
+            f"actual={identity.tree}, expected={tree}"
+        )
+    return identity
+
+
+def require_unchanged_source_identity(
+    root: Path, expected: SourceIdentity
+) -> SourceIdentity:
+    actual = git_source_identity(root)
+    if actual != expected:
+        raise RuntimeError(
+            "HASHI source changed while the image was building: "
+            f"revision={expected.revision}->{actual.revision}, "
+            f"tree={expected.tree}->{actual.tree}"
+        )
+    return actual
 
 
 def require_clean_tracked_worktree(root: Path, *, label: str) -> None:
@@ -590,6 +881,8 @@ def write_manifest(image_root: Path, build_info: dict) -> int:
 
 
 def validate_image(image_root: Path) -> None:
+    app_hashi = image_root / "app" / "hashi"
+    validate_portable_runtime_inputs(app_hashi)
     portable_identity = json.loads(
         (image_root / "data" / "portable-instance.json").read_text(encoding="utf-8")
     )
@@ -637,7 +930,10 @@ def validate_image(image_root: Path) -> None:
         "runtime/python/python.exe",
         "runtime/bin/ffmpeg.exe",
         "data/portable-instance.json",
+        "app/hashi/__main__.py",
         "app/hashi/main.py",
+        "app/hashi/pyproject.toml",
+        f"app/hashi/{_RUNTIME_POLICY.standard_lock}",
         "app/hashi/tui.py",
         "app/hashi/tui/assets/sounds/soft_chat_send.wav",
         "app/hashi/tui/assets/sounds/soft_chat_receive.wav",
@@ -675,9 +971,7 @@ def validate_image(image_root: Path) -> None:
             f"obsolete split-runtime installer files are present: {present_obsolete}"
         )
 
-    common = (image_root / "launcher" / "Common.ps1").read_text(
-        encoding="utf-8-sig"
-    )
+    common = (image_root / "launcher" / "Common.ps1").read_text(encoding="utf-8-sig")
     installer = (image_root / "launcher" / "Install-To-PC.ps1").read_text(
         encoding="utf-8-sig"
     )
@@ -691,7 +985,12 @@ def validate_image(image_root: Path) -> None:
 
 def build(args: argparse.Namespace) -> Path:
     require_clean_tracked_worktree(HASHI_ROOT, label="HASHI source")
-    hashi_revision = git_revision(HASHI_ROOT)
+    source_identity = require_expected_source_identity(
+        HASHI_ROOT,
+        expected_revision=getattr(args, "expected_revision", None),
+        expected_tree=getattr(args, "expected_tree", None),
+    )
+    validate_portable_dependency_generation()
     output = args.output.resolve()
     if output.exists():
         marker = output / ".hashi-portable-bundle"
@@ -715,8 +1014,10 @@ def build(args: argparse.Namespace) -> Path:
         licenses.mkdir(parents=True, exist_ok=True)
 
         copy_hashi_source(app_hashi)
+        validate_portable_runtime_inputs(app_hashi)
         extract_python(runtime_python, args.cache)
         install_python_dependencies(runtime_python)
+        validate_bundled_runtime_contract(runtime_python, app_hashi)
         install_piper(runtime_python, app_hashi, licenses, args.cache)
         install_ffmpeg(runtime_bin, licenses, args.cache)
         install_tesseract(app_hashi, licenses, args.cache, build_temp)
@@ -741,7 +1042,8 @@ def build(args: argparse.Namespace) -> Path:
             "schema_version": 1,
             "product": "HASHI Portable Windows x64",
             "built_at_utc": datetime.now(timezone.utc).isoformat(),
-            "hashi_revision": hashi_revision,
+            "hashi_revision": source_identity.revision,
+            "hashi_tree": source_identity.tree,
             "python_version": PYTHON_VERSION,
             "pairing_token_ttl_seconds": PAIRING_TOKEN_TTL_SECONDS,
             "maximum_image_bytes": MAX_IMAGE_BYTES,
@@ -814,8 +1116,7 @@ def build(args: argparse.Namespace) -> Path:
                 f"{MAX_IMAGE_BYTES:,}"
             )
         require_clean_tracked_worktree(HASHI_ROOT, label="HASHI source")
-        if git_revision(HASHI_ROOT) != hashi_revision:
-            raise RuntimeError("HASHI revision changed while the image was building")
+        require_unchanged_source_identity(HASHI_ROOT, source_identity)
         staging.replace(output)
         status(
             f"complete: {output} ({final_size:,} logical bytes; "
@@ -842,6 +1143,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=HASHI_ROOT / "build" / "portable-cache",
     )
     parser.add_argument("--secrets", type=Path, default=HASHI_ROOT / "secrets.json")
+    parser.add_argument(
+        "--expected-revision",
+        help="require this full HASHI source commit ID before building",
+    )
+    parser.add_argument(
+        "--expected-tree",
+        help="require this full HASHI source tree ID before building",
+    )
     parser.add_argument("--allow-missing-deepseek-key", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)

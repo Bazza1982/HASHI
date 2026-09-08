@@ -13,7 +13,12 @@ import yaml
 
 from orchestrator.config import ConfigManager
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
-from orchestrator.runtime_contract import load_runtime_policy
+from orchestrator.runtime_contract import (
+    CORE_SOURCE_PATHS,
+    core_source_digest,
+    load_runtime_policy,
+    locked_standard_dependencies,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 PORTABLE = ROOT / "packaging" / "portable_windows"
@@ -140,7 +145,7 @@ def test_portable_launcher_reports_real_startup_milestones_not_elapsed_time():
     assert "AddSeconds(75)" not in common
     assert "AddSeconds(45)" not in common
     assert "HASHI_REMOTE_LIVE_ENDPOINTS_PATH" in common
-    assert "HASHI_WORKBENCH_URL = \"http://127.0.0.1:$port\"" in common
+    assert 'HASHI_WORKBENCH_URL = "http://127.0.0.1:$port"' in common
     assert "HASHI_PORTABLE_STORAGE_PROFILE = 'removable'" not in common
     assert "HASHI_PORTABLE_EXECUTION_MODE = 'local-install'" in common
     assert "HASHI_WINDOWS_NATIVE_ONLY = '1'" in common
@@ -165,14 +170,12 @@ def test_portable_launcher_uses_identity_bound_loopback_with_dynamic_ports():
     assert "HASHI_LOCAL_ENDPOINT_FILE" in common
     assert "load_local_endpoint" in tui
     assert "HASHI_WORKBENCH_URL does not match" in tui
-    assert "api_host != \"127.0.0.1\"" in instances
+    assert 'api_host != "127.0.0.1"' in instances
     assert "172." not in common
 
 
 def test_portable_stop_closes_only_owned_local_runtime_and_browser():
-    stop = (TEMPLATES / "launcher" / "Stop-HASHI.ps1").read_text(
-        encoding="utf-8"
-    )
+    stop = (TEMPLATES / "launcher" / "Stop-HASHI.ps1").read_text(encoding="utf-8")
 
     assert "Get-PortableOwnedProcesses" in stop
     assert "browser-profile" in stop
@@ -182,9 +185,7 @@ def test_portable_stop_closes_only_owned_local_runtime_and_browser():
     assert "portable-local-stop" in stop
     assert "eject the USB" not in stop
     assert "弹出 USB" not in stop
-    assert stop.index("$remaining.Count -gt 0") < stop.index(
-        "HASHI has stopped"
-    )
+    assert stop.index("$remaining.Count -gt 0") < stop.index("HASHI has stopped")
 
 
 def test_portable_full_local_install_is_admin_atomic_verified_and_idempotent():
@@ -222,7 +223,10 @@ def test_portable_full_local_install_is_admin_atomic_verified_and_idempotent():
     assert "SHA256SUMS.txt" in installer
     assert "Assert-StaticManifestCoverage" in installer
     assert "C:\\.HASHI-Portable.installing." in installer
-    assert "Move-Item -LiteralPath $script:StageRoot -Destination $script:InstallRoot" in installer
+    assert (
+        "Move-Item -LiteralPath $script:StageRoot -Destination $script:InstallRoot"
+        in installer
+    )
     assert ".hashi-local-install.json" in installer
     assert "authoritative_data = 'local:data'" in installer
     assert "complete_copy = $true" in installer
@@ -243,12 +247,18 @@ def test_portable_full_local_install_is_admin_atomic_verified_and_idempotent():
     assert "ReparsePoint" in uninstaller
     assert "Stop-HASHI.ps1" in uninstaller
     assert "C:\\.HASHI-Portable.removing." in uninstaller
-    assert "Move-Item -LiteralPath $script:InstallRoot -Destination $removalRoot" in uninstaller
+    assert (
+        "Move-Item -LiteralPath $script:InstallRoot -Destination $removalRoot"
+        in uninstaller
+    )
     assert "Remove-Item -LiteralPath $removalRoot -Recurse -Force" in uninstaller
     assert uninstaller.index(
         "Move-Item -LiteralPath $script:InstallRoot -Destination $removalRoot"
     ) < uninstaller.index("\n    Remove-DesktopShortcuts\n")
-    assert "Move-Item -LiteralPath $removalRoot -Destination $script:InstallRoot" not in uninstaller
+    assert (
+        "Move-Item -LiteralPath $removalRoot -Destination $script:InstallRoot"
+        not in uninstaller
+    )
     assert "Remove-Item -LiteralPath $script:SourceRoot -Recurse" not in uninstaller
     assert "CommonApplicationData" not in uninstaller
 
@@ -364,8 +374,7 @@ def test_portable_setup_guidance_is_bilingual_plain_language_and_actionable(
     source_scripts = list((TEMPLATES / "launcher").glob("*.ps1"))
     assert source_scripts
     assert all(
-        script.read_bytes().startswith(b"\xef\xbb\xbf")
-        for script in source_scripts
+        script.read_bytes().startswith(b"\xef\xbb\xbf") for script in source_scripts
     )
 
     builder.copy_launchers(tmp_path)
@@ -461,14 +470,168 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
         builder.require_clean_tracked_worktree(source, label="fixture")
 
 
+def test_builder_copies_the_real_runtime_contract_inputs(tmp_path):
+    builder = _load_builder()
+    destination = tmp_path / "portable-app"
+
+    builder.copy_hashi_source(destination)
+
+    source_policy = load_runtime_policy(ROOT)
+    copied_policy = load_runtime_policy(destination)
+    assert copied_policy == source_policy
+    required = tuple(
+        dict.fromkeys(
+            (
+                "__main__.py",
+                "pyproject.toml",
+                source_policy.standard_lock,
+                *CORE_SOURCE_PATHS,
+            )
+        )
+    )
+    for relative in required:
+        assert (destination / relative).read_bytes() == (ROOT / relative).read_bytes()
+    assert core_source_digest(destination) == core_source_digest(ROOT)
+    builder.validate_portable_runtime_inputs(destination)
+
+
+def test_portable_dependency_generation_matches_the_runtime_standard_lock():
+    builder = _load_builder()
+
+    builder.validate_portable_dependency_generation(
+        source_root=ROOT,
+        portable_root=PORTABLE,
+    )
+
+
+def test_portable_dependency_generation_rejects_a_drifted_lock(tmp_path):
+    builder = _load_builder()
+    source = tmp_path / "source"
+    portable = source / "packaging" / "portable_windows"
+    standard = source / "constraints" / "standard-py312.lock"
+    portable.mkdir(parents=True)
+    standard.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "pyproject.toml", source / "pyproject.toml")
+    shutil.copy2(ROOT / "requirements.txt", source / "requirements.txt")
+    shutil.copy2(ROOT / "constraints" / "standard-py312.lock", standard)
+    shutil.copy2(PORTABLE / "requirements.in", portable / "requirements.in")
+    lock = (PORTABLE / "requirements.lock").read_text(encoding="utf-8")
+    policy = load_runtime_policy(source)
+    expected = locked_standard_dependencies(source, policy)["aiohttp"]
+    lock = lock.replace(f"aiohttp=={expected}", "aiohttp==0.0.0", 1)
+    (portable / "requirements.lock").write_text(lock, encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"aiohttp: portable=0\.0\.0, standard={re.escape(expected)}",
+    ):
+        builder.validate_portable_dependency_generation(
+            source_root=source,
+            portable_root=portable,
+        )
+
+
+def test_portable_dependency_generation_rejects_a_drifted_direct_input(tmp_path):
+    builder = _load_builder()
+    source = tmp_path / "source"
+    portable = source / "packaging" / "portable_windows"
+    standard = source / "constraints" / "standard-py312.lock"
+    portable.mkdir(parents=True)
+    standard.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "pyproject.toml", source / "pyproject.toml")
+    shutil.copy2(ROOT / "requirements.txt", source / "requirements.txt")
+    shutil.copy2(ROOT / "constraints" / "standard-py312.lock", standard)
+    requirements = (PORTABLE / "requirements.in").read_text(encoding="utf-8")
+    requirements = requirements.replace("edge-tts==7.2.7", "edge-tts==0.0.0", 1)
+    (portable / "requirements.in").write_text(requirements, encoding="utf-8")
+    shutil.copy2(PORTABLE / "requirements.lock", portable / "requirements.lock")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"edge-tts: lock=7\.2\.7, input=0\.0\.0",
+    ):
+        builder.validate_portable_dependency_generation(
+            source_root=source,
+            portable_root=portable,
+        )
+
+
+def test_builder_rejects_wrong_or_changed_source_identity(tmp_path):
+    builder = _load_builder()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tracked.txt").write_text("first\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", source], check=True)
+    subprocess.run(["git", "-C", source, "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            source,
+            "-c",
+            "user.name=Portable Test",
+            "-c",
+            "user.email=portable@example.invalid",
+            "commit",
+            "-qm",
+            "first",
+        ],
+        check=True,
+    )
+
+    initial = builder.require_expected_source_identity(source)
+    assert (
+        builder.require_expected_source_identity(
+            source,
+            expected_revision=initial.revision,
+            expected_tree=initial.tree,
+        )
+        == initial
+    )
+    with pytest.raises(RuntimeError, match="expected revision"):
+        builder.require_expected_source_identity(
+            source,
+            expected_revision="0" * 40,
+            expected_tree=initial.tree,
+        )
+    with pytest.raises(RuntimeError, match="expected tree"):
+        builder.require_expected_source_identity(
+            source,
+            expected_revision=initial.revision,
+            expected_tree="0" * 40,
+        )
+
+    (source / "tracked.txt").write_text("second\n", encoding="utf-8")
+    subprocess.run(["git", "-C", source, "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            source,
+            "-c",
+            "user.name=Portable Test",
+            "-c",
+            "user.email=portable@example.invalid",
+            "commit",
+            "-qm",
+            "second",
+        ],
+        check=True,
+    )
+    with pytest.raises(RuntimeError, match="changed while the image was building"):
+        builder.require_unchanged_source_identity(source, initial)
+
+
 def test_portable_dependency_lock_keeps_requested_compact_capabilities():
     lock = (PORTABLE / "requirements.lock").read_text(encoding="utf-8")
+    policy = load_runtime_policy(ROOT)
+    standard = locked_standard_dependencies(ROOT, policy)
+    for name in ("pymupdf", "textual", "zeroconf"):
+        assert f"{name}=={standard[name]}" in lock
     for required in (
+        "edge-tts==7.2.7",
         "playwright==1.58.0",
         "psutil==7.2.2",
-        "pymupdf==1.27.2.2",
-        "textual==8.1.1",
-        "zeroconf==0.148.0",
     ):
         assert required in lock
     for excluded in (
@@ -508,7 +671,14 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
     assert builder.MAX_IMAGE_BYTES == 957_000_000
     assert builder.CAPACITY_CHECK_CLUSTER_BYTES == 32 * 1024
     assert builder.PAIRING_TOKEN_TTL_SECONDS == 604800
-    assert set(builder.ROOT_SOURCE_FILES) == {"main.py", "tui.py", "LICENSE"}
+    assert set(builder.ROOT_SOURCE_FILES) == {
+        "__main__.py",
+        "main.py",
+        "tui.py",
+        "pyproject.toml",
+        "LICENSE",
+    }
+    assert builder.RUNTIME_POLICY_FILES == (load_runtime_policy(ROOT).standard_lock,)
     assert "exp/loader.py" in builder.ROOT_PACKAGE_FILES
     assert "veritas" in builder.SOURCE_DIRS
     for name in ("codex", "claude", "gemini", "grok"):

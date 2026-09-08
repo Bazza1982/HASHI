@@ -72,8 +72,17 @@ seven days; the LAN itself is not treated as authenticated.
 Build from the HASHI repository root:
 
 ```bash
-python3 packaging/portable_windows/build.py
+python3 packaging/portable_windows/build.py \
+  --expected-revision <full-commit-id> \
+  --expected-tree <full-tree-id>
 ```
+
+The expected Git identities are optional for local development and required
+for a release build. Before downloading or staging an image, the builder
+checks them against the clean source worktree and verifies that the Portable
+hash lock contains every dependency from the runtime policy's standard lock
+at the exact approved version. It checks the source identity again before the
+staging directory is published.
 
 The source `secrets.json` must contain `deepseek_api_key`. Only the DeepSeek,
 optional DashScope/OpenRouter, and Remote shared credentials are copied. Secret
@@ -89,6 +98,11 @@ hash comparison for `data`. Capacity is checked conservatively using 32 KiB
 allocation units; NTFS with its default 4 KiB allocation unit is recommended.
 
 Only Git-tracked files from the explicit source allowlist enter `app/hashi`.
+The allowlist includes `__main__.py`, `pyproject.toml`, the standard dependency
+lock named by `[tool.hashi.runtime]`, and every protected Core source required
+to recompute the runtime fingerprint. The bundled Python executes the shared
+runtime-contract checker after dependencies are installed and before the image
+can be published.
 Untracked development state, logs, local secrets, project-private workflows,
 instance-local Skills, and generated workflow runs cannot leak into a newly
 built image. The tracked HASHI input must be clean, and its revision is checked

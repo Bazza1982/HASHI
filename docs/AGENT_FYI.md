@@ -29,6 +29,15 @@ the legacy sequential event matching before any real backfill; merging this
 tool does not repair history or adopt a running usage renderer. See
 [cost contract](METER_COST_DISPLAY_PLAN.md).
 
+Portable Windows derives its Python release and standard dependency lock from
+the shared runtime policy. Its tracked source payload includes `__main__.py`,
+`pyproject.toml`, the policy-selected lock, and the complete protected Core
+manifest. Release builds pass exact commit/tree expectations, keep the source
+clean and unchanged, and run the shared runtime checker against the bundled
+interpreter before publication. A source checkpoint does not prove a complete
+bundle, installation, or running adoption; see the
+[Portable builder](../packaging/portable_windows/README.md).
+
 ## Engineering rules and authority
 
 Before changing HASHI, read [AGENTS.md](../AGENTS.md), the

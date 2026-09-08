@@ -91,9 +91,7 @@ def test_current_process_satisfies_repository_runtime_contract():
     else:
         assert fingerprint.platform_abi.startswith("cpython-312-")
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint.dependency_digest)
-    assert re.fullmatch(
-        r"sha256:[0-9a-f]{64}", fingerprint.runtime_policy_digest
-    )
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint.runtime_policy_digest)
     assert fingerprint.worker_model == "per-agent-process"
     assert fingerprint.worker_protocol == 1
     assert fingerprint.generation_schema == 2
@@ -109,9 +107,7 @@ def test_machine_policy_matches_implemented_worker_protocols():
 
 def test_function_managers_and_entrypoints_are_disjoint_from_core():
     core_modules = {
-        relative.removesuffix("/__init__.py")
-        .removesuffix(".py")
-        .replace("/", ".")
+        relative.removesuffix("/__init__.py").removesuffix(".py").replace("/", ".")
         for relative in CORE_SOURCE_PATHS
     }
 
@@ -161,8 +157,12 @@ def test_standard_dependency_generation_rejects_missing_or_drifted_package():
     installed = {
         re.split(r"[=<>!~ ;\[]", line, maxsplit=1)[0].strip().lower(): line.split(
             "==", 1
-        )[1].split(";", 1)[0].strip()
-        for line in (ROOT / policy.standard_lock).read_text(encoding="utf-8").splitlines()
+        )[1]
+        .split(";", 1)[0]
+        .strip()
+        for line in (ROOT / policy.standard_lock)
+        .read_text(encoding="utf-8")
+        .splitlines()
         if line and not line.startswith(("#", " "))
     }
     installed.pop("aiohttp")
@@ -205,7 +205,7 @@ def test_packaging_metadata_is_derived_from_runtime_policy():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     assert f'requires-python = "{policy.requires_python}"' in pyproject
-    assert f'Programming Language :: Python :: {policy.python_minor_text}' in pyproject
+    assert f"Programming Language :: Python :: {policy.python_minor_text}" in pyproject
     assert "Programming Language :: Python :: 3.10" not in pyproject
     assert "Programming Language :: Python :: 3.11" not in pyproject
     assert "Programming Language :: Python :: 3.13" not in pyproject
@@ -238,19 +238,19 @@ def test_deployment_versions_derive_from_the_runtime_authority():
     assert expected_python in mac_builder
     assert expected_date in mac_builder
 
-    windows_builder = (
-        ROOT / "packaging" / "portable_windows" / "build.py"
-    ).read_text(encoding="utf-8")
-    assert 'tomllib.load(_policy_file)["tool"]["hashi"]["runtime"]' in windows_builder
-    assert 'PYTHON_VERSION = str(_RUNTIME_POLICY["python"])' in windows_builder
-    assert 'PYTHON_BUILD_DATE = str(_RUNTIME_POLICY["portable-build-date"])' in windows_builder
+    windows_builder = (ROOT / "packaging" / "portable_windows" / "build.py").read_text(
+        encoding="utf-8"
+    )
+    assert "load_runtime_policy(HASHI_ROOT)" in windows_builder
+    assert "validate_portable_dependency_generation()" in windows_builder
+    assert "import tomllib" not in windows_builder
+    assert "PYTHON_VERSION = _RUNTIME_POLICY.python_text" in windows_builder
+    assert "PYTHON_BUILD_DATE = _RUNTIME_POLICY.portable_build_date" in windows_builder
 
 
 def test_standard_lock_covers_every_standard_requirement_and_launch_path():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    lock = (ROOT / "constraints" / "standard-py312.lock").read_text(
-        encoding="utf-8"
-    )
+    lock = (ROOT / "constraints" / "standard-py312.lock").read_text(encoding="utf-8")
     locked_names = {
         re.split(r"[=<>!~ ;\[]", line, maxsplit=1)[0].strip().lower()
         for line in lock.splitlines()
@@ -390,9 +390,7 @@ def test_core_has_no_static_binding_to_replaceable_function_modules():
         "transports",
     }
     core_modules = {
-        relative.removesuffix("/__init__.py")
-        .removesuffix(".py")
-        .replace("/", ".")
+        relative.removesuffix("/__init__.py").removesuffix(".py").replace("/", ".")
         for relative in CORE_SOURCE_PATHS
     }
     violations = []
@@ -424,9 +422,7 @@ def test_core_has_no_static_binding_to_replaceable_function_modules():
 
 def test_process_identity_manifest_matches_importable_core_modules():
     importable_core = {
-        relative.removesuffix("/__init__.py")
-        .removesuffix(".py")
-        .replace("/", ".")
+        relative.removesuffix("/__init__.py").removesuffix(".py").replace("/", ".")
         for relative in CORE_SOURCE_PATHS
         if relative.startswith(("adapters/", "orchestrator/", "remote/", "tools/"))
     }
@@ -437,12 +433,21 @@ def test_process_identity_manifest_matches_importable_core_modules():
 def test_instance_lock_remains_in_core_and_local_locks_belong_to_function_processes():
     assert "orchestrator/instance_lock.py" in CORE_SOURCE_PATHS
     from orchestrator.function_contract import is_function_module_name
+
     assert is_function_module_name("orchestrator.process_resources")
 
 
 def test_cross_platform_modules_do_not_call_posix_only_fchmod_directly():
     violations = []
-    for top_level in ("adapters", "flow", "nagare", "orchestrator", "remote", "tools", "transports"):
+    for top_level in (
+        "adapters",
+        "flow",
+        "nagare",
+        "orchestrator",
+        "remote",
+        "tools",
+        "transports",
+    ):
         for path in (ROOT / top_level).rglob("*.py"):
             if path.name == "file_permissions.py":
                 continue
