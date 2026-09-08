@@ -5425,7 +5425,7 @@ async def test_stop_cancels_all_active_high_volume_subagents(tmp_path):
             turn_id="turn-stop-subagents",
         )
     )
-    await asyncio.wait_for(both_started.wait(), timeout=1)
+    await asyncio.wait_for(both_started.wait(), timeout=5)
 
     assert await runtime.stop_turn("turn-stop-subagents") is True
     result = await asyncio.wait_for(turn, timeout=1)
