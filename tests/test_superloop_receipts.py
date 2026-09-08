@@ -429,6 +429,8 @@ def test_malformed_row_does_not_starve_valid_review(receipt_case, monkeypatch):
 
 @pytest.mark.parametrize("prior_state", ["reviewed", "awaiting_execution"])
 def test_completed_delivery_contract_reopens_review_once_after_restart(receipt_case, monkeypatch, prior_state):
+    import hashlib
+    from orchestrator.superloop_taskboard import SuperloopTaskboardService
     from orchestrator.superloop_receipts import SuperloopReceiptService
     manager, store, calls, payload = receipt_case
     asyncio.run(manager._handle_agent_reply(payload))
@@ -459,7 +461,7 @@ def test_completed_delivery_contract_reopens_review_once_after_restart(receipt_c
         return 'req-recovery'
     service.reconcile(enqueue, activity)
     row = store.load_loop_json_list(path)[-1]
-    assert set(row['review_gaps']) == {'fix:runtime_adoption', 'fix:user_acceptance'}
+    assert set(row['review_gaps']) == {'fix:acceptance_contract', 'outcome_report'}
     assert row['followthrough_state'] == 'recovery_queued'
     assert len(admitted) == 1
     clock[0] += 31
@@ -470,19 +472,33 @@ def test_completed_delivery_contract_reopens_review_once_after_restart(receipt_c
     tasks[0].update(runtime_adoption_verified=True, user_acceptance_verified=True,
                     runtime_adoption_evidence_ref='../outside.md', user_acceptance_evidence_ref='missing.md')
     store.save_loop_json_list(board, tasks)
-    assert set(service.review_gaps('sl-review', row)) == {'fix:runtime_adoption', 'fix:user_acceptance'}
-    (root / 'delivery.md').write_text('Generation adopted; user command exercised, observed result recorded')
-    tasks[0].update(runtime_adoption_evidence_ref='delivery.md', user_acceptance_evidence_ref='delivery.md',
-                    terminal_delivery_required=True)
+    assert set(service.review_gaps('sl-review', row)) == {'fix:acceptance_contract', 'outcome_report'}
+    # Replace the old prose-file shortcut with matching reviewed observations.
+    tasks[0].update(user_outcome='Requested feature works on the target and reports to the user',
+                    terminal_delivery_required=True, acceptance_checks=[], acceptance_results={})
+    for kind in ('runtime_adoption', 'user_acceptance', 'terminal_delivery'):
+        check = dict(id=kind, kind=kind, scope='target-instance', scenario='Observe ' + kind,
+                     expected='Requested operation succeeds', prerequisites=[], subject_version='candidate')
+        tasks[0]['acceptance_checks'].append(check)
+        artifact = root / (kind + '.log')
+        artifact.write_text('Original observed result for ' + kind)
+        proof = dict(task_id='fix', check=check, result='passed', observer='worker@remote',
+                     observed_at='2026-09-08T07:00:00+00:00', observed='Successful operation',
+                     subject_version='candidate', artifacts=[dict(ref=artifact.name,
+                     sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())])
+        evidence = root / (kind + '.json')
+        evidence.write_text(json.dumps(proof))
+        tasks[0]['acceptance_results'][kind] = dict(evidence_ref=evidence.name,
+            sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(), reviewed_by='manager@local')
     store.save_loop_json_list(board, tasks)
-    assert service.review_gaps('sl-review', row) == ['fix:terminal_delivery']
-    tasks[0].update(terminal_delivery_verified=True, terminal_delivery_evidence_ref='delivery.md')
-    store.save_loop_json_list(board, tasks)
+    rows = store.load_loop_json_list(path)
+    rows[-1]['outcome_report'] = SuperloopTaskboardService(store).outcome_report('sl-review')
+    store.save_loop_json_list(path, rows)
     clock[0] += 31
     service.reconcile(enqueue, activity)
     assert store.load_loop_json_list(path)[-1]['followthrough_state'] == 'reviewed'
     # Later evidence loss is detected, but cannot create another recovery.
-    (root / 'delivery.md').unlink()
+    (root / 'user_acceptance.log').unlink()
     clock[0] += 31
     service.reconcile(enqueue, activity)
     assert store.load_loop_json_list(path)[-1]['followthrough_state'] == 'needs_attention'
@@ -544,7 +560,7 @@ def test_reviewed_controller_rechecks_reopened_board_without_delivery_completion
     assert service.delivery_gaps('sl-review') == []
     service.reconcile(lambda request: admitted.append(request) or 'req-recovery', activity)
     result = store.load_loop_json_list(path)[0]
-    assert set(result['review_gaps']) == {'fix', 'new-user-task'}
+    assert set(result['review_gaps']) == {'fix:acceptance_contract', 'new-user-task', 'outcome_report'}
     assert result['followthrough_state'] == 'recovery_queued'
     assert len(admitted) == 1
     clock[0] += 31

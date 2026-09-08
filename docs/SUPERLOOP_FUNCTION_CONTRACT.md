@@ -389,7 +389,9 @@ dispatch work and must not be enabled as a substitute for controller execution.
 
 ### Explicit delivery closeout contract (2026-09-08)
 
-An outcome task may opt in with `delivery_required: true`. When such a task is
+An outcome task may opt in with `delivery_required: true`. The initial contract
+below is historical; the scoped acceptance contract later in this document
+supersedes its Boolean/file-presence completion path. Initially, when such a task was
 `completed`, its taskboard row must contain `runtime_adoption_verified: true`
 and `user_acceptance_verified: true`, each with a corresponding
 `runtime_adoption_evidence_ref` / `user_acceptance_evidence_ref` naming an existing
@@ -467,3 +469,85 @@ A follow-up real Store scenario leaves the accepted dispatch ledger and old
 activity file unchanged, advances past `review_after`, and verifies exactly one
 controller recovery without dispatching the original work again. It fails on the
 prior implementation and passes with dispatch-observation expiry enforced.
+
+### Scoped acceptance and manager outcome review (2026-09-08)
+
+Functional owner: PAO. Engineering layer: Functions. This repairs existing
+delivery supervision; it does not authorize product/Core edits, restarts or
+new recurring schedules. `superloop_taskboard` is the single acceptance owner
+used by task completion, loop closeout validation and receipt reconciliation.
+
+Every `delivery_required` task defines `user_outcome` and a nonempty
+`acceptance_checks` list **before dispatch**, with a separate check for each
+required scenario and target scope. Each check contains `id`, `kind`, `scope`,
+`scenario`, `expected`, and optional `prerequisites` (explicit dependency IDs).
+Each check also declares `subject_version`, the exact intended revision or
+generation; the observation must match it. IDs must be unique. The set includes `runtime_adoption` and `user_acceptance`,
+plus `terminal_delivery` when required. Implementation, test, review and merge
+checks can also be recorded separately. Scope must identify the relevant
+instance, platform, Agents, direction and intended version where applicable.
+The delivery owner must choose a complete user path, including applicable
+failure/persistence boundaries. Do not redefine that path to fit passing tests.
+
+`acceptance_results[check_id]` contains `evidence_ref`, its `sha256`, and
+`reviewed_by` (qualified reviewer identity). The loop-local JSON evidence is:
+
+```json
+{
+  "task_id": "delivery-task",
+  "check": {"id": "preview", "kind": "user_acceptance", "scope": "source -> target", "subject_version": "candidate-123",
+    "scenario": "Preview an existing Agent", "expected": "Preview succeeds; source is unchanged",
+    "prerequisites": []},
+  "result": "passed",
+  "observer": "worker@instance",
+  "observed_at": "2026-09-08T07:00:00+00:00",
+  "subject_version": "candidate-123",
+  "observed": "Actual operation and result",
+  "artifacts": [{"ref": "original-observation.json", "sha256": "actual artifact SHA-256"}]
+}
+```
+
+The `check` must exactly match the current declared check. Changing the scenario,
+scope, expectation or prerequisites invalidates old results. The named reviewer
+must differ from the observer; the controller independently inspects the raw
+artifacts and their scope before recording the review. Missing, changed,
+out-of-loop, malformed, unreviewed, failed and mismatched evidence cannot pass.
+Old `*_verified` flags remain historical notes; they cannot bypass this contract.
+This validates structure, provenance and coverage, not the truth of observations,
+identity authentication or the adequacy of a manager's chosen acceptance plan.
+
+Completion through `update_task_status` raises `ValueError` with the missing
+delivery checks before persisting a false completion. Direct file writers are
+still caught by the same check in `validate_loop(closeout=True)` and receipt
+reconciliation. Legacy delivery tasks must define their scoped plan; ordinary
+code-only tasks retain their prior contract. Cancellation is not auto-replayed.
+
+For unfinished delivery tasks the review row has `dispositions` entries with
+`task_id` and `check_dispositions`: each unaccepted check has `check_id` and an
+existing active/action/blocked/deferred disposition. An action still needs its
+next step in the task's canonical `next_disposition`; the receipt disposition
+must match that value so the report cannot retain an obsolete global wait. An action needs its
+next step under continuous supervision. `blocked` also names `blocked_on`, a
+nonempty subset of that check's `prerequisites`. Thus an adoption approval does
+not cover an independent preview check. This does not prove the dependency
+itself is justified; the controller must verify that judgment. Legitimate
+unfinished work with complete current dispositions does not trigger recovery.
+
+The controller records `outcome_report` from
+`SuperloopTaskboardService.outcome_report(loop_id)` and uses that projection to
+report requested outcomes, accepted scopes, remaining checks and next ownership.
+A task with all checks accepted but still open requires a formal closeout action;
+an empty remaining-check list cannot exempt it indefinitely. A stale/missing projection requires review; test counts and commits cannot
+substitute for it. It is not a message receipt. Exact-request canonical Connector
+delivery still determines whether the visible report was sent. Work review and
+report delivery remain separate, and missing delivery never resends product work.
+The existing single recovery budget, pause/stop boundaries and maintenance
+fallback are unchanged.
+
+Failure proof: four real-Store scenarios failed before this patch: status
+completion accepted missing evidence; Runner closed a loop without receipts;
+single-Agent adoption plus failed preview passed Boolean checks; and one adoption
+wait hid the independent preview. The repaired scenarios also exercise persisted
+reviewed observations, evidence mutation, next-check coverage and report staleness.
+Source validation, running adoption and full live management acceptance are
+separate facts recorded in the instance's delivery board.

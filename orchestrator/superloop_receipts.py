@@ -16,6 +16,9 @@ from typing import Any
 from orchestrator.superloop_dispatch import SuperloopDispatchLedger
 from orchestrator.superloop_interlock import evaluate_dispatch_interlock, loop_dispatch_lock
 from orchestrator.superloop_store import SuperloopStore, system_actor
+from orchestrator.superloop_taskboard import (
+    SuperloopTaskboardService, acceptance_gap, delivery_contract_gaps, task_delivery_gaps,
+)
 
 logger = logging.getLogger(__name__)
 RETRY_SECONDS = 30
@@ -70,7 +73,7 @@ class SuperloopReceiptService:
         return path.is_relative_to(root) and path.is_file()
 
     def delivery_gaps(self, loop_id: str) -> list[str]:
-        """Require recorded outcome evidence only for opted-in completed tasks."""
+        """Use the same delivery contract as task transitions and loop closeout."""
         state = self.store.load_loop_state(loop_id)
         tasks = self.store.load_loop_json_list(self.store.resolve_loop_path(
             loop_id, state.get("taskboard_path"), "taskboard.json"))
@@ -78,13 +81,7 @@ class SuperloopReceiptService:
         for task in tasks:
             if task.get("status") != "completed" or task.get("delivery_required") is not True:
                 continue
-            requirements = ["runtime_adoption", "user_acceptance"]
-            if task.get("terminal_delivery_required") is True:
-                requirements.append("terminal_delivery")
-            for requirement in requirements:
-                if (task.get(requirement + "_verified") is not True
-                        or not self._evidence_exists(loop_id, task.get(requirement + "_evidence_ref"))):
-                    gaps.append(f"{task.get('task_id')}:{requirement}")
+            gaps.extend(f"{task.get('task_id')}:{gap}" for gap in task_delivery_gaps(self.store, loop_id, task))
         return gaps
 
     def review_gaps(self, loop_id: str, row: dict) -> list[str]:
@@ -112,7 +109,7 @@ class SuperloopReceiptService:
             return (isinstance(deadline, (int, float)) and not isinstance(deadline, bool)
                     and math.isfinite(deadline) and deadline > time.time())
 
-        def disposition_valid(task: dict, d: Any, *, allow_action: bool = True) -> bool:
+        def disposition_valid(task: dict, d: Any, *, allow_action: bool = True, check: dict | None = None) -> bool:
             if not isinstance(d, dict):
                 return False
             kind = d.get("kind")
@@ -124,19 +121,51 @@ class SuperloopReceiptService:
                         and deadline_valid(d))
             if kind == "action" and allow_action:
                 return (self._evidence_exists(loop_id, d.get("evidence_ref"))
-                        and (not continuous or disposition_valid(task, d.get("next"), allow_action=False)))
+                        and (not continuous or disposition_valid(task, d.get("next"), allow_action=False, check=check)))
             if kind in {"blocked", "deferred"}:
                 if not all(isinstance(d.get(k), str) and d[k].strip()
                            for k in ("reason", "owner", "trigger")):
                     return False
+                if kind == "blocked" and check is not None:
+                    blocked_on = d.get("blocked_on")
+                    if (not isinstance(blocked_on, list) or not blocked_on
+                            or any(p not in check.get("prerequisites", []) for p in blocked_on)):
+                        return False
                 return deadline_valid(d)
             return False
 
         for task in tasks:
             if task.get("status") in {"completed", "cancelled", "canceled", "aborted", "failed"}:
                 continue
+            if task.get("delivery_required") is True:
+                plan_gaps = delivery_contract_gaps(task)
+                if plan_gaps:
+                    gaps.extend(f"{task.get('task_id')}:{g}" for g in plan_gaps)
+                    continue
+                disposition = by_task.get(task.get("task_id"), {})
+                next_step = task.get("next_disposition")
+                if not isinstance(next_step, dict) or disposition != dict(next_step, task_id=task.get("task_id")):
+                    gaps.append(f"{task.get('task_id')}:next_step_mismatch")
+                rows = disposition.get("check_dispositions", [])
+                if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+                    gaps.append(str(task.get("task_id")))
+                    continue
+                by_check = {d.get("check_id"): d for d in rows}
+                if len(by_check) != len(rows):
+                    gaps.append(str(task.get("task_id")))
+                remaining = [check for check in task["acceptance_checks"]
+                             if acceptance_gap(self.store, loop_id, task, check)]
+                if not remaining:
+                    gaps.append(f"{task.get('task_id')}:closeout")
+                for check in remaining:
+                    if not disposition_valid(task, by_check.get(check["id"]), check=check):
+                        gaps.append(f"{task.get('task_id')}:{check['id']}:next_step")
+                continue
             if not disposition_valid(task, by_task.get(task.get("task_id"), {})):
                 gaps.append(str(task.get("task_id")))
+        expected_report = SuperloopTaskboardService(self.store).outcome_report(loop_id)
+        if expected_report and row.get("outcome_report") != expected_report:
+            gaps.append("outcome_report")
         return gaps
 
     def reconcile(self, enqueue: Callable[[dict], str | None], activity: Callable[[str, str], dict | None]) -> None:
@@ -280,10 +309,17 @@ class SuperloopReceiptService:
             "A task label, runner state change or promise is not execution evidence. "
             "Verify dispatch execution separately, reuse existing receipt/deadline triggers and do not add "
             "recurring polling. Report user outcomes, unresolved impact and next responsibility visibly. "
-            "For completed tasks explicitly marked delivery_required=true, record runtime_adoption_verified "
-            "and user_acceptance_verified with matching *_evidence_ref files; when terminal_delivery_required=true, "
-            "also record terminal_delivery_verified and terminal_delivery_evidence_ref. Missing delivery evidence "
-            "requires reopening the delivery task and taking action or recording a concrete blocker. "
+            "For delivery_required tasks, define user_outcome and acceptance_checks before dispatch: each check "
+            "has id, kind, exact scope, subject_version, scenario, expected and prerequisites. Include runtime_adoption and "
+            "user_acceptance checks, and terminal_delivery if required. Follow the scoped observation format in "
+            "docs/SUPERLOOP_FUNCTION_CONTRACT.md; independently inspect original artifacts before recording "
+            "acceptance_results. Old verified booleans and file existence cannot close delivery. For every "
+            "unaccepted check record check_dispositions with check_id and the same disposition fields above. "
+            "A blocked check also needs blocked_on drawn from its own prerequisites; an adoption approval "
+            "cannot block independent preview/testing. Link dispatches to their actual task; do not duplicate work. "
+            "Derive outcome_report using SuperloopTaskboardService.outcome_report and save it on the review row. "
+            "Use those requested outcomes, passed scopes and remaining checks in the visible user report; "
+            "missing coverage stays open under its delivery owner. Never redefine acceptance to fit a passing test. "
             "Review records never prove runtime adoption or terminal delivery. report_delivery_state=unverified "
             "requires independent canonical Connector delivery_event inspection for the exact controller request. "
             "If the single recovery is exhausted, the existing controller/maintenance review must handle "

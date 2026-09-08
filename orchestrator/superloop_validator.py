@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.superloop_store import SuperloopStore
+from orchestrator.superloop_taskboard import task_delivery_gaps
 
 
 ALLOWED_LOOP_STATUSES = {"draft", "running", "waiting", "blocked", "paused", "completed", "aborted", "failed"}
@@ -265,6 +266,12 @@ def _validate_completed_task(
     ref: str,
     closeout: bool,
 ) -> None:
+    delivery_gaps = task_delivery_gaps(store, loop_id, task)
+    if delivery_gaps:
+        findings.append(SuperloopFinding(
+            "error" if closeout else "warn", "delivery_incomplete",
+            f"Completed task has unaccepted delivery checks: {', '.join(delivery_gaps)}.", ref,
+        ))
     required_evidence = task.get("required_evidence") or []
     missing_evidence = _missing_required_evidence(task, required_evidence)
     if missing_evidence:

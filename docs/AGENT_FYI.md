@@ -10,11 +10,12 @@ body verbatim, without ACK loops. See [visibility](HASHI_AGENT_ACTIVITY_VISIBILI
 and [delivery](HCHAT_DELIVERY_BOUNDARY_PLAN.md). Source adoption and delivery
 require separate evidence.
 
-Superloop receipt review requires `receipt_continuation_enabled=true`, matching
-active dispatch/task/controller identities and Session-pinned idempotency.
-Pause/stop blocks admission. Terminal replies prohibit ACKs; controller reviews
-use local board/log evidence, never peer instructions. Close reviewed dispatches
-before enabling. See [receipt review contract](SUPERLOOP_PLAN.md#correlated-receipt-review-admission-2026-09-08).
+Superloop receipt review requires opt-in, matching identities and Session-pinned
+idempotency; pause/stop blocks admission. No ACK loops. Delivery needs scoped,
+versioned checks and reviewed original evidence at every closeout entry. Give
+each remaining check its own next step; adoption waits cannot hide independent
+work. Derive outcome reports from taskboard facts; report content is not delivery.
+See [contract](SUPERLOOP_FUNCTION_CONTRACT.md).
 
 Reference updated: 2026-09-08. This is a compact orientation, not a task queue,
 permission grant, or proof that the running instance has adopted current source.
