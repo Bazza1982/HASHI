@@ -21,13 +21,20 @@ import tempfile
 import unicodedata
 import zipfile
 from collections.abc import Iterable, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
-from orchestrator.pcm import parse_pcm_text
+from orchestrator.pcm import (
+    PCM_FILENAME,
+    PCMValidationError,
+    canonical_agent_md,
+    load_pcm_document,
+    parse_pcm_text,
+)
 from orchestrator.process_execution import is_wsl
 
 PACKAGE_TYPE = "hashi-agent-move"
@@ -168,6 +175,45 @@ def detect_environment_kind() -> str:
     return system or "unknown"
 
 
+def _read_canonical_pcm(workspace: Path, agent_id: str) -> str:
+    """Read the exact workspace PCM through its authoritative validator."""
+
+    try:
+        aliases = sorted(
+            entry.name
+            for entry in workspace.iterdir()
+            if entry.name.casefold() == PCM_FILENAME.casefold()
+            and entry.name != PCM_FILENAME
+        )
+    except OSError as exc:
+        raise AgentMoveError(
+            f"canonical agent.md cannot be inspected for Agent '{agent_id}'"
+        ) from exc
+    if aliases:
+        raise AgentMoveError(
+            f"workspace/{aliases[0]} conflicts with the reserved canonical Agent "
+            f"identity path {PCM_FILENAME!r}; use the exact lower-case filename"
+        )
+
+    pcm_path = canonical_agent_md(workspace)
+    try:
+        document = load_pcm_document(pcm_path, workspace_dir=workspace)
+    except PCMValidationError as exc:
+        if exc.code == "pcm_missing":
+            raise AgentMoveError(
+                f"canonical agent.md is missing for Agent '{agent_id}'"
+            ) from exc
+        raise AgentMoveError(f"canonical agent.md is invalid: {exc}") from exc
+
+    try:
+        pcm_bytes = pcm_path.read_bytes()
+    except OSError as exc:
+        raise AgentMoveError(f"canonical agent.md is invalid: {exc}") from exc
+    if hashlib.sha256(pcm_bytes).hexdigest() != document.content_sha256:
+        raise AgentMoveError("canonical agent.md changed while preparing the package")
+    return pcm_bytes.decode("utf-8")
+
+
 def create_agent_move_package(
     hashi_root: Path | str,
     agent_id: str,
@@ -204,14 +250,7 @@ def create_agent_move_package(
             f"source Agent '{name}' has already moved to another instance"
         )
     workspace = _resolve_workspace(root, raw_config, name)
-    pcm_path = workspace / "agent.md"
-    if not pcm_path.is_file():
-        raise AgentMoveError(f"canonical agent.md is missing for Agent '{name}'")
-    pcm_text = pcm_path.read_text(encoding="utf-8")
-    try:
-        parse_pcm_text(pcm_text, path=pcm_path)
-    except ValueError as exc:
-        raise AgentMoveError(f"canonical agent.md is invalid: {exc}") from exc
+    pcm_text = _read_canonical_pcm(workspace, name)
 
     agent_config, config_warnings = _portable_agent_config(raw_config, name)
     schedules = _collect_schedules(root, name)
@@ -808,8 +847,8 @@ def _prepare_workspace_entries(
         try:
             source_uri = item.source.resolve().as_uri() + "?mode=ro"
             with (
-                sqlite3.connect(source_uri, uri=True) as source_db,
-                sqlite3.connect(snapshot) as target_db,
+                closing(sqlite3.connect(source_uri, uri=True)) as source_db,
+                closing(sqlite3.connect(snapshot)) as target_db,
             ):
                 source_db.backup(target_db)
             prepared.append(

@@ -92,6 +92,11 @@ case-folding collisions, reserved device names, invalid characters, trailing
 dots/spaces, and oversized path components before import. The receiver rebuilds
 its own workspace path and applies only permissions supported by its operating
 system. Source `workzone.json` and absolute source paths are never imported.
+The source accepts only the physically lower-case canonical `agent.md`; a
+case-folded alias such as `Agent.md` is rejected before packaging on every
+filesystem. SQLite backup connections are closed before their temporary
+snapshots are removed, including on Windows filesystems that enforce open-file
+sharing locks.
 
 ## Activation
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -21,6 +22,29 @@ from orchestrator.pcm import render_pcm_document
 
 def _write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _rewrite_archive(
+    source_path: Path,
+    target_path: Path,
+    *,
+    replacements: dict[str, bytes],
+) -> None:
+    with zipfile.ZipFile(source_path, "r") as source:
+        members = {name: source.read(name) for name in source.namelist()}
+    members.update(replacements)
+    checksums = {
+        "schema_version": 1,
+        "files": {
+            name: hashlib.sha256(content).hexdigest()
+            for name, content in members.items()
+            if name != "checksums.json"
+        },
+    }
+    members["checksums.json"] = json.dumps(checksums).encode("utf-8")
+    with zipfile.ZipFile(target_path, "w") as target:
+        for name, content in members.items():
+            target.writestr(name, content)
 
 
 def _source_root(tmp_path: Path) -> Path:
@@ -185,21 +209,45 @@ def test_package_rejects_windows_case_collision(tmp_path):
     root = _source_root(tmp_path)
     workspace = root / "workspaces" / "zelda"
     (workspace / "Readme.txt").write_text("one", encoding="utf-8")
-    (workspace / "README.TXT").write_text("two", encoding="utf-8")
     path = tmp_path / "zelda.hashi-agent"
     create_agent_move_package(root, "zelda", path)
+    replacement = tmp_path / "case-collision.hashi-agent"
+    with zipfile.ZipFile(path, "r") as archive:
+        metadata = json.loads(
+            archive.read("metadata/workspace.json").decode("utf-8")
+        )
+    metadata["files"].append(
+        {
+            **next(
+                item for item in metadata["files"] if item["path"] == "Readme.txt"
+            ),
+            "path": "README.TXT",
+        }
+    )
+    metadata["source_bytes"] += len(b"two")
+    _rewrite_archive(
+        path,
+        replacement,
+        replacements={
+            "metadata/workspace.json": json.dumps(metadata).encode("utf-8"),
+            "workspace/README.TXT": b"two",
+        },
+    )
 
     with pytest.raises(AgentMoveError, match="case-insensitive path collision"):
-        read_agent_move_package(path, target_platform="windows")
+        read_agent_move_package(replacement, target_platform="windows")
 
 
-def test_package_rejects_windows_reserved_agent_id(tmp_path):
+def test_package_rejects_windows_reserved_agent_id(tmp_path, monkeypatch):
     root = _source_root(tmp_path)
     agents = json.loads((root / "agents.json").read_text())
     agents["agents"][0]["name"] = "CON"
     agents["agents"][0]["workspace_dir"] = "workspaces/zelda"
     _write_json(root / "agents.json", agents)
     path = tmp_path / "con.hashi-agent"
+    monkeypatch.setattr(
+        "orchestrator.agent_move.package.detect_environment_kind", lambda: "linux"
+    )
     create_agent_move_package(root, "CON", path)
 
     with pytest.raises(AgentMoveError, match="Windows reserved filename"):
@@ -263,13 +311,17 @@ def test_package_enforces_receiver_size_before_publishing_output(tmp_path):
 
 def test_package_reserves_canonical_agent_md_name(tmp_path):
     root = _source_root(tmp_path)
-    (root / "workspaces" / "zelda" / "Agent.md").write_text(
-        "must not shadow identity/agent.md",
-        encoding="utf-8",
-    )
+    workspace = root / "workspaces" / "zelda"
+    (workspace / "agent.md").rename(workspace / "Agent.md")
+    assert "Agent.md" in {entry.name for entry in workspace.iterdir()}
 
     with pytest.raises(AgentMoveError, match="reserved"):
-        create_agent_move_package(root, "zelda", tmp_path / "zelda.hashi-agent")
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "zelda.hashi-agent",
+            include_workspace=False,
+        )
 
 
 def test_snapshot_fingerprint_is_stable_and_detects_sqlite_changes(tmp_path):

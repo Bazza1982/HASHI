@@ -114,7 +114,8 @@ and tracked files.
 
 Agent identity uses the exact lower-case
 `workspaces/<agent_id>/agent.md` with strict `[persona]`, `[sys]`, and
-optional `[memory]` blocks. Seeds live in `agent_seeds/`. Local Agent
+optional `[memory]` blocks. Move packaging rejects case-folded aliases and
+closes SQLite snapshots before cleanup. Seeds live in `agent_seeds/`. Local Agent
 creation or adoption needs the user's operational authority.
 
 ## Working modes and Engine selection
