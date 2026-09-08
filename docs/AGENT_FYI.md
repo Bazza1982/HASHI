@@ -6,7 +6,9 @@ bridge and background turns, must request visible delivery. Legacy
 Functions enforce this at admission. Preserve destination authorization and
 terminal HChat reply rules. See [visibility decision](HASHI_AGENT_ACTIVITY_VISIBILITY.md).
 HChat receipts show the exact final payload. A destination queue acknowledgement
-is `queued`; only an explicit terminal state is `sent`; errors are `failed`.
+is `queued`; `sent` requires a confirmed Frontend Connector transport receipt.
+Protocol states such as `reply_sent` and `completed` do not provide that receipt.
+Errors and failure states are `failed`, even beside a contradictory success flag.
 Terminal HChat/protocol replies show their body verbatim in one normal response
 and must not start an acknowledgement loop. See the
 [HChat delivery decision](HCHAT_DELIVERY_BOUNDARY_PLAN.md).

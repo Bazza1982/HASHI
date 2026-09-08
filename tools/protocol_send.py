@@ -36,8 +36,9 @@ from tools.hchat_send import (
     _split_target_address,
 )
 
-_TERMINAL_SUCCESS_STATES = frozenset({"completed", "reply_sent"})
-_FAILURE_STATES = frozenset({"abandoned_after_restart", "failed", "reply_failed"})
+_FAILURE_STATES = frozenset(
+    {"abandoned_after_restart", "failed", "reply_failed", "timed_out"}
+)
 
 
 def _build_request_headers(
@@ -396,8 +397,9 @@ def _delivery_disposition(result: dict) -> str:
     state = str(result.get("state") or "accepted").strip().lower()
     if not result.get("ok") or state in _FAILURE_STATES:
         return "failed"
-    if state in _TERMINAL_SUCCESS_STATES:
-        return "sent"
+    # Protocol lifecycle states stop at a peer protocol endpoint or its local
+    # /api/chat queue. Neither reply_sent nor completed carries the later
+    # Frontend Connector transport receipt, so this tool cannot claim "sent".
     return "queued"
 
 
@@ -410,12 +412,11 @@ def _print_delivery_receipt(
 ) -> None:
     disposition = _delivery_disposition(result)
     stream = sys.stderr if disposition == "failed" else sys.stdout
-    if disposition == "sent":
-        title = "✅ Protocol terminal message sent"
-    elif disposition == "queued":
-        title = "🟡 Protocol message queued"
-    else:
-        title = "❌ Protocol message failed"
+    title = (
+        "❌ Protocol message failed"
+        if disposition == "failed"
+        else "🟡 Protocol message queued"
+    )
     print(f"{title}: {from_agent} → {target}", file=stream)
     print(f"   Message:\n{text}", file=stream)
 
@@ -496,7 +497,8 @@ def send_protocol_message(
             from_instance=source_instance,
             timeout=timeout,
         )
-    if result.get("ok"):
+    disposition = _delivery_disposition(result)
+    if disposition != "failed":
         _record_outbound_correlation(
             payload,
             state=str(result.get("state") or "accepted"),

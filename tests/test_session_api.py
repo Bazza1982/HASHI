@@ -213,6 +213,22 @@ async def test_tui_and_workbench_legacy_chat_share_default_conversation_binding(
 
 
 @pytest.mark.asyncio
+async def test_legacy_chat_response_is_queue_ack_without_transport_receipt(tmp_path):
+    server, _runtime = _server(tmp_path)
+    request = _Request({"agent": "lily", "text": "queue this"})
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["request_id"] == "req-api-1"
+    assert "delivery_receipt" not in payload
+    assert "delivered" not in payload
+
+
+@pytest.mark.asyncio
 async def test_tui_legacy_transcript_reads_shared_canonical_session(tmp_path):
     server, runtime = _server(tmp_path)
     session = server.session_store.resolve_session(

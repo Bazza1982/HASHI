@@ -32,8 +32,12 @@ Delivery presentation contract:
   metadata and cannot replace the payload or claim a stronger result.
 - A successful Backend API, Remote `/hchat`, or protocol queue acknowledgement
   is `queued`. It proves destination admission only.
-- `sent` is reserved for an explicit terminal success state such as
-  `reply_sent` or `completed`. A false response or error is `failed`.
+- `sent` requires a confirmed Frontend Connector transport receipt. The current
+  protocol response does not carry that receipt: `reply_sent`, `completed`, and
+  `reply_delivered_locally` describe protocol/API lifecycle progress and remain
+  `queued` in sender-facing output.
+- A false response, error, or failure state is `failed`; a failure state such as
+  `reply_failed` takes precedence even when a response also contains `ok=true`.
 - Incoming terminal HChat/protocol replies instruct the receiving Agent to show
   the reply body verbatim in its one normal user-facing response. They continue
   to forbid acknowledgements and new HChat/protocol messages.
@@ -359,7 +363,8 @@ Required tests:
 - `hchat-reply:*` summaries remain wrappable,
 - transcript/core transcript/listener payloads agree on sent vs shown text.
 - queue acknowledgement is not labelled sent or delivered,
-- explicit terminal success is labelled sent,
+- protocol lifecycle states remain queued without a Frontend Connector receipt,
+- failure state takes precedence over a contradictory top-level success flag,
 - queue and failure receipts preserve the complete original payload,
 - duplicate terminal reply does not enqueue twice.
 

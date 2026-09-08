@@ -323,7 +323,9 @@ async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
     assert str(Path("tools") / "hchat_send.py") in enqueued[0]["prompt"]
     assert "show the exact message body passed to --text" in enqueued[0]["prompt"]
     assert "'queued' means the destination accepted it" in enqueued[0]["prompt"]
-    assert "'sent' requires explicit terminal send success" in enqueued[0]["prompt"]
+    assert "'sent' requires a confirmed" in enqueued[0]["prompt"]
+    assert "Frontend Connector transport receipt" in enqueued[0]["prompt"]
+    assert "failed state must be reported as failed" in enqueued[0]["prompt"]
 
 
 @pytest.mark.asyncio
@@ -453,7 +455,7 @@ async def test_cmd_hchat_legacy_path_preserves_remote_target_in_prompt(tmp_path)
     assert 'agent "rika@hashi2"' in enqueued[0]["prompt"]
     assert "--to rika@hashi2 --from zelda" in enqueued[0]["prompt"]
     assert "show the exact message body passed to --text" in enqueued[0]["prompt"]
-    assert "failed command must be reported as failed" in enqueued[0]["prompt"]
+    assert "failed state must be reported as failed" in enqueued[0]["prompt"]
 
 
 @pytest.mark.asyncio

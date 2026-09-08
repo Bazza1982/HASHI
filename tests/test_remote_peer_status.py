@@ -2680,8 +2680,8 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
     manager._probe_local_workbench = lambda _host, _port: True
     captured = []
 
-    def post(_url, payload, timeout):
-        captured.append((payload, timeout))
+    def post(url, payload, timeout):
+        captured.append((url, payload, timeout))
         return {"ok": True, "request_id": "req-terminal"}
 
     manager._post_json = post
@@ -2703,7 +2703,10 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
     )
 
     assert request_id == "req-terminal"
-    payload = captured[0][0]
+    # /api/chat acknowledges queue admission with a request id. It does not
+    # return the later Telegram transport receipt.
+    assert captured[0][0] == "http://127.0.0.1:18804/api/chat"
+    payload = captured[0][1]
     assert payload["source"] == "protocol:reply"
     assert payload["idempotency_key"] == "protocol:reply:reply-1"
     assert payload["request_metadata"]["system_exchange_terminal"] is True
