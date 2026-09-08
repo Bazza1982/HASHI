@@ -431,7 +431,11 @@ contain `next`, an `active_dispatch` or `blocked`/`deferred` disposition. It
 cannot recursively point to another action. A local action file alone cannot
 exempt an unfinished task indefinitely. Blocked/deferred dispositions retain
 reason, owner and trigger and add `review_after`, finite absolute UTC epoch
-seconds. The timestamp is a reassessment deadline, not restart permission or a
+seconds. Active dispatch dispositions also require this deadline: an accepted
+ledger row and old execution file cannot certify continuing activity indefinitely.
+On expiry the controller must inspect actual current activity and renew the
+observation or take the next authorized action; the service never resends the
+original assignment. The timestamp is a reassessment deadline, not restart permission or a
 new Scheduler job; use existing receipt/deadline/maintenance opportunities.
 Expiry becomes a review gap. Explicit invalid or expired timestamps are rejected
 even on legacy loops; loops without the opt-in retain existing action contracts.
@@ -458,3 +462,8 @@ step; both fail before the fix and pass afterward against real SuperloopStore
 persistence. Source tests do not prove running Remote adoption or user delivery.
 Adoption and the complete receipt-to-visible-outcome scenario remain separate
 release checks.
+
+A follow-up real Store scenario leaves the accepted dispatch ledger and old
+activity file unchanged, advances past `review_after`, and verifies exactly one
+controller recovery without dispatching the original work again. It fails on the
+prior implementation and passes with dispatch-observation expiry enforced.

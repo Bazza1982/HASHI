@@ -593,3 +593,48 @@ def test_continuous_action_requires_next_step_and_wait_expiry_is_reconciled(rece
     service.reconcile(lambda request: admitted.append(request) or 'req-recovery', activity)
     assert store.load_loop_json_list(path)[0]['followthrough_state'] == 'recovery_queued'
     assert len(admitted) == 1
+
+
+def test_continuous_dispatch_observation_expires_without_resending_work(receipt_case, monkeypatch):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    root = store.loop_dir('sl-review')
+    path = root / 'receipt_reviews.json'
+    state = store.load_loop_state('sl-review')
+    state['continuous_supervision_required'] = True
+    store.save_loop_state('sl-review', state)
+    (root / 'observation.md').write_text('Worker was executing at prior review')
+    rows = store.load_loop_json_list(path)
+    clock = [10**12]
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: clock[0])
+    disposition = dict(task_id='fix', kind='active_dispatch', dispatch_instance_id='msg-work',
+                       evidence_ref='observation.md', review_after=clock[0] + 60)
+    rows[0].update(review_verified=True, review_evidence_ref='observation.md',
+                   followthrough_state='reviewed', dispositions=[disposition])
+    store.save_loop_json_list(path, rows)
+    service = SuperloopReceiptService(SuperloopStore(store.root_dir), local_instance='HASHI2')
+    ledger_before = service.ledger.load_rows('sl-review')
+    admitted = []
+    def activity(agent, request_id):
+        return dict(ok=True, agent_id=agent, request_id=request_id,
+                    session_id='ses-manager', state='completed', terminal=True)
+    def enqueue(request):
+        admitted.append(request)
+        return 'req-recovery'
+    service.reconcile(enqueue, activity)
+    assert not admitted
+    clock[0] += 61
+    service.reconcile(enqueue, activity)
+    row = store.load_loop_json_list(path)[0]
+    assert row['review_gaps'] == ['fix']
+    assert row['followthrough_state'] == 'recovery_queued'
+    assert len(admitted) == 1
+    assert admitted[0]['agent'] == 'manager'
+    clock[0] += 31
+    service.reconcile(enqueue, activity)
+    assert store.load_loop_json_list(path)[0]['followthrough_state'] == 'needs_attention'
+    assert len(admitted) == 1
+    assert service.ledger.load_rows('sl-review') == ledger_before
+    assert (root / 'observation.md').is_file()

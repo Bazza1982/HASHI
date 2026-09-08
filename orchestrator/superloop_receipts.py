@@ -103,6 +103,15 @@ class SuperloopReceiptService:
             latest[dispatch.get("dispatch_instance_id")] = dispatch
         continuous = state.get("continuous_supervision_required") is True
 
+        def deadline_valid(d: dict) -> bool:
+            deadline = d.get("review_after")
+            if deadline is None:
+                return not continuous
+            # Absolute UTC epoch seconds; invalid/nonfinite values must not
+            # turn an old observation or wait into a permanent exemption.
+            return (isinstance(deadline, (int, float)) and not isinstance(deadline, bool)
+                    and math.isfinite(deadline) and deadline > time.time())
+
         def disposition_valid(task: dict, d: Any, *, allow_action: bool = True) -> bool:
             if not isinstance(d, dict):
                 return False
@@ -111,7 +120,8 @@ class SuperloopReceiptService:
                 dispatch = latest.get(d.get("dispatch_instance_id"), {})
                 return (dispatch.get("task_id") == task.get("task_id")
                         and dispatch.get("status") == "accepted" and dispatch.get("terminal") is False
-                        and self._evidence_exists(loop_id, d.get("evidence_ref")))
+                        and self._evidence_exists(loop_id, d.get("evidence_ref"))
+                        and deadline_valid(d))
             if kind == "action" and allow_action:
                 return (self._evidence_exists(loop_id, d.get("evidence_ref"))
                         and (not continuous or disposition_valid(task, d.get("next"), allow_action=False)))
@@ -119,13 +129,7 @@ class SuperloopReceiptService:
                 if not all(isinstance(d.get(k), str) and d[k].strip()
                            for k in ("reason", "owner", "trigger")):
                     return False
-                deadline = d.get("review_after")
-                if deadline is None:
-                    return not continuous
-                # Absolute UTC epoch seconds; invalid/nonfinite values must not
-                # turn an intentional wait into a permanent exemption.
-                return (isinstance(deadline, (int, float)) and not isinstance(deadline, bool)
-                        and math.isfinite(deadline) and deadline > time.time())
+                return deadline_valid(d)
             return False
 
         for task in tasks:
@@ -269,9 +273,10 @@ class SuperloopReceiptService:
             "{task_id, kind: blocked|deferred, reason, owner, trigger} for a concrete dependency, capacity, "
             "priority or approval wait. Use existing SuperloopStore persistence. Evidence paths are files "
             "relative to this loop. When continuous_supervision_required=true, an action on an unfinished task "
-            "also needs a next disposition (active_dispatch or blocked|deferred); every blocked/deferred "
+            "also needs a next disposition (active_dispatch or blocked|deferred); every active_dispatch/blocked/deferred "
             "disposition needs review_after as absolute UTC epoch seconds using an existing receipt, deadline "
-            "or maintenance review, not a new recurring schedule. Expired waits need current reassessment. "
+            "or maintenance review, not a new recurring schedule. Expired waits or execution observations need "
+            "current activity reassessment by the controller, not resending the original assignment. "
             "A task label, runner state change or promise is not execution evidence. "
             "Verify dispatch execution separately, reuse existing receipt/deadline triggers and do not add "
             "recurring polling. Report user outcomes, unresolved impact and next responsibility visibly. "

@@ -204,7 +204,7 @@ file, a saved setting or an old transcript.
 
 PAO rechecks the latest receipt against the whole board; recovery is once only.
 Failed/cancelled/exhausted Runs need existing supervisor/heartbeat attention.
-`continuous_supervision_required` requires action `next` and wait `review_after`.
+`continuous_supervision_required` requires action `next` and dispatch/wait `review_after`.
 Execution never proves delivery. Inspect exact-request Connector evidence; lead
 reports with user outcomes and next owner/action. No new Core or cron authority.
 See `SUPERLOOP_FUNCTION_CONTRACT.md` for delivery opt-ins and adoption boundaries.
