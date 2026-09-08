@@ -2949,6 +2949,24 @@ async def handle_empty_success_response(runtime, item) -> None:
     )
 
 
+def _terminal_exchange_verbatim_text(item) -> str | None:
+    metadata = getattr(item, "request_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    if str(getattr(item, "source", "") or "").strip().casefold() != "protocol:reply":
+        return None
+    if metadata.get("system_exchange") is not True:
+        return None
+    if str(metadata.get("system_exchange_kind") or "").strip().casefold() != "reply":
+        return None
+    if metadata.get("system_exchange_terminal") is not True:
+        return None
+    text = metadata.get("system_exchange_terminal_text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return text
+
+
 async def prepare_successful_response(runtime, item, response, *, completion_path: str) -> SuccessfulResponse:
     observe_terminal_response(runtime, item, response)
     if item.source == "bridge:hchat-draft" and hasattr(runtime, "_prepare_hchat_draft_success"):
@@ -2960,33 +2978,63 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
     from orchestrator.native_audio_delivery import audio_parts, claim_audio_parts
 
     claim_audio_parts(runtime, item, getattr(response, "content", ()))
-    display_text = runtime._strip_transfer_accept_prefix(item, response.text)
-    visible_text, wrapper_result = await runtime._apply_wrapper_to_visible_text(
-        item,
-        display_text or response.text,
-    )
-    if _contains_dangling_tool_markup(response.text) or _contains_dangling_tool_markup(
-        visible_text
-    ):
-        fallback = _safe_blocked_tool_markup_final(runtime, item)
-        runtime.logger.error(
-            f"Blocked dangling tool markup at the final delivery boundary: request={item.request_id}"
+    terminal_text = _terminal_exchange_verbatim_text(item)
+    if terminal_text is not None:
+        provider_text = str(getattr(response, "text", "") or "")
+        response.text = terminal_text
+        response_metadata = getattr(response, "stream_metadata", None)
+        response_metadata = (
+            dict(response_metadata) if isinstance(response_metadata, Mapping) else {}
         )
-        response.text = fallback
-        response.stop_reason = "no_final_text"
-        metadata = getattr(response, "stream_metadata", None)
-        metadata = dict(metadata) if isinstance(metadata, dict) else {}
-        metadata.update(
+        response_metadata.update(
             {
-                "completion_status": "incomplete",
-                "completion_stop_reason": "no_final_text",
-                "dangling_tool_markup_blocked": True,
+                "terminal_exchange_verbatim_enforced": True,
+                "terminal_exchange_provider_text_changed": (
+                    provider_text != terminal_text
+                ),
+                "terminal_exchange_provider_text_sha256": _hashlib.sha256(
+                    provider_text.encode("utf-8")
+                ).hexdigest(),
             }
         )
-        response.stream_metadata = metadata
-        display_text = fallback
-        visible_text = fallback
-    visible_text = normalize_user_visible_paths(visible_text)
+        response.stream_metadata = response_metadata
+        if provider_text != terminal_text:
+            runtime.logger.warning(
+                "Terminal protocol reply %s differed from provider presentation; "
+                "enforced the authenticated protocol body verbatim.",
+                item.request_id,
+            )
+        display_text = terminal_text
+        visible_text = terminal_text
+        wrapper_result = None
+    else:
+        display_text = runtime._strip_transfer_accept_prefix(item, response.text)
+        visible_text, wrapper_result = await runtime._apply_wrapper_to_visible_text(
+            item,
+            display_text or response.text,
+        )
+        if _contains_dangling_tool_markup(response.text) or _contains_dangling_tool_markup(
+            visible_text
+        ):
+            fallback = _safe_blocked_tool_markup_final(runtime, item)
+            runtime.logger.error(
+                f"Blocked dangling tool markup at the final delivery boundary: request={item.request_id}"
+            )
+            response.text = fallback
+            response.stop_reason = "no_final_text"
+            metadata = getattr(response, "stream_metadata", None)
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            metadata.update(
+                {
+                    "completion_status": "incomplete",
+                    "completion_stop_reason": "no_final_text",
+                    "dangling_tool_markup_blocked": True,
+                }
+            )
+            response.stream_metadata = metadata
+            display_text = fallback
+            visible_text = fallback
+        visible_text = normalize_user_visible_paths(visible_text)
     has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
     if not visible_text.strip() and not has_typed_audio:
         return SuccessfulResponse(
@@ -2995,7 +3043,11 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             wrapper_result=wrapper_result,
         )
     runtime._mark_success()
-    safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
+    safe_core_raw = (
+        terminal_text
+        if terminal_text is not None
+        else extract_memory_plus_update_details(response.text).visible_text
+    )
     if visible_text.strip():
         runtime._append_core_transcript(
             item,

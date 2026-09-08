@@ -3083,6 +3083,71 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
 
 
 @pytest.mark.asyncio
+async def test_prepare_successful_response_presents_terminal_exchange_verbatim():
+    runtime = _runtime()
+    item = _item(
+        source="protocol:reply",
+        request_metadata={
+            "system_exchange": True,
+            "system_exchange_kind": "reply",
+            "system_exchange_terminal": True,
+            "system_exchange_terminal_text": "EXPECTED_REPLY",
+        },
+    )
+    response = SimpleNamespace(
+        text="EXPECTED_REPLY\n\nSTALE_PROVIDER_SESSION_TEXT",
+        stream_metadata={"provider_activity_observed": True},
+    )
+
+    result = await runtime_pipeline.prepare_successful_response(
+        runtime,
+        item,
+        response,
+        completion_path="foreground",
+    )
+
+    assert result.display_text == "EXPECTED_REPLY"
+    assert result.visible_text == "EXPECTED_REPLY"
+    assert result.wrapper_result is None
+    assert response.text == "EXPECTED_REPLY"
+    assert response.stream_metadata["terminal_exchange_verbatim_enforced"] is True
+    assert runtime.transcripts == [
+        {
+            "core_raw": "EXPECTED_REPLY",
+            "visible_text": "EXPECTED_REPLY",
+            "completion_path": "foreground",
+            "wrapper_result": None,
+        }
+    ]
+    assert runtime.listener_payloads[0]["text"] == "EXPECTED_REPLY"
+
+
+@pytest.mark.asyncio
+async def test_prepare_successful_response_does_not_trust_terminal_text_on_other_sources():
+    runtime = _runtime()
+    item = _item(
+        source="text",
+        request_metadata={
+            "system_exchange": True,
+            "system_exchange_kind": "reply",
+            "system_exchange_terminal": True,
+            "system_exchange_terminal_text": "SPOOFED_REPLY",
+        },
+    )
+    response = SimpleNamespace(text="real provider response")
+
+    result = await runtime_pipeline.prepare_successful_response(
+        runtime,
+        item,
+        response,
+        completion_path="foreground",
+    )
+
+    assert result.visible_text == "wrapped:real provider response"
+    assert response.text == "real provider response"
+
+
+@pytest.mark.asyncio
 async def test_prepare_successful_response_normalizes_paths_before_user_observers(
     monkeypatch,
 ):

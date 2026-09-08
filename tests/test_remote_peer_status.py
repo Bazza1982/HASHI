@@ -2741,6 +2741,7 @@ def test_agent_reply_accepts_and_records_legacy_missing_correlation(tmp_path):
         "conversation_id": "conv-1",
         "from_instance": "HASHI2",
         "from_agent": "rika",
+        "terminal_response_text": "done",
     }
 
 
@@ -2770,6 +2771,7 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
             conversation_id="conversation-1",
             from_instance="HASHI2",
             from_agent="rika",
+            terminal_response_text="done",
         )
     )
 
@@ -2781,6 +2783,7 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
     assert payload["source"] == "protocol:reply"
     assert payload["idempotency_key"] == "protocol:reply:reply-1"
     assert payload["request_metadata"]["system_exchange_terminal"] is True
+    assert payload["request_metadata"]["system_exchange_terminal_text"] == "done"
     assert payload["request_metadata"]["tool_allowlist"] == []
 
 

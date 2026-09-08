@@ -1117,6 +1117,7 @@ class ProtocolManager:
             conversation_id=conversation_id,
             from_instance=from_instance,
             from_agent=from_agent,
+            terminal_response_text=str((body or {}).get("text") or "").strip(),
         )
         if not request_id:
             return 502, self._error_payload("local_enqueue_failed", "Failed to inject reply into local agent", retryable=True, payload=payload)
@@ -1186,6 +1187,7 @@ class ProtocolManager:
         conversation_id: str,
         from_instance: str,
         from_agent: str,
+        terminal_response_text: str | None = None,
     ) -> str | None:
         terminal = exchange_kind == "reply"
         request_metadata = {
@@ -1202,6 +1204,13 @@ class ProtocolManager:
             # the Workbench boundary prevents a model-generated ACK/Hchat
             # from starting a new cross-instance conversation.
             request_metadata["tool_allowlist"] = []
+            normalized_terminal_text = str(terminal_response_text or "").strip()
+            if normalized_terminal_text:
+                # The provider may absorb the reply for session continuity,
+                # but the user-visible terminal body remains protocol-owned.
+                request_metadata["system_exchange_terminal_text"] = (
+                    normalized_terminal_text
+                )
         payload = {
             "agent": agent_name,
             "text": text,
