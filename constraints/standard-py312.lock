@@ -1,6 +1,6 @@
 # Generated with:
 # uv pip compile requirements.txt --python-version 3.12 --universal \
-#   --output-file constraints/standard-py312.lock
+#   --no-annotate --output-file constraints/standard-py312.lock
 #
 # This is the reproducible standard-profile dependency generation for the
 # CPython 3.12 Core. Update it only through an explicit dependency migration.
@@ -49,6 +49,7 @@ starlette==1.6.0
 textual==8.2.8
 typing-extensions==4.16.0
 typing-inspection==0.4.4
+tzdata==2026.3 ; sys_platform == 'win32'
 uvicorn==0.52.4
 yarl==1.24.5
 zeroconf==0.151.3

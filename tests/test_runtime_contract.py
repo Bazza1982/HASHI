@@ -274,6 +274,25 @@ def test_standard_lock_covers_every_standard_requirement_and_launch_path():
         assert "standard-py312.lock" in content
 
 
+def test_windows_timezone_database_is_declared_and_hash_locked():
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    standard_lock = (ROOT / "constraints" / "standard-py312.lock").read_text(
+        encoding="utf-8"
+    )
+    portable_lock = (
+        ROOT / "packaging" / "portable_windows" / "requirements.lock"
+    ).read_text(encoding="utf-8")
+
+    assert 'tzdata>=2026.3; platform_system == "Windows"' in requirements
+    assert "tzdata>=2026.3; platform_system == 'Windows'" in project
+    assert "tzdata==2026.3 ; sys_platform == 'win32'" in standard_lock
+    tzdata_block = portable_lock.split("tzdata==2026.3", 1)[1].split(
+        "\nuvicorn==", 1
+    )[0]
+    assert tzdata_block.count("--hash=sha256:") >= 2
+
+
 def test_all_first_party_launchers_run_the_runtime_contract_checker():
     for relative in (
         "bin/bridge-u.sh",

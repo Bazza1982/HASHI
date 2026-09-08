@@ -87,6 +87,11 @@ installed for an approved optional profile, but the effective installed set is
 part of `dependency_digest`; Core and every Worker must therefore see the same
 environment.
 
+Windows has no system IANA timezone database. The standard dependency contract
+therefore installs the hash-locked `tzdata` package on Windows only, so
+timezone-sensitive Scheduler and Wiki evidence uses the same named zones as
+Linux/WSL without embedding a fixed-offset fallback in Core.
+
 ## Ownership boundary
 
 ### Stable Core and replaceable Functions
