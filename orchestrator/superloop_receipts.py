@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -100,22 +101,37 @@ class SuperloopReceiptService:
         latest = {}
         for dispatch in self.ledger.load_rows(loop_id):
             latest[dispatch.get("dispatch_instance_id")] = dispatch
+        continuous = state.get("continuous_supervision_required") is True
+
+        def disposition_valid(task: dict, d: Any, *, allow_action: bool = True) -> bool:
+            if not isinstance(d, dict):
+                return False
+            kind = d.get("kind")
+            if kind == "active_dispatch":
+                dispatch = latest.get(d.get("dispatch_instance_id"), {})
+                return (dispatch.get("task_id") == task.get("task_id")
+                        and dispatch.get("status") == "accepted" and dispatch.get("terminal") is False
+                        and self._evidence_exists(loop_id, d.get("evidence_ref")))
+            if kind == "action" and allow_action:
+                return (self._evidence_exists(loop_id, d.get("evidence_ref"))
+                        and (not continuous or disposition_valid(task, d.get("next"), allow_action=False)))
+            if kind in {"blocked", "deferred"}:
+                if not all(isinstance(d.get(k), str) and d[k].strip()
+                           for k in ("reason", "owner", "trigger")):
+                    return False
+                deadline = d.get("review_after")
+                if deadline is None:
+                    return not continuous
+                # Absolute UTC epoch seconds; invalid/nonfinite values must not
+                # turn an intentional wait into a permanent exemption.
+                return (isinstance(deadline, (int, float)) and not isinstance(deadline, bool)
+                        and math.isfinite(deadline) and deadline > time.time())
+            return False
+
         for task in tasks:
             if task.get("status") in {"completed", "cancelled", "canceled", "aborted", "failed"}:
                 continue
-            d = by_task.get(task.get("task_id"), {})
-            valid = False
-            if d.get("kind") == "active_dispatch":
-                dispatch = latest.get(d.get("dispatch_instance_id"), {})
-                valid = (dispatch.get("task_id") == task.get("task_id")
-                         and dispatch.get("status") == "accepted" and dispatch.get("terminal") is False
-                         and self._evidence_exists(loop_id, d.get("evidence_ref")))
-            elif d.get("kind") == "action":
-                valid = self._evidence_exists(loop_id, d.get("evidence_ref"))
-            elif d.get("kind") in {"blocked", "deferred"}:
-                valid = all(isinstance(d.get(k), str) and d[k].strip()
-                            for k in ("reason", "owner", "trigger"))
-            if not valid:
+            if not disposition_valid(task, by_task.get(task.get("task_id"), {})):
                 gaps.append(str(task.get("task_id")))
         return gaps
 
@@ -135,11 +151,11 @@ class SuperloopReceiptService:
                 for snapshot in snapshots:
                     if not isinstance(snapshot, dict) or snapshot.get("status") != "queued":
                         continue
-                    # Only the latest review supervises later delivery changes;
+                    # Only the latest review supervises the current whole board;
                     # historical receipts must not fan out recovery for one gap.
                     if snapshot.get("followthrough_state") == "reviewed" and (
                             snapshot.get("idempotency_key") != latest_review.get("idempotency_key")
-                            or not self.delivery_gaps(loop_id)):
+                            or not self.review_gaps(loop_id, snapshot)):
                         continue
                     now = time.time()
                     if float(snapshot.get("check_after") or 0) > now:
@@ -164,7 +180,7 @@ class SuperloopReceiptService:
                             latest_current = next((item for item in reversed(rows)
                                 if isinstance(item, dict) and item.get("status") == "queued"), {})
                             if (row.get("idempotency_key") != latest_current.get("idempotency_key")
-                                    or not self.delivery_gaps(loop_id)):
+                                    or not self.review_gaps(loop_id, row)):
                                 continue
                         if not isinstance(row.get("request"), dict) or not isinstance(row.get("recovery", {}), dict):
                             continue
@@ -186,6 +202,11 @@ class SuperloopReceiptService:
                             self.store.save_loop_json_list(path, rows)
                             continue
                         row.pop("observation_error", None)
+                        # The request activity API exposes execution, not the
+                        # canonical Connector delivery_event. Never promote Run
+                        # completion or a manager-written file to sent evidence.
+                        row["report_delivery_state"] = "unverified"
+                        row["report_delivery_reason"] = "activity_api_has_no_connector_delivery_evidence"
                         row["execution_state"] = observed.get("state")
                         row["observed_request_id"] = request_id
                         gaps = self.review_gaps(loop_id, row)
@@ -223,6 +244,12 @@ class SuperloopReceiptService:
                                         row["followthrough_state"] = "recovery_queued"
                                 except Exception:
                                     recovery["last_error"] = "admission_unconfirmed"
+                        if row.get("followthrough_state") == "needs_attention":
+                            row["attention_owner"] = controller.get("agent")
+                            row["attention_trigger"] = "existing_controller_or_maintenance_review"
+                        else:
+                            row.pop("attention_owner", None)
+                            row.pop("attention_trigger", None)
                         self.store.save_loop_json_list(path, rows)
             except (OSError, ValueError, TypeError, KeyError):
                 logger.exception("Superloop review reconciliation deferred for %s", loop_id)
@@ -230,6 +257,9 @@ class SuperloopReceiptService:
     @staticmethod
     def _closeout_policy() -> str:
         return (
+            "Lead the visible user report with requested outcomes: what now works, what still affects the user, "
+            "the actual next action and responsible owner, and the blocker with its release condition. "
+            "Do not substitute test counts, commits, queue admission or worker claims for delivery results. "
             "Review the entire taskboard and current worker activity, queues and scheduled work, not only "
             "the triggering task. Take every currently authorized, conflict-free next action now; "
             "a runtime adoption wait must not block independent development or review. Before ending, "
@@ -238,14 +268,21 @@ class SuperloopReceiptService:
             "with a local recent execution observation for existing work; {task_id, kind: action, evidence_ref} for actual work performed; or "
             "{task_id, kind: blocked|deferred, reason, owner, trigger} for a concrete dependency, capacity, "
             "priority or approval wait. Use existing SuperloopStore persistence. Evidence paths are files "
-            "relative to this loop. A task label, runner state change or promise is not execution evidence. "
+            "relative to this loop. When continuous_supervision_required=true, an action on an unfinished task "
+            "also needs a next disposition (active_dispatch or blocked|deferred); every blocked/deferred "
+            "disposition needs review_after as absolute UTC epoch seconds using an existing receipt, deadline "
+            "or maintenance review, not a new recurring schedule. Expired waits need current reassessment. "
+            "A task label, runner state change or promise is not execution evidence. "
             "Verify dispatch execution separately, reuse existing receipt/deadline triggers and do not add "
             "recurring polling. Report user outcomes, unresolved impact and next responsibility visibly. "
             "For completed tasks explicitly marked delivery_required=true, record runtime_adoption_verified "
             "and user_acceptance_verified with matching *_evidence_ref files; when terminal_delivery_required=true, "
             "also record terminal_delivery_verified and terminal_delivery_evidence_ref. Missing delivery evidence "
             "requires reopening the delivery task and taking action or recording a concrete blocker. "
-            "Review records never prove runtime adoption or terminal delivery."
+            "Review records never prove runtime adoption or terminal delivery. report_delivery_state=unverified "
+            "requires independent canonical Connector delivery_event inspection for the exact controller request. "
+            "If the single recovery is exhausted, the existing controller/maintenance review must handle "
+            "needs_attention; that status is not itself a delivered user notification."
         )
 
     def _match(self, loop_id: str, receipt: dict) -> str | None:

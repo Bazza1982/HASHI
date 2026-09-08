@@ -202,9 +202,9 @@ file, a saved setting or an old transcript.
 
 ## Superloop controller follow-through
 
-PAO tracks controller Runs after receipt cleanup. Missing dispositions allow one
-idempotent recovery; failed/cancelled/exhausted Runs need attention. No new Core,
-cron or task-start authority. `delivery_required=true` needs adoption and user
-acceptance evidence; `terminal_delivery_required=true` also needs transport proof.
-Only the latest reviewed receipt rechecks delivery gaps with the original limit.
-See `SUPERLOOP_FUNCTION_CONTRACT.md`. Code, tests, adoption and delivery differ.
+PAO rechecks the latest receipt against the whole board; recovery is once only.
+Failed/cancelled/exhausted Runs need existing supervisor/heartbeat attention.
+`continuous_supervision_required` requires action `next` and wait `review_after`.
+Execution never proves delivery. Inspect exact-request Connector evidence; lead
+reports with user outcomes and next owner/action. No new Core or cron authority.
+See `SUPERLOOP_FUNCTION_CONTRACT.md` for delivery opt-ins and adoption boundaries.

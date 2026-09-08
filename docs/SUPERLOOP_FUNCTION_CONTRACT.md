@@ -379,9 +379,11 @@ The original review row records `review_verified`, a loop-local existing
 These checks detect omissions and absent evidence. They cannot judge whether a
 human or agent's evidence is truthful, whether a blocker is justified, or whether
 an accepted dispatch really executed. The controller must independently verify
-those facts. A reviewed row is historical evidence for that turn, not a perpetual
-certification of tasks created later. Existing heartbeat supervision remains the
-fallback for failures and later changes. Scheduler auto-advance still does not
+those facts. A reviewed row is historical evidence for that turn. The latest queued review
+continues supervising the current whole board: newly added/reopened tasks, lost
+evidence and expired structured waits invalidate the old disposition. Historical
+rows do not fan out recovery. Existing heartbeat supervision remains the
+fallback after the single recovery budget is exhausted. Scheduler auto-advance still does not
 dispatch work and must not be enabled as a substitute for controller execution.
 
 
@@ -403,8 +405,7 @@ failed tasks are not reopened by this check.
 Receipt reconciliation reports missing outcome fields as `task_id:requirement`
 gaps, including for the latest previously `reviewed` row. Historical reviewed rows do
 not each fan out recovery for the same current gap. The latest row is re-observed through
-the identity-checked activity API only when an explicit completed-delivery gap
-exists; the original one-logical-recovery allowance still applies. Deleting
+the identity-checked activity API when any current whole-board gap exists; the original one-logical-recovery allowance still applies. Deleting
 previous evidence cannot reset that allowance. Failed or cancelled controller
 runs never auto-recover. The controller must correct a premature completion,
 then record actual action or a concrete blocker; the service does not rewrite
@@ -420,3 +421,40 @@ Implementation scope: authorized PAO Functions maintenance branch
 temporary SuperloopStore persistence, including restart, evidence loss and the
 single recovery boundary. Instance adoption and live delivery acceptance remain
 separate, unverified release steps for this branch.
+
+
+### Continuous next-step supervision (2026-09-08)
+
+A loop can set `continuous_supervision_required: true` to require a next step
+for unfinished tasks. An `action` still records work performed, but must also
+contain `next`, an `active_dispatch` or `blocked`/`deferred` disposition. It
+cannot recursively point to another action. A local action file alone cannot
+exempt an unfinished task indefinitely. Blocked/deferred dispositions retain
+reason, owner and trigger and add `review_after`, finite absolute UTC epoch
+seconds. The timestamp is a reassessment deadline, not restart permission or a
+new Scheduler job; use existing receipt/deadline/maintenance opportunities.
+Expiry becomes a review gap. Explicit invalid or expired timestamps are rejected
+even on legacy loops; loops without the opt-in retain existing action contracts.
+
+The single persisted recovery allowance does not reset after board changes,
+wait expiry, restart or action completion. Exhaustion records `needs_attention`,
+`attention_owner` and `attention_trigger=existing_controller_or_maintenance_review`.
+This is inspectable state for the existing supervisor, not a delivered alert.
+Failed/cancelled runs are not replayed and pause/opt-out still stop admission.
+
+Controller reporting starts with the user's requested outcomes, remaining
+impact, actual next action/owner and blocker/release condition. Execution activity
+is not Connector delivery evidence: the current activity API has no canonical
+`delivery_event`, and the compatibility transcript API reads the default Backend
+API Session message projection, not the exact controller Session delivery audit.
+Reconciliation therefore records `report_delivery_state=unverified` with an
+explicit reason. It does not invent a sent Boolean, accept a manually written
+report file as transport proof, or rerun work because delivery is unverified.
+Exact-request canonical Connector events still require independent inspection.
+
+Implementation/verification: the 2026-09-08 Functions patch reproduces a reviewed
+row ignoring reopened/new tasks and an old action file hiding an absent next
+step; both fail before the fix and pass afterward against real SuperloopStore
+persistence. Source tests do not prove running Remote adoption or user delivery.
+Adoption and the complete receipt-to-visible-outcome scenario remain separate
+release checks.

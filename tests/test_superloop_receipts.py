@@ -516,3 +516,80 @@ def test_new_review_during_delivery_poll_prevents_historical_recovery(receipt_ca
     service.reconcile(lambda request: admitted.append(request) or 'req-recovery', activity)
     assert not admitted
     assert 'recovery' not in store.load_loop_json_list(path)[0]
+
+
+def test_reviewed_controller_rechecks_reopened_board_without_delivery_completion(receipt_case, monkeypatch):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    root = store.loop_dir('sl-review')
+    path = root / 'receipt_reviews.json'
+    rows = store.load_loop_json_list(path)
+    (root / 'review.md').write_text('Prior independent review')
+    rows[0].update(review_verified=True, review_evidence_ref='review.md',
+                   followthrough_state='reviewed', dispositions=[])
+    store.save_loop_json_list(path, rows)
+    tasks = store.load_loop_json_list(root / 'taskboard.json')
+    tasks[0].update(status='in_progress', delivery_required=True)
+    tasks.append(dict(task_id='new-user-task', status='pending'))
+    store.save_loop_json_list(root / 'taskboard.json', tasks)
+    clock = [10**12]
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: clock[0])
+    admitted = []
+    def activity(agent, request_id):
+        return dict(ok=True, agent_id=agent, request_id=request_id,
+                    session_id='ses-manager', state='completed', terminal=True)
+    service = SuperloopReceiptService(SuperloopStore(store.root_dir), local_instance='HASHI2')
+    assert service.delivery_gaps('sl-review') == []
+    service.reconcile(lambda request: admitted.append(request) or 'req-recovery', activity)
+    result = store.load_loop_json_list(path)[0]
+    assert set(result['review_gaps']) == {'fix', 'new-user-task'}
+    assert result['followthrough_state'] == 'recovery_queued'
+    assert len(admitted) == 1
+    clock[0] += 31
+    service.reconcile(lambda request: admitted.append(request) or 'duplicate', activity)
+    result = store.load_loop_json_list(path)[0]
+    assert result['followthrough_state'] == 'needs_attention'
+    assert len(admitted) == 1
+    assert result['report_delivery_state'] == 'unverified'
+    assert result['attention_owner'] == 'manager'
+    assert result['attention_trigger'] == 'existing_controller_or_maintenance_review'
+
+
+def test_continuous_action_requires_next_step_and_wait_expiry_is_reconciled(receipt_case, monkeypatch):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    state = store.load_loop_state('sl-review')
+    state['continuous_supervision_required'] = True
+    store.save_loop_state('sl-review', state)
+    root = store.loop_dir('sl-review')
+    (root / 'action.md').write_text('Code merged; runtime adoption remains')
+    path = root / 'receipt_reviews.json'
+    rows = store.load_loop_json_list(path)
+    rows[0].update(review_verified=True, review_evidence_ref='action.md', followthrough_state='reviewed',
+                   dispositions=[dict(task_id='fix', kind='action', evidence_ref='action.md')])
+    store.save_loop_json_list(path, rows)
+    service = SuperloopReceiptService(store, local_instance='HASHI2')
+    clock = [10**12]
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: clock[0])
+    assert service.review_gaps('sl-review', rows[0]) == ['fix']
+    followup = dict(kind='blocked', reason='Instance busy', owner='manager',
+                    trigger='Existing maintenance window', review_after=clock[0] + 60)
+    rows[0]['dispositions'][0]['next'] = followup
+    for invalid in (True, 'tomorrow', float('nan'), float('inf'), clock[0] - 1):
+        followup['review_after'] = invalid
+        assert service.review_gaps('sl-review', rows[0]) == ['fix']
+    followup['review_after'] = clock[0] + 60
+    store.save_loop_json_list(path, rows)
+    assert service.review_gaps('sl-review', rows[0]) == []
+    clock[0] += 61
+    admitted = []
+    def activity(agent, request_id):
+        return dict(ok=True, agent_id=agent, request_id=request_id,
+                    session_id='ses-manager', state='completed', terminal=True)
+    service.reconcile(lambda request: admitted.append(request) or 'req-recovery', activity)
+    assert store.load_loop_json_list(path)[0]['followthrough_state'] == 'recovery_queued'
+    assert len(admitted) == 1
