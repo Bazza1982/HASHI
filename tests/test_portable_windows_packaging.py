@@ -471,6 +471,7 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
         "superloops/loops/tracked-run/state.json": "must be pruned\n",
         "flow/workflows/library/builtin.yaml": "must ship\n",
         "skills/library-pick/SKILL.md": "must be pruned\n",
+        "scripts/hashi_remote_watchdog.py": "HASHI2 must not ship\n",
     }
     for relative, content in tracked.items():
         path = source / relative
@@ -512,6 +513,7 @@ def test_builder_copies_only_git_tracked_allowlisted_source(tmp_path, monkeypatc
     assert not (destination / "superloops" / "loops").exists()
     assert (destination / "flow/workflows/library/builtin.yaml").is_file()
     assert not (destination / "skills" / "library-pick").exists()
+    assert not (destination / "scripts" / "hashi_remote_watchdog.py").exists()
     for path in untracked:
         assert not (destination / path.relative_to(source)).exists()
 
@@ -742,6 +744,7 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
         "dual_brain_context.py",
         "generate_agent_behavior_audit.py",
         "gitwatch.py",
+        "hashi_remote_watchdog.py",
         "monitor_hashi1.py",
         "patrol_errors.py",
         "wiki_organise.py",

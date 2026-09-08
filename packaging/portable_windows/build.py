@@ -172,6 +172,7 @@ PRUNED_SOURCE_PATHS = (
     "scripts/patrol_errors.py",
     "scripts/query_memory.py",
     "scripts/remote_memory_consolidation.py",
+    "scripts/hashi_remote_watchdog.py",
     "scripts/reset_dual_brain_notepads.py",
     "scripts/run_dual_brain_turn.py",
     "scripts/send_whatsapp_test.py",
@@ -1009,6 +1010,7 @@ def validate_image(image_root: Path) -> None:
         "app/hashi/adapters/claude_cli.py",
         "app/hashi/adapters/gemini_cli.py",
         "app/hashi/adapters/grok_cli.py",
+        "app/hashi/scripts/hashi_remote_watchdog.py",
     )
     present = [relative for relative in forbidden if (image_root / relative).exists()]
     if present:
