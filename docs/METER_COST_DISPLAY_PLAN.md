@@ -78,6 +78,17 @@
 - 未知模型**不**悄悄套用高价 `default` 后假装精确 → 显示「成本未知」。
 - `0.0` 与 `None` 必须区分：前者可能是真正免费或本地模型，后者才是未知。
 
+2026-09-08：PAO 用量维护工具 `scripts/backfill_codex_tokens.py` 同样遵守此契约。
+回填使用 `tools.token_tracker` 的既有价格事实与阶梯，不再复制价格表或通过
+模糊名称、默认模型猜价。无价格时写入 `cost_usd: null`、`cost_known: false`
+和 `cost_source: unknown`；明确标记的 provider 实报（包括零）保持原值。
+价格簿估值记录当前 `pricing_revisions`。预览显示已知小计与未知项，只有
+新旧成本都完整时才显示差额。
+
+这只是回填工具的成本修复，不是自动获取价格或历史账目已修复的证明。
+原有按顺序匹配事件和记录的限制仍在；真实回填前须核实目标数据对应关系，
+先检查 `--dry-run`。代码采用不触发回填，不需要重启实例。
+
 ## 5. 范围定义
 
 - 只显示主响应时写作「**前台回合成本**」，不称「账单」或「任务总成本」（wrapper / CoS / audit follow-up / observer / meditation / dream 等部分异步、部分无 request correlation）。

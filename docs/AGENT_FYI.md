@@ -22,6 +22,13 @@ permission grant, or proof that the running instance has adopted current source.
 `/fyi` reads this reference again and identifies its content revision. Check live
 configuration/status before claiming an Engine, model, tool, or route is available.
 
+Codex token backfill derives prices from the shared metering table. Missing
+models/prices stay unknown; explicitly provider-reported costs retain their
+values. Preview shows incomplete totals without a numeric cost delta. Review
+the legacy sequential event matching before any real backfill; merging this
+tool does not repair history or adopt a running usage renderer. See
+[cost contract](METER_COST_DISPLAY_PLAN.md).
+
 ## Engineering rules and authority
 
 Before changing HASHI, read [AGENTS.md](../AGENTS.md), the
