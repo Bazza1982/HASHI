@@ -1343,16 +1343,25 @@ class ProtocolManager:
         item["last_seen_offset"] = int(data.get("offset") or item.get("last_seen_offset") or 0)
         messages = data.get("messages") or []
         changed = False
+        reply_boundary_observed = False
 
         for message in messages:
             role = str(message.get("role") or "")
             text = str(message.get("text") or "")
             if not text:
                 continue
-            if not item.get("matched_user_prompt") and role == "user" and text == item.get("prompt_text"):
-                item["matched_user_prompt"] = True
-                item["state"] = "matched_user_prompt"
-                changed = True
+            if role == "user":
+                if not item.get("matched_user_prompt") and text == item.get("prompt_text"):
+                    item["matched_user_prompt"] = True
+                    item["state"] = "matched_user_prompt"
+                    changed = True
+                    continue
+                if item.get("matched_user_prompt"):
+                    # Transcript records are ordered request pairs.  A later
+                    # user record starts another request, so none of its
+                    # assistant output belongs to this protocol exchange.
+                    reply_boundary_observed = True
+                    break
                 continue
             if item.get("matched_user_prompt") and role == "assistant":
                 segments = list(item.get("assistant_segments") or [])
@@ -1362,6 +1371,13 @@ class ProtocolManager:
                     item["state"] = "assistant_streaming" if len(segments) > 1 else "assistant_started"
                     item["settle_deadline"] = now + self._settle_window_seconds
                     changed = True
+
+        if reply_boundary_observed and item.get("assistant_segments"):
+            # The next request is a stronger completion boundary than the
+            # legacy quiet-window timer.  Finalize now without absorbing the
+            # following request's response.
+            item["settle_deadline"] = now
+            changed = True
 
         if item.get("assistant_segments") and float(item.get("settle_deadline") or 0) and now >= float(item.get("settle_deadline") or 0):
             reply_text = "\n\n".join(str(x).strip() for x in item.get("assistant_segments") or [] if str(x).strip()).strip()

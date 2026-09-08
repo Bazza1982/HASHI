@@ -2617,6 +2617,65 @@ def test_protocol_ignores_legacy_reply_deadline_instead_of_timing_out():
     assert manager._inflight["active"]["state"] == "delivered_to_local_queue"
 
 
+def test_protocol_reply_collection_stops_at_next_user_request_boundary():
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._settle_window_seconds = 30
+
+    async def poll_transcript(agent_name, offset):
+        assert agent_name == "agent1"
+        assert offset == 12
+        return {
+            "offset": 900,
+            "messages": [
+                {
+                    "role": "user",
+                    "text": "expected prompt",
+                    "source": "protocol:message",
+                },
+                {
+                    "role": "assistant",
+                    "text": "EXPECTED_REPLY",
+                    "source": "protocol:message",
+                },
+                {
+                    "role": "user",
+                    "text": "unrelated terminal prompt",
+                    "source": "protocol:reply",
+                },
+                {
+                    "role": "assistant",
+                    "text": "UNRELATED_REPLY",
+                    "source": "protocol:reply",
+                },
+            ],
+        }
+
+    sent = []
+
+    async def send_agent_reply(_item, reply_text):
+        sent.append(reply_text)
+        return True
+
+    manager._poll_transcript = poll_transcript
+    manager._send_agent_reply = send_agent_reply
+    item = {
+        "to_agent": "agent1",
+        "prompt_text": "expected prompt",
+        "last_seen_offset": 12,
+        "matched_user_prompt": False,
+        "state": "delivered_to_local_queue",
+    }
+
+    changed = asyncio.run(manager._advance_inflight_item(item, now=100.0))
+
+    assert changed is True
+    assert item["last_seen_offset"] == 900
+    assert item["assistant_segments"] == ["EXPECTED_REPLY"]
+    assert item["reply_text"] == "EXPECTED_REPLY"
+    assert item["state"] == "reply_sent"
+    assert sent == ["EXPECTED_REPLY"]
+
+
 def _reply_payload(**overrides):
     payload = {
         "message_type": "agent_reply",
