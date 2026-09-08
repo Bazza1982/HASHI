@@ -325,6 +325,15 @@ automation error. The wiki pipeline continues to trust only the dated embed
 completion event in the consolidation log and must stay fail-closed when that
 event is absent.
 
+The shared PCM Functions evidence gate in
+`orchestrator/wiki_consolidation_evidence.py` owns that decision for local Wiki
+pipeline consumers. For the configured local date, it requires the latest scan
+to report zero errors and the latest subsequent embed outcome to be
+`phase=embed` with zero errors. A newer scan or `embed_error` invalidates an
+older success; malformed or timezone-ambiguous evidence fails closed. A clean
+`embedded=0` event after a clean zero-insert scan remains valid completion
+evidence because there was no pending embedding work.
+
 Daily run behavior:
 
 1. Fetch new consolidated memories since the safe watermark.
