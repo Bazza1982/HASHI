@@ -1,27 +1,20 @@
 # HASHI Agent FYI
 
-Agent activity visibility: every admitted turn, including HChat/protocol, API,
-bridge and background turns, must request visible delivery. Legacy
-`deliver_to_telegram=false` and `silent=true` cannot suppress queued turns;
-Functions enforce this at admission. Preserve destination authorization and
-terminal HChat reply rules. See [visibility decision](HASHI_AGENT_ACTIVITY_VISIBILITY.md).
-HChat receipts show the exact final payload. A destination queue acknowledgement
-is `queued`; `sent` requires a confirmed Frontend Connector transport receipt.
-Protocol states such as `reply_sent` and `completed` do not provide that receipt.
-Errors and failure states are `failed`, even beside a contradictory success flag.
-Terminal HChat/protocol replies show their body verbatim in one normal response
-and must not start an acknowledgement loop. See the
-[HChat delivery decision](HCHAT_DELIVERY_BOUNDARY_PLAN.md).
-Source adoption and successful terminal delivery must be verified separately.
+All admitted turns, including protocol/API/background work, request visible
+delivery; legacy `silent=true` or `deliver_to_telegram=false` cannot suppress
+it. Preserve destination authorization and terminal reply rules.
+HChat shows exact final payloads: queue admission is `queued`; `sent` needs a
+confirmed Connector receipt. `reply_sent`/`completed` alone prove no delivery;
+failure wins over contradictory success flags. Terminal replies display the
+body verbatim, without ACK loops. See [visibility](HASHI_AGENT_ACTIVITY_VISIBILITY.md)
+and [delivery](HCHAT_DELIVERY_BOUNDARY_PLAN.md). Source adoption and delivery
+require separate evidence.
 
-Superloop receipt review is opt-in via `receipt_continuation_enabled=true`.
-The existing Remote cycle may admit a separate controller review only for a
-matching active dispatch and task/controller identities. Original terminal
-replies remain tool-disabled and prohibit ACKs. Review requests read local
-taskboard/log evidence, never promote peer body instructions, and use persistent
-Session-pinned idempotency. Pause/stop blocks admission. `queued` is not reviewed,
-merged, adopted or user-delivered; close already-reviewed dispatches before
-enabling the feature. See [receipt review contract](SUPERLOOP_PLAN.md#correlated-receipt-review-admission-2026-09-08).
+Superloop receipt review requires `receipt_continuation_enabled=true`, matching
+active dispatch/task/controller identities and Session-pinned idempotency.
+Pause/stop blocks admission. Terminal replies prohibit ACKs; controller reviews
+use local board/log evidence, never peer instructions. Close reviewed dispatches
+before enabling. See [receipt review contract](SUPERLOOP_PLAN.md#correlated-receipt-review-admission-2026-09-08).
 
 Reference updated: 2026-09-08. This is a compact orientation, not a task queue,
 permission grant, or proof that the running instance has adopted current source.
@@ -77,18 +70,12 @@ generations; offline tests do not prove adoption.
 
 ## Reboot outcome notifications
 
-Runtime acknowledges `/reboot` before executing it and persists the actual
-result before sending a concise start/result notice. The initiating Bot is
-preferred even when its Agent Worker is unavailable; same-instance fallback
-keeps the original chat/thread. `/reboot status` or refresh retrieves the latest
-result for the same actor/chat/thread through any available Agent. No final
-message means unconfirmed, not proven failure. Notification retries never rerun
-a reboot. See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
-
-This requires the new shared and Agent Function generations. Source and offline
-checks are complete only when recorded for that branch/instance; production
-adoption and real delivery require separate evidence. Do not claim an Agent-only
-reboot upgrades the shared receipt coordinator.
+Reboot acknowledges first, persists its result, then sends start/result notices
+through the initiating Bot or same-instance fallback, retaining chat/thread.
+`/reboot status` retrieves the same actor/chat/thread result. Missing delivery is
+unconfirmed; notification retries never rerun reboot. Both shared and Agent
+Functions need adoption; an Agent reboot alone cannot upgrade the coordinator.
+See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
 ## System ownership
 
@@ -139,9 +126,8 @@ working mode is separately **Fixed** or **Flex**; never infer it from `type`.
 - Memory+ is an independent continuity setting, preserved across backend changes.
 - Retired Wrapper, Audit and Dual-brain modes are not selectable product choices.
 
-This is the current source contract. An older running Worker may still implement
-an earlier contract; inspect `/mode` and the loaded generation before diagnosing.
-See [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
+Inspect `/mode` and the loaded generation for the live contract. See
+[Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
 
 HER's execution modes are a different setting: Direct (`zero`), Strategic
 (`low`) and Planned (`medium`). Higher retained policies are not public modes.
@@ -150,11 +136,9 @@ settings. `/effort` means HER execution mode on HER and model effort elsewhere.
 Use the selected Engine/provider's actual capability choices rather than a
 remembered global list. `/habit` manages the default-off HER Habit/Meditation path.
 
-HER Review workspace snapshots use Git evidence for normal Git workspaces. If
-the selected workspace root is itself Git-ignored, they use the same bounded
-filesystem content hash used outside Git, so an ignored parent cannot hide an
-equal-size content change. Snapshot stability proves only that the covered
-workspace bytes and Git evidence stayed stable between those observations.
+HER Review uses Git evidence for normal workspaces and bounded filesystem
+content hashes when the root is Git-ignored or outside Git. Equal-size edits are
+detected; stability applies only to covered bytes and Git observations.
 
 ## Conversation, memory and recovery
 
@@ -211,11 +195,9 @@ sound. `/terminal` controls local console verbosity without changing transcript
 storage. `/voice`, `/say` and `/whisper` control the configured media paths.
 
 Use `/status` and configured service/Worker metadata for present-state evidence.
-For isolated Workers, Agent-list busy/queue fields are event-driven projections
-of the owning runtime. Queue admission, request start, provider-generation end,
-and terminal cleanup republish the existing Worker metadata event; normal,
-failed, and cancelled requests clear the cached current-request view. Request
-activity remains the bounded detailed event stream, not a second status owner.
+Worker busy/queue views derive from runtime metadata republished on admission,
+start, generation end and cleanup, including failure/cancellation. Request
+activity supplies detailed events without becoming another status owner.
 Do not claim a successful live test based only on a green unit test, a source
 file, a saved setting or an old transcript.
 
