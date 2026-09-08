@@ -2405,6 +2405,37 @@ def test_registry_sync_writes_prune_only_changes_without_live_peers(tmp_path):
     assert set(instances) == {"hashi1"}
 
 
+def test_registry_missing_legacy_instances_file_keeps_live_cache_without_warning(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    state_home = tmp_path / "state-home"
+    state_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: state_home))
+    registry = PeerRegistry(hashi_root, "HASHI3")
+    registry._peers = {
+        "HASHI2": PeerInfo(
+            instance_id="HASHI2",
+            display_name="HASHI2",
+            host="192.168.0.211",
+            port=8767,
+            workbench_port=18802,
+            platform="wsl",
+            properties={"live_status": "online", "last_seen_ok": int(time.time())},
+        )
+    }
+
+    with caplog.at_level("WARNING", logger="remote.peer.registry"):
+        registry._sync_to_instances_json()
+
+    assert not (hashi_root / "instances.json").exists()
+    assert read_live_endpoints(hashi_root)["hashi2"]["remote_port"] == 8767
+    assert "instances.json not found" not in caplog.text
+
+
 def test_registry_keeps_current_peer_even_when_legacy_timestamp_is_old(tmp_path):
     hashi_root = tmp_path / "hashi"
     hashi_root.mkdir()

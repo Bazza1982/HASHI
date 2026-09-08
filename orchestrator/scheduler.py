@@ -798,7 +798,28 @@ class TaskScheduler:
         agent_name: str,
     ) -> bool:
         try:
-            await action_coro
+            result = await action_coro
+            ok: bool | None = None
+            detail = ""
+            if isinstance(result, bool):
+                ok = result
+            elif (
+                isinstance(result, (tuple, list))
+                and result
+                and isinstance(result[0], bool)
+            ):
+                ok = result[0]
+                if len(result) > 1 and result[1] is not None:
+                    detail = _safe_excerpt(str(result[1]))
+            if ok is False:
+                scheduler_logger.error(
+                    "%s %s for %s reported failure%s",
+                    task_kind,
+                    task_id,
+                    agent_name,
+                    f": {detail}" if detail else "",
+                )
+                return False
             return True
         except asyncio.CancelledError:
             raise

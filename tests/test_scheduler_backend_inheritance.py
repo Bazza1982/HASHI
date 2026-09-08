@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.scheduler import TaskScheduler
 from orchestrator.skill_manager import SkillDefinition
 
 
@@ -28,6 +30,39 @@ async def test_legacy_underscore_action_id_routes_to_jobs_automation():
         args="run",
         task_id="nightly-memory",
     )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_surfaces_failed_local_automation_result(tmp_path, caplog):
+    failure = "Automation target not found: instance/skills/memory-consolidation.py"
+    runtime = SimpleNamespace(
+        name="lily",
+        invoke_scheduler_skill=AsyncMock(return_value=(False, failure)),
+    )
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+    cron = {
+        "id": "lily-memory-consolidation",
+        "agent": "lily",
+        "schedule": "5 3 * * *",
+        "action": "skill:memory-consolidation",
+        "args": "run",
+    }
+
+    with caplog.at_level("ERROR", logger="BridgeU.Scheduler"):
+        ok = await scheduler._fire_cron_job(
+            cron,
+            runtime_map={"lily": runtime},
+            tasks={"crons": [cron]},
+            now_dt=datetime(2026, 9, 8, 3, 5),
+        )
+
+    assert ok is False
+    assert failure in caplog.text
 
 
 @pytest.mark.asyncio

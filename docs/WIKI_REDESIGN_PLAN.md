@@ -317,6 +317,14 @@ The normal production run is daily. Lily's HASHI cron triggers the pipeline once
 
 The one-hour gap gives consolidation enough time to finish normal and moderately heavy runs before the wiki reads consolidated memory. The wiki pipeline must still verify that today's consolidation completed before it advances its own watermark.
 
+The consolidation action is an instance-installed operator automation, not a
+shared source asset. A Scheduler trigger timestamp records an attempted due
+occurrence; it is not evidence that scan or embed completed. Scheduler action
+failures must remain failures at the Function boundary and identify the local
+automation error. The wiki pipeline continues to trust only the dated embed
+completion event in the consolidation log and must stay fail-closed when that
+event is absent.
+
 Daily run behavior:
 
 1. Fetch new consolidated memories since the safe watermark.

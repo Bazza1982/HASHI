@@ -475,6 +475,11 @@ The registry therefore needs two layers:
 This data should live in remote-owned state files, not only in `instances.json`.
 
 `instances.json` can remain a compatibility surface, but it should no longer be the canonical remote routing model.
+An instance that has never configured that compatibility file remains valid:
+Remote must keep publishing its own live endpoint cache, must not synthesize or
+copy an instance identity file, and must not emit a warning on every discovery
+update merely because the compatibility surface is absent. Read or write
+failures for a configured compatibility file remain actionable warnings.
 
 ### Workstream 3: Add remote agent directory sync
 

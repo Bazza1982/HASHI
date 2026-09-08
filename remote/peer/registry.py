@@ -1,11 +1,9 @@
-"""
-Peer Registry — syncs discovered peers back into instances.json.
+"""Persist discovered peers and maintain the optional legacy instance view.
 
-When LanDiscovery finds a new HASHI instance on the LAN, this registry
-writes its real IP and port into instances.json so hchat_send.py can
-route messages to it using the actual network address (not 127.0.0.1).
-
-This is the bridge between mDNS discovery and HASHI's existing routing.
+The Remote-owned live endpoint cache is authoritative for current routing.
+When ``instances.json`` already exists, the registry also updates that legacy
+compatibility surface. Its absence is a valid instance configuration and must
+not cause Remote to create a copied identity file.
 """
 
 import dataclasses
@@ -1169,7 +1167,10 @@ class PeerRegistry:
         except Exception as exc:
             logger.warning("Registry: failed to write live endpoint cache: %s", exc)
         if not self._instances_path.exists():
-            logger.warning("instances.json not found at %s", self._instances_path)
+            logger.debug(
+                "Legacy instances.json compatibility view is not configured at %s",
+                self._instances_path,
+            )
             return
 
         try:

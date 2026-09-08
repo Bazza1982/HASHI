@@ -52,6 +52,13 @@ conflicts fail closed; failed initialization preserves the prior selection.
 Codex CLI advertises Astra capacity to compaction while explicit overrides win.
 Windows Remote task registration preserves argv and records native stderr
 without treating it as process failure.
+Scheduler Function actions propagate typed unsuccessful results instead of
+treating a completed RPC as successful work. For Wiki maintenance, a due-time
+record is only an attempt; the dated consolidation embed event remains the
+completion fact. Operator automation packages remain instance-local.
+Remote routing uses its Remote-owned live endpoint cache when the optional
+legacy `instances.json` view is absent; that valid pre-state is quiet and does
+not cause Remote to invent instance configuration.
 
 Source, immutable artifacts, running generations, and terminal delivery are
 separate evidence. `/reboot min` replaces one Agent Worker;
