@@ -196,6 +196,9 @@ def test_activation_failure_restores_source_and_rolls_back_target(
     tmp_path, monkeypatch
 ):
     root = _source(tmp_path)
+    session_path = root / "workspaces" / "zelda" / ".runtime_session.json"
+    original_session = b'{"engine_session_id":"original-session"}\n'
+    session_path.write_bytes(original_session)
     receiver = _Receiver(fail_activate=True)
     _install_receiver(monkeypatch, receiver)
     prepared = coordinator.prepare_outbound_move(
@@ -222,6 +225,7 @@ def test_activation_failure_restores_source_and_rolls_back_target(
         json.loads((root / "tasks.json").read_text())["heartbeats"][0]["enabled"]
         is True
     )
+    assert session_path.read_bytes() == original_session
 
 
 def test_uncertain_target_rollback_keeps_source_disabled(tmp_path, monkeypatch):

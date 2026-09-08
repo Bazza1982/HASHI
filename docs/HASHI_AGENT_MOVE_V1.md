@@ -170,3 +170,19 @@ On the shared-Functions runtime, migration reads and writes bridge_home
 source checkout. Legacy instance-directory reads and the Agent picker accept
 UTF-8 with or without a BOM. Stage, confirm and recovery use the same instance
 root so a split installation cannot migrate another checkout's Agent.
+
+## Shared review checkpoint — 2026-09-08
+
+PAO / Functions review compared `d09b5a49` with shared main `fcf6509d`:
+the Remote migration implementation, command methods, and migration locale
+entries already agree. Only the additional dry-run and rollback assertions
+are carried into this checkpoint; no duplicate product implementation is needed.
+Independent Python 3.12 verification of `tests/test_runtime_remote.py` and
+`tests/test_agent_move_coordinator.py` passed all 34 tests, with no skips.
+Temporary in-memory mutations each produced the expected failing test when
+dry-run used the code directory, staged a target, or rollback overwrote the
+original runtime-session bytes. No mutation was saved to product sources.
+
+This is an offline review checkpoint on `fix/move-review-evidence-20260908`.
+HASHI1 runtime adoption and user-terminal acceptance remain pending; shared
+source equivalence and passing tests do not establish either outcome.

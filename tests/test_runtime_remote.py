@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -308,6 +308,8 @@ async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(runtime_remote, "preview_outbound_move", _preview)
+    prepare = Mock(side_effect=AssertionError("dry-run must not stage a target"))
+    monkeypatch.setattr(runtime_remote, "prepare_outbound_move", prepare)
     update = SimpleNamespace(effective_chat=SimpleNamespace(id=99))
 
     await runtime_remote.do_move(
@@ -319,7 +321,10 @@ async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
         dry_run=True,
     )
 
-    assert calls and calls[0][2:] == ("zelda", "hashi2", "HASHI_TEST")
+    assert calls
+    prepare.assert_not_called()
+    assert calls[0][0] == tmp_path
+    assert calls[0][2:] == ("zelda", "hashi2", "HASHI_TEST")
     assert (
         "Source and target configuration were not changed"
         in runtime.replies[-1]["text"]

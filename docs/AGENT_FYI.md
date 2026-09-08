@@ -102,6 +102,11 @@ second authoritative chat archive. See the owning architecture documents.
 
 ## Configuration and discovery
 
+The 2026-09-08 migration review found the HASHI1 delivery patch already matches
+shared main's product behavior. The shared checkpoint retains only stronger
+dry-run and rollback tests. HASHI1 runtime adoption and terminal acceptance
+remain unverified; see [Agent Move review evidence](HASHI_AGENT_MOVE_V1.md#shared-review-checkpoint--2026-09-08).
+
 `/move` derives destinations from the local Remote's trusted live `/peers`
 directory, including resolved routes and receiver capabilities. It refreshes
 discovery before staging or confirming a move; disconnected or unsupported
