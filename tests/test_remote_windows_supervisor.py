@@ -127,3 +127,43 @@ function Stop-Process {{
     assert result.returncode == 0, result.stderr
     assert stopped.read_text(encoding="utf-8-sig").splitlines() == ["101", "100"]
     assert started.read_text(encoding="utf-8-sig").strip() == "HashiRemote-supervisor-test"
+
+
+def test_restart_waits_for_force_terminated_process_to_leave_cim(tmp_path):
+    root = tmp_path / "hashi delayed exit"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-DELAYED"}}),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py"
+    )
+    started = tmp_path / "delayed-started.txt"
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+$global:SleepCalls = 0
+$global:RemoteRows = @(
+    [pscustomobject]@{{ProcessId=303; ParentProcessId=302; Name='python.exe'; CommandLine='python -m remote --hashi-root "{root}" --supervised'}}
+)
+function Get-CimInstance {{
+    param($ClassName)
+    if ($global:SleepCalls -ge 18) {{ @() }} else {{ @($global:RemoteRows) }}
+}}
+function Start-Sleep {{
+    param([int]$Milliseconds)
+    $global:SleepCalls++
+}}
+function Stop-ScheduledTask {{ param($TaskName) }}
+function Start-ScheduledTask {{
+    param($TaskName)
+    Set-Content -LiteralPath {_ps_string(started)} -Value $TaskName
+}}
+function Stop-Process {{ param([int]$Id, [switch]$Force) }}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+""")
+    assert result.returncode == 0, result.stderr
+    assert started.read_text(encoding="utf-8-sig").strip() == (
+        "HashiRemote-supervisor-delayed"
+    )

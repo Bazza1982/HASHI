@@ -158,9 +158,11 @@ function Stop-OwnedRemoteProcesses {
 
     # Task Scheduler can report Ready after Stop-ScheduledTask while the runner's
     # native child remains alive. Match the exact --hashi-root and retire only
-    # that instance's Python/runner chain. Repeat so an orphan exposed after its
-    # parent exits is included in the next snapshot.
-    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    # that instance's Python/runner chain. Windows can keep a force-terminated
+    # Python shim visible through CIM for several seconds, so poll for a bounded
+    # 15 seconds instead of reporting a false restart failure immediately.
+    $ForcePollAttempts = 15 * 4
+    for ($attempt = 0; $attempt -lt $ForcePollAttempts; $attempt++) {
         $Owned = @(Get-OwnedRemoteProcesses)
         if ($Owned.Count -eq 0) {
             return $true
