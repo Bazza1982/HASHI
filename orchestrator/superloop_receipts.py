@@ -68,9 +68,27 @@ class SuperloopReceiptService:
         path = (root / ref).resolve()
         return path.is_relative_to(root) and path.is_file()
 
+    def delivery_gaps(self, loop_id: str) -> list[str]:
+        """Require recorded outcome evidence only for opted-in completed tasks."""
+        state = self.store.load_loop_state(loop_id)
+        tasks = self.store.load_loop_json_list(self.store.resolve_loop_path(
+            loop_id, state.get("taskboard_path"), "taskboard.json"))
+        gaps = []
+        for task in tasks:
+            if task.get("status") != "completed" or task.get("delivery_required") is not True:
+                continue
+            requirements = ["runtime_adoption", "user_acceptance"]
+            if task.get("terminal_delivery_required") is True:
+                requirements.append("terminal_delivery")
+            for requirement in requirements:
+                if (task.get(requirement + "_verified") is not True
+                        or not self._evidence_exists(loop_id, task.get(requirement + "_evidence_ref"))):
+                    gaps.append(f"{task.get('task_id')}:{requirement}")
+        return gaps
+
     def review_gaps(self, loop_id: str, row: dict) -> list[str]:
         """Validate recorded dispositions, not the truth of a manager's claims."""
-        gaps = []
+        gaps = self.delivery_gaps(loop_id)
         if row.get("review_verified") is not True or not self._evidence_exists(loop_id, row.get("review_evidence_ref")):
             gaps.append("review_evidence")
         state = self.store.load_loop_state(loop_id)
@@ -111,10 +129,17 @@ class SuperloopReceiptService:
                 controller = state.get("controller") or {}
                 if not isinstance(controller, dict) or _identity(controller.get("instance")) != self.local_instance:
                     continue
-                for snapshot in self.store.load_loop_json_list(path):
+                snapshots = self.store.load_loop_json_list(path)
+                latest_review = next((item for item in reversed(snapshots)
+                    if isinstance(item, dict) and item.get("status") == "queued"), {})
+                for snapshot in snapshots:
                     if not isinstance(snapshot, dict) or snapshot.get("status") != "queued":
                         continue
-                    if snapshot.get("followthrough_state") == "reviewed":
+                    # Only the latest review supervises later delivery changes;
+                    # historical receipts must not fan out recovery for one gap.
+                    if snapshot.get("followthrough_state") == "reviewed" and (
+                            snapshot.get("idempotency_key") != latest_review.get("idempotency_key")
+                            or not self.delivery_gaps(loop_id)):
                         continue
                     now = time.time()
                     if float(snapshot.get("check_after") or 0) > now:
@@ -133,8 +158,14 @@ class SuperloopReceiptService:
                     with loop_dispatch_lock(self.store, loop_id):
                         rows = self.store.load_loop_json_list(path)
                         row = next((r for r in rows if r.get("idempotency_key") == snapshot.get("idempotency_key")), None)
-                        if row is None or row.get("followthrough_state") == "reviewed":
+                        if row is None:
                             continue
+                        if row.get("followthrough_state") == "reviewed":
+                            latest_current = next((item for item in reversed(rows)
+                                if isinstance(item, dict) and item.get("status") == "queued"), {})
+                            if (row.get("idempotency_key") != latest_current.get("idempotency_key")
+                                    or not self.delivery_gaps(loop_id)):
+                                continue
                         if not isinstance(row.get("request"), dict) or not isinstance(row.get("recovery", {}), dict):
                             continue
                         current_recovery = row.get("recovery") or {}
@@ -210,6 +241,10 @@ class SuperloopReceiptService:
             "relative to this loop. A task label, runner state change or promise is not execution evidence. "
             "Verify dispatch execution separately, reuse existing receipt/deadline triggers and do not add "
             "recurring polling. Report user outcomes, unresolved impact and next responsibility visibly. "
+            "For completed tasks explicitly marked delivery_required=true, record runtime_adoption_verified "
+            "and user_acceptance_verified with matching *_evidence_ref files; when terminal_delivery_required=true, "
+            "also record terminal_delivery_verified and terminal_delivery_evidence_ref. Missing delivery evidence "
+            "requires reopening the delivery task and taking action or recording a concrete blocker. "
             "Review records never prove runtime adoption or terminal delivery."
         )
 

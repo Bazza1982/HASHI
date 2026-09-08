@@ -202,8 +202,9 @@ file, a saved setting or an old transcript.
 
 ## Superloop controller follow-through
 
-PAO Functions check admitted controller Runs independently of Remote receipts.
-Missing whole-board dispositions after completion permit one durable idempotent
-recovery; failed, cancelled or exhausted attempts require attention. This grants
-no Core, cron or task-start authority. See `SUPERLOOP_FUNCTION_CONTRACT.md`.
-Keep source, tests, merge, adoption and delivery evidence separate.
+PAO tracks controller Runs after receipt cleanup. Missing dispositions allow one
+idempotent recovery; failed/cancelled/exhausted Runs need attention. No new Core,
+cron or task-start authority. `delivery_required=true` needs adoption and user
+acceptance evidence; `terminal_delivery_required=true` also needs transport proof.
+Only the latest reviewed receipt rechecks delivery gaps with the original limit.
+See `SUPERLOOP_FUNCTION_CONTRACT.md`. Code, tests, adoption and delivery differ.

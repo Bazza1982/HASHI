@@ -383,3 +383,40 @@ those facts. A reviewed row is historical evidence for that turn, not a perpetua
 certification of tasks created later. Existing heartbeat supervision remains the
 fallback for failures and later changes. Scheduler auto-advance still does not
 dispatch work and must not be enabled as a substitute for controller execution.
+
+
+### Explicit delivery closeout contract (2026-09-08)
+
+An outcome task may opt in with `delivery_required: true`. When such a task is
+`completed`, its taskboard row must contain `runtime_adoption_verified: true`
+and `user_acceptance_verified: true`, each with a corresponding
+`runtime_adoption_evidence_ref` / `user_acceptance_evidence_ref` naming an existing
+file inside the loop. User acceptance here means an independently recorded
+functional check of the requested behavior, not merely a passing code test.
+Tasks whose outcome includes a visible message also set
+`terminal_delivery_required: true` and require `terminal_delivery_verified: true`
+with `terminal_delivery_evidence_ref`. Message delivery and functional acceptance
+are distinct evidence. Ordinary code-only tasks and existing boards without this
+explicit opt-in retain their prior completion contract. Cancelled, aborted and
+failed tasks are not reopened by this check.
+
+Receipt reconciliation reports missing outcome fields as `task_id:requirement`
+gaps, including for the latest previously `reviewed` row. Historical reviewed rows do
+not each fan out recovery for the same current gap. The latest row is re-observed through
+the identity-checked activity API only when an explicit completed-delivery gap
+exists; the original one-logical-recovery allowance still applies. Deleting
+previous evidence cannot reset that allowance. Failed or cancelled controller
+runs never auto-recover. The controller must correct a premature completion,
+then record actual action or a concrete blocker; the service does not rewrite
+task status or autonomously dispatch the original work.
+
+This validates presence and scope of evidence, not its truth. The responsible
+controller must independently inspect generation identity and the real user
+scenario. A loop without a persisted receipt review is still handled by its
+existing controller/maintenance trigger; this change creates no new scheduler.
+
+Implementation scope: authorized PAO Functions maintenance branch
+`fix/superloop-delivery-evidence-20260908`. Offline receipt-service tests use real
+temporary SuperloopStore persistence, including restart, evidence loss and the
+single recovery boundary. Instance adoption and live delivery acceptance remain
+separate, unverified release steps for this branch.

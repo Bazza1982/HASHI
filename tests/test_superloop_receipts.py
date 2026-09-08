@@ -425,3 +425,94 @@ def test_malformed_row_does_not_starve_valid_review(receipt_case, monkeypatch):
     asyncio.run(manager._process_inflight_once())
     assert store.load_loop_json_list(path)[1]['execution_state'] == 'failed'
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("prior_state", ["reviewed", "awaiting_execution"])
+def test_completed_delivery_contract_reopens_review_once_after_restart(receipt_case, monkeypatch, prior_state):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    root = store.loop_dir('sl-review')
+    path = root / 'receipt_reviews.json'
+    (root / 'review.md').write_text('Independent review')
+    rows = store.load_loop_json_list(path)
+    rows[0].update(review_verified=True, review_evidence_ref='review.md', followthrough_state=prior_state)
+    old = dict(rows[0], idempotency_key='historical-review', followthrough_state='reviewed')
+    store.save_loop_json_list(path, [old] + rows)
+    board = root / 'taskboard.json'
+    tasks = store.load_loop_json_list(board)
+    tasks[0].update(status='completed', delivery_required=True,
+                    runtime_adoption_verified=False, user_acceptance_verified=False)
+    tasks.append(dict(task_id='code-only', status='completed'))
+    tasks.append(dict(task_id='cancelled', status='cancelled', delivery_required=True))
+    store.save_loop_json_list(board, tasks)
+    service = SuperloopReceiptService(SuperloopStore(store.root_dir), local_instance='HASHI2')
+    clock = [10**12]
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: clock[0])
+    def activity(agent, request_id):
+        return dict(ok=True, request_id=request_id, agent_id=agent,
+                    session_id='ses-manager', state='completed', terminal=True)
+    admitted = []
+    def enqueue(request):
+        admitted.append(request)
+        return 'req-recovery'
+    service.reconcile(enqueue, activity)
+    row = store.load_loop_json_list(path)[-1]
+    assert set(row['review_gaps']) == {'fix:runtime_adoption', 'fix:user_acceptance'}
+    assert row['followthrough_state'] == 'recovery_queued'
+    assert len(admitted) == 1
+    clock[0] += 31
+    service.reconcile(enqueue, activity)
+    assert store.load_loop_json_list(path)[-1]['followthrough_state'] == 'needs_attention'
+    assert len(admitted) == 1
+    # Booleans and outside paths are not delivery evidence.
+    tasks[0].update(runtime_adoption_verified=True, user_acceptance_verified=True,
+                    runtime_adoption_evidence_ref='../outside.md', user_acceptance_evidence_ref='missing.md')
+    store.save_loop_json_list(board, tasks)
+    assert set(service.review_gaps('sl-review', row)) == {'fix:runtime_adoption', 'fix:user_acceptance'}
+    (root / 'delivery.md').write_text('Generation adopted; user command exercised, observed result recorded')
+    tasks[0].update(runtime_adoption_evidence_ref='delivery.md', user_acceptance_evidence_ref='delivery.md',
+                    terminal_delivery_required=True)
+    store.save_loop_json_list(board, tasks)
+    assert service.review_gaps('sl-review', row) == ['fix:terminal_delivery']
+    tasks[0].update(terminal_delivery_verified=True, terminal_delivery_evidence_ref='delivery.md')
+    store.save_loop_json_list(board, tasks)
+    clock[0] += 31
+    service.reconcile(enqueue, activity)
+    assert store.load_loop_json_list(path)[-1]['followthrough_state'] == 'reviewed'
+    # Later evidence loss is detected, but cannot create another recovery.
+    (root / 'delivery.md').unlink()
+    clock[0] += 31
+    service.reconcile(enqueue, activity)
+    assert store.load_loop_json_list(path)[-1]['followthrough_state'] == 'needs_attention'
+    assert len(admitted) == 1
+
+
+def test_new_review_during_delivery_poll_prevents_historical_recovery(receipt_case, monkeypatch):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    root = store.loop_dir('sl-review')
+    path = root / 'receipt_reviews.json'
+    rows = store.load_loop_json_list(path)
+    rows[0]['followthrough_state'] = 'reviewed'
+    store.save_loop_json_list(path, rows)
+    board = root / 'taskboard.json'
+    tasks = store.load_loop_json_list(board)
+    tasks[0].update(status='completed', delivery_required=True)
+    store.save_loop_json_list(board, tasks)
+    service = SuperloopReceiptService(store, local_instance='HASHI2')
+    monkeypatch.setattr('orchestrator.superloop_receipts.time.time', lambda: 10**12)
+    def activity(agent, request_id):
+        current = store.load_loop_json_list(path)
+        current.append(dict(current[0], idempotency_key='new-review',
+                            controller_request_id='req-new-review'))
+        store.save_loop_json_list(path, current)
+        return dict(ok=True, request_id=request_id, agent_id=agent,
+                    session_id='ses-manager', state='completed', terminal=True)
+    admitted = []
+    service.reconcile(lambda request: admitted.append(request) or 'req-recovery', activity)
+    assert not admitted
+    assert 'recovery' not in store.load_loop_json_list(path)[0]
