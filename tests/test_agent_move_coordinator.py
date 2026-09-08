@@ -138,6 +138,29 @@ def test_preview_is_disposable_and_does_not_create_outbound_state(
     assert not (root / "state" / "agent_moves" / "outbound").exists()
 
 
+def test_preview_reports_non_authoritative_retained_identity(tmp_path, monkeypatch):
+    root = _source(tmp_path)
+    retained = root / "workspaces" / "zelda" / "AGENT.md"
+    retained.write_text("legacy retained identity", encoding="utf-8")
+    receiver = _Receiver()
+    _install_receiver(monkeypatch, receiver)
+
+    result = coordinator.preview_outbound_move(
+        root,
+        {"hashi2": {}},
+        "zelda",
+        "hashi2",
+        source_instance="HASHI1",
+    )
+
+    assert result["package_schema"] == 2
+    assert result["retained_identity"]["authoritative"] is False
+    assert result["retained_identity"]["original_path"] == "AGENT.md"
+    assert result["retained_identity"]["target_policy"] == (
+        "persistent transaction attachment; never installed as live PCM"
+    )
+
+
 def test_confirm_move_disables_source_only_after_target_commit(tmp_path, monkeypatch):
     root = _source(tmp_path)
     commit_guards = []
@@ -401,6 +424,38 @@ def test_confirm_rejects_stale_source_snapshot_and_rolls_back_target(
         "newer durable memory",
         encoding="utf-8",
     )
+
+    with pytest.raises(AgentMoveError, match="durable state changed"):
+        coordinator.confirm_outbound_move(
+            root,
+            {"hashi2": {}},
+            prepared["package_id"],
+        )
+
+    assert [call[0] for call in receiver.calls] == ["stage", "commit", "rollback"]
+    assert (
+        json.loads((root / "agents.json").read_text())["agents"][0]["is_active"]
+        is True
+    )
+    assert source_move_guard_state(root, "zelda") is None
+
+
+def test_confirm_rejects_changed_retained_identity_and_rolls_back_target(
+    tmp_path, monkeypatch
+):
+    root = _source(tmp_path)
+    retained = root / "workspaces" / "zelda" / "AGENT.md"
+    retained.write_text("historical identity one", encoding="utf-8")
+    receiver = _Receiver()
+    _install_receiver(monkeypatch, receiver)
+    prepared = coordinator.prepare_outbound_move(
+        root,
+        {"hashi2": {}},
+        "zelda",
+        "hashi2",
+        source_instance="HASHI1",
+    )
+    retained.write_text("historical identity two", encoding="utf-8")
 
     with pytest.raises(AgentMoveError, match="durable state changed"):
         coordinator.confirm_outbound_move(

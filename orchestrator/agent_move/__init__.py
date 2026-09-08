@@ -7,8 +7,10 @@ source-side transport used by the Telegram ``/move`` command.
 
 from .package import (
     AGENT_MOVE_CAPABILITY,
+    PACKAGE_SCHEMA_MIN_VERSION,
     PACKAGE_SCHEMA_VERSION,
     PACKAGE_TYPE,
+    RETAINED_IDENTITY_CAPABILITY,
     AgentMoveArchive,
     AgentMoveError,
     create_agent_move_package,
@@ -27,8 +29,10 @@ from .service import (
 
 __all__ = [
     "AGENT_MOVE_CAPABILITY",
+    "PACKAGE_SCHEMA_MIN_VERSION",
     "PACKAGE_SCHEMA_VERSION",
     "PACKAGE_TYPE",
+    "RETAINED_IDENTITY_CAPABILITY",
     "AgentMoveArchive",
     "AgentMoveError",
     "activate_agent_move",

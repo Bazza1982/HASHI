@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.agent_move.package import (
+    RETAINED_IDENTITY_CAPABILITY,
     AgentMoveError,
     archive_snapshot_fingerprint,
     create_agent_move_package,
@@ -123,6 +124,7 @@ def test_package_round_trip_preserves_identity_memory_and_encrypted_agent_secret
     )
 
     assert package.manifest["schema_version"] == 1
+    assert package.retained_identity is None
     assert package.agent_config["is_active"] is False
     assert package.agent_config["workspace_dir"] == "workspaces/zelda"
     assert decrypt_agent_secrets(package, "shared-secret") == {
@@ -322,6 +324,137 @@ def test_package_reserves_canonical_agent_md_name(tmp_path):
             tmp_path / "zelda.hashi-agent",
             include_workspace=False,
         )
+
+
+def test_package_schema2_preserves_exact_uppercase_identity_as_attachment(tmp_path):
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    retained = b"# Historical AGENT identity\n\nDo not execute this as PCM.\n"
+    (workspace / "AGENT.md").write_bytes(retained)
+
+    package = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "zelda-schema2.hashi-agent",
+        source_instance="HASHI1",
+    )
+
+    assert package.manifest["schema_version"] == 2
+    assert RETAINED_IDENTITY_CAPABILITY in package.manifest[
+        "required_receiver_capabilities"
+    ]
+    assert package.manifest["sections"]["retained_identity"] is True
+    assert package.retained_identity == {
+        "authoritative": False,
+        "original_path": "AGENT.md",
+        "archive_path": "retained-identity/AGENT.md",
+        "sha256": hashlib.sha256(retained).hexdigest(),
+        "size": len(retained),
+    }
+    assert "retained-identity/AGENT.md" in package.names
+    assert "workspace/AGENT.md" not in package.names
+
+    destination = tmp_path / "windows-target-workspace"
+    extract_agent_workspace(package, destination, target_platform="windows")
+    assert (destination / "agent.md").is_file()
+    assert not (destination / "AGENT.md").exists()
+
+
+@pytest.mark.parametrize("name", ["Agent.md", "aGeNt.Md"])
+def test_package_rejects_other_case_variants_of_reserved_identity(tmp_path, name):
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    (workspace / name).write_text("not allowed", encoding="utf-8")
+
+    with pytest.raises(AgentMoveError, match="only exact root AGENT.md"):
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "invalid-alias.hashi-agent",
+        )
+
+
+def test_package_rejects_uppercase_identity_symlink(tmp_path):
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    try:
+        (workspace / "AGENT.md").symlink_to(workspace / "memory" / "continuity.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable on this platform")
+
+    with pytest.raises(AgentMoveError, match="regular file"):
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "linked-alias.hashi-agent",
+        )
+
+
+def test_package_rejects_uppercase_identity_directory(tmp_path):
+    root = _source_root(tmp_path)
+    (root / "workspaces" / "zelda" / "AGENT.md").mkdir()
+
+    with pytest.raises(AgentMoveError, match="regular file"):
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "directory-alias.hashi-agent",
+        )
+
+
+@pytest.mark.parametrize("relative", ["nested/AGENT.md", "nested/agent.md"])
+def test_package_rejects_nested_identity_names(tmp_path, relative):
+    root = _source_root(tmp_path)
+    path = root / "workspaces" / "zelda" / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("nested identity", encoding="utf-8")
+
+    with pytest.raises(AgentMoveError, match="only exact root AGENT.md"):
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "nested-alias.hashi-agent",
+        )
+
+
+def test_schema2_snapshot_fingerprint_detects_retained_identity_change(tmp_path):
+    root = _source_root(tmp_path)
+    retained_path = root / "workspaces" / "zelda" / "AGENT.md"
+    retained_path.write_text("historical identity one", encoding="utf-8")
+    first = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "first-schema2.hashi-agent",
+    )
+    first_fingerprint = archive_snapshot_fingerprint(first)
+
+    retained_path.write_text("historical identity two", encoding="utf-8")
+    second = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "second-schema2.hashi-agent",
+    )
+
+    assert archive_snapshot_fingerprint(second) != first_fingerprint
+
+
+def test_schema2_rejects_retained_identity_metadata_mismatch(tmp_path):
+    root = _source_root(tmp_path)
+    (root / "workspaces" / "zelda" / "AGENT.md").write_text(
+        "historical identity",
+        encoding="utf-8",
+    )
+    path = tmp_path / "valid-schema2.hashi-agent"
+    create_agent_move_package(root, "zelda", path)
+    replacement = tmp_path / "tampered-schema2.hashi-agent"
+    _rewrite_archive(
+        path,
+        replacement,
+        replacements={"retained-identity/AGENT.md": b"different retained identity"},
+    )
+
+    with pytest.raises(AgentMoveError, match="metadata does not match"):
+        read_agent_move_package(replacement)
 
 
 def test_snapshot_fingerprint_is_stable_and_detects_sqlite_changes(tmp_path):

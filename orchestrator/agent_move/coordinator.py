@@ -72,6 +72,9 @@ def preview_outbound_move(
             secret_passphrase=token,
             max_package_bytes=_receiver_package_limit(client),
         )
+        compatibility_check = getattr(client, "ensure_package_compatible", None)
+        if callable(compatibility_check):
+            compatibility_check(package)
         exclusion_summary = _exclusion_summary(package.workspace_metadata)
         return {
             "ok": True,
@@ -79,6 +82,8 @@ def preview_outbound_move(
             "agent_id": package.agent_id,
             "target_instance": client.target_instance,
             "target_environment": client.capabilities.get("environment_kind"),
+            "package_schema": package.manifest.get("schema_version"),
+            "retained_identity": _retained_identity_preview(package.retained_identity),
             "package_bytes": path.stat().st_size,
             "workspace_files": len(package.workspace_metadata.get("files") or []),
             "workspace_source_bytes": int(
@@ -148,6 +153,9 @@ def prepare_outbound_move(
             package_id=package_id,
             max_package_bytes=_receiver_package_limit(client),
         )
+        compatibility_check = getattr(client, "ensure_package_compatible", None)
+        if callable(compatibility_check):
+            compatibility_check(package)
         exclusion_summary = _exclusion_summary(package.workspace_metadata)
         state.update(
             {
@@ -155,6 +163,10 @@ def prepare_outbound_move(
                 "sha256": package_sha256(package_path),
                 "package_bytes": package_path.stat().st_size,
                 "source_environment": package.manifest.get("source_environment"),
+                "package_schema": package.manifest.get("schema_version"),
+                "retained_identity": _retained_identity_preview(
+                    package.retained_identity
+                ),
                 "target_environment": client.capabilities.get("environment_kind"),
                 "workspace_files": len(package.workspace_metadata.get("files") or []),
                 "workspace_source_bytes": int(
@@ -181,6 +193,8 @@ def prepare_outbound_move(
                 "staged_at": utc_now_iso(),
                 "remote_status": remote.get("status"),
                 "credential_status": remote.get("credential_status") or {},
+                "retained_identity": remote.get("retained_identity")
+                or state.get("retained_identity"),
                 "warnings": list(remote.get("warnings") or []),
             }
         )
@@ -660,6 +674,19 @@ def _exclusion_summary(workspace_metadata: Mapping[str, Any]) -> dict[str, int]:
         reason = str(item.get("reason") or "unspecified")
         result[reason] = result.get(reason, 0) + 1
     return dict(sorted(result.items()))
+
+
+def _retained_identity_preview(
+    metadata: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if metadata is None:
+        return None
+    return {
+        **dict(metadata),
+        "target_policy": (
+            "persistent transaction attachment; never installed as live PCM"
+        ),
+    }
 
 
 def _public_outbound(state: Mapping[str, Any]) -> dict[str, Any]:

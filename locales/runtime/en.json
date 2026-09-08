@@ -1552,6 +1552,8 @@
     "remote.move.preview_clean": "✅ Source and target configuration were not changed.",
     "remote.move.cross_platform": "🧭 Cross-platform conversion will rebuild paths and permissions on the target; OS integrations remain target-owned.",
     "remote.move.prepared_safe": "The verified package is staged on the target. Nothing is active there and the source is unchanged. Confirm to commit, or cancel to roll it back.",
+    "remote.move.retained_identity_preview": "⚠️ Root <code>AGENT.md</code> is included as a non-authoritative retained attachment (SHA-256 <code>{sha256}</code>); only <code>agent.md</code> remains the live PCM identity.",
+    "remote.move.retained_identity_stored": "📎 Non-authoritative <code>AGENT.md</code> retained at <code>{path}</code> (SHA-256 <code>{sha256}</code>); it is never loaded as live PCM.",
     "remote.move.credentials_missing": "⚠️ Activation will remain blocked until these target credential keys exist: <code>{keys}</code>",
     "remote.move.target_rebind": "🔐 Verify target-owned integrations before use: <code>{items}</code>",
     "remote.move.review_notes": "⚠️ Review notes:",

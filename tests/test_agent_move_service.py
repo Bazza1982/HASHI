@@ -151,6 +151,99 @@ def test_stage_commit_activate_and_recoverable_rollback(tmp_path):
     assert (source / "workspaces" / "zelda").is_dir()
 
 
+def test_schema2_retained_identity_is_persisted_outside_workspace_and_survives_rollback(
+    tmp_path,
+):
+    source, target, _ = _roots(tmp_path)
+    retained = b"historical uppercase identity\n"
+    (source / "workspaces" / "zelda" / "AGENT.md").write_bytes(retained)
+    package_path = tmp_path / "zelda-schema2.hashi-agent"
+    package = create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        include_agent_secrets=True,
+        secret_passphrase="shared-secret",
+    )
+
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        secret_passphrase="shared-secret",
+        target_platform="windows",
+    )
+
+    retained_state = staged["retained_identity"]
+    assert retained_state["authoritative"] is False
+    assert retained_state["original_path"] == "AGENT.md"
+    stored = target / retained_state["storage_path"]
+    assert stored.read_bytes() == retained
+    assert retained_state["sha256"] == package.retained_identity["sha256"]
+    assert any("non-authoritative" in warning for warning in staged["warnings"])
+
+    commit_agent_move(
+        target,
+        staged["package_id"],
+        secret_passphrase="shared-secret",
+        target_platform="windows",
+    )
+    workspace = target / "workspaces" / "zelda"
+    assert (workspace / "agent.md").is_file()
+    assert not (workspace / "AGENT.md").exists()
+
+    rolled_back = rollback_agent_move(target, staged["package_id"])
+    assert rolled_back["status"] == "rolled_back"
+    assert stored.read_bytes() == retained
+    assert rolled_back["retained_identity"]["storage_path"] == retained_state[
+        "storage_path"
+    ]
+
+
+def test_schema2_stage_failure_removes_only_incomplete_transaction(tmp_path, monkeypatch):
+    source, target, _ = _roots(tmp_path)
+    (source / "workspaces" / "zelda" / "AGENT.md").write_text(
+        "historical identity",
+        encoding="utf-8",
+    )
+    package_path = tmp_path / "zelda-schema2-failure.hashi-agent"
+    package = create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+    )
+    target_agents_before = (target / "agents.json").read_bytes()
+    source_identity_before = (
+        source / "workspaces" / "zelda" / "AGENT.md"
+    ).read_bytes()
+    monkeypatch.setattr(
+        service,
+        "_preserve_retained_identity",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        stage_agent_move(
+            target,
+            package_path.read_bytes(),
+            expected_sha256=package_sha256(package_path),
+            source_instance="HASHI1",
+        )
+
+    record_dir = (
+        target / "state" / "agent_moves" / "incoming" / package.package_id
+    )
+    assert not record_dir.exists()
+    assert not list((target / "state" / "agent_moves" / "incoming").glob(".upload-*"))
+    assert (target / "agents.json").read_bytes() == target_agents_before
+    assert (
+        source / "workspaces" / "zelda" / "AGENT.md"
+    ).read_bytes() == source_identity_before
+
+
 def test_activation_blocks_when_agent_credential_was_not_packaged(tmp_path):
     source, target, _ = _roots(tmp_path)
     package_path = tmp_path / "without-secrets.hashi-agent"

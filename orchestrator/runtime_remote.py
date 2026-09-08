@@ -474,6 +474,21 @@ def _render_move_prepared(result: dict[str, Any]) -> str:
 
 def _render_move_review_notes(result: dict[str, Any]) -> list[str]:
     lines: list[str] = []
+    retained = result.get("retained_identity")
+    if isinstance(retained, dict):
+        storage_path = str(retained.get("storage_path") or "").strip()
+        key = (
+            "remote.move.retained_identity_stored"
+            if storage_path
+            else "remote.move.retained_identity_preview"
+        )
+        lines.append(
+            ui_language.tr(
+                key,
+                sha256=html.escape(str(retained.get("sha256") or "unknown")),
+                path=html.escape(storage_path or "target transaction storage"),
+            )
+        )
     rebind = list(result.get("target_rebind_required") or [])
     if rebind:
         lines.append(
@@ -491,18 +506,20 @@ def _render_move_review_notes(result: dict[str, Any]) -> list[str]:
 
 def _render_move_complete(result: dict[str, Any]) -> str:
     if result.get("status") == "copied_inactive":
-        return (
+        body = (
             f"{card_title('✅', 'Agent copied inactive')}\n\n"
             f"{ui_language.tr('remote.move.copy_complete', agent=html.escape(str(result.get('agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
         )
+        return "\n".join([body, *_render_move_review_notes(result)])
     order = list(result.get("reboot_order") or [])
     source = html.escape(str(order[0] if order else result.get("source_instance") or "source"))
     target = html.escape(str(order[1] if len(order) > 1 else result.get("target_instance") or "target"))
-    return (
+    body = (
         f"{card_title('✅', 'Agent move committed')}\n\n"
         f"{ui_language.tr('remote.move.move_complete', agent=html.escape(str(result.get('agent_id'))), target=html.escape(str(result.get('target_instance'))))}\n\n"
         f"{ui_language.tr('remote.move.reboot_order', source=source, target=target, agent=html.escape(str(result.get('agent_id'))))}"
     )
+    return "\n".join([body, *_render_move_review_notes(result)])
 
 
 def render_remote_peer_lines(

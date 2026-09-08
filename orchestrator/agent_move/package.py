@@ -38,9 +38,13 @@ from orchestrator.pcm import (
 from orchestrator.process_execution import is_wsl
 
 PACKAGE_TYPE = "hashi-agent-move"
-PACKAGE_SCHEMA_VERSION = 1
+PACKAGE_SCHEMA_MIN_VERSION = 1
+PACKAGE_SCHEMA_VERSION = 2
 AGENT_MOVE_CAPABILITY = "agent_move_receive_v1"
+RETAINED_IDENTITY_CAPABILITY = "agent_move_retained_identity_v1"
 PACKAGE_EXTENSION = ".hashi-agent"
+RETAINED_IDENTITY_ARCHIVE_PATH = "retained-identity/AGENT.md"
+RETAINED_IDENTITY_METADATA_PATH = "metadata/retained-identity.json"
 MAX_ARCHIVE_MEMBERS = 100_000
 MAX_UNPACKED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_WORKSPACE_BYTES = MAX_UNPACKED_BYTES - (16 * 1024 * 1024)
@@ -48,6 +52,8 @@ _CONTROL_MEMBER_LIMITS = {
     "manifest.json": 1024 * 1024,
     "identity/agent.json": 4 * 1024 * 1024,
     "identity/agent.md": 16 * 1024 * 1024,
+    RETAINED_IDENTITY_ARCHIVE_PATH: 16 * 1024 * 1024,
+    RETAINED_IDENTITY_METADATA_PATH: 1024 * 1024,
     "access/requirements.json": 4 * 1024 * 1024,
     "schedules/tasks.json": 32 * 1024 * 1024,
     "metadata/workspace.json": 64 * 1024 * 1024,
@@ -140,6 +146,7 @@ class AgentMoveArchive:
     access_requirements: dict[str, Any]
     schedules: dict[str, Any]
     workspace_metadata: dict[str, Any]
+    retained_identity: dict[str, Any] | None
     checksums: dict[str, str]
     names: tuple[str, ...]
 
@@ -178,23 +185,6 @@ def detect_environment_kind() -> str:
 def _read_canonical_pcm(workspace: Path, agent_id: str) -> str:
     """Read the exact workspace PCM through its authoritative validator."""
 
-    try:
-        aliases = sorted(
-            entry.name
-            for entry in workspace.iterdir()
-            if entry.name.casefold() == PCM_FILENAME.casefold()
-            and entry.name != PCM_FILENAME
-        )
-    except OSError as exc:
-        raise AgentMoveError(
-            f"canonical agent.md cannot be inspected for Agent '{agent_id}'"
-        ) from exc
-    if aliases:
-        raise AgentMoveError(
-            f"workspace/{aliases[0]} conflicts with the reserved canonical Agent "
-            f"identity path {PCM_FILENAME!r}; use the exact lower-case filename"
-        )
-
     pcm_path = canonical_agent_md(workspace)
     try:
         document = load_pcm_document(pcm_path, workspace_dir=workspace)
@@ -212,6 +202,91 @@ def _read_canonical_pcm(workspace: Path, agent_id: str) -> str:
     if hashlib.sha256(pcm_bytes).hexdigest() != document.content_sha256:
         raise AgentMoveError("canonical agent.md changed while preparing the package")
     return pcm_bytes.decode("utf-8")
+
+
+def _read_retained_identity(
+    workspace: Path, agent_id: str
+) -> tuple[bytes | None, dict[str, Any] | None]:
+    """Read the sole tolerated non-canonical identity without following links."""
+
+    try:
+        aliases = sorted(
+            entry
+            for entry in workspace.iterdir()
+            if entry.name.casefold() == PCM_FILENAME.casefold()
+            and entry.name != PCM_FILENAME
+        )
+    except OSError as exc:
+        raise AgentMoveError(
+            f"canonical agent.md cannot be inspected for Agent '{agent_id}'"
+        ) from exc
+    invalid = [entry.name for entry in aliases if entry.name != "AGENT.md"]
+    if invalid:
+        raise AgentMoveError(
+            f"workspace/{invalid[0]} conflicts with the reserved Agent identity; "
+            "only exact root AGENT.md may be retained as a non-authoritative attachment"
+        )
+    if not aliases:
+        return None, None
+
+    path = aliases[0]
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise AgentMoveError("retained root AGENT.md cannot be inspected") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise AgentMoveError(
+            "retained root AGENT.md must be a regular file owned by the workspace"
+        )
+    if int(before.st_size) > _CONTROL_MEMBER_LIMITS[RETAINED_IDENTITY_ARCHIVE_PATH]:
+        raise AgentMoveError("retained root AGENT.md exceeds its size limit")
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise AgentMoveError(
+                    "retained root AGENT.md must be a regular file owned by the workspace"
+                )
+            content = handle.read()
+        after = path.lstat()
+    except AgentMoveError:
+        raise
+    except OSError as exc:
+        raise AgentMoveError("retained root AGENT.md cannot be read safely") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def identity(info: os.stat_result) -> tuple[int, int, int, int]:
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+        )
+
+    if (
+        stat.S_ISLNK(after.st_mode)
+        or not stat.S_ISREG(after.st_mode)
+        or identity(before) != identity(opened)
+        or identity(opened) != identity(after)
+        or len(content) != int(opened.st_size)
+    ):
+        raise AgentMoveError("retained root AGENT.md changed while preparing the package")
+    metadata = {
+        "authoritative": False,
+        "original_path": "AGENT.md",
+        "archive_path": RETAINED_IDENTITY_ARCHIVE_PATH,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size": len(content),
+    }
+    return content, metadata
 
 
 def create_agent_move_package(
@@ -250,7 +325,11 @@ def create_agent_move_package(
             f"source Agent '{name}' has already moved to another instance"
         )
     workspace = _resolve_workspace(root, raw_config, name)
+    retained_identity_bytes, retained_identity = _read_retained_identity(
+        workspace, name
+    )
     pcm_text = _read_canonical_pcm(workspace, name)
+    package_schema = 2 if retained_identity is not None else 1
 
     agent_config, config_warnings = _portable_agent_config(raw_config, name)
     schedules = _collect_schedules(root, name)
@@ -311,7 +390,7 @@ def create_agent_move_package(
     }
     manifest = {
         "package_type": PACKAGE_TYPE,
-        "schema_version": PACKAGE_SCHEMA_VERSION,
+        "schema_version": package_schema,
         "package_id": package_key,
         "created_at": utc_now_iso(),
         "source_instance": str(
@@ -322,6 +401,7 @@ def create_agent_move_package(
         "workspace_policy": workspace_metadata["policy"],
         "sections": {
             "identity": True,
+            "retained_identity": retained_identity is not None,
             "workspace": bool(include_workspace),
             "memory": True,
             "schedules": any(
@@ -330,9 +410,26 @@ def create_agent_move_package(
             "access_requirements": True,
             "encrypted_agent_secrets": bool(encrypted_secrets),
         },
-        "required_receiver_capabilities": [AGENT_MOVE_CAPABILITY],
-        "compatibility_floor": "agent-move-v1",
-        "warnings": config_warnings,
+        "required_receiver_capabilities": [
+            AGENT_MOVE_CAPABILITY,
+            *(
+                [RETAINED_IDENTITY_CAPABILITY]
+                if retained_identity is not None
+                else []
+            ),
+        ],
+        "compatibility_floor": f"agent-move-v{package_schema}",
+        "warnings": [
+            *config_warnings,
+            *(
+                [
+                    "root AGENT.md will be retained as a non-authoritative attachment; "
+                    "only agent.md remains the live PCM identity"
+                ]
+                if retained_identity is not None
+                else []
+            ),
+        ],
     }
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -360,6 +457,19 @@ def create_agent_move_package(
                 _write_bytes(
                     archive, "identity/agent.md", pcm_text.encode("utf-8"), checksums
                 )
+                if retained_identity_bytes is not None and retained_identity is not None:
+                    _write_bytes(
+                        archive,
+                        RETAINED_IDENTITY_ARCHIVE_PATH,
+                        retained_identity_bytes,
+                        checksums,
+                    )
+                    _write_bytes(
+                        archive,
+                        RETAINED_IDENTITY_METADATA_PATH,
+                        _json_bytes(retained_identity),
+                        checksums,
+                    )
                 _write_bytes(
                     archive,
                     "access/requirements.json",
@@ -467,6 +577,11 @@ def read_agent_move_package(
             )
         _validate_workspace_members(names, target_kind)
         _validate_workspace_metadata(workspace_metadata, names)
+        retained_identity = _read_and_validate_retained_identity(
+            archive,
+            manifest,
+            names,
+        )
 
     return AgentMoveArchive(
         package_path=path,
@@ -475,6 +590,7 @@ def read_agent_move_package(
         access_requirements=access,
         schedules=schedules,
         workspace_metadata=workspace_metadata,
+        retained_identity=retained_identity,
         checksums={str(k): str(v) for k, v in checksums.items()},
         names=tuple(names),
     )
@@ -492,6 +608,18 @@ def decrypt_agent_secrets(
     with zipfile.ZipFile(package.package_path, "r") as archive:
         payload = archive.read("secrets/agent.enc")
     return _decrypt_json(payload, passphrase)
+
+
+def read_retained_identity_bytes(package: AgentMoveArchive) -> bytes | None:
+    """Return the validated non-authoritative identity attachment, if present."""
+
+    if package.retained_identity is None:
+        return None
+    with zipfile.ZipFile(package.package_path, "r") as archive:
+        content = _read_required(archive, RETAINED_IDENTITY_ARCHIVE_PATH)
+    if hashlib.sha256(content).hexdigest() != package.retained_identity.get("sha256"):
+        raise AgentMoveError("retained identity attachment changed after validation")
+    return content
 
 
 def extract_agent_workspace(
@@ -568,6 +696,8 @@ def archive_snapshot_fingerprint(
         "identity/agent.md",
         "access/requirements.json",
         "schedules/tasks.json",
+        RETAINED_IDENTITY_ARCHIVE_PATH,
+        RETAINED_IDENTITY_METADATA_PATH,
     }
     file_checksums = {
         name: digest
@@ -588,7 +718,7 @@ def archive_snapshot_fingerprint(
         )
     credentials = decrypt_agent_secrets(package, secret_passphrase)
     payload = {
-        "schema_version": 1,
+        "schema_version": int(package.manifest.get("schema_version") or 1),
         "file_checksums": dict(sorted(file_checksums.items())),
         "portable_files": sorted(portable_files, key=lambda item: item["path"]),
         "agent_credentials": credentials,
@@ -722,6 +852,11 @@ def _scan_workspace(
             relative = child.relative_to(workspace).as_posix()
             normalized_directory = directory.casefold()
             reason = ""
+            if normalized_directory == PCM_FILENAME.casefold():
+                raise AgentMoveError(
+                    f"workspace/{relative} conflicts with the reserved Agent identity; "
+                    "only exact root AGENT.md may be retained as a non-authoritative attachment"
+                )
             if normalized_directory in _SKIP_DIR_NAMES:
                 reason = "ephemeral_or_environment_directory"
             elif child.is_symlink() or _is_windows_junction(child):
@@ -740,6 +875,13 @@ def _scan_workspace(
             if relative == "agent.md":
                 continue
             normalized_filename = filename.casefold()
+            if normalized_filename == PCM_FILENAME.casefold():
+                if relative == "AGENT.md":
+                    continue
+                raise AgentMoveError(
+                    f"workspace/{relative} conflicts with the reserved Agent identity; "
+                    "only exact root AGENT.md may be retained as a non-authoritative attachment"
+                )
             is_environment_secret = normalized_filename.startswith(
                 ".env."
             ) and not normalized_filename.endswith((".example", ".sample", ".template"))
@@ -920,10 +1062,18 @@ def _write_file(
 def _validate_manifest(manifest: Mapping[str, Any]) -> None:
     if manifest.get("package_type") != PACKAGE_TYPE:
         raise AgentMoveError("package_type is not a HASHI Agent move archive")
-    if manifest.get("schema_version") != PACKAGE_SCHEMA_VERSION:
+    schema = manifest.get("schema_version")
+    if (
+        not isinstance(schema, int)
+        or isinstance(schema, bool)
+        or schema not in range(
+            PACKAGE_SCHEMA_MIN_VERSION,
+            PACKAGE_SCHEMA_VERSION + 1,
+        )
+    ):
         raise AgentMoveError(
-            f"unsupported Agent move schema {manifest.get('schema_version')!r}; "
-            f"this receiver accepts schema {PACKAGE_SCHEMA_VERSION}"
+            f"unsupported Agent move schema {schema!r}; this receiver accepts "
+            f"schemas {PACKAGE_SCHEMA_MIN_VERSION} through {PACKAGE_SCHEMA_VERSION}"
         )
     normalize_agent_id(str(manifest.get("agent_id") or ""))
     _validate_package_id(str(manifest.get("package_id") or ""))
@@ -932,6 +1082,72 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
     required = manifest.get("required_receiver_capabilities")
     if not isinstance(required, list) or AGENT_MOVE_CAPABILITY not in required:
         raise AgentMoveError("manifest does not require the agent-move-v1 receiver")
+    sections = manifest.get("sections")
+    if not isinstance(sections, Mapping):
+        raise AgentMoveError("manifest sections must be an object")
+    if schema == 2:
+        if RETAINED_IDENTITY_CAPABILITY not in required:
+            raise AgentMoveError(
+                "schema 2 manifest does not require retained AGENT.md support"
+            )
+        if sections.get("retained_identity") is not True:
+            raise AgentMoveError(
+                "schema 2 manifest must declare the retained identity attachment"
+            )
+    elif sections.get("retained_identity") not in {None, False}:
+        raise AgentMoveError(
+            "schema 1 manifest cannot declare a retained identity attachment"
+        )
+
+
+def _read_and_validate_retained_identity(
+    archive: zipfile.ZipFile,
+    manifest: Mapping[str, Any],
+    names: Iterable[str],
+) -> dict[str, Any] | None:
+    retained_members = [
+        name
+        for name in names
+        if name.startswith("retained-identity/")
+        or name == RETAINED_IDENTITY_METADATA_PATH
+    ]
+    schema = int(manifest.get("schema_version") or 0)
+    if schema == 1:
+        if retained_members:
+            raise AgentMoveError(
+                "schema 1 package cannot contain a retained identity attachment"
+            )
+        return None
+    expected_members = {
+        RETAINED_IDENTITY_ARCHIVE_PATH,
+        RETAINED_IDENTITY_METADATA_PATH,
+    }
+    if set(retained_members) != expected_members:
+        raise AgentMoveError(
+            "schema 2 retained identity attachment is incomplete or contains unknown members"
+        )
+    metadata = _read_json(archive, RETAINED_IDENTITY_METADATA_PATH)
+    content = _read_required(archive, RETAINED_IDENTITY_ARCHIVE_PATH)
+    expected_keys = {
+        "authoritative",
+        "original_path",
+        "archive_path",
+        "sha256",
+        "size",
+    }
+    if set(metadata) != expected_keys:
+        raise AgentMoveError("retained identity metadata fields are invalid")
+    digest = hashlib.sha256(content).hexdigest()
+    if (
+        metadata.get("authoritative") is not False
+        or metadata.get("original_path") != "AGENT.md"
+        or metadata.get("archive_path") != RETAINED_IDENTITY_ARCHIVE_PATH
+        or metadata.get("sha256") != digest
+        or not isinstance(metadata.get("size"), int)
+        or metadata.get("size") != len(content)
+    ):
+        raise AgentMoveError("retained identity metadata does not match AGENT.md")
+    return dict(metadata)
 
 
 def _validate_package_id(value: str) -> None:
@@ -963,9 +1179,12 @@ def _validate_workspace_members(names: Iterable[str], target_platform: str) -> N
     windows = str(target_platform or "").lower() == "windows"
     for relative in workspace_names:
         _safe_member_name(relative)
-        if relative.casefold() == "agent.md":
+        if any(
+            component.casefold() == PCM_FILENAME.casefold()
+            for component in PurePosixPath(relative).parts
+        ):
             raise AgentMoveError(
-                "workspace/agent.md is reserved for the canonical Agent identity"
+                "workspace Agent identity aliases are reserved for control members"
             )
         if not windows:
             continue
@@ -1004,9 +1223,12 @@ def _validate_workspace_metadata(
         if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
             raise AgentMoveError("workspace metadata file entries must contain a path")
         path = _safe_member_name(str(item["path"]))
-        if path.casefold() == "agent.md":
+        if any(
+            component.casefold() == PCM_FILENAME.casefold()
+            for component in PurePosixPath(path).parts
+        ):
             raise AgentMoveError(
-                "workspace/agent.md is reserved for the canonical Agent identity"
+                "workspace Agent identity aliases are reserved for control members"
             )
         metadata_paths.append(path)
     if len(metadata_paths) != len(set(metadata_paths)):

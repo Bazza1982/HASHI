@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from orchestrator.agent_move.package import create_agent_move_package
 from orchestrator.agent_move.remote_client import (
+    AgentMoveRemoteClient,
     AgentMoveRemoteError,
     _candidate_base_urls,
     _request_json,
@@ -278,6 +279,42 @@ def test_remote_agent_move_rejects_plaintext_package_transport(tmp_path):
 
     assert response.status_code == 400
     assert "Encrypted Agent move transport is required" in response.json()["error"]
+
+
+def test_schema2_upload_is_refused_clearly_by_schema1_receiver(tmp_path, monkeypatch):
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    (source / "workspaces" / "zelda" / "AGENT.md").write_text(
+        "retained historical identity",
+        encoding="utf-8",
+    )
+    package_path = tmp_path / "zelda-schema2.hashi-agent"
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+    )
+    client = AgentMoveRemoteClient(
+        base_url="http://127.0.0.1:8767",
+        target_instance="HASHI2",
+        source_instance="HASHI1",
+        shared_token=TOKEN,
+        capabilities={
+            "capability": "agent_move_receive_v1",
+            "schema_min": 1,
+            "schema_max": 1,
+            "max_package_bytes": 256 * 1024 * 1024,
+            "package_encryption": [ENVELOPE_SCHEME],
+        },
+    )
+    monkeypatch.setattr(
+        AgentMoveRemoteClient,
+        "_request",
+        lambda *args, **kwargs: pytest.fail("incompatible package must not upload"),
+    )
+
+    with pytest.raises(AgentMoveRemoteError, match="schema 2.*schema 1"):
+        client.stage(package_path)
 
 
 def test_remote_agent_move_rejects_tampered_encrypted_transport(tmp_path):

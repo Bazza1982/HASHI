@@ -1552,6 +1552,8 @@
     "remote.move.preview_clean": "✅ 来源与目标配置均未改变。",
     "remote.move.cross_platform": "🧭 跨平台移动会由目标端重建路径与权限；操作系统集成仍由目标实例重新绑定。",
     "remote.move.prepared_safe": "已在目标端暂存并验证迁移包；目标尚未启用，来源也未改变。请选择确认提交或取消回滚。",
+    "remote.move.retained_identity_preview": "⚠️ 根目录 <code>AGENT.md</code> 将作为非权威附件保留（SHA-256 <code>{sha256}</code>）；实时 PCM 身份仍仅使用 <code>agent.md</code>。",
+    "remote.move.retained_identity_stored": "📎 非权威 <code>AGENT.md</code> 已保留在 <code>{path}</code>（SHA-256 <code>{sha256}</code>）；系统不会把它加载为实时 PCM。",
     "remote.move.credentials_missing": "⚠️ 在目标端具备以下凭据键之前，启用会被阻止：<code>{keys}</code>",
     "remote.move.target_rebind": "🔐 使用前请核验由目标端管理的集成：<code>{items}</code>",
     "remote.move.review_notes": "⚠️ 审查提示：",

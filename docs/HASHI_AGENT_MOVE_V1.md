@@ -13,6 +13,8 @@ receiver. The source never writes a target filesystem path directly.
 
 - An outbound instance must implement this protocol.
 - A target must advertise `agent_move_receive_v1` and accept schema version 1.
+  A source that has an exact root `AGENT.md` uses schema version 2 and also
+  requires `agent_move_retained_identity_v1`.
 - A pre-feature target must be updated and reloaded before it can receive an
   Agent. A pre-feature source must be updated before it can transfer one out.
 - Future senders should retain a schema-v1 exporter while schema v1 remains a
@@ -28,6 +30,17 @@ receiver. The source never writes a target filesystem path directly.
 - Agent-owned secret keys, encrypted with the paired HASHI Remote shared
   secret;
 - access requirements and an explicit target-rebind list.
+
+`agent.md` is always the sole live PCM identity. On case-sensitive sources,
+one additional exact, root-level, ordinary file named `AGENT.md` is preserved
+by schema 2 as a non-authoritative attachment. It is checksummed, included in
+the final freshness comparison, and never placed in the imported workspace.
+Preview and transaction status identify it explicitly. During target staging,
+the receiver copies it to
+`state/agent_moves/incoming/<package-id>/retained-identity/AGENT.md` and records
+the path and digest in transaction state. Commit, cancellation, and rollback do
+not remove that preservation copy. A staging failure before the transaction
+record is durable removes only that incomplete transaction and its upload.
 
 The archive excludes active sessions, runtime state directories, virtual
 environments, caches, nested repositories, external symlinks, source workzone
@@ -92,11 +105,14 @@ case-folding collisions, reserved device names, invalid characters, trailing
 dots/spaces, and oversized path components before import. The receiver rebuilds
 its own workspace path and applies only permissions supported by its operating
 system. Source `workzone.json` and absolute source paths are never imported.
-The source accepts only the physically lower-case canonical `agent.md`; a
-case-folded alias such as `Agent.md` is rejected before packaging on every
-filesystem. SQLite backup connections are closed before their temporary
-snapshots are removed, including on Windows filesystems that enforce open-file
-sharing locks.
+The source accepts only the physically lower-case canonical `agent.md` as PCM.
+The exact root ordinary file `AGENT.md` has the schema-2 preservation semantics
+described above. Other case variants, identity-named directories, symlinks, and
+nested identity paths are rejected before packaging. Because the attachment is
+stored outside the Agent workspace, a Windows target never has to materialize
+`agent.md` and `AGENT.md` in the same case-insensitive directory. SQLite backup
+connections are closed before their temporary snapshots are removed, including
+on Windows filesystems that enforce open-file sharing locks.
 
 ## Activation
 

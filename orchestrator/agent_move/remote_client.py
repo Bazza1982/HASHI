@@ -16,7 +16,14 @@ from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT
 from remote.security.client_auth import build_client_auth_headers
 from remote.security.shared_token import HEADER_NONCE, verify_response_auth
 
-from .package import AGENT_MOVE_CAPABILITY, AgentMoveError, package_sha256
+from .package import (
+    AGENT_MOVE_CAPABILITY,
+    RETAINED_IDENTITY_CAPABILITY,
+    AgentMoveArchive,
+    AgentMoveError,
+    package_sha256,
+    read_agent_move_package,
+)
 from .transport_crypto import ENVELOPE_SCHEME, encrypt_package_transport
 
 
@@ -34,6 +41,8 @@ class AgentMoveRemoteClient:
 
     def stage(self, package_path: Path | str, *, timeout: int = 300) -> dict[str, Any]:
         path = Path(package_path)
+        package = read_agent_move_package(path, verify=True)
+        self.ensure_package_compatible(package)
         package_bytes = path.stat().st_size
         try:
             receiver_limit = int(self.capabilities.get("max_package_bytes") or 0)
@@ -64,6 +73,53 @@ class AgentMoveRemoteClient:
             },
             timeout=timeout,
         )
+
+    def ensure_package_compatible(self, package: AgentMoveArchive) -> None:
+        """Reject unsupported schemas before any package bytes leave the source."""
+
+        try:
+            schema = int(package.manifest.get("schema_version") or 0)
+            schema_min = int(self.capabilities.get("schema_min") or 0)
+            schema_max = int(self.capabilities.get("schema_max") or 0)
+        except (TypeError, ValueError) as exc:
+            raise AgentMoveRemoteError(
+                "target receiver reported invalid Agent move schema limits"
+            ) from exc
+        if not schema_min <= schema <= schema_max:
+            retained = (
+                " and retained AGENT.md support"
+                if package.retained_identity is not None
+                else ""
+            )
+            raise AgentMoveRemoteError(
+                f"package requires schema {schema}{retained}, but "
+                f"{self.target_instance} receiver accepts schema "
+                f"{schema_min} through {schema_max}; update/reboot the target receiver first"
+            )
+        advertised = {
+            str(item)
+            for item in (self.capabilities.get("capabilities") or [])
+            if str(item)
+        }
+        primary = str(self.capabilities.get("capability") or "")
+        if primary:
+            advertised.add(primary)
+        required = {
+            str(item)
+            for item in package.manifest.get("required_receiver_capabilities", [])
+            if str(item)
+        }
+        missing = sorted(required - advertised)
+        if missing:
+            detail = (
+                "retained AGENT.md support"
+                if RETAINED_IDENTITY_CAPABILITY in missing
+                else ", ".join(missing)
+            )
+            raise AgentMoveRemoteError(
+                f"{self.target_instance} receiver does not advertise {detail}; "
+                "update/reboot the target receiver first"
+            )
 
     def commit(self, package_id: str, *, timeout: int = 300) -> dict[str, Any]:
         return self._action("commit", package_id, timeout=timeout)

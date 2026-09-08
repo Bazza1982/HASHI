@@ -34,12 +34,15 @@ from orchestrator.process_execution import process_is_alive
 from .package import (
     AGENT_MOVE_CAPABILITY,
     MAX_UNPACKED_BYTES,
+    PACKAGE_SCHEMA_MIN_VERSION,
     PACKAGE_SCHEMA_VERSION,
+    RETAINED_IDENTITY_CAPABILITY,
     AgentMoveArchive,
     AgentMoveError,
     decrypt_agent_secrets,
     detect_environment_kind,
     extract_agent_workspace,
+    read_retained_identity_bytes,
     read_agent_move_package,
     utc_now_iso,
 )
@@ -55,8 +58,12 @@ def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
     return {
         "ok": True,
         "capability": AGENT_MOVE_CAPABILITY,
+        "capabilities": [
+            AGENT_MOVE_CAPABILITY,
+            RETAINED_IDENTITY_CAPABILITY,
+        ],
         "package_type": "hashi-agent-move",
-        "schema_min": PACKAGE_SCHEMA_VERSION,
+        "schema_min": PACKAGE_SCHEMA_MIN_VERSION,
         "schema_max": PACKAGE_SCHEMA_VERSION,
         "max_package_bytes": MAX_PACKAGE_BYTES,
         "max_unpacked_bytes": MAX_UNPACKED_BYTES,
@@ -67,6 +74,7 @@ def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
         "encrypted_agent_secrets": True,
         "package_encryption": [ENVELOPE_SCHEME],
         "source_workspace_retained": True,
+        "retained_identity_attachment": True,
         "max_access_scope": _target_max_access_scope(root),
     }
 
@@ -147,6 +155,11 @@ def stage_agent_move(
                 verify=True,
                 target_platform=target_kind,
             )
+            retained_identity = _preserve_retained_identity(
+                root,
+                record_dir,
+                package,
+            )
             credential_status = _credential_status(root, package, secret_passphrase)
             record = {
                 "schema_version": MOVE_STATE_SCHEMA_VERSION,
@@ -162,6 +175,7 @@ def stage_agent_move(
                 "status": "staged",
                 "staged_at": utc_now_iso(),
                 "credential_status": credential_status,
+                "retained_identity": retained_identity,
                 "replaces_dormant_source": bool(dormant),
                 "dormant_package_id": (
                     str((dormant or {}).get("transfer_package_id") or "") or None
@@ -455,6 +469,15 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
                 "reboot_required": bool(record.get("rollback_requires_reboot")),
             }
         )
+        if isinstance(record.get("retained_identity"), Mapping):
+            retained = dict(record["retained_identity"])
+            retained.update(
+                {
+                    "status": "retained_after_rollback",
+                    "retained_after_rollback_at": utc_now_iso(),
+                }
+            )
+            record["retained_identity"] = retained
         _atomic_json(record_dir / "state.json", record, mode=0o600)
         return _public_state(record)
 
@@ -896,6 +919,34 @@ def _credential_status(
     }
 
 
+def _preserve_retained_identity(
+    root: Path,
+    record_dir: Path,
+    package: AgentMoveArchive,
+) -> dict[str, Any] | None:
+    metadata = package.retained_identity
+    if metadata is None:
+        return None
+    content = read_retained_identity_bytes(package)
+    if content is None:  # pragma: no cover - archive validation keeps these coupled
+        raise AgentMoveError("schema 2 package is missing retained AGENT.md content")
+    attachment_dir = record_dir / "retained-identity"
+    attachment_path = attachment_dir / "AGENT.md"
+    metadata_path = attachment_dir / "metadata.json"
+    _atomic_bytes(attachment_path, content, mode=0o600)
+    state = {
+        **metadata,
+        "storage_path": attachment_path.relative_to(root).as_posix(),
+        "metadata_path": metadata_path.relative_to(root).as_posix(),
+        "retention_policy": "persistent_transaction_attachment",
+        "live_pcm": False,
+        "status": "retained",
+        "retained_at": utc_now_iso(),
+    }
+    _atomic_json(metadata_path, state, mode=0o600)
+    return state
+
+
 def _stage_warnings(
     root: Path,
     package: AgentMoveArchive,
@@ -908,6 +959,11 @@ def _stage_warnings(
     if package.manifest.get("source_environment") != target_environment:
         warnings.append(
             "cross-platform move: target rebuilt filesystem paths and permissions from portable metadata"
+        )
+    if package.retained_identity is not None:
+        warnings.append(
+            "root AGENT.md was preserved outside the workspace as a non-authoritative "
+            "attachment; only agent.md is installed as the live PCM identity"
         )
     if replaces_dormant_source:
         warnings.append(
@@ -1158,6 +1214,7 @@ def _public_state(record: Mapping[str, Any]) -> dict[str, Any]:
         "workspace",
         "imported_task_ids",
         "credential_status",
+        "retained_identity",
         "replaces_dormant_source",
         "dormant_package_id",
         "warnings",
