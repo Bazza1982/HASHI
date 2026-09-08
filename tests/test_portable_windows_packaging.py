@@ -51,6 +51,60 @@ def test_portable_builder_uses_the_canonical_python_runtime_distribution():
     assert "node" not in builder.ASSETS
 
 
+def test_portable_builder_uses_host_7zip_when_available(tmp_path, monkeypatch):
+    builder = _load_builder()
+    host_7zip = tmp_path / "host" / "7z.exe"
+    monkeypatch.setattr(
+        builder.shutil,
+        "which",
+        lambda command: str(host_7zip) if command == "7z" else None,
+    )
+    monkeypatch.setattr(
+        builder,
+        "download",
+        lambda *_args, **_kwargs: pytest.fail("host 7-Zip must avoid download"),
+    )
+
+    assert builder.resolve_7zip(tmp_path / "cache", tmp_path / "build") == host_7zip
+
+
+def test_portable_builder_bootstraps_pinned_7zip_on_windows(tmp_path, monkeypatch):
+    builder = _load_builder()
+    installer = tmp_path / builder.ASSETS["7zip"].filename
+    installer.write_bytes(b"pinned-msi")
+    commands = []
+
+    monkeypatch.setattr(builder.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(builder.sys, "platform", "win32")
+    monkeypatch.setattr(builder, "download", lambda asset, _cache: installer)
+
+    def fake_run(command):
+        commands.append(command)
+        target = Path(command[-1].removeprefix("TARGETDIR="))
+        executable = target / "Files" / "7-Zip" / "7z.exe"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"7z")
+
+    monkeypatch.setattr(builder, "run", fake_run)
+
+    executable = builder.resolve_7zip(tmp_path / "cache", tmp_path / "build")
+
+    assert executable == tmp_path / "build" / "7zip" / "Files" / "7-Zip" / "7z.exe"
+    assert commands == [
+        [
+            "msiexec.exe",
+            "/a",
+            str(installer),
+            "/qn",
+            f"TARGETDIR={tmp_path / 'build' / '7zip'}",
+        ]
+    ]
+    assert builder.ASSETS["7zip"].url.startswith(
+        "https://github.com/ip7z/7zip/releases/download/26.03/"
+    )
+    assert re.fullmatch(r"[0-9a-f]{64}", builder.ASSETS["7zip"].sha256)
+
+
 def test_portable_profile_has_one_her_engine_and_configurable_regional_providers(
     tmp_path,
 ):

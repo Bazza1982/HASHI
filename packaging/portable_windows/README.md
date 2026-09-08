@@ -83,6 +83,11 @@ python3 packaging/portable_windows/build.py \
   --expected-tree <full-tree-id>
 ```
 
+The builder uses an existing `7z`/`7zz` command when one is available. On a
+Windows host without 7-Zip, it downloads the hash-pinned official 7-Zip MSI
+and administratively extracts a build-only copy into the temporary staging
+area; it does not install 7-Zip on the PC.
+
 The expected Git identities are optional for local development and required
 for a release build. Before downloading or staging an image, the builder
 checks them against the clean source worktree and verifies that the Portable

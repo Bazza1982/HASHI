@@ -59,6 +59,11 @@ class SourceIdentity:
 
 
 ASSETS = {
+    "7zip": Asset(
+        "7z2603-x64.msi",
+        "https://github.com/ip7z/7zip/releases/download/26.03/7z2603-x64.msi",
+        "c0680064d698a62dd4a5a47f403db356a6531a5473e4c4b1d090ea2590513926",
+    ),
     "python": Asset(
         f"cpython-{PYTHON_VERSION}+{PYTHON_BUILD_DATE}-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
         (
@@ -634,6 +639,39 @@ def install_ffmpeg(runtime_bin: Path, licenses: Path, cache: Path) -> None:
     )
 
 
+def resolve_7zip(cache: Path, build_temp: Path) -> Path:
+    """Return a full 7-Zip executable without requiring a Windows install."""
+
+    for command in ("7z", "7zz"):
+        executable = shutil.which(command)
+        if executable:
+            return Path(executable)
+
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "7-Zip is required to extract the pinned Tesseract installer; "
+            "install 7z or 7zz on the build host"
+        )
+
+    installer = download(ASSETS["7zip"], cache)
+    extract_root = build_temp / "7zip"
+    extract_root.mkdir(parents=True, exist_ok=True)
+    status("extract pinned build-only 7-Zip runtime")
+    run(
+        [
+            "msiexec.exe",
+            "/a",
+            str(installer),
+            "/qn",
+            f"TARGETDIR={extract_root}",
+        ]
+    )
+    executable = next(extract_root.rglob("7z.exe"), None)
+    if executable is None:
+        raise RuntimeError("pinned 7-Zip MSI did not contain 7z.exe")
+    return executable
+
+
 def install_tesseract(
     app_hashi: Path, licenses: Path, cache: Path, build_temp: Path
 ) -> None:
@@ -641,7 +679,8 @@ def install_tesseract(
     extract_root = build_temp / "tesseract-extracted"
     extract_root.mkdir(parents=True, exist_ok=True)
     status("extract Tesseract Windows runtime")
-    run(["7z", "x", "-y", str(installer), f"-o{extract_root}"])
+    seven_zip = resolve_7zip(cache, build_temp)
+    run([str(seven_zip), "x", "-y", str(installer), f"-o{extract_root}"])
     binary_root = app_hashi / "hashi_assets" / "ocr" / "bin" / "windows-x86_64"
     binary_root.mkdir(parents=True, exist_ok=True)
     tesseract_exe = next(extract_root.rglob("tesseract.exe"), None)
