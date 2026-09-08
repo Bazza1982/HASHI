@@ -142,12 +142,20 @@ startup table is refreshed when the derived state changes.
 
 Agent Worker logging has no independent console handler. Each Worker retains
 diagnostics in `logs/function-workers/worker-<pid>.log` and relays warning/error
-records through Function IPC to the shared terminal owner. That owner applies
-the existing terminal level and animation filters; Python warnings use the same
-route. Credential-shaped text is redacted before either sink, including tokens
-embedded in request URLs, and Worker diagnostic files are owner-readable only.
-Muting the animation does not discard file diagnostics. This introduces no Core
-log policy or new protocol version.
+records through Function IPC only when the creating shared supervisor advertises
+the optional `worker-log-relay-v1` bootstrap capability. A legacy supervisor
+does not advertise that capability, so a newer Worker keeps the warning in its
+local file without sending an event the supervisor cannot decode. A capable
+owner applies the existing terminal level and animation filters; Python warnings
+use the same route. Credential-shaped text is redacted before either sink,
+including tokens embedded in request URLs, and Worker diagnostic files are
+owner-readable only. Muting the animation does not discard file diagnostics.
+This introduces no Core log policy or new protocol version.
+The capability list is additive and fail-closed: an absent, malformed, or
+unknown declaration does not enable relay. A newer Supervisor advertises the
+feature to newer Workers, while older Workers ignore the additional bootstrap
+field. This preserves all four old/new Supervisor–Worker combinations during a
+rolling Functions adoption.
 
 Local desktop wrappers should select the instance/distro and delegate to the
 existing `bin/bridge-u.sh` menu. The menu obtains Agent choices and service ports

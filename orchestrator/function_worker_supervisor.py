@@ -28,6 +28,7 @@ from orchestrator.function_generation import (
     verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_bootstrap import run_function_worker_process
+from orchestrator.function_worker_features import WORKER_LOG_RELAY_FEATURE
 from orchestrator.function_worker_protocol import (
     FUNCTION_WORKER_PROTOCOL_VERSION,
     FunctionWorkerDisconnected,
@@ -1391,6 +1392,7 @@ class FunctionWorkerSupervisor:
         bootstrap = {
             "entrypoint": "orchestrator.function_worker_host:run_function_worker",
             "protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
+            "protocol_features": [WORKER_LOG_RELAY_FEATURE],
             "nonce": nonce,
             "agent_name": str(agent_name),
             "code_root": str(self.kernel.paths.code_root),

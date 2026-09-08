@@ -1511,8 +1511,13 @@ async def run_function_worker(connection: Any, bootstrap: Mapping[str, Any]) -> 
     host = FunctionWorkerHost(connection, bootstrap)
     host.peer.start()
     from orchestrator.bootstrap_logging import setup_worker_logging
+    from orchestrator.function_worker_features import worker_log_relay_enabled
 
-    log_relay = setup_worker_logging(host.bridge_home, host.peer)
+    log_relay = setup_worker_logging(
+        host.bridge_home,
+        host.peer,
+        relay_enabled=worker_log_relay_enabled(bootstrap),
+    )
     try:
         await asyncio.wait_for(host.prepare(), timeout=WORKER_PREPARE_TIMEOUT_SECONDS)
     except Exception as exc:

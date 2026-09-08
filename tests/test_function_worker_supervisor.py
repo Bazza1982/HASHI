@@ -17,6 +17,7 @@ from orchestrator.function_generation import (
     verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_protocol import FunctionWorkerDisconnected
+from orchestrator.function_worker_features import WORKER_LOG_RELAY_FEATURE
 from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
     FunctionWorkerError,
@@ -691,8 +692,14 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     monkeypatch.setattr(supervisor, "topology_snapshot", lambda **kwargs: {})
     process = SimpleNamespace(start=lambda: None)
     connection = SimpleNamespace(close=lambda: None)
+    process_args = []
+
+    def build_process(**kwargs):
+        process_args.append(kwargs["args"])
+        return process
+
     context = SimpleNamespace(
-        Pipe=lambda **kwargs: (connection, connection), Process=lambda **kwargs: process
+        Pipe=lambda **kwargs: (connection, connection), Process=build_process
     )
     monkeypatch.setattr(
         "orchestrator.function_worker_supervisor.multiprocessing.get_context",
@@ -729,3 +736,4 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(retired) == 1 and not supervisor._candidates
+    assert process_args[0][1]["protocol_features"] == [WORKER_LOG_RELAY_FEATURE]

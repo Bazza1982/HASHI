@@ -72,13 +72,16 @@ class AnimMute(logging.Filter):
 class WorkerLogRelay(logging.Handler):
     """Relay sanitized warnings while files retain sanitized diagnostics."""
 
-    def __init__(self, peer):
+    def __init__(self, peer, *, enabled: bool):
         super().__init__(logging.WARNING)
         self.peer = peer
+        self.enabled = bool(enabled)
         self.loop = asyncio.get_running_loop()
         self.pending = set()
 
     def emit(self, record):
+        if not self.enabled:
+            return
         payload = {"name": record.name, "level": record.levelno,
                    "message": redact_log_text(record.getMessage())[:8000],
                    "terminal_safe": bool(getattr(record, "terminal_safe", False)),
@@ -105,7 +108,12 @@ class WorkerLogRelay(logging.Handler):
             await asyncio.gather(*tuple(self.pending), return_exceptions=True)
 
 
-def setup_worker_logging(bridge_home: Path, peer) -> WorkerLogRelay:
+def setup_worker_logging(
+    bridge_home: Path,
+    peer,
+    *,
+    relay_enabled: bool = False,
+) -> WorkerLogRelay:
     directory = Path(bridge_home) / "logs" / "function-workers"
     directory.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(directory / f"worker-{os.getpid()}.log", encoding="utf-8")
@@ -114,7 +122,7 @@ def setup_worker_logging(bridge_home: Path, peer) -> WorkerLogRelay:
     handler.setFormatter(
         CredentialRedactingFormatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
     )
-    relay = WorkerLogRelay(peer)
+    relay = WorkerLogRelay(peer, enabled=relay_enabled)
     logging.basicConfig(level=logging.INFO, handlers=[handler, relay], force=True)
     logging.captureWarnings(True)
     return relay
