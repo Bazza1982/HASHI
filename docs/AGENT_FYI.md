@@ -30,65 +30,43 @@ configuration/status before claiming an Engine, model, tool, or route is availab
 
 ## Engineering rules and authority
 
-Before changing HASHI, read the repository's [AGENTS.md](../AGENTS.md), then the
-[System Architecture](../ARCHITECTURE.md) and
-[Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
-Use the [Command UI Style Guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) for user surfaces
-and [Testing Policy](TESTING_POLICY.md) for verification.
+Before changing HASHI, read [AGENTS.md](../AGENTS.md), the
+[System Architecture](../ARCHITECTURE.md), and
+[Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md). Use the
+[Command UI Style Guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) for user surfaces and
+[Testing Policy](TESTING_POLICY.md) for verification.
 
-A current user prohibition on reboot, restart, publication or other operations
-remains binding. Do not treat this catalog, history, a task example, an approval
-flag, or an old decision as authorization for a new action. A task's already-given
-specific authorization does not need to be requested again.
+Current user limits on restart, publication, messaging, or other operations
+remain binding. Catalogs, old approvals, examples, and history do not grant new
+authority.
 
-Core protection derives from `orchestrator.runtime_contract.CORE_SOURCE_PATHS`.
-Ordinary feature changes belong in Functions/configuration. Instance model and
-effort opt-ins use `allowed_backends`, resolved by the Function-layer options
-view. The shared catalogue is now Functions; neither kind of model change
-requires a Core edit. Core never imports model/UI/provider/task policy.
-Before edits name the owner, layer and focused check; use the existing Core guard.
+Core protection derives only from
+`orchestrator.runtime_contract.CORE_SOURCE_PATHS`. Normal behavior belongs in
+Functions or configuration. Resolve instance model/effort choices through
+`allowed_backends` and the Function-owned options view; do not duplicate
+catalogs or move product behavior into Core. Run the Core guard before edits and
+before completion.
 
-API Gateway model menus, saved defaults and request routing also read active
-Agents' instance opt-ins, including configured reasoning efforts. Model/effort
-conflicts are rejected. The shared Function Gateway loads that catalog at start;
-new opt-ins require Gateway reload before selection. This does not widen another
-instance's models or replace the current shared-service architecture. See the
-[API Guide](API_GUIDE.md#instance-configured-models).
+API Gateway menus and routing use active Agents' configured opt-ins. Selection
+conflicts fail closed; failed initialization preserves the prior selection.
+Codex CLI advertises Astra capacity to compaction while explicit overrides win.
+Windows Remote task registration preserves argv and records native stderr
+without treating it as process failure.
 
-Codex CLI declares Astra context capacity to the compaction resolver; explicit
-capacity overrides retain precedence. Failed backend selection preserves the
-existing selection and offers model buttons for retry; a busy Agent receives an
-alert. Windows Remote task registration now preserves Python argv and logs native
-stderr without aborting the process. These are Function/adapter/platform changes;
-running services require separately authorized adoption.
+Source, immutable artifacts, running generations, and terminal delivery are
+separate evidence. `/reboot min` replaces one Agent Worker;
+`/reboot same|max` keeps its declared Agent scope. Broad shared replacement
+uses `python main.py --replace-functions`, requires operational authority, and
+cannot cross a Core/Python/API fingerprint change. Read
+[Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) before changing lifecycle
+boundaries.
 
-Source implementation, offline verification and live adoption are separate.
-An immutable Function Worker keeps its installed generation until an authorized
-replacement. `/reboot min` replaces one Agent Worker; `same`/`max` retain their
-Agent-only target rules. Shared services now run in a separate Function process;
-`python main.py --replace-functions` requests a broad shared handoff with a service
-gap. This operation requires explicit operational scope. Accepted is not completed.
-Health reports Core, shared and per-Agent process generations separately. Read
-[Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) before changing these boundaries.
-Core changes require a planned cold adoption. Neither action is implicit in a
-request to fix code. If operational testing is forbidden, report that clearly.
-
-Startup qualification includes enabled post-Turn observer factory modules and
-their dependencies from active Agents' instance configuration. Newly enabled
-observers invalidate incomplete generation caches; they never bypass immutable
-imports. Shared startup stays connecting until actual Connector activation,
-then derives readiness and recovery from ingress results without hiding other
-failures. Worker warnings retain per-process file diagnostics. They use the
-shared terminal's animation/level filters only when the creating supervisor
-advertises the optional Worker log relay capability; Workers created by an older
-supervisor keep warnings local so rolling adoption cannot break READY.
-Capability parsing is fail-closed, and the additional bootstrap field remains
-safe for older Workers that ignore unknown fields. Local desktop launchers
-delegate Agent and port display to the existing
-configuration-driven menu. See
-[Startup and qualification ownership](HASHI_SLIM_CORE_ARCHITECTURE.md#startup-presentation-and-connector-health).
-These repairs require the relevant new shared/Agent generations; source edits
-and offline tests alone do not prove live adoption.
+Startup qualification includes configured post-Turn observer factories and
+their dependencies. Connector readiness is derived after actual activation.
+Worker warnings remain in per-process files and enter the shared terminal only
+when the supervisor advertises log-relay support. Older peers ignore the
+optional field safely. These repairs need the matching shared and Agent
+generations; offline tests do not prove adoption.
 
 ## Reboot outcome notifications
 
@@ -123,30 +101,21 @@ second authoritative chat archive. See the owning architecture documents.
 
 ## Configuration and discovery
 
-The 2026-09-08 migration review found the HASHI1 delivery patch already matches
-shared main's product behavior. The shared checkpoint retains only stronger
-dry-run and rollback tests. HASHI1 runtime adoption and terminal acceptance
-remain unverified; see [Agent Move review evidence](HASHI_AGENT_MOVE_V1.md#shared-review-checkpoint--2026-09-08).
+`/move` derives destinations and capabilities from the trusted live Remote
+peer directory and refreshes it before staging or confirmation. It rejects
+offline, unknown, or unsupported targets and never starts a reboot itself.
+Migration state belongs to `bridge_home`; see
+[Agent Move](HASHI_AGENT_MOVE_V1.md).
 
-`/move` derives destinations from the local Remote's trusted live `/peers`
-directory, including resolved routes and receiver capabilities. It refreshes
-discovery before staging or confirming a move; disconnected or unsupported
-targets are rejected. Discovery failure leaves recovery actions available.
-Migration configuration and state belong to `bridge_home`, independently of
-the source checkout or loaded Function generation. The command does not start
-either instance's reboot automatically. See [Agent Move](HASHI_AGENT_MOVE_V1.md).
+Read the active instance's configuration and registry for identity, workspaces,
+Agents, endpoints, and ports. Never infer them from folder names or old memory.
+Keep credentials in configured secret stores and out of replies, tests, logs,
+and tracked files.
 
-Read the active instance's `agents.json` / instance registry for identity,
-workspace, enabled Agents, endpoints and ports. Do not guess them from folder
-names or reuse a machine address from memory. Credentials stay in configured
-secret stores and must never appear in replies, test receipts or tracked files.
-Use configured endpoint discovery and capability checks; a sample port or model
-name is not evidence that a service is available here.
-
-Agent identity is in the exact lower-case `workspaces/<agent_id>/agent.md`, with
-strict `[persona]`, `[sys]` and optional `[memory]` blocks. Seed templates live
-in `agent_seeds/`. `agents.json.sample` documents configuration. Local Agent
-creation/adoption requires the user's authorized operational scope.
+Agent identity uses the exact lower-case
+`workspaces/<agent_id>/agent.md` with strict `[persona]`, `[sys]`, and
+optional `[memory]` blocks. Seeds live in `agent_seeds/`. Local Agent
+creation or adoption needs the user's operational authority.
 
 ## Working modes and Engine selection
 
@@ -195,29 +164,21 @@ remembered global list. `/habit` manages the default-off HER Habit/Meditation pa
 
 ## Tools, background work and communication
 
-Use the tools/skills actually exposed for this turn; a catalog is not permission
-or a promise of availability. `/help` and `/skill` show the active command/skill
-surfaces. `/workzone` selects authorized working roots; preserve the separation
-between execution paths and user-facing platform paths.
+Use only tools and skills exposed for the current turn. `/help`, `/skill`,
+and `/workzone` show current surfaces and authorized roots.
 
-Use HASHI's managed background jobs for long process work (`/bg`, managed job
-tools, or the configured Backend API). Do not instantiate a second manager to
-bypass the running owner's job records. Inspect a completion event's job ID,
-result and output before retrying; an event does not itself authorize new work.
-Nagare and Superloop are PAO-owned orchestration facilities with their own docs.
+Use HASHI-managed jobs for long processes; do not create a second manager.
+Inspect the recorded job result before retrying. Nagare and Superloop are
+PAO-owned facilities with separate contracts.
 
-HChat requires an authorized communication task. Unqualified Agent names mean
-local delivery; preserve `agent@INSTANCE` for cross-instance delivery. Resolve
-routes through the configured registry/Remote protocol and advertised capabilities,
-not a hard-coded HASHI1/HASHI9 address. Old mailbox transport is retired.
-Attachments and remote file operations require their advertised capabilities and
-configured credentials; never copy a token into a command example or log.
-Function Worker diagnostic logs redact credential-shaped text, including tokens
-embedded in request URLs, before file persistence or shared-console relay.
+HChat needs an authorized communication task. Unqualified Agent names are local;
+retain `agent@INSTANCE` for cross-instance routing. Resolve routes and
+capabilities through Remote. Old mailbox transport is retired. Never put
+credentials in commands, logs, or receipts; Worker logs redact
+credential-shaped text before persistence or relay.
 
-`/browser`, `/usecomputer`, `/exp`, voice/media and remote tools are optional
-capabilities. Select the available route for the task; inspect permissions and
-configuration rather than assuming a logged-in browser or network layout.
+Browser, computer, EXP, voice/media, and Remote tools are optional. Check current
+capability and configuration before using them.
 
 ## Presentation
 

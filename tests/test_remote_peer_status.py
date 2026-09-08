@@ -1705,6 +1705,7 @@ def test_bootstrap_probe_rejects_mismatched_instance_identity():
     assert manager._probe_instance_route("127.0.0.1", 8766, "WATCHTOWER_VALIDATE2") is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode-bit contract")
 def test_live_endpoints_file_is_private(tmp_path):
     write_live_endpoints(
         tmp_path,
@@ -1725,6 +1726,7 @@ def test_live_endpoints_file_is_private(tmp_path):
     assert stat.S_IMODE(mode) == 0o600
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode-bit contract")
 def test_remove_live_endpoint_removes_only_matching_instance(tmp_path):
     write_live_endpoints(
         tmp_path,

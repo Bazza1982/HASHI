@@ -109,7 +109,12 @@ def test_pcm_accepts_only_exact_workspace_lowercase_filename(tmp_path):
     linked_workspace = tmp_path / "linked"
     linked_workspace.mkdir()
     linked = linked_workspace / "agent.md"
-    linked.symlink_to(external)
+    try:
+        linked.symlink_to(external)
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires developer mode or elevation")
+        raise
     with pytest.raises(PCMValidationError) as exc_info:
         load_pcm_document(linked, workspace_dir=linked_workspace)
     assert exc_info.value.code == "pcm_symlink_forbidden"
@@ -223,11 +228,14 @@ def test_canonical_audit_root_inside_workspace_is_rejected_before_migration(tmp_
     secrets_path = tmp_path / "secrets.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     secrets_path.write_text("{}", encoding="utf-8")
+    before_workspace = {path.name: path.read_bytes() for path in workspace.iterdir()}
+    before_config = config_path.read_bytes()
 
     with pytest.raises(ValueError, match="outside every mutable Agent workspace"):
         ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
-    assert not (workspace / "agent.md").exists()
+    assert {path.name: path.read_bytes() for path in workspace.iterdir()} == before_workspace
+    assert config_path.read_bytes() == before_config
     assert "system_md" in json.loads(config_path.read_text(encoding="utf-8"))["agents"][0]
 
 
@@ -694,7 +702,7 @@ async def test_backend_plus_delivers_one_continuation_payload_to_fixed_target(tm
         "handoff",
         "Backend continuation [3 exchanges]",
         silent=True,
-        deliver_to_telegram=False,
+        deliver_to_telegram=True,
         skip_memory_injection=True,
     )
 
