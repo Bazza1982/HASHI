@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
@@ -1255,7 +1255,52 @@ class ProtocolManager:
                 last_exc = exc
         raise last_exc or RuntimeError("local transcript poll failed")
 
+    async def _process_superloop_receipts(self) -> None:
+        root = getattr(self, "_hashi_root", None)
+        if root is None or not (root / "superloops" / "loops").is_dir():
+            return
+        from orchestrator.superloop_receipts import SuperloopReceiptService
+        from orchestrator.superloop_store import SuperloopStore
+
+        receipts = [dict(item) for item in self._inflight.values() if item.get("state") == "reply_delivered_locally"]
+        if not receipts:
+            return
+
+        def enqueue(payload: dict) -> str | None:
+            for host, port in self._local_workbench_routes():
+                if not self._probe_local_workbench(host, port):
+                    continue
+                try:
+                    result = self._post_json(local_http_url(port, "/api/chat", host=host), payload, timeout=10)
+                    if result.get("ok") and result.get("request_id"):
+                        return str(result["request_id"])
+                except Exception:
+                    continue
+            return None
+
+        def resolve_session(agent: str, request_id: str) -> str | None:
+            path = f"/api/agents/{quote(agent, safe='')}/requests/{quote(request_id, safe='')}/activity?limit=1"
+            for host, port in self._local_workbench_routes():
+                if not self._probe_local_workbench(host, port):
+                    continue
+                try:
+                    result = self._get_json(local_http_url(port, path, host=host), timeout=10)
+                    if result.get("ok") and result.get("session_id"):
+                        return str(result["session_id"])
+                except Exception:
+                    continue
+            return None
+
+        try:
+            service = SuperloopReceiptService(
+                SuperloopStore(root / "superloops"), local_instance=str(self._instance_info.get("instance_id") or ""),
+            )
+            await asyncio.get_running_loop().run_in_executor(None, service.process, receipts, enqueue, resolve_session)
+        except Exception:
+            logger.exception("Superloop receipt review deferred; durable receipt retained")
+
     async def _process_inflight_once(self) -> None:
+        await self._process_superloop_receipts()
         if not self._inflight:
             return
         dirty = False

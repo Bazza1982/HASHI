@@ -31,6 +31,64 @@ Test coverage:
 - `tests/test_superloop_*.py` validates core state, command flow, runner, waits,
   scheduler advancement, and timeout issue behavior.
 
+### Correlated receipt review admission (2026-09-08)
+
+Owner: PAO, Functions layer. `orchestrator/superloop_receipts.py` owns the
+receipt-to-controller admission policy; Remote is a transport adapter.
+An operator may opt an existing loop in with
+`state.receipt_continuation_enabled = true`. The default remains off and no
+Scheduler auto-advance setting, cron, or process is added.
+
+Remote's existing `_process_inflight_once` supplies its persisted
+`reply_delivered_locally` receipt identities. The original reply handler still
+returns promptly after terminal admission and preserves its empty tool
+allowlist and no-ACK policy. It does not wait for controller admission.
+Only a receipt matching exactly one opted-in loop's latest schema-v2 accepted,
+nonterminal dispatch (`in_reply_to` equals `dispatch_instance_id`), task owner
+Agent/instance and local controller Agent/instance can request review.
+Collected, aborted and failed dispatches and completed/cancelled/failed tasks
+cannot wake the controller. Close old dispatches before opting in if their
+receipts have already been reviewed.
+Pause/stop state and signal files block admission under the existing dispatch
+lock. Candidate and issue blockers may be investigated by the controller;
+this exception does not permit worker dispatch.
+
+The service resolves the original receipt request's Session through the
+owner-scoped request-activity API, then persists an independent local
+`superloop:receipt` request. Its instructions ask the controller to read the
+taskboard and incremental worker logs and inspect evidence. Peer-authored body
+text is never copied into this tool-enabled request; it has no `system_exchange`
+metadata. This is an authorized controller review, not a peer acknowledgement
+or a repeat of the original assignment.
+
+`receipt_reviews.json` records attempts, pending/queued admission, original
+receipt references, pinned Session, exact local prompt, stable API idempotency
+key and admitted controller request ID. Missing Session lookup or uncertain
+admission remains pending and retries no sooner than 30 seconds on the existing
+Remote cycle. Restart rescans persisted receipts. A lost response reuses the
+same Session and prompt even if the default Session changes, so the real API
+SessionStore returns the same admitted Run. File locking and network calls run
+in an executor; concurrent cycle entry cannot block the async event loop while
+another task holds the lock.
+
+`queued` proves only controller admission. `review_verified` remains false;
+task status, review, merge, runtime adoption and user-terminal delivery do not
+advance automatically. A failed controller Run is handled by existing human
+supervision and the four-hour maintenance task, outside this admission fix.
+
+Validation on branch `fix/superloop-receipt-continuation-20260908`: the original
+handler-to-cycle regression failed before the fix because only `protocol:reply`
+was admitted. Focused coverage exercises the real handler, service, API chat and
+activity handlers, runtime admission helper and SQLite idempotency boundary,
+including response loss, process-state reload, Session switch, concurrent ticks,
+identity mismatch, collected dispatches, missing Session and pause/resume.
+An in-memory mutation dropping the Session pin failed the real API/SQLite
+response-loss test by admitting a second Run after the default Session changed;
+the unchanged implementation replays the original Run. No mutation was persisted.
+This is source/offline evidence only. Running Remote adoption and live controller
+execution remain separate operational checks; this implementation does not
+restart any instance or enable an existing loop.
+
 ## 1. Purpose
 
 HASHI already has two useful but different automation shapes:

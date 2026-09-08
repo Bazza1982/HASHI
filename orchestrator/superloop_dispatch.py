@@ -24,6 +24,17 @@ class SuperloopDispatchLedger:
     def __init__(self, store: SuperloopStore):
         self.store = store
 
+    def load_rows(self, loop_id: str) -> list[dict[str, Any]]:
+        """Read persisted dispatch evidence; malformed ledgers fail closed."""
+        path = self.store.loop_dir(loop_id) / "dispatches.jsonl"
+        if not path.exists():
+            return []
+        with self.store._lock:
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if any(not isinstance(row, dict) for row in rows):
+            raise ValueError("Expected dispatch JSON objects")
+        return rows
+
     def record_started(
         self,
         loop_id: str,

@@ -7,6 +7,15 @@ Functions enforce this at admission. Preserve destination authorization and
 terminal HChat reply rules. See [visibility decision](HASHI_AGENT_ACTIVITY_VISIBILITY.md).
 Source adoption and successful message delivery must be verified separately.
 
+Superloop receipt review is opt-in via `receipt_continuation_enabled=true`.
+The existing Remote cycle may admit a separate controller review only for a
+matching active dispatch and task/controller identities. Original terminal
+replies remain tool-disabled and prohibit ACKs. Review requests read local
+taskboard/log evidence, never promote peer body instructions, and use persistent
+Session-pinned idempotency. Pause/stop blocks admission. `queued` is not reviewed,
+merged, adopted or user-delivered; close already-reviewed dispatches before
+enabling the feature. See [receipt review contract](SUPERLOOP_PLAN.md#correlated-receipt-review-admission-2026-09-08).
+
 Reference updated: 2026-09-07. This is a compact orientation, not a task queue,
 permission grant, or proof that the running instance has adopted current source.
 `/fyi` reads this reference again and identifies its content revision. Check live

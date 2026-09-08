@@ -104,6 +104,7 @@ def evaluate_dispatch_interlock(
     state: dict[str, Any] | None = None,
     check_status: bool = True,
     check_pause_signals: bool = True,
+    check_work_blockers: bool = True,
 ) -> DispatchInterlockDecision:
     """Return the fail-closed decision that must precede a worker dispatch.
 
@@ -127,6 +128,11 @@ def evaluate_dispatch_interlock(
         if file_signal:
             reason, path = file_signal
             return DispatchInterlockDecision(False, reason, {"source": "file", "path": path.name})
+
+    # Controller review may investigate a blocked candidate or issue, but must
+    # still obey exactly the same stop/pause boundary as worker dispatch.
+    if not check_work_blockers:
+        return DispatchInterlockDecision(True, "ready_for_review")
 
     candidate_reason = _candidate_block_reason(loop_state)
     if candidate_reason:
