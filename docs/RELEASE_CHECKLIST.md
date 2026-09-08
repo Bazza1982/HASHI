@@ -15,6 +15,26 @@
 - Python source distribution and wheel: `python -m build`
 - npm publication boundary: `npm pack --dry-run --json` and
   `python -m pytest -q tests/contract/test_npm_package_contract.py`
+- npm command and instance lifecycle:
+  - the package remains `hashi-bridge` (the unrelated third-party `hashi`
+    package name is not claimed) while its executable is `hashi`
+  - post-install either verifies a versioned user-scoped Python environment or
+    explicitly reports an incomplete runtime; it never prints ready early
+  - `python -m pytest -q tests/test_instance_registry.py tests/test_hashi_instance_cli.py`
+  - selection precedence is explicit instance, longest cwd binding, default,
+    only instance, then interactive choice/non-interactive ambiguity
+  - Windows, each WSL distribution, native Linux, and macOS use separate
+    registries and never select another environment's runtime through PATH
+  - existing Git registration preserves exact identity/data bytes; managed
+    instance creation allocates isolated homes and non-conflicting ports
+  - repeat start is idempotent; status verifies instance/API/lock identity;
+    stop refuses Agent work, non-terminal background jobs, or unverifiable
+    activity endpoints and never force-kills
+  - recoverable remove/restore, exact-confirmation managed purge, external data
+    non-deletion, explicit stopped-instance update adoption, and npm uninstall
+    data preservation all pass on Windows and Linux/WSL
+  - `hashi ui` remains an external compatibility entry; no Workbench product
+    source, launcher, or package payload is restored
 - Relevant contract and platform scopes are run and reported separately; live
   scope requires explicit authorization
 - Architecture boundaries:

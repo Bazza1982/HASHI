@@ -387,7 +387,12 @@ Voice message → Transcription → Preview text + [✅ Send] [❌ Cancel] butto
 
 ## Installation
 
-**See [INSTALL.md](INSTALL.md) for detailed installation instructions.**
+**See [docs/INSTALL.md](docs/INSTALL.md) for detailed installation instructions.**
+
+Published npm releases use the package name `hashi-bridge` (the unrelated
+`hashi` package name is already owned by another project) and expose the
+`hashi` command. The command manages one shared program plus isolated named
+instances; npm uninstall never deletes instance data.
 
 ### Nagare Core And Editor
 

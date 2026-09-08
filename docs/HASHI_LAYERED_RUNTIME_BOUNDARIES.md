@@ -73,6 +73,7 @@ Current authoritative owners include:
 | Core process supervision and instance lock/PID paths | `orchestrator/kernel_process.py`, `main.py` and `orchestrator/instance_lock.py` |
 | compatibility port defaults | `orchestrator/runtime_defaults.py` |
 | stable Remote port candidate/allocation policy | `orchestrator/stable_port_allocator.py` |
+| npm-installed program's user-scoped instance registry, cwd/default selection and explicit program adoption | `tools/instance_registry.py`, projected by `scripts/hashi_instance_cli.py` |
 | local instance identity and ports | ignored `agents.json` / `instances.json` |
 
 This table records current physical fact owners. Conceptual ownership remains
@@ -263,6 +264,22 @@ Rules:
   back to a conflicting default.
 
 ### Per-instance process ownership
+
+The npm-facing registry is a Layer 3 selector, not a replacement for Layer 4
+identity. It maps a local name to one `code_root` and `bridge_home`, plus cwd
+bindings, a default, and the explicitly adopted installed-program version.
+`agents.json` remains authoritative for the runtime `instance_id` and service
+ports. Registration of an existing Git instance is therefore read-only: it
+records those facts but never regenerates the identity, copies secrets, or
+rewrites workspaces.
+
+The registry itself lives outside the installed program and is scoped to the
+current Windows, WSL-distribution, Linux, or macOS environment. Selection order
+is explicit name, longest cwd binding, default, sole instance, then interactive
+choice; non-interactive ambiguity fails closed. npm upgrade/uninstall cannot
+delete or migrate this registry or any bridge home. Managed recursive deletion
+requires an exact confirmation plus a matching instance marker beneath the
+managed data root; external/Git roots are never purge targets.
 
 The process lock is scoped to the instance's local `bridge_home`, under:
 

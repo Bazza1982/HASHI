@@ -288,6 +288,9 @@ def test_all_first_party_launchers_run_the_runtime_contract_checker():
         "windows/TUI_onboarding.bat",
     ):
         content = (ROOT / relative).read_text(encoding="utf-8")
+        if relative == "onboard-cli.js":
+            assert "require('./cli')" in content
+            continue
         assert "check_runtime_contract.py" in content
 
 

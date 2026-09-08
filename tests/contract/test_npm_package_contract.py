@@ -12,13 +12,27 @@ pytestmark = pytest.mark.contract
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_npm_tarball_contains_runtime_closure_without_local_state() -> None:
+def test_npm_manifest_keeps_program_and_instance_data_lifecycles_separate() -> None:
+    manifest = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+
+    assert manifest["name"] == "hashi-bridge"
+    assert manifest["bin"]["hashi"] == "./cli.js"
+    assert manifest["bin"]["hashi-onboard"] == "./onboard-cli.js"
+    assert not {
+        "preuninstall",
+        "uninstall",
+        "postuninstall",
+    }.intersection(manifest.get("scripts", {}))
+    assert "scripts/hashi_instance_cli.py" in manifest["files"]
+
+
+def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> None:
     npm = shutil.which("npm")
     assert npm is not None, "npm is required to verify the npm publication boundary"
 
     result = subprocess.run(
-        [npm, "pack", "--dry-run", "--json"],
-        cwd=ROOT,
+        [npm, "pack", str(ROOT), "--dry-run", "--json"],
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
@@ -35,6 +49,7 @@ def test_npm_tarball_contains_runtime_closure_without_local_state() -> None:
         "pyproject.toml",
         "THIRD_PARTY_NOTICES.md",
         "constraints/standard-py312.lock",
+        "docs/INSTALL.md",
         "adapters/base.py",
         "browser_gateway/__init__.py",
         "flow/flow_cli.py",
@@ -44,7 +59,9 @@ def test_npm_tarball_contains_runtime_closure_without_local_state() -> None:
         "orchestrator/config.py",
         "remote/__init__.py",
         "scripts/check_runtime_contract.py",
+        "scripts/hashi_instance_cli.py",
         "tools/builtins.py",
+        "tools/instance_registry.py",
         "tools/bin/usecomputer",
         "transports/__init__.py",
         "tui/__init__.py",

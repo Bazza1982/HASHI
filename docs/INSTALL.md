@@ -8,12 +8,154 @@
 
 ## Contents
 
+- [npm command install and named instances](#npm-command-install-and-named-instances)
 - [Windows](#windows)
 - [macOS](#macos)
 - [Linux (native) / WSL2](#linux-native--wsl2)
 - [Python dependency profiles](#python-dependency-profiles)
 - [Multi-instance ports](#multi-instance-ports)
 - [Hashi Remote](#hashi-remote)
+
+---
+
+## npm command install and named instances
+
+The npm package name is **`hashi-bridge`**. The unscoped package name `hashi`
+belongs to an unrelated third party and must not be used for this project. A
+published `hashi-bridge` release installs the `hashi` and `hashi-onboard`
+commands:
+
+```bash
+npm install --global hashi-bridge
+hashi help
+```
+
+Post-install prepares a versioned, user-scoped Python 3.12.13 virtual
+environment from `constraints/standard-py312.lock`. It prints “runtime is
+ready” only after the complete runtime contract passes. If Python, network, or
+dependency preparation fails, npm leaves the program entry installed but
+reports **runtime setup is incomplete**; the failed build is not adopted and
+no instance data is touched.
+
+One program installation serves multiple isolated named instances in the same
+OS environment. Windows, each WSL distribution, native Linux, and macOS keep
+separate registries and never follow another environment's PATH or runtime.
+The default locations are:
+
+| Environment | Registry | Instance data |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\HASHI\instances.json` | `%LOCALAPPDATA%\HASHI\instances\<name>` |
+| Linux / WSL | `${XDG_CONFIG_HOME:-~/.config}/hashi/instances.json` | `${XDG_DATA_HOME:-~/.local/share}/hashi/instances/<name>` |
+| macOS | `${XDG_CONFIG_HOME:-~/.config}/hashi/instances.json` | `${XDG_DATA_HOME:-~/.local/share}/hashi/instances/<name>` |
+
+`HASHI_REGISTRY_ROOT` and `HASHI_DATA_ROOT` are supported explicit overrides,
+primarily for managed deployments and tests. They do not make a Windows
+registry visible to WSL or vice versa. Both roots must remain outside the npm
+program directory so a later package uninstall cannot remove instance data.
+
+### Commands
+
+```text
+hashi
+hashi start
+hashi tui
+hashi status
+hashi stop
+hashi ui
+hashi --instance <name> ...
+hashi instance create <name>
+hashi instance list
+hashi instance default <name>
+hashi instance bind <name> [directory]
+hashi instance remove <name>
+hashi instance restore <name>
+hashi instance adopt <name>
+```
+
+`hashi` starts or attaches the selected instance and opens the TUI. `start`
+runs it in the background, while `status`, `stop`, and `tui` all use the same
+registry, bridge home, configured Backend API port, instance lock, and runtime
+identity. Instance selection is deterministic:
+
+1. explicit `--instance`;
+2. the longest matching current-directory binding;
+3. the user default;
+4. the only registered instance;
+5. a terminal prompt when interactive, or an explicit ambiguity error for a
+   script/non-interactive caller.
+
+The first interactive `hashi` run creates a minimal `default` instance and
+enters onboarding. A scripted first run fails with instructions instead of
+creating an identity implicitly. To create another isolated instance:
+
+```bash
+hashi instance create research --default
+hashi instance bind research /path/to/research-project
+hashi --instance research onboard
+hashi --instance research start
+```
+
+Creation writes only a new instance ID, an unused adjacent Backend/API Gateway
+port pair, and an empty Agent list. Credentials are created only through that
+instance's onboarding. Onboarding writes workspaces, language, wakeup state,
+configuration, secrets, and crash logs beneath the selected bridge home—not
+the shared npm program directory.
+
+An existing Git instance can be registered without reconstructing or editing
+its identity:
+
+```bash
+hashi instance create hashi2 --from /home/me/projects/hashi2
+hashi instance create split-home --from /opt/hashi --home /srv/hashi-data
+```
+
+Registration requires an existing HASHI `main.py`, runtime contract, and
+`agents.json`; it reads the configured instance ID/ports and binds the code and
+data roots. It does not copy or rewrite the checkout, credentials, workspaces,
+or Agent PCMs. External/Git data can be unregistered but is never recursively
+purged by this command.
+
+### Stop, remove, upgrade, and uninstall safety
+
+`hashi stop` first verifies the exact local API identity plus every Agent's
+live generation/queue/transfer state and all non-terminal background jobs. If
+work exists—or either activity endpoint cannot be verified—it sends no shutdown
+request and never falls back to a force kill.
+When idle, it requests the existing authenticated graceful-shutdown API and
+waits for the instance lock to release.
+
+`hashi instance remove <name>` requires the instance to be stopped. Managed
+data moves atomically into the user-scoped HASHI recovery area and can be
+returned with `instance restore`; Git/external data remains where it was.
+Permanent deletion is available only for marker-verified managed data and
+requires both `--purge` and an exact `--confirm <name>` (or exact interactive
+entry):
+
+```bash
+hashi instance remove research --purge --confirm research
+```
+
+Updating the npm program never restarts a running instance and never rewrites
+its identity or data. A stopped managed instance whose recorded version differs
+from the installed version reports `update-pending`; adopt it explicitly, then
+start it:
+
+```bash
+npm install --global hashi-bridge@<version>
+hashi --instance research status
+hashi instance adopt research
+hashi --instance research start
+```
+
+`npm uninstall --global hashi-bridge` removes program entry points only. It has
+no uninstall lifecycle script and leaves the registry, versioned runtime,
+recoverable removals, identities, credentials, workspaces, transcripts, and
+logs intact.
+
+Workbench remains retired. `hashi ui` only starts an independently installed
+`hashi-ui` executable (or the exact path in `HASHI_UI_EXECUTABLE`) against the
+selected instance's Backend API; no Workbench implementation is bundled or
+silently restored.
 
 ---
 

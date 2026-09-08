@@ -82,7 +82,7 @@ restart the target agent with `/reboot min`.
 
 ---
 
-## npm Global Installation (Experimental)
+## npm Global Installation
 
 You can install HASHI as a global npm package:
 
@@ -93,9 +93,14 @@ npm install -g hashi-bridge
 This will:
 - Install the `hashi` and `hashi-onboard` commands globally
 - Enforce the approved HASHI CPython 3.12.13 Core and locked dependencies
-- Prompt you to install Python dependencies
+- Prepare an isolated, versioned Python dependency environment when possible
+- Keep named instance identities and data outside the npm program directory
 
-**Note:** The npm package is a lightweight wrapper that requires Python to be installed separately.
+An approved CPython 3.12.13 base runtime must be available. If automatic
+dependency preparation fails, installation reports that runtime setup is
+incomplete and never claims HASHI is ready. See
+[docs/INSTALL.md](docs/INSTALL.md#npm-command-install-and-named-instances) for
+the complete multi-instance, upgrade, recovery, and purge contract.
 
 ### Usage after npm install:
 
@@ -177,6 +182,10 @@ Simply delete the `hashi/` directory.
 ```bash
 npm uninstall -g hashi-bridge
 ```
+
+This removes program entry points only. It intentionally preserves instance
+registries, identities, credentials, workspaces, transcripts, logs, recoverable
+removals, and versioned runtimes.
 
 ---
 

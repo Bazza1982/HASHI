@@ -7,11 +7,19 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
 
 # ── Crash log setup ──────────────────────────────────────────────────────────
-_LOG_PATH = Path(__file__).parent.parent / "onboarding_crash.log"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _bridge_home() -> Path:
+    return Path(os.environ.get("BRIDGE_HOME") or str(_PROJECT_ROOT)).resolve()
+
+
+_LOG_PATH = _bridge_home() / "onboarding_crash.log"
 
 
 def _log(msg: str):
@@ -31,6 +39,24 @@ def _clear_log():
         )
     except Exception:
         pass
+
+
+def _atomic_write_json(path: Path, payload: dict, *, private: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        if private:
+            try:
+                temporary.chmod(0o600)
+            except OSError:
+                pass
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,10 +243,42 @@ def run_onboarding():
                 print(
                     f'{C_WARN}Invalid input. You must type "I AGREE" (exactly as shown) to continue.{C_RESET}'
                 )
-    # Immediate Hatchery Initialization
-    project_root = Path(__file__).parent.parent
+    project_root = _PROJECT_ROOT
+    bridge_home = _bridge_home()
+    bridge_home.mkdir(parents=True, exist_ok=True)
     _log(f"project_root: {project_root}")
-    workspace_dir = project_root / "workspaces" / "onboarding_agent"
+    _log(f"bridge_home: {bridge_home}")
+
+    # Phase 1.5: Completion Detection. This check must happen before resetting
+    # any workspace file, so declining a re-onboarding prompt is read-only.
+    agents_path = bridge_home / "agents.json"
+    secrets_path = bridge_home / "secrets.json"
+    _log(f"bridge_home resolved: {bridge_home}")
+    is_completed = False
+    if agents_path.exists():
+        try:
+            with open(agents_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                configured_agents = (
+                    cfg.get("agents", []) if isinstance(cfg, dict) else []
+                )
+                if isinstance(configured_agents, list) and any(
+                    isinstance(agent, dict) and agent.get("name") == "hashiko"
+                    for agent in configured_agents
+                ):
+                    is_completed = True
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+
+    if is_completed:
+        print(f"\n{C_WARN}{lang['alreadyCompleted']}{C_RESET}")
+        confirm = input(f"{C_LABEL}{lang['resetConfirm']}{C_RESET}").strip().lower()
+        if confirm != "y":
+            print(f"\n{C_OK}{lang['enjoyMessage']}{C_RESET}")
+            return
+
+    # Immediate Hatchery Initialization
+    workspace_dir = bridge_home / "workspaces" / "onboarding_agent"
     workspace_dir.mkdir(parents=True, exist_ok=True)
     _log(f"workspace_dir created: {workspace_dir}")
     shutil.copy(project_root / "docs" / "initial.md", workspace_dir / "initial.md")
@@ -257,32 +315,6 @@ def run_onboarding():
     wakeup_path = workspace_dir / "WAKEUP.prompt"
     with open(wakeup_path, "w", encoding="utf-8") as f:
         f.write(welcome_prompt)
-
-    # Phase 1.5: Completion Detection
-    _log("Phase 1.5: Completion detection")
-    # IMPORTANT: main.py expects agents.json/secrets.json under bridge_home.
-    # Respect BRIDGE_HOME env (used by Windows batch launchers) and default to project_root.
-    bridge_home = Path(os.environ.get("BRIDGE_HOME") or str(project_root)).resolve()
-    bridge_home.mkdir(parents=True, exist_ok=True)
-    agents_path = bridge_home / "agents.json"
-    secrets_path = bridge_home / "secrets.json"
-    _log(f"bridge_home resolved: {bridge_home}")
-    is_completed = False
-    if agents_path.exists():
-        try:
-            with open(agents_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                if any(a.get("name") == "hashiko" for a in cfg.get("agents", [])):
-                    is_completed = True
-        except (OSError, json.JSONDecodeError, TypeError):
-            pass
-
-    if is_completed:
-        print(f"\n{C_WARN}{lang['alreadyCompleted']}{C_RESET}")
-        confirm = input(f"{C_LABEL}{lang['resetConfirm']}{C_RESET}").strip().lower()
-        if confirm != "y":
-            print(f"\n{C_OK}{lang['enjoyMessage']}{C_RESET}")
-            sys.exit(0)
 
     # Phase 1.8: Pre-Hatch Warm Prompt
     print(
@@ -363,8 +395,7 @@ def run_onboarding():
                 agents_cfg["agents"] = [new_agent] + old_agents
         except (OSError, json.JSONDecodeError, TypeError):
             pass
-    with open(agents_path, "w", encoding="utf-8") as f:
-        json.dump(agents_cfg, f, indent=2, ensure_ascii=False)
+    _atomic_write_json(agents_path, agents_cfg)
     _log(f"agents.json written: {agents_path}")
 
     secrets = {}
@@ -378,21 +409,28 @@ def run_onboarding():
         secrets["hashiko"] = "WORKBENCH_ONLY_NO_TOKEN"
     if or_key:
         secrets["openrouter_key"] = or_key
-    with open(secrets_path, "w", encoding="utf-8") as f:
-        json.dump(secrets, f, indent=2, ensure_ascii=False)
+    _atomic_write_json(secrets_path, secrets, private=True)
 
-    last_agents_path = project_root / ".bridge_u_last_agents.txt"
+    last_agents_path = bridge_home / ".bridge_u_last_agents.txt"
     with open(last_agents_path, "w", encoding="utf-8") as f:
         f.write("selected|hashiko\n")
 
+    (bridge_home / ".bridge_u_lang.txt").write_text(l_code, encoding="utf-8")
     print(f"\n{C_OK}{lang['hatcheryComplete']}{C_RESET}")
+    if str(os.environ.get("HASHI_ONBOARD_NO_LAUNCH") or "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        _log("Onboarding completed without launch (HASHI_ONBOARD_NO_LAUNCH).")
+        return
     print(f"{C_TEXT}{lang['launching']}{C_RESET}")
 
     main_sh = project_root / "bin" / "bridge-u.sh"
     _log(f"bridge-u.sh path: {main_sh} | exists: {main_sh.exists()}")
     if main_sh.exists():
         os.chmod(main_sh, 0o755)
-        (project_root / ".bridge_u_lang.txt").write_text(l_code, encoding="utf-8")
 
         # Launch bridge using the most native mechanism for the current OS.
         # - Windows: use bridge-u.bat (no bash expected)
