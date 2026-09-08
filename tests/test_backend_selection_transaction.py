@@ -244,6 +244,6 @@ async def test_commands_reach_real_selection_transaction(
     if with_context and sessions:
         runtime.enqueue_request.assert_awaited_once_with(
             42, "RESTORE ONCE", "handoff", "Backend continuation [3 exchanges]",
-            silent=True, deliver_to_telegram=False, skip_memory_injection=True,
+            silent=True, deliver_to_telegram=True, skip_memory_injection=True,
         )
     assert runtime._clear_handoff_state.call_count == int(not with_context)

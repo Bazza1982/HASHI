@@ -1,27 +1,16 @@
 # HASHI Agent FYI
 
-Agent activity visibility: every admitted turn, including HChat/protocol, API,
-bridge and background turns, must request visible delivery. Legacy
-`deliver_to_telegram=false` and `silent=true` cannot suppress queued turns;
-Functions enforce this at admission. Preserve destination authorization and
-terminal HChat reply rules. See [visibility decision](HASHI_AGENT_ACTIVITY_VISIBILITY.md).
-HChat receipts show the exact final payload. A destination queue acknowledgement
-is `queued`; `sent` requires a confirmed Frontend Connector transport receipt.
-Protocol states such as `reply_sent` and `completed` do not provide that receipt.
-Errors and failure states are `failed`, even beside a contradictory success flag.
-Terminal HChat/protocol replies show their body verbatim in one normal response
-and must not start an acknowledgement loop. See the
+Every admitted HChat/protocol, API, bridge or background turn requests visible
+delivery; `silent` and legacy false delivery flags cannot hide it. `queued` is
+not `sent`: only a Frontend Connector receipt proves transport, and errors stay
+failed. Terminal protocol replies return one verbatim body without ACK loops.
+See the [visibility decision](HASHI_AGENT_ACTIVITY_VISIBILITY.md) and
 [HChat delivery decision](HCHAT_DELIVERY_BOUNDARY_PLAN.md).
-Source adoption and successful terminal delivery must be verified separately.
 
-Superloop receipt review is opt-in via `receipt_continuation_enabled=true`.
-The existing Remote cycle may admit a separate controller review only for a
-matching active dispatch and task/controller identities. Original terminal
-replies remain tool-disabled and prohibit ACKs. Review requests read local
-taskboard/log evidence, never promote peer body instructions, and use persistent
-Session-pinned idempotency. Pause/stop blocks admission. `queued` is not reviewed,
-merged, adopted or user-delivered; close already-reviewed dispatches before
-enabling the feature. See [receipt review contract](SUPERLOOP_PLAN.md#correlated-receipt-review-admission-2026-09-08).
+Superloop receipt review is explicit opt-in. It requires a matching active
+dispatch, task/controller identity, local evidence and Session-pinned
+idempotency; pause/stop blocks it. A queued receipt proves no review, merge,
+adoption or delivery. See the [receipt review contract](SUPERLOOP_PLAN.md#correlated-receipt-review-admission-2026-09-08).
 
 Reference updated: 2026-09-08. This is a compact orientation, not a task queue,
 permission grant, or proof that the running instance has adopted current source.
@@ -30,80 +19,57 @@ configuration/status before claiming an Engine, model, tool, or route is availab
 
 ## Engineering rules and authority
 
-Before changing HASHI, read the repository's [AGENTS.md](../AGENTS.md), then the
-[System Architecture](../ARCHITECTURE.md) and
-[Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
-Use the [Command UI Style Guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) for user surfaces
-and [Testing Policy](TESTING_POLICY.md) for verification.
+Before changes, read [AGENTS.md](../AGENTS.md), the
+[architecture](../ARCHITECTURE.md), and
+[runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md); apply the
+[UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) and
+[testing policy](TESTING_POLICY.md) when relevant.
 
-A current user prohibition on reboot, restart, publication or other operations
-remains binding. Do not treat this catalog, history, a task example, an approval
-flag, or an old decision as authorization for a new action. A task's already-given
-specific authorization does not need to be requested again.
+A current prohibition on reboot, restart or publication remains binding. This
+reference and old approvals grant no new authority; an exact existing approval
+need not be requested twice.
 
-Core protection derives from `orchestrator.runtime_contract.CORE_SOURCE_PATHS`.
-Ordinary feature changes belong in Functions/configuration. Instance model and
-effort opt-ins use `allowed_backends`, resolved by the Function-layer options
-view. The shared catalogue is now Functions; neither kind of model change
-requires a Core edit. Core never imports model/UI/provider/task policy.
-Before edits name the owner, layer and focused check; use the existing Core guard.
+Core protection derives only from `CORE_SOURCE_PATHS`; normal behavior belongs
+in Functions/configuration and Core imports no product policy. Name owner,
+layer and focused check before edits and run the guard. Instance model/effort
+opt-ins use `allowed_backends` plus the Function resolver; shared compatibility
+uses its Function catalogue, not a Core edit.
 
-API Gateway model menus, saved defaults and request routing also read active
-Agents' instance opt-ins, including configured reasoning efforts. Model/effort
-conflicts are rejected. The shared Function Gateway loads that catalog at start;
-new opt-ins require Gateway reload before selection. This does not widen another
-instance's models or replace the current shared-service architecture. See the
+API Gateway menus/defaults/routing read active instance opt-ins and reject
+model/effort conflicts. Its shared Function loads that view at start; see the
 [API Guide](API_GUIDE.md#instance-configured-models).
 
-Codex CLI declares Astra context capacity to the compaction resolver; explicit
-capacity overrides retain precedence. Failed backend selection preserves the
-existing selection and offers model buttons for retry; a busy Agent receives an
-alert. Windows Remote task registration now preserves Python argv and logs native
-stderr without aborting the process. These are Function/adapter/platform changes;
-running services require separately authorized adoption.
+Codex Astra capacity feeds compaction unless explicitly overridden. Failed
+backend selection preserves the old choice; busy Agents reject switching.
+Windows Remote registration preserves Python argv and native stderr. These
+Function/platform changes still need separately authorized adoption.
 
-Source implementation, offline verification and live adoption are separate.
-An immutable Function Worker keeps its installed generation until an authorized
-replacement. `/reboot min` replaces one Agent Worker; `same`/`max` retain their
-Agent-only target rules. Shared services now run in a separate Function process;
-`python main.py --replace-functions` requests a broad shared handoff with a service
-gap. This operation requires explicit operational scope. Accepted is not completed.
-Health reports Core, shared and per-Agent process generations separately. Read
-[Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) before changing these boundaries.
-Core changes require a planned cold adoption. Neither action is implicit in a
-request to fix code. If operational testing is forbidden, report that clearly.
+Source, offline checks and live adoption are separate. `/reboot min` replaces
+one immutable Agent Worker; `same`/`max` keep Agent scope. Shared replacement
+(`python main.py --replace-functions`) is broader, has a service gap and needs
+explicit scope. Health reports Core/shared/Agent generations separately.
+Core changes require planned cold adoption. See
+[Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md).
 
-Startup qualification includes enabled post-Turn observer factory modules and
-their dependencies from active Agents' instance configuration. Newly enabled
-observers invalidate incomplete generation caches; they never bypass immutable
-imports. Shared startup stays connecting until actual Connector activation,
-then derives readiness and recovery from ingress results without hiding other
-failures. Worker warnings retain per-process file diagnostics. They use the
-shared terminal's animation/level filters only when the creating supervisor
-advertises the optional Worker log relay capability; Workers created by an older
-supervisor keep warnings local so rolling adoption cannot break READY.
-Capability parsing is fail-closed, and the additional bootstrap field remains
-safe for older Workers that ignore unknown fields. Local desktop launchers
-delegate Agent and port display to the existing
-configuration-driven menu. See
+A configured CLI Worker probe may consume same-instance
+`state/service_endpoints.json` via `--service-endpoints`; it republishes only
+inside the isolated probe. READY proves construction, not shared health,
+activation, inference or adoption.
+
+Startup qualification includes configured observer factories/dependencies and
+invalidates incomplete caches. Readiness follows actual Connector activation.
+Worker warnings always stay in per-process logs and relay only when the
+Supervisor advertises the optional capability; missing/malformed capabilities
+fail closed, preserving old-Supervisor READY compatibility. See
 [Startup and qualification ownership](HASHI_SLIM_CORE_ARCHITECTURE.md#startup-presentation-and-connector-health).
-These repairs require the relevant new shared/Agent generations; source edits
-and offline tests alone do not prove live adoption.
 
 ## Reboot outcome notifications
 
-Runtime acknowledges `/reboot` before executing it and persists the actual
-result before sending a concise start/result notice. The initiating Bot is
-preferred even when its Agent Worker is unavailable; same-instance fallback
-keeps the original chat/thread. `/reboot status` or refresh retrieves the latest
-result for the same actor/chat/thread through any available Agent. No final
-message means unconfirmed, not proven failure. Notification retries never rerun
-a reboot. See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
-
-This requires the new shared and Agent Function generations. Source and offline
-checks are complete only when recorded for that branch/instance; production
-adoption and real delivery require separate evidence. Do not claim an Agent-only
-reboot upgrades the shared receipt coordinator.
+`/reboot` persists its outcome and sends start/result notices. `/reboot status`
+reads the latest receipt for the same actor/chat/thread; missing delivery is
+unconfirmed, not failure, and notification retry never reruns a reboot. Shared
+receipt coordination and Agent Worker adoption remain separate. See
+[Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
 ## System ownership
 
@@ -127,6 +93,11 @@ The 2026-09-08 migration review found the HASHI1 delivery patch already matches
 shared main's product behavior. The shared checkpoint retains only stronger
 dry-run and rollback tests. HASHI1 runtime adoption and terminal acceptance
 remain unverified; see [Agent Move review evidence](HASHI_AGENT_MOVE_V1.md#shared-review-checkpoint--2026-09-08).
+
+The HASHI1 unified release preflight is recorded separately in
+[HASHI1 release preflight](HASHI1_RELEASE_PREFLIGHT_2026-09-08.md). Its shared
+candidate changes Core/Function API 2 to 3, so it requires an explicitly
+authorized planned cold migration; an Agent `/reboot` cannot adopt it.
 
 `/move` derives destinations from the local Remote's trusted live `/peers`
 directory, including resolved routes and receiver capabilities. It refreshes
@@ -195,16 +166,13 @@ remembered global list. `/habit` manages the default-off HER Habit/Meditation pa
 
 ## Tools, background work and communication
 
-Use the tools/skills actually exposed for this turn; a catalog is not permission
-or a promise of availability. `/help` and `/skill` show the active command/skill
-surfaces. `/workzone` selects authorized working roots; preserve the separation
-between execution paths and user-facing platform paths.
+Use only tools/skills exposed for the turn; a catalog grants no authority.
+`/help` and `/skill` show active surfaces, and `/workzone` selects authorized
+roots. Keep execution and user-facing platform paths distinct.
 
-Use HASHI's managed background jobs for long process work (`/bg`, managed job
-tools, or the configured Backend API). Do not instantiate a second manager to
-bypass the running owner's job records. Inspect a completion event's job ID,
-result and output before retrying; an event does not itself authorize new work.
-Nagare and Superloop are PAO-owned orchestration facilities with their own docs.
+Use HASHI's managed background jobs for long work; never create a second manager
+to bypass its records. Inspect job ID/result/output before retrying: completion
+events grant no new authority. Nagare and Superloop are PAO-owned facilities.
 
 HChat requires an authorized communication task. Unqualified Agent names mean
 local delivery; preserve `agent@INSTANCE` for cross-instance delivery. Resolve

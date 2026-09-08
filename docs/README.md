@@ -73,6 +73,7 @@ line.
 ## Active (keep these current)
 
 ### Core references
+- [HASHI1_RELEASE_PREFLIGHT_2026-09-08.md](HASHI1_RELEASE_PREFLIGHT_2026-09-08.md) — HASHI1 unified-candidate delta, Core/ABI decision, local-config preservation, Codex READY and `/move` no-staging evidence, plus cold-adoption and rollback runbook
 - [HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md) — current HASHI3 live runtime/device-control receipts, completed gates, installed Browser/Computer components, and remaining operator-dependent canaries
 - [HASHI3_FUNCTION_WORKER_PAUSE_CHECKPOINT_2026-09-04.md](HASHI3_FUNCTION_WORKER_PAUSE_CHECKPOINT_2026-09-04.md) — superseded historical safe-pause snapshot retained for audit continuity
 - [HASHI_PYTHON_RUNTIME_COMPATIBILITY.md](HASHI_PYTHON_RUNTIME_COMPATIBILITY.md) — normative CPython 3.12.13 Core, per-Agent Function Worker, immutable generation, JSON IPC, rollback, recovery, test and migration contract

@@ -547,7 +547,7 @@ async def test_retry_stops_resets_handoffs_then_requeues_original_prompt(tmp_pat
     ]
     handoff_args, handoff_kwargs = enqueued[0]
     assert handoff_args[1] == "HANDOFF CONTEXT"
-    assert handoff_kwargs["deliver_to_telegram"] is False
+    assert handoff_kwargs["deliver_to_telegram"] is True
     assert handoff_kwargs["skip_memory_injection"] is True
     assert handoff_kwargs["is_retry"] is True
 
