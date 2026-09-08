@@ -15,6 +15,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Task Scheduler defaults background tasks to below-normal priority. Under
+# sustained host load that can starve Python imports for minutes, so normalize
+# legacy registrations here as well as in the task definition.
+try {
+    [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass =
+        [System.Diagnostics.ProcessPriorityClass]::Normal
+} catch {
+    # A freshly registered task also requests normal priority explicitly.
+}
+
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = $Utf8NoBom
+try {
+    [Console]::OutputEncoding = $Utf8NoBom
+} catch {
+    # Hidden task sessions may not expose a mutable console.
+}
+
 $LogDir = Split-Path -Parent $LogPath
 if ($LogDir) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null

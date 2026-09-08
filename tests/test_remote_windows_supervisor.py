@@ -41,14 +41,20 @@ def test_registered_task_preserves_module_arguments_stderr_and_exit(tmp_path, ro
     shutil.copyfile(ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py")
     (remote / "__init__.py").write_text("", encoding="utf-8")
     (remote / "__main__.py").write_text(
-        "import json, os, sys\nfrom pathlib import Path\n"
+        "import ctypes, json, os, sys\nfrom pathlib import Path\n"
+        "kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+        "kernel32.GetCurrentProcess.restype = ctypes.c_void_p\n"
+        "kernel32.GetPriorityClass.argtypes = [ctypes.c_void_p]\n"
         "Path('received.json').write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
         "print('REMOTE_STDOUT_OK', flush=True)\n"
         "print('REMOTE_STDERR_OK', file=sys.stderr, flush=True)\n"
         "print('REMOTE_AFTER_STDERR_OK', flush=True)\n"
+        "print('REMOTE_UTF8_🌸_测试', flush=True)\n"
+        "print(f'REMOTE_PRIORITY={kernel32.GetPriorityClass(kernel32.GetCurrentProcess())}', flush=True)\n"
         "sys.exit(int(os.environ['REMOTE_TEST_EXIT']))\n", encoding="utf-8"
     )
     action_path = tmp_path / "action.json"
+    settings_path = tmp_path / "settings.json"
     # Capture the real controller's action without registering an OS task.
     register = _powershell(f"""
 $ErrorActionPreference = 'Stop'
@@ -57,7 +63,18 @@ function New-ScheduledTaskAction {{
     [pscustomobject]@{{Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory}}
 }}
 function New-ScheduledTaskTrigger {{ @{{}} }}
-function New-ScheduledTaskSettingsSet {{ @{{}} }}
+function New-ScheduledTaskSettingsSet {{
+    param(
+        [switch]$AllowStartIfOnBatteries,
+        [switch]$DontStopIfGoingOnBatteries,
+        [int]$RestartCount,
+        $RestartInterval,
+        [int]$Priority
+    )
+    [pscustomobject]@{{Priority=$Priority}} |
+        ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(settings_path)}
+    @{{}}
+}}
 function New-ScheduledTaskPrincipal {{ @{{}} }}
 function New-ScheduledTask {{ param($Action, $Trigger, $Settings, $Principal) $Action }}
 function Register-ScheduledTask {{
@@ -72,6 +89,7 @@ function Register-ScheduledTask {{
         subprocess.list2cmdline([action["Execute"]]) + " " + action["Arguments"],
         cwd=root, env={**os.environ, "REMOTE_TEST_EXIT": str(exit_code)},
         capture_output=True, text=True, timeout=30,
+        creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS,
     )
     assert (root / "received.json").exists(), result.stderr
     assert json.loads((root / "received.json").read_text(encoding="utf-8")) == [
@@ -80,8 +98,16 @@ function Register-ScheduledTask {{
     assert result.returncode == exit_code, result.stderr
     log = (root / "logs/hashi-remote-supervisor.log").read_bytes()
     text = log.decode("utf-16") if log.startswith(b"\xff\xfe") else log.decode("utf-8-sig")
-    for marker in ("REMOTE_STDOUT_OK", "REMOTE_STDERR_OK", "REMOTE_AFTER_STDERR_OK"):
+    for marker in (
+        "REMOTE_STDOUT_OK",
+        "REMOTE_STDERR_OK",
+        "REMOTE_AFTER_STDERR_OK",
+        "REMOTE_UTF8_🌸_测试",
+        "REMOTE_PRIORITY=32",
+    ):
         assert marker in text
+    settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    assert settings["Priority"] == 4
 
 
 def test_legacy_task_runner_keeps_python_module_switch(tmp_path):
@@ -94,6 +120,35 @@ exit $LASTEXITCODE
     data = log.read_bytes()
     text = data.decode("utf-16") if data.startswith(b"\xff\xfe") else data.decode("utf-8-sig")
     assert "usage:" in text
+
+
+def test_register_propagates_task_registration_failure(tmp_path):
+    root = tmp_path / "hashi denied"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-DENIED"}}),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py"
+    )
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+function New-ScheduledTaskAction {{ @{{}} }}
+function New-ScheduledTaskTrigger {{ @{{}} }}
+function New-ScheduledTaskSettingsSet {{ @{{}} }}
+function New-ScheduledTaskPrincipal {{ @{{}} }}
+function New-ScheduledTask {{ @{{}} }}
+function Register-ScheduledTask {{
+    param($TaskName, $InputObject, [switch]$Force, $ErrorAction)
+    if ([string]$ErrorAction -eq 'Stop') {{ throw 'REGISTRATION_DENIED' }}
+}}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+""")
+    assert result.returncode != 0
+    assert "Registered and enabled Remote supervisor" not in result.stdout
+    assert "REGISTRATION_DENIED" in result.stderr
 
 
 def test_restart_retires_only_exact_instance_remote_processes(tmp_path):
