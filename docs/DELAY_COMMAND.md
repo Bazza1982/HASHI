@@ -96,3 +96,18 @@ Delay records use the `delayed_messages` top-level key in the existing
 `orchestrator/runtime_pending.py`; scheduling and due dispatch live in
 `orchestrator/scheduler.py`; command handling lives in
 `orchestrator/commands/delay.py`.
+
+When an Agent runs in an isolated Function Worker, `WorkerSchedulerFacade`
+forwards create, list, and cancel operations over the existing JSON Scheduler
+RPC. The Supervisor binds every request to the identity of the connected Worker
+and rejects a different `agent_name` before it reaches scheduler state. The
+shared `TaskScheduler` remains the only owner of validation, idempotency,
+limits, locking, and persistence; Workers do not create a timer or write a
+second delay store.
+
+The Worker boundary is covered with a real duplex JSON pipe and a real
+`TaskScheduler`: the creation scenario checks the persisted record, and the
+cross-Agent rejection scenario checks that no state file is written. On the
+defective implementation the creation path fails because the facade has no
+`schedule_delayed_message`; with create forwarding but no identity binding,
+the rejection scenario also fails because the foreign record is accepted.

@@ -89,6 +89,33 @@ class WorkerSchedulerFacade:
         )
         return [dict(item) for item in result or ()]
 
+    async def schedule_delayed_message(
+        self,
+        *,
+        agent_name: str,
+        chat_id: int,
+        prompt: str,
+        delay_minutes: int,
+        idempotency_key: str | None = None,
+        request_metadata: Mapping[str, Any] | None = None,
+        deliver_to_telegram: bool = True,
+    ) -> dict[str, Any]:
+        result = await self.peer.request(
+            "core.scheduler.schedule_delayed_message",
+            {
+                "agent_name": agent_name,
+                "chat_id": chat_id,
+                "prompt": prompt,
+                "delay_minutes": delay_minutes,
+                "idempotency_key": idempotency_key,
+                "request_metadata": (
+                    dict(request_metadata) if request_metadata is not None else None
+                ),
+                "deliver_to_telegram": deliver_to_telegram,
+            },
+        )
+        return dict(result or {})
+
     async def cancel_delayed_messages(
         self,
         agent_name: str,

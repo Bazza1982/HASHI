@@ -190,8 +190,11 @@ remembered global list. `/habit` manages the default-off HER Habit/Meditation pa
   without model work. `/steer` changes direction during execution; `/focus`
   narrows the task while preserving progress.
 - `/delay`, `/queue` and `/recall` manage queued/future requests without confusing
-  them with cron/heartbeat records. Never replay scheduler-recovery batches
-  without the user's explicit choice.
+  them with cron/heartbeat records. An isolated Worker's `/delay` mutation uses
+  the shared Scheduler RPC; the Supervisor binds it to that Worker's Agent
+  identity, while the existing Scheduler remains the only persistent state
+  owner. Never replay scheduler-recovery batches without the user's explicit
+  choice.
 
 ## Tools, background work and communication
 
