@@ -73,7 +73,38 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
     assert headers["x-hashi-from-instance"] == "HASHI1"
     assert request["body"]["body"]["text"] == "hello there"
     assert request["body"]["to_agent"] == "lily"
-    assert "Protocol message delivered" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Protocol message queued" in output
+    assert "Message:\nhello there" in output
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"ok": True, "state": "accepted"}, "queued"),
+        ({"ok": True, "state": "delivered_to_local_queue"}, "queued"),
+        ({"ok": True, "state": "reply_sent"}, "sent"),
+        ({"ok": True, "state": "completed"}, "sent"),
+        ({"ok": False, "state": "reply_failed"}, "failed"),
+        ({"ok": True, "state": "reply_failed"}, "failed"),
+    ],
+)
+def test_protocol_delivery_disposition_distinguishes_queue_terminal_and_failure(result, expected):
+    assert protocol_send._delivery_disposition(result) == expected
+
+
+def test_protocol_terminal_success_receipt_shows_sent_and_original_body(capsys):
+    protocol_send._print_delivery_receipt(
+        result={"ok": True, "state": "reply_sent"},
+        from_agent="rika",
+        target="zelda@HASHI1",
+        text="Done.\nEvidence retained.",
+    )
+
+    output = capsys.readouterr().out
+    assert "Protocol terminal message sent" in output
+    assert "Protocol message queued" not in output
+    assert "Message:\nDone.\nEvidence retained." in output
 
 
 def test_send_protocol_message_records_outbound_correlation(monkeypatch, tmp_path):
@@ -414,3 +445,4 @@ def test_send_protocol_message_prints_operator_delivery_result(monkeypatch, caps
     err = capsys.readouterr().err
     assert "Delivery result: target_not_found:" in err
     assert "Target agent 'lily' not found" in err
+    assert "Message:\nhello there" in err

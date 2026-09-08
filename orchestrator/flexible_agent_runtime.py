@@ -2133,7 +2133,11 @@ class FlexibleAgentRuntime:
         4. Cross-instance delivery via send_hchat(name) when no instance is known.
         """
         try:
-            from tools.hchat_send import parse_hchat_message, parse_return_address
+            from tools.hchat_send import (
+                format_hchat_terminal_reply,
+                parse_hchat_message,
+                parse_return_address,
+            )
             sender = parse_return_address(item.prompt)
         except Exception:
             sender = None
@@ -2151,7 +2155,7 @@ class FlexibleAgentRuntime:
             local_instance = str(_get_instance_id(_load_config()) or "").upper()
         except Exception:
             local_instance = ""
-        reply_text = f"[hchat reply from {self.name}] {response_text}"
+        reply_text = format_hchat_terminal_reply(self.name, response_text)
 
         # ── 1. Try local runtime only when sender is local/unspecified ────────
         if not sender_instance or sender_instance == local_instance:
@@ -5644,7 +5648,10 @@ class FlexibleAgentRuntime:
                 f"Write it as yourself — the same message goes to all agents. Be concise.\n"
                 f"3. Send the message to EACH agent by running these bash commands:\n"
                 f"{send_cmds}\n"
-                f"4. Report back to the user: what you sent, to whom, and how many succeeded.\n\n"
+                f"4. In your final response, show the exact message body passed to --text "
+                f"under a 'Message:' label, list the targets, and report how many queued. "
+                f"Use 'sent' only when terminal output explicitly reports terminal send "
+                f"success; report any failed target as failed.\n\n"
                 f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
                 f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
                 f"just report the reply content to the user. Do NOT send another hchat message back."
@@ -5671,7 +5678,10 @@ class FlexibleAgentRuntime:
                 f"Write it as yourself — introduce yourself if appropriate, include relevant context, be concise.\n"
                 f"3. Send the message by running this bash command:\n"
                 f"   {sys.executable} {Path(__file__).resolve().parent.parent / 'tools' / 'hchat_send.py'} --to {target_name} --from {self.name} --text \"<your composed message>\"\n"
-                f"4. Report back to the user: what you sent and a brief summary of why.\n\n"
+                f"4. In your final response, show the exact message body passed to --text "
+                f"under a 'Message:' label. Preserve the tool's result: 'queued' means "
+                f"the destination accepted it for processing, 'sent' requires explicit "
+                f"terminal send success, and a failed command must be reported as failed.\n\n"
                 f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
                 f"IMPORTANT: When you later receive a message starting with '[hchat reply from ...]', "
                 f"just report the reply content to the user. Do NOT send another hchat message back — "
@@ -5716,6 +5726,7 @@ class FlexibleAgentRuntime:
             HChatDraftParseError,
             deliver_hchat_draft,
             draft_parse_error_text,
+            hchat_delivery_receipt_text,
             hchat_delivery_log_fields,
             hchat_draft_parsed_log_fields,
             parse_hchat_draft,
@@ -5755,13 +5766,11 @@ class FlexibleAgentRuntime:
 
         sender = getattr(self, "_hchat_draft_sender", None)
         result = deliver_hchat_draft(draft, from_agent=self.name, sender=sender)
-        visible_text = (
-            draft.user_report
-            if result.success and draft.user_report
-            else f"Message delivered to {result.target}."
-            if result.success
-            else f"[hchat] Delivery failed to {result.target}: {result.error or 'unknown error'}"
+        locale = ui_language.preferred_locale(
+            self,
+            actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),
         )
+        visible_text = hchat_delivery_receipt_text(result, locale=locale)
         visible_text = normalize_user_visible_paths(visible_text)
         if result.success:
             self._mark_success()

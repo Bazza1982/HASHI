@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import sys
 from urllib.error import URLError
+
+import pytest
 
 from orchestrator.enterprise import ChannelRegistry, IdentityService
 from tools import hchat_send
@@ -141,10 +144,13 @@ def test_format_hchat_message_adds_autoreply_instruction():
 def test_format_hchat_message_preserves_reply_body_for_loop_guard():
     message = hchat_send.format_hchat_message("akane", "HASHI1", "[hchat reply from akane] done")
 
-    assert message == "[hchat from akane@HASHI1] [hchat reply from akane] done"
+    parsed = hchat_send.parse_hchat_message(message)
+    assert parsed is not None
+    assert parsed["body"].startswith("[hchat reply from akane] done")
+    assert "show the reply body above verbatim" in parsed["body"]
 
 
-def test_send_via_workbench_uses_autoreply_envelope(monkeypatch):
+def test_send_via_workbench_uses_autoreply_envelope(monkeypatch, capsys):
     payloads = []
 
     class FakeResponse:
@@ -176,7 +182,7 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch):
         18800,
         "akane",
         "zelda",
-        "Please review the queue fix.",
+        "Please review the queue fix.\nKeep this exact line.",
         "HASHI1",
         expected_instance="HASHI1",
     )
@@ -184,6 +190,30 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch):
     assert payloads[0]["agent"] == "akane"
     assert payloads[0]["text"].startswith("[hchat from zelda@HASHI1] HChat protocol note:")
     assert "Do not run hchat_send.py" in payloads[0]["text"]
+    output = capsys.readouterr().out
+    assert "Hchat queued" in output
+    assert "Message:\nPlease review the queue fix.\nKeep this exact line." in output
+
+
+def test_hchat_cli_failure_shows_original_body(monkeypatch, capsys):
+    monkeypatch.setattr(hchat_send, "send_hchat", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hchat_send.py",
+            "--to",
+            "akane",
+            "--from",
+            "zelda",
+            "--text",
+            "Please review.\nKeep this exact line.",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        hchat_send.main()
+    assert "Message:\nPlease review.\nKeep this exact line." in capsys.readouterr().err
 
 
 def test_probe_http_returns_false_on_unexpected_exception(monkeypatch):

@@ -321,6 +321,9 @@ async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
     assert "[HCHAT TASK]" in enqueued[0]["prompt"]
     assert "--to akane --from zelda" in enqueued[0]["prompt"]
     assert str(Path("tools") / "hchat_send.py") in enqueued[0]["prompt"]
+    assert "show the exact message body passed to --text" in enqueued[0]["prompt"]
+    assert "'queued' means the destination accepted it" in enqueued[0]["prompt"]
+    assert "'sent' requires explicit terminal send success" in enqueued[0]["prompt"]
 
 
 @pytest.mark.asyncio
@@ -449,6 +452,8 @@ async def test_cmd_hchat_legacy_path_preserves_remote_target_in_prompt(tmp_path)
     assert enqueued[0]["source"] == "bridge:hchat"
     assert 'agent "rika@hashi2"' in enqueued[0]["prompt"]
     assert "--to rika@hashi2 --from zelda" in enqueued[0]["prompt"]
+    assert "show the exact message body passed to --text" in enqueued[0]["prompt"]
+    assert "failed command must be reported as failed" in enqueued[0]["prompt"]
 
 
 @pytest.mark.asyncio
@@ -625,13 +630,49 @@ async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
         completion_path="foreground",
     )
 
-    assert result.visible_text == "I sent Akane the plan."
+    assert result.visible_text == (
+        "🟡 Hchat queued for akane.\n\n"
+        "Message:\n"
+        "Please review the plan."
+    )
     assert sender_calls == [("akane", "zelda", "Please review the plan.", {})]
     assert listener_payloads[0]["success"] is True
-    assert listener_payloads[0]["text"] == "I sent Akane the plan."
+    assert listener_payloads[0]["text"] == result.visible_text
     assert listener_payloads[0]["hchat_draft_parsed"]["target"] == "akane"
     assert listener_payloads[0]["hchat_payload_final"] == "Please review the plan."
-    assert listener_payloads[0]["hchat_delivery_status"] == "delivered"
+    assert listener_payloads[0]["hchat_delivery_status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_hchat_draft_failure_shows_original_body_and_failure(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    listener_payloads = []
+    runtime.register_request_listener = (
+        FlexibleAgentRuntime.register_request_listener.__get__(
+            runtime, FlexibleAgentRuntime
+        )
+    )
+    runtime.register_request_listener(
+        "req-001", lambda payload: listener_payloads.append(payload)
+    )
+    runtime._hchat_draft_sender = lambda *args, **kwargs: False
+    item = _queued_request_from("bridge:hchat-draft")
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw='{"target": "akane", "message": "Please review the plan."}',
+        completion_path="foreground",
+    )
+
+    assert result.visible_text == (
+        "❌ Hchat delivery failed for akane.\n\n"
+        "Message:\n"
+        "Please review the plan.\n\n"
+        "Reason: send_hchat returned false"
+    )
+    assert listener_payloads[0]["success"] is False
+    assert listener_payloads[0]["hchat_delivery_status"] == "failed"
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,9 @@ from tools.hchat_send import (
     _split_target_address,
 )
 
+_TERMINAL_SUCCESS_STATES = frozenset({"completed", "reply_sent"})
+_FAILURE_STATES = frozenset({"abandoned_after_restart", "failed", "reply_failed"})
+
 
 def _build_request_headers(
     *,
@@ -387,6 +390,36 @@ def _cancel_staged_attachments(
         print(f"⚠️  Failed to cancel staged uploads on server: {exc}", file=sys.stderr)
 
 
+def _delivery_disposition(result: dict) -> str:
+    if not isinstance(result, dict):
+        return "failed"
+    state = str(result.get("state") or "accepted").strip().lower()
+    if not result.get("ok") or state in _FAILURE_STATES:
+        return "failed"
+    if state in _TERMINAL_SUCCESS_STATES:
+        return "sent"
+    return "queued"
+
+
+def _print_delivery_receipt(
+    *,
+    result: dict,
+    from_agent: str,
+    target: str,
+    text: str,
+) -> None:
+    disposition = _delivery_disposition(result)
+    stream = sys.stderr if disposition == "failed" else sys.stdout
+    if disposition == "sent":
+        title = "✅ Protocol terminal message sent"
+    elif disposition == "queued":
+        title = "🟡 Protocol message queued"
+    else:
+        title = "❌ Protocol message failed"
+    print(f"{title}: {from_agent} → {target}", file=stream)
+    print(f"   Message:\n{text}", file=stream)
+
+
 def send_protocol_message(
     target: str,
     from_agent: str,
@@ -470,7 +503,12 @@ def send_protocol_message(
             result=result,
             sidecar_base_url=local_sidecar_base_url,
         )
-        print(f"✅ Protocol message delivered: {from_agent} → {to_agent}@{target_instance}")
+        _print_delivery_receipt(
+            result=result,
+            from_agent=from_agent,
+            target=f"{to_agent}@{target_instance}",
+            text=text,
+        )
         print(f"   message_id: {payload['message_id']}")
         print(f"   conversation_id: {payload['conversation_id']}")
         print(f"   state: {result.get('state', 'accepted')}")
@@ -478,6 +516,12 @@ def send_protocol_message(
             print(f"   attachments: {len(attachments)}")
         return True
     _record_outbound_correlation(payload, state="failed", result=result, sidecar_base_url=local_sidecar_base_url)
+    _print_delivery_receipt(
+        result=result,
+        from_agent=from_agent,
+        target=f"{to_agent}@{target_instance}",
+        text=text,
+    )
     body = result.get("body") if isinstance(result.get("body"), dict) else {}
     if str(body.get("code") or "") == "local_enqueue_failed":
         print(
@@ -485,7 +529,7 @@ def send_protocol_message(
             file=sys.stderr,
         )
     print(f"❌ Delivery result: {format_delivery_result(result)}", file=sys.stderr)
-    print(f"❌ Protocol message failed: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
+    print(f"   Response: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
     return False
 
 

@@ -2515,7 +2515,9 @@ def test_flex_hchat_cross_instance_reply_is_tagged(monkeypatch):
     assert sent["to_agent"] == "rika"
     assert sent["from_agent"] == "sakura"
     assert sent["target_instance"] == "HASHI2"
-    assert sent["text"] == "[hchat reply from sakura] Roger that"
+    assert sent["text"].startswith("[hchat reply from sakura] Roger that\n\n")
+    assert "show the reply body above verbatim" in sent["text"]
+    assert sent["text"].count("[hchat reply from sakura]") == 1
 
 
 def test_flex_hchat_reply_body_is_not_replied_again(monkeypatch):
@@ -2730,9 +2732,25 @@ def test_protocol_message_prompt_forbids_side_channel_ack():
         {"text": "please inspect this"},
     )
 
+    assert "System exchange message from rika@HASHI2:\nplease inspect this" in prompt
     assert "respond once" in prompt
     assert "Do not send Hchat" in prompt
     assert "protocol returns this response automatically" in prompt
+
+
+def test_protocol_terminal_reply_prompt_requires_verbatim_body_presentation():
+    manager = ProtocolManager.__new__(ProtocolManager)
+    body = "Review complete.\n\n- one\n- two"
+
+    prompt = manager._render_remote_reply_prompt(
+        "rika",
+        "HASHI2",
+        {"text": body},
+    )
+
+    assert prompt.startswith(f"System exchange reply from rika@HASHI2:\n{body}\n\n")
+    assert "show the reply body above verbatim in your normal assistant response" in prompt
+    assert "do not answer the peer" in prompt.lower()
 
 
 def test_agent_reply_marks_existing_correlation_terminal(tmp_path):
