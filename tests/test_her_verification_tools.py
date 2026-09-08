@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
 from tools import her_verification
 from tools.registry import ToolRegistry
+
+
+def _run_git(repo, *args: str) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _initialize_git_repo(repo) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    _run_git(repo, "init", "--quiet")
+    _run_git(repo, "config", "user.email", "tests@hashi.local")
+    _run_git(repo, "config", "user.name", "HASHI tests")
 
 
 def test_verification_tools_have_truthful_registry_safety_metadata(tmp_path):
@@ -30,8 +48,11 @@ def test_verification_tools_have_truthful_registry_safety_metadata(tmp_path):
 async def test_workspace_inspection_is_read_only_and_snapshot_detects_real_drift(
     tmp_path,
 ):
+    _initialize_git_repo(tmp_path)
     tracked = tmp_path / "sample.txt"
     tracked.write_text("alpha\n", encoding="utf-8")
+    _run_git(tmp_path, "add", "sample.txt")
+    _run_git(tmp_path, "commit", "--quiet", "-m", "initial")
     before = await her_verification.execute_workspace_inspect(
         {"operation": "snapshot"}, workspace_dir=tmp_path
     )
@@ -48,13 +69,49 @@ async def test_workspace_inspection_is_read_only_and_snapshot_detects_real_drift
 
     assert search.output == "1:alpha\n"
     assert json.loads(hashed.output)["sha256"]
+    assert before.details["vcs"] == "git"
     assert before.details["snapshot_sha256"] == unchanged.details["snapshot_sha256"]
 
-    tracked.write_text("beta\n", encoding="utf-8")
+    tracked.write_text("expanded\n", encoding="utf-8")
     changed = await her_verification.execute_workspace_inspect(
         {"operation": "snapshot"}, workspace_dir=tmp_path
     )
     assert changed.details["snapshot_sha256"] != before.details["snapshot_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_snapshot_detects_same_size_drift_in_ignored_nested_workspace(
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    _initialize_git_repo(repo)
+    (repo / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    (repo / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    _run_git(repo, "add", ".gitignore", "tracked.txt")
+    _run_git(repo, "commit", "--quiet", "-m", "initial")
+
+    workspace = repo / "ignored" / "nested-workspace"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "result.txt"
+    before_content = b"alpha\n"
+    after_content = b"bravo\n"
+    assert len(before_content) == len(after_content)
+    artifact.write_bytes(before_content)
+
+    before = await her_verification.execute_workspace_inspect(
+        {"operation": "snapshot"}, workspace_dir=workspace
+    )
+    unchanged = await her_verification.execute_workspace_inspect(
+        {"operation": "snapshot"}, workspace_dir=workspace
+    )
+    artifact.write_bytes(after_content)
+    changed = await her_verification.execute_workspace_inspect(
+        {"operation": "snapshot"}, workspace_dir=workspace
+    )
+
+    assert before.details["snapshot_sha256"] == unchanged.details["snapshot_sha256"]
+    assert changed.details["snapshot_sha256"] != before.details["snapshot_sha256"]
+    assert changed.details["vcs"] == "filesystem"
 
 
 @pytest.mark.asyncio

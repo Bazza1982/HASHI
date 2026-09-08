@@ -994,7 +994,12 @@ current workspace state. It cannot remediate, contact the user, or widen its
 own tool set. Its delegated catalogue may include:
 
 - `workspace_inspect` for bounded status, diff, search, hash, artifact, and
-  before/after snapshot evidence;
+  before/after snapshot evidence. A normal Git workspace uses HEAD, status,
+  staged and unstaged diffs, plus content hashes for untracked files. When the
+  selected review root is itself excluded by Git ignore rules, snapshotting
+  uses the existing bounded filesystem content hash rooted at that workspace;
+  Git's intentionally empty view must not hide content changes, including
+  same-size replacements;
 - `verification_run` for a configured recipe or direct process `argv`. Commands
   run in the authoritative current workspace without copying or sandboxing it.
   They inherit the HASHI process identity, filesystem access, environment,

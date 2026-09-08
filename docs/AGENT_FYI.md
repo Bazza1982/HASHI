@@ -142,6 +142,12 @@ settings. `/effort` means HER execution mode on HER and model effort elsewhere.
 Use the selected Engine/provider's actual capability choices rather than a
 remembered global list. `/habit` manages the default-off HER Habit/Meditation path.
 
+HER Review workspace snapshots use Git evidence for normal Git workspaces. If
+the selected workspace root is itself Git-ignored, they use the same bounded
+filesystem content hash used outside Git, so an ignored parent cannot hide an
+equal-size content change. Snapshot stability proves only that the covered
+workspace bytes and Git evidence stayed stable between those observations.
+
 ## Conversation, memory and recovery
 
 - `/new` creates/selects a new HASHI Conversation Session; `/fresh` advances its

@@ -525,7 +525,10 @@ acceptance. The Review tool named `verification_run` remains a validation tool,
 not a Verification prompt or stage.
 
 `workspace_inspect` tests cover status, diff, bounded search, hashes, artifacts,
-path escape rejection, and snapshot drift. Review `verification_run` tests
+path escape rejection, and snapshot drift. Snapshot coverage must exercise both
+a normal Git workspace and a nested workspace whose root is Git-ignored,
+including an equal-size content replacement that timestamps or byte counts
+alone cannot distinguish. Review `verification_run` tests
 prove configured recipes and direct argv commands run in the current workspace
 without a copy or implicit shell, with the documented timeout and inherited
 runtime authority.

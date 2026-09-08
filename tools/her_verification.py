@@ -110,7 +110,21 @@ def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
     except ValueError:
         return None
 
-    pathspec = ["--", str(relative_root)] if str(relative_root) != "." else []
+    relative_root_text = relative_root.as_posix()
+    if relative_root_text != ".":
+        ignored = _run_read_only(
+            ["git", "check-ignore", "--quiet", "--", relative_root_text],
+            cwd=git_root,
+        )
+        if ignored.returncode == 0:
+            # Git deliberately omits an ignored workspace from status, diff,
+            # and untracked-file output. Let the bounded filesystem snapshot
+            # hash the review root instead so content drift remains visible.
+            return None
+        if ignored.returncode != 1:
+            return None
+
+    pathspec = ["--", relative_root_text] if relative_root_text != "." else []
     head = _run_read_only(["git", "rev-parse", "HEAD"], cwd=git_root)
     status = _run_read_only(
         ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", *pathspec],
