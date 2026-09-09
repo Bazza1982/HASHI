@@ -44,6 +44,10 @@ Use these docs by intent:
 - **Understand HASHI architecture and terminology:** start with
   [HASHI System Architecture](../ARCHITECTURE.md), then read the PCM, PAO, HER
   v2, Frontend Connector, and engineering-layer specifications linked below.
+- **Choose release numbers and Portable labels:** use
+  [HASHI Versioning and Distribution Policy](HASHI_VERSIONING_POLICY.md), then
+  the [release checklist](RELEASE_CHECKLIST.md). The policy does not itself
+  bump the current candidate or prove runtime adoption.
 - **Understand the product direction:** start with
   [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md)
   and [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md).
@@ -73,6 +77,8 @@ line.
 ## Active (keep these current)
 
 ### Core references
+
+- [HASHI_VERSIONING_POLICY.md](HASHI_VERSIONING_POLICY.md) — accepted Core/functional/maintenance numbering, pre-release maturity, Portable build identity, compatibility evidence, and prospective adoption boundary
 - [HASHI1_RELEASE_PREFLIGHT_2026-09-08.md](HASHI1_RELEASE_PREFLIGHT_2026-09-08.md) — HASHI1 unified-candidate delta, Core/ABI decision, local-config preservation, Codex READY and `/move` no-staging evidence, plus cold-adoption and rollback runbook
 - [HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md) — current HASHI3 live runtime/device-control receipts, completed gates, installed Browser/Computer components, and remaining operator-dependent canaries
 - [HASHI3_FUNCTION_WORKER_PAUSE_CHECKPOINT_2026-09-04.md](HASHI3_FUNCTION_WORKER_PAUSE_CHECKPOINT_2026-09-04.md) — superseded historical safe-pause snapshot retained for audit continuity

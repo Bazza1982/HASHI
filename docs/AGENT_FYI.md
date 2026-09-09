@@ -20,6 +20,12 @@ Reference updated: 2026-09-09. This orientation is neither a task queue,
 permission grant, nor live-adoption proof. `/fyi` reloads it and identifies the
 revision. Verify live status before claiming any Engine, model, tool, or route.
 
+Release naming follows the accepted [versioning policy](HASHI_VERSIONING_POLICY.md)
+and [release checklist](RELEASE_CHECKLIST.md). This is a prospective governance
+decision recorded in HASHI1, not a bump of the current candidate or proof of
+Portable updater support. Release labels, compatibility evidence, exact build
+identity, and running-generation adoption remain separate facts.
+
 Codex token backfill uses the shared metering table. Missing prices remain
 unknown and provider-reported costs are retained. Preview marks incomplete
 totals without inventing a delta. Review legacy event matching before real
