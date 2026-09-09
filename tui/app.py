@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 from rich.console import Group
 from rich.markdown import Markdown
@@ -15,12 +16,14 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.strip import Strip
 from textual.suggester import SuggestFromList
 from textual.widgets import Input, RichLog, Static
 
 from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
+from tui.clipboard import copy_to_windows_clipboard
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
 from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
 from tui.onboarding import (
@@ -31,6 +34,7 @@ from tui.onboarding import (
     write_config,
 )
 from tui.sounds import play_message_sound
+from tui.telegram_rendering import command_message_renderable
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +58,24 @@ TUI_COMMAND_HELP = {
     "quit": ("退出 TUI", "Exit the TUI"),
     "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
 }
+TUI_COMMAND_HELP["telegram"] = (
+    "\u67e5\u770b\u6216\u8bbe\u7f6e TUI Telegram \u955c\u50cf",
+    "Inspect or set TUI Telegram mirroring",
+)
 TUI_DISCOVERY_COMMANDS = ("/help", "/to", "/mode", "/model", "/backend")
 
 
 def markup(text: str) -> Text:
     """Render Rich markup explicitly before writing into RichLog."""
     return Text.from_markup(text)
+
+
+def _enabled_setting(value, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().casefold() not in {"0", "false", "no", "off"}
 
 
 def chat_message_renderable(role: str, prefix: str, body: str) -> Group:
@@ -125,6 +141,55 @@ class ChatHistory(RichLog):
         self.border_title = "Chat"
         self.wrap = True
 
+    def selection_updated(self, selection):
+        """Freeze follow-tail while the user is dragging a text selection."""
+
+        super().selection_updated(selection)
+        self.auto_scroll = selection is None
+
+    def _render_line(self, y: int, scroll_x: int, width: int) -> Strip:
+        """Render Rich content with Textual's screen selection style."""
+
+        # RichLog omits the per-cell selection offsets that Textual's newer
+        # Log widget supplies. Add them so mouse drags resolve to character
+        # positions rather than selecting the entire widget as one block.
+        line = super()._render_line(y, scroll_x, width).apply_offsets(scroll_x, y)
+        selection = self.text_selection
+        if selection is None or (span := selection.get_span(y)) is None:
+            return line
+        start, end = span
+        visible_start = max(0, start - scroll_x)
+        visible_end = width if end == -1 else min(width, end - scroll_x)
+        if visible_end <= visible_start:
+            return line
+        selection_style = self.screen.get_component_rich_style("screen--selection")
+        return Strip.join(
+            (
+                line.crop(0, visible_start),
+                line.crop(visible_start, visible_end).apply_style(selection_style),
+                line.crop(visible_end, width),
+            )
+        )
+
+    def get_selection(self, selection):
+        """Extract selected text from RichLog's rendered line buffer.
+
+        Textual's generic widget implementation asks ``render()`` for a text
+        visual. ``RichLog`` renders through ``render_line()`` instead, so its
+        inherited implementation sees a diagnostic panel and returns no text.
+        Keep the visual cell widths while extracting, then remove padding that
+        RichLog adds to the end of each rendered row.
+        """
+
+        rendered = "\n".join(line.text for line in self.lines)
+        selected = selection.extract(rendered)
+        return "\n".join(row.rstrip() for row in selected.splitlines()), "\n"
+
+    def resume_auto_scroll(self) -> None:
+        self.auto_scroll = True
+        if self.is_mounted:
+            self.scroll_end(animate=False, immediate=False, x_axis=False)
+
 
 class ChatInput(Input):
     """Single-line input for sending messages."""
@@ -177,12 +242,80 @@ class CommandPreview(Static):
         self.display = False
 
 
+class TypingIndicator(Static):
+    """Ephemeral, Run-bound TUI queue/typing projection."""
+
+    DEFAULT_CSS = """
+    TypingIndicator {
+        display: none;
+        height: 1;
+        padding: 0 1;
+        background: #091722;
+        color: #9be7ff;
+    }
+    """
+
+    _FRAMES = ("\u2026", "\u00b7", "\u00b7\u00b7", "\u00b7\u00b7\u00b7")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__("", *args, **kwargs)
+        self._agent = ""
+        self._language = "en"
+        self._phase = "idle"
+        self._frame = 0
+
+    def on_mount(self):
+        self.set_interval(0.4, self._advance)
+
+    def show_run(self, *, agent: str, phase: str, language: str) -> None:
+        self._agent = str(agent or "Agent")
+        self._language = "zh" if language == "zh" else "en"
+        self._phase = "running" if phase == "running" else "queued"
+        self._frame = 0
+        self.display = True
+        self._render_state()
+
+    def clear_run(self) -> None:
+        self._phase = "idle"
+        self._agent = ""
+        self.display = False
+        self.update(Text(""))
+
+    def refresh_language(self, language: str) -> None:
+        self._language = "zh" if language == "zh" else "en"
+        if self._phase != "idle":
+            self._render_state()
+
+    def _advance(self) -> None:
+        if self._phase != "running" or not self.display:
+            return
+        self._frame = (self._frame + 1) % len(self._FRAMES)
+        self._render_state()
+
+    def _render_state(self) -> None:
+        if self._phase == "queued":
+            value = (
+                f"\u5df2\u6392\u961f\uff0c\u7b49\u5f85 {self._agent}\u2026"
+                if self._language == "zh"
+                else f"Queued \u00b7 waiting for {self._agent}\u2026"
+            )
+        else:
+            suffix = self._FRAMES[self._frame]
+            value = (
+                f"{self._agent} \u6b63\u5728\u8f93\u5165{suffix}"
+                if self._language == "zh"
+                else f"{self._agent} is typing{suffix}"
+            )
+        self.update(Text(value, style="italic #9be7ff"))
+
+
 class FooterInfoBox(Static):
-    """Compact footer showing only the active connection context."""
+    """Compact footer backed only by authoritative runtime/API facts."""
 
     DEFAULT_CSS = """
     FooterInfoBox {
-        height: 3;
+        height: auto;
+        min-height: 4;
         background: #050b12;
         color: #dff6ff;
         border: solid #2a5b82;
@@ -209,22 +342,103 @@ class FooterInfoBox(Static):
         current_agent: str | None = None,
         instance_id: str = "",
         language: str = "en",
+        metadata: dict | None = None,
+        telegram_mirror: bool = True,
     ):
         self._language = language
-        icon = "✅" if gateway_ok else "❌"
+        facts = dict(metadata or {})
+        presentation = facts.get("presentation_status")
+        presentation = dict(presentation) if isinstance(presentation, dict) else {}
+        labels = (
+            {
+                "instance": "实例",
+                "agent": "Agent",
+                "engine": "Engine",
+                "model": "模型",
+                "provider": "模型提供商",
+                "route": "路由",
+                "effort": "推理强度",
+                "think": "Think",
+                "verbose": "Verbose",
+                "commentary": "Commentary",
+                "mirror": "TG 镜像",
+            }
+            if language == "zh"
+            else {
+                "instance": "Instance",
+                "agent": "Agent",
+                "engine": "Engine",
+                "model": "Model",
+                "provider": "Provider",
+                "route": "Route",
+                "effort": "Effort",
+                "think": "Think",
+                "verbose": "Verbose",
+                "commentary": "Commentary",
+                "mirror": "TG mirror",
+            }
+        )
+        display_name = str(facts.get("display_name") or agent or "").strip()
+        agent_id = str(facts.get("id") or facts.get("name") or current_agent or "").strip()
+        engine = str(
+            presentation.get("engine")
+            or facts.get("active_backend")
+            or facts.get("engine")
+            or backend
+            or ""
+        ).strip()
         no_agent = "未选择 Agent" if language == "zh" else "No agent"
-        parts = [icon, instance_id or "HASHI", agent or no_agent]
-        if backend:
-            parts.append(backend)
-        if language == "zh":
-            parts.append("API 已连接" if gateway_ok else "API 离线")
+        agent_label = display_name or agent_id or no_agent
+        if agent_id and display_name and agent_id != display_name:
+            agent_label = f"{display_name} ({agent_id})"
+        first = [
+            "✅" if gateway_ok else "❌",
+            f"{labels['instance']} {instance_id or 'HASHI'}",
+            f"{labels['agent']} {agent_label}",
+        ]
+        if engine:
+            first.append(f"{labels['engine']} {engine}")
+
+        second: list[str] = []
+        her = presentation.get("her_v2")
+        if engine == "her-v2" and isinstance(her, dict):
+            quick = her.get("quick") if isinstance(her.get("quick"), dict) else {}
+            pro = her.get("pro") if isinstance(her.get("pro"), dict) else {}
+            second.append(
+                f"{labels['model']} Q:{quick.get('model') or '?'} / P:{pro.get('model') or '?'}"
+            )
+            second.append(
+                f"{labels['provider']} Q:{quick.get('provider') or '?'} / P:{pro.get('provider') or '?'}"
+            )
+            if her.get("routing_mode"):
+                second.append(f"{labels['route']} {her['routing_mode']}")
         else:
-            parts.append("API connected" if gateway_ok else "API offline")
-        self._status_line = " · ".join(parts)
+            model = str(presentation.get("model") or facts.get("model") or "").strip()
+            if model:
+                second.append(f"{labels['model']} {model}")
+
+        def switch(name: str) -> str:
+            value = presentation.get(name)
+            return "ON" if value is True else "OFF" if value is False else "n/a"
+
+        effort = str(presentation.get("effort") or "n/a")
+        second.extend(
+            [
+                f"{labels['effort']} {effort}",
+                f"{labels['think']} {switch('think')}",
+                f"{labels['verbose']} {switch('verbose')}",
+                f"{labels['commentary']} {switch('commentary')}",
+                "API 已连接" if language == "zh" and gateway_ok else
+                "API 离线" if language == "zh" else
+                "API connected" if gateway_ok else "API offline",
+                f"{labels['mirror']} {'ON' if telegram_mirror else 'OFF'}",
+            ]
+        )
+        self._status_line = " · ".join(first) + "\n" + " · ".join(second)
         self._refresh_footer()
 
     def _refresh_footer(self):
-        self._content = markup(f"[bold #63ffd9]{self._status_line}[/]")
+        self._content = Text(self._status_line, style="bold #63ffd9")
         self.refresh()
 
     def render(self) -> Text:
@@ -338,6 +552,10 @@ class HASHITuiApp(App):
         background: #050b12;
         color: #dff6ff;
     }
+    Screen > .screen--selection {
+        background: #ffdf6b;
+        color: #050b12;
+    }
     #main-container {
         height: 1fr;
         padding: 0 1 1 1;
@@ -351,7 +569,8 @@ class HASHITuiApp(App):
         min-height: 10;
     }
     #footer-info-box {
-        height: 3;
+        height: auto;
+        min-height: 4;
     }
     """
 
@@ -385,6 +604,12 @@ class HASHITuiApp(App):
         self._chat_targets: list[str] = []
         self.current_agent_display: str = ""
         self.current_backend: str = ""
+        self._current_agent_metadata: dict = {}
+        self._tui_client_id = f"tui-{uuid4().hex}"
+        self._active_run_ref: tuple[int, str, str, str, str] | None = None
+        self._active_run_phase = "idle"
+        self._submission_sequence = 0
+        self._latest_submission_ref: tuple[int, str, int] | None = None
         preferences = self._load_tui_preferences()
         requested_layout = str(
             os.environ.get("HASHI_TUI_LAYOUT") or preferences.get("layout") or "chat"
@@ -401,6 +626,17 @@ class HASHITuiApp(App):
             self._sound_enabled = requested_sounds.strip().casefold() not in {
                 "0", "false", "no", "off",
             }
+        self._tui_typing_enabled = _enabled_setting(
+            os.environ.get("HASHI_TUI_TYPING", preferences.get("typing")),
+            default=True,
+        )
+        self._telegram_mirror_enabled = _enabled_setting(
+            os.environ.get(
+                "HASHI_TUI_TELEGRAM_MIRROR",
+                preferences.get("telegram_mirror"),
+            ),
+            default=True,
+        )
         command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
         command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._command_names = list(dict.fromkeys(command_names))
@@ -448,6 +684,13 @@ class HASHITuiApp(App):
             return candidate
         return Path.cwd()
 
+    def copy_to_clipboard(self, text: str) -> None:
+        """Use Textual OSC 52 and the native Windows clipboard when present."""
+
+        super().copy_to_clipboard(text)
+        if not copy_to_windows_clipboard(text):
+            logger.debug("Native Windows clipboard adapter was unavailable; OSC 52 was used")
+
     @property
     def _preferences_path(self) -> Path:
         return self.bridge_home / "state" / "tui_preferences.json"
@@ -468,6 +711,8 @@ class HASHITuiApp(App):
                         "language": self._ui_language,
                         "layout": self._layout_mode,
                         "sounds": self._sound_enabled,
+                        "typing": self._tui_typing_enabled,
+                        "telegram_mirror": self._telegram_mirror_enabled,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -482,6 +727,7 @@ class HASHITuiApp(App):
             yield LogPanel(id="log-panel")
             with Vertical(id="chat-container"):
                 yield ChatHistory(id="chat-history")
+                yield TypingIndicator(id="typing-indicator")
                 yield ChatInput(
                     placeholder="Message · /help · /to <agent> · /instance",
                     suggester=SuggestFromList(self._suggestion_names, case_sensitive=False),
@@ -800,7 +1046,7 @@ class HASHITuiApp(App):
         if generation != self._connection_generation or client is not self.api:
             logger.debug("Discarded stale TUI agent load: generation=%s", generation)
             return
-        self._agents_cache = agents
+        self._adopt_agent_directory(agents)
         self._update_status_bar()
         if agents and not self.current_agent:
             # Auto-select first active agent
@@ -811,6 +1057,24 @@ class HASHITuiApp(App):
             if not self.current_agent and agents:
                 self._select_agent(agents[0], client=client, generation=generation)
 
+    def _adopt_agent_directory(self, agents: list[dict]) -> None:
+        self._agents_cache = list(agents)
+        if not self.current_agent:
+            return
+        selected = next(
+            (item for item in agents if item.get("name") == self.current_agent),
+            None,
+        )
+        if selected is None:
+            return
+        self._current_agent_metadata = dict(selected)
+        self.current_agent_display = str(
+            selected.get("display_name") or self.current_agent
+        )
+        self.current_backend = str(
+            selected.get("active_backend") or selected.get("engine") or ""
+        )
+
     def _select_agent(
         self,
         agent_data: dict,
@@ -820,10 +1084,15 @@ class HASHITuiApp(App):
     ):
         client = client or self.api
         generation = self._connection_generation if generation is None else generation
-        self.current_agent = agent_data.get("name", "")
+        selected_name = agent_data.get("name", "")
+        if selected_name != self.current_agent:
+            self._clear_typing_indicator()
+            self._latest_submission_ref = None
+        self.current_agent = selected_name
         self._chat_targets = [self.current_agent] if self.current_agent else []
         self.current_agent_display = agent_data.get("display_name", self.current_agent)
         self.current_backend = agent_data.get("active_backend", agent_data.get("engine", ""))
+        self._current_agent_metadata = dict(agent_data)
         client.reset_offset(self.current_agent)
         chat = self.query_one("#chat-history", ChatHistory)
         emoji = agent_data.get("emoji", "")
@@ -855,7 +1124,13 @@ class HASHITuiApp(App):
         if generation != self._connection_generation or client is not self.api:
             logger.info("Skipped stale onboarding wakeup: agent=%s generation=%s", agent, generation)
             return
-        await client.send_chat(agent, prompt)
+        await client.send_chat(
+            agent,
+            prompt,
+            client_id=self._tui_client_id,
+            telegram_mirror=self._telegram_mirror_enabled,
+            ui_locale=self._ui_language,
+        )
 
     def _render_transcript_message(self, msg: dict):
         role = msg.get("role", "?")
@@ -874,6 +1149,7 @@ class HASHITuiApp(App):
             chat.write(chat_message_renderable("user", "You", text))
         elif role == "assistant":
             chat.write(chat_message_renderable("assistant", prefix, text))
+            self._clear_typing_for_transcript_message(msg)
 
     @work()
     async def _load_initial_transcript(
@@ -914,7 +1190,7 @@ class HASHITuiApp(App):
                     if self._agent_refresh_tick == 0:
                         agents = await client.list_agents()
                         if generation == self._connection_generation and client is self.api:
-                            self._agents_cache = agents
+                            self._adopt_agent_directory(agents)
                             self._update_status_bar()
                     poll_targets = self._chat_targets[:]
                     if self.current_agent and self.current_agent not in poll_targets:
@@ -991,6 +1267,9 @@ class HASHITuiApp(App):
         if normalized == "/agents":
             await self._handle_agents_cmd()
             return
+        if normalized == "/telegram" or normalized.startswith("/telegram "):
+            self._handle_telegram_cmd(normalized)
+            return
         if normalized == "/tui" or normalized.startswith("/tui "):
             self._handle_tui_cmd(normalized)
             return
@@ -1004,7 +1283,10 @@ class HASHITuiApp(App):
             await self._handle_instance_cmd(normalized)
             return
         if normalized == "/clear":
-            self.query_one("#chat-history", ChatHistory).clear()
+            self.clear_selection()
+            chat_history = self.query_one("#chat-history", ChatHistory)
+            chat_history.clear()
+            chat_history.resume_auto_scroll()
             return
         if normalized == "/quit":
             await self._shutdown()
@@ -1025,7 +1307,13 @@ class HASHITuiApp(App):
         if self.current_agent_display == "ALL":
             # Broadcast to all active agents
             self._play_message_sound("sent")
-            self._send_broadcast(normalized, self.api, self._connection_generation)
+            self._send_broadcast(
+                normalized,
+                self.api,
+                self._connection_generation,
+                self._telegram_mirror_enabled,
+                self._ui_language,
+            )
             return
 
         if not self.current_agent:
@@ -1033,7 +1321,22 @@ class HASHITuiApp(App):
             return
         else:
             self._play_message_sound("sent")
-            self._send_message(normalized, self.current_agent, self.api, self._connection_generation)
+            self._submission_sequence += 1
+            submission_ref = (
+                self._connection_generation,
+                self.current_agent,
+                self._submission_sequence,
+            )
+            self._latest_submission_ref = submission_ref
+            self._send_message(
+                normalized,
+                self.current_agent,
+                self.api,
+                self._connection_generation,
+                self._telegram_mirror_enabled,
+                self._ui_language,
+                submission_ref,
+            )
 
     def on_input_changed(self, event: Input.Changed):
         """Show a Codex-style palette for an incomplete slash command."""
@@ -1143,6 +1446,12 @@ class HASHITuiApp(App):
     def on_key(self, event):
         """Navigate the visible command palette without affecting ordinary input."""
 
+        if event.key == "escape" and self.screen.get_selected_text() is not None:
+            self.clear_selection()
+            self.query_one("#chat-history", ChatHistory).resume_auto_scroll()
+            event.stop()
+            event.prevent_default()
+            return
         input_box = self.query_one("#chat-input", ChatInput)
         if self.focused is not input_box or not self._command_matches:
             return
@@ -1164,6 +1473,13 @@ class HASHITuiApp(App):
     def _handle_tui_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)
         parts = text.split()
+        if len(parts) >= 2 and parts[1].casefold() == "typing":
+            self._handle_tui_typing_cmd(parts[2:])
+            return
+        if len(parts) >= 2 and parts[1].casefold() == "telegram":
+            suffix = " ".join(parts[2:])
+            self._handle_telegram_cmd("/telegram" + (f" {suffix}" if suffix else ""))
+            return
         if len(parts) == 1:
             current = "中文" if self._ui_language == "zh" else "English"
             sound = (
@@ -1171,9 +1487,13 @@ class HASHITuiApp(App):
                 if self._ui_language == "zh"
                 else ("on" if self._sound_enabled else "off")
             )
+            typing = "ON" if self._tui_typing_enabled else "OFF"
+            mirror = "ON" if self._telegram_mirror_enabled else "OFF"
             chat.write(markup(
-                f"[#c7ff8a]TUI language · {current} · sound · {sound}[/]\n"
-                "[#9be7ff]/tui language zh|en · /tui sound on|off|test[/]"
+                f"[#c7ff8a]TUI language · {current} · sound · {sound} · "
+                f"typing · {typing} · TG mirror · {mirror}[/]\n"
+                "[#9be7ff]/tui language zh|en · /tui sound on|off|test · "
+                "/tui typing on|off · /tui telegram on|off[/]"
             ))
             return
         if len(parts) == 2 and parts[1].casefold() in {"language", "lang"}:
@@ -1249,8 +1569,67 @@ class HASHITuiApp(App):
                 chat.write(markup(f"[#63ffd9]{message}[/]"))
                 return
         chat.write(markup(
-            "[#ff7a7a]Use /tui language zh|en or /tui sound on|off|test.[/]"
+            "[#ff7a7a]Use /tui language zh|en, /tui sound on|off|test, "
+            "/tui typing on|off, or /tui telegram on|off.[/]"
         ))
+
+    def _handle_tui_typing_cmd(self, arguments: list[str]) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        if not arguments:
+            state = "ON" if self._tui_typing_enabled else "OFF"
+            message = (
+                f"TUI \u8f93\u5165\u63d0\u793a {state}\u3002\u8be5\u8bbe\u7f6e\u4e0e Telegram /typing \u76f8\u4e92\u72ec\u7acb\u3002"
+                if self._ui_language == "zh"
+                else f"TUI typing indicator {state}. This is independent of Telegram /typing."
+            )
+            chat.write(Text(message, style="#c7ff8a"))
+            return
+        action = arguments[0].casefold()
+        if len(arguments) != 1 or action not in {"on", "off"}:
+            chat.write(Text("Use /tui typing on|off.", style="#ff7a7a"))
+            return
+        self._tui_typing_enabled = action == "on"
+        self._save_tui_preferences()
+        self._refresh_typing_indicator()
+        message = (
+            f"\u2713 TUI \u8f93\u5165\u63d0\u793a\u5df2{'\u5f00\u542f' if self._tui_typing_enabled else '\u5173\u95ed'}\u3002"
+            if self._ui_language == "zh"
+            else f"\u2713 TUI typing indicator {'enabled' if self._tui_typing_enabled else 'disabled'}."
+        )
+        chat.write(Text(message, style="#63ffd9"))
+
+    def _handle_telegram_cmd(self, text: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split()
+        if len(parts) > 2 or (len(parts) == 2 and parts[1].casefold() not in {"on", "off"}):
+            chat.write(Text("Use /telegram on|off.", style="#ff7a7a"))
+            return
+        changed = len(parts) == 2
+        if changed:
+            self._telegram_mirror_enabled = parts[1].casefold() == "on"
+            self._save_tui_preferences()
+            self._update_status_bar()
+        state = "ON" if self._telegram_mirror_enabled else "OFF"
+        connector = self._current_agent_metadata.get("telegram_connected")
+        if self._ui_language == "zh":
+            connector_state = (
+                "已连接" if connector is True else "离线" if connector is False else "未知"
+            )
+            prefix = "\u2713 " if changed else ""
+            message = (
+                f"{prefix}TUI Telegram \u955c\u50cf {state}\uff08Bot {connector_state}\uff09\u3002"
+                "\u4ec5\u5f71\u54cd\u6b64 TUI \u4eca\u540e\u63d0\u4ea4\u7684 Run\uff1b\u5f53\u524d\u4f1a\u8bdd\u4ecd\u662f\u6b63\u5f0f\u5171\u4eab\u4f1a\u8bdd\uff0c\u4e0d\u8865\u53d1\u5386\u53f2\u5185\u5bb9\u3002"
+            )
+        else:
+            connector_state = (
+                "connected" if connector is True else "offline" if connector is False else "unknown"
+            )
+            prefix = "\u2713 " if changed else ""
+            message = (
+                f"{prefix}TUI Telegram mirror {state} (Bot {connector_state}). "
+                "This affects only future Runs submitted by this TUI; the Conversation remains shared and no history is replayed."
+            )
+        chat.write(Text(message, style="#63ffd9" if changed else "#c7ff8a"))
 
     def _play_message_sound(self, event: str) -> bool:
         return play_message_sound(event, enabled=self._sound_enabled)
@@ -1306,12 +1685,25 @@ class HASHITuiApp(App):
 `/clear`　Clear this view　　`/quit`　Exit
 
 Command prefixes autocomplete; unknown commands are never sent to an Agent. Use `/help zh` for Chinese."""
+        if language == "zh":
+            help_text += (
+                "\n\n`/tui typing on|off`\u3000\u8bbe\u7f6e TUI \u8f93\u5165\u63d0\u793a"
+                "\n`/telegram on|off`\u3000\u8bbe\u7f6e\u6b64 TUI \u4eca\u540e Run \u7684 Telegram \u955c\u50cf"
+            )
+        else:
+            help_text += (
+                "\n\n`/tui typing on|off`  Configure the TUI typing indicator"
+                "\n`/telegram on|off`  Configure Telegram mirroring for future Runs from this TUI"
+            )
         chat.write(chat_message_renderable("assistant", "HASHI", help_text))
 
     def _refresh_chrome(self):
         log = self.query_one("#log-panel", LogPanel)
         chat = self.query_one("#chat-history", ChatHistory)
         input_box = self.query_one("#chat-input", ChatInput)
+        self.query_one("#typing-indicator", TypingIndicator).refresh_language(
+            self._ui_language
+        )
         if self._ui_language == "zh":
             log.border_title = f"主机日志 · {self.launch_instance_id}（本机）"
             input_box.placeholder = "输入消息 · /help · /to <Agent> · /instance"
@@ -1392,26 +1784,66 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         agent: str,
         client: TuiApiClient,
         generation: int,
+        telegram_mirror: bool,
+        ui_locale: str,
+        submission_ref: tuple[int, str, int],
     ):
-        result = await client.send_chat(agent, text)
+        result = await client.send_chat(
+            agent,
+            text,
+            client_id=self._tui_client_id,
+            telegram_mirror=telegram_mirror,
+            ui_locale=ui_locale,
+        )
         if generation != self._connection_generation or client is not self.api:
             logger.info("TUI message completed on previous instance generation=%s agent=%s", generation, agent)
             return
-        if not result.get("ok", True) and "error" in result:
-            chat = self.query_one("#chat-history", ChatHistory)
-            chat.write(Text(f"Error ({agent}): {result['error']}", style="red"))
+
+        if result.get("slash_command"):
+            self._render_command_result(result, agent=agent)
+            if str(result.get("command") or "").casefold() in {"stop", "cancel"}:
+                self._clear_typing_indicator()
+            await self._refresh_runtime_state(client=client, generation=generation)
+            return
+
+        if not result.get("ok", True):
+            self._clear_typing_indicator()
+            error = str(result.get("error") or "Request was rejected")
+            self.query_one("#chat-history", ChatHistory).write(
+                Text(f"Error ({agent}): {error}", style="red")
+            )
             return
 
         session_id = str(result.get("session_id") or "").strip()
         run_id = str(result.get("run_id") or "").strip()
-        if not session_id or not run_id or client.proxied:
+        request_id = str(result.get("request_id") or "").strip()
+        if not session_id or not run_id:
+            logger.warning(
+                "TUI submission returned no trackable Run: agent=%s request=%s",
+                agent,
+                request_id or "missing",
+            )
+            if self._latest_submission_ref == submission_ref:
+                self._clear_typing_indicator()
+            return
+        if self._latest_submission_ref != submission_ref:
+            logger.debug("Ignored stale TUI Run indicator: submission=%s", submission_ref)
             return
 
-        while generation == self._connection_generation and client is self.api:
+        run_ref = (generation, agent, session_id, run_id, request_id)
+        self._set_typing_run(run_ref, phase="queued")
+        status_failures = 0
+
+        while self._active_run_ref == run_ref:
             status = await client.run_info(session_id, run_id)
-            if generation != self._connection_generation or client is not self.api:
+            if (
+                generation != self._connection_generation
+                or client is not self.api
+                or self._active_run_ref != run_ref
+            ):
                 return
             if not status.get("ok"):
+                status_failures += 1
                 logger.warning(
                     "TUI could not track submitted Run: agent=%s session=%s run=%s error=%s",
                     agent,
@@ -1419,7 +1851,19 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                     run_id,
                     status.get("error"),
                 )
+                if status_failures < 3:
+                    await asyncio.sleep(0.5)
+                    continue
+                self._clear_typing_indicator(run_ref)
+                self.query_one("#chat-history", ChatHistory).write(
+                    Text(
+                        f"Run status unavailable ({agent}): "
+                        f"{status.get('error') or 'unknown error'}",
+                        style="red",
+                    )
+                )
                 return
+            status_failures = 0
             run = status.get("run")
             state = (
                 str(run.get("state") or "").strip().casefold()
@@ -1431,8 +1875,95 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 if failure:
                     chat = self.query_one("#chat-history", ChatHistory)
                     chat.write(Text(f"Request failed ({agent}): {failure}", style="red"))
+                self._clear_typing_indicator(run_ref)
                 return
+            self._set_typing_run(
+                run_ref,
+                phase="running" if state == "running" else "queued",
+            )
             await asyncio.sleep(0.5)
+
+    def _render_command_result(self, result: dict, *, agent: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        messages = result.get("messages")
+        rendered = False
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict) or not str(message.get("text") or ""):
+                    continue
+                chat.write(command_message_renderable(message))
+                rendered = True
+        if not result.get("ok", True):
+            error = str(result.get("error") or "Command failed")
+            if not rendered or not any(
+                error in str(message.get("text") or "")
+                for message in messages or []
+                if isinstance(message, dict)
+            ):
+                chat.write(Text(f"Command failed ({agent}): {error}", style="red"))
+
+    async def _refresh_runtime_state(
+        self,
+        *,
+        client: TuiApiClient,
+        generation: int,
+    ) -> None:
+        agents = await client.list_agents()
+        if generation != self._connection_generation or client is not self.api:
+            return
+        self._adopt_agent_directory(agents)
+        self._update_status_bar()
+
+    def _set_typing_run(
+        self,
+        run_ref: tuple[int, str, str, str, str],
+        *,
+        phase: str,
+    ) -> None:
+        if run_ref[0] != self._connection_generation or run_ref[1] != self.current_agent:
+            return
+        self._active_run_ref = run_ref
+        self._active_run_phase = "running" if phase == "running" else "queued"
+        self._refresh_typing_indicator()
+
+    def _refresh_typing_indicator(self) -> None:
+        indicator = self.query_one("#typing-indicator", TypingIndicator)
+        run_ref = self._active_run_ref
+        if (
+            not self._tui_typing_enabled
+            or run_ref is None
+            or run_ref[0] != self._connection_generation
+            or run_ref[1] != self.current_agent
+        ):
+            indicator.clear_run()
+            return
+        indicator.show_run(
+            agent=self.current_agent_display or run_ref[1],
+            phase=self._active_run_phase,
+            language=self._ui_language,
+        )
+
+    def _clear_typing_indicator(
+        self,
+        run_ref: tuple[int, str, str, str, str] | None = None,
+    ) -> None:
+        if run_ref is not None and self._active_run_ref != run_ref:
+            return
+        self._active_run_ref = None
+        self._active_run_phase = "idle"
+        if self.is_mounted:
+            self.query_one("#typing-indicator", TypingIndicator).clear_run()
+
+    def _clear_typing_for_transcript_message(self, message: dict) -> None:
+        run_ref = self._active_run_ref
+        if run_ref is None:
+            return
+        message_run = str(message.get("run_id") or "").strip()
+        message_request = str(message.get("request_id") or "").strip()
+        if (message_run and message_run == run_ref[3]) or (
+            message_request and message_request == run_ref[4]
+        ):
+            self._clear_typing_indicator(run_ref)
 
     @work()
     async def _send_broadcast(
@@ -1440,11 +1971,19 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         text: str,
         client: TuiApiClient,
         generation: int,
+        telegram_mirror: bool,
+        ui_locale: str,
     ):
         agents = await client.list_agents()
         for a in agents:
             if a.get("is_active") or a.get("online"):
-                await client.send_chat(a["name"], text)
+                await client.send_chat(
+                    a["name"],
+                    text,
+                    client_id=self._tui_client_id,
+                    telegram_mirror=telegram_mirror,
+                    ui_locale=ui_locale,
+                )
         if generation != self._connection_generation:
             logger.info("TUI broadcast completed on previous instance generation=%s", generation)
 
@@ -1464,6 +2003,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
         target = parts[0].lower()
         if target == "all":
+            self._clear_typing_indicator()
+            self._latest_submission_ref = None
             # Multi-cast mode — just switch display; actual sending done in send
             active_targets = [
                 a["name"]
@@ -1474,6 +2015,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self._chat_targets = active_targets
             self.current_agent_display = "ALL"
             self.current_backend = ""
+            self._current_agent_metadata = {}
             chat.border_title = "Chat \u2014 \U0001f4e2 Broadcasting to ALL agents"
             chat.write(markup("[#63ffd9]\u2705 Broadcasting mode: messages will be sent to all active agents.[/]"))
             self._update_status_bar()
@@ -1599,6 +2141,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             agents = agent_result["agents"]
 
             previous_instance = self.current_instance_id
+            self._clear_typing_indicator()
+            self._latest_submission_ref = None
             self._connection_generation += 1
             generation = self._connection_generation
             self.api = candidate
@@ -1608,6 +2152,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self._chat_targets = []
             self.current_agent_display = ""
             self.current_backend = ""
+            self._current_agent_metadata = {}
             self._agents_cache = []
             self._agent_refresh_tick = 0
             chat.clear()
@@ -1645,6 +2190,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self.current_agent,
             self.current_instance_id,
             self._ui_language,
+            self._current_agent_metadata,
+            self._telegram_mirror_enabled,
         )
 
     # ── Actions ─────────────────────────────────────────────────────────
@@ -1666,6 +2213,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         await self._shutdown()
 
     async def _shutdown(self):
+        self._clear_typing_indicator()
         if self._log_follow_task and not self._log_follow_task.done():
             self._log_follow_task.cancel()
         if self.bridge_proc and self.bridge_proc.returncode is None:

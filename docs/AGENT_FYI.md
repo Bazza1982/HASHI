@@ -1,8 +1,11 @@
 # HASHI Agent FYI
 
 Every admitted turn, including protocol/API/background work, requires visible
-delivery; legacy suppression flags cannot override it. Preserve destination
-authorization and terminal-reply rules. HChat exposes exact final payloads:
+delivery; legacy suppression flags cannot override it. The sole narrow
+projection exception is a validated, client-bound TUI
+`hashi.frontend-delivery` version 1 policy snapshotted for one Run. It may skip
+that Run's Telegram mirror but never its formal Conversation record or TUI
+result. Preserve destination authorization and terminal-reply rules. HChat exposes exact final payloads:
 admission is `queued`, while `sent` requires a confirmed Connector receipt.
 `reply_sent`/`completed` alone are not delivery proof, and failure wins over
 contradictory success flags. Terminal replies are verbatim and never create ACK
@@ -103,10 +106,25 @@ See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
 The built-in TUI completes entered slash-command prefixes from its displayed
 canonical matches and rejects unknown slash commands locally. Its sent/received
-sounds and language/layout preferences are local Connector presentation state;
-they do not alter a HASHI Conversation Session.
-The TUI compact connection bar intentionally omits working mode. Use `/mode`
-when the current mode is relevant.
+sounds, language/layout, typing indicator and default Telegram mirror choice are
+local Connector presentation state; they do not alter a HASHI Conversation
+Session. Unified command `messages` render immediately and are not transcript
+entries. Mouse selection pauses follow-tail; `Ctrl+C` copies the selection to
+the Windows clipboard and `Esc` clears it.
+
+`/telegram` and `/telegram on|off` inspect or change the current TUI's default;
+`/tui telegram on|off` is the explicit alias. The setting is snapshotted at
+submission for future TUI Runs only. Off means zero Telegram typing,
+commentary, final or error projection for that Run; it does not disconnect the
+Bot, create a private Session, affect another source/window, or cause later
+replay. `/tui typing on|off` controls only the local Run-fenced TUI indicator
+and is independent of Telegram `/typing`.
+
+The TUI connection footer uses live runtime `presentation_status`; offline
+unknown values remain unknown. Model Provider and structured Quick/Pro routing
+appear only for HER v2. It intentionally omits working mode. Use `/mode` when
+the current mode is relevant. Source presence is not live adoption proof;
+confirm the active Function generation/provenance on each instance.
 
 Distinguish Engine from Model Provider and HASHI Conversation from Engine
 Session. Frontend history is a projection, not another authoritative archive.

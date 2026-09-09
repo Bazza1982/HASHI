@@ -3629,6 +3629,48 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_tui_mirror_off_persists_final_without_any_telegram_delivery(monkeypatch):
+    runtime = _runtime()
+    item = _item(
+        prompt="TUI-only projection",
+        source="tui",
+        deliver_to_telegram=False,
+    )
+    outcomes = []
+    monkeypatch.setattr(
+        runtime_cross_session,
+        "record_turn_result",
+        lambda current_runtime, current_item, **fields: outcomes.append(fields),
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="canonical response"),
+        visible_text="canonical response",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert runtime.last_response["text"] == "canonical response"
+    assert not hasattr(runtime, "sent_message")
+    assert runtime.voice_replies == []
+    assert outcomes == [
+        {
+            "delivered": False,
+            "assistant_text": "canonical response",
+            "response": SimpleNamespace(text="canonical response"),
+            "completion_path": "foreground",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handle_success_delivery_records_failed_transport_outcome(monkeypatch):
     runtime = _runtime()
     item = _item(prompt="user text")

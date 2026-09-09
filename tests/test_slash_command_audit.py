@@ -175,6 +175,25 @@ async def test_execute_local_command_writes_success_audit(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_execute_local_command_honors_tui_locale_metadata(tmp_path):
+    from orchestrator import ui_language
+
+    class _LocaleRuntime(_Runtime):
+        async def cmd_status(self, update, context):
+            await update.message.reply_text(ui_language.current_locale())
+
+    result = await execute_local_command(
+        _LocaleRuntime(tmp_path),
+        "/status",
+        chat_id=99,
+        source_channel="tui",
+        session_metadata={"ui_locale": "zh-CN"},
+    )
+
+    assert result["messages"][0]["text"] == "zh-CN"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("voice_outcome", "expected_effect"),
     [

@@ -798,9 +798,15 @@ class FlexibleAgentRuntime:
         idempotency_key: str | None = None,
     ):
         # Agent turns are always observable, including legacy IPC callers that
-        # request hidden delivery. Keep the wire arguments for compatibility;
-        # enforce policy here in Functions before any admission/queue side effects.
-        deliver_to_telegram = True
+        # request hidden delivery.  The sole narrow exception is a complete,
+        # typed TUI per-Run delivery policy.  Resolve it before admission so the
+        # immutable QueuedRequest snapshots the choice for the full Turn.
+        from orchestrator.frontend_delivery import telegram_delivery_for_admission
+
+        deliver_to_telegram = telegram_delivery_for_admission(
+            source=source,
+            request_metadata=request_metadata,
+        )
         silent = False
         normalized_request_content = None
         manifest = ()
@@ -1300,6 +1306,8 @@ class FlexibleAgentRuntime:
         return "\n".join(parts)
 
     def get_runtime_metadata(self) -> dict:
+        from orchestrator.frontend_status import runtime_presentation_status
+
         delivery = telegram_delivery_failover.delivery_status_summary(self)
         display_policy = telegram_stream_policy.get_display_policy(self)
         return {
@@ -1328,6 +1336,7 @@ class FlexibleAgentRuntime:
                 "verbose": self._verbose,
                 "think": self._think,
             },
+            "presentation_status": runtime_presentation_status(self),
             "channels": {
                 "telegram": self.telegram_connected,
                 "workbench": True,

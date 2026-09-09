@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 import remote.api.server as remote_server
-from remote.api.server import create_app
+from orchestrator.frontend_delivery import tui_run_delivery_policy
+from remote.api.server import ProtocolTuiRequest, create_app
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import build_auth_headers
 from remote.terminal.executor import TerminalExecutor
@@ -180,3 +181,66 @@ def test_tui_proxy_allowlist_rejects_arbitrary_workbench_operation(tmp_path):
 
     assert response.status_code == 400
     assert response.json()["error"] == "operation_not_allowed"
+
+
+def test_tui_proxy_forwards_typed_run_delivery_policy_without_text_inference(
+    tmp_path,
+    monkeypatch,
+):
+    client, _token = _client(tmp_path)
+    captured = {}
+
+    def _forward(_url, payload, timeout=15):
+        captured.update(payload)
+        return {
+            "ok": True,
+            "target_instance": "HASHI2",
+            "result": {"ok": True, "request_id": "req-1"},
+        }
+
+    monkeypatch.setattr(remote_server, "_post_json_with_optional_hmac", _forward)
+    policy = tui_run_delivery_policy(
+        telegram_mirror=False,
+        client_id="tui-window-1",
+    )
+
+    response = client.post(
+        "/tui/proxy",
+        json={
+            "target_instance": "HASHI2",
+            "operation": "chat",
+            "agent": "akane",
+            "text": "the words do not encode policy",
+            "client_id": "tui-window-1",
+            "ui_locale": "zh-CN",
+            "delivery_policy": policy,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["delivery_policy"] == policy
+    assert captured["client_id"] == "tui-window-1"
+    assert captured["text"] == "the words do not encode policy"
+
+
+def test_tui_proxy_rejects_invalid_policy_and_accepts_typed_run_identity():
+    invalid = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="chat",
+        agent="akane",
+        text="hello",
+        client_id="tui-window-1",
+        delivery_policy={"telegram": {"mirror": False}},
+    )
+    valid_run = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="run_info",
+        session_id="session_123",
+        run_id="run_456",
+    )
+
+    assert remote_server._validate_tui_proxy_payload(invalid) == (
+        False,
+        "invalid_delivery_policy",
+    )
+    assert remote_server._validate_tui_proxy_payload(valid_run) == (True, "ok")

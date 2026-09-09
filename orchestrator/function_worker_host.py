@@ -1395,13 +1395,15 @@ class FunctionWorkerHost:
                 try_execute_slash_command_text,
             )
 
-            return await try_execute_slash_command_text(
+            result = await try_execute_slash_command_text(
                 runtime,
                 str(params.get("text") or ""),
                 source_channel=str(params.get("source_channel") or "api_chat"),
                 chat_id=params.get("chat_id"),
                 session_metadata=params.get("session_metadata"),
             )
+            await self.emit_metadata()
+            return result
         if method == "runtime.activity.poll":
             return runtime.request_activity.poll(
                 str(params["request_id"]),

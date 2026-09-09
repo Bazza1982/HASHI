@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from orchestrator.frontend_delivery import tui_run_delivery_policy
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,11 @@ class TuiApiClient:
         *,
         agent: str | None = None,
         text: str | None = None,
+        client_id: str | None = None,
+        ui_locale: str | None = None,
+        delivery_policy: dict | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
         offset: int = 0,
         limit: int = 20,
         timeout: float = 25,
@@ -138,11 +144,26 @@ class TuiApiClient:
             payload["agent"] = agent
         if text is not None:
             payload["text"] = text
+        if client_id is not None:
+            payload["client_id"] = client_id
+        if ui_locale is not None:
+            payload["ui_locale"] = ui_locale
+        if delivery_policy is not None:
+            payload["delivery_policy"] = dict(delivery_policy)
+        if session_id is not None:
+            payload["session_id"] = session_id
+        if run_id is not None:
+            payload["run_id"] = run_id
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
                 async with session.post(f"{self.remote_url}/tui/proxy", json=payload) as response:
                     envelope = await self._read_json_response(response)
             if response.status >= 400 or not envelope.get("ok"):
+                result = envelope.get("result")
+                if isinstance(result, dict):
+                    result.setdefault("ok", False)
+                    result.setdefault("status", response.status)
+                    return result
                 envelope.setdefault("ok", False)
                 envelope.setdefault("status", response.status)
                 return envelope
@@ -203,14 +224,47 @@ class TuiApiClient:
         agents = data.get("agents", [])
         return agents if isinstance(agents, list) else []
 
-    async def send_chat(self, agent: str, text: str) -> dict:
+    async def send_chat(
+        self,
+        agent: str,
+        text: str,
+        *,
+        client_id: str | None = None,
+        telegram_mirror: bool = True,
+        ui_locale: str = "en",
+    ) -> dict:
         """Send a text message without bypassing the selected transport."""
+        policy = (
+            tui_run_delivery_policy(
+                telegram_mirror=telegram_mirror,
+                client_id=client_id,
+            )
+            if client_id
+            else None
+        )
         if self.proxied:
-            return await self._proxy_request("chat", agent=agent, text=text)
+            return await self._proxy_request(
+                "chat",
+                agent=agent,
+                text=text,
+                client_id=client_id,
+                ui_locale=ui_locale,
+                delivery_policy=policy,
+            )
+        payload = {"agent": agent, "text": text}
+        if policy is not None:
+            payload.update(
+                {
+                    "source": "tui",
+                    "client_id": client_id,
+                    "ui_locale": ui_locale,
+                    "delivery_policy": policy,
+                }
+            )
         return await self._direct_request(
             "POST",
             "/api/chat",
-            json_body={"agent": agent, "text": text},
+            json_body=payload,
             timeout=25,
         )
 
@@ -218,11 +272,12 @@ class TuiApiClient:
         """Read the durable status of one directly submitted Session Run."""
 
         if self.proxied:
-            return {
-                "ok": False,
-                "error": "Run status is unavailable through this Remote proxy.",
-                "error_code": "run_status_proxy_unavailable",
-            }
+            return await self._proxy_request(
+                "run_info",
+                session_id=session_id,
+                run_id=run_id,
+                timeout=5,
+            )
         encoded_session = quote(str(session_id), safe="")
         encoded_run = quote(str(run_id), safe="")
         return await self._direct_request(

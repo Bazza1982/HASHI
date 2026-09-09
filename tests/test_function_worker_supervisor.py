@@ -376,6 +376,51 @@ async def test_core_proxy_routes_external_stop_through_worker_control_protocol()
 
 
 @pytest.mark.asyncio
+async def test_worker_republishes_runtime_metadata_after_slash_command(monkeypatch):
+    observed = []
+
+    async def execute(runtime, text, **kwargs):
+        observed.append((runtime, text, kwargs))
+        return {"ok": True, "command": "model", "messages": []}
+
+    monkeypatch.setattr(
+        "orchestrator.admin_local_testing.try_execute_slash_command_text",
+        execute,
+    )
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = SimpleNamespace()
+    host.phase = "ACTIVE"
+    host.accepting = True
+    host.agent_name = "akane"
+    publications = []
+
+    async def emit_metadata():
+        publications.append("metadata")
+
+    host.emit_metadata = emit_metadata
+
+    result = await host.handle_request(
+        "runtime.slash",
+        {
+            "text": "/model",
+            "source_channel": "tui",
+            "session_metadata": {"ui_locale": "en"},
+        },
+    )
+
+    assert result["command"] == "model"
+    assert publications == ["metadata"]
+    assert observed[0][1:] == (
+        "/model",
+        {
+            "source_channel": "tui",
+            "chat_id": None,
+            "session_metadata": {"ui_locale": "en"},
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_worker_activation_reconciles_only_its_agent_before_accepting(
     monkeypatch,
 ):

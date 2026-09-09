@@ -40,6 +40,7 @@ class _Runtime:
         self.server = None
         self.last_request_metadata = None
         self.api_request_metadata = []
+        self.api_delivery_flags = []
         self._safevoice_enabled = False
         self._native_voice_transcripts = {}
         self.voice_manager = SimpleNamespace(
@@ -101,7 +102,7 @@ class _Runtime:
     ):
         del source
         del idempotency_key
-        assert deliver_to_telegram is True
+        self.api_delivery_flags.append(bool(deliver_to_telegram))
         self.api_request_metadata.append(dict(request_metadata))
         return f"req-api-{len(self.api_request_metadata)}"
 
@@ -226,6 +227,70 @@ async def test_legacy_chat_response_is_queue_ack_without_transport_receipt(tmp_p
     assert payload["request_id"] == "req-api-1"
     assert "delivery_receipt" not in payload
     assert "delivered" not in payload
+
+
+@pytest.mark.asyncio
+async def test_tui_chat_snapshots_typed_mirror_policy_without_forking_conversation(
+    tmp_path,
+):
+    from orchestrator.frontend_delivery import tui_run_delivery_policy
+
+    server, runtime = _server(tmp_path)
+    policy = tui_run_delivery_policy(
+        telegram_mirror=False,
+        client_id="tui-window-7",
+    )
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "stay in the shared conversation",
+            "source": "tui",
+            "client_id": "tui-window-7",
+            "ui_locale": "zh-CN",
+            "delivery_policy": policy,
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["delivery_policy"] == {
+        "scope": "run",
+        "telegram_mirror": False,
+    }
+    assert runtime.api_delivery_flags[-1] is False
+    metadata = runtime.api_request_metadata[-1]
+    assert metadata["session_surface"] == "workbench"
+    assert metadata["session_channel_key"] == "default"
+    assert metadata["frontend_client"] == {
+        "kind": "tui",
+        "client_id": "tui-window-7",
+    }
+    assert metadata["frontend_delivery_policy"] == policy
+    assert metadata["response_preferences"]["frontend_delivery_policy"] == policy
+
+
+@pytest.mark.asyncio
+async def test_tui_chat_rejects_untyped_or_mismatched_mirror_policy(tmp_path):
+    server, runtime = _server(tmp_path)
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "must fail visible",
+            "source": "tui",
+            "client_id": "tui-window-7",
+            "delivery_policy": {"telegram_mirror": False},
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+
+    assert response.status == 400
+    assert json.loads(response.text)["error_code"] == "invalid_tui_delivery_policy"
+    assert runtime.api_request_metadata == []
 
 
 @pytest.mark.asyncio

@@ -58,6 +58,7 @@ from orchestrator.agent_move.transport_crypto import (
     ENVELOPE_SCHEME,
     decrypt_package_transport,
 )
+from orchestrator.frontend_delivery import normalize_tui_run_delivery_policy
 from orchestrator.pathing import instance_runtime_dir
 from orchestrator.process_execution import process_is_alive
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
@@ -145,6 +146,7 @@ TUI_PROXY_OPERATIONS = {
     "health",
     "agents",
     "chat",
+    "run_info",
     "transcript_recent",
     "transcript_poll",
 }
@@ -310,6 +312,11 @@ class TuiProxyRequest(BaseModel):
     operation: str
     agent: Optional[str] = None
     text: Optional[str] = None
+    client_id: Optional[str] = None
+    ui_locale: Optional[str] = None
+    delivery_policy: Optional[dict[str, Any]] = None
+    session_id: Optional[str] = None
+    run_id: Optional[str] = None
     offset: int = 0
     limit: int = 20
 
@@ -321,6 +328,11 @@ class ProtocolTuiRequest(BaseModel):
     operation: str
     agent: Optional[str] = None
     text: Optional[str] = None
+    client_id: Optional[str] = None
+    ui_locale: Optional[str] = None
+    delivery_policy: Optional[dict[str, Any]] = None
+    session_id: Optional[str] = None
+    run_id: Optional[str] = None
     offset: int = 0
     limit: int = 20
 
@@ -537,6 +549,26 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
         text = str(payload.text or "")
         if not text or len(text.encode("utf-8")) > TUI_PROXY_MAX_TEXT_BYTES:
             return False, "invalid_text"
+        ui_locale = str(payload.ui_locale or "")
+        if len(ui_locale) > 32 or any(ord(character) < 32 for character in ui_locale):
+            return False, "invalid_ui_locale"
+        if payload.delivery_policy is not None:
+            try:
+                normalize_tui_run_delivery_policy(
+                    payload.delivery_policy,
+                    client_id=str(payload.client_id or ""),
+                )
+            except ValueError:
+                return False, "invalid_delivery_policy"
+    if operation == "run_info":
+        for value in (payload.session_id, payload.run_id):
+            identifier = str(value or "").strip()
+            if (
+                not identifier
+                or len(identifier) > 200
+                or any(ord(character) < 33 for character in identifier)
+            ):
+                return False, "invalid_run_identity"
     if payload.offset < 0:
         return False, "invalid_offset"
     if payload.limit < 1 or payload.limit > 200:
@@ -560,9 +592,25 @@ def _local_workbench_tui_request(
     elif operation == "chat":
         path = "/api/chat"
         method = "POST"
-        body_bytes = json.dumps(
-            {"agent": agent, "text": str(payload.text or "")}
-        ).encode("utf-8")
+        body = {
+            "agent": agent,
+            "text": str(payload.text or ""),
+        }
+        if payload.delivery_policy is not None:
+            body.update(
+                {
+                    "source": "tui",
+                    "client_id": str(payload.client_id or ""),
+                    "ui_locale": str(payload.ui_locale or ""),
+                    "delivery_policy": dict(payload.delivery_policy),
+                }
+            )
+        body_bytes = json.dumps(body).encode("utf-8")
+    elif operation == "run_info":
+        path = (
+            f"/api/v1/sessions/{quote(str(payload.session_id), safe='')}/runs/"
+            f"{quote(str(payload.run_id), safe='')}"
+        )
     elif operation == "transcript_recent":
         path = f"/api/transcript/{quote(agent, safe='')}?limit={int(payload.limit)}"
     elif operation == "transcript_poll":
@@ -1340,6 +1388,11 @@ def create_app(
             operation=payload.operation,
             agent=payload.agent,
             text=payload.text,
+            client_id=payload.client_id,
+            ui_locale=payload.ui_locale,
+            delivery_policy=payload.delivery_policy,
+            session_id=payload.session_id,
+            run_id=payload.run_id,
             offset=payload.offset,
             limit=payload.limit,
         )

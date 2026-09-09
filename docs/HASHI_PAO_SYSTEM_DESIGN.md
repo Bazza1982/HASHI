@@ -173,6 +173,27 @@ PAO exposes authenticated discovery, Conversation Sessions, Messages, Runs,
 Events, controls, attachments, approvals, and operational status. Connectors
 may cache projections but must reconstruct them from PAO-owned state.
 
+PAO also owns the admission-time delivery decision for each Run. A Connector
+may request a projection policy only through a typed, versioned contract. The
+current TUI contract is `hashi.frontend-delivery` version 1, has `scope=run`, is
+bound to an ephemeral TUI client identity, and contains the boolean
+`telegram.mirror` projection choice. PAO validates and snapshots it before the
+Run enters the queue; changing frontend preferences later cannot mutate an
+in-flight Run. Missing, malformed, forged, legacy, or non-TUI suppression input
+fails visible.
+
+Turning off that projection does not create a new Conversation authority. The
+TUI continues to use the shared Conversation Session and PAO still commits its
+Message, Run, Events and terminal result. Only the Telegram delivery projector
+is skipped for that TUI-origin Run; Telegram-native input, Scheduler, HChat,
+other clients and other Runs retain their own admission decisions. PAO does not
+replay skipped projections when a later Run enables Telegram mirroring.
+
+PAO projects live presentation facts through Agent metadata. Engine, model,
+effort and current switches come from the active runtime; HER v2 alone supplies
+its structured Quick/Pro Model Provider routing. Frontends may format these
+facts but must not infer them from files or become another catalogue owner.
+
 ## 7. Command ownership
 
 Commands are connector entry points into domain contracts.

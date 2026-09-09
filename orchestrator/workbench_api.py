@@ -74,6 +74,11 @@ from orchestrator.flexible_backend_registry import (
     BACKEND_REGISTRY,
     is_selectable_backend,
 )
+from orchestrator.frontend_delivery import (
+    normalize_tui_run_delivery_policy,
+    tui_request_metadata,
+)
+from orchestrator.ui_language import normalize_locale
 from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.pathing import resolve_path_value
 from orchestrator.service_endpoints import ServiceEndpointError, select_service_bind_host
@@ -1183,11 +1188,11 @@ class WorkbenchApiServer:
             engine = agent_row.get("engine") or agent_row.get(
                 "active_backend", "unknown"
             )
-            model = agent_row.get("model", "unknown")
+            model = agent_row.get("model") or "unknown"
             if agent_row.get("type") in {"flex", "limited"}:
                 for backend in agent_row.get("allowed_backends", []):
                     if backend.get("engine") == agent_row.get("active_backend"):
-                        model = backend.get("model", model)
+                        model = backend.get("model") or model
                         break
             metadata = {
                 "id": agent_row["name"],
@@ -1206,6 +1211,16 @@ class WorkbenchApiServer:
                 "status": "offline",
                 "type": agent_row.get("type", "unknown"),
                 "telegram_connected": False,
+                "presentation_status": {
+                    "schema_version": 1,
+                    "source": "configured_offline_agent",
+                    "engine": agent_row.get("active_backend") or engine,
+                    "model": model,
+                    "effort": None,
+                    "think": None,
+                    "verbose": None,
+                    "commentary": None,
+                },
                 "channels": {
                     "telegram": False,
                     "workbench": False,
@@ -5226,6 +5241,7 @@ class WorkbenchApiServer:
             self._learn_reply_route(text, reply_route)
 
         supplied_metadata = payload.get("request_metadata")
+        source = str(payload.get("source") or "api").strip() or "api"
         session_metadata = {
             "session_id": payload.get("session_id") or None,
             "owner_id": self._v1_owner_id(request),
@@ -5234,10 +5250,60 @@ class WorkbenchApiServer:
         }
         if isinstance(supplied_metadata, dict):
             session_metadata.update(supplied_metadata)
+        telegram_mirror = True
+        supplied_delivery_policy = payload.get("delivery_policy")
+        if source.casefold() == "tui":
+            client_id = str(payload.get("client_id") or "").strip()
+            try:
+                normalized_policy = normalize_tui_run_delivery_policy(
+                    supplied_delivery_policy,
+                    client_id=client_id,
+                )
+            except ValueError as exc:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_code": "invalid_tui_delivery_policy",
+                    },
+                    status=400,
+                )
+            telegram_mirror = bool(normalized_policy["telegram"]["mirror"])
+            response_preferences = session_metadata.get("response_preferences")
+            response_preferences = (
+                dict(response_preferences)
+                if isinstance(response_preferences, Mapping)
+                else {}
+            )
+            response_preferences["frontend_delivery_policy"] = normalized_policy
+            # The TUI continues to use the established shared Workbench
+            # Conversation binding.  Client identity scopes presentation and
+            # delivery only; it never creates a private or competing Session.
+            session_metadata.update(
+                {
+                    "session_surface": "workbench",
+                    "session_channel_key": "default",
+                    "ui_locale": normalize_locale(payload.get("ui_locale")),
+                    "response_preferences": response_preferences,
+                    **tui_request_metadata(
+                        telegram_mirror=telegram_mirror,
+                        client_id=client_id,
+                    ),
+                }
+            )
+        elif supplied_delivery_policy is not None:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "delivery_policy is supported only for source=tui",
+                    "error_code": "invalid_delivery_policy_source",
+                },
+                status=400,
+            )
         slash_result = await try_execute_slash_command_text(
             runtime,
             text,
-            source_channel="api_chat",
+            source_channel="tui" if source.casefold() == "tui" else "api_chat",
             session_metadata=session_metadata,
         )
         if slash_result is not None:
@@ -5248,12 +5314,17 @@ class WorkbenchApiServer:
 
         request_id = await runtime.enqueue_api_text(
             text,
-            source=str(payload.get("source") or "api"),
-            deliver_to_telegram=True,
+            source=source,
+            deliver_to_telegram=telegram_mirror,
             request_metadata=session_metadata,
             idempotency_key=str(payload.get("idempotency_key") or "").strip() or None,
         )
         response_payload = {"ok": True, "request_id": request_id}
+        if source.casefold() == "tui":
+            response_payload["delivery_policy"] = {
+                "scope": "run",
+                "telegram_mirror": telegram_mirror,
+            }
         if request_id:
             try:
                 run = self.session_store.get_run_by_request(request_id)

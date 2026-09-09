@@ -88,15 +88,28 @@ supports local operation and trusted instance switching through Hashi Remote.
 Current implementation boundary:
 
 - the TUI uses the basic Backend API chat and transcript routes;
+- those routes keep the established `workbench/default` Conversation binding,
+  so a TUI window is a projection of the same formal Conversation rather than
+  the owner of a private TUI Session;
 - its local command palette derives Agent commands from the canonical command
   metadata, shows at most five prefix matches, and keeps TUI-only navigation and
   layout commands inside the Connector;
 - submitting a command prefix selects the first displayed prefix match, while an
   unknown slash command is rejected locally and never becomes a model prompt;
+- unified slash-command response `messages` are rendered immediately by the
+  TUI with target-safe Telegram HTML/Markdown conversion. They are not inserted
+  into the transcript, so later polling cannot duplicate them;
+- chat history remains a Rich/Markdown projection while exposing mouse
+  selection, a visible selection style, selection-first `Ctrl+C`, and
+  selection-fenced follow-tail behaviour;
 - short sent/received sounds are a local, persisted TUI preference. Windows uses
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
-- the compact connection bar intentionally omits working mode; `/mode` remains
-  the authoritative place to inspect or change it;
+- language, layout, sounds, the TUI typing indicator, and the default Telegram
+  mirror choice are local persisted Connector preferences;
+- the connection footer projects live Agent metadata for Engine, model, effort,
+  Think, Verbose, Commentary and Connector state. Model Provider and structured
+  Quick/Pro routing are shown only for HER v2. The footer intentionally omits
+  working mode; `/mode` remains its authoritative control surface;
 - its cross-instance path proxies only a small named operation set through
   authenticated Hashi Remote peers; and
 - it does not yet implement the complete Persistent Session API v1 multi-
@@ -105,6 +118,46 @@ Current implementation boundary:
 This current limitation must be stated plainly. Future TUI development should
 adopt the richer Session/Event contract without changing the rule that the TUI
 stays inside HASHI.
+
+### 5.1 TUI per-Run Telegram projection
+
+The TUI may disable only the Telegram projection of a newly submitted TUI Run.
+The public `delivery_policy` wire value is complete, versioned and client-bound:
+
+```json
+{
+  "type": "hashi.frontend-delivery",
+  "version": 1,
+  "scope": "run",
+  "frontend": "tui",
+  "client_id": "tui-<ephemeral-window-id>",
+  "telegram": {"mirror": false}
+}
+```
+
+The Backend API validates that value for `source=tui`, binds it to the same
+ephemeral TUI client identity, and snapshots the canonical form into the
+admitted Run metadata. Invalid or incomplete policy cannot create a hidden
+Turn. Legacy callers and all non-TUI sources remain visible by default.
+
+`telegram.mirror=false` prevents Telegram typing, commentary, final and error
+delivery for that Run. It does not disconnect the Bot, fork Context, change the
+Conversation binding, suppress the TUI projection, or affect Telegram-native,
+Scheduler, HChat, API, another client, or another already-open TUI window.
+Changing the local preference affects future submissions only. Re-enabling it
+does not replay Turns completed while the projection was disabled.
+
+TUI queue/typing state is an ephemeral Connector projection fenced by instance
+generation, Agent, Session, Run and request identity. Durable Run status and
+matching transcript metadata may advance or clear it; errors, terminal states,
+stop/cancel, Agent switching, instance switching and shutdown clear it. The TUI
+preference is independent of Telegram's `/typing` policy.
+
+Footer state comes from the runtime's `presentation_status` projection carried
+by the existing Agent metadata interface. The live runtime/Engine registry is
+authoritative; offline configured Agents expose only their configured Engine
+and model and mark unavailable live switches unknown. Connectors must not scan
+scattered configuration files or duplicate model/effort catalogues.
 
 ## 6. Backend API and Persistent Session API
 

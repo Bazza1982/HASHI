@@ -285,16 +285,17 @@ async def execute_local_command(
             session.handler_kind = "native"
 
         store = _CaptureStore(messages=[])
+        local_session_metadata = _local_command_session_metadata(
+            source_channel=source_channel,
+            chat_id=chat_id,
+            session_metadata=session_metadata,
+        )
         update = _FakeUpdate(
             runtime.global_config.authorized_id,
             local_chat_id,
             store,
             command_line,
-            session_metadata=_local_command_session_metadata(
-                source_channel=source_channel,
-                chat_id=chat_id,
-                session_metadata=session_metadata,
-            ),
+            session_metadata=local_session_metadata,
         )
         context = SimpleNamespace(args=args)
 
@@ -309,7 +310,11 @@ async def execute_local_command(
                 runtime._send_text = store.capture_send
             try:
                 with (
-                    ui_language.language_scope(runtime, update),
+                    ui_language.language_scope(
+                        runtime,
+                        update,
+                        locale=str(local_session_metadata.get("ui_locale") or "") or None,
+                    ),
                     slash_command_audit.bind_slash_command_audit_session(session),
                 ):
                     if registry_command is not None:

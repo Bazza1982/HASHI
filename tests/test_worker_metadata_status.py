@@ -329,6 +329,8 @@ async def _build_stack(tmp_path: Path, *, outcome: str):
     host.agent_name = runtime.name
     host.phase = "ACTIVE"
     host.accepting = True
+    host.started_at = "2026-09-10T00:00:00+10:00"
+    host.adopted_at = "2026-09-10T00:00:01+10:00"
     host.nonce = "nonce-test"
     host.manifest = SimpleNamespace(generation_id=generation_id, entries=())
     host.expected_runtime = SimpleNamespace(runtime_id="runtime-test")

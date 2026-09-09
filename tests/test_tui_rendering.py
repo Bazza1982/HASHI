@@ -7,6 +7,10 @@ from io import StringIO
 from pathlib import Path
 
 from rich.console import Console
+from rich.text import Text
+from textual.events import MouseMove
+from textual.geometry import Offset
+from textual.selection import Selection
 
 from tui import sounds
 from tui.app import (
@@ -16,8 +20,10 @@ from tui.app import (
     CommandPreview,
     FooterInfoBox,
     LogPanel,
+    TypingIndicator,
     chat_message_renderable,
 )
+from tui.telegram_rendering import command_message_renderable
 
 
 def _render_plain(renderable) -> str:
@@ -149,7 +155,8 @@ async def test_tui_compact_design_has_bilingual_help_and_adjustable_layout(tmp_p
 
         footer = app.query_one("#footer-info-box", FooterInfoBox)
         footer.update_state("Rika", "codex-cli", True, instance_id="HASHI1")
-        assert "HASHI1 · Rika · codex-cli · API connected" in footer.render().plain
+        assert "Instance HASHI1 · Agent Rika · Engine codex-cli" in footer.render().plain
+        assert "API connected" in footer.render().plain
         assert "Flex" not in footer.render().plain
 
         app._load_initial_transcript = lambda *_args, **_kwargs: None
@@ -200,7 +207,13 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
         assert input_box.value == "/help"
 
     preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
-    assert preferences == {"language": "zh", "layout": "balanced", "sounds": True}
+    assert preferences == {
+        "language": "zh",
+        "layout": "balanced",
+        "sounds": True,
+        "typing": True,
+        "telegram_mirror": True,
+    }
 
 
 async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_path):
@@ -251,3 +264,254 @@ async def test_tui_sound_setting_is_persisted_and_can_be_previewed(tmp_path):
 
     preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
     assert preferences["sounds"] is True
+
+
+def test_command_message_safely_converts_telegram_html_and_keeps_literals():
+    renderable = command_message_renderable(
+        {
+            "text": (
+                "<b>Model</b> · &lt;safe&gt; [bold red]literal[/] "
+                "<unsafe>x</unsafe> <a href=\"javascript:alert(1)\">link</a>\x1b"
+            ),
+            "meta": {"parse_mode": "HTML"},
+        }
+    )
+    output = _render_plain(renderable)
+
+    assert "Model · <safe>" in output
+    assert "[bold red]literal[/]" in output
+    assert "<unsafe>x</unsafe>" in output
+    assert "\x1b" not in output
+    assert all(span.style.link is None for span in renderable.spans)
+
+
+async def test_command_response_messages_render_immediately_and_refresh_status(tmp_path):
+    class CommandClient:
+        proxied = False
+
+        def __init__(self):
+            self.sent = []
+
+        async def send_chat(self, agent, text, **kwargs):
+            self.sent.append((agent, text, kwargs))
+            return {
+                "ok": True,
+                "slash_command": True,
+                "command": "model",
+                "messages": [
+                    {
+                        "channel": "reply",
+                        "text": "<b>Model</b> · gpt-test",
+                        "meta": {"parse_mode": "HTML"},
+                    }
+                ],
+            }
+
+        async def list_agents(self):
+            return [
+                {
+                    "id": "akane",
+                    "name": "akane",
+                    "display_name": "Akane",
+                    "active_backend": "codex-cli",
+                    "online": True,
+                    "presentation_status": {
+                        "engine": "codex-cli",
+                        "model": "gpt-test",
+                        "effort": "high",
+                        "think": True,
+                        "verbose": False,
+                        "commentary": True,
+                    },
+                }
+            ]
+
+        def reset_offset(self, _agent):
+            return None
+
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
+    app._schedule_startup_sequence = lambda: None
+    client = CommandClient()
+    app.api = client
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent((await client.list_agents())[0], client=client)
+        app._submission_sequence = 1
+        submission_ref = (0, "akane", 1)
+        app._latest_submission_ref = submission_ref
+        app._send_message(
+            "/model",
+            "akane",
+            client,
+            0,
+            False,
+            "en",
+            submission_ref,
+        )
+        await pilot.pause(0.2)
+
+        rendered = "\n".join(line.text for line in app.query_one("#chat-history", ChatHistory).lines)
+        assert "Model · gpt-test" in rendered
+        assert len(client.sent) == 1
+        assert client.sent[0][2]["telegram_mirror"] is False
+        assert "Effort high" in app.query_one("#footer-info-box", FooterInfoBox).render().plain
+
+
+async def test_footer_shows_her_routes_but_never_invents_other_engine_provider(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(82, 30)):
+        footer = app.query_one("#footer-info-box", FooterInfoBox)
+        footer.update_state(
+            "Akane",
+            "her-v2",
+            True,
+            current_agent="akane",
+            instance_id="HASHI2",
+            metadata={
+                "id": "akane",
+                "display_name": "Akane",
+                "presentation_status": {
+                    "engine": "her-v2",
+                    "effort": "planned",
+                    "think": True,
+                    "verbose": False,
+                    "commentary": True,
+                    "her_v2": {
+                        "routing_mode": "hybrid",
+                        "quick": {"provider": "openai", "model": "gpt-quick"},
+                        "pro": {"provider": "anthropic", "model": "claude-pro"},
+                    },
+                },
+            },
+            telegram_mirror=False,
+        )
+        plain = footer.render().plain
+        assert "Instance HASHI2" in plain
+        assert "Agent Akane (akane)" in plain
+        assert "Engine her-v2" in plain
+        assert "Model Q:gpt-quick / P:claude-pro" in plain
+        assert "Provider Q:openai / P:anthropic" in plain
+        assert "Think ON · Verbose OFF · Commentary ON" in plain
+        assert "TG mirror OFF" in plain
+        assert "Flex" not in plain
+
+        footer.update_state(
+            "Rika",
+            "codex-cli",
+            True,
+            current_agent="rika",
+            instance_id="HASHI3",
+            metadata={
+                "id": "rika",
+                "display_name": "Rika",
+                "provider": "must-not-render",
+                "presentation_status": {
+                    "engine": "codex-cli",
+                    "model": "gpt-codex",
+                    "effort": "xhigh",
+                    "think": False,
+                    "verbose": True,
+                    "commentary": False,
+                },
+            },
+        )
+        plain = footer.render().plain
+        assert "Model gpt-codex" in plain
+        assert "Provider" not in plain
+
+
+async def test_chat_selection_pauses_follow_tail_copies_and_escape_resumes(
+    tmp_path,
+    monkeypatch,
+):
+    copied = []
+    monkeypatch.setattr("tui.app.copy_to_windows_clipboard", lambda text: copied.append(text) or True)
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        chat = app.query_one("#chat-history", ChatHistory)
+        chat.write(Text("copy me"))
+        await pilot.pause()
+        selection = Selection(Offset(0, 0), Offset(7, 0))
+        app.screen.selections = {chat: selection}
+        await pilot.pause()
+        assert chat.auto_scroll is False
+        assert app.screen.get_selected_text() == "copy me"
+        selected_line = chat._render_line(0, 0, 10)
+        selection_style = app.screen.get_component_rich_style("screen--selection")
+        assert any(
+            segment.style is not None
+            and segment.style.bgcolor == selection_style.bgcolor
+            for segment in selected_line
+        )
+
+        await pilot.press("ctrl+c")
+        assert copied == ["copy me"]
+
+        await pilot.press("escape")
+        assert app.screen.get_selected_text() is None
+        assert chat.auto_scroll is True
+
+
+async def test_mouse_drag_creates_chat_selection(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        chat = app.query_one("#chat-history", ChatHistory)
+        chat.write(Text("mouse copy"))
+        await pilot.pause()
+
+        await pilot.mouse_down(chat, offset=(1, 1))
+        await pilot._post_mouse_events(
+            [MouseMove],
+            chat,
+            offset=(6, 1),
+            button=1,
+        )
+        await pilot.mouse_up(chat, offset=(6, 1))
+
+        assert app.screen.get_selected_text() == "mouse"
+        assert chat.auto_scroll is False
+
+
+async def test_typing_and_telegram_preferences_are_persistent_and_run_fenced(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(100, 30)):
+        app.current_agent = "akane"
+        app.current_agent_display = "Akane"
+        first = (0, "akane", "session-1", "run-1", "request-1")
+        second = (0, "akane", "session-1", "run-2", "request-2")
+        indicator = app.query_one("#typing-indicator", TypingIndicator)
+
+        app._set_typing_run(first, phase="queued")
+        assert indicator.display is True
+        assert "Queued" in indicator.render().plain
+        app._set_typing_run(second, phase="running")
+        assert "Akane is typing" in indicator.render().plain
+        app._clear_typing_indicator(first)
+        assert app._active_run_ref == second
+        assert indicator.display is True
+
+        app._handle_tui_cmd("/tui typing off")
+        assert indicator.display is False
+        app._handle_tui_cmd("/tui typing on")
+        assert indicator.display is True
+        app._handle_telegram_cmd("/telegram off")
+        assert app._telegram_mirror_enabled is False
+        app._clear_typing_indicator(second)
+        assert indicator.display is False
+
+    preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
+    assert preferences["typing"] is True
+    assert preferences["telegram_mirror"] is False
+    reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
+    assert reloaded._tui_typing_enabled is True
+    assert reloaded._telegram_mirror_enabled is False
