@@ -61,6 +61,17 @@ def test_memory_plus_is_not_an_exclusive_mode_button() -> None:
     assert "tgl:mode:memory+" not in callbacks
 
 
+def test_memory_plus_store_uses_portable_lf_bytes(tmp_path: Path) -> None:
+    workspace = tmp_path / "portable"
+
+    prepare_memory_plus_store(workspace)
+
+    for name in ("memory_plus_state.json", "memory_plus_notepad.md"):
+        payload = (workspace / "memory" / name).read_bytes()
+        assert b"\n" in payload
+        assert b"\r\n" not in payload
+
+
 def test_ensure_memory_plus_observer_adds_factory(tmp_path: Path) -> None:
     changed = ensure_memory_plus_observer(tmp_path)
     config = json.loads((tmp_path / "post_turn_observers.json").read_text(encoding="utf-8"))

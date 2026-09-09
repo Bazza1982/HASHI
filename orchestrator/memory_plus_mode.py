@@ -1154,7 +1154,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 def _write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
     tmp.replace(path)
 
 
