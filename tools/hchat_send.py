@@ -312,9 +312,33 @@ def _hchat_channel_egress_allowed(
 
 def _is_local_agent(cfg: dict, agent_name: str) -> bool:
     for agent in cfg.get("agents", []):
-        if agent.get("name", "").lower() == agent_name.lower():
+        if (
+            agent.get("name", "").lower() == agent_name.lower()
+            and agent.get("is_active", True) is not False
+        ):
             return True
     return False
+
+
+def _moved_agent_destination(agent_name: str) -> dict[str, str] | None:
+    try:
+        from orchestrator.agent_move.service import moved_agent_destination
+
+        return moved_agent_destination(ROOT, agent_name)
+    except Exception:
+        return None
+
+
+def _print_moved_agent_hint(agent_name: str) -> bool:
+    moved = _moved_agent_destination(agent_name)
+    if not moved:
+        return False
+    print(
+        f"❌ {agent_name} moved to {moved['address']}; refresh the Agent directory "
+        "and resend to the new address.",
+        file=sys.stderr,
+    )
+    return True
 
 
 def _load_contacts() -> dict:
@@ -1223,6 +1247,8 @@ def send_hchat(
                 return True
             print(f"❌ Local API failed for {to_agent}.", file=sys.stderr)
             return False
+        if _print_moved_agent_hint(to_agent):
+            return False
         print(f"❌ {to_agent} is not a local agent on {instance_id}. Cross-instance delivery requires agent@INSTANCE.", file=sys.stderr)
         return False
 
@@ -1231,6 +1257,8 @@ def send_hchat(
             if _send_via_local_workbench(cfg, local_port, to_agent, from_agent, text, source_instance, reply_route):
                 return True
             print(f"❌ Local API failed for {to_agent}@{target_instance}.", file=sys.stderr)
+            return False
+        if _print_moved_agent_hint(to_agent):
             return False
         print(f"❌ {to_agent}@{target_instance} is not a local active agent.", file=sys.stderr)
         return False
@@ -1344,7 +1372,18 @@ def check_hchat_route(
     if not target_instance or target_instance == instance_id.upper():
         result["target_instance"] = target_instance or instance_id.upper()
         if not _is_local_agent(cfg, to_agent):
-            result["error"] = f"{to_agent}@{result['target_instance']} is not a local active agent"
+            moved = _moved_agent_destination(to_agent)
+            if moved:
+                result.update(
+                    route_type="agent_moved",
+                    moved_to=moved["address"],
+                    error=(
+                        f"{to_agent}@{result['target_instance']} moved to "
+                        f"{moved['address']}; refresh the Agent directory"
+                    ),
+                )
+            else:
+                result["error"] = f"{to_agent}@{result['target_instance']} is not a local active agent"
             return result
         host = _first_reachable_workbench(
             _local_workbench_hosts(cfg),

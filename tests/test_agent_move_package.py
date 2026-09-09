@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.agent_move.package import (
+    AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
     RETAINED_IDENTITY_CAPABILITY,
     AgentMoveError,
     archive_snapshot_fingerprint,
@@ -123,7 +124,7 @@ def test_package_round_trip_preserves_identity_memory_and_encrypted_agent_secret
         secret_passphrase="shared-secret",
     )
 
-    assert package.manifest["schema_version"] == 1
+    assert package.manifest["schema_version"] == 3
     assert package.retained_identity is None
     assert package.agent_config["is_active"] is False
     assert package.agent_config["workspace_dir"] == "workspaces/zelda"
@@ -166,6 +167,43 @@ def test_package_rejects_wrong_secret_passphrase(tmp_path):
 
     with pytest.raises(AgentMoveError, match="decryption failed"):
         decrypt_agent_secrets(package, "wrong")
+
+
+def test_clone_package_carries_capabilities_and_safe_secrets_but_never_telegram(
+    tmp_path,
+):
+    root = _source_root(tmp_path)
+    secrets = json.loads((root / "secrets.json").read_text())
+    secrets["zelda_api_key"] = "agent-only-api-key"
+    _write_json(root / "secrets.json", secrets)
+    capability = {
+        "name": "zelda",
+        "hchat": {"allow": ["lily"]},
+        "tools": {"allow": ["file_read"]},
+    }
+    _write_json(root / "agent_capabilities.json", {"agents": [capability]})
+
+    package = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "zelda-clone.hashi-agent",
+        source_instance="HASHI1",
+        operation="clone",
+        include_agent_secrets=True,
+        include_telegram_secret=False,
+        secret_passphrase="shared-secret",
+    )
+
+    assert package.manifest["schema_version"] == 3
+    assert package.manifest["operation"] == "clone"
+    assert AGENT_TRANSFER_LIFECYCLE_CAPABILITY in package.manifest[
+        "required_receiver_capabilities"
+    ]
+    assert package.agent_capability == capability
+    assert package.access_requirements["telegram_secret_included"] is False
+    assert decrypt_agent_secrets(package, "shared-secret") == {
+        "zelda_api_key": "agent-only-api-key"
+    }
 
 
 def test_package_rejects_inactive_retained_source_copy(tmp_path):
@@ -341,6 +379,7 @@ def test_package_schema2_preserves_exact_uppercase_identity_as_attachment(tmp_pa
         "zelda",
         tmp_path / "zelda-schema2.hashi-agent",
         source_instance="HASHI1",
+        schema_version=2,
     )
 
     assert package.manifest["schema_version"] == 2
@@ -445,6 +484,7 @@ def test_schema2_snapshot_fingerprint_detects_retained_identity_change(tmp_path)
         root,
         "zelda",
         tmp_path / "first-schema2.hashi-agent",
+        schema_version=2,
     )
     first_fingerprint = archive_snapshot_fingerprint(first)
 
@@ -453,6 +493,7 @@ def test_schema2_snapshot_fingerprint_detects_retained_identity_change(tmp_path)
         root,
         "zelda",
         tmp_path / "second-schema2.hashi-agent",
+        schema_version=2,
     )
 
     assert archive_snapshot_fingerprint(second) != first_fingerprint
@@ -469,7 +510,7 @@ def test_schema2_rejects_retained_identity_metadata_mismatch(tmp_path):
         encoding="utf-8",
     )
     path = tmp_path / "valid-schema2.hashi-agent"
-    create_agent_move_package(root, "zelda", path)
+    create_agent_move_package(root, "zelda", path, schema_version=2)
     replacement = tmp_path / "tampered-schema2.hashi-agent"
     _rewrite_archive(
         path,

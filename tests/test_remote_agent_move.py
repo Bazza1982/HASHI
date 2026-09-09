@@ -21,6 +21,7 @@ from orchestrator.agent_move.transport_crypto import (
     encrypt_package_transport,
 )
 from orchestrator.pcm import render_pcm_document
+from remote.api import server as remote_server
 from remote.api.server import create_app
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import (
@@ -234,6 +235,94 @@ def test_remote_agent_move_stage_commit_activate_protocol(tmp_path):
     )
 
 
+def test_remote_clone_resolve_lifecycle_and_finalize_without_telegram(
+    tmp_path,
+    monkeypatch,
+):
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=True)
+    source_secrets = json.loads((source / "secrets.json").read_text())
+    source_secrets["zelda_api_key"] = "safe-agent-key"
+    _write_json(source / "secrets.json", source_secrets)
+    package_path = tmp_path / "zelda-clone.hashi-agent"
+    package = create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        operation="clone",
+        include_agent_secrets=True,
+        include_telegram_secret=False,
+        secret_passphrase=TOKEN,
+    )
+    lifecycle_calls = []
+    monkeypatch.setattr(
+        remote_server,
+        "_request_workbench_agent_lifecycle",
+        lambda agent, *, action: lifecycle_calls.append((agent, action))
+        or {"ok": True, "agent": agent, "action": action},
+    )
+    monkeypatch.setattr(
+        remote_server,
+        "_fetch_workbench_health",
+        lambda timeout=1.0: {"ok": True, "agents": ["zelda_1"]},
+    )
+    client = _client(target)
+
+    resolved = _post(
+        client,
+        "/agent-move/v1/resolve",
+        {
+            "from_instance": "HASHI1",
+            "source_agent_id": "zelda",
+            "operation": "clone",
+        },
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["target_agent_id"] == "zelda_1"
+
+    raw = package_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    envelope = encrypt_package_transport(
+        raw,
+        shared_token=TOKEN,
+        source_instance="HASHI1",
+        target_instance="HASHI2",
+        package_sha256=digest,
+    )
+    staged = _post(
+        client,
+        "/agent-move/v1/stage",
+        {
+            "from_instance": "HASHI1",
+            "encryption": ENVELOPE_SCHEME,
+            "package_b64": base64.b64encode(envelope).decode("ascii"),
+            "sha256": digest,
+            "operation": "clone",
+            "target_agent_id": "zelda_1",
+        },
+    )
+    assert staged.status_code == 200
+    assert staged.json()["target_agent_id"] == "zelda_1"
+    for action in ("commit", "activate", "start", "finalize"):
+        response = _post(
+            client,
+            f"/agent-move/v1/{action}",
+            {"from_instance": "HASHI1", "package_id": package.package_id},
+        )
+        assert response.status_code == 200, response.text
+    assert response.json()["status"] == "completed"
+    assert lifecycle_calls == [("zelda_1", "start")]
+
+    rows = json.loads((target / "agents.json").read_text())["agents"]
+    clone = next(row for row in rows if row["name"] == "zelda_1")
+    assert clone["is_active"] is True
+    assert clone["telegram_token_key"] == "zelda_1"
+    secrets = json.loads((target / "secrets.json").read_text())
+    assert "zelda_1" not in secrets
+    assert secrets["zelda_1_api_key"] == "safe-agent-key"
+
+
 def test_remote_agent_move_rejects_authenticated_source_mismatch(tmp_path):
     source = _root(tmp_path, "source", "HASHI1", with_agent=True)
     target = _root(tmp_path, "target", "HASHI2", with_agent=False)
@@ -298,6 +387,7 @@ def test_schema2_upload_is_refused_clearly_by_schema1_receiver(tmp_path, monkeyp
         "zelda",
         package_path,
         source_instance="HASHI1",
+        schema_version=2,
     )
     client = AgentMoveRemoteClient(
         base_url="http://127.0.0.1:8767",

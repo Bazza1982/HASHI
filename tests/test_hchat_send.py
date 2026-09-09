@@ -358,6 +358,60 @@ def test_check_hchat_route_unknown_local_agent_fails_before_probe(monkeypatch):
     assert probes == []
 
 
+def test_old_local_hchat_address_returns_moved_destination(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    cfg = _local_cfg()
+    next(row for row in cfg["agents"] if row["name"] == "akane")[
+        "is_active"
+    ] = False
+    (tmp_path / "agents.json").write_text(json.dumps(cfg), encoding="utf-8")
+    tombstone = tmp_path / "state" / "agent_moves" / "moved_agents.json"
+    tombstone.parent.mkdir(parents=True)
+    tombstone.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "agents": {
+                    "akane": {
+                        "agent_id": "akane",
+                        "package_id": "move-1",
+                        "target_agent_id": "akane_1",
+                        "target_instance": "HASHI3",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(hchat_send, "ROOT", tmp_path)
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(
+        hchat_send,
+        "_build_reply_route",
+        lambda _cfg: {"instance_id": "HASHI1"},
+    )
+
+    route = hchat_send.check_hchat_route("akane@HASHI1", "zelda")
+    sent = hchat_send.send_hchat("akane@HASHI1", "zelda", "in flight")
+
+    assert route["ok"] is False
+    assert route["route_type"] == "agent_moved"
+    assert route["moved_to"] == "akane_1@HASHI3"
+    assert "refresh the Agent directory" in route["error"]
+    assert sent is False
+    assert "moved to akane_1@HASHI3" in capsys.readouterr().err
+
+
+def test_inactive_agent_is_not_a_local_delivery_target():
+    cfg = _local_cfg()
+    cfg["agents"][0]["is_active"] = False
+
+    assert hchat_send._is_local_agent(cfg, "akane") is False
+
+
 def test_check_hchat_route_group_reports_members_without_delivery(monkeypatch):
     cfg = _local_cfg()
     cfg["groups"] = {"staff": {"members": ["akane", "zelda"], "exclude_from_broadcast": []}}

@@ -131,9 +131,23 @@ Session. Frontend history is a projection, not another authoritative archive.
 
 ## Configuration and discovery
 
-`/move` refreshes trusted live Remote peers before staging/confirmation, rejects
-offline, unknown or unsupported targets, and never starts reboot itself.
-Migration state belongs to `bridge_home`; see [Agent Move](HASHI_AGENT_MOVE_V1.md).
+`/move` is migration only; `/clone` is clone only. Both refresh trusted live
+Remote peers before staging/confirmation and use the same authenticated package,
+journal, registry, workspace, Scheduler, secret and lifecycle writers. Omitted
+clone target means this instance; a supplied target must resolve uniquely, and
+`local` is an ordinary possible instance name. ID conflicts use the first free
+`_1`, `_2`, … suffix unless a legal free `--as` ID is supplied.
+
+Every instance keeps at least one active Agent. Move therefore rejects the last
+active source before prepare. Its target stays inactive until source
+Worker/Telegram ingress has stopped; after target activation and Workbench
+verification, source registry/workspace/Agent secrets are deleted. Clone leaves
+the source active, never copies Telegram credentials, activates the new Agent
+for Workbench/API, and imports Scheduler entries disabled. HChat directories use
+live `agent_id@instance_id`; an old address returns `agent_moved` plus the new
+address from the audit-only tombstone. Historical move journals remain
+recoverable. Transfer state belongs to `bridge_home`; see
+[Agent Move](HASHI_AGENT_MOVE_V1.md).
 
 Read active configuration/registry for identities, workspaces, Agents, endpoints
 and ports; never infer them from paths or memory. Keep credentials only in

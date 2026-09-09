@@ -20,6 +20,7 @@ from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import DEFAULT_AGENT_MODE, FlexibleAgentConfig, GlobalConfig
+from orchestrator.agent_move.package import AgentMoveError
 from orchestrator.bootstrap_logging import refresh_console_output_filters
 from orchestrator.command_ui import (
     back_label,
@@ -2856,7 +2857,12 @@ class FlexibleAgentRuntime:
             await query.answer(
                 ui_language.tr("agents.alert.deactivating", agent=name)
             )
-            orchestrator.set_agent_active(name, False)
+            if not orchestrator.set_agent_active(name, False):
+                await query.answer(
+                    ui_language.tr("agents.alert.last_active"),
+                    show_alert=True,
+                )
+                return
         elif action == "start":
             await query.answer(
                 ui_language.tr("agents.alert.starting", agent=name)
@@ -2922,10 +2928,15 @@ class FlexibleAgentRuntime:
                     show_alert=True,
                 )
                 return
+            if not orchestrator.delete_agent_from_config(name):
+                await query.answer(
+                    ui_language.tr("agents.alert.last_active"),
+                    show_alert=True,
+                )
+                return
             await query.answer(
                 ui_language.tr("agents.alert.deleted", agent=name)
             )
-            orchestrator.delete_agent_from_config(name)
 
         text, markup = self._build_agents_view(orchestrator)
         await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
@@ -3318,7 +3329,37 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
 
-        # /move <agent> <target> [--keep-source] [--dry-run]
+        if args and args[0].lower() in {"continue", "finalize"}:
+            if len(args) != 2:
+                await self._reply_text(
+                    update,
+                    ui_language.tr("remote.move.continue_usage"),
+                )
+                return
+            try:
+                result = await asyncio.to_thread(
+                    runtime_remote.continue_outbound_move,
+                    runtime_remote.instance_root(self),
+                    instances,
+                    args[1],
+                )
+                await self._reply_text(
+                    update,
+                    runtime_remote._render_move_complete(result),
+                    parse_mode="HTML",
+                )
+            except (AgentMoveError, OSError) as exc:
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "remote.move.failed",
+                        error=html.escape(str(exc)),
+                    ),
+                    parse_mode="HTML",
+                )
+            return
+
+        # /move <agent> <target> [--dry-run]
         if len(args) >= 2:
             agent_id = args[0]
             target = args[1]
@@ -3365,6 +3406,77 @@ class FlexibleAgentRuntime:
 
     async def callback_move(self, update: Update, context: Any):
         await runtime_remote.handle_move_callback(self, update, context)
+
+    # ── /clone command ───────────────────────────────────────────────────────
+    async def cmd_clone(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        try:
+            instances = await runtime_remote.load_clone_instances(self)
+        except runtime_remote.MoveDiscoveryError as exc:
+            await self._reply_text(update, ui_language.tr(exc.message_key))
+            return
+        args = list(context.args or [])
+        if args and args[0].lower() == "list":
+            lines = [f"<b>{html.escape(ui_language.tr('move.known_instances'))}:</b>"]
+            for key, entry in sorted(instances.items()):
+                instance_id = str(entry.get("instance_id") or key).upper()
+                lines.append(
+                    f"  • <code>{html.escape(instance_id)}</code> — "
+                    f"{html.escape(str(entry.get('display_name') or instance_id))}"
+                )
+            await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
+        if not args:
+            await runtime_remote.clone_show_agent_picker(self, update)
+            return
+
+        dry_run = "--dry-run" in args
+        target_agent_id = None
+        if "--as" in args:
+            index = args.index("--as")
+            if index + 1 >= len(args):
+                await self._reply_text(update, ui_language.tr("remote.clone.as_usage"))
+                return
+            target_agent_id = args[index + 1]
+            del args[index : index + 2]
+        args = [item for item in args if item != "--dry-run"]
+        if len(args) not in {1, 2}:
+            await self._reply_text(update, ui_language.tr("remote.clone.usage"))
+            return
+        agent_id = args[0]
+        target = args[1] if len(args) == 2 else str(self.global_config.instance_id)
+        await self._do_clone(
+            update,
+            agent_id,
+            target,
+            instances,
+            target_agent_id=target_agent_id,
+            dry_run=dry_run,
+        )
+
+    async def _do_clone(
+        self,
+        update,
+        agent_id: str,
+        target: str,
+        instances: dict,
+        *,
+        target_agent_id: str | None = None,
+        dry_run: bool = False,
+    ):
+        await runtime_remote.do_clone(
+            self,
+            update,
+            agent_id,
+            target,
+            instances,
+            target_agent_id=target_agent_id,
+            dry_run=dry_run,
+        )
+
+    async def callback_clone(self, update: Update, context: Any):
+        await runtime_remote.handle_clone_callback(self, update, context)
 
     def _resolve_bridge_handoff_endpoint(self, target_instance: str, mode: str) -> tuple[str, str]:
         return runtime_transfer.resolve_bridge_handoff_endpoint(self, target_instance, mode)

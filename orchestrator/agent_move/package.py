@@ -39,12 +39,14 @@ from orchestrator.process_execution import is_wsl
 
 PACKAGE_TYPE = "hashi-agent-move"
 PACKAGE_SCHEMA_MIN_VERSION = 1
-PACKAGE_SCHEMA_VERSION = 2
+PACKAGE_SCHEMA_VERSION = 3
 AGENT_MOVE_CAPABILITY = "agent_move_receive_v1"
 RETAINED_IDENTITY_CAPABILITY = "agent_move_retained_identity_v1"
+AGENT_TRANSFER_LIFECYCLE_CAPABILITY = "agent_transfer_lifecycle_v1"
 PACKAGE_EXTENSION = ".hashi-agent"
 RETAINED_IDENTITY_ARCHIVE_PATH = "retained-identity/AGENT.md"
 RETAINED_IDENTITY_METADATA_PATH = "metadata/retained-identity.json"
+AGENT_CAPABILITY_ARCHIVE_PATH = "identity/capability.json"
 MAX_ARCHIVE_MEMBERS = 100_000
 MAX_UNPACKED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_WORKSPACE_BYTES = MAX_UNPACKED_BYTES - (16 * 1024 * 1024)
@@ -52,6 +54,7 @@ _CONTROL_MEMBER_LIMITS = {
     "manifest.json": 1024 * 1024,
     "identity/agent.json": 4 * 1024 * 1024,
     "identity/agent.md": 16 * 1024 * 1024,
+    AGENT_CAPABILITY_ARCHIVE_PATH: 4 * 1024 * 1024,
     RETAINED_IDENTITY_ARCHIVE_PATH: 16 * 1024 * 1024,
     RETAINED_IDENTITY_METADATA_PATH: 1024 * 1024,
     "access/requirements.json": 4 * 1024 * 1024,
@@ -153,6 +156,7 @@ class AgentMoveArchive:
     schedules: dict[str, Any]
     workspace_metadata: dict[str, Any]
     retained_identity: dict[str, Any] | None
+    agent_capability: dict[str, Any] | None
     checksums: dict[str, str]
     names: tuple[str, ...]
 
@@ -186,6 +190,15 @@ def detect_environment_kind() -> str:
         return "wsl"
     system = platform.system().lower()
     return system or "unknown"
+
+
+def validate_agent_id_for_platform(agent_id: str, target_platform: str) -> str:
+    """Validate one portable Agent ID against the receiver filesystem rules."""
+
+    value = normalize_agent_id(agent_id)
+    if str(target_platform or "").strip().lower() == "windows":
+        _validate_windows_component(value, context="Agent ID")
+    return value
 
 
 def _read_canonical_pcm(workspace: Path, agent_id: str) -> str:
@@ -306,6 +319,9 @@ def create_agent_move_package(
     secret_passphrase: str | None = None,
     package_id: str | None = None,
     max_package_bytes: int | None = None,
+    operation: str = "move",
+    include_telegram_secret: bool = True,
+    schema_version: int | None = None,
 ) -> AgentMoveArchive:
     """Create one checksummed Agent move archive.
 
@@ -316,6 +332,9 @@ def create_agent_move_package(
 
     root = Path(hashi_root).expanduser().resolve()
     name = normalize_agent_id(agent_id)
+    transfer_operation = str(operation or "").strip().lower()
+    if transfer_operation not in {"move", "clone"}:
+        raise AgentMoveError("Agent transfer operation must be 'move' or 'clone'")
     package_key = str(package_id or uuid4())
     _validate_package_id(package_key)
     output = Path(output_path).expanduser().resolve()
@@ -335,11 +354,26 @@ def create_agent_move_package(
         workspace, name
     )
     pcm_text = _read_canonical_pcm(workspace, name)
-    package_schema = 2 if retained_identity is not None else 1
+    requested_schema = int(schema_version) if schema_version is not None else 3
+    if requested_schema not in range(PACKAGE_SCHEMA_MIN_VERSION, PACKAGE_SCHEMA_VERSION + 1):
+        raise AgentMoveError(f"unsupported requested Agent package schema {requested_schema}")
+    if retained_identity is not None and requested_schema == 1:
+        raise AgentMoveError("schema 1 cannot preserve retained root AGENT.md")
+    agent_capability = (
+        _collect_agent_capability(root, name) if requested_schema >= 3 else None
+    )
+    package_schema = requested_schema
 
     agent_config, config_warnings = _portable_agent_config(raw_config, name)
     schedules = _collect_schedules(root, name)
-    secret_values, required_secret_keys = _collect_agent_secrets(root, raw_config, name)
+    secret_values, required_secret_keys, telegram_secret_key = _collect_agent_secrets(
+        root, raw_config, name
+    )
+    if not include_telegram_secret:
+        secret_values.pop(telegram_secret_key, None)
+        required_secret_keys = [
+            key for key in required_secret_keys if key != telegram_secret_key
+        ]
     if include_agent_secrets and secret_values and not secret_passphrase:
         raise AgentMoveError(
             "an encryption passphrase is required to include Agent credentials"
@@ -376,6 +410,16 @@ def create_agent_move_package(
             "workzone_mounts",
         ],
     }
+    if package_schema >= 3:
+        access_requirements.update(
+            {
+                "telegram_secret_key": telegram_secret_key,
+                "telegram_secret_included": bool(
+                    include_telegram_secret and telegram_secret_key in secret_values
+                ),
+                "operation": transfer_operation,
+            }
+        )
     workspace_metadata = {
         "schema_version": 1,
         "policy": "durable-workspace-v1"
@@ -437,6 +481,12 @@ def create_agent_move_package(
             ),
         ],
     }
+    if package_schema >= 3:
+        manifest["operation"] = transfer_operation
+        manifest["sections"]["agent_capability"] = agent_capability is not None
+        manifest["required_receiver_capabilities"].insert(
+            1, AGENT_TRANSFER_LIFECYCLE_CAPABILITY
+        )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.{package_key}.tmp")
@@ -463,6 +513,13 @@ def create_agent_move_package(
                 _write_bytes(
                     archive, "identity/agent.md", pcm_text.encode("utf-8"), checksums
                 )
+                if agent_capability is not None:
+                    _write_bytes(
+                        archive,
+                        AGENT_CAPABILITY_ARCHIVE_PATH,
+                        _json_bytes(agent_capability),
+                        checksums,
+                    )
                 if retained_identity_bytes is not None and retained_identity is not None:
                     _write_bytes(
                         archive,
@@ -568,6 +625,25 @@ def read_agent_move_package(
         _validate_manifest(manifest)
         agent_config = _read_json(archive, "identity/agent.json")
         access = _read_json(archive, "access/requirements.json")
+        if int(manifest.get("schema_version") or 0) >= 3:
+            operation = str(manifest.get("operation") or "").strip().lower()
+            if operation not in {"move", "clone"}:
+                raise AgentMoveError("schema 3 package operation is invalid")
+            if str(access.get("operation") or "").strip().lower() != operation:
+                raise AgentMoveError(
+                    "schema 3 access requirements do not match the operation"
+                )
+            telegram_key = access.get("telegram_secret_key")
+            if not isinstance(telegram_key, str) or not telegram_key.strip():
+                raise AgentMoveError(
+                    "schema 3 access requirements omit the Telegram credential key"
+                )
+            if not isinstance(access.get("telegram_secret_included"), bool):
+                raise AgentMoveError(
+                    "schema 3 access requirements omit Telegram credential policy"
+                )
+            if operation == "clone" and access.get("telegram_secret_included"):
+                raise AgentMoveError("clone package declares a Telegram credential")
         schedules = _read_json(archive, "schedules/tasks.json")
         workspace_metadata = _read_json(archive, "metadata/workspace.json")
         pcm_text = _read_required(archive, "identity/agent.md").decode("utf-8")
@@ -588,6 +664,11 @@ def read_agent_move_package(
             manifest,
             names,
         )
+        agent_capability = _read_and_validate_agent_capability(
+            archive,
+            manifest,
+            names,
+        )
 
     return AgentMoveArchive(
         package_path=path,
@@ -597,6 +678,7 @@ def read_agent_move_package(
         schedules=schedules,
         workspace_metadata=workspace_metadata,
         retained_identity=retained_identity,
+        agent_capability=agent_capability,
         checksums={str(k): str(v) for k, v in checksums.items()},
         names=tuple(names),
     )
@@ -703,6 +785,7 @@ def archive_snapshot_fingerprint(
     stable_control = {
         "identity/agent.json",
         "identity/agent.md",
+        AGENT_CAPABILITY_ARCHIVE_PATH,
         "access/requirements.json",
         "schedules/tasks.json",
         RETAINED_IDENTITY_ARCHIVE_PATH,
@@ -801,6 +884,38 @@ def _configured_instance_id(root: Path) -> str | None:
     return str((data.get("global") or {}).get("instance_id") or "").strip() or None
 
 
+def _collect_agent_capability(
+    root: Path, agent_id: str
+) -> dict[str, Any] | None:
+    """Return the Agent-owned HChat/tool permission declaration, if present."""
+
+    path = root / "agent_capabilities.json"
+    if not path.is_file():
+        return None
+    data = _load_json_file(path)
+    entries = data.get("agents", []) if isinstance(data, dict) else []
+    if isinstance(entries, dict):
+        raw = entries.get(agent_id)
+        if not isinstance(raw, dict):
+            return None
+        result = dict(raw)
+        result.setdefault("name", agent_id)
+        return result
+    if not isinstance(entries, list):
+        return None
+    matches = [
+        dict(item)
+        for item in entries
+        if isinstance(item, dict)
+        and str(item.get("name") or item.get("id") or "") == agent_id
+    ]
+    if len(matches) > 1:
+        raise AgentMoveError(
+            f"Agent '{agent_id}' has duplicate capability declarations"
+        )
+    return matches[0] if matches else None
+
+
 def _collect_schedules(root: Path, agent_id: str) -> dict[str, Any]:
     path = root / "tasks.json"
     if not path.is_file():
@@ -827,7 +942,7 @@ def _collect_agent_secrets(
     root: Path,
     agent_config: Mapping[str, Any],
     agent_id: str,
-) -> tuple[dict[str, Any], list[str]]:
+) -> tuple[dict[str, Any], list[str], str]:
     values: dict[str, Any] = {}
     path = root / "secrets.json"
     data: dict[str, Any] = {}
@@ -849,7 +964,7 @@ def _collect_agent_secrets(
     if inline and token_key not in values:
         values[token_key] = inline
     required = sorted(values)
-    return values, required
+    return values, required, token_key
 
 
 def _scan_workspace(
@@ -1111,10 +1226,71 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
             raise AgentMoveError(
                 "schema 2 manifest must declare the retained identity attachment"
             )
-    elif sections.get("retained_identity") not in {None, False}:
+        if sections.get("agent_capability") not in {None, False}:
+            raise AgentMoveError(
+                "schema 2 manifest cannot declare an Agent capability attachment"
+            )
+    elif schema == 1:
+        if sections.get("retained_identity") not in {None, False}:
+            raise AgentMoveError(
+                "schema 1 manifest cannot declare a retained identity attachment"
+            )
+        if sections.get("agent_capability") not in {None, False}:
+            raise AgentMoveError(
+                "schema 1 manifest cannot declare an Agent capability attachment"
+            )
+    elif schema == 3:
+        if str(manifest.get("operation") or "").strip().lower() not in {
+            "move",
+            "clone",
+        }:
+            raise AgentMoveError("schema 3 manifest operation is invalid")
+        if AGENT_TRANSFER_LIFECYCLE_CAPABILITY not in required:
+            raise AgentMoveError(
+                "schema 3 manifest does not require transfer lifecycle support"
+            )
+        retained = sections.get("retained_identity") is True
+        if retained and RETAINED_IDENTITY_CAPABILITY not in required:
+            raise AgentMoveError(
+                "schema 3 retained identity does not require receiver support"
+            )
+        if not retained and RETAINED_IDENTITY_CAPABILITY in required:
+            raise AgentMoveError(
+                "schema 3 declares retained identity support without an attachment"
+            )
+        if not isinstance(sections.get("agent_capability"), bool):
+            raise AgentMoveError(
+                "schema 3 must declare whether Agent capabilities are attached"
+            )
+
+
+def _read_and_validate_agent_capability(
+    archive: zipfile.ZipFile,
+    manifest: Mapping[str, Any],
+    names: Iterable[str],
+) -> dict[str, Any] | None:
+    present = AGENT_CAPABILITY_ARCHIVE_PATH in set(names)
+    declared = bool((manifest.get("sections") or {}).get("agent_capability"))
+    schema = int(manifest.get("schema_version") or 0)
+    if schema < 3:
+        if present:
+            raise AgentMoveError(
+                "legacy Agent move packages cannot contain capability declarations"
+            )
+        return None
+    if present != declared:
         raise AgentMoveError(
-            "schema 1 manifest cannot declare a retained identity attachment"
+            "Agent capability attachment does not match the manifest"
         )
+    if not present:
+        return None
+    capability = _read_json(archive, AGENT_CAPABILITY_ARCHIVE_PATH)
+    identity = str(capability.get("name") or capability.get("id") or "")
+    if identity != str(manifest.get("agent_id") or ""):
+        raise AgentMoveError(
+            "Agent capability attachment does not match the packaged Agent"
+        )
+    return capability
 
 
 def _read_and_validate_retained_identity(
@@ -1133,6 +1309,14 @@ def _read_and_validate_retained_identity(
         if retained_members:
             raise AgentMoveError(
                 "schema 1 package cannot contain a retained identity attachment"
+            )
+        return None
+    if schema == 3 and not bool(
+        (manifest.get("sections") or {}).get("retained_identity")
+    ):
+        if retained_members:
+            raise AgentMoveError(
+                "schema 3 package declares no retained identity attachment"
             )
         return None
     expected_members = {

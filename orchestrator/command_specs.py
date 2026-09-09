@@ -163,6 +163,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("usage", "cmd_usage", "View detailed usage", "tools", menu_visible=False),
     CommandSpec("logo", "cmd_logo", "Play startup animation", "tools"),
     CommandSpec("move", "cmd_move", "Move an agent to another instance", "tools", menu_visible=False),
+    CommandSpec("clone", "cmd_clone", "Clone an agent locally or to another instance", "tools", menu_visible=False),
     CommandSpec("wa_on", "cmd_wa_on", "Start WhatsApp transport", "tools"),
     CommandSpec("wa_off", "cmd_wa_off", "Stop WhatsApp transport", "tools"),
     CommandSpec("wa_send", "cmd_wa_send", "Send a WhatsApp message", "tools"),

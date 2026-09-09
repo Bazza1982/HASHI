@@ -3777,6 +3777,22 @@ class WorkbenchApiServer:
                             status=400,
                         )
             else:
+                if previous and sum(
+                    1
+                    for row in raw.get("agents", [])
+                    if isinstance(row, dict)
+                    and row.get("is_active", True) is not False
+                ) <= 1:
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": (
+                                "cannot deactivate the last active Agent; create or "
+                                "clone another Agent first"
+                            ),
+                        },
+                        status=409,
+                    )
                 if runtime_before is not None:
                     ok, message = await self.orchestrator.stop_agent(name)
                     lifecycle = {"ok": ok, "message": message}
@@ -5227,6 +5243,22 @@ class WorkbenchApiServer:
         text = (payload.get("text") or "").strip()
         runtime = runtime_map.get(agent_name)
         if runtime is None:
+            from orchestrator.agent_move.service import moved_agent_destination
+
+            moved = moved_agent_destination(self.config_path.parent, agent_name)
+            if moved:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            f"agent '{agent_name}' moved to {moved['address']}; "
+                            "refresh the Agent directory"
+                        ),
+                        "error_code": "agent_moved",
+                        "moved_to": moved["address"],
+                    },
+                    status=410,
+                )
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
@@ -5390,6 +5422,22 @@ class WorkbenchApiServer:
             runtime_map = self._runtime_map()
             runtime = runtime_map.get(to_agent)
             if runtime is None:
+                from orchestrator.agent_move.service import moved_agent_destination
+
+                moved = moved_agent_destination(self.config_path.parent, to_agent)
+                if moved:
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": (
+                                f"agent '{to_agent}' moved to {moved['address']}; "
+                                "refresh the Agent directory"
+                            ),
+                            "error_code": "agent_moved",
+                            "moved_to": moved["address"],
+                        },
+                        status=410,
+                    )
                 return web.json_response(
                     {
                         "ok": False,

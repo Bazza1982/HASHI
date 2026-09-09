@@ -43,13 +43,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
-from orchestrator.agent_move.package import AGENT_MOVE_CAPABILITY, AgentMoveError
+from orchestrator.agent_move.package import (
+    AGENT_MOVE_CAPABILITY,
+    AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
+    AgentMoveError,
+)
 from orchestrator.agent_move.service import (
     MAX_PACKAGE_BYTES,
     activate_agent_move,
     commit_agent_move,
     get_agent_move_status,
+    finalize_agent_move,
+    moved_agent_destination,
     receiver_capabilities,
+    resolve_agent_transfer_target,
     rollback_agent_move,
     stage_agent_move,
 )
@@ -118,6 +125,7 @@ API_PROTOCOL_CAPABILITIES = [
     "version_query_v1",
     "tui_proxy_v1",
     AGENT_MOVE_CAPABILITY,
+    AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
 ]
 
 _WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
@@ -224,6 +232,15 @@ class AgentMoveStagePayload(BaseModel):
     encryption: str
     package_b64: str
     sha256: str
+    operation: str = "legacy_move"
+    target_agent_id: Optional[str] = None
+
+
+class AgentMoveResolvePayload(BaseModel):
+    from_instance: str
+    source_agent_id: str
+    operation: str
+    requested_agent_id: Optional[str] = None
 
 
 class AgentMoveActionPayload(BaseModel):
@@ -1038,6 +1055,50 @@ def _fetch_workbench_json(
 
 def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
     return _fetch_workbench_json("/api/health", timeout=timeout)
+
+
+def _request_workbench_agent_lifecycle(
+    agent: str,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action not in {"start", "stop"}:
+        raise AgentMoveError("unsupported Agent lifecycle action")
+    body = json.dumps({"agent": str(agent)}, separators=(",", ":")).encode("utf-8")
+    try:
+        status, content, _headers = _forward_workbench_gateway_request(
+            method="POST",
+            api_path=f"admin/{normalized_action}-agent",
+            query="",
+            body_bytes=body,
+            request_headers={"content-type": "application/json"},
+        )
+        payload = json.loads(content.decode("utf-8"))
+    except Exception as exc:
+        raise AgentMoveError(
+            f"target Workbench could not {normalized_action} Agent '{agent}': {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AgentMoveError("target Workbench returned an invalid lifecycle response")
+    message = str(payload.get("message") or payload.get("error") or "")
+    tolerated = (
+        normalized_action == "start" and "already" in message.lower()
+    ) or (
+        normalized_action == "stop" and "not running" in message.lower()
+    )
+    if status >= 400 and not tolerated:
+        raise AgentMoveError(
+            f"target Workbench could not {normalized_action} Agent '{agent}': "
+            f"{message or f'HTTP {status}'}"
+        )
+    return {
+        "ok": True,
+        "agent": str(agent),
+        "action": normalized_action,
+        "workbench_status": status,
+        "message": message,
+    }
 
 
 def _request_workbench_reboot(
@@ -1883,6 +1944,25 @@ def create_app(
                     content={"ok": False, "error": "Exchange forwarding error", "detail": str(e)},
                 )
 
+        moved = (
+            moved_agent_destination(Path(_hashi_root), payload.to_agent)
+            if _hashi_root
+            else None
+        )
+        if moved:
+            return JSONResponse(
+                status_code=410,
+                content={
+                    "ok": False,
+                    "error": (
+                        f"agent '{payload.to_agent}' moved to {moved['address']}; "
+                        "refresh the Agent directory"
+                    ),
+                    "error_code": "agent_moved",
+                    "moved_to": moved["address"],
+                },
+            )
+
         # Format for workbench injection
         if payload.source_hchat_format:
             message_text = payload.text  # already formatted
@@ -2509,6 +2589,8 @@ def create_app(
                 source_instance=authenticated_instance or payload.from_instance,
                 target_instance=str(_instance_info.get("instance_id") or "HASHI"),
                 secret_passphrase=load_shared_token(Path(_hashi_root)),
+                operation=payload.operation,
+                target_agent_id=payload.target_agent_id,
             )
             return _agent_move_response(request, result)
         except AgentMoveError as exc:
@@ -2516,6 +2598,45 @@ def create_app(
             return _agent_move_response(
                 request,
                 status_code=status_code,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    @app.post("/agent-move/v1/resolve")
+    async def agent_move_resolve(request: Request, payload: AgentMoveResolvePayload):
+        body_bytes = await request.body()
+        ok, reason, _authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent transfer authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            result = await asyncio.to_thread(
+                resolve_agent_transfer_target,
+                Path(_hashi_root),
+                payload.source_agent_id,
+                operation=payload.operation,
+                requested_agent_id=payload.requested_agent_id,
+            )
+            return _agent_move_response(request, result)
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=409,
                 content={"ok": False, "error": str(exc)},
             )
 
@@ -2590,6 +2711,108 @@ def create_app(
     @app.post("/agent-move/v1/rollback")
     async def agent_move_rollback(request: Request, payload: AgentMoveActionPayload):
         return await _agent_move_action(request, payload, rollback_agent_move)
+
+    async def _agent_move_runtime_action(
+        request: Request,
+        payload: AgentMoveActionPayload,
+        *,
+        action: str,
+    ):
+        body_bytes = await request.body()
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Agent transfer authentication failed",
+                    "code": reason,
+                },
+            )
+        if not _hashi_root:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={"ok": False, "error": "HASHI root is unavailable"},
+            )
+        try:
+            current = await asyncio.to_thread(
+                get_agent_move_status,
+                Path(_hashi_root),
+                payload.package_id,
+            )
+            if str(current.get("source_instance") or "").upper() != str(
+                authenticated_instance or payload.from_instance
+            ).upper():
+                return _agent_move_response(
+                    request,
+                    status_code=403,
+                    content={
+                        "ok": False,
+                        "error": "Agent transfer belongs to another source instance",
+                    },
+                )
+            target_agent_id = str(
+                current.get("target_agent_id") or current.get("agent_id") or ""
+            )
+            if action in {"start", "stop"}:
+                lifecycle = await asyncio.to_thread(
+                    _request_workbench_agent_lifecycle,
+                    target_agent_id,
+                    action=action,
+                )
+                result = {**current, "lifecycle": lifecycle}
+            elif action == "finalize":
+                health = await asyncio.to_thread(_fetch_workbench_health, 3.0)
+                runtime_online = bool(
+                    health
+                    and target_agent_id in {
+                        str(item) for item in health.get("agents", []) or []
+                    }
+                )
+                result = await asyncio.to_thread(
+                    finalize_agent_move,
+                    Path(_hashi_root),
+                    payload.package_id,
+                    runtime_online=runtime_online,
+                )
+            else:  # pragma: no cover - routes below are fixed constants
+                raise AgentMoveError("unsupported Agent transfer runtime action")
+            return _agent_move_response(request, result)
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request,
+                status_code=409,
+                content={"ok": False, "error": str(exc)},
+            )
+
+    @app.post("/agent-move/v1/start")
+    async def agent_move_start(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_runtime_action(
+            request,
+            payload,
+            action="start",
+        )
+
+    @app.post("/agent-move/v1/stop")
+    async def agent_move_stop(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_runtime_action(
+            request,
+            payload,
+            action="stop",
+        )
+
+    @app.post("/agent-move/v1/finalize")
+    async def agent_move_finalize(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_runtime_action(
+            request,
+            payload,
+            action="finalize",
+        )
 
     @app.get("/agent-move/v1/status/{package_id}")
     async def agent_move_status(request: Request, package_id: str):

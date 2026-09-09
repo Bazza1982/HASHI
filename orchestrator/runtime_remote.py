@@ -14,9 +14,12 @@ from orchestrator import remote_lifecycle, runtime_pending, ui_language
 from orchestrator.agent_move.coordinator import (
     cancel_outbound_move,
     confirm_outbound_move,
+    continue_outbound_move,
     get_outbound_move,
     prepare_outbound_move,
+    prepare_outbound_clone,
     preview_outbound_move,
+    preview_outbound_clone,
 )
 from orchestrator.agent_move.package import AgentMoveError
 from orchestrator.agent_move.source_guard import source_move_guard_state
@@ -192,16 +195,77 @@ async def load_move_instances(runtime: Any) -> dict[str, dict[str, Any]]:
     return instances
 
 
+async def load_clone_instances(runtime: Any) -> dict[str, dict[str, Any]]:
+    """Return trusted peers plus the explicit current-instance clone target."""
+
+    try:
+        instances = await load_move_instances(runtime)
+    except MoveDiscoveryError:
+        # Local cloning does not depend on the Remote sidecar. A named remote
+        # target will still fail normal instance resolution with the local-only
+        # option list when discovery is unavailable.
+        instances = {}
+    config = getattr(runtime, "global_config", None)
+    current = str(getattr(config, "instance_id", None) or "HASHI").strip().upper()
+    instances[current.lower()] = {
+        "instance_id": current,
+        "display_name": str(getattr(config, "display_name", None) or current),
+        "environment_kind": str(
+            getattr(config, "environment_kind", None)
+            or getattr(config, "platform", None)
+            or "local"
+        ),
+        "active": True,
+        "local": True,
+        "capabilities": ["agent_move_receive_v1", "agent_transfer_lifecycle_v1"],
+    }
+    return instances
+
+
+def resolve_transfer_instance(
+    instances: dict[str, dict[str, Any]],
+    target: str,
+) -> tuple[str, dict[str, Any]]:
+    """Resolve a real unique ID/key/display name; no magic ``local`` alias."""
+
+    query = str(target or "").strip().casefold()
+    matches: dict[str, dict[str, Any]] = {}
+    for key, entry in instances.items():
+        instance_id = str(entry.get("instance_id") or key).strip().upper()
+        candidates = {
+            str(key).strip().casefold(),
+            instance_id.casefold(),
+            str(entry.get("display_name") or "").strip().casefold(),
+        }
+        if query and query in candidates:
+            matches[instance_id] = entry
+    options = ", ".join(
+        sorted(
+            {
+                str(entry.get("instance_id") or key).strip().upper()
+                for key, entry in instances.items()
+            }
+        )
+    ) or "none"
+    if not matches:
+        raise AgentMoveError(
+            f"unknown target instance '{target}'; available instances: {options}"
+        )
+    if len(matches) > 1:
+        raise AgentMoveError(
+            f"ambiguous target instance '{target}'; matching instances: "
+            + ", ".join(sorted(matches))
+        )
+    instance_id, entry = next(iter(matches.items()))
+    return instance_id, entry
+
+
 def _move_target_error(target: str, instances: dict) -> str | None:
-    entry = next(
-        (value for key, value in instances.items()
-         if str(key).casefold() == str(target).casefold()
-         or str(value.get("instance_id") or "").casefold() == str(target).casefold()),
-        None,
-    )
-    if entry is None:
-        key = "remote.move.unknown_target"
-    elif entry.get("active") is False:
+    try:
+        _instance_id, entry = resolve_transfer_instance(instances, target)
+    except AgentMoveError as exc:
+        return f"⚠️ <code>{html.escape(str(exc))}</code>"
+    if entry.get("active") is False:
         key = "remote.move.target_unavailable"
     elif "capabilities" in entry and "agent_move_receive_v1" not in (entry.get("capabilities") or []):
         key = "remote.move.target_unsupported"
@@ -301,12 +365,6 @@ async def move_show_options(runtime: Any, update: Any, agent_id: str, target: st
                     runtime, f"move:exec:{agent_id}:{target}:move"
                 ),
             ),
-            InlineKeyboardButton(
-                ui_language.tr("remote.move.button.copy"),
-                callback_data=_move_callback_data(
-                    runtime, f"move:exec:{agent_id}:{target}:keep"
-                ),
-            ),
         ],
         [
             InlineKeyboardButton(
@@ -348,6 +406,13 @@ async def do_move(
             parse_mode="HTML",
         )
         return
+    if keep_source:
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr("remote.move.keep_source_retired"),
+            parse_mode="HTML",
+        )
+        return
 
     selected_runtime = _find_agent_runtime(runtime, agent_id)
     delayed, busy = await _move_preflight(runtime, agent_id, selected_runtime)
@@ -364,6 +429,7 @@ async def do_move(
     if target_error:
         await runtime._send_text(chat_id, target_error, parse_mode="HTML")
         return
+    resolved_target, _target_entry = resolve_transfer_instance(instances, target)
 
     if busy:
         await runtime._send_text(
@@ -394,7 +460,7 @@ async def do_move(
                 project_root,
                 instances,
                 agent_id,
-                target,
+                resolved_target,
                 source_instance=source_instance,
             )
             await runtime._send_text(
@@ -409,12 +475,12 @@ async def do_move(
             project_root,
             instances,
             agent_id,
-            target,
+            resolved_target,
             source_instance=source_instance,
             keep_source=keep_source,
         )
         package_id = str(result["package_id"])
-        confirmation_key = "remote.move.confirm_copy" if keep_source else "remote.move.confirm_move"
+        confirmation_key = "remote.move.confirm_move"
         markup = InlineKeyboardMarkup(
             [
                 [
@@ -445,12 +511,271 @@ async def do_move(
         )
 
 
+async def clone_show_agent_picker(runtime: Any, update: Any) -> None:
+    root = instance_root(runtime)
+    try:
+        with open(root / "agents.json", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+        rows = data if isinstance(data, list) else data.get("agents", [])
+        names = [
+            str(row.get("name") or row.get("id") or "")
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("is_active", True) is not False
+            and str(row.get("name") or row.get("id") or "")
+        ]
+    except Exception:
+        names = []
+    if not names:
+        await runtime._reply_text(update, ui_language.tr("remote.move.no_agents"))
+        return
+    markup = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"🤖 {name}",
+                    callback_data=_move_callback_data(runtime, f"clone:agent:{name}"),
+                )
+            ]
+            for name in names
+        ]
+    )
+    await runtime._reply_text(
+        update,
+        f"{card_title('🧬', 'Clone agent')}\n\n"
+        f"{ui_language.tr('remote.clone.select_agent')}",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+
+
+async def clone_show_target_picker(
+    runtime: Any,
+    update: Any,
+    agent_id: str,
+    instances: dict[str, dict[str, Any]],
+) -> None:
+    current = str(runtime.global_config.instance_id or "HASHI").upper()
+    rows = []
+    for key, entry in sorted(
+        instances.items(),
+        key=lambda item: str(item[1].get("instance_id") or item[0]),
+    ):
+        if entry.get("active") is False:
+            continue
+        instance_id = str(entry.get("instance_id") or key).upper()
+        label = str(entry.get("display_name") or instance_id)
+        if instance_id == current:
+            label = f"{label} · {ui_language.tr('common.current')}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🧬 {label}",
+                    callback_data=_move_callback_data(
+                        runtime,
+                        f"clone:target:{agent_id}:{instance_id}",
+                    ),
+                )
+            ]
+        )
+    await runtime._reply_text(
+        update,
+        f"{card_title('🧬', 'Clone agent')}\n\n"
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n\n"
+        f"{ui_language.tr('remote.clone.select_target')}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def clone_show_options(
+    runtime: Any,
+    update: Any,
+    agent_id: str,
+    target: str,
+) -> None:
+    markup = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("remote.clone.button.clone"),
+                    callback_data=_move_callback_data(
+                        runtime,
+                        f"clone:exec:{agent_id}:{target}:clone",
+                    ),
+                ),
+                InlineKeyboardButton(
+                    ui_language.tr("remote.move.button.preview"),
+                    callback_data=_move_callback_data(
+                        runtime,
+                        f"clone:exec:{agent_id}:{target}:dry",
+                    ),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("remote.move.button.keep"),
+                    callback_data="clone:cancel",
+                )
+            ],
+        ]
+    )
+    await update.callback_query.edit_message_text(
+        f"{card_title('🧬', 'Clone agent')}\n\n"
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
+        f"{ui_language.tr('remote.clone.choose')}",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+
+
+async def do_clone(
+    runtime: Any,
+    update: Any,
+    agent_id: str,
+    target: str,
+    instances: dict[str, dict[str, Any]],
+    *,
+    target_agent_id: str | None = None,
+    dry_run: bool = False,
+) -> None:
+    chat_id = update.effective_chat.id
+    selected_runtime = _find_agent_runtime(runtime, agent_id)
+    delayed, busy = await _move_preflight(runtime, agent_id, selected_runtime)
+    if delayed or busy:
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr(
+                "remote.clone.agent_busy",
+                agent=html.escape(agent_id),
+            ),
+            parse_mode="HTML",
+        )
+        return
+    try:
+        resolved_target, entry = resolve_transfer_instance(instances, target)
+        if entry.get("active") is False:
+            raise AgentMoveError(f"target instance '{resolved_target}' is unavailable")
+        if (
+            not entry.get("local")
+            and "capabilities" in entry
+            and "agent_transfer_lifecycle_v1" not in (entry.get("capabilities") or [])
+        ):
+            raise AgentMoveError(
+                f"target instance '{resolved_target}' has not adopted clone support"
+            )
+        operation = "preview" if dry_run else "prepare"
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr(
+                f"remote.clone.{operation}_started",
+                agent=html.escape(agent_id),
+                target=html.escape(resolved_target),
+            ),
+            parse_mode="HTML",
+        )
+        root = instance_root(runtime)
+        source_instance = str(runtime.global_config.instance_id or "HASHI")
+        if dry_run:
+            result = await asyncio.to_thread(
+                preview_outbound_clone,
+                root,
+                instances,
+                agent_id,
+                resolved_target,
+                source_instance=source_instance,
+                target_agent_id=target_agent_id,
+            )
+            await runtime._send_text(
+                chat_id,
+                _render_clone_preview(result),
+                parse_mode="HTML",
+            )
+            return
+        result = await asyncio.to_thread(
+            prepare_outbound_clone,
+            root,
+            instances,
+            agent_id,
+            resolved_target,
+            source_instance=source_instance,
+            target_agent_id=target_agent_id,
+        )
+        package_id = str(result["package_id"])
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr("remote.clone.confirm"),
+                        callback_data=f"clone:commit:{package_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr("remote.move.cancel_prepared"),
+                        callback_data=f"clone:abort:{package_id}",
+                    )
+                ],
+            ]
+        )
+        await runtime._send_text(
+            chat_id,
+            _render_clone_prepared(result),
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+    except (AgentMoveError, OSError) as exc:
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr("remote.clone.failed", error=html.escape(str(exc))),
+            parse_mode="HTML",
+        )
+
+
+def _render_clone_preview(result: dict[str, Any]) -> str:
+    return (
+        f"{card_title('🔎', 'Agent clone preview')}\n\n"
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · "
+        f"<code>{html.escape(str(result.get('agent_id')))}</code> → "
+        f"<code>{html.escape(str(result.get('target_agent_id')))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.target'))}</b> · "
+        f"<code>{html.escape(str(result.get('target_instance')))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('remote.move.workspace_files'))}</b> · "
+        f"<code>{int(result.get('workspace_files') or 0)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('remote.move.schedules'))}</b> · "
+        f"<code>{int(result.get('schedule_count') or 0)}</code>\n\n"
+        f"{ui_language.tr('remote.clone.preview_clean', target_agent=html.escape(str(result.get('target_agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
+    )
+
+
+def _render_clone_prepared(result: dict[str, Any]) -> str:
+    return (
+        f"{card_title('🛡️', 'Agent clone prepared')}\n\n"
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · "
+        f"<code>{html.escape(str(result.get('agent_id')))}</code> → "
+        f"<code>{html.escape(str(result.get('target_agent_id')))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.target'))}</b> · "
+        f"<code>{html.escape(str(result.get('target_instance')))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('remote.move.package_id'))}</b> · "
+        f"<code>{html.escape(str(result.get('package_id')))}</code>\n\n"
+        f"{ui_language.tr('remote.clone.prepared_safe')}"
+    )
+
+
+def _render_clone_complete(result: dict[str, Any]) -> str:
+    return (
+        f"{card_title('✅', 'Agent clone complete')}\n\n"
+        f"{ui_language.tr('remote.clone.complete', source_agent=html.escape(str(result.get('agent_id'))), target_agent=html.escape(str(result.get('target_agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
+    )
+
+
 def _render_move_preview(result: dict[str, Any]) -> str:
     cross_platform = result.get("source_environment") != result.get("target_environment")
     lines = [
         card_title("🔎", "Agent move preview"),
         "",
-        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(result.get('agent_id')))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(result.get('agent_id')))}</code> → <code>{html.escape(str(result.get('target_agent_id') or result.get('agent_id')))}</code>",
         f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(str(result.get('target_instance')))}</code>",
         f"<b>{html.escape(ui_language.tr('remote.move.package_size'))}</b> · <code>{int(result.get('package_bytes') or 0):,} B</code>",
         f"<b>{html.escape(ui_language.tr('remote.move.workspace_files'))}</b> · <code>{int(result.get('workspace_files') or 0)}</code>",
@@ -472,7 +797,7 @@ def _render_move_prepared(result: dict[str, Any]) -> str:
     lines = [
         card_title("🛡️", "Agent move prepared"),
         "",
-        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(result.get('agent_id')))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(result.get('agent_id')))}</code> → <code>{html.escape(str(result.get('target_agent_id') or result.get('agent_id')))}</code>",
         f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(str(result.get('target_instance')))}</code>",
         f"<b>{html.escape(ui_language.tr('remote.move.package_id'))}</b> · <code>{html.escape(str(result.get('package_id')))}</code>",
         f"<b>{html.escape(ui_language.tr('remote.move.workspace_files'))}</b> · <code>{int(result.get('workspace_files') or 0)}</code>",
@@ -529,6 +854,18 @@ def _render_move_complete(result: dict[str, Any]) -> str:
         body = (
             f"{card_title('✅', 'Agent copied inactive')}\n\n"
             f"{ui_language.tr('remote.move.copy_complete', agent=html.escape(str(result.get('agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
+        )
+        return "\n".join([body, *_render_move_review_notes(result)])
+    if result.get("status") == "source_disabled_target_committed":
+        body = (
+            f"{card_title('🛡️', 'Agent move awaiting source stop')}\n\n"
+            f"{ui_language.tr('remote.move.source_stop_required', agent=html.escape(str(result.get('agent_id'))), target_agent=html.escape(str(result.get('target_agent_id') or result.get('agent_id'))), target=html.escape(str(result.get('target_instance'))), package_id=html.escape(str(result.get('package_id'))))}"
+        )
+        return "\n".join([body, *_render_move_review_notes(result)])
+    if result.get("status") == "completed":
+        body = (
+            f"{card_title('✅', 'Agent move complete')}\n\n"
+            f"{ui_language.tr('remote.move.lifecycle_complete', agent=html.escape(str(result.get('agent_id'))), target_agent=html.escape(str(result.get('target_agent_id') or result.get('agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
         )
         return "\n".join([body, *_render_move_review_notes(result)])
     order = list(result.get("reboot_order") or [])
@@ -592,7 +929,14 @@ def render_remote_peer_lines(
 
 async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
     try:
-        await _handle_move_callback(runtime, update, context)
+        resolved = _resolve_move_callback_data(
+            runtime,
+            update.callback_query.data or "",
+        )
+        if str(resolved or "").startswith("clone:"):
+            await _handle_clone_callback(runtime, update, context)
+        else:
+            await _handle_move_callback(runtime, update, context)
     except MoveDiscoveryError as exc:
         data = _resolve_move_callback_data(runtime, update.callback_query.data or "") or ""
         parts = data.split(":")
@@ -603,6 +947,10 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         await update.callback_query.edit_message_text(
             ui_language.tr(exc.message_key), reply_markup=markup,
         )
+
+
+async def handle_clone_callback(runtime: Any, update: Any, context: Any) -> None:
+    await handle_move_callback(runtime, update, context)
 
 
 async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
@@ -680,12 +1028,6 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                         runtime, f"move:exec:{agent_id}:{target}:move"
                     ),
                 ),
-                InlineKeyboardButton(
-                    ui_language.tr("remote.move.button.copy"),
-                    callback_data=_move_callback_data(
-                        runtime, f"move:exec:{agent_id}:{target}:keep"
-                    ),
-                ),
             ],
             [
                 InlineKeyboardButton(
@@ -717,16 +1059,24 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
         sync = mode == "sync"
         dry = mode == "dry"
         instances = await load_move_instances(runtime)
-        await runtime._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry)
+        if keep:
+            await query.edit_message_text(
+                ui_language.tr("remote.move.keep_source_retired"),
+                parse_mode="HTML",
+            )
+            return
+        await runtime._do_move(update, agent_id, target, instances, keep_source=False, sync=sync, dry_run=dry)
         return
 
-    if action in {"commit", "abort"} and len(parts) >= 3:
+    if action in {"commit", "continue", "abort"} and len(parts) >= 3:
         package_id = parts[2]
         project_root = instance_root(runtime)
         instances = await load_move_instances(runtime)
         await query.edit_message_text(
             ui_language.tr(
-                "remote.move.committing" if action == "commit" else "remote.move.cancelling"
+                "remote.move.committing"
+                if action in {"commit", "continue"}
+                else "remote.move.cancelling"
             ),
             parse_mode="HTML",
         )
@@ -761,12 +1111,43 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                     )
                     return
             if action == "commit":
-                result = await asyncio.to_thread(
-                    confirm_outbound_move,
-                    project_root,
-                    instances,
-                    package_id,
-                )
+                if outbound.get("status") in {
+                    "source_disabled_target_committed",
+                    "activating_target",
+                    "move_completed_cleanup_pending",
+                    "moved_pending_reboots",
+                }:
+                    result = await asyncio.to_thread(
+                        continue_outbound_move,
+                        project_root,
+                        instances,
+                        package_id,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        confirm_outbound_move,
+                        project_root,
+                        instances,
+                        package_id,
+                    )
+                if (
+                    result.get("status") == "source_disabled_target_committed"
+                    and agent_id != str(getattr(runtime, "name", "") or "")
+                ):
+                    orchestrator = getattr(runtime, "orchestrator", None)
+                    stop_agent = getattr(orchestrator, "stop_agent", None)
+                    if callable(stop_agent):
+                        ok, message = await stop_agent(agent_id)
+                        if not ok and "not running" not in str(message).lower():
+                            raise AgentMoveError(
+                                f"source connector could not be stopped: {message}"
+                            )
+                        result = await asyncio.to_thread(
+                            continue_outbound_move,
+                            project_root,
+                            instances,
+                            package_id,
+                        )
                 await query.edit_message_text(
                     _render_move_complete(result),
                     parse_mode="HTML",
@@ -776,6 +1157,17 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                     and result.get("status") == "copied_inactive"
                 ):
                     selected_runtime._agent_move_quiesced = False
+            elif action == "continue":
+                result = await asyncio.to_thread(
+                    continue_outbound_move,
+                    project_root,
+                    instances,
+                    package_id,
+                )
+                await query.edit_message_text(
+                    _render_move_complete(result),
+                    parse_mode="HTML",
+                )
             else:
                 await asyncio.to_thread(
                     cancel_outbound_move,
@@ -799,6 +1191,128 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                 f"{ui_language.tr('remote.move.recovery_hint')}",
                 parse_mode="HTML",
                 reply_markup=_move_recovery_markup(package_id),
+            )
+
+
+async def _handle_clone_callback(runtime: Any, update: Any, context: Any) -> None:
+    del context
+    query = update.callback_query
+    if not runtime._is_authorized_user(query.from_user.id):
+        await query.answer()
+        return
+    await query.answer()
+    data = _resolve_move_callback_data(runtime, query.data or "")
+    if data is None:
+        await query.edit_message_text(ui_language.tr("remote.clone.selection_expired"))
+        return
+    parts = data.split(":", 3)
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "cancel":
+        await query.edit_message_text(ui_language.tr("remote.clone.cancelled"))
+        return
+    if action == "agent" and len(parts) >= 3:
+        agent_id = parts[2]
+        instances = await load_clone_instances(runtime)
+        current = str(runtime.global_config.instance_id or "HASHI").upper()
+        rows = []
+        for key, entry in sorted(instances.items()):
+            if entry.get("active") is False:
+                continue
+            instance_id = str(entry.get("instance_id") or key).upper()
+            label = str(entry.get("display_name") or instance_id)
+            if instance_id == current:
+                label = f"{label} · {ui_language.tr('common.current')}"
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"🧬 {label}",
+                        callback_data=_move_callback_data(
+                            runtime,
+                            f"clone:target:{agent_id}:{instance_id}",
+                        ),
+                    )
+                ]
+            )
+        await query.edit_message_text(
+            f"{card_title('🧬', 'Clone agent')}\n\n"
+            f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n\n"
+            f"{ui_language.tr('remote.clone.select_target')}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+    if action == "target" and len(parts) >= 4:
+        await clone_show_options(runtime, update, parts[2], parts[3])
+        return
+    if action == "exec" and len(parts) >= 4:
+        agent_id = parts[2]
+        target_mode = parts[3].split(":", 1)
+        target = target_mode[0]
+        dry_run = len(target_mode) > 1 and target_mode[1] == "dry"
+        instances = await load_clone_instances(runtime)
+        await runtime._do_clone(
+            update,
+            agent_id,
+            target,
+            instances,
+            dry_run=dry_run,
+        )
+        return
+    if action in {"commit", "abort"} and len(parts) >= 3:
+        package_id = parts[2]
+        root = instance_root(runtime)
+        instances = await load_clone_instances(runtime)
+        await query.edit_message_text(
+            ui_language.tr(
+                "remote.clone.committing"
+                if action == "commit"
+                else "remote.move.cancelling"
+            ),
+            parse_mode="HTML",
+        )
+        try:
+            if action == "commit":
+                result = await asyncio.to_thread(
+                    confirm_outbound_move,
+                    root,
+                    instances,
+                    package_id,
+                )
+                await query.edit_message_text(
+                    _render_clone_complete(result),
+                    parse_mode="HTML",
+                )
+            else:
+                await asyncio.to_thread(
+                    cancel_outbound_move,
+                    root,
+                    instances,
+                    package_id,
+                )
+                await query.edit_message_text(
+                    ui_language.tr("remote.clone.prepared_cancelled"),
+                    parse_mode="HTML",
+                )
+        except (AgentMoveError, OSError) as exc:
+            await query.edit_message_text(
+                ui_language.tr("remote.clone.failed", error=html.escape(str(exc))),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                ui_language.tr("remote.move.retry_recovery"),
+                                callback_data=f"clone:commit:{package_id}",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                ui_language.tr("remote.move.reconcile_cancel"),
+                                callback_data=f"clone:abort:{package_id}",
+                            )
+                        ]
+                    ]
+                ),
             )
 
 

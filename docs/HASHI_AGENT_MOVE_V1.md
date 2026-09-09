@@ -2,9 +2,11 @@
 
 ## Purpose
 
-`/move` transfers a durable Agent identity between HASHI instances. It is
-separate from live task/session handoff and from the HASHI ↔ Hermes transfer
-format.
+`/move` transfers one durable Agent identity between HASHI instances. `/clone`
+creates a new Agent locally or remotely while leaving the source active. These
+operations are separate from live task/session handoff and from the HASHI ↔
+Hermes transfer format, but deliberately share one package, receiver,
+authentication, transaction journal, and registry-writing implementation.
 
 The source sends a platform-neutral `agent-move-v1` archive to a target-owned
 receiver. The source never writes a target filesystem path directly.
@@ -12,9 +14,12 @@ receiver. The source never writes a target filesystem path directly.
 ## Compatibility
 
 - An outbound instance must implement this protocol.
-- A target must advertise `agent_move_receive_v1` and accept schema version 1.
-  A source that has an exact root `AGENT.md` uses schema version 2 and also
-  requires `agent_move_retained_identity_v1`.
+- A target must advertise `agent_move_receive_v1`. New move/clone transactions
+  use schema version 3 and require `agent_transfer_lifecycle_v1`; an exact root
+  `AGENT.md` additionally requires `agent_move_retained_identity_v1`.
+- Schema versions 1 and 2 remain readable so historical transaction journals
+  can still be reconciled or rolled back. New clients do not expose their old
+  copy/`keep_source` UI.
 - A pre-feature target must be updated and reloaded before it can receive an
   Agent. A pre-feature source must be updated before it can transfer one out.
 - Future senders should retain a schema-v1 exporter while schema v1 remains a
@@ -28,12 +33,14 @@ receiver. The source never writes a target filesystem path directly.
 - consistent SQLite snapshots rather than live WAL sidecars;
 - the Agent's schedules, imported disabled for review;
 - Agent-owned secret keys, encrypted with the paired HASHI Remote shared
-  secret;
+  secret. A move includes its Telegram credential for a single-consumer
+  cutover; a clone always excludes every Telegram credential;
+- the Agent-owned capability/tool/permission declaration;
 - access requirements and an explicit target-rebind list.
 
 `agent.md` is always the sole live PCM identity. On case-sensitive sources,
 one additional exact, root-level, ordinary file named `AGENT.md` is preserved
-by schema 2 as a non-authoritative attachment. It is checksummed, included in
+by schema 2 and later as a non-authoritative attachment. It is checksummed, included in
 the final freshness comparison, and never placed in the imported workspace.
 Preview and transaction status identify it explicitly. During target staging,
 the receiver copies it to
@@ -42,10 +49,12 @@ the path and digest in transaction state. Commit, cancellation, and rollback do
 not remove that preservation copy. A staging failure before the transaction
 record is durable removes only that incomplete transaction and its upload.
 
-The archive excludes active sessions, runtime state directories, virtual
-environments, caches, nested repositories, external symlinks, source workzone
-paths, and common plaintext credential files. Instance-level provider/OAuth,
-browser, filesystem, and operating-system access remains target-owned.
+The archive excludes active sessions, runtime state directories, queues and
+in-progress work, virtual environments, caches, nested repositories, external
+symlinks, source workzone/absolute paths, and common plaintext credential
+files. Instance-level provider/OAuth, browser, filesystem, and
+operating-system access remains target-owned. Imported schedules are always
+disabled drafts.
 
 Every preview reports included file count, package size, and excluded-path
 count. The v1 receiver accepts packages up to 256 MiB and archives expanding to
@@ -65,24 +74,44 @@ their own repository/artifact workflow.
    snapshot and compares it to the staged package. If memory, configuration,
    schedules, permissions, or Agent-owned credentials changed, the target is
    rolled back and a fresh prepare is required.
-6. In copy mode, the transaction stops after inactive import and leaves the
-   source active.
-7. In move mode, the source configuration and schedules are disabled, then
-   the target configuration is activated.
-8. The source workspace is retained. Imported schedules stay disabled.
+6. For a clone, the target is activated and hot-started through the Workbench
+   lifecycle API, then verified as usable. The source remains active. Telegram
+   is unconfigured and imported schedules stay disabled.
+7. For a move, the source registry entry and schedules are disabled first. The
+   target remains inactive until the source Worker and Telegram ingress are
+   demonstrably stopped. `/move continue <transaction-id>` then activates and
+   hot-starts the target.
+8. The receiver verifies target identity, canonical PCM, durable workspace and
+   memory digests, remapped Agent credentials, portable paths, disabled
+   schedules, capability declaration, and live Workbench availability.
+9. Only after verification does the source delete its registry entry,
+   workspace, Agent-only secrets, schedules, capability declaration, and
+   temporary package. It retains an audit-only move journal and destination
+   tombstone. A cleanup error becomes `move_completed_cleanup_pending`; the
+   already verified target remains authoritative and the source is never
+   re-enabled.
 
 During the final freshness check the source Agent is briefly quiesced. Once
 its source configuration is disabled, the still-running process refuses new
-work and only directs the operator through the required source-first reboot.
-This prevents memories from diverging in the interval between cutover and hot
-reload.
+work. If another local Agent initiated the move, HASHI can stop the source
+Worker and continue automatically; when an Agent moves itself, the operator
+continues the recorded transaction from another Agent on the source instance.
+The target cannot become active before the source process is absent, which
+mechanically prevents two Telegram pollers.
 
-A later return move may replace that exact inactive retained source copy when
-its journal proves it was moved to the incoming source instance. The receiver
-backs up the dormant workspace and configuration before replacement, so a
-failed return cutover restores the dormant copy. Any active, unrelated, or
-unproven Agent-ID/workspace collision remains a hard error; v1 never guesses at
+Historical return moves may still replace the exact inactive retained source
+copy created by the legacy protocol when its journal proves ownership. New
+moves clean the verified source instead. Any active, unrelated, or unproven
+Agent-ID/workspace collision remains a hard error; HASHI never guesses at
 memory merges.
+
+Each instance must retain at least one active Agent. A move of the last active
+Agent fails before packaging or target mutation and directs the user to create
+or clone another Agent. Clone remains allowed. Target IDs are resolved
+case-insensitively against both registry and workspaces: the first collision
+uses `_1`, then `_2`, and so on, while `--as` accepts a legal explicit free ID.
+`local` has no special meaning; omitted clone target means the current instance,
+and every supplied target must resolve to one real, unique instance ID/name.
 
 Request and response HMACs bind every state-changing Remote exchange. Both
 sides keep journals so interrupted commit, source-disable, source-restore, and
@@ -114,25 +143,42 @@ stored outside the Agent workspace, a Windows target never has to materialize
 connections are closed before their temporary snapshots are removed, including
 on Windows filesystems that enforce open-file sharing locks.
 
-## Activation
+## Activation and directory visibility
 
-`/move` never starts a reboot. After a successful move, unload the source copy
-first with `/reboot min` from the moved Agent. After it is offline, use the
-target instance's `/reboot` menu from an already-running Agent and select the
-moved Agent. This order prevents two processes from polling the same delivery
-credential.
+Schema-3 transfers use the existing authenticated Workbench lifecycle gateway,
+so clone targets and verified move targets are usable immediately without an
+instance reboot. The move cutover remains source-first: commit cannot activate
+the target, and continue refuses while the source Worker is visible.
+
+HChat and the Remote directory publish only active `agent_id@instance_id`
+addresses. After successful source cleanup, delivery to the old local address,
+Workbench HChat endpoint, Remote HChat endpoint, or protocol address returns
+`agent_moved`, the new address, and an instruction to refresh the directory.
+The tombstone is audit/routing metadata, not a retained Agent copy.
 
 ## Command Surface
 
-- `/move` — choose Agent, target, preview/copy/move, then explicitly confirm.
+- `/move` — choose Agent and remote target, preview, then explicitly confirm the
+  source-first migration.
 - `/move <agent> <target> --dry-run` — disposable preflight.
-- `/move <agent> <target> --keep-source` — prepare an inactive target copy.
+- `/move continue <transaction-id>` — finish activation/verification/cleanup
+  after the source Worker is stopped.
+- `/clone <agent>` — clone on the current instance using the first free ID.
+- `/clone <agent> <instance>` — clone to one explicitly resolved current or
+  remote instance.
+- `/clone <agent> [instance] --as <new-id>` — request a legal free target ID.
+- `/clone <agent> [instance] --dry-run` — disposable clone preflight.
 - `python scripts/move_agent.py <agent> <target>` — prepare via CLI.
-- `python scripts/move_agent.py --confirm <move-id>` — confirm a staged move.
+- `python scripts/move_agent.py --confirm <move-id>` — commit the target inactive
+  and disable the source registry entry.
+- `python scripts/move_agent.py --continue <move-id>` — after the source Worker
+  stops, activate, verify, and finish cleanup.
 - `python scripts/move_agent.py --cancel <move-id>` — roll back a staged move.
 
-Legacy `--sync` and plaintext direct-move credentials are rejected. Offline
-HASHI ↔ Hermes import/export remains on its existing, separate workflow.
+Legacy `--sync` is rejected. `--keep-source` produces a compatibility message
+directing users to `/clone` and prepares nothing. Plaintext direct-move
+credentials remain rejected. Offline HASHI ↔ Hermes import/export remains on
+its existing, separate workflow.
 
 
 ## HASHI3 /move Remote discovery — 2026-09-07

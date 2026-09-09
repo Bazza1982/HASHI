@@ -69,6 +69,7 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     CallbackBinding(r"^tgl:", "callback_toggle"),
     CallbackBinding(r"^group:", "callback_group"),
     CallbackBinding(r"^move:", "callback_move"),
+    CallbackBinding(r"^clone:", "callback_clone"),
     CallbackBinding(r"^language:", "callback_language"),
 )
 

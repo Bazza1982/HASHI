@@ -62,6 +62,46 @@ def test_load_instances_reads_first_available_file(tmp_path):
     }
 
 
+def test_transfer_instance_resolution_uses_real_ids_and_never_magic_local():
+    instances = {
+        "hashi2": {"instance_id": "HASHI2", "display_name": "Current"},
+        "local": {"instance_id": "LOCAL", "display_name": "Lab"},
+    }
+
+    instance_id, _entry = runtime_remote.resolve_transfer_instance(
+        instances,
+        "local",
+    )
+    assert instance_id == "LOCAL"
+
+    with pytest.raises(AgentMoveError, match="unknown target instance 'local'"):
+        runtime_remote.resolve_transfer_instance(
+            {"hashi2": instances["hashi2"]},
+            "local",
+        )
+
+
+def test_transfer_instance_resolution_rejects_ambiguous_display_name():
+    instances = {
+        "one": {"instance_id": "HASHI1", "display_name": "Shared"},
+        "two": {"instance_id": "HASHI2", "display_name": "shared"},
+    }
+    with pytest.raises(AgentMoveError, match="ambiguous target instance"):
+        runtime_remote.resolve_transfer_instance(instances, "SHARED")
+
+
+@pytest.mark.asyncio
+async def test_local_clone_directory_survives_remote_sidecar_unavailability(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._fetch_remote_json = AsyncMock(return_value=(None, None))
+
+    instances = await runtime_remote.load_clone_instances(runtime)
+
+    assert list(instances) == ["hashi_test"]
+    assert instances["hashi_test"]["instance_id"] == "HASHI_TEST"
+    assert instances["hashi_test"]["local"] is True
+
+
 @pytest.mark.asyncio
 async def test_move_show_agent_picker_lists_agents(tmp_path):
     (tmp_path / "agents.json").write_text(
@@ -163,7 +203,7 @@ async def test_handle_move_callback_agent_lists_targets(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_handle_move_callback_exec_invokes_runtime_do_move(tmp_path):
+async def test_stale_keep_source_callback_redirects_to_clone_without_staging(tmp_path):
     calls = []
     runtime = _runtime(tmp_path)
 
@@ -175,10 +215,8 @@ async def test_handle_move_callback_exec_invokes_runtime_do_move(tmp_path):
 
     await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
 
-    assert len(calls) == 1
-    assert calls[0][:2] == ("zelda", "hashi2")
-    assert calls[0][2]["hashi2"]["remote_port"] == 8767
-    assert calls[0][3] == {"keep_source": True, "sync": False, "dry_run": False}
+    assert calls == []
+    assert "/clone" in update.callback_query.edits[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -369,7 +407,7 @@ async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
     assert calls
     prepare.assert_not_called()
     assert calls[0][0] == tmp_path
-    assert calls[0][2:] == ("zelda", "hashi2", "HASHI_TEST")
+    assert calls[0][2:] == ("zelda", "HASHI2", "HASHI_TEST")
     assert (
         "Source and target configuration were not changed"
         in runtime.replies[-1]["text"]

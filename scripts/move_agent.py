@@ -2,14 +2,14 @@
 """
 move_agent.py — HASHI Agent Migration Tool
 
-Moves or copies an agent (config + secrets + workspace) between HASHI instances,
+Moves an agent (config + secrets + workspace) between HASHI instances,
 to/from USB/portable paths, or between WSL and Windows.
 
 Usage:
   # Instance-to-instance (agent-move-v1 over authenticated HASHI Remote)
   python scripts/move_agent.py zelda hashi2
-  python scripts/move_agent.py zelda hashi9 --keep-source
   python scripts/move_agent.py --confirm <move-id>
+  python scripts/move_agent.py --continue <move-id>
   python scripts/move_agent.py --cancel <move-id>
 
   # Export to package file
@@ -51,6 +51,7 @@ if str(HASHI_ROOT) not in sys.path:
 from orchestrator.agent_move.coordinator import (
     cancel_outbound_move,
     confirm_outbound_move,
+    continue_outbound_move,
     prepare_outbound_move,
     preview_outbound_move,
 )
@@ -740,12 +741,14 @@ def main():
         "--no-secrets", action="store_true", help="Exclude secrets from package"
     )
     parser.add_argument(
-        "--keep-source", action="store_true", help="Keep source agent active after move"
+        "--keep-source",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--sync",
         action="store_true",
-        help="Merge memories instead of overwrite (move-back)",
+        help="Retired compatibility option; agent-move-v1 includes durable memory",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Preview actions without making changes"
@@ -779,7 +782,13 @@ def main():
     parser.add_argument(
         "--confirm",
         metavar="MOVE_ID",
-        help="Commit an already staged agent-move-v1 package",
+        help="Commit a staged move and disable its source registry entry",
+    )
+    parser.add_argument(
+        "--continue",
+        dest="continue_move",
+        metavar="MOVE_ID",
+        help="Activate and verify a committed move after its source Worker stops",
     )
     parser.add_argument(
         "--cancel",
@@ -794,13 +803,35 @@ def main():
         Path(args.instances_file) if args.instances_file else None
     )
 
-    if args.confirm or args.cancel:
+    if args.keep_source:
+        print(
+            "Error: --keep-source copy mode has moved to the /clone command; "
+            "no transfer was prepared.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    lifecycle_actions = [
+        value for value in (args.confirm, args.continue_move, args.cancel) if value
+    ]
+    if len(lifecycle_actions) > 1:
+        print(
+            "Error: choose only one of --confirm, --continue, or --cancel.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if lifecycle_actions:
         try:
-            result = (
-                confirm_outbound_move(HASHI_ROOT, instances, args.confirm)
-                if args.confirm
-                else cancel_outbound_move(HASHI_ROOT, instances, args.cancel)
-            )
+            if args.confirm:
+                result = confirm_outbound_move(HASHI_ROOT, instances, args.confirm)
+            elif args.continue_move:
+                result = continue_outbound_move(
+                    HASHI_ROOT,
+                    instances,
+                    args.continue_move,
+                )
+            else:
+                result = cancel_outbound_move(HASHI_ROOT, instances, args.cancel)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
         except (AgentMoveError, OSError) as exc:
@@ -909,7 +940,7 @@ def main():
     if args.sync:
         print(
             "Error: --sync is retired; agent-move-v1 already includes durable memory. "
-            "Use --keep-source for an inactive copy.",
+            "Use /clone when the source Agent must remain active.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -957,6 +988,12 @@ def main():
             return
         result = confirm_outbound_move(HASHI_ROOT, instances, prepared["package_id"])
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get("status") == "source_disabled_target_committed":
+            print(
+                "\nSource registry is disabled and the target remains inactive. "
+                "Stop or adopt the source Worker change, then run "
+                f"scripts/move_agent.py --continue {prepared['package_id']}."
+            )
     except (AgentMoveError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

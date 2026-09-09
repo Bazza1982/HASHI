@@ -39,7 +39,34 @@ class AgentMoveRemoteClient:
     shared_token: str
     capabilities: dict[str, Any]
 
-    def stage(self, package_path: Path | str, *, timeout: int = 300) -> dict[str, Any]:
+    def resolve_target_id(
+        self,
+        source_agent_id: str,
+        *,
+        operation: str,
+        requested_agent_id: str | None = None,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        return self._request(
+            "/agent-move/v1/resolve",
+            method="POST",
+            payload={
+                "from_instance": self.source_instance,
+                "source_agent_id": source_agent_id,
+                "operation": operation,
+                "requested_agent_id": requested_agent_id,
+            },
+            timeout=timeout,
+        )
+
+    def stage(
+        self,
+        package_path: Path | str,
+        *,
+        operation: str = "legacy_move",
+        target_agent_id: str | None = None,
+        timeout: int = 300,
+    ) -> dict[str, Any]:
         path = Path(package_path)
         package = read_agent_move_package(path, verify=True)
         self.ensure_package_compatible(package)
@@ -70,6 +97,8 @@ class AgentMoveRemoteClient:
                 "encryption": ENVELOPE_SCHEME,
                 "package_b64": base64.b64encode(envelope).decode("ascii"),
                 "sha256": digest,
+                "operation": operation,
+                "target_agent_id": target_agent_id,
             },
             timeout=timeout,
         )
@@ -129,6 +158,15 @@ class AgentMoveRemoteClient:
 
     def rollback(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
         return self._action("rollback", package_id, timeout=timeout)
+
+    def start(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
+        return self._action("start", package_id, timeout=timeout)
+
+    def stop(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
+        return self._action("stop", package_id, timeout=timeout)
+
+    def finalize(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
+        return self._action("finalize", package_id, timeout=timeout)
 
     def status(self, package_id: str, *, timeout: int = 30) -> dict[str, Any]:
         return self._request(

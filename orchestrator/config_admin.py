@@ -32,6 +32,17 @@ class ConfigAdmin:
         raw = self.load_raw_config()
         for ag in raw.get("agents", []):
             if ag.get("name") == agent_name:
+                if (
+                    not active
+                    and ag.get("is_active", True) is not False
+                    and sum(
+                        1
+                        for row in raw.get("agents", [])
+                        if isinstance(row, dict)
+                        and row.get("is_active", True) is not False
+                    ) <= 1
+                ):
+                    return False
                 ag["is_active"] = active
                 self.write_raw_config(raw)
                 return True
@@ -41,8 +52,18 @@ class ConfigAdmin:
         """Remove an agent entry from config. Returns True if found and removed."""
         raw = self.load_raw_config()
         agents = raw.get("agents", [])
+        removed = [ag for ag in agents if ag.get("name") == agent_name]
+        remaining = [ag for ag in agents if ag.get("name") != agent_name]
+        if (
+            any(ag.get("is_active", True) is not False for ag in removed)
+            and not any(
+                isinstance(ag, dict) and ag.get("is_active", True) is not False
+                for ag in remaining
+            )
+        ):
+            return False
         orig_len = len(agents)
-        raw["agents"] = [ag for ag in agents if ag.get("name") != agent_name]
+        raw["agents"] = remaining
         if len(raw["agents"]) < orig_len:
             self.write_raw_config(raw)
             return True

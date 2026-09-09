@@ -14,8 +14,12 @@ from orchestrator.agent_move.package import (
 )
 from orchestrator.agent_move.service import (
     activate_agent_move,
+    cleanup_source_agent,
     commit_agent_move,
     deactivate_source_agent,
+    finalize_agent_move,
+    moved_agent_destination,
+    resolve_agent_transfer_target,
     restore_source_agent,
     rollback_agent_move,
     stage_agent_move,
@@ -59,7 +63,25 @@ def _roots(tmp_path: Path) -> tuple[Path, Path, Path]:
         "access_scope": "drive",
         "is_active": True,
     }
-    _write_json(source / "agents.json", _agents("HASHI1", [row]))
+    _write_json(
+        source / "agents.json",
+        _agents(
+            "HASHI1",
+            [
+                row,
+                {
+                    "name": "anchor",
+                    "type": "flex",
+                    "workspace_dir": "workspaces/anchor",
+                    "active_backend": "codex-cli",
+                    "allowed_backends": [
+                        {"engine": "codex-cli", "model": "gpt-5.5"}
+                    ],
+                    "is_active": True,
+                },
+            ],
+        ),
+    )
     _write_json(source / "secrets.json", {"zelda": "agent-token", "shared": "source"})
     _write_json(
         source / "tasks.json",
@@ -170,6 +192,7 @@ def test_schema2_retained_identity_is_persisted_outside_workspace_and_survives_r
         source_instance="HASHI1",
         include_agent_secrets=True,
         secret_passphrase="shared-secret",
+        schema_version=2,
     )
 
     staged = stage_agent_move(
@@ -223,6 +246,7 @@ def test_schema2_stage_failure_removes_only_incomplete_transaction(tmp_path, mon
         "zelda",
         package_path,
         source_instance="HASHI1",
+        schema_version=2,
     )
     target_agents_before = (target / "agents.json").read_bytes()
     source_identity_before = (
@@ -299,6 +323,226 @@ def test_return_move_cannot_replace_target_owned_shared_secret():
             {"provider_shared": "target-value"},
             {"provider_shared": "source-value"},
             replace_conflicts_for_agent="zelda",
+        )
+
+
+def test_target_id_resolution_uses_first_free_suffix_and_rejects_explicit_collision(
+    tmp_path,
+):
+    _, target, _ = _roots(tmp_path)
+    agents = json.loads((target / "agents.json").read_text())
+    agents["agents"].append(
+        {"name": "ZELDA", "workspace_dir": "workspaces/ZELDA", "is_active": True}
+    )
+    _write_json(target / "agents.json", agents)
+    (target / "workspaces" / "zelda_1").mkdir(parents=True)
+
+    resolved = resolve_agent_transfer_target(
+        target,
+        "zelda",
+        operation="move",
+    )
+    assert resolved["target_agent_id"] == "zelda_2"
+    custom = resolve_agent_transfer_target(
+        target,
+        "zelda",
+        operation="clone",
+        requested_agent_id="sheik",
+    )
+    assert custom["target_agent_id"] == "sheik"
+
+    with pytest.raises(AgentMoveError, match="already used"):
+        resolve_agent_transfer_target(
+            target,
+            "zelda",
+            operation="clone",
+            requested_agent_id="ZeLdA",
+        )
+
+
+def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
+    source, target, package_path = _roots(tmp_path)
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        target_instance="HASHI2",
+        secret_passphrase="shared-secret",
+        operation="move",
+        target_agent_id="zelda",
+    )
+    commit_agent_move(
+        target,
+        staged["package_id"],
+        secret_passphrase="shared-secret",
+    )
+    deactivate_source_agent(
+        source,
+        "zelda",
+        staged["package_id"],
+        target_instance="HASHI2",
+    )
+    activate_agent_move(target, staged["package_id"])
+    finalized = finalize_agent_move(
+        target,
+        staged["package_id"],
+        runtime_online=True,
+    )
+    assert finalized["status"] == "completed"
+    target_agent = json.loads((target / "agents.json").read_text())["agents"][0]
+    assert target_agent["is_active"] is True
+    assert "transfer_package_id" not in target_agent
+    assert not (
+        target
+        / "state"
+        / "agent_moves"
+        / "incoming"
+        / staged["package_id"]
+        / "package.hashi-agent"
+    ).exists()
+
+    cleaned = cleanup_source_agent(
+        source,
+        staged["package_id"],
+        source_secret_keys=["zelda"],
+        target_instance="HASHI2",
+        target_agent_id="zelda",
+    )
+    assert cleaned["status"] == "source_cleaned"
+    assert [
+        row["name"]
+        for row in json.loads((source / "agents.json").read_text())["agents"]
+    ] == ["anchor"]
+    assert not (source / "workspaces" / "zelda").exists()
+    assert "zelda" not in json.loads((source / "secrets.json").read_text())
+    assert not any(
+        item.get("agent") == "zelda"
+        for item in json.loads((source / "tasks.json").read_text())["heartbeats"]
+    )
+    assert moved_agent_destination(source, "ZELDA")["address"] == "zelda@HASHI2"
+
+
+def test_schema3_clone_is_active_without_telegram_and_schedules_stay_disabled(
+    tmp_path,
+):
+    source, target, _ = _roots(tmp_path)
+    source_secrets = json.loads((source / "secrets.json").read_text())
+    source_secrets["zelda_api_key"] = "safe-agent-key"
+    _write_json(source / "secrets.json", source_secrets)
+    package_path = tmp_path / "zelda-clone.hashi-agent"
+    package = create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        operation="clone",
+        include_agent_secrets=True,
+        include_telegram_secret=False,
+        secret_passphrase="shared-secret",
+    )
+
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        target_instance="HASHI2",
+        secret_passphrase="shared-secret",
+        operation="clone",
+        target_agent_id="zelda_copy",
+    )
+    commit_agent_move(
+        target,
+        staged["package_id"],
+        secret_passphrase="shared-secret",
+    )
+    activate_agent_move(target, staged["package_id"])
+    finalized = finalize_agent_move(
+        target,
+        staged["package_id"],
+        runtime_online=True,
+    )
+
+    assert finalized["status"] == "completed"
+    target_agent = json.loads((target / "agents.json").read_text())["agents"][0]
+    assert target_agent["name"] == "zelda_copy"
+    assert target_agent["is_active"] is True
+    assert target_agent["telegram_token_key"] == "zelda_copy"
+    target_secrets = json.loads((target / "secrets.json").read_text())
+    assert "zelda_copy" not in target_secrets
+    assert target_secrets["zelda_copy_api_key"] == "safe-agent-key"
+    imported = [
+        item
+        for item in json.loads((target / "tasks.json").read_text())["heartbeats"]
+        if item.get("agent") == "zelda_copy"
+    ]
+    assert len(imported) == 1
+    assert imported[0]["enabled"] is False
+    assert "import_package_id" not in imported[0]
+    assert json.loads((source / "agents.json").read_text())["agents"][0][
+        "is_active"
+    ] is True
+    assert package.access_requirements["telegram_secret_included"] is False
+
+
+@pytest.mark.parametrize("tamper", ["config", "secret", "schedule"])
+def test_finalization_rejects_target_state_changed_after_commit(tmp_path, tamper):
+    source, target, _ = _roots(tmp_path)
+    source_secrets = json.loads((source / "secrets.json").read_text())
+    source_secrets["zelda_api_key"] = "safe-agent-key"
+    _write_json(source / "secrets.json", source_secrets)
+    package_path = tmp_path / "zelda-verified.hashi-agent"
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        operation="clone",
+        include_agent_secrets=True,
+        include_telegram_secret=False,
+        secret_passphrase="shared-secret",
+    )
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        target_instance="HASHI2",
+        secret_passphrase="shared-secret",
+        operation="clone",
+        target_agent_id="zelda_copy",
+    )
+    commit_agent_move(
+        target,
+        staged["package_id"],
+        secret_passphrase="shared-secret",
+    )
+    activate_agent_move(target, staged["package_id"])
+
+    if tamper == "config":
+        agents = json.loads((target / "agents.json").read_text())
+        agents["agents"][0]["access_scope"] = "workspace"
+        _write_json(target / "agents.json", agents)
+    elif tamper == "secret":
+        secrets = json.loads((target / "secrets.json").read_text())
+        secrets["zelda_copy_api_key"] = "changed"
+        _write_json(target / "secrets.json", secrets)
+    else:
+        tasks = json.loads((target / "tasks.json").read_text())
+        imported = next(
+            item
+            for item in tasks["heartbeats"]
+            if item.get("agent") == "zelda_copy"
+        )
+        imported["schedule"] = "changed"
+        _write_json(target / "tasks.json", tasks)
+
+    with pytest.raises(AgentMoveError, match="differ"):
+        finalize_agent_move(
+            target,
+            staged["package_id"],
+            runtime_online=True,
         )
 
 
@@ -655,7 +899,7 @@ def test_return_move_replaces_and_can_restore_dormant_source_copy(tmp_path):
         secret_passphrase="shared-secret",
     )
     assert committed_return["replaces_dormant_source"] is True
-    assert len(json.loads((source / "agents.json").read_text())["agents"]) == 1
+    assert len(json.loads((source / "agents.json").read_text())["agents"]) == 2
     assert (
         source / "workspaces" / "zelda" / "memory" / "facts.md"
     ).read_text() == "newer target memory"

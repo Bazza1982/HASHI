@@ -1005,6 +1005,18 @@ class ProtocolManager:
 
         local_agents = {item["agent_name"] for item in self.get_local_agents_snapshot()}
         if to_agent not in local_agents:
+            from orchestrator.agent_move.service import moved_agent_destination
+
+            moved = moved_agent_destination(self._hashi_root, to_agent)
+            if moved:
+                error = self._error_payload(
+                    "agent_moved",
+                    f"Target agent '{to_agent}' moved to {moved['address']}; refresh the Agent directory",
+                    retryable=False,
+                    payload=payload,
+                )
+                error["body"]["details"] = {"moved_to": moved["address"]}
+                return 410, error
             return 404, self._error_payload("target_agent_not_found", f"Target agent '{to_agent}' not found", retryable=False, payload=payload)
 
         prompt_text = self._render_remote_message_prompt(from_agent, from_instance, payload.get("body") or {})
@@ -1107,6 +1119,18 @@ class ProtocolManager:
 
         local_agents = {item["agent_name"] for item in self.get_local_agents_snapshot()}
         if to_agent not in local_agents:
+            from orchestrator.agent_move.service import moved_agent_destination
+
+            moved = moved_agent_destination(self._hashi_root, to_agent)
+            if moved:
+                error = self._error_payload(
+                    "agent_moved",
+                    f"Reply target '{to_agent}' moved to {moved['address']}; refresh the Agent directory",
+                    retryable=False,
+                    payload=payload,
+                )
+                error["body"]["details"] = {"moved_to": moved["address"]}
+                return 410, error
             return 404, self._error_payload("target_agent_unavailable", f"Reply target '{to_agent}' is unavailable", retryable=True, payload=payload)
         prompt_text = self._render_remote_reply_prompt(from_agent, from_instance, body)
         request_id = await self._enqueue_local_prompt(
