@@ -15,8 +15,10 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.suggester import SuggestFromList
 from textual.widgets import Input, RichLog, Static
 
+from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
@@ -31,6 +33,27 @@ from tui.onboarding import (
 from tui.sounds import play_message_sound
 
 logger = logging.getLogger(__name__)
+
+STARTUP_LOGO = (
+    "  ██╗  ██╗  █████╗ ███████╗██╗  ██╗██╗",
+    "  ██║  ██║ ██╔══██╗██╔════╝██║  ██║██║",
+    "  ███████║ ███████║███████╗███████║██║",
+    "  ██╔══██║ ██╔══██║╚════██║██╔══██║██║",
+    "  ██║  ██║ ██║  ██║███████║██║  ██║██║",
+    "  ╚═╝  ╚═╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝",
+)
+
+TUI_COMMAND_HELP = {
+    "help": ("查看 TUI 与 Agent 命令", "Show TUI and Agent commands"),
+    "to": ("切换聊天目标", "Change the chat target"),
+    "instance": ("查看或切换 HASHI 实例", "List or switch HASHI instances"),
+    "layout": ("调整日志与聊天布局", "Resize log and chat panes"),
+    "log": ("显示、隐藏或暂停主机日志", "Show, hide, or pause the host log"),
+    "agents": ("查看可用 Agent", "List available Agents"),
+    "clear": ("清空当前 TUI 显示", "Clear the current TUI view"),
+    "quit": ("退出 TUI", "Exit the TUI"),
+    "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
+}
 
 
 def markup(text: str) -> Text:
@@ -106,7 +129,6 @@ class ChatInput(Input):
     """Single-line input for sending messages."""
     DEFAULT_CSS = """
     ChatInput {
-        dock: bottom;
         height: 3;
         background: #0b1824;
         color: #dff6ff;
@@ -116,6 +138,31 @@ class ChatInput(Input):
         border: solid #63ffd9;
     }
     """
+
+
+class CommandPreview(Static):
+    """One-line slash-command match shown below the input."""
+
+    DEFAULT_CSS = """
+    CommandPreview {
+        display: none;
+        height: 1;
+        padding: 0 2;
+        background: #101d28;
+        color: #9be7ff;
+    }
+    """
+
+    def show_match(self, command: str, description: str):
+        line = Text()
+        line.append(command, style="bold #71b7ff")
+        line.append("    ")
+        line.append(description, style="#9be7ff")
+        self.update(line)
+        self.display = True
+
+    def hide_match(self):
+        self.display = False
 
 
 class FooterInfoBox(Static):
@@ -136,6 +183,7 @@ class FooterInfoBox(Static):
         super().__init__("", *args, **kwargs)
         self._content = Text("")
         self._status_line = "❌ HASHI · No agent · API offline"
+        self._language = "en"
 
     def on_mount(self):
         self._refresh_footer()
@@ -149,14 +197,20 @@ class FooterInfoBox(Static):
         agents: list[dict] | None = None,
         current_agent: str | None = None,
         instance_id: str = "",
+        language: str = "en",
     ):
+        self._language = language
         icon = "✅" if gateway_ok else "❌"
-        parts = [icon, instance_id or "HASHI", agent or "No agent"]
+        no_agent = "未选择 Agent" if language == "zh" else "No agent"
+        parts = [icon, instance_id or "HASHI", agent or no_agent]
         if backend:
             parts.append(backend)
         if mode:
             parts.append(mode.title())
-        parts.append("API connected" if gateway_ok else "API offline")
+        if language == "zh":
+            parts.append("API 已连接" if gateway_ok else "API 离线")
+        else:
+            parts.append("API connected" if gateway_ok else "API offline")
         self._status_line = " · ".join(parts)
         self._refresh_footer()
 
@@ -294,6 +348,7 @@ class HASHITuiApp(App):
 
     BINDINGS = [
         Binding("ctrl+l", "toggle_log_pause", "Pause Log", show=True),
+        Binding("tab", "complete_command", "Complete command", show=False, priority=True),
         Binding("ctrl+q", "quit_app", "Quit", show=True),
     ]
 
@@ -322,9 +377,19 @@ class HASHITuiApp(App):
         self.current_agent_display: str = ""
         self.current_backend: str = ""
         self._agent_mode: str = ""
-        self._layout_mode = "chat"
-        requested_language = str(os.environ.get("HASHI_TUI_LANGUAGE") or "").casefold()
+        preferences = self._load_tui_preferences()
+        requested_layout = str(
+            os.environ.get("HASHI_TUI_LAYOUT") or preferences.get("layout") or "chat"
+        ).casefold()
+        self._layout_mode = requested_layout if requested_layout in {"chat", "balanced", "compact"} else "chat"
+        requested_language = str(
+            os.environ.get("HASHI_TUI_LANGUAGE") or preferences.get("language") or "en"
+        ).casefold()
         self._ui_language = "zh" if requested_language.startswith("zh") else "en"
+        command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
+        command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
+        self._command_names = list(dict.fromkeys(command_names))
+        self._current_command_match: str | None = None
         self.api = TuiApiClient(
             base_url=local_urls[0],
             fallback_base_urls=local_urls[1:],
@@ -356,16 +421,47 @@ class HASHITuiApp(App):
             return candidate
         return Path.cwd()
 
+    @property
+    def _preferences_path(self) -> Path:
+        return self.bridge_home / "state" / "tui_preferences.json"
+
+    def _load_tui_preferences(self) -> dict:
+        try:
+            data = json.loads(self._preferences_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (FileNotFoundError, OSError, ValueError):
+            return {}
+
+    def _save_tui_preferences(self):
+        try:
+            self._preferences_path.parent.mkdir(parents=True, exist_ok=True)
+            self._preferences_path.write_text(
+                json.dumps(
+                    {"language": self._ui_language, "layout": self._layout_mode},
+                    ensure_ascii=False,
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("TUI preferences could not be saved: error=%s", exc)
+
     def compose(self) -> ComposeResult:
         with Vertical(id="main-container"):
             yield LogPanel(id="log-panel")
             with Vertical(id="chat-container"):
                 yield ChatHistory(id="chat-history")
-                yield ChatInput(placeholder="Message · /help · /to <agent> · /instance", id="chat-input")
+                yield ChatInput(
+                    placeholder="Message · /help · /to <agent> · /instance",
+                    suggester=SuggestFromList(self._command_names, case_sensitive=False),
+                    id="chat-input",
+                )
+                yield CommandPreview(id="command-preview")
             yield FooterInfoBox(id="footer-info-box")
 
     def on_mount(self):
-        self.query_one("#log-panel", LogPanel).border_title = f"Host log · {self.launch_instance_id} (local)"
+        self._apply_layout(self._layout_mode, persist=False)
+        self._refresh_chrome()
         # Start the intro only after the first screen refresh so frames are visible.
         self.call_after_refresh(self._schedule_startup_sequence)
 
@@ -396,13 +492,28 @@ class HASHITuiApp(App):
             self._start_bridge()
 
     async def _play_log_startup_animation(self):
+        self._render_host_header()
+        await asyncio.sleep(0.2)
+
+    def _render_host_header(self):
         log = self.query_one("#log-panel", LogPanel)
         log.clear()
-        log.write(markup(
-            f"[bold #63ffd9]HASHI · {self.launch_instance_id}[/]\n"
-            "[#9be7ff]Terminal connected · preparing local services…[/]"
-        ))
-        await asyncio.sleep(0.2)
+        if self._layout_mode == "balanced":
+            colors = ("#71b7ff", "#7dc6ff", "#87d4ff", "#92e1ff", "#9eeed8", "#c7ff8a")
+            logo = "\n".join(
+                f"[bold {color}]{line}[/]" for color, line in zip(colors, STARTUP_LOGO)
+            )
+            status = "终端已连接" if self._ui_language == "zh" else "Terminal connected"
+            log.write(markup(f"{logo}\n[#9be7ff]{self.launch_instance_id} · {status}[/]"))
+        else:
+            status = (
+                "终端已连接 · 正在准备本地服务…"
+                if self._ui_language == "zh"
+                else "Terminal connected · preparing local services…"
+            )
+            log.write(markup(
+                f"[bold #63ffd9]HASHI · {self.launch_instance_id}[/]\n[#9be7ff]{status}[/]"
+            ))
 
     # ── Onboarding ──────────────────────────────────────────────────────
 
@@ -686,9 +797,10 @@ class HASHITuiApp(App):
         client.reset_offset(self.current_agent)
         chat = self.query_one("#chat-history", ChatHistory)
         emoji = agent_data.get("emoji", "")
-        location = "local" if self.current_instance_id == self.launch_instance_id else "remote"
+        location = self._location_label()
+        chat_label = "聊天" if self._ui_language == "zh" else "Chat"
         chat.border_title = (
-            f"Chat · {emoji} {self.current_agent_display} ({self.current_agent})"
+            f"{chat_label} · {emoji} {self.current_agent_display} ({self.current_agent})"
             f"@{self.current_instance_id} ({location})"
         )
         self._update_status_bar()
@@ -828,6 +940,9 @@ class HASHITuiApp(App):
         if normalized == "/agents":
             await self._handle_agents_cmd()
             return
+        if normalized == "/tui" or normalized.startswith("/tui "):
+            self._handle_tui_cmd(normalized)
+            return
         if normalized == "/help" or normalized.startswith("/help "):
             self._handle_help_cmd(normalized)
             return
@@ -868,6 +983,75 @@ class HASHITuiApp(App):
         else:
             play_message_sound("sent")
             self._send_message(normalized, self.current_agent, self.api, self._connection_generation)
+
+    def on_input_changed(self, event: Input.Changed):
+        """Show a Codex-style one-line preview for an incomplete slash command."""
+
+        value = event.value.strip().casefold()
+        preview = self.query_one("#command-preview", CommandPreview)
+        self._current_command_match = None
+        if not value.startswith("/") or " " in value or len(value) < 2:
+            preview.hide_match()
+            return
+        match = next((command for command in self._command_names if command.startswith(value)), None)
+        if match is None:
+            preview.hide_match()
+            return
+        self._current_command_match = match
+        preview.show_match(match, self._command_description(match[1:]))
+
+    def _command_description(self, name: str) -> str:
+        local = TUI_COMMAND_HELP.get(name)
+        if local:
+            return local[0 if self._ui_language == "zh" else 1]
+        spec = next((item for item in COMMAND_SPECS if item.name == name), None)
+        if spec is None:
+            return ""
+        chinese = {
+            "backend": "选择或查看后端",
+            "language": "选择界面语言",
+            "mode": "选择或查看工作模式",
+            "model": "选择模型与推理强度",
+            "status": "查看 Agent 状态",
+            "version": "查看实际运行版本",
+        }
+        if self._ui_language == "zh" and name in chinese:
+            return chinese[name]
+        return spec.description
+
+    def action_complete_command(self):
+        input_box = self.query_one("#chat-input", ChatInput)
+        if self.focused is not input_box or not self._current_command_match:
+            return
+        input_box.value = self._current_command_match
+        input_box.cursor_position = len(input_box.value)
+        self.query_one("#command-preview", CommandPreview).hide_match()
+
+    def _handle_tui_cmd(self, text: str):
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split()
+        if len(parts) == 1 or (len(parts) == 2 and parts[1].casefold() in {"language", "lang"}):
+            current = "中文" if self._ui_language == "zh" else "English"
+            chat.write(markup(
+                f"[#c7ff8a]TUI language · {current} · /tui language zh|en[/]"
+            ))
+            return
+        if len(parts) == 3 and parts[1].casefold() in {"language", "lang"}:
+            requested = parts[2].casefold()
+            if requested in {"zh", "cn", "中文", "chinese"}:
+                self._ui_language = "zh"
+            elif requested in {"en", "english"}:
+                self._ui_language = "en"
+            else:
+                chat.write(markup("[#ff7a7a]Use /tui language zh|en.[/]"))
+                return
+            self._save_tui_preferences()
+            self._refresh_chrome()
+            self._render_host_header()
+            message = "✓ TUI 已切换为中文。" if self._ui_language == "zh" else "✓ TUI switched to English."
+            chat.write(markup(f"[#63ffd9]{message}[/]"))
+            return
+        chat.write(markup("[#ff7a7a]Use /tui language zh|en.[/]"))
 
     def _handle_help_cmd(self, text: str):
         """Render TUI and common Agent commands without sending them to a model."""
@@ -918,7 +1102,36 @@ class HASHITuiApp(App):
 Use `/help zh` for Chinese. Agent commands are executed by the selected instance."""
         chat.write(chat_message_renderable("assistant", "HASHI", help_text))
 
-    def _apply_layout(self, mode: str):
+    def _refresh_chrome(self):
+        log = self.query_one("#log-panel", LogPanel)
+        chat = self.query_one("#chat-history", ChatHistory)
+        input_box = self.query_one("#chat-input", ChatInput)
+        if self._ui_language == "zh":
+            log.border_title = f"主机日志 · {self.launch_instance_id}（本机）"
+            input_box.placeholder = "输入消息 · /help · /to <Agent> · /instance"
+        else:
+            log.border_title = f"Host log · {self.launch_instance_id} (local)"
+            input_box.placeholder = "Message · /help · /to <agent> · /instance"
+        if self.current_agent_display:
+            location = self._location_label()
+            chat_label = "聊天" if self._ui_language == "zh" else "Chat"
+            emoji = next(
+                (str(item.get("emoji") or "") for item in self._agents_cache if item.get("name") == self.current_agent),
+                "",
+            )
+            chat.border_title = (
+                f"{chat_label} · {emoji} {self.current_agent_display} ({self.current_agent})"
+                f"@{self.current_instance_id} ({location})"
+            )
+        self._update_status_bar()
+
+    def _location_label(self) -> str:
+        local = self.current_instance_id == self.launch_instance_id
+        if self._ui_language == "zh":
+            return "本机" if local else "远程"
+        return "local" if local else "remote"
+
+    def _apply_layout(self, mode: str, *, persist: bool = True):
         log = self.query_one("#log-panel", LogPanel)
         chat_container = self.query_one("#chat-container", Vertical)
         if mode == "compact":
@@ -929,6 +1142,10 @@ Use `/help zh` for Chinese. Agent commands are executed by the selected instance
             log.styles.height = "1fr"
             chat_container.styles.height = "1fr" if mode == "balanced" else "3fr"
         self._layout_mode = mode
+        if mode == "balanced" and self.is_mounted:
+            self._render_host_header()
+        if persist:
+            self._save_tui_preferences()
 
     def _handle_layout_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)
@@ -1191,8 +1408,9 @@ Use `/help zh` for Chinese. Agent commands are executed by the selected instance
             self._agents_cache = []
             self._agent_refresh_tick = 0
             chat.clear()
-            location = "local" if self.current_instance_id == self.launch_instance_id else "remote"
-            chat.border_title = f"Chat · {self.current_instance_id} ({location})"
+            location = self._location_label()
+            chat_label = "聊天" if self._ui_language == "zh" else "Chat"
+            chat.border_title = f"{chat_label} · {self.current_instance_id} ({location})"
             await self._load_agents(
                 client=candidate,
                 generation=generation,
@@ -1224,6 +1442,7 @@ Use `/help zh` for Chinese. Agent commands are executed by the selected instance
             self._agents_cache,
             self.current_agent,
             self.current_instance_id,
+            self._ui_language,
         )
 
     # ── Actions ─────────────────────────────────────────────────────────
@@ -1231,9 +1450,14 @@ Use `/help zh` for Chinese. Agent commands are executed by the selected instance
     def action_toggle_log_pause(self):
         self._log_paused = not self._log_paused
         log = self.query_one("#log-panel", LogPanel)
+        base_title = (
+            f"主机日志 · {self.launch_instance_id}（本机）"
+            if self._ui_language == "zh"
+            else f"Host log · {self.launch_instance_id} (local)"
+        )
+        paused = " [已暂停]" if self._ui_language == "zh" else " [PAUSED]"
         log.border_title = (
-            f"Host log · {self.launch_instance_id} (local)"
-            + (" [PAUSED]" if self._log_paused else "")
+            base_title + (paused if self._log_paused else "")
         )
 
     async def action_quit_app(self):

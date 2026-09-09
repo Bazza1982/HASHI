@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import wave
 from io import StringIO
 from pathlib import Path
@@ -8,7 +9,15 @@ from pathlib import Path
 from rich.console import Console
 
 from tui import sounds
-from tui.app import HASHITuiApp, ChatHistory, FooterInfoBox, LogPanel, chat_message_renderable
+from tui.app import (
+    HASHITuiApp,
+    ChatHistory,
+    ChatInput,
+    CommandPreview,
+    FooterInfoBox,
+    LogPanel,
+    chat_message_renderable,
+)
 
 
 def _render_plain(renderable) -> str:
@@ -119,3 +128,34 @@ async def test_tui_compact_design_has_bilingual_help_and_adjustable_layout(tmp_p
         footer = app.query_one("#footer-info-box", FooterInfoBox)
         footer.update_state("Rika", "codex-cli", True, "flex", instance_id="HASHI1")
         assert "HASHI1 · Rika · codex-cli · Flex · API connected" in footer.render().plain
+
+
+async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app._handle_tui_cmd("/tui language zh")
+        await pilot.pause()
+        assert app._ui_language == "zh"
+        assert "主机日志" in app.query_one("#log-panel", LogPanel).border_title
+        assert "输入消息" in app.query_one("#chat-input", ChatInput).placeholder
+        assert "API 离线" in app.query_one("#footer-info-box", FooterInfoBox).render().plain
+
+        app._handle_layout_cmd("/layout balanced")
+        await pilot.pause()
+        log_text = "\n".join(line.text for line in app.query_one("#log-panel", LogPanel).lines)
+        assert "██╗" in log_text
+
+        input_box = app.query_one("#chat-input", ChatInput)
+        input_box.focus()
+        await pilot.press("/", "h", "e")
+        await pilot.pause()
+        preview = app.query_one("#command-preview", CommandPreview)
+        assert preview.display is True
+        assert app._current_command_match == "/help"
+        await pilot.press("tab")
+        assert input_box.value == "/help"
+
+    preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
+    assert preferences == {"language": "zh", "layout": "balanced"}
