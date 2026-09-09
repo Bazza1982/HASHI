@@ -54,6 +54,7 @@ TUI_COMMAND_HELP = {
     "quit": ("退出 TUI", "Exit the TUI"),
     "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
 }
+TUI_DISCOVERY_COMMANDS = ("/help", "/to", "/mode", "/model", "/backend")
 
 
 def markup(text: str) -> Text:
@@ -141,24 +142,35 @@ class ChatInput(Input):
 
 
 class CommandPreview(Static):
-    """One-line slash-command match shown below the input."""
+    """Compact slash-command palette shown below the input."""
 
     DEFAULT_CSS = """
     CommandPreview {
         display: none;
-        height: 1;
-        padding: 0 2;
+        height: auto;
+        max-height: 5;
+        padding: 0 1;
         background: #101d28;
         color: #9be7ff;
     }
     """
 
-    def show_match(self, command: str, description: str):
-        line = Text()
-        line.append(command, style="bold #71b7ff")
-        line.append("    ")
-        line.append(description, style="#9be7ff")
-        self.update(line)
+    def show_matches(
+        self,
+        matches: list[tuple[str, str, str]],
+        selected_index: int = 0,
+    ):
+        rows = Text()
+        for index, (command, description, scope) in enumerate(matches):
+            selected = index == selected_index
+            rows.append("› " if selected else "  ", style="bold #63ffd9" if selected else "#39566e")
+            rows.append(f"{command:<18}", style="bold #71b7ff" if selected else "#7dc6ff")
+            rows.append(description, style="#dff6ff" if selected else "#9fb3c8")
+            rows.append(f"  {scope}", style="dim #7fb6c7")
+            if index < len(matches) - 1:
+                rows.append("\n")
+        self.styles.height = len(matches)
+        self.update(rows)
         self.display = True
 
     def hide_match(self):
@@ -390,6 +402,8 @@ class HASHITuiApp(App):
         command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._command_names = list(dict.fromkeys(command_names))
         self._current_command_match: str | None = None
+        self._command_matches: list[str] = []
+        self._command_match_index = 0
         self.api = TuiApiClient(
             base_url=local_urls[0],
             fallback_base_urls=local_urls[1:],
@@ -985,20 +999,52 @@ class HASHITuiApp(App):
             self._send_message(normalized, self.current_agent, self.api, self._connection_generation)
 
     def on_input_changed(self, event: Input.Changed):
-        """Show a Codex-style one-line preview for an incomplete slash command."""
+        """Show a Codex-style palette for an incomplete slash command."""
 
         value = event.value.strip().casefold()
         preview = self.query_one("#command-preview", CommandPreview)
         self._current_command_match = None
+        self._command_matches = []
+        self._command_match_index = 0
         if not value.startswith("/") or " " in value or len(value) < 2:
+            if value == "/":
+                self._command_matches = [
+                    command for command in TUI_DISCOVERY_COMMANDS if command in self._command_names
+                ]
+                self._show_command_matches()
+            else:
+                preview.hide_match()
+            return
+        self._command_matches = [
+            command for command in self._command_names if command.startswith(value)
+        ][:5]
+        if not self._command_matches:
             preview.hide_match()
             return
-        match = next((command for command in self._command_names if command.startswith(value)), None)
-        if match is None:
-            preview.hide_match()
+        self._show_command_matches()
+
+    def _show_command_matches(self):
+        if not self._command_matches:
+            self.query_one("#command-preview", CommandPreview).hide_match()
+            self._current_command_match = None
             return
-        self._current_command_match = match
-        preview.show_match(match, self._command_description(match[1:]))
+        self._command_match_index %= len(self._command_matches)
+        self._current_command_match = self._command_matches[self._command_match_index]
+        local_names = set(TUI_COMMAND_HELP)
+        tui_scope = "TUI"
+        agent_scope = "Agent"
+        matches = [
+            (
+                command,
+                self._command_description(command[1:]),
+                tui_scope if command[1:] in local_names else agent_scope,
+            )
+            for command in self._command_matches
+        ]
+        self.query_one("#command-preview", CommandPreview).show_matches(
+            matches,
+            self._command_match_index,
+        )
 
     def _command_description(self, name: str) -> str:
         local = TUI_COMMAND_HELP.get(name)
@@ -1026,6 +1072,29 @@ class HASHITuiApp(App):
         input_box.value = self._current_command_match
         input_box.cursor_position = len(input_box.value)
         self.query_one("#command-preview", CommandPreview).hide_match()
+
+    def on_key(self, event):
+        """Navigate the visible command palette without affecting ordinary input."""
+
+        input_box = self.query_one("#chat-input", ChatInput)
+        if self.focused is not input_box or not self._command_matches:
+            return
+        if event.key == "down":
+            self._command_match_index = (self._command_match_index + 1) % len(self._command_matches)
+        elif event.key == "up":
+            self._command_match_index = (self._command_match_index - 1) % len(self._command_matches)
+        elif event.key == "escape":
+            self._command_matches = []
+            self._current_command_match = None
+            self.query_one("#command-preview", CommandPreview).hide_match()
+            event.stop()
+            event.prevent_default()
+            return
+        else:
+            return
+        self._show_command_matches()
+        event.stop()
+        event.prevent_default()
 
     def _handle_tui_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)

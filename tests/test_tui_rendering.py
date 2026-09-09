@@ -149,10 +149,18 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
 
         input_box = app.query_one("#chat-input", ChatInput)
         input_box.focus()
-        await pilot.press("/", "h", "e")
+        await pilot.press("/")
         await pilot.pause()
         preview = app.query_one("#command-preview", CommandPreview)
         assert preview.display is True
+        assert app._command_matches == ["/help", "/to", "/mode", "/model", "/backend"]
+        await pilot.press("down")
+        assert app._current_command_match == "/to"
+        await pilot.press("tab")
+        assert input_box.value == "/to"
+
+        input_box.value = "/he"
+        await pilot.pause()
         assert app._current_command_match == "/help"
         await pilot.press("tab")
         assert input_box.value == "/help"
