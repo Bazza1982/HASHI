@@ -205,7 +205,6 @@ class FooterInfoBox(Static):
         agent: str = "",
         backend: str = "",
         gateway_ok: bool = False,
-        mode: str = "",
         agents: list[dict] | None = None,
         current_agent: str | None = None,
         instance_id: str = "",
@@ -217,8 +216,6 @@ class FooterInfoBox(Static):
         parts = [icon, instance_id or "HASHI", agent or no_agent]
         if backend:
             parts.append(backend)
-        if mode:
-            parts.append(mode.title())
         if language == "zh":
             parts.append("API 已连接" if gateway_ok else "API 离线")
         else:
@@ -388,7 +385,6 @@ class HASHITuiApp(App):
         self._chat_targets: list[str] = []
         self.current_agent_display: str = ""
         self.current_backend: str = ""
-        self._agent_mode: str = ""
         preferences = self._load_tui_preferences()
         requested_layout = str(
             os.environ.get("HASHI_TUI_LAYOUT") or preferences.get("layout") or "chat"
@@ -828,7 +824,6 @@ class HASHITuiApp(App):
         self._chat_targets = [self.current_agent] if self.current_agent else []
         self.current_agent_display = agent_data.get("display_name", self.current_agent)
         self.current_backend = agent_data.get("active_backend", agent_data.get("engine", ""))
-        self._agent_mode = str(agent_data.get("mode") or "").strip().lower()
         client.reset_offset(self.current_agent)
         chat = self.query_one("#chat-history", ChatHistory)
         emoji = agent_data.get("emoji", "")
@@ -1375,7 +1370,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
     def _handle_log_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)
-        log = self.query_one("#log-panel", LogPanel)
         parts = text.split(maxsplit=1)
         action = parts[1].strip().casefold() if len(parts) > 1 else "pause"
         if action == "show":
@@ -1480,7 +1474,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self._chat_targets = active_targets
             self.current_agent_display = "ALL"
             self.current_backend = ""
-            self._agent_mode = "broadcast"
             chat.border_title = "Chat \u2014 \U0001f4e2 Broadcasting to ALL agents"
             chat.write(markup("[#63ffd9]\u2705 Broadcasting mode: messages will be sent to all active agents.[/]"))
             self._update_status_bar()
@@ -1615,7 +1608,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self._chat_targets = []
             self.current_agent_display = ""
             self.current_backend = ""
-            self._agent_mode = ""
             self._agents_cache = []
             self._agent_refresh_tick = 0
             chat.clear()
@@ -1649,7 +1641,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             agent,
             self.current_backend,
             self.gateway_ok,
-            self._agent_mode,
             self._agents_cache,
             self.current_agent,
             self.current_instance_id,

@@ -148,8 +148,9 @@ async def test_tui_compact_design_has_bilingual_help_and_adjustable_layout(tmp_p
         assert app.query_one("#log-panel", LogPanel).display is True
 
         footer = app.query_one("#footer-info-box", FooterInfoBox)
-        footer.update_state("Rika", "codex-cli", True, "flex", instance_id="HASHI1")
-        assert "HASHI1 · Rika · codex-cli · Flex · API connected" in footer.render().plain
+        footer.update_state("Rika", "codex-cli", True, instance_id="HASHI1")
+        assert "HASHI1 · Rika · codex-cli · API connected" in footer.render().plain
+        assert "Flex" not in footer.render().plain
 
         app._load_initial_transcript = lambda *_args, **_kwargs: None
         app._select_agent(
@@ -160,15 +161,7 @@ async def test_tui_compact_design_has_bilingual_help_and_adjustable_layout(tmp_p
                 "mode": "fixed",
             }
         )
-        assert app._agent_mode == "fixed"
-        app._select_agent(
-            {
-                "name": "akane",
-                "display_name": "小茜",
-                "active_backend": "codex-cli",
-            }
-        )
-        assert app._agent_mode == ""
+        assert "Fixed" not in footer.render().plain
 
 
 async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
