@@ -12,6 +12,8 @@ from adapters.openrouter_api import (
     _APIResult,
     _assistant_content_text,
     _message_structured_data,
+    _request_wire_evidence,
+    _response_wire_evidence,
 )
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
 from adapters.xai_imagine import generate_xai_image, is_imagine_image_model
@@ -184,8 +186,21 @@ class XaiApiAdapter(OpenRouterAdapter):
             payload["stream_options"] = stream_options
         return payload
 
-    def _build_payload(self, messages: list[dict], use_streaming: bool = False,
-                       tool_tiers: list[str] | None = ...) -> dict:
+    def _request_headers(self) -> dict[str, str]:
+        return self._xai_headers()
+
+    def _build_payload(
+        self,
+        messages: list[dict],
+        use_streaming: bool = False,
+        tool_tiers: list[str] | None = ...,
+        *,
+        excluded_tool_names: frozenset[str] = frozenset(),
+        audio_output=None,
+        allow_tools: bool = True,
+    ) -> dict:
+        if audio_output is not None:
+            raise ValueError("xAI OAuth adapter does not support native audio output")
         if self._use_responses_api():
             return self._build_responses_payload(messages, use_streaming=use_streaming)
         payload: dict = {
@@ -195,9 +210,16 @@ class XaiApiAdapter(OpenRouterAdapter):
         if use_streaming:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
-        if self.tool_registry:
+        if allow_tools and self.tool_registry:
             tiers = self.DEFAULT_TOOL_TIERS if tool_tiers is ... else tool_tiers
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
+            if excluded_tool_names:
+                tool_defs = [
+                    item
+                    for item in tool_defs
+                    if str((item.get("function") or {}).get("name") or "")
+                    not in excluded_tool_names
+                ]
             if tool_defs:
                 payload["tools"] = tool_defs
         return payload
@@ -293,6 +315,18 @@ class XaiApiAdapter(OpenRouterAdapter):
         response.raise_for_status()
         data = response.json()
         result = self._parse_api_body(data)
+        try:
+            response_request = response.request
+        except (AttributeError, RuntimeError):
+            response_request = None
+        result.wire_evidence = {
+            "transport": "json",
+            "request": _request_wire_evidence(payload, response_request),
+            "raw_response": _response_wire_evidence(response),
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+        }
 
         if on_stream_event is not None:
             reasoning = str(getattr(result, "reasoning_content", "") or "").strip()
@@ -322,11 +356,29 @@ class XaiApiAdapter(OpenRouterAdapter):
         tool_calls_acc: dict[int, dict] = {}
         finish_reason = "stop"
         stream_usage: dict = {}
+        wire_evidence: dict[str, Any] = {
+            "transport": "sse",
+            "request": _request_wire_evidence(payload),
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+        }
 
         async def _read_stream(response) -> None:
             nonlocal finish_reason, stream_usage
+            try:
+                stream_request = response.request
+            except (AttributeError, RuntimeError):
+                stream_request = None
+            wire_evidence["request"] = _request_wire_evidence(
+                payload, stream_request
+            )
             async for line in response.aiter_lines():
                 self._touch_activity()
+                event_arrival = len(wire_evidence["sse_events"]) + 1
+                wire_evidence["sse_events"].append(
+                    {"arrival": event_arrival, "raw_line": line}
+                )
                 if not line.startswith("data: "):
                     continue
                 data_str = line[6:].strip()
@@ -382,10 +434,31 @@ class XaiApiAdapter(OpenRouterAdapter):
                     if tc_delta.get("id"):
                         acc["id"] = tc_delta["id"]
                     fn_delta = tc_delta.get("function", {})
+                    wire_evidence["tool_call_fragments"].append(
+                        {
+                            "arrival": len(wire_evidence["tool_call_fragments"]) + 1,
+                            "sse_event_arrival": event_arrival,
+                            "index": idx,
+                            "id_fragment": tc_delta.get("id", ""),
+                            "type_fragment": tc_delta.get("type", ""),
+                            "name_fragment": fn_delta.get("name", ""),
+                            "arguments_fragment": fn_delta.get("arguments", ""),
+                        }
+                    )
                     if fn_delta.get("name"):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
+                    wire_evidence["assembly_snapshots"].append(
+                        {
+                            "arrival": len(wire_evidence["assembly_snapshots"]) + 1,
+                            "after_fragment": len(wire_evidence["tool_call_fragments"]),
+                            "index": idx,
+                            "assembled": json.loads(
+                                json.dumps(acc, ensure_ascii=False)
+                            ),
+                        }
+                    )
 
         async with self.client.stream(
             "POST", request_url, json=payload, headers=headers
@@ -418,6 +491,7 @@ class XaiApiAdapter(OpenRouterAdapter):
             thinking_tokens=comp_details.get("reasoning_tokens", 0),
         )
         result.reasoning_content = reasoning_content
+        result.wire_evidence = wire_evidence
         return result
 
     async def generate_external_tool_response(
@@ -536,6 +610,19 @@ class XaiApiAdapter(OpenRouterAdapter):
 
         if is_imagine_image_model(self.config.model):
             return await self._generate_imagine_response(prompt, started, on_stream_event)
+
+        # Chat-Completions xAI models share the complete OpenAI-compatible
+        # Provider protocol owner, including invalid-tool forensics and the
+        # bounded in-loop repair contract. Responses-API models expose no
+        # HASHI tool calls here and retain their dedicated parser below.
+        if not self._use_responses_api():
+            return await super().generate_response(
+                prompt,
+                request_id,
+                is_retry=is_retry,
+                silent=silent,
+                on_stream_event=on_stream_event,
+            )
 
         use_streaming = on_stream_event is not None and not self._use_responses_api()
         messages = [

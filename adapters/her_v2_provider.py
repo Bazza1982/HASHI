@@ -307,6 +307,7 @@ def _backend_response_error(
     for key in (
         "provider_http_failure",
         "provider_protocol",
+        "provider_protocol_forensic_path",
         "transport_audit_path",
         "gateway_continuation",
     ):
@@ -2775,6 +2776,18 @@ class HashiStageProvider(StageProvider):
         """Durably audit and account each physical Provider call as it settles."""
 
         setter = getattr(backend, "set_provider_call_observer", None)
+        context_setter = getattr(backend, "set_provider_invocation_context", None)
+        if callable(context_setter):
+            context_setter(
+                {
+                    "turn_id": str(turn_id or ""),
+                    "request_ref": str(request_ref or request_id or ""),
+                    "invocation_id": str(invocation_id or ""),
+                    "stage": str(phase or "provider"),
+                    "role": str(role or "provider"),
+                    "plan_id": str(plan_id or ""),
+                }
+            )
         if not callable(setter):
             return
 

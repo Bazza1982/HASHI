@@ -1,5 +1,7 @@
 import asyncio
 import hashlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,7 +10,11 @@ import pytest
 
 from adapters import deepseek_api
 from adapters.deepseek_api import DeepSeekAdapter
-from adapters.openrouter_api import _APIResult, _backend_failure_response
+from adapters.openrouter_api import (
+    _APIResult,
+    _backend_failure_response,
+    _tool_call_forensic_details,
+)
 from adapters.stream_events import (
     KIND_SHELL_EXEC,
     KIND_TEXT_DELTA,
@@ -741,7 +747,7 @@ async def test_truncation_never_executes_accumulated_tool_calls(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_incomplete_tool_arguments_fail_before_any_tool_side_effect(
+async def test_incomplete_tool_arguments_repair_in_place_before_any_side_effect(
     monkeypatch,
     tmp_path,
 ):
@@ -759,20 +765,371 @@ async def test_incomplete_tool_arguments_fail_before_any_tool_side_effect(
         }
     ]
 
+    repaired = [
+        {
+            "id": "call_partial",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path":"/tmp"}',
+            },
+        }
+    ]
+    replies = iter(
+        [
+            _APIResult(
+                "",
+                incomplete,
+                "tool_calls",
+                provider_response_id="provider-bad-1",
+            ),
+            _APIResult(
+                "",
+                repaired,
+                "tool_calls",
+                provider_response_id="provider-repaired-1",
+            ),
+            _APIResult(
+                "done",
+                None,
+                "stop",
+                provider_response_id="provider-final-1",
+            ),
+        ]
+    )
+    payloads = []
+
     async def fake_call(payload, headers, on_stream_event):
-        return _APIResult("", incomplete, "tool_calls")
+        payloads.append(payload)
+        return next(replies)
 
     monkeypatch.setattr(adapter, "_call_api_once", fake_call)
 
     response = await adapter.generate_response("inspect", "req-partial-tool")
 
-    assert response.is_success is False
-    assert response.error_code == "PROVIDER_INVALID_TOOL_CALLS"
-    assert response.tool_call_count == 0
-    assert adapter.tool_registry.calls == []
+    assert response.is_success is True
+    assert response.text == "done"
+    assert response.tool_call_count == 1
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/tmp"}, "call_partial")
+    ]
+    assert len(payloads) == 3
+    assert any(
+        "repair request 1/3" in message.get("content", "")
+        for message in payloads[1]["messages"]
+        if message.get("role") == "system"
+    )
     assert observed[0]["decision"] == "reject_invalid_tool_calls"
     assert observed[0]["tool_calls"][0]["complete"] is False
     assert observed[0]["tool_calls"][0]["arguments_state"] == "invalid_json"
+    assert observed[0]["tool_call_repair"]["next_request"] == "1/3"
+    forensic_path = response.stream_metadata["provider_protocol_forensic_path"]
+    records = [
+        json.loads(line)
+        for line in Path(forensic_path).read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[0]["tool_calls"][0]["parser_input"] == '{"path":'
+    assert records[0]["tool_calls"][0]["parser_error"]["type"] == "JSONDecodeError"
+    assert records[0]["raw_provider"]["transport"] == "test_double"
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_arguments_succeed_on_third_repair_without_replay(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    first_tool = [
+        {
+            "id": "call_first",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path":"/first"}',
+            },
+        }
+    ]
+    bad_tool = [
+        {
+            "id": "call_second",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":'},
+        }
+    ]
+    repaired_tool = [
+        {
+            "id": "call_second",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path":"/second"}',
+            },
+        }
+    ]
+    replies = iter(
+        [
+            _APIResult("", first_tool, "tool_calls", provider_response_id="p-1"),
+            _APIResult("", bad_tool, "tool_calls", provider_response_id="p-bad-0"),
+            _APIResult("", bad_tool, "tool_calls", provider_response_id="p-bad-1"),
+            _APIResult("", bad_tool, "tool_calls", provider_response_id="p-bad-2"),
+            _APIResult("", repaired_tool, "tool_calls", provider_response_id="p-good-3"),
+            _APIResult("complete", None, "stop", provider_response_id="p-final"),
+        ]
+    )
+    payloads = []
+
+    async def fake_call(payload, headers, on_stream_event):
+        payloads.append(payload)
+        return next(replies)
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-third-repair")
+
+    assert response.is_success is True
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/first"}, "call_first"),
+        ("file_list", {"path": "/second"}, "call_second"),
+    ]
+    repair_prompts = [
+        message["content"]
+        for payload in payloads
+        for message in payload["messages"]
+        if message.get("role") == "system"
+        and "tool-call repair request" in message.get("content", "")
+    ]
+    assert any("repair request 1/3" in prompt for prompt in repair_prompts)
+    assert any("repair request 2/3" in prompt for prompt in repair_prompts)
+    assert any("repair request 3/3" in prompt for prompt in repair_prompts)
+    assert all("call_first" in prompt for prompt in repair_prompts)
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_arguments_exhaust_three_repairs_with_precise_error(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    bad_tool = [
+        {
+            "id": "call_broken",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":'},
+        }
+    ]
+    provider_ids = iter(["bad-initial", "bad-repair-1", "bad-repair-2", "bad-repair-3"])
+    call_count = 0
+
+    async def fake_call(payload, headers, on_stream_event):
+        nonlocal call_count
+        call_count += 1
+        return _APIResult(
+            "",
+            bad_tool,
+            "tool_calls",
+            provider_response_id=next(provider_ids),
+        )
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-exhaust-repair")
+
+    assert call_count == 4
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_INVALID_TOOL_CALLS"
+    assert response.error_retryable is False
+    assert adapter.tool_registry.calls == []
+    assert "file_list" in response.error
+    assert "3 repair attempts" in response.error
+    assert "bad-repair-3" in response.error
+    forensic_path = Path(
+        response.stream_metadata["provider_protocol_forensic_path"]
+    )
+    assert str(forensic_path) in response.error
+    records = [
+        json.loads(line)
+        for line in forensic_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 4
+    assert [row["repair"]["next_request"] for row in records] == [
+        "1/3",
+        "2/3",
+        "3/3",
+        None,
+    ]
+    assert records[-1]["repair"]["status"] == "exhausted"
+
+
+@pytest.mark.asyncio
+async def test_invalid_mixed_tool_batch_executes_only_the_repaired_batch(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    initial = [
+        {
+            "id": "call_valid",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path":"/valid"}',
+            },
+        },
+        {
+            "id": "call_bad",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":'},
+        },
+    ]
+    repaired = [
+        initial[0],
+        {
+            "id": "call_bad",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path":"/repaired"}',
+            },
+        },
+    ]
+    replies = iter(
+        [
+            _APIResult("", initial, "tool_calls"),
+            _APIResult("", repaired, "tool_calls"),
+            _APIResult("done", None, "stop"),
+        ]
+    )
+
+    async def fake_call(payload, headers, on_stream_event):
+        return next(replies)
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-mixed-repair")
+
+    assert response.is_success is True
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/valid"}, "call_valid"),
+        ("file_list", {"path": "/repaired"}, "call_bad"),
+    ]
+
+
+def test_tool_forensic_evidence_distinguishes_provider_json_from_assembly_damage():
+    tool_calls = [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":}'},
+        }
+    ]
+    raw_fragments = [
+        {
+            "arrival": 1,
+            "index": 0,
+            "arguments_fragment": '{"path":',
+        },
+        {
+            "arrival": 2,
+            "index": 0,
+            "arguments_fragment": '"/tmp"}',
+        },
+    ]
+
+    detail = _tool_call_forensic_details(
+        tool_calls,
+        argument_fragments=raw_fragments,
+    )[0]
+
+    assert detail["provider_arguments_from_fragments"] == '{"path":"/tmp"}'
+    assert detail["parser_input"] == '{"path":}'
+    assert detail["assembly_matches_provider_fragments"] is False
+    assert detail["attribution"] == "hashi_assembly_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_repair_preserves_every_sse_fragment(tmp_path):
+    adapter = _adapter(tmp_path)
+    streams = iter(
+        [
+            [
+                'data: {"id":"bad-stream","choices":[{"delta":{"tool_calls":['
+                '{"index":0,"id":"call-stream","type":"function","function":'
+                '{"name":"file_list","arguments":"{\\"path\\":"}}]},'
+                '"finish_reason":null}]}',
+                'data: {"id":"bad-stream","choices":[{"delta":{"tool_calls":['
+                '{"index":0,"function":{"arguments":"}"}}]},'
+                '"finish_reason":"tool_calls"}]}',
+                "data: [DONE]",
+            ],
+            [
+                'data: {"id":"good-stream","choices":[{"delta":{"tool_calls":['
+                '{"index":0,"id":"call-stream","type":"function","function":'
+                '{"name":"file_list","arguments":"{\\"path\\":\\"/tmp\\"}"}}]},'
+                '"finish_reason":"tool_calls"}]}',
+                "data: [DONE]",
+            ],
+            [
+                'data: {"id":"final-stream","choices":[{"delta":{"content":"done"},'
+                '"finish_reason":"stop"}]}',
+                "data: [DONE]",
+            ],
+        ]
+    )
+
+    class _StreamResponse:
+        headers = {"x-request-id": "wire-stream"}
+
+        def __init__(self, lines):
+            self.lines = lines
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            for line in self.lines:
+                yield line
+
+    class _StreamContext:
+        def __init__(self, lines):
+            self.response = _StreamResponse(lines)
+
+        async def __aenter__(self):
+            return self.response
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(
+        stream=lambda *args, **kwargs: _StreamContext(next(streams))
+    )
+
+    async def capture(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "inspect",
+        "req-stream-repair",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/tmp"}, "call-stream")
+    ]
+    records = [
+        json.loads(line)
+        for line in Path(
+            response.stream_metadata["provider_protocol_forensic_path"]
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    raw = records[0]["raw_provider"]
+    assert len(raw["sse_events"]) == 3
+    assert [
+        fragment["arguments_fragment"]
+        for fragment in raw["tool_call_fragments"]
+    ] == ['{"path":', "}"]
+    assert records[0]["tool_calls"][0]["parser_input"] == '{"path":}'
+    assert records[0]["tool_calls"][0]["attribution"] == "provider_invalid_json"
 
 
 @pytest.mark.asyncio

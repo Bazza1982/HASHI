@@ -90,6 +90,66 @@ async def test_xai_api_adapter_generate_response_success(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_xai_chat_adapter_uses_shared_bad_tool_json_repair(tmp_path):
+    cfg = SimpleNamespace(
+        name="test-agent",
+        workspace_dir=tmp_path,
+        system_md=None,
+        model="grok-4.3",
+    )
+    global_cfg = SimpleNamespace(
+        hermes_home=None,
+        xai_api_base_url="https://api.x.ai/v1",
+        xai_use_responses_api=False,
+    )
+    adapter = XaiApiAdapter(cfg, global_cfg, api_key="static")
+    adapter.sys_prompt = "system"
+    adapter._bearer_token = "static"
+    adapter._base_url = "https://api.x.ai/v1"
+    adapter.tool_registry = SimpleNamespace(get_tool_definitions=lambda tiers=None: [])
+    from adapters.openrouter_api import _APIResult
+
+    bad_call = {
+        "id": "call-xai",
+        "type": "function",
+        "function": {"name": "file_read", "arguments": '{"path":'},
+    }
+    good_call = {
+        "id": "call-xai",
+        "type": "function",
+        "function": {"name": "file_read", "arguments": '{"path":"a.txt"}'},
+    }
+    call_api = AsyncMock(
+        side_effect=[
+            _APIResult("", [bad_call], "tool_calls", provider_response_id="xai-bad"),
+            _APIResult("", [good_call], "tool_calls", provider_response_id="xai-good"),
+            _APIResult("done", None, "stop", provider_response_id="xai-final"),
+        ]
+    )
+    executed = []
+
+    async def run_tool_calls(calls, messages, _callback, **_kwargs):
+        executed.extend(calls)
+        messages.append(
+            {"role": "tool", "tool_call_id": "call-xai", "content": "contents"}
+        )
+
+    adapter._run_tool_calls = run_tool_calls
+    with patch.object(adapter, "_resolve_bearer", new=AsyncMock()), patch.object(
+        adapter, "_call_api_once", new=call_api
+    ):
+        response = await adapter.generate_response("inspect", "req-xai-repair")
+
+    assert response.is_success is True
+    assert executed == [good_call]
+    assert call_api.await_count == 3
+    assert response.stream_metadata["provider_tool_repair_count"] == 1
+    assert Path(
+        response.stream_metadata["provider_protocol_forensic_path"]
+    ).is_file()
+
+
+@pytest.mark.asyncio
 async def test_xai_external_tool_response_forwards_protocol_without_execution(tmp_path):
     cfg = SimpleNamespace(
         name="test-agent",

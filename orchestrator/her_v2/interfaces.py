@@ -92,13 +92,14 @@ class StageInvocationError(RuntimeError):
                 else ProviderFailureCode(str(code))
             )
         except ValueError:
-            # HASHI-owned boundary codes (for example typed context-capacity
-            # rejection) intentionally survive without expanding this enum or
-            # coupling generic StageRequest to a compaction concern.
+            # An Adapter's explicit stable code is already a classification,
+            # even when an independently replaceable Adapter is newer than
+            # this enum. Preserve well-formed wire codes losslessly; only an
+            # absent or malformed classification becomes PROVIDER_UNKNOWN.
             raw_code = str(code or "")
             self.code = (
                 raw_code
-                if raw_code.startswith("CONTEXT_")
+                if re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", raw_code)
                 else ProviderFailureCode.PROVIDER_UNKNOWN
             )
         self.human_description = sanitise_provider_error(

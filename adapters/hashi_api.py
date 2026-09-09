@@ -32,6 +32,7 @@ import httpx
 
 from adapters.base import BackendCapabilities, BackendResponse, TokenUsage
 from adapters.openrouter_api import (
+    INVALID_TOOL_CALL_REPAIR_LIMIT,
     _MEDIA_FALLBACK_TOOL_NAMES,
     OpenRouterAdapter,
     ProviderCallObserverError,
@@ -40,10 +41,14 @@ from adapters.openrouter_api import (
     _backend_failure_response,
     _effective_protocol_parameters,
     _message_structured_data,
+    _invalid_tool_repair_prompt,
+    _invalid_tool_user_error,
     _provider_request_id,
     _provider_protocol_error_message,
     _provider_response_decision,
     _response_protocol_record,
+    _request_wire_evidence,
+    _response_wire_evidence,
     _stream_error_exception,
     _tool_call_protocol_summary,
     _utc_timestamp,
@@ -505,6 +510,15 @@ class HashiApiAdapter(OpenRouterAdapter):
             raise
 
         response_body = bytes(response.content)
+        wire_evidence = {
+            "transport": "json",
+            "request": _request_wire_evidence(payload, request),
+            "raw_response": _response_wire_evidence(response),
+            "transport_audit_refs": list(audit_refs),
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+        }
         response_ref = self._record_transport_event(
             (
                 "client_response_rejected"
@@ -519,6 +533,7 @@ class HashiApiAdapter(OpenRouterAdapter):
             response_body=response_body,
         )
         audit_refs.append(response_ref)
+        wire_evidence["transport_audit_refs"] = list(audit_refs)
         try:
             response.raise_for_status()
             data = response.json()
@@ -537,6 +552,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                 provider_response_id=str(data.get("id") or ""),
                 transport_request_id=_provider_request_id(response),
                 transport_state="complete_response_no_choices",
+                wire_evidence=wire_evidence,
             )
 
         choice = choices[0]
@@ -583,6 +599,7 @@ class HashiApiAdapter(OpenRouterAdapter):
             provider_response_id=str(data.get("id") or ""),
             transport_request_id=_provider_request_id(response),
             reasoning_state=("available" if reasoning_text else "unavailable"),
+            wire_evidence=wire_evidence,
         )
 
     async def _stream_api_once(
@@ -608,6 +625,14 @@ class HashiApiAdapter(OpenRouterAdapter):
             headers,
             streaming=True,
         )
+        wire_evidence: dict[str, Any] = {
+            "transport": "sse",
+            "request": _request_wire_evidence(payload, request),
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+            "transport_audit_refs": list(audit_refs),
+        }
         try:
             response = await self.client.send(request, stream=True)
         except BaseException as exc:
@@ -647,6 +672,10 @@ class HashiApiAdapter(OpenRouterAdapter):
             async for line in response.aiter_lines():
                 stream_lines.append(line)
                 self._touch_activity()
+                event_arrival = len(wire_evidence["sse_events"]) + 1
+                wire_evidence["sse_events"].append(
+                    {"arrival": event_arrival, "raw_line": line}
+                )
 
                 if not line.startswith("data: "):
                     continue
@@ -754,10 +783,31 @@ class HashiApiAdapter(OpenRouterAdapter):
                     if tc_delta.get("id"):
                         acc["id"] = tc_delta["id"]
                     fn_delta = tc_delta.get("function", {})
+                    wire_evidence["tool_call_fragments"].append(
+                        {
+                            "arrival": len(wire_evidence["tool_call_fragments"]) + 1,
+                            "sse_event_arrival": event_arrival,
+                            "index": idx,
+                            "id_fragment": tc_delta.get("id", ""),
+                            "type_fragment": tc_delta.get("type", ""),
+                            "name_fragment": fn_delta.get("name", ""),
+                            "arguments_fragment": fn_delta.get("arguments", ""),
+                        }
+                    )
                     if fn_delta.get("name"):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
+                    wire_evidence["assembly_snapshots"].append(
+                        {
+                            "arrival": len(wire_evidence["assembly_snapshots"]) + 1,
+                            "after_fragment": len(wire_evidence["tool_call_fragments"]),
+                            "index": idx,
+                            "assembled": json.loads(
+                                json.dumps(acc, ensure_ascii=False)
+                            ),
+                        }
+                    )
             if not saw_done and not finish_reason:
                 raise httpx.RemoteProtocolError(
                     "provider stream ended without a completion marker"
@@ -844,6 +894,7 @@ class HashiApiAdapter(OpenRouterAdapter):
 
         full_text = "".join(text_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
+        wire_evidence["transport_audit_refs"] = list(audit_refs)
         return _APIResult(
             text=full_text,
             tool_calls=tool_calls,
@@ -873,6 +924,7 @@ class HashiApiAdapter(OpenRouterAdapter):
             reasoning_state=(
                 "available" if reasoning_chunks else "unavailable"
             ),
+            wire_evidence=wire_evidence,
         )
 
     async def generate_response(
@@ -906,6 +958,12 @@ class HashiApiAdapter(OpenRouterAdapter):
         gateway_transport_calls: list[dict[str, Any]] = []
         terminal_decision: dict[str, Any] | None = None
         last_provider_call_record: dict[str, Any] | None = None
+        completed_tool_calls: list[dict[str, str]] = []
+        repair_attempt_for_incident = 0
+        repair_incident = 0
+        active_forensic_path: Path | None = None
+        last_forensic_path: Path | None = None
+        total_tool_repair_requests = 0
 
         try:
             self._touch_activity()
@@ -1153,6 +1211,47 @@ class HashiApiAdapter(OpenRouterAdapter):
                     result,
                     tool_registry_available=self.tool_registry is not None,
                 )
+                invalid_tool_response = (
+                    str(decision.get("error_code") or "")
+                    == "PROVIDER_INVALID_TOOL_CALLS"
+                )
+                if invalid_tool_response and active_forensic_path is None:
+                    repair_incident += 1
+                next_repair_number = (
+                    repair_attempt_for_incident + 1
+                    if invalid_tool_response
+                    and repair_attempt_for_incident < INVALID_TOOL_CALL_REPAIR_LIMIT
+                    else None
+                )
+                repair_record: dict[str, Any] = {}
+                if invalid_tool_response:
+                    repair_record = {
+                        "incident": repair_incident,
+                        "response_to_request": (
+                            f"{repair_attempt_for_incident}/{INVALID_TOOL_CALL_REPAIR_LIMIT}"
+                            if repair_attempt_for_incident
+                            else None
+                        ),
+                        "next_request": (
+                            f"{next_repair_number}/{INVALID_TOOL_CALL_REPAIR_LIMIT}"
+                            if next_repair_number is not None
+                            else None
+                        ),
+                        "status": (
+                            "retrying"
+                            if next_repair_number is not None
+                            else "exhausted"
+                        ),
+                    }
+                elif repair_attempt_for_incident:
+                    repair_record = {
+                        "incident": repair_incident,
+                        "response_to_request": (
+                            f"{repair_attempt_for_incident}/{INVALID_TOOL_CALL_REPAIR_LIMIT}"
+                        ),
+                        "next_request": None,
+                        "status": "repaired",
+                    }
                 last_provider_call_record = self._provider_call_record(
                     request_id=request_id,
                     serial=provider_attempt_count,
@@ -1182,6 +1281,11 @@ class HashiApiAdapter(OpenRouterAdapter):
                         "response_observed_at": _utc_timestamp(),
                         "effective_parameters": effective_parameters,
                         **_response_protocol_record(result, decision),
+                        **(
+                            {"tool_call_repair": repair_record}
+                            if repair_record
+                            else {}
+                        ),
                     },
                 )
                 provider_calls.append(last_provider_call_record)
@@ -1192,6 +1296,83 @@ class HashiApiAdapter(OpenRouterAdapter):
 
                 last_text = result.text
                 last_structured_data = result.structured_data
+
+                if invalid_tool_response:
+                    active_forensic_path, tool_details = (
+                        self._write_invalid_tool_call_forensic(
+                            path=active_forensic_path,
+                            request_id=request_id,
+                            call_serial=provider_attempt_count,
+                            payload=payload,
+                            result=result,
+                            provider_call_record=last_provider_call_record,
+                            repair_response_number=repair_attempt_for_incident,
+                            next_repair_number=next_repair_number,
+                            incident_number=repair_incident,
+                        )
+                    )
+                    last_forensic_path = active_forensic_path
+                    if next_repair_number is not None:
+                        repair_message_start = len(messages)
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": json.dumps(
+                                    {
+                                        "hashi_rejected_tool_call_batch": result.tool_calls,
+                                        "reason": "invalid tool arguments JSON",
+                                        "executed": False,
+                                    },
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            }
+                        )
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": _invalid_tool_repair_prompt(
+                                    tool_details,
+                                    repair_number=next_repair_number,
+                                    completed_tool_calls=completed_tool_calls,
+                                ),
+                            }
+                        )
+                        outbound_messages = (
+                            messages[repair_message_start:]
+                            if gateway_session_id is not None
+                            else messages
+                        )
+                        repair_attempt_for_incident = next_repair_number
+                        total_tool_repair_requests += 1
+                        continue
+
+                    provider_request_id = str(
+                        result.provider_response_id
+                        or result.transport_request_id
+                        or last_provider_call_record.get("provider_request_id")
+                        or ""
+                    )
+                    terminal_decision = {
+                        **dict(decision),
+                        "repair_attempts_exhausted": INVALID_TOOL_CALL_REPAIR_LIMIT,
+                        "invalid_tool_names": [
+                            str(item.get("name") or "<missing>")
+                            for item in tool_details
+                            if str(item.get("arguments_state") or "")
+                            != "valid_object"
+                        ],
+                        "provider_request_id": provider_request_id,
+                        "provider_protocol_forensic_path": str(
+                            active_forensic_path
+                        ),
+                    }
+                    last_text = ""
+                    break
+
+                if repair_attempt_for_incident:
+                    repair_attempt_for_incident = 0
+                    active_forensic_path = None
 
                 if not bool(decision.get("execute_tools")):
                     terminal_decision = dict(decision)
@@ -1222,6 +1403,14 @@ class HashiApiAdapter(OpenRouterAdapter):
                     },
                 )
                 outbound_messages = messages[tool_result_start:]
+                completed_tool_calls.extend(
+                    {
+                        "id": str(call.get("id") or ""),
+                        "name": str((call.get("function") or {}).get("name") or ""),
+                    }
+                    for call in result.tool_calls
+                    if isinstance(call, Mapping)
+                )
                 self._trace(
                     "HASHI_API_TRACE tool_round_completed "
                     "request_id=%s tool_round=%s tool_calls=%s",
@@ -1242,16 +1431,28 @@ class HashiApiAdapter(OpenRouterAdapter):
             protocol_error_code = str(
                 (terminal_decision or {}).get("error_code") or ""
             )
+            protocol_error = (
+                _provider_protocol_error_message(protocol_error_code)
+                if not protocol_success
+                else None
+            )
+            if (
+                protocol_error_code == "PROVIDER_INVALID_TOOL_CALLS"
+                and last_forensic_path is not None
+            ):
+                protocol_error = _invalid_tool_user_error(
+                    tool_details,
+                    provider_request_id=str(
+                        (terminal_decision or {}).get("provider_request_id") or ""
+                    ),
+                    forensic_path=last_forensic_path,
+                )
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
                 structured_data=last_structured_data,
                 is_success=protocol_success,
-                error=(
-                    _provider_protocol_error_message(protocol_error_code)
-                    if not protocol_success
-                    else None
-                ),
+                error=protocol_error,
                 error_code=protocol_error_code or None,
                 error_retryable=(
                     bool((terminal_decision or {}).get("error_retryable"))
@@ -1269,9 +1470,16 @@ class HashiApiAdapter(OpenRouterAdapter):
                     else None
                 ),
                 stream_metadata={
+                    "provider_failure_description": (
+                        protocol_error if not protocol_success else None
+                    ),
                     "meter": {"provider_calls": provider_calls},
                     "multimodal_routing": list(media_routing),
                     "multimodal_fallback_attempted": media_fallback_attempted,
+                    "provider_tool_repair_count": total_tool_repair_requests,
+                    "provider_protocol_forensic_path": (
+                        str(last_forensic_path) if last_forensic_path else None
+                    ),
                     "gateway_continuation": {
                         "enabled": gateway_session_id is not None,
                         "session_id": gateway_session_id,
@@ -1299,7 +1507,9 @@ class HashiApiAdapter(OpenRouterAdapter):
                     )
                     or None
                 ),
-                side_effects_possible=False,
+                side_effects_possible=bool(
+                    not protocol_success and total_tool_calls
+                ),
             )
 
         except HashiApiTransportAuditError as exc:

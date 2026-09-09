@@ -24,6 +24,8 @@ from adapters.openrouter_api import (
     _iter_provider_stream_lines,
     _message_structured_data,
     _provider_request_id,
+    _request_wire_evidence,
+    _response_wire_evidence,
     _tool_call_protocol_summary,
 )
 from adapters.stream_events import KIND_THINKING, StreamEvent
@@ -160,6 +162,18 @@ class DeepSeekAdapter(OpenRouterAdapter):
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         response = await self.client.post(_DEEPSEEK_URL, json=payload, headers=headers)
         response.raise_for_status()
+        try:
+            response_request = response.request
+        except (AttributeError, RuntimeError):
+            response_request = None
+        wire_evidence = {
+            "transport": "json",
+            "request": _request_wire_evidence(payload, response_request),
+            "raw_response": _response_wire_evidence(response),
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+        }
         data = response.json()
         choices = data.get("choices") or []
         if not choices:
@@ -173,6 +187,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 provider_response_id=str(data.get("id") or ""),
                 transport_request_id=_provider_request_id(response),
                 transport_state="complete_response_no_choices",
+                wire_evidence=wire_evidence,
             )
 
         choice = choices[0]
@@ -234,6 +249,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     reasoning_state=(
                         "available" if reasoning_content else "unavailable"
                     ),
+                    wire_evidence=wire_evidence,
                 ),
                 reasoning_content,
             ),
@@ -252,6 +268,13 @@ class DeepSeekAdapter(OpenRouterAdapter):
         saw_done = False
         provider_response_id = ""
         transport_request_id = ""
+        wire_evidence = {
+            "transport": "sse",
+            "request": _request_wire_evidence(payload),
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+        }
         protocol_state = {
             "raw_finish_reason_present": False,
             "raw_finish_reason": None,
@@ -270,9 +293,20 @@ class DeepSeekAdapter(OpenRouterAdapter):
             response.raise_for_status()
             transport_request_id = _provider_request_id(response)
             protocol_state["transport_request_id"] = transport_request_id
+            try:
+                stream_request = response.request
+            except (AttributeError, RuntimeError):
+                stream_request = None
+            wire_evidence["request"] = _request_wire_evidence(
+                payload, stream_request
+            )
 
             async for line in _iter_provider_stream_lines(response, protocol_state):
                 self._touch_activity()
+                event_arrival = len(wire_evidence["sse_events"]) + 1
+                wire_evidence["sse_events"].append(
+                    {"arrival": event_arrival, "raw_line": line}
+                )
                 if not line.startswith("data: "):
                     continue
                 data_str = line[6:].strip()
@@ -371,10 +405,31 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     if tc_delta.get("id"):
                         acc["id"] = tc_delta["id"]
                     fn_delta = tc_delta.get("function", {})
+                    wire_evidence["tool_call_fragments"].append(
+                        {
+                            "arrival": len(wire_evidence["tool_call_fragments"]) + 1,
+                            "sse_event_arrival": event_arrival,
+                            "index": idx,
+                            "id_fragment": tc_delta.get("id", ""),
+                            "type_fragment": tc_delta.get("type", ""),
+                            "name_fragment": fn_delta.get("name", ""),
+                            "arguments_fragment": fn_delta.get("arguments", ""),
+                        }
+                    )
                     if fn_delta.get("name"):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
+                    wire_evidence["assembly_snapshots"].append(
+                        {
+                            "arrival": len(wire_evidence["assembly_snapshots"]) + 1,
+                            "after_fragment": len(wire_evidence["tool_call_fragments"]),
+                            "index": idx,
+                            "assembled": json.loads(
+                                json.dumps(acc, ensure_ascii=False)
+                            ),
+                        }
+                    )
                 if tool_calls_acc:
                     protocol_state["tool_calls"] = _tool_call_protocol_summary(
                         list(tool_calls_acc.values())
@@ -421,6 +476,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     reasoning_state=(
                         "available" if reasoning_content else "unavailable"
                     ),
+                    wire_evidence=wire_evidence,
                 ),
                 reasoning_content,
             ),

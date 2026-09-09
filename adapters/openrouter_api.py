@@ -6,6 +6,8 @@ import hashlib
 import io
 import json
 import logging
+import os
+import threading
 import time
 import wave
 from dataclasses import dataclass, field
@@ -52,6 +54,14 @@ from orchestrator.multimodal_contract import (
     routing_decisions_payload,
     validate_authorized_media_references,
 )
+
+
+INVALID_TOOL_CALL_REPAIR_LIMIT = 3
+_PROVIDER_FORENSIC_WRITE_LOCK = threading.Lock()
+
+
+class ProviderProtocolForensicError(RuntimeError):
+    """A mandatory private Provider-protocol record could not be persisted."""
 
 
 HASHI_COMPACTION_CAPABILITIES = {
@@ -252,6 +262,10 @@ class _APIResult:
     stream_eof: bool = False
     stream_truncated: bool = False
     reasoning_state: str = ""
+    # Complete request/response evidence is retained only long enough to write
+    # a private local forensic record when the Provider tool protocol is bad.
+    # It must never be copied into ordinary audit, stream, or user metadata.
+    wire_evidence: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         # Test doubles and older compatible adapters construct _APIResult with
@@ -413,6 +427,262 @@ def _tool_call_protocol_summary(
         )
         all_complete = all_complete and complete
     return summaries, all_complete
+
+
+def _tool_call_forensic_details(
+    tool_calls: Any,
+    *,
+    argument_fragments: list[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return untruncated parser and assembly evidence for every tool call.
+
+    This structure is private forensic material.  Callers must never attach it
+    to normal BackendResponse metadata or user-visible errors.
+    """
+
+    calls = tool_calls if isinstance(tool_calls, list) else [tool_calls]
+    fragments = [
+        dict(item)
+        for item in (argument_fragments or [])
+        if isinstance(item, Mapping)
+    ]
+    details: list[dict[str, Any]] = []
+    for position, call in enumerate(calls):
+        call_mapping = dict(call) if isinstance(call, Mapping) else {}
+        function = call_mapping.get("function")
+        function_mapping = dict(function) if isinstance(function, Mapping) else {}
+        index = call_mapping.get("index", position)
+        raw_arguments = function_mapping.get("arguments")
+        parser_input = (
+            raw_arguments
+            if isinstance(raw_arguments, str)
+            else (
+                json.dumps(raw_arguments, ensure_ascii=False, separators=(",", ":"))
+                if raw_arguments is not None
+                else ""
+            )
+        )
+        matching_fragments = [
+            item
+            for item in fragments
+            if item.get("index", 0) == index
+        ]
+        matching_fragments.sort(key=lambda item: int(item.get("arrival") or 0))
+        provider_arguments = "".join(
+            str(item.get("arguments_fragment") or "")
+            for item in matching_fragments
+        )
+        has_provider_fragments = bool(matching_fragments)
+        assembly_matches = (
+            provider_arguments == parser_input if has_provider_fragments else True
+        )
+
+        parser_error: dict[str, Any] | None = None
+        parsed_type = ""
+        arguments_state = "missing"
+        if isinstance(raw_arguments, str):
+            try:
+                parsed = json.loads(parser_input or "{}")
+            except json.JSONDecodeError as exc:
+                arguments_state = "invalid_json"
+                parser_error = {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                    "reason": exc.msg,
+                    "character_position": int(exc.pos),
+                    "byte_position": len(parser_input[: exc.pos].encode("utf-8")),
+                    "line": int(exc.lineno),
+                    "column": int(exc.colno),
+                }
+            else:
+                parsed_type = type(parsed).__name__
+                arguments_state = (
+                    "valid_object" if isinstance(parsed, Mapping) else "non_object_json"
+                )
+                if not isinstance(parsed, Mapping):
+                    parser_error = {
+                        "type": "NonObjectJSON",
+                        "message": (
+                            "tool arguments decoded successfully but did not produce "
+                            "a JSON object"
+                        ),
+                        "reason": "decoded_value_is_not_object",
+                        "character_position": None,
+                        "byte_position": None,
+                        "line": None,
+                        "column": None,
+                    }
+        elif isinstance(raw_arguments, Mapping):
+            parsed_type = type(raw_arguments).__name__
+            arguments_state = "valid_object"
+        elif raw_arguments is None:
+            parser_error = {
+                "type": "MissingToolArguments",
+                "message": "tool arguments are missing",
+                "reason": "missing",
+                "character_position": None,
+                "byte_position": None,
+                "line": None,
+                "column": None,
+            }
+        else:
+            arguments_state = "invalid_type"
+            parser_error = {
+                "type": "InvalidToolArgumentsType",
+                "message": f"tool arguments have unsupported type {type(raw_arguments).__name__}",
+                "reason": "invalid_type",
+                "character_position": None,
+                "byte_position": None,
+                "line": None,
+                "column": None,
+            }
+
+        if not assembly_matches:
+            attribution = "hashi_assembly_mismatch"
+        elif arguments_state == "invalid_json":
+            attribution = "provider_invalid_json"
+        elif arguments_state == "valid_object":
+            attribution = "valid"
+        else:
+            attribution = "provider_invalid_tool_arguments"
+        details.append(
+            {
+                "position": position,
+                "index": index,
+                "id": str(call_mapping.get("id") or ""),
+                "type": str(call_mapping.get("type") or "function"),
+                "name": str(function_mapping.get("name") or ""),
+                "argument_fragments": matching_fragments,
+                "provider_arguments_from_fragments": provider_arguments,
+                "parser_input": parser_input,
+                "parser_input_type": type(raw_arguments).__name__,
+                "parser_input_characters": len(parser_input),
+                "parser_input_bytes": len(parser_input.encode("utf-8")),
+                "parsed_type": parsed_type,
+                "arguments_state": arguments_state,
+                "parser_error": parser_error,
+                "assembly_matches_provider_fragments": assembly_matches,
+                "attribution": attribution,
+            }
+        )
+    return details
+
+
+def _wire_body_evidence(raw: bytes) -> dict[str, Any]:
+    """Preserve exact wire bytes without truncation or redaction."""
+
+    payload = bytes(raw)
+    try:
+        body = payload.decode("utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        body = base64.b64encode(payload).decode("ascii")
+        encoding = "base64"
+    return {
+        "body": body,
+        "encoding": encoding,
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _request_wire_evidence(
+    payload: Mapping[str, Any],
+    request: Any = None,
+) -> dict[str, Any]:
+    try:
+        raw = bytes(request.content) if request is not None else b""
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        raw = b""
+    if not raw:
+        raw = json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    return _wire_body_evidence(raw)
+
+
+def _response_wire_evidence(response: Any) -> dict[str, Any]:
+    try:
+        raw = bytes(response.content)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        raw = b""
+    return _wire_body_evidence(raw)
+
+
+def _invalid_tool_repair_prompt(
+    tool_details: list[Mapping[str, Any]],
+    *,
+    repair_number: int,
+    completed_tool_calls: list[Mapping[str, Any]],
+) -> str:
+    issues: list[str] = []
+    for detail in tool_details:
+        if str(detail.get("arguments_state") or "") == "valid_object":
+            continue
+        parser_error = detail.get("parser_error")
+        error = dict(parser_error) if isinstance(parser_error, Mapping) else {}
+        issues.append(
+            "tool index={index}, id={id}, name={name}: {kind} at character "
+            "{position}: {reason}; exact arguments={arguments}".format(
+                index=detail.get("index"),
+                id=detail.get("id") or "<missing>",
+                name=detail.get("name") or "<missing>",
+                kind=error.get("type") or detail.get("arguments_state") or "invalid",
+                position=(
+                    error.get("character_position")
+                    if error.get("character_position") is not None
+                    else "n/a"
+                ),
+                reason=error.get("reason") or error.get("message") or "invalid arguments",
+                arguments=json.dumps(
+                    detail.get("parser_input"), ensure_ascii=False
+                ),
+            )
+        )
+    completed = ", ".join(
+        f"{item.get('id') or '<missing>'}:{item.get('name') or '<missing>'}"
+        for item in completed_tool_calls
+    ) or "none"
+    return (
+        f"HASHI tool-call repair request {repair_number}/{INVALID_TOOL_CALL_REPAIR_LIMIT}. "
+        "The preceding Provider response was rejected before any tool in that "
+        "batch executed. Correct the same intended tool call(s) and emit a complete "
+        "tool-call batch whose arguments are valid JSON objects. Do not restart the "
+        "task and do not repeat previously completed tool calls. "
+        f"Previously completed tool calls: {completed}. "
+        f"Exact parse issue(s): {' | '.join(issues)}"
+    )
+
+
+def _invalid_tool_user_error(
+    tool_details: list[Mapping[str, Any]],
+    *,
+    provider_request_id: str,
+    forensic_path: Path,
+) -> str:
+    invalid = next(
+        (
+            detail
+            for detail in tool_details
+            if str(detail.get("arguments_state") or "") != "valid_object"
+        ),
+        {},
+    )
+    parser_error = invalid.get("parser_error")
+    error = dict(parser_error) if isinstance(parser_error, Mapping) else {}
+    name = str(invalid.get("name") or "<missing>")
+    reason = str(error.get("reason") or error.get("message") or "invalid JSON")
+    position = error.get("character_position")
+    position_text = f" at character {position}" if position is not None else ""
+    return (
+        "PROVIDER_INVALID_TOOL_CALLS: Provider tool "
+        f"{name} still had invalid JSON after 3 repair attempts "
+        f"({reason}{position_text}). No malformed tool was executed. "
+        f"Provider request ID: {provider_request_id or 'unavailable'}. "
+        f"Complete private local diagnostic: {forensic_path}"
+    )
 
 
 def _provider_response_decision(
@@ -801,7 +1071,13 @@ def _backend_failure_response(
     code = "PROVIDER_UNKNOWN"
     description = "The provider request failed for an unknown technical reason."
 
-    if isinstance(error, MultimodalContractError):
+    if isinstance(error, ProviderProtocolForensicError):
+        code = "AUDIT_PERSISTENCE_FAILURE"
+        description = (
+            "HASHI stopped because the mandatory private Provider protocol "
+            "forensic record could not be persisted."
+        )
+    elif isinstance(error, MultimodalContractError):
         code = error.code
         description = str(error)
     elif status is not None:
@@ -1074,6 +1350,7 @@ class OpenRouterAdapter(BaseBackend):
         self.tool_registry = None   # Injected by FlexibleBackendManager if tools configured
         self._audio_asset_store: AudioAssetStore | None = None
         self._provider_call_observer: ProviderCallObserver | None = None
+        self._provider_invocation_context: dict[str, Any] = {}
 
     def set_provider_call_observer(
         self,
@@ -1082,6 +1359,156 @@ class OpenRouterAdapter(BaseBackend):
         """Install a synchronous durable observer for physical HTTP calls."""
 
         self._provider_call_observer = observer
+
+    def set_provider_invocation_context(self, context: Mapping[str, Any]) -> None:
+        """Bind HER/PAO identifiers to private protocol-forensic records."""
+
+        self._provider_invocation_context = {
+            str(key): value
+            for key, value in dict(context or {}).items()
+            if value not in (None, "")
+        }
+
+    def _write_invalid_tool_call_forensic(
+        self,
+        *,
+        path: Path | None,
+        request_id: str,
+        call_serial: int,
+        payload: Mapping[str, Any],
+        result: _APIResult,
+        provider_call_record: Mapping[str, Any],
+        repair_response_number: int,
+        next_repair_number: int | None,
+        incident_number: int,
+    ) -> tuple[Path, list[dict[str, Any]]]:
+        """Durably append one complete bad-tool response to a private log."""
+
+        workspace = Path(self.config.workspace_dir).expanduser().resolve()
+        forensic_root = workspace / "logs" / "provider_protocol_forensics"
+        if path is None:
+            identity = hashlib.sha256(
+                f"{request_id}|{incident_number}|{uuid4().hex}".encode("utf-8")
+            ).hexdigest()[:24]
+            path = forensic_root / f"invalid-tool-calls-{identity}.jsonl"
+
+        wire = (
+            dict(result.wire_evidence)
+            if isinstance(result.wire_evidence, Mapping)
+            else {}
+        )
+        raw_provider = wire or {
+            "transport": "test_double",
+            "request": _request_wire_evidence(payload),
+            "response": {
+                "provider_response_id": str(result.provider_response_id or ""),
+                "transport_request_id": str(result.transport_request_id or ""),
+                "finish_reason": result.raw_finish_reason,
+                "text": result.text,
+                "tool_calls": result.tool_calls,
+            },
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+        }
+        raw_fragments = raw_provider.get("tool_call_fragments")
+        tool_details = _tool_call_forensic_details(
+            result.tool_calls,
+            argument_fragments=(
+                list(raw_fragments) if isinstance(raw_fragments, list) else []
+            ),
+        )
+        provider_request_id = str(
+            result.provider_response_id
+            or result.transport_request_id
+            or provider_call_record.get("provider_request_id")
+            or ""
+        )
+        record = {
+            "format": "hashi-provider-tool-forensic-v1",
+            "recorded_at": _utc_timestamp(),
+            "hashi": {
+                "request_id": str(request_id or ""),
+                "call_serial": max(1, int(call_serial)),
+                "agent_id": str(getattr(self.config, "name", "") or ""),
+                "instance_id": str(
+                    getattr(self.global_config, "instance_id", "")
+                    or getattr(self.global_config, "name", "")
+                    or ""
+                ),
+                "runtime_generation_id": str(
+                    getattr(self.config, "runtime_generation_id", "")
+                    or getattr(self.config, "generation_id", "")
+                    or ""
+                ),
+                **dict(self._provider_invocation_context),
+            },
+            "provider": {
+                "adapter": type(self).__name__,
+                "provider": str(
+                    getattr(self.config, "engine", "") or "openrouter-api"
+                ),
+                "model": str(getattr(self.config, "model", "") or ""),
+                "provider_request_id": provider_request_id,
+                "provider_response_id": str(result.provider_response_id or ""),
+                "transport_request_id": str(result.transport_request_id or ""),
+                "finish_reason_present": bool(result.finish_reason_present),
+                "raw_finish_reason": result.raw_finish_reason,
+                "normalized_finish_reason": str(result.finish_reason or ""),
+            },
+            "repair": {
+                "incident": max(1, int(incident_number)),
+                "response_to_repair_request": (
+                    f"{repair_response_number}/{INVALID_TOOL_CALL_REPAIR_LIMIT}"
+                    if repair_response_number
+                    else None
+                ),
+                "next_request": (
+                    f"{next_repair_number}/{INVALID_TOOL_CALL_REPAIR_LIMIT}"
+                    if next_repair_number is not None
+                    else None
+                ),
+                "status": "retrying" if next_repair_number is not None else "exhausted",
+            },
+            "request_started_at": provider_call_record.get("request_started_at"),
+            "response_observed_at": provider_call_record.get("response_observed_at"),
+            "raw_provider": raw_provider,
+            "tool_calls": tool_details,
+            "normalization": {
+                "tool_protocol_summary": _tool_call_protocol_summary(
+                    result.tool_calls
+                )[0],
+                "transport_complete": bool(result.transport_complete),
+                "transport_state": str(result.transport_state or ""),
+            },
+        }
+        encoded = json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ) + "\n"
+        try:
+            forensic_root.mkdir(parents=True, exist_ok=True)
+            forensic_root.chmod(0o700)
+            flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+            descriptor = os.open(path, flags, 0o600)
+            try:
+                with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                    descriptor = -1
+                    with _PROVIDER_FORENSIC_WRITE_LOCK:
+                        handle.write(encoded)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            path.chmod(0o600)
+        except OSError as exc:
+            raise ProviderProtocolForensicError(
+                f"private Provider protocol forensic persistence failed: {exc}"
+            ) from exc
+        return path, tool_details
 
     def _provider_call_record(
         self,
@@ -1966,6 +2393,18 @@ class OpenRouterAdapter(BaseBackend):
             headers=headers,
         )
         response.raise_for_status()
+        try:
+            response_request = response.request
+        except (AttributeError, RuntimeError):
+            response_request = None
+        wire_evidence = {
+            "transport": "json",
+            "request": _request_wire_evidence(payload, response_request),
+            "raw_response": _response_wire_evidence(response),
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+        }
         data = response.json()
         choices = data.get("choices") or []
         if not choices:
@@ -1979,6 +2418,7 @@ class OpenRouterAdapter(BaseBackend):
                 provider_response_id=str(data.get("id") or ""),
                 transport_request_id=_provider_request_id(response),
                 transport_state="complete_response_no_choices",
+                wire_evidence=wire_evidence,
             )
 
         choice = choices[0]
@@ -2066,6 +2506,7 @@ class OpenRouterAdapter(BaseBackend):
                 if reasoning_content
                 else ("encrypted" if encrypted_reasoning else "unavailable")
             ),
+            wire_evidence=wire_evidence,
         )
 
     # ------------------------------------------------------------------
@@ -2095,6 +2536,13 @@ class OpenRouterAdapter(BaseBackend):
         audio_chunks: list[str] = []
         audio_transcript = ""
         audio_encoded_size = 0
+        wire_evidence: dict[str, Any] = {
+            "transport": "sse",
+            "request": _request_wire_evidence(payload),
+            "sse_events": [],
+            "tool_call_fragments": [],
+            "assembly_snapshots": [],
+        }
         protocol_state: dict[str, Any] = {
             "raw_finish_reason_present": False,
             "raw_finish_reason": None,
@@ -2127,9 +2575,16 @@ class OpenRouterAdapter(BaseBackend):
                 stream_request = httpx.Request(
                     "POST", self._chat_completions_url()
                 )
+            wire_evidence["request"] = _request_wire_evidence(
+                payload, stream_request
+            )
 
             async for line in _iter_provider_stream_lines(response, protocol_state):
                 self._touch_activity()
+                event_arrival = len(wire_evidence["sse_events"]) + 1
+                wire_evidence["sse_events"].append(
+                    {"arrival": event_arrival, "raw_line": line}
+                )
 
                 if not line.startswith("data: "):
                     continue
@@ -2320,10 +2775,31 @@ class OpenRouterAdapter(BaseBackend):
                     if tc_delta.get("id"):
                         acc["id"] = tc_delta["id"]
                     fn_delta = tc_delta.get("function", {})
+                    wire_evidence["tool_call_fragments"].append(
+                        {
+                            "arrival": len(wire_evidence["tool_call_fragments"]) + 1,
+                            "sse_event_arrival": event_arrival,
+                            "index": idx,
+                            "id_fragment": tc_delta.get("id", ""),
+                            "type_fragment": tc_delta.get("type", ""),
+                            "name_fragment": fn_delta.get("name", ""),
+                            "arguments_fragment": fn_delta.get("arguments", ""),
+                        }
+                    )
                     if fn_delta.get("name"):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
+                    wire_evidence["assembly_snapshots"].append(
+                        {
+                            "arrival": len(wire_evidence["assembly_snapshots"]) + 1,
+                            "after_fragment": len(wire_evidence["tool_call_fragments"]),
+                            "index": idx,
+                            "assembled": json.loads(
+                                json.dumps(acc, ensure_ascii=False)
+                            ),
+                        }
+                    )
                 if tool_calls_acc:
                     protocol_state["tool_calls"] = _tool_call_protocol_summary(
                         list(tool_calls_acc.values())
@@ -2383,6 +2859,7 @@ class OpenRouterAdapter(BaseBackend):
                 if reasoning_chunks
                 else ("encrypted" if encrypted_reasoning else "unavailable")
             ),
+            wire_evidence=wire_evidence,
         )
 
     # ------------------------------------------------------------------
@@ -2428,6 +2905,12 @@ class OpenRouterAdapter(BaseBackend):
         input_normalization: tuple[dict[str, Any], ...] = ()
         terminal_decision: dict[str, Any] | None = None
         last_provider_call_record: dict[str, Any] | None = None
+        completed_tool_calls: list[dict[str, str]] = []
+        repair_attempt_for_incident = 0
+        repair_incident = 0
+        active_forensic_path: Path | None = None
+        last_forensic_path: Path | None = None
+        total_tool_repair_requests = 0
 
         try:
             self._touch_activity()
@@ -2694,6 +3177,47 @@ class OpenRouterAdapter(BaseBackend):
                     result,
                     tool_registry_available=self.tool_registry is not None,
                 )
+                invalid_tool_response = (
+                    str(decision.get("error_code") or "")
+                    == "PROVIDER_INVALID_TOOL_CALLS"
+                )
+                if invalid_tool_response and active_forensic_path is None:
+                    repair_incident += 1
+                next_repair_number = (
+                    repair_attempt_for_incident + 1
+                    if invalid_tool_response
+                    and repair_attempt_for_incident < INVALID_TOOL_CALL_REPAIR_LIMIT
+                    else None
+                )
+                repair_record: dict[str, Any] = {}
+                if invalid_tool_response:
+                    repair_record = {
+                        "incident": repair_incident,
+                        "response_to_request": (
+                            f"{repair_attempt_for_incident}/{INVALID_TOOL_CALL_REPAIR_LIMIT}"
+                            if repair_attempt_for_incident
+                            else None
+                        ),
+                        "next_request": (
+                            f"{next_repair_number}/{INVALID_TOOL_CALL_REPAIR_LIMIT}"
+                            if next_repair_number is not None
+                            else None
+                        ),
+                        "status": (
+                            "retrying"
+                            if next_repair_number is not None
+                            else "exhausted"
+                        ),
+                    }
+                elif repair_attempt_for_incident:
+                    repair_record = {
+                        "incident": repair_incident,
+                        "response_to_request": (
+                            f"{repair_attempt_for_incident}/{INVALID_TOOL_CALL_REPAIR_LIMIT}"
+                        ),
+                        "next_request": None,
+                        "status": "repaired",
+                    }
                 last_provider_call_record = self._provider_call_record(
                     request_id=request_id,
                     serial=provider_attempt_serial,
@@ -2722,6 +3246,11 @@ class OpenRouterAdapter(BaseBackend):
                         "response_observed_at": _utc_timestamp(),
                         "effective_parameters": effective_parameters,
                         **_response_protocol_record(result, decision),
+                        **(
+                            {"tool_call_repair": repair_record}
+                            if repair_record
+                            else {}
+                        ),
                     },
                 )
                 provider_calls.append(last_provider_call_record)
@@ -2734,6 +3263,77 @@ class OpenRouterAdapter(BaseBackend):
                 last_structured_data = result.structured_data
                 last_audio_bytes = result.audio_bytes
                 last_audio_transcript = result.audio_transcript
+
+                if invalid_tool_response:
+                    active_forensic_path, tool_details = (
+                        self._write_invalid_tool_call_forensic(
+                            path=active_forensic_path,
+                            request_id=request_id,
+                            call_serial=provider_attempt_serial,
+                            payload=payload,
+                            result=result,
+                            provider_call_record=last_provider_call_record,
+                            repair_response_number=repair_attempt_for_incident,
+                            next_repair_number=next_repair_number,
+                            incident_number=repair_incident,
+                        )
+                    )
+                    last_forensic_path = active_forensic_path
+                    if next_repair_number is not None:
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": json.dumps(
+                                    {
+                                        "hashi_rejected_tool_call_batch": result.tool_calls,
+                                        "reason": "invalid tool arguments JSON",
+                                        "executed": False,
+                                    },
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            }
+                        )
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": _invalid_tool_repair_prompt(
+                                    tool_details,
+                                    repair_number=next_repair_number,
+                                    completed_tool_calls=completed_tool_calls,
+                                ),
+                            }
+                        )
+                        repair_attempt_for_incident = next_repair_number
+                        total_tool_repair_requests += 1
+                        continue
+
+                    provider_request_id = str(
+                        result.provider_response_id
+                        or result.transport_request_id
+                        or last_provider_call_record.get("provider_request_id")
+                        or ""
+                    )
+                    terminal_decision = {
+                        **dict(decision),
+                        "repair_attempts_exhausted": INVALID_TOOL_CALL_REPAIR_LIMIT,
+                        "invalid_tool_names": [
+                            str(item.get("name") or "<missing>")
+                            for item in tool_details
+                            if str(item.get("arguments_state") or "")
+                            != "valid_object"
+                        ],
+                        "provider_request_id": provider_request_id,
+                        "provider_protocol_forensic_path": str(
+                            active_forensic_path
+                        ),
+                    }
+                    last_text = ""
+                    break
+
+                if repair_attempt_for_incident:
+                    repair_attempt_for_incident = 0
+                    active_forensic_path = None
 
                 # The protocol decision is persisted synchronously above. No
                 # tool side effect may occur before that durable boundary.
@@ -2770,6 +3370,14 @@ class OpenRouterAdapter(BaseBackend):
                         ),
                     },
                 )
+                completed_tool_calls.extend(
+                    {
+                        "id": str(call.get("id") or ""),
+                        "name": str((call.get("function") or {}).get("name") or ""),
+                    }
+                    for call in result.tool_calls
+                    if isinstance(call, Mapping)
+                )
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             from adapters.base import TokenUsage
@@ -2789,6 +3397,17 @@ class OpenRouterAdapter(BaseBackend):
                 if not protocol_success
                 else None
             )
+            if (
+                protocol_error_code == "PROVIDER_INVALID_TOOL_CALLS"
+                and last_forensic_path is not None
+            ):
+                protocol_error = _invalid_tool_user_error(
+                    tool_details,
+                    provider_request_id=str(
+                        (terminal_decision or {}).get("provider_request_id") or ""
+                    ),
+                    forensic_path=last_forensic_path,
+                )
             if protocol_success and audio_output is not None and not last_audio_bytes:
                 raise MultimodalContractError(
                     "provider completed a native voice request without audio output",
@@ -2906,9 +3525,16 @@ class OpenRouterAdapter(BaseBackend):
                     else None
                 ),
                 stream_metadata={
+                    "provider_failure_description": (
+                        protocol_error if not protocol_success else None
+                    ),
                     "meter": {"provider_calls": provider_calls},
                     "provider_transport_retry_count": (
                         provider_transport_retry_count
+                    ),
+                    "provider_tool_repair_count": total_tool_repair_requests,
+                    "provider_protocol_forensic_path": (
+                        str(last_forensic_path) if last_forensic_path else None
                     ),
                     "multimodal_routing": list(media_routing),
                     "multimodal_fallback_attempted": media_fallback_attempted,
@@ -2934,7 +3560,9 @@ class OpenRouterAdapter(BaseBackend):
                     )
                     or None
                 ),
-                side_effects_possible=False,
+                side_effects_possible=bool(
+                    not protocol_success and total_tool_calls
+                ),
             )
 
         except asyncio.CancelledError:

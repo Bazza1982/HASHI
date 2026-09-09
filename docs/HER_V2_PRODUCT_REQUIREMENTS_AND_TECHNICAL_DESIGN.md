@@ -1313,6 +1313,15 @@ final lane is not proof of delivery.
 
 Logs must apply existing HASHI secret-redaction, access-control, retention, and workspace-isolation policies.
 
+Malformed Provider tool-call protocol has one deliberately narrower forensic
+exception. HASHI writes the complete, unredacted and untruncated request body,
+raw response or ordered SSE events, fragment-by-fragment tool assembly, exact
+JSON parser input and exception position to an Agent-local private file. The
+directory/file permissions are restricted; ordinary audit, Telegram, HChat,
+Backend API errors and user cards receive only a safe summary and the local
+path. Failure to persist this mandatory evidence stops execution without a
+tool side effect.
+
 ## 18. Failure, Retry, and Recovery
 
 ### 18.1 Stage-local provider recovery
@@ -1374,6 +1383,29 @@ If the process stops unexpectedly:
 A later user request such as “continue” starts a new turn. Its Triage stage may inspect conversation history, the previous Ledger, and HASHI logs to determine remaining work.
 
 Recovery is conversational, not transactional.
+
+### 18.3 Malformed tool-call repair
+
+An otherwise complete Provider response whose tool arguments are not a JSON
+object is repaired inside the same physical conversation and tool loop. HASHI
+validates the whole returned batch before executing any member, records the
+private forensic evidence, identifies the exact call and parser failure to the
+Provider, and asks it to reissue the intended complete batch. Earlier messages,
+completed tool results, goal, plan and authority remain in place. A completed
+tool is never replayed and a malformed tool executes zero times.
+
+The initial malformed response permits at most three repair requests, recorded
+as `1/3`, `2/3` and `3/3` with their Provider request IDs. The first valid
+response resumes ordinary execution. If the response to `3/3` is still invalid,
+HER stops with `PROVIDER_INVALID_TOOL_CALLS`, the tool name, concise parser
+reason, final Provider request ID and private diagnostic path. This repair is
+not HER's fresh-connection retry, not JSON/schema output repair, and never
+creates or reruns a PAO Run, Cron job or Scheduler action.
+
+An Adapter's explicit stable uppercase failure code, retryability, cause and
+Provider request ID cross the HER boundary without enum-based downgrading.
+`PROVIDER_UNKNOWN` is reserved for failures that arrived without a valid
+classification.
 
 ## 19. Timeout Model
 
@@ -1653,6 +1685,10 @@ HER v2 is ready for production rollout only when:
   Quick/Light model at high HER effort, supports Tier 2/Tier 3 watchdog
   isolation, keeps Gemini stateless, and leaves ordinary provider tool loops
   unchanged;
+- malformed tool-call JSON produces complete private wire/assembly evidence,
+  executes no malformed call, receives at most three same-loop repair requests,
+  never replays completed tools, and preserves its Adapter error code through
+  the final HER response;
 - Auto Compact preserves protected authority and open tool truth verbatim,
   retains raw source, atomically commits only validated capsules, and otherwise
   continues with the best safely assembled context plus a mandatory warning;

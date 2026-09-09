@@ -183,6 +183,13 @@ global list. `/habit` manages the default-off Habit/Meditation path.
 HER Review uses Git evidence normally and bounded content hashes for ignored or
 non-Git roots. Equal-size edits are detected; stability covers only observed data.
 
+HER Provider adapters validate a complete tool-call batch before side effects.
+Malformed arguments stay in the same tool loop for at most three explicit
+format-repair requests; completed tools are not replayed. Full raw wire and
+assembly evidence is written only to a restricted local forensic file, while
+normal errors expose a safe summary and its path. Explicit Adapter failure
+codes survive HER unchanged; this mechanism never reruns a PAO or Cron Run.
+
 ## Conversation, memory and recovery
 
 - `/new` creates/selects a HASHI Conversation Session; `/fresh` advances context

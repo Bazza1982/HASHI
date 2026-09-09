@@ -669,6 +669,68 @@ async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
 
 
 @pytest.mark.asyncio
+async def test_hashi_api_repairs_bad_tool_json_inside_gateway_continuation(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: []
+    )
+    bad_call = {
+        "id": "call-repair",
+        "type": "function",
+        "function": {"name": "file_read", "arguments": '{"path":'},
+    }
+    good_call = {
+        "id": "call-repair",
+        "type": "function",
+        "function": {"name": "file_read", "arguments": '{"path":"a.txt"}'},
+    }
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            _APIResult("", [bad_call], "tool_calls", provider_response_id="bad-1"),
+            _APIResult("", [good_call], "tool_calls", provider_response_id="good-1"),
+            _APIResult("finished", None, "stop", provider_response_id="final-1"),
+        ]
+    )
+    executed = []
+
+    async def run_tool_calls(calls, messages, _callback, **_kwargs):
+        executed.extend(calls)
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call-repair",
+                "content": "file contents",
+            }
+        )
+
+    adapter._run_tool_calls = run_tool_calls
+
+    response = await adapter.generate_response("Inspect the file", "request-repair")
+
+    assert response.is_success is True
+    assert executed == [good_call]
+    assert adapter._call_api_once.call_count == 3
+    repair_payload = adapter._call_api_once.call_args_list[1].args[0]
+    assert [message["role"] for message in repair_payload["messages"]] == [
+        "assistant",
+        "system",
+    ]
+    assert "repair request 1/3" in repair_payload["messages"][1]["content"]
+    assert response.stream_metadata["provider_tool_repair_count"] == 1
+    assert Path(
+        response.stream_metadata["provider_protocol_forensic_path"]
+    ).is_file()
+    continuation = response.stream_metadata["gateway_continuation"]
+    assert continuation["enabled"] is True
+    assert continuation["full_prompt_send_count"] == 1
+    assert [call["message_count"] for call in continuation["transport_calls"]] == [
+        2,
+        2,
+        1,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_preserves_multipart_messages_and_reasoning_effort(tmp_path):
     image = tmp_path / "photo.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\nhashi-api")

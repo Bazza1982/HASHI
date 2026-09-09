@@ -20,7 +20,11 @@ from adapters.her_v2 import (
     _backend_response_error,
 )
 from adapters.ollama_api import OllamaAdapter
-from adapters.openrouter_api import OpenRouterAdapter, _APIResult
+from adapters.openrouter_api import (
+    OpenRouterAdapter,
+    _APIResult,
+    _PROVIDER_PROTOCOL_ERROR_MESSAGES,
+)
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_FINAL,
@@ -171,6 +175,36 @@ def test_untyped_legacy_backend_failures_receive_safe_provider_types(
     assert failure.code is code
     assert failure.retryable is retryable
     assert failure.human_description
+
+
+@pytest.mark.parametrize("adapter_code", sorted(_PROVIDER_PROTOCOL_ERROR_MESSAGES))
+def test_every_known_adapter_protocol_error_survives_her_without_downgrade(
+    adapter_code,
+):
+    failure = _backend_response_error(
+        BackendResponse(
+            text="",
+            duration_ms=1,
+            error="exact adapter cause",
+            is_success=False,
+            error_code=adapter_code,
+            error_retryable=False,
+            provider_request_id="provider-request-1",
+            stream_metadata={
+                "provider_failure_description": "precise adapter description",
+                "provider_protocol": {"decision": "rejected"},
+            },
+        ),
+        fallback="provider failed",
+    )
+
+    assert failure.error_code == adapter_code
+    assert failure.error_code != ProviderFailureCode.PROVIDER_UNKNOWN.value
+    assert failure.retryable is False
+    assert str(failure) == "exact adapter cause"
+    assert failure.human_description == "precise adapter description"
+    assert failure.provider_request_id == "provider-request-1"
+    assert failure.details["provider_protocol"] == {"decision": "rejected"}
 
 
 def _agent_config(tmp_path, *, her_v2=None, effort="low"):
