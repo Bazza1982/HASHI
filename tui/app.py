@@ -398,9 +398,26 @@ class HASHITuiApp(App):
             os.environ.get("HASHI_TUI_LANGUAGE") or preferences.get("language") or "en"
         ).casefold()
         self._ui_language = "zh" if requested_language.startswith("zh") else "en"
+        requested_sounds = os.environ.get("HASHI_TUI_SOUNDS")
+        if requested_sounds is None:
+            self._sound_enabled = bool(preferences.get("sounds", True))
+        else:
+            self._sound_enabled = requested_sounds.strip().casefold() not in {
+                "0", "false", "no", "off",
+            }
         command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
         command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._command_names = list(dict.fromkeys(command_names))
+        known_command_names = [f"/{spec.name}" for spec in COMMAND_SPECS]
+        known_command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
+        self._known_command_names = list(dict.fromkeys(known_command_names))
+        self._command_order = {
+            command: index for index, command in enumerate(self._command_names)
+        }
+        self._suggestion_names = sorted(
+            self._command_names,
+            key=lambda command: (len(command), self._command_order[command]),
+        )
         self._current_command_match: str | None = None
         self._command_matches: list[str] = []
         self._command_match_index = 0
@@ -451,7 +468,11 @@ class HASHITuiApp(App):
             self._preferences_path.parent.mkdir(parents=True, exist_ok=True)
             self._preferences_path.write_text(
                 json.dumps(
-                    {"language": self._ui_language, "layout": self._layout_mode},
+                    {
+                        "language": self._ui_language,
+                        "layout": self._layout_mode,
+                        "sounds": self._sound_enabled,
+                    },
                     ensure_ascii=False,
                     indent=2,
                 ) + "\n",
@@ -467,7 +488,7 @@ class HASHITuiApp(App):
                 yield ChatHistory(id="chat-history")
                 yield ChatInput(
                     placeholder="Message · /help · /to <agent> · /instance",
-                    suggester=SuggestFromList(self._command_names, case_sensitive=False),
+                    suggester=SuggestFromList(self._suggestion_names, case_sensitive=False),
                     id="chat-input",
                 )
                 yield CommandPreview(id="command-preview")
@@ -914,7 +935,7 @@ class HASHITuiApp(App):
                                 self._render_transcript_message(msg)
                                 received = True
                         if received:
-                            play_message_sound("received")
+                            self._play_message_sound("received")
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -929,14 +950,15 @@ class HASHITuiApp(App):
 
     async def on_input_submitted(self, event: Input.Submitted):
         text = event.value.strip()
-        event.input.value = ""
 
         # Light onboarding accepts empty Enter to advance
         if self._light_onboarding:
+            event.input.value = ""
             await self._handle_light_onboarding_input(text)
             return
 
         if not text:
+            event.input.value = ""
             return
         normalized = text
         if normalized.startswith("/ "):
@@ -944,8 +966,28 @@ class HASHITuiApp(App):
 
         # Onboarding mode
         if self._onboarding:
+            event.input.value = ""
             await self._handle_onboarding_input(normalized)
             return
+
+        if normalized.startswith("/"):
+            resolved = self._resolve_submitted_command(normalized)
+            if resolved is None:
+                event.input.value = ""
+                self._hide_command_preview()
+                chat = self.query_one("#chat-history", ChatHistory)
+                command = normalized.split(maxsplit=1)[0]
+                message = (
+                    f"未找到命令：{command}"
+                    if self._ui_language == "zh"
+                    else f"Unknown command: {command}"
+                )
+                chat.write(Text(message, style="dim #9fb3c8"))
+                return
+            normalized = resolved
+
+        event.input.value = ""
+        self._hide_command_preview()
 
         # TUI local commands
         if normalized == "/to" or normalized.startswith("/to "):
@@ -987,7 +1029,7 @@ class HASHITuiApp(App):
 
         if self.current_agent_display == "ALL":
             # Broadcast to all active agents
-            play_message_sound("sent")
+            self._play_message_sound("sent")
             self._send_broadcast(normalized, self.api, self._connection_generation)
             return
 
@@ -995,7 +1037,7 @@ class HASHITuiApp(App):
             chat.write(markup("[yellow]No agent selected. Use /to <name> first.[/]"))
             return
         else:
-            play_message_sound("sent")
+            self._play_message_sound("sent")
             self._send_message(normalized, self.current_agent, self.api, self._connection_generation)
 
     def on_input_changed(self, event: Input.Changed):
@@ -1015,13 +1057,43 @@ class HASHITuiApp(App):
             else:
                 preview.hide_match()
             return
-        self._command_matches = [
-            command for command in self._command_names if command.startswith(value)
-        ][:5]
+        self._command_matches = self._ranked_command_matches(value)
         if not self._command_matches:
             preview.hide_match()
             return
         self._show_command_matches()
+
+    def _ranked_command_matches(self, prefix: str) -> list[str]:
+        """Return stable prefix matches, preferring the shortest completion."""
+
+        matches = [command for command in self._command_names if command.startswith(prefix)]
+        matches.sort(key=lambda command: (len(command), self._command_order[command]))
+        return matches[:5]
+
+    def _resolve_submitted_command(self, text: str) -> str | None:
+        """Resolve an exact or partial slash command without fuzzy correction."""
+
+        command, separator, arguments = text.partition(" ")
+        prefix = command.casefold()
+        if prefix == "/":
+            return None
+        canonical = next(
+            (candidate for candidate in self._known_command_names if candidate.casefold() == prefix),
+            None,
+        )
+        if canonical is None:
+            matches = self._ranked_command_matches(prefix)
+            if not matches:
+                return None
+            selected = self._current_command_match
+            canonical = selected if selected in matches else matches[0]
+        return canonical + (separator + arguments if separator else "")
+
+    def _hide_command_preview(self):
+        self._command_matches = []
+        self._current_command_match = None
+        self._command_match_index = 0
+        self.query_one("#command-preview", CommandPreview).hide_match()
 
     def _show_command_matches(self):
         if not self._command_matches:
@@ -1084,9 +1156,7 @@ class HASHITuiApp(App):
         elif event.key == "up":
             self._command_match_index = (self._command_match_index - 1) % len(self._command_matches)
         elif event.key == "escape":
-            self._command_matches = []
-            self._current_command_match = None
-            self.query_one("#command-preview", CommandPreview).hide_match()
+            self._hide_command_preview()
             event.stop()
             event.prevent_default()
             return
@@ -1099,7 +1169,19 @@ class HASHITuiApp(App):
     def _handle_tui_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)
         parts = text.split()
-        if len(parts) == 1 or (len(parts) == 2 and parts[1].casefold() in {"language", "lang"}):
+        if len(parts) == 1:
+            current = "中文" if self._ui_language == "zh" else "English"
+            sound = (
+                ("开" if self._sound_enabled else "关")
+                if self._ui_language == "zh"
+                else ("on" if self._sound_enabled else "off")
+            )
+            chat.write(markup(
+                f"[#c7ff8a]TUI language · {current} · sound · {sound}[/]\n"
+                "[#9be7ff]/tui language zh|en · /tui sound on|off|test[/]"
+            ))
+            return
+        if len(parts) == 2 and parts[1].casefold() in {"language", "lang"}:
             current = "中文" if self._ui_language == "zh" else "English"
             chat.write(markup(
                 f"[#c7ff8a]TUI language · {current} · /tui language zh|en[/]"
@@ -1120,7 +1202,63 @@ class HASHITuiApp(App):
             message = "✓ TUI 已切换为中文。" if self._ui_language == "zh" else "✓ TUI switched to English."
             chat.write(markup(f"[#63ffd9]{message}[/]"))
             return
-        chat.write(markup("[#ff7a7a]Use /tui language zh|en.[/]"))
+        if len(parts) == 2 and parts[1].casefold() == "sound":
+            state = (
+                ("已开启" if self._sound_enabled else "已关闭")
+                if self._ui_language == "zh"
+                else ("on" if self._sound_enabled else "off")
+            )
+            chat.write(markup(
+                f"[#c7ff8a]TUI sound · {state} · /tui sound on|off|test[/]"
+            ))
+            return
+        if len(parts) == 3 and parts[1].casefold() == "sound":
+            action = parts[2].casefold()
+            if action in {"on", "1", "yes"}:
+                self._sound_enabled = True
+                self._save_tui_preferences()
+                played = self._play_message_sound("received")
+                message = (
+                    "✓ TUI 提示音已开启。" if self._ui_language == "zh"
+                    else "✓ TUI sounds enabled."
+                )
+                if not played:
+                    message += (
+                        " 当前系统没有可用的音频输出。"
+                        if self._ui_language == "zh"
+                        else " No audio output is available on this system."
+                    )
+                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                return
+            if action in {"off", "0", "no"}:
+                self._sound_enabled = False
+                self._save_tui_preferences()
+                message = (
+                    "✓ TUI 提示音已关闭。" if self._ui_language == "zh"
+                    else "✓ TUI sounds disabled."
+                )
+                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                return
+            if action == "test":
+                played = self._play_message_sound("sent")
+                if played:
+                    self.set_timer(0.2, lambda: self._play_message_sound("received"))
+                if played and self._ui_language == "zh":
+                    message = "✓ 正在试听发送与接收提示音。"
+                elif played:
+                    message = "✓ Testing sent and received sounds."
+                elif self._ui_language == "zh":
+                    message = "当前系统没有可用的音频输出。"
+                else:
+                    message = "No audio output is available on this system."
+                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                return
+        chat.write(markup(
+            "[#ff7a7a]Use /tui language zh|en or /tui sound on|off|test.[/]"
+        ))
+
+    def _play_message_sound(self, event: str) -> bool:
+        return play_message_sound(event, enabled=self._sound_enabled)
 
     def _handle_help_cmd(self, text: str):
         """Render TUI and common Agent commands without sending them to a model."""
@@ -1147,9 +1285,11 @@ class HASHITuiApp(App):
 `/instance [名称]`　查看或切换实例
 `/layout [chat|balanced|compact|reset]`　调整窗口比例
 `/log [show|hide|pause]`　控制本地日志
+`/tui language zh|en`　切换界面语言
+`/tui sound on|off|test`　设置或试听提示音
 `/clear`　清空当前显示　　`/quit`　退出
 
-输入 `/help en` 查看英文版。这里只显示常用命令；Agent 命令仍由当前实例执行。"""
+输入命令前缀可自动补全；未知命令不会发送给 Agent。输入 `/help en` 查看英文版。"""
         else:
             help_text = """## ❔ HASHI TUI HELP
 
@@ -1166,9 +1306,11 @@ class HASHITuiApp(App):
 `/instance [name]`　List or switch instances
 `/layout [chat|balanced|compact|reset]`　Resize the panes
 `/log [show|hide|pause]`　Control the host log
+`/tui language zh|en`　Change the interface language
+`/tui sound on|off|test`　Configure or preview message sounds
 `/clear`　Clear this view　　`/quit`　Exit
 
-Use `/help zh` for Chinese. Agent commands are executed by the selected instance."""
+Command prefixes autocomplete; unknown commands are never sent to an Agent. Use `/help zh` for Chinese."""
         chat.write(chat_message_renderable("assistant", "HASHI", help_text))
 
     def _refresh_chrome(self):

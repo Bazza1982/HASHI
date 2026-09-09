@@ -101,6 +101,11 @@ See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 - **Frontend Connectors** expose Telegram, WhatsApp, TUI, Backend API and Remote.
   Workbench is retired; names such as `workbench_port` are API compatibility.
 
+The built-in TUI completes entered slash-command prefixes from its displayed
+canonical matches and rejects unknown slash commands locally. Its sent/received
+sounds and language/layout preferences are local Connector presentation state;
+they do not alter a HASHI Conversation Session.
+
 Distinguish Engine from Model Provider and HASHI Conversation from Engine
 Session. Frontend history is a projection, not another authoritative archive.
 

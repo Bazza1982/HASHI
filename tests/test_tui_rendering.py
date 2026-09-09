@@ -71,6 +71,28 @@ def test_message_sounds_use_distinct_soft_chat_files(monkeypatch):
     ]
 
 
+def test_message_sounds_use_wsl_pulse_audio_without_blocking(monkeypatch):
+    launched = []
+    monkeypatch.setattr(sounds.sys, "platform", "linux")
+    monkeypatch.setattr(
+        sounds.shutil,
+        "which",
+        lambda name: "/usr/bin/paplay" if name == "paplay" else None,
+    )
+    monkeypatch.setattr(
+        sounds.subprocess,
+        "Popen",
+        lambda argv, **kwargs: launched.append((argv, kwargs)),
+    )
+
+    assert sounds.play_message_sound("sent") is True
+    assert launched[0][0] == [
+        "/usr/bin/paplay",
+        str(sounds.MESSAGE_SOUND_FILES["sent"]),
+    ]
+    assert launched[0][1]["start_new_session"] is True
+
+
 def test_soft_chat_assets_are_small_distinct_pcm_waves():
     properties = {}
     digests = set()
@@ -166,4 +188,54 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
         assert input_box.value == "/help"
 
     preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
-    assert preferences == {"language": "zh", "layout": "balanced"}
+    assert preferences == {"language": "zh", "layout": "balanced", "sounds": True}
+
+
+async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+    sent: list[str] = []
+    app._send_message = lambda text, *_args: sent.append(text)
+    app._play_message_sound = lambda _event: True
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.gateway_ok = True
+        app.current_agent = "rika"
+        app.current_agent_display = "Rika"
+        input_box = app.query_one("#chat-input", ChatInput)
+        input_box.focus()
+
+        input_box.value = "/mod"
+        await pilot.pause()
+        assert app._current_command_match == "/mode"
+        await pilot.press("enter")
+        assert sent == ["/mode"]
+
+        input_box.value = "/effortt"
+        await pilot.press("enter")
+        assert sent == ["/mode"]
+        chat = app.query_one("#chat-history", ChatHistory)
+        rendered = "\n".join(line.text for line in chat.lines)
+        assert "Unknown command: /effortt" in rendered
+
+        # Exact non-menu commands remain valid even though they are not previewed.
+        input_box.value = "/move"
+        await pilot.press("enter")
+        assert sent == ["/mode", "/move"]
+
+
+async def test_tui_sound_setting_is_persisted_and_can_be_previewed(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+    played: list[str] = []
+    app._play_message_sound = lambda event: played.append(event) or True
+
+    async with app.run_test(size=(120, 40)):
+        app._handle_tui_cmd("/tui sound off")
+        assert app._sound_enabled is False
+        app._handle_tui_cmd("/tui sound on")
+        assert app._sound_enabled is True
+        assert played == ["received"]
+
+    preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
+    assert preferences["sounds"] is True

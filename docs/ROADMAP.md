@@ -177,8 +177,12 @@ unreleased checkpoint above):
 
 ### V2.4 — Interactive TUI wrapper ✅
 - `tui.py` launcher provides a split-panel terminal UI wrapping `main.py` as a subprocess.
-- Log panel (upper ~80%): real-time stdout/stderr streaming with auto-scroll.
-- Chat input bar (lower ~20%): sends messages to agents via HTTP API Gateway.
+- Host log panel (upper ~25% by default): real-time stdout/stderr streaming with
+  auto-scroll; balanced and hidden-log layouts remain available.
+- Chat panel (lower ~75% by default): sends messages to agents via Backend API.
+- Five-row slash-command palette with prefix completion and local rejection of
+  unknown commands.
+- Local bilingual chrome plus optional sent/received message sounds.
 - Agent selector and status bar (agent name, backend, uptime, gateway reachability).
 - Built with [Textual](https://github.com/Textualize/textual); `main.py` unchanged.
 - Graceful degradation when API Gateway unavailable.
