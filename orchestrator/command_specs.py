@@ -29,6 +29,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("help", "cmd_help", "Show help menu", "everyday"),
     CommandSpec("start", "cmd_start", "Start another stopped agent", "everyday"),
     CommandSpec("status", "cmd_status", "View agent status", "everyday"),
+    CommandSpec("version", "cmd_version", "View trusted running and source versions", "everyday"),
     CommandSpec("sys", "cmd_sys", "Manage local/global system prompts", "tools", sensitive=True),
     CommandSpec("habit", "cmd_habit", "View and manage HER habits", "tools"),
     CommandSpec("dream", "cmd_dream", "Maintain HER habits on a schedule", "tools"),

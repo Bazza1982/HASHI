@@ -333,6 +333,33 @@ def _request_json(
     return result
 
 
+def request_authenticated_json(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    shared_token: str | None,
+    from_instance: str,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Public read/write transport primitive with request and response HMAC."""
+
+    return _request_json(
+        url,
+        method=method,
+        payload=payload,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+    )
+
+
+def candidate_remote_base_urls(entry: Mapping[str, Any]) -> list[str]:
+    """Resolve bounded Remote URLs using the same policy as Agent move."""
+
+    return _candidate_base_urls(entry, _remote_port(entry))
+
+
 def _instance_entry(instances: Mapping[str, Any], target: str) -> dict[str, Any]:
     for key, raw in instances.items():
         if _normalize_instance(key) == target or (

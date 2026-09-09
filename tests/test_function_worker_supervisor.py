@@ -580,6 +580,12 @@ def test_generation_artifact_contains_only_verified_immutable_bytes(tmp_path):
         "orchestrator/worker_demo.py",
         "orchestrator/assets/prompt.txt",
     }
+    metadata = json.loads(
+        (artifact / "function-generation.json").read_text(encoding="utf-8")
+    )
+    assert metadata["provenance"]["generation_id"] == generation.manifest.generation_id
+    assert metadata["provenance"]["artifact_kind"] == "function-generation"
+    assert str(source_root) not in json.dumps(metadata["provenance"])
     assert not (artifact / "flow" / "runs").exists()
 
 

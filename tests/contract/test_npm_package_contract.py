@@ -45,6 +45,7 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
 
     assert {
         "cli.js",
+        "BUILD_INFO.json",
         "main.py",
         "pyproject.toml",
         "runtime-entry.json",
@@ -61,12 +62,24 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
         "remote/__init__.py",
         "scripts/check_runtime_contract.py",
         "scripts/hashi_instance_cli.py",
+        "scripts/npm-build-provenance.js",
         "tools/builtins.py",
         "tools/instance_registry.py",
         "tools/bin/usecomputer",
         "transports/__init__.py",
         "tui/__init__.py",
     } <= packaged
+
+    build_info = json.loads(
+        (ROOT / "BUILD_INFO.json").read_text(encoding="utf-8")
+    )
+    provenance = build_info["provenance"]
+    assert provenance["release_channel"] == "npm"
+    assert provenance["product_version"] == "4.0.0a2"
+    assert provenance["build_id"].startswith("sha256:")
+    assert not any(
+        key in provenance for key in ("code_root", "path", "remote_url", "username")
+    )
 
     assert not any(
         name.startswith(

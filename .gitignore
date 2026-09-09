@@ -197,6 +197,10 @@ exp/barry/aonsw_data_analysis/
 # Tool execution audit ledger (machine-local runtime output)
 /tool_action_audit.jsonl
 
+# Generated release provenance and Windows download metadata.
+/BUILD_INFO.json
+*Zone.Identifier
+
 # Local Remote/HChat health-check action (machine-specific configuration and bytecode)
 /skills/remote_guard/
 /skills/remote-guard/

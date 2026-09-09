@@ -5029,6 +5029,11 @@ class FlexibleAgentRuntime:
     async def cmd_status(self, update: Update, context: Any):
         await runtime_status.cmd_status(self, update, context)
 
+    async def cmd_version(self, update: Update, context: Any):
+        from orchestrator import runtime_version
+
+        await runtime_version.command(self, update, context)
+
     def _terminal_keyboard(self) -> InlineKeyboardMarkup:
         current = terminal_console.get_level()
         return InlineKeyboardMarkup(

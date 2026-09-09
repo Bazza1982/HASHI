@@ -34,6 +34,7 @@
     "hashi-onboard": "./onboard-cli.js"
   },
   "scripts": {
+    "prepack": "node scripts/npm-build-provenance.js",
     "postinstall": "node postinstall.js"
   },
   "engines": {
@@ -52,6 +53,7 @@
     "postinstall.js",
     "pyproject.toml",
     "runtime-entry.json",
+    "BUILD_INFO.json",
     "main.py",
     "hashi.py",
     "hashi_launcher.py",
@@ -82,6 +84,7 @@
     "scripts/exp_assets.py",
     "scripts/hashi_instance_cli.py",
     "scripts/launcher_helper.py",
+    "scripts/npm-build-provenance.js",
     "scripts/resolve_instance_runtime.py",
     "skills/README.md",
     "skills/claude/",

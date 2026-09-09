@@ -252,6 +252,7 @@ async def test_health_exposes_runtime_contract_and_active_generation(tmp_path):
             "pid": 2468,
             "generation_id": "sha256:" + "c" * 64,
             "phase": "ACTIVE",
+            "adopted_at": None,
             "accepting": True,
             "alive": True,
             "telegram_ingress": {
@@ -261,6 +262,37 @@ async def test_health_exposes_runtime_contract_and_active_generation(tmp_path):
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_version_endpoint_returns_the_shared_structured_payload(
+    tmp_path, monkeypatch
+):
+    server = _server(tmp_path, profile="personal")
+    server.orchestrator = object()
+    expected = {
+        "ok": True,
+        "schema_version": 1,
+        "instance": {"id": "HASHI3"},
+        "state": {"code": "running_matches_source", "reasons": []},
+    }
+    seen = {}
+
+    def collect(subject, *, agent_name=None):
+        seen["subject"] = subject
+        seen["agent_name"] = agent_name
+        return expected
+
+    monkeypatch.setattr(
+        "orchestrator.version_info.collect_version_payload", collect
+    )
+
+    response = await server.handle_version(
+        SimpleNamespace(query={"agent": "akane"})
+    )
+
+    assert json.loads(response.text) == expected
+    assert seen == {"subject": server.orchestrator, "agent_name": "akane"}
 
 
 def test_whatsapp_channel_health_uses_transport_connection_state(tmp_path):

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from orchestrator.build_provenance import capture_build_provenance
 from orchestrator.function_generation import (
     CandidateProbeReceipt,
     FUNCTION_GENERATION_SCHEMA_VERSION,
@@ -155,6 +156,11 @@ def materialize_generation_artifact(
             "schema_version": FUNCTION_GENERATION_SCHEMA_VERSION,
             "generation_id": generation.manifest.generation_id,
             "created_at": datetime.now().astimezone().isoformat(),
+            "provenance": capture_build_provenance(
+                generation.code_root,
+                artifact_kind="function-generation",
+                generation_id=generation.manifest.generation_id,
+            ),
             "manifest": generation.manifest.to_dict(),
             "probe": {
                 "pid": generation.receipt.probe_pid,
@@ -1153,6 +1159,7 @@ class FunctionWorkerSupervisor:
                 "runtime_id": str(handle.metadata.get("runtime_id") or ""),
                 "phase": str(handle.metadata.get("worker_phase") or ""),
                 "accepting": bool(handle.metadata.get("worker_accepting", False)),
+                "adopted_at": handle.metadata.get("worker_adopted_at"),
             }
             for handle in self.kernel.runtimes
             if isinstance(handle, AgentRuntimeHandle)
@@ -1206,6 +1213,24 @@ class FunctionWorkerSupervisor:
         )
         return {
             "runtimes": runtimes,
+            "shared_functions": {
+                "pid": os.getpid(),
+                "generation_id": getattr(self.kernel, "shared_generation_id", None),
+                "adopted_at": getattr(self.kernel, "shared_adopted_at", None),
+            },
+            "function_workers": [
+                {
+                    "agent": handle.name,
+                    "pid": handle.worker_pid,
+                    "generation_id": handle.generation_id,
+                    "adopted_at": handle.metadata.get("worker_adopted_at"),
+                    "phase": handle.metadata.get("worker_phase"),
+                    "accepting": bool(handle.metadata.get("worker_accepting", False)),
+                }
+                for handle in self.kernel.runtimes
+                if isinstance(handle, AgentRuntimeHandle)
+            ],
+            "runtime": self.kernel.runtime_fingerprint.to_dict(),
             "starting": sorted(getattr(self.kernel, "_startup_tasks", {})),
             "whatsapp_connected": bool(getattr(self.kernel, "whatsapp", None)),
             "scheduler": scheduler_snapshot,

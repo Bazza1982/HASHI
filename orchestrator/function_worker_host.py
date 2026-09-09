@@ -497,6 +497,11 @@ class WorkerKernelFacade:
     def capability_status(self) -> dict[str, Any]:
         return dict(self._capabilities)
 
+    def version_topology(self) -> dict[str, Any]:
+        """Return the safe lifecycle facts broadcast by shared Functions."""
+
+        return dict(self._topology)
+
     async def agent_move_preflight(self, agent_name: str) -> dict[str, Any]:
         """Read only the cross-Agent state needed to guard a move."""
 
@@ -773,6 +778,8 @@ class FunctionWorkerHost:
         self.facade: WorkerKernelFacade | None = None
         self.phase = "BOOTING"
         self.accepting = False
+        self.started_at = datetime.now().astimezone().isoformat()
+        self.adopted_at: str | None = None
         self.was_telegram_connected = False
         self.stop_event = asyncio.Event()
         self.audio_transcript_tasks: set[asyncio.Task[Any]] = set()
@@ -851,6 +858,16 @@ class FunctionWorkerHost:
             topology=self.bootstrap.get("topology") or {},
         )
         runtime.orchestrator = facade
+        runtime._runtime_fingerprint = self.expected_runtime
+        runtime._worker_version_metadata = {
+            "agent": self.agent_name,
+            "pid": os.getpid(),
+            "generation_id": self.manifest.generation_id,
+            "started_at": self.started_at,
+            "adopted_at": self.adopted_at,
+            "phase": self.phase,
+            "accepting": self.accepting,
+        }
         facade.attach_runtime(runtime)
         runtime.agent_directory = facade.agent_directory
         runtime.bind_handlers()
@@ -963,6 +980,8 @@ class FunctionWorkerHost:
                 "worker_nonce": self.nonce,
                 "worker_phase": self.phase,
                 "worker_accepting": self.accepting,
+                "worker_started_at": self.started_at,
+                "worker_adopted_at": self.adopted_at,
                 "generation_id": self.manifest.generation_id,
                 "generation_module_count": len(self.manifest.entries),
                 "runtime_id": self.expected_runtime.runtime_id,
@@ -1101,6 +1120,12 @@ class FunctionWorkerHost:
         )
         self.accepting = True
         self.phase = "ACTIVE"
+        self.adopted_at = datetime.now().astimezone().isoformat()
+        runtime._worker_version_metadata.update(
+            adopted_at=self.adopted_at,
+            phase=self.phase,
+            accepting=True,
+        )
         await self.emit_metadata()
         return {
             "ok": True,

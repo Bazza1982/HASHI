@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from orchestrator.build_provenance import capture_build_provenance
 from orchestrator.process_execution import process_is_alive
 
 
@@ -66,6 +67,10 @@ def write_runtime_claim(
         "supervised": bool(supervised),
         "started_at": now,
         "updated_at": now,
+        "provenance": capture_build_provenance(
+            code_root,
+            artifact_kind="hashi-remote",
+        ),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(claim, indent=2, sort_keys=True), encoding="utf-8")

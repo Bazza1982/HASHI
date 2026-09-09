@@ -114,6 +114,7 @@ API_PROTOCOL_CAPABILITIES = [
     "protocol_ack_v1",
     "protocol_reply_v1",
     "workbench_gateway_v1",
+    "version_query_v1",
     "tui_proxy_v1",
     AGENT_MOVE_CAPABILITY,
 ]
@@ -968,15 +969,27 @@ def _forward_workbench_gateway_request(
     raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
 
 
-def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
+def _fetch_workbench_json(
+    path: str,
+    *,
+    timeout: float = 1.0,
+) -> dict[str, Any] | None:
+    normalized = path if str(path).startswith("/") else f"/{path}"
     for host in local_http_hosts():
-        req = urllib_request.Request(local_http_url(_workbench_port, "/api/health", host=host), method="GET")
+        req = urllib_request.Request(
+            local_http_url(_workbench_port, normalized, host=host), method="GET"
+        )
         try:
             with urllib_request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                value = json.loads(resp.read().decode("utf-8"))
+                return value if isinstance(value, dict) else None
         except Exception:
             continue
     return None
+
+
+def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
+    return _fetch_workbench_json("/api/health", timeout=timeout)
 
 
 def _request_workbench_reboot(
@@ -1148,6 +1161,42 @@ def create_app(
             ),
             "trusted_view": True,
         }
+
+    @app.get("/version/v1")
+    async def version_query(request: Request):
+        """Return local Workbench facts only to a mutually authenticated peer."""
+
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=b"",
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Version query authentication failed",
+                    "code": reason,
+                },
+            )
+        payload = await asyncio.to_thread(
+            _fetch_workbench_json,
+            "/api/version",
+            timeout=3.0,
+        )
+        if not payload or payload.get("ok") is False:
+            return _agent_move_response(
+                request,
+                status_code=503,
+                content={
+                    "ok": False,
+                    "error": "Local Workbench version facts are unavailable",
+                },
+            )
+        result = dict(payload)
+        result["authenticated_instance"] = authenticated_instance
+        result["authenticated_response_proof"] = True
+        return _agent_move_response(request, result)
 
     # ── HASHI Workbench Gateway ─────────────────────────────
 

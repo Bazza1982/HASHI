@@ -10,6 +10,7 @@ import asyncio
 import argparse
 import importlib
 import os
+from datetime import datetime
 from pathlib import Path
 
 from orchestrator.function_generation import candidate_import_guard
@@ -231,6 +232,12 @@ class RuntimeAppHost:
             raise RuntimeError("shared Functions are not active")
         app._handoff_draining = False
         app._shared_committed = True
+        app.shared_adopted_at = datetime.now().astimezone().isoformat()
+        broadcast_topology = getattr(
+            app.function_workers, "broadcast_topology", None
+        )
+        if callable(broadcast_topology):
+            await broadcast_topology()
         if app.api_gateway:
             app.api_gateway._accepting_requests = True
         # Checkpoint before opening external connectors: recovery must know the

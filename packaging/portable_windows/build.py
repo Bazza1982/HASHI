@@ -38,6 +38,7 @@ from orchestrator.runtime_contract import (  # noqa: E402
     load_runtime_policy,
     locked_standard_dependencies,
 )
+from orchestrator.build_provenance import capture_build_provenance  # noqa: E402
 
 _RUNTIME_POLICY = load_runtime_policy(HASHI_ROOT)
 PYTHON_VERSION = _RUNTIME_POLICY.python_text
@@ -1176,12 +1177,19 @@ def build(args: argparse.Namespace) -> Path:
                 "THIRD_PARTY_LICENSES",
             )
         }
+        built_at = datetime.now(timezone.utc)
         build_info = {
             "schema_version": 1,
             "product": "HASHI Portable Windows x64",
-            "built_at_utc": datetime.now(timezone.utc).isoformat(),
+            "built_at_utc": built_at.isoformat(),
             "hashi_revision": source_identity.revision,
             "hashi_tree": source_identity.tree,
+            "provenance": capture_build_provenance(
+                HASHI_ROOT,
+                artifact_kind="portable-windows-x64",
+                release_channel="portable",
+                now=built_at,
+            ),
             "python_version": PYTHON_VERSION,
             "pairing_token_ttl_seconds": PAIRING_TOKEN_TTL_SECONDS,
             "maximum_image_bytes": MAX_IMAGE_BYTES,

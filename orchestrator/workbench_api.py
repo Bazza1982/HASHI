@@ -674,6 +674,7 @@ class WorkbenchApiServer:
             self.handle_device_capability_status,
         )
         self.app.router.add_get("/api/health", self.handle_health)
+        self.app.router.add_get("/api/version", self.handle_version)
         self.app.router.add_post("/api/jobs/import", self.handle_jobs_import)
         self.runner = None
         self.site = None
@@ -6593,6 +6594,7 @@ class WorkbenchApiServer:
         payload["shared_functions"] = {
             "pid": os.getpid(),
             "generation_id": getattr(orchestrator, "shared_generation_id", None),
+            "adopted_at": getattr(orchestrator, "shared_adopted_at", None),
         }
         generation = getattr(orchestrator, "function_generation", None)
         if isinstance(generation, dict):
@@ -6606,6 +6608,9 @@ class WorkbenchApiServer:
                 ),
                 "phase": str(
                     getattr(runtime, "metadata", {}).get("worker_phase") or ""
+                ),
+                "adopted_at": getattr(runtime, "metadata", {}).get(
+                    "worker_adopted_at"
                 ),
                 "accepting": bool(
                     getattr(runtime, "metadata", {}).get(
@@ -6639,6 +6644,28 @@ class WorkbenchApiServer:
         )
         if self._is_governed_profile():
             payload["enterprise"] = self._enterprise_health_payload()
+        return web.json_response(payload)
+
+    async def handle_version(self, request):
+        """Expose the same structured, path-free facts used by /version."""
+
+        from orchestrator.version_info import collect_version_payload
+
+        agent_name = str(request.query.get("agent") or "").strip() or None
+        try:
+            payload = await asyncio.to_thread(
+                collect_version_payload,
+                self.orchestrator,
+                agent_name=agent_name,
+            )
+        except (OSError, ValueError) as exc:
+            logging.getLogger("HASHI.Workbench.Version").warning(
+                "Version fact collection failed: %s", exc
+            )
+            return web.json_response(
+                {"ok": False, "error": "version_facts_unavailable"},
+                status=503,
+            )
         return web.json_response(payload)
 
     async def handle_device_capability_register(self, request):
