@@ -1,5 +1,17 @@
 # Release Checklist
 
+## HASHI version and distribution identity
+
+- Apply the accepted [Versioning and Distribution Policy](HASHI_VERSIONING_POLICY.md)
+  to future HASHI releases; record the reviewed increment, pre-release maturity,
+  equivalent package versions, and distribution/build identity.
+- Link exact source, Core/runtime, qualified Functions, artifact, and migration
+  evidence as required by that policy. Preserve published tags/artifacts and
+  distinguish a version label from actual running-generation adoption.
+- These are release-review requirements, not proof of automatic version checks
+  or Portable updater support. This documentation update does not change the
+  current candidate or grant publication/restart authority.
+
 ## HASHI Bridge
 
 - Testing scope follows `docs/TESTING_POLICY.md`; focused, core, offline

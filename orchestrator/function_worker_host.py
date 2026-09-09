@@ -923,6 +923,12 @@ class FunctionWorkerHost:
     def metadata(self) -> dict[str, Any]:
         runtime = self._require_runtime()
         result = dict(runtime.get_runtime_metadata())
+        agent_mode = str(
+            getattr(getattr(runtime, "backend_manager", None), "agent_mode", "")
+            or ""
+        ).strip().lower()
+        if agent_mode:
+            result["mode"] = agent_mode
         command_registry_notices: list[dict[str, Any]] = []
         try:
             from orchestrator.admin_local_testing import supported_commands

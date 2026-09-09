@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import os
-import random
 import sys
 from pathlib import Path
 
@@ -16,8 +15,10 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.suggester import SuggestFromList
 from textual.widgets import Input, RichLog, Static
 
+from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
@@ -33,22 +34,27 @@ from tui.sounds import play_message_sound
 
 logger = logging.getLogger(__name__)
 
-
-STARTUP_LOGO = [
+STARTUP_LOGO = (
     "  ██╗  ██╗  █████╗ ███████╗██╗  ██╗██╗",
     "  ██║  ██║ ██╔══██╗██╔════╝██║  ██║██║",
     "  ███████║ ███████║███████╗███████║██║",
     "  ██╔══██║ ██╔══██║╚════██║██╔══██║██║",
     "  ██║  ██║ ██║  ██║███████║██║  ██║██║",
     "  ╚═╝  ╚═╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝",
-]
-STARTUP_HANKAKU = list("ｦｧｨｩｪｫｬｭｮｯｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ")
-STARTUP_POEM = [
-    "「橋」は「知」を繋ぎ、",
-    "「知」は未来を拓く。",
-    "The Bridge connects Intellect;",
-    "Intellect opens the future.",
-]
+)
+
+TUI_COMMAND_HELP = {
+    "help": ("查看 TUI 与 Agent 命令", "Show TUI and Agent commands"),
+    "to": ("切换聊天目标", "Change the chat target"),
+    "instance": ("查看或切换 HASHI 实例", "List or switch HASHI instances"),
+    "layout": ("调整日志与聊天布局", "Resize log and chat panes"),
+    "log": ("显示、隐藏或暂停主机日志", "Show, hide, or pause the host log"),
+    "agents": ("查看可用 Agent", "List available Agents"),
+    "clear": ("清空当前 TUI 显示", "Clear the current TUI view"),
+    "quit": ("退出 TUI", "Exit the TUI"),
+    "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
+}
+TUI_DISCOVERY_COMMANDS = ("/help", "/to", "/mode", "/model", "/backend")
 
 
 def markup(text: str) -> Text:
@@ -124,7 +130,6 @@ class ChatInput(Input):
     """Single-line input for sending messages."""
     DEFAULT_CSS = """
     ChatInput {
-        dock: bottom;
         height: 3;
         background: #0b1824;
         color: #dff6ff;
@@ -136,50 +141,63 @@ class ChatInput(Input):
     """
 
 
+class CommandPreview(Static):
+    """Compact slash-command palette shown below the input."""
+
+    DEFAULT_CSS = """
+    CommandPreview {
+        display: none;
+        height: auto;
+        max-height: 5;
+        padding: 0 1;
+        background: #101d28;
+        color: #9be7ff;
+    }
+    """
+
+    def show_matches(
+        self,
+        matches: list[tuple[str, str, str]],
+        selected_index: int = 0,
+    ):
+        rows = Text()
+        for index, (command, description, scope) in enumerate(matches):
+            selected = index == selected_index
+            rows.append("› " if selected else "  ", style="bold #63ffd9" if selected else "#39566e")
+            rows.append(f"{command:<18}", style="bold #71b7ff" if selected else "#7dc6ff")
+            rows.append(description, style="#dff6ff" if selected else "#9fb3c8")
+            rows.append(f"  {scope}", style="dim #7fb6c7")
+            if index < len(matches) - 1:
+                rows.append("\n")
+        self.styles.height = len(matches)
+        self.update(rows)
+        self.display = True
+
+    def hide_match(self):
+        self.display = False
+
+
 class FooterInfoBox(Static):
-    """Footer box holding banner metadata, ticker, current status, and connected agents."""
+    """Compact footer showing only the active connection context."""
 
     DEFAULT_CSS = """
     FooterInfoBox {
-        height: 5;
+        height: 3;
         background: #050b12;
         color: #dff6ff;
         border: solid #2a5b82;
         padding: 0 1;
-        margin-top: 1;
+        margin-top: 0;
     }
     """
-
-    TICKER_TEXTS = (
-        "「橋」は「知」を繋ぎ、「知」は未来を拓く。",
-        '"A bridge connects knowledge, and knowledge opens the future."',
-        "「桥」连接知识，知识开拓未来。",
-        "「橋」連接知識，知識開拓未來。",
-        "「다리」는 지식을 이어주고, 지식은 미래를 열어준다。",
-        "„Brücke\" verbindet Wissen, und Wissen erschließt die Zukunft.",
-        "« Le pont relie la connaissance, et la connaissance ouvre l'avenir. »",
-        "«Мост» соединяет знания, а знания открывают будущее.",
-        ".«الجسر» يربط المعرفة، والمعرفة تفتح المستقبل",
-    )
 
     def __init__(self, *args, **kwargs):
         super().__init__("", *args, **kwargs)
         self._content = Text("")
-        self._offset = 0
-        self._ticker = ""
-        self._status_line = " ❌ No agent selected | API: offline"
-        self._connected_line = ""
+        self._status_line = "❌ HASHI · No agent · API offline"
+        self._language = "en"
 
     def on_mount(self):
-        separator = "  ✦  "
-        self._ticker = separator.join(self.TICKER_TEXTS) + separator
-        self.set_interval(0.234, self._advance)
-        self._refresh_footer()
-
-    def _advance(self):
-        if not self._ticker:
-            return
-        self._offset = (self._offset + 1) % len(self._ticker)
         self._refresh_footer()
 
     def update_state(
@@ -187,51 +205,26 @@ class FooterInfoBox(Static):
         agent: str = "",
         backend: str = "",
         gateway_ok: bool = False,
-        mode: str = "",
         agents: list[dict] | None = None,
         current_agent: str | None = None,
         instance_id: str = "",
+        language: str = "en",
     ):
-        icon = "\u2705" if gateway_ok else "\u274c"
-        instance_part = f"Instance: {instance_id} | " if instance_id else ""
-        agent_part = f"Agent: {agent}" if agent else "No agent selected"
-        backend_part = f" | Backend: {backend}" if backend else ""
-        mode_part = f" | Mode: {mode}" if mode else ""
-        api_part = f" | API: {'connected' if gateway_ok else 'offline'}"
-        self._status_line = f" {icon} {instance_part}{agent_part}{backend_part}{mode_part}{api_part}"
-
-        connected = []
-        for agent_data in agents or []:
-            if not agent_data.get("online"):
-                continue
-            agent_id = agent_data.get("id") or agent_data.get("name") or "?"
-            if current_agent and agent_id == current_agent:
-                continue
-            display_name = agent_data.get("display_name") or agent_data.get("name") or agent_id
-            connected.append(f"[{display_name} ({agent_id})]")
-        self._connected_line = f"  Other connected: {' '.join(connected)}" if connected else ""
+        self._language = language
+        icon = "✅" if gateway_ok else "❌"
+        no_agent = "未选择 Agent" if language == "zh" else "No agent"
+        parts = [icon, instance_id or "HASHI", agent or no_agent]
+        if backend:
+            parts.append(backend)
+        if language == "zh":
+            parts.append("API 已连接" if gateway_ok else "API 离线")
+        else:
+            parts.append("API connected" if gateway_ok else "API offline")
+        self._status_line = " · ".join(parts)
         self._refresh_footer()
 
     def _refresh_footer(self):
-        width = max(self.size.width or 0, 20)
-        stream = self._ticker
-        while len(stream) < width * 2:
-            stream += self._ticker
-        start = self._offset
-        view = stream[start:start + width]
-        footer_lines = [
-            "[bold #9be7ff]HASHI // CLI RETRO[/] [#71b7ff]::[/] [#63ffd9]TERMINAL WORKBENCH[/]   "
-            "[#63ffd9]AUTHOR[/] Barry Li   [#71b7ff]WEBSITE[/] https://barryli.phd   [#c7ff8a]LICENSE[/] MIT",
-            f"[#63ffd9]{view}[/]",
-            f"[#63ffd9]{self._status_line}[/]",
-        ]
-        if self._connected_line:
-            footer_lines.append(f"[#9be7ff]{self._connected_line}[/]")
-
-        self.styles.height = 5 if not self._connected_line else 6
-        self._content = markup(
-            "\n".join(footer_lines)
-        )
+        self._content = markup(f"[bold #63ffd9]{self._status_line}[/]")
         self.refresh()
 
     def render(self) -> Text:
@@ -351,17 +344,20 @@ class HASHITuiApp(App):
     }
     #log-panel {
         height: 1fr;
+        min-height: 4;
     }
     #chat-container {
-        height: 1fr;
+        height: 3fr;
+        min-height: 10;
     }
     #footer-info-box {
-        height: 5;
+        height: 3;
     }
     """
 
     BINDINGS = [
         Binding("ctrl+l", "toggle_log_pause", "Pause Log", show=True),
+        Binding("tab", "complete_command", "Complete command", show=False, priority=True),
         Binding("ctrl+q", "quit_app", "Quit", show=True),
     ]
 
@@ -389,7 +385,38 @@ class HASHITuiApp(App):
         self._chat_targets: list[str] = []
         self.current_agent_display: str = ""
         self.current_backend: str = ""
-        self._agent_mode: str = ""
+        preferences = self._load_tui_preferences()
+        requested_layout = str(
+            os.environ.get("HASHI_TUI_LAYOUT") or preferences.get("layout") or "chat"
+        ).casefold()
+        self._layout_mode = requested_layout if requested_layout in {"chat", "balanced", "compact"} else "chat"
+        requested_language = str(
+            os.environ.get("HASHI_TUI_LANGUAGE") or preferences.get("language") or "en"
+        ).casefold()
+        self._ui_language = "zh" if requested_language.startswith("zh") else "en"
+        requested_sounds = os.environ.get("HASHI_TUI_SOUNDS")
+        if requested_sounds is None:
+            self._sound_enabled = bool(preferences.get("sounds", True))
+        else:
+            self._sound_enabled = requested_sounds.strip().casefold() not in {
+                "0", "false", "no", "off",
+            }
+        command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
+        command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
+        self._command_names = list(dict.fromkeys(command_names))
+        known_command_names = [f"/{spec.name}" for spec in COMMAND_SPECS]
+        known_command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
+        self._known_command_names = list(dict.fromkeys(known_command_names))
+        self._command_order = {
+            command: index for index, command in enumerate(self._command_names)
+        }
+        self._suggestion_names = sorted(
+            self._command_names,
+            key=lambda command: (len(command), self._command_order[command]),
+        )
+        self._current_command_match: str | None = None
+        self._command_matches: list[str] = []
+        self._command_match_index = 0
         self.api = TuiApiClient(
             base_url=local_urls[0],
             fallback_base_urls=local_urls[1:],
@@ -421,16 +448,51 @@ class HASHITuiApp(App):
             return candidate
         return Path.cwd()
 
+    @property
+    def _preferences_path(self) -> Path:
+        return self.bridge_home / "state" / "tui_preferences.json"
+
+    def _load_tui_preferences(self) -> dict:
+        try:
+            data = json.loads(self._preferences_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (FileNotFoundError, OSError, ValueError):
+            return {}
+
+    def _save_tui_preferences(self):
+        try:
+            self._preferences_path.parent.mkdir(parents=True, exist_ok=True)
+            self._preferences_path.write_text(
+                json.dumps(
+                    {
+                        "language": self._ui_language,
+                        "layout": self._layout_mode,
+                        "sounds": self._sound_enabled,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("TUI preferences could not be saved: error=%s", exc)
+
     def compose(self) -> ComposeResult:
         with Vertical(id="main-container"):
             yield LogPanel(id="log-panel")
             with Vertical(id="chat-container"):
                 yield ChatHistory(id="chat-history")
-                yield ChatInput(placeholder="Type message, /to <agent>, or /instance ...", id="chat-input")
+                yield ChatInput(
+                    placeholder="Message · /help · /to <agent> · /instance",
+                    suggester=SuggestFromList(self._suggestion_names, case_sensitive=False),
+                    id="chat-input",
+                )
+                yield CommandPreview(id="command-preview")
             yield FooterInfoBox(id="footer-info-box")
 
     def on_mount(self):
-        self.query_one("#log-panel", LogPanel).border_title = f"Local log — {self.launch_instance_id}"
+        self._apply_layout(self._layout_mode, persist=False)
+        self._refresh_chrome()
         # Start the intro only after the first screen refresh so frames are visible.
         self.call_after_refresh(self._schedule_startup_sequence)
 
@@ -442,7 +504,7 @@ class HASHITuiApp(App):
     async def _run_startup_sequence(self):
         await asyncio.sleep(0.05)
         await self._play_log_startup_animation()
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(0.1)
         agents_path = self.bridge_home / "agents.json"
         needs_onboarding = True
         if agents_path.exists():
@@ -461,97 +523,28 @@ class HASHITuiApp(App):
             self._start_bridge()
 
     async def _play_log_startup_animation(self):
+        self._render_host_header()
+        await asyncio.sleep(0.2)
+
+    def _render_host_header(self):
         log = self.query_one("#log-panel", LogPanel)
-
-        async def show(lines: list[str], delay: float):
-            log.clear()
-            log.write(markup("\n".join(lines)))
-            await asyncio.sleep(delay)
-
-        kanji_frames = [
-            [
-                "[bold #ffcf87]木[/]  [#7fb6c7]ki  ·  wood[/]",
-                "",
-                "[#39566e]Waiting for the bridge to wake up...[/]",
-            ],
-            [
-                "[bold #ffcf87]木[/]  [#7fb6c7]ki  ·  wood[/]",
-                "[bold #71b7ff]喬[/]  [#7fb6c7]qiao  ·  tall[/]",
-                "",
-                "[#39566e]The pieces are lining up...[/]",
-            ],
-            [
-                "[bold #ffcf87]木[/]  [#7fb6c7]ki  ·  wood[/]  [#7fb6c7]+[/]  [bold #71b7ff]喬[/]  [#7fb6c7]qiao  ·  tall[/]",
-                "",
-                "[bold #63ffd9]橋[/]  [#9be7ff]hashi  ·  bridge[/]",
-            ],
-        ]
-        for frame in kanji_frames:
-            await show(frame, 0.45)
-
-        for reveal in range(7):
-            progress = reveal / 6
-            lines = ["[#39566e]Decrypting startup banner...[/]", ""]
-            for idx, line in enumerate(STARTUP_LOGO):
-                built = []
-                cutoff = int(len(line) * progress)
-                for pos, ch in enumerate(line):
-                    if ch == " ":
-                        built.append(" ")
-                    elif pos <= cutoff:
-                        built.append(ch)
-                    else:
-                        built.append(random.choice(STARTUP_HANKAKU))
-                color = ["#71b7ff", "#7dc6ff", "#87d4ff", "#92e1ff", "#9eeed8", "#c7ff8a"][idx]
-                lines.append(f"[bold {color}]{''.join(built)}[/]")
-            await show(lines, 0.16)
-
-        final_logo = ["", *[f"[bold {color}]{line}[/]" for color, line in zip(
-            ["#71b7ff", "#7dc6ff", "#87d4ff", "#92e1ff", "#9eeed8", "#c7ff8a"],
-            STARTUP_LOGO,
-        )]]
-        await show(final_logo, 0.25)
-
-        for step in range(6):
-            poem_lines = []
-            for poem in STARTUP_POEM:
-                resolved = []
-                for idx, ch in enumerate(poem):
-                    if ch == " " or idx / max(len(poem), 1) <= step / 5:
-                        resolved.append(ch)
-                    else:
-                        resolved.append(random.choice(STARTUP_HANKAKU))
-                poem_lines.append(f"[#9be7ff]{''.join(resolved)}[/]")
-            await show(
-                final_logo
-                + [
-                    "",
-                    "[#63ffd9]Universal Flexible Safe AI Agents[/]  [#7fb6c7]Powered by agent Engines[/]",
-                    "",
-                    *poem_lines,
-                    "",
-                    "[#7fb6c7]Barry Li[/]  [#71b7ff]https://barryli.phd[/]  [#c7ff8a]MIT[/]",
-                ],
-                0.14,
+        log.clear()
+        if self._layout_mode == "balanced":
+            colors = ("#71b7ff", "#7dc6ff", "#87d4ff", "#92e1ff", "#9eeed8", "#c7ff8a")
+            logo = "\n".join(
+                f"[bold {color}]{line}[/]" for color, line in zip(colors, STARTUP_LOGO)
             )
-
-        await show(
-            final_logo
-            + [
-                "",
-                "[#63ffd9]Universal Flexible Safe AI Agents[/]  [#7fb6c7]Powered by agent Engines[/]",
-                "",
-                "[#ffdf6b]「橋」は「知」を繋ぎ、[/]",
-                "[#71b7ff]「知」は未来を拓く。[/]",
-                "[#9fb3c8]The Bridge connects Intellect;[/]",
-                "[#dff6ff]Intellect opens the future.[/]",
-                "",
-                "[#7fb6c7]Barry Li[/]  [#71b7ff]https://barryli.phd[/]  [#c7ff8a]MIT[/]",
-                "",
-                "[#39566e]Startup animation loaded into HASHI Log[/]",
-            ],
-            1.0,
-        )
+            status = "终端已连接" if self._ui_language == "zh" else "Terminal connected"
+            log.write(markup(f"{logo}\n[#9be7ff]{self.launch_instance_id} · {status}[/]"))
+        else:
+            status = (
+                "终端已连接 · 正在准备本地服务…"
+                if self._ui_language == "zh"
+                else "Terminal connected · preparing local services…"
+            )
+            log.write(markup(
+                f"[bold #63ffd9]HASHI · {self.launch_instance_id}[/]\n[#9be7ff]{status}[/]"
+            ))
 
     # ── Onboarding ──────────────────────────────────────────────────────
 
@@ -831,13 +824,14 @@ class HASHITuiApp(App):
         self._chat_targets = [self.current_agent] if self.current_agent else []
         self.current_agent_display = agent_data.get("display_name", self.current_agent)
         self.current_backend = agent_data.get("active_backend", agent_data.get("engine", ""))
-        self._agent_mode = agent_data.get("mode", "flex")
         client.reset_offset(self.current_agent)
         chat = self.query_one("#chat-history", ChatHistory)
         emoji = agent_data.get("emoji", "")
+        location = self._location_label()
+        chat_label = "聊天" if self._ui_language == "zh" else "Chat"
         chat.border_title = (
-            f"Chat — {self.current_instance_id} — {emoji} "
-            f"{self.current_agent_display} ({self.current_agent})"
+            f"{chat_label} · {emoji} {self.current_agent_display} ({self.current_agent})"
+            f"@{self.current_instance_id} ({location})"
         )
         self._update_status_bar()
         # Load recent transcript
@@ -936,7 +930,7 @@ class HASHITuiApp(App):
                                 self._render_transcript_message(msg)
                                 received = True
                         if received:
-                            play_message_sound("received")
+                            self._play_message_sound("received")
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -951,14 +945,15 @@ class HASHITuiApp(App):
 
     async def on_input_submitted(self, event: Input.Submitted):
         text = event.value.strip()
-        event.input.value = ""
 
         # Light onboarding accepts empty Enter to advance
         if self._light_onboarding:
+            event.input.value = ""
             await self._handle_light_onboarding_input(text)
             return
 
         if not text:
+            event.input.value = ""
             return
         normalized = text
         if normalized.startswith("/ "):
@@ -966,8 +961,28 @@ class HASHITuiApp(App):
 
         # Onboarding mode
         if self._onboarding:
+            event.input.value = ""
             await self._handle_onboarding_input(normalized)
             return
+
+        if normalized.startswith("/"):
+            resolved = self._resolve_submitted_command(normalized)
+            if resolved is None:
+                event.input.value = ""
+                self._hide_command_preview()
+                chat = self.query_one("#chat-history", ChatHistory)
+                command = normalized.split(maxsplit=1)[0]
+                message = (
+                    f"未找到命令：{command}"
+                    if self._ui_language == "zh"
+                    else f"Unknown command: {command}"
+                )
+                chat.write(Text(message, style="dim #9fb3c8"))
+                return
+            normalized = resolved
+
+        event.input.value = ""
+        self._hide_command_preview()
 
         # TUI local commands
         if normalized == "/to" or normalized.startswith("/to "):
@@ -976,14 +991,26 @@ class HASHITuiApp(App):
         if normalized == "/agents":
             await self._handle_agents_cmd()
             return
+        if normalized == "/tui" or normalized.startswith("/tui "):
+            self._handle_tui_cmd(normalized)
+            return
+        if normalized == "/help" or normalized.startswith("/help "):
+            self._handle_help_cmd(normalized)
+            return
+        if normalized == "/layout" or normalized.startswith("/layout "):
+            self._handle_layout_cmd(normalized)
+            return
         if normalized == "/instance" or normalized.startswith("/instance "):
             await self._handle_instance_cmd(normalized)
+            return
+        if normalized == "/clear":
+            self.query_one("#chat-history", ChatHistory).clear()
             return
         if normalized == "/quit":
             await self._shutdown()
             return
-        if normalized == "/log":
-            self.action_toggle_log_pause()
+        if normalized == "/log" or normalized.startswith("/log "):
+            self._handle_log_cmd(normalized)
             return
 
         # Everything else → send to agent
@@ -997,7 +1024,7 @@ class HASHITuiApp(App):
 
         if self.current_agent_display == "ALL":
             # Broadcast to all active agents
-            play_message_sound("sent")
+            self._play_message_sound("sent")
             self._send_broadcast(normalized, self.api, self._connection_generation)
             return
 
@@ -1005,8 +1032,358 @@ class HASHITuiApp(App):
             chat.write(markup("[yellow]No agent selected. Use /to <name> first.[/]"))
             return
         else:
-            play_message_sound("sent")
+            self._play_message_sound("sent")
             self._send_message(normalized, self.current_agent, self.api, self._connection_generation)
+
+    def on_input_changed(self, event: Input.Changed):
+        """Show a Codex-style palette for an incomplete slash command."""
+
+        value = event.value.strip().casefold()
+        preview = self.query_one("#command-preview", CommandPreview)
+        self._current_command_match = None
+        self._command_matches = []
+        self._command_match_index = 0
+        if not value.startswith("/") or " " in value or len(value) < 2:
+            if value == "/":
+                self._command_matches = [
+                    command for command in TUI_DISCOVERY_COMMANDS if command in self._command_names
+                ]
+                self._show_command_matches()
+            else:
+                preview.hide_match()
+            return
+        self._command_matches = self._ranked_command_matches(value)
+        if not self._command_matches:
+            preview.hide_match()
+            return
+        self._show_command_matches()
+
+    def _ranked_command_matches(self, prefix: str) -> list[str]:
+        """Return stable prefix matches, preferring the shortest completion."""
+
+        matches = [command for command in self._command_names if command.startswith(prefix)]
+        matches.sort(key=lambda command: (len(command), self._command_order[command]))
+        return matches[:5]
+
+    def _resolve_submitted_command(self, text: str) -> str | None:
+        """Resolve an exact or partial slash command without fuzzy correction."""
+
+        command, separator, arguments = text.partition(" ")
+        prefix = command.casefold()
+        if prefix == "/":
+            return None
+        canonical = next(
+            (candidate for candidate in self._known_command_names if candidate.casefold() == prefix),
+            None,
+        )
+        if canonical is None:
+            matches = self._ranked_command_matches(prefix)
+            if not matches:
+                return None
+            selected = self._current_command_match
+            canonical = selected if selected in matches else matches[0]
+        return canonical + (separator + arguments if separator else "")
+
+    def _hide_command_preview(self):
+        self._command_matches = []
+        self._current_command_match = None
+        self._command_match_index = 0
+        self.query_one("#command-preview", CommandPreview).hide_match()
+
+    def _show_command_matches(self):
+        if not self._command_matches:
+            self.query_one("#command-preview", CommandPreview).hide_match()
+            self._current_command_match = None
+            return
+        self._command_match_index %= len(self._command_matches)
+        self._current_command_match = self._command_matches[self._command_match_index]
+        local_names = set(TUI_COMMAND_HELP)
+        tui_scope = "TUI"
+        agent_scope = "Agent"
+        matches = [
+            (
+                command,
+                self._command_description(command[1:]),
+                tui_scope if command[1:] in local_names else agent_scope,
+            )
+            for command in self._command_matches
+        ]
+        self.query_one("#command-preview", CommandPreview).show_matches(
+            matches,
+            self._command_match_index,
+        )
+
+    def _command_description(self, name: str) -> str:
+        local = TUI_COMMAND_HELP.get(name)
+        if local:
+            return local[0 if self._ui_language == "zh" else 1]
+        spec = next((item for item in COMMAND_SPECS if item.name == name), None)
+        if spec is None:
+            return ""
+        chinese = {
+            "backend": "选择或查看后端",
+            "language": "选择界面语言",
+            "mode": "选择或查看工作模式",
+            "model": "选择模型与推理强度",
+            "status": "查看 Agent 状态",
+            "version": "查看实际运行版本",
+        }
+        if self._ui_language == "zh" and name in chinese:
+            return chinese[name]
+        return spec.description
+
+    def action_complete_command(self):
+        input_box = self.query_one("#chat-input", ChatInput)
+        if self.focused is not input_box or not self._current_command_match:
+            return
+        input_box.value = self._current_command_match
+        input_box.cursor_position = len(input_box.value)
+        self.query_one("#command-preview", CommandPreview).hide_match()
+
+    def on_key(self, event):
+        """Navigate the visible command palette without affecting ordinary input."""
+
+        input_box = self.query_one("#chat-input", ChatInput)
+        if self.focused is not input_box or not self._command_matches:
+            return
+        if event.key == "down":
+            self._command_match_index = (self._command_match_index + 1) % len(self._command_matches)
+        elif event.key == "up":
+            self._command_match_index = (self._command_match_index - 1) % len(self._command_matches)
+        elif event.key == "escape":
+            self._hide_command_preview()
+            event.stop()
+            event.prevent_default()
+            return
+        else:
+            return
+        self._show_command_matches()
+        event.stop()
+        event.prevent_default()
+
+    def _handle_tui_cmd(self, text: str):
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split()
+        if len(parts) == 1:
+            current = "中文" if self._ui_language == "zh" else "English"
+            sound = (
+                ("开" if self._sound_enabled else "关")
+                if self._ui_language == "zh"
+                else ("on" if self._sound_enabled else "off")
+            )
+            chat.write(markup(
+                f"[#c7ff8a]TUI language · {current} · sound · {sound}[/]\n"
+                "[#9be7ff]/tui language zh|en · /tui sound on|off|test[/]"
+            ))
+            return
+        if len(parts) == 2 and parts[1].casefold() in {"language", "lang"}:
+            current = "中文" if self._ui_language == "zh" else "English"
+            chat.write(markup(
+                f"[#c7ff8a]TUI language · {current} · /tui language zh|en[/]"
+            ))
+            return
+        if len(parts) == 3 and parts[1].casefold() in {"language", "lang"}:
+            requested = parts[2].casefold()
+            if requested in {"zh", "cn", "中文", "chinese"}:
+                self._ui_language = "zh"
+            elif requested in {"en", "english"}:
+                self._ui_language = "en"
+            else:
+                chat.write(markup("[#ff7a7a]Use /tui language zh|en.[/]"))
+                return
+            self._save_tui_preferences()
+            self._refresh_chrome()
+            self._render_host_header()
+            message = "✓ TUI 已切换为中文。" if self._ui_language == "zh" else "✓ TUI switched to English."
+            chat.write(markup(f"[#63ffd9]{message}[/]"))
+            return
+        if len(parts) == 2 and parts[1].casefold() == "sound":
+            state = (
+                ("已开启" if self._sound_enabled else "已关闭")
+                if self._ui_language == "zh"
+                else ("on" if self._sound_enabled else "off")
+            )
+            chat.write(markup(
+                f"[#c7ff8a]TUI sound · {state} · /tui sound on|off|test[/]"
+            ))
+            return
+        if len(parts) == 3 and parts[1].casefold() == "sound":
+            action = parts[2].casefold()
+            if action in {"on", "1", "yes"}:
+                self._sound_enabled = True
+                self._save_tui_preferences()
+                played = self._play_message_sound("received")
+                message = (
+                    "✓ TUI 提示音已开启。" if self._ui_language == "zh"
+                    else "✓ TUI sounds enabled."
+                )
+                if not played:
+                    message += (
+                        " 当前系统没有可用的音频输出。"
+                        if self._ui_language == "zh"
+                        else " No audio output is available on this system."
+                    )
+                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                return
+            if action in {"off", "0", "no"}:
+                self._sound_enabled = False
+                self._save_tui_preferences()
+                message = (
+                    "✓ TUI 提示音已关闭。" if self._ui_language == "zh"
+                    else "✓ TUI sounds disabled."
+                )
+                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                return
+            if action == "test":
+                played = self._play_message_sound("sent")
+                if played:
+                    self.set_timer(0.2, lambda: self._play_message_sound("received"))
+                if played and self._ui_language == "zh":
+                    message = "✓ 正在试听发送与接收提示音。"
+                elif played:
+                    message = "✓ Testing sent and received sounds."
+                elif self._ui_language == "zh":
+                    message = "当前系统没有可用的音频输出。"
+                else:
+                    message = "No audio output is available on this system."
+                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                return
+        chat.write(markup(
+            "[#ff7a7a]Use /tui language zh|en or /tui sound on|off|test.[/]"
+        ))
+
+    def _play_message_sound(self, event: str) -> bool:
+        return play_message_sound(event, enabled=self._sound_enabled)
+
+    def _handle_help_cmd(self, text: str):
+        """Render TUI and common Agent commands without sending them to a model."""
+
+        parts = text.split(maxsplit=1)
+        requested = parts[1].strip().casefold() if len(parts) > 1 else ""
+        language = "zh" if requested in {"zh", "中文", "chinese"} else self._ui_language
+        if requested in {"en", "english"}:
+            language = "en"
+        chat = self.query_one("#chat-history", ChatHistory)
+        if language == "zh":
+            help_text = """## ❔ HASHI TUI 帮助
+
+**常用 Agent 命令**
+
+`/backend`　选择或查看后端
+`/mode`　选择或查看工作模式
+`/status`　查看当前 Agent 状态
+`/version [full|all]`　查看实际运行版本
+
+**TUI 导航与布局**
+
+`/to <agent|all>`　切换聊天目标
+`/instance [名称]`　查看或切换实例
+`/layout [chat|balanced|compact|reset]`　调整窗口比例
+`/log [show|hide|pause]`　控制本地日志
+`/tui language zh|en`　切换界面语言
+`/tui sound on|off|test`　设置或试听提示音
+`/clear`　清空当前显示　　`/quit`　退出
+
+输入命令前缀可自动补全；未知命令不会发送给 Agent。输入 `/help en` 查看英文版。"""
+        else:
+            help_text = """## ❔ HASHI TUI HELP
+
+**Common Agent commands**
+
+`/backend`　Select or inspect the backend
+`/mode`　Select or inspect the work mode
+`/status`　Show current Agent status
+`/version [full|all]`　Show the running version
+
+**TUI navigation and layout**
+
+`/to <agent|all>`　Change the chat target
+`/instance [name]`　List or switch instances
+`/layout [chat|balanced|compact|reset]`　Resize the panes
+`/log [show|hide|pause]`　Control the host log
+`/tui language zh|en`　Change the interface language
+`/tui sound on|off|test`　Configure or preview message sounds
+`/clear`　Clear this view　　`/quit`　Exit
+
+Command prefixes autocomplete; unknown commands are never sent to an Agent. Use `/help zh` for Chinese."""
+        chat.write(chat_message_renderable("assistant", "HASHI", help_text))
+
+    def _refresh_chrome(self):
+        log = self.query_one("#log-panel", LogPanel)
+        chat = self.query_one("#chat-history", ChatHistory)
+        input_box = self.query_one("#chat-input", ChatInput)
+        if self._ui_language == "zh":
+            log.border_title = f"主机日志 · {self.launch_instance_id}（本机）"
+            input_box.placeholder = "输入消息 · /help · /to <Agent> · /instance"
+        else:
+            log.border_title = f"Host log · {self.launch_instance_id} (local)"
+            input_box.placeholder = "Message · /help · /to <agent> · /instance"
+        if self.current_agent_display:
+            location = self._location_label()
+            chat_label = "聊天" if self._ui_language == "zh" else "Chat"
+            emoji = next(
+                (str(item.get("emoji") or "") for item in self._agents_cache if item.get("name") == self.current_agent),
+                "",
+            )
+            chat.border_title = (
+                f"{chat_label} · {emoji} {self.current_agent_display} ({self.current_agent})"
+                f"@{self.current_instance_id} ({location})"
+            )
+        self._update_status_bar()
+
+    def _location_label(self) -> str:
+        local = self.current_instance_id == self.launch_instance_id
+        if self._ui_language == "zh":
+            return "本机" if local else "远程"
+        return "local" if local else "remote"
+
+    def _apply_layout(self, mode: str, *, persist: bool = True):
+        log = self.query_one("#log-panel", LogPanel)
+        chat_container = self.query_one("#chat-container", Vertical)
+        if mode == "compact":
+            log.display = False
+            chat_container.styles.height = "1fr"
+        else:
+            log.display = True
+            log.styles.height = "1fr"
+            chat_container.styles.height = "1fr" if mode == "balanced" else "3fr"
+        self._layout_mode = mode
+        if mode == "balanced" and self.is_mounted:
+            self._render_host_header()
+        if persist:
+            self._save_tui_preferences()
+
+    def _handle_layout_cmd(self, text: str):
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split(maxsplit=1)
+        requested = parts[1].strip().casefold() if len(parts) > 1 else ""
+        aliases = {"reset": "chat", "default": "chat"}
+        mode = aliases.get(requested, requested)
+        if not mode:
+            chat.write(markup(f"[#c7ff8a]Layout · {self._layout_mode} · Use /layout chat|balanced|compact[/]"))
+            return
+        if mode not in {"chat", "balanced", "compact"}:
+            chat.write(markup("[#ff7a7a]Unknown layout. Use /layout chat|balanced|compact|reset.[/]"))
+            return
+        self._apply_layout(mode)
+        chat.write(markup(f"[#63ffd9]✓ Layout · {mode}[/]"))
+
+    def _handle_log_cmd(self, text: str):
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split(maxsplit=1)
+        action = parts[1].strip().casefold() if len(parts) > 1 else "pause"
+        if action == "show":
+            self._apply_layout("chat")
+            chat.write(markup("[#63ffd9]✓ Host log shown.[/]"))
+        elif action == "hide":
+            self._apply_layout("compact")
+            chat.write(markup("[#63ffd9]✓ Host log hidden.[/]"))
+        elif action == "pause":
+            self.action_toggle_log_pause()
+            state = "paused" if self._log_paused else "following"
+            chat.write(markup(f"[#63ffd9]✓ Host log · {state}.[/]"))
+        else:
+            chat.write(markup("[#ff7a7a]Use /log show|hide|pause.[/]"))
 
     @work()
     async def _send_message(
@@ -1097,7 +1474,6 @@ class HASHITuiApp(App):
             self._chat_targets = active_targets
             self.current_agent_display = "ALL"
             self.current_backend = ""
-            self._agent_mode = "broadcast"
             chat.border_title = "Chat \u2014 \U0001f4e2 Broadcasting to ALL agents"
             chat.write(markup("[#63ffd9]\u2705 Broadcasting mode: messages will be sent to all active agents.[/]"))
             self._update_status_bar()
@@ -1232,11 +1608,12 @@ class HASHITuiApp(App):
             self._chat_targets = []
             self.current_agent_display = ""
             self.current_backend = ""
-            self._agent_mode = ""
             self._agents_cache = []
             self._agent_refresh_tick = 0
             chat.clear()
-            chat.border_title = f"Chat — {self.current_instance_id}"
+            location = self._location_label()
+            chat_label = "聊天" if self._ui_language == "zh" else "Chat"
+            chat.border_title = f"{chat_label} · {self.current_instance_id} ({location})"
             await self._load_agents(
                 client=candidate,
                 generation=generation,
@@ -1264,10 +1641,10 @@ class HASHITuiApp(App):
             agent,
             self.current_backend,
             self.gateway_ok,
-            self._agent_mode,
             self._agents_cache,
             self.current_agent,
             self.current_instance_id,
+            self._ui_language,
         )
 
     # ── Actions ─────────────────────────────────────────────────────────
@@ -1275,9 +1652,14 @@ class HASHITuiApp(App):
     def action_toggle_log_pause(self):
         self._log_paused = not self._log_paused
         log = self.query_one("#log-panel", LogPanel)
+        base_title = (
+            f"主机日志 · {self.launch_instance_id}（本机）"
+            if self._ui_language == "zh"
+            else f"Host log · {self.launch_instance_id} (local)"
+        )
+        paused = " [已暂停]" if self._ui_language == "zh" else " [PAUSED]"
         log.border_title = (
-            f"Local log — {self.launch_instance_id}"
-            + (" [PAUSED]" if self._log_paused else "")
+            base_title + (paused if self._log_paused else "")
         )
 
     async def action_quit_app(self):

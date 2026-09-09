@@ -88,6 +88,15 @@ supports local operation and trusted instance switching through Hashi Remote.
 Current implementation boundary:
 
 - the TUI uses the basic Backend API chat and transcript routes;
+- its local command palette derives Agent commands from the canonical command
+  metadata, shows at most five prefix matches, and keeps TUI-only navigation and
+  layout commands inside the Connector;
+- submitting a command prefix selects the first displayed prefix match, while an
+  unknown slash command is rejected locally and never becomes a model prompt;
+- short sent/received sounds are a local, persisted TUI preference. Windows uses
+  the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
+- the compact connection bar intentionally omits working mode; `/mode` remains
+  the authoritative place to inspect or change it;
 - its cross-instance path proxies only a small named operation set through
   authenticated Hashi Remote peers; and
 - it does not yet implement the complete Persistent Session API v1 multi-
