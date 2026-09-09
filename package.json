@@ -51,6 +51,7 @@
     "onboard-cli.js",
     "postinstall.js",
     "pyproject.toml",
+    "runtime-entry.json",
     "main.py",
     "hashi.py",
     "hashi_launcher.py",

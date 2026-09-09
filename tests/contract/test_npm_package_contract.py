@@ -47,6 +47,7 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
         "cli.js",
         "main.py",
         "pyproject.toml",
+        "runtime-entry.json",
         "THIRD_PARTY_NOTICES.md",
         "constraints/standard-py312.lock",
         "docs/INSTALL.md",

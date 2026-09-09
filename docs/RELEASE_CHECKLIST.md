@@ -15,6 +15,8 @@
 - Python source distribution and wheel: `python -m build`
 - npm publication boundary: `npm pack --dry-run --json` and
   `python -m pytest -q tests/contract/test_npm_package_contract.py`
+  - the tarball includes `runtime-entry.json`; an installed program must be
+    able to qualify its Function generation, not merely pass runtime-only setup
 - npm command and instance lifecycle:
   - the package remains `hashi-bridge` (the unrelated third-party `hashi`
     package name is not claimed) while its executable is `hashi`

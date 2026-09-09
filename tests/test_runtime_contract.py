@@ -325,6 +325,7 @@ def test_npm_package_contains_runtime_authority_and_reproducible_lock():
         "nagare/",
         "orchestrator/",
         "pyproject.toml",
+        "runtime-entry.json",
         "remote/",
         "constraints/standard-py312.lock",
         "scripts/check_runtime_contract.py",
