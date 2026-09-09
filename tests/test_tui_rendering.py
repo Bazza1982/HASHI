@@ -8,7 +8,7 @@ from pathlib import Path
 from rich.console import Console
 
 from tui import sounds
-from tui.app import chat_message_renderable
+from tui.app import HASHITuiApp, ChatHistory, FooterInfoBox, LogPanel, chat_message_renderable
 
 
 def _render_plain(renderable) -> str:
@@ -96,3 +96,26 @@ def test_message_sounds_can_be_disabled(monkeypatch):
 
     assert sounds.play_message_sound("sent") is False
     assert played == []
+
+
+async def test_tui_compact_design_has_bilingual_help_and_adjustable_layout(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app._handle_help_cmd("/help zh")
+        await pilot.pause()
+        chat = app.query_one("#chat-history", ChatHistory)
+        rendered = "\n".join(line.text for line in chat.lines)
+        assert "HASHI TUI 帮助" in rendered
+        assert "/backend" in rendered
+        assert "/to <agent|all>" in rendered
+
+        app._handle_layout_cmd("/layout compact")
+        assert app.query_one("#log-panel", LogPanel).display is False
+        app._handle_layout_cmd("/layout balanced")
+        assert app.query_one("#log-panel", LogPanel).display is True
+
+        footer = app.query_one("#footer-info-box", FooterInfoBox)
+        footer.update_state("Rika", "codex-cli", True, "flex", instance_id="HASHI1")
+        assert "HASHI1 · Rika · codex-cli · Flex · API connected" in footer.render().plain
