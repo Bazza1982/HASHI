@@ -33,7 +33,11 @@ from orchestrator.function_worker_supervisor import (
     persist_qualified_generation_cache,
     verify_generation_artifact,
 )
-from orchestrator.function_worker_host import FunctionWorkerHost, WorkerSchedulerFacade
+from orchestrator.function_worker_host import (
+    FunctionWorkerHost,
+    WorkerKernelFacade,
+    WorkerSchedulerFacade,
+)
 from orchestrator.runtime_contract import (
     current_runtime_fingerprint,
     load_runtime_policy,
@@ -217,6 +221,71 @@ async def test_worker_scheduler_rpc_rejects_cross_agent_creation_without_state_w
         assert await scheduler.list_delayed_messages("zelda") == []
         assert await scheduler.list_delayed_messages("sunny") == []
         assert not state_path.exists()
+    finally:
+        await asyncio.gather(core_peer.close(), worker_peer.close())
+
+
+@pytest.mark.asyncio
+async def test_worker_move_preflight_reads_only_cross_agent_guards(tmp_path):
+    kernel = _Kernel()
+    kernel.scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[],
+        authorized_id=7,
+    )
+    source_client = _Client("zelda", 101)
+    target_client = _Client("sunny", 102)
+    source = _handle(kernel, source_client)
+    target = _handle(kernel, target_client)
+    target.metadata.update({"is_generating": True, "queue_depth": 2})
+    kernel.runtimes.extend([source, target])
+    await kernel.scheduler.schedule_delayed_message(
+        agent_name="sunny",
+        chat_id=42,
+        prompt="future work",
+        delay_minutes=5,
+    )
+    supervisor = FunctionWorkerSupervisor(kernel)
+    core_connection, worker_connection = multiprocessing.Pipe(duplex=True)
+
+    async def handle_request(method, params):
+        return await supervisor.handle_worker_request(
+            source_client, method, params
+        )
+
+    core_peer = JsonConnectionPeer(
+        core_connection,
+        label="move-preflight-core",
+        request_handler=handle_request,
+    )
+    worker_peer = JsonConnectionPeer(
+        worker_connection,
+        label="move-preflight-worker",
+    )
+    core_peer.start()
+    worker_peer.start()
+    facade = WorkerKernelFacade(
+        peer=worker_peer,
+        paths=SimpleNamespace(),
+        global_cfg=SimpleNamespace(),
+        skill_manager=SimpleNamespace(),
+        agent_name="zelda",
+    )
+    try:
+        result = await facade.agent_move_preflight("sunny")
+
+        assert result == {
+            "agent_name": "sunny",
+            "busy": True,
+            "delayed_count": 1,
+        }
+        assert set(result) == {"agent_name", "busy", "delayed_count"}
+        with pytest.raises(
+            FunctionWorkerRemoteError,
+            match="Worker 'zelda' cannot access Scheduler state for Agent 'sunny'",
+        ):
+            await facade.scheduler.list_delayed_messages("sunny")
     finally:
         await asyncio.gather(core_peer.close(), worker_peer.close())
 

@@ -1665,6 +1665,8 @@ class FunctionWorkerSupervisor:
             )
         if method == "core.cos.query":
             return await self._chief_of_staff_query(client, params)
+        if method == "core.agent_move.preflight":
+            return await self._agent_move_preflight(client, params)
         if method.startswith("core.service."):
             return await self._service_request(method, params)
         if method.startswith("core.background_jobs."):
@@ -1678,6 +1680,49 @@ class FunctionWorkerSupervisor:
         raise FunctionWorkerProtocolError(
             f"Unknown Core request from Worker {client.agent_name!r}: {method}"
         )
+
+    async def _agent_move_preflight(
+        self,
+        client: FunctionWorkerClient,
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Expose move guards without exposing another Agent's Scheduler records."""
+
+        source = self.kernel._runtime_map().get(client.agent_name)
+        if source is None or source.client is not client:
+            raise FunctionWorkerProtocolError(
+                "Agent move preflight came from an inactive Worker"
+            )
+        agent_name = str(params.get("agent_name") or "").strip()
+        if not agent_name:
+            raise ValueError("agent move preflight requires agent_name")
+
+        target = self.kernel._runtime_map().get(agent_name)
+        metadata = (
+            target.get_runtime_metadata()
+            if target is not None
+            else {}
+        )
+        try:
+            queue_depth = max(0, int(metadata.get("queue_depth") or 0))
+        except (TypeError, ValueError):
+            queue_depth = 0
+        busy = bool(metadata.get("is_generating")) or queue_depth > 0
+
+        delayed_count = 0
+        scheduler = getattr(self.kernel, "scheduler", None)
+        counter = getattr(scheduler, "count_delayed_messages", None)
+        if callable(counter):
+            result = counter(agent_name)
+            if inspect.isawaitable(result):
+                result = await result
+            delayed_count = max(0, int(result or 0))
+
+        return {
+            "agent_name": agent_name,
+            "busy": busy,
+            "delayed_count": delayed_count,
+        }
 
     async def _capability_request(
         self,

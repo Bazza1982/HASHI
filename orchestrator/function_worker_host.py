@@ -497,6 +497,19 @@ class WorkerKernelFacade:
     def capability_status(self) -> dict[str, Any]:
         return dict(self._capabilities)
 
+    async def agent_move_preflight(self, agent_name: str) -> dict[str, Any]:
+        """Read only the cross-Agent state needed to guard a move."""
+
+        result = await self.peer.request(
+            "core.agent_move.preflight",
+            {"agent_name": str(agent_name)},
+        )
+        return {
+            "agent_name": str(result.get("agent_name") or agent_name),
+            "busy": bool(result.get("busy", False)),
+            "delayed_count": max(0, int(result.get("delayed_count") or 0)),
+        }
+
     async def refresh_capability_status(self) -> dict[str, Any]:
         result = await self.peer.request("core.capability.status", {})
         self._capabilities = dict(result or {})

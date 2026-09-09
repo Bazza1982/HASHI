@@ -66,6 +66,27 @@ def _find_agent_runtime(runtime: Any, agent_id: str) -> Any | None:
     )
 
 
+async def _move_preflight(
+    runtime: Any,
+    agent_id: str,
+    selected_runtime: Any | None,
+) -> tuple[int, bool]:
+    """Read move guards through the narrow Worker facade when one is active."""
+
+    orchestrator = getattr(runtime, "orchestrator", None)
+    preflight = getattr(orchestrator, "agent_move_preflight", None)
+    if callable(preflight):
+        result = await preflight(agent_id)
+        return (
+            max(0, int(result.get("delayed_count") or 0)),
+            bool(result.get("busy", False)),
+        )
+
+    delayed = await runtime_pending.delayed_count(runtime, agent_name=agent_id)
+    busy_check = getattr(selected_runtime, "_backend_busy", None)
+    return delayed, bool(callable(busy_check) and busy_check())
+
+
 def _move_recovery_markup(package_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -328,7 +349,8 @@ async def do_move(
         )
         return
 
-    delayed = await runtime_pending.delayed_count(runtime, agent_name=agent_id)
+    selected_runtime = _find_agent_runtime(runtime, agent_id)
+    delayed, busy = await _move_preflight(runtime, agent_id, selected_runtime)
     if delayed:
         await runtime._send_text(
             chat_id,
@@ -343,9 +365,7 @@ async def do_move(
         await runtime._send_text(chat_id, target_error, parse_mode="HTML")
         return
 
-    selected_runtime = _find_agent_runtime(runtime, agent_id)
-    busy_check = getattr(selected_runtime, "_backend_busy", None)
-    if callable(busy_check) and busy_check():
+    if busy:
         await runtime._send_text(
             chat_id,
             ui_language.tr("remote.move.agent_busy", agent=html.escape(agent_id)),
@@ -725,12 +745,10 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                 selected_runtime._agent_move_target_instance = target_instance
 
             if action == "commit":
-                delayed = await runtime_pending.delayed_count(
-                    runtime,
-                    agent_name=agent_id,
+                delayed, busy = await _move_preflight(
+                    runtime, agent_id, selected_runtime
                 )
-                busy_check = getattr(selected_runtime, "_backend_busy", None)
-                if delayed or (callable(busy_check) and busy_check()):
+                if delayed or busy:
                     if selected_runtime is not None:
                         selected_runtime._agent_move_quiesced = False
                     await query.edit_message_text(

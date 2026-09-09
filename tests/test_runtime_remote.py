@@ -222,6 +222,51 @@ async def test_handle_move_callback_commit_runs_two_phase_cutover(
 
 
 @pytest.mark.asyncio
+async def test_handle_move_callback_other_agent_uses_worker_preflight(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime.global_config.project_root = tmp_path / "code-generation"
+    selected = SimpleNamespace(name="sunny")
+    preflight = AsyncMock(return_value={"busy": False, "delayed_count": 0})
+    runtime.orchestrator = SimpleNamespace(
+        runtimes=[selected],
+        agent_move_preflight=preflight,
+    )
+    monkeypatch.setattr(
+        runtime_pending,
+        "delayed_count",
+        AsyncMock(side_effect=AssertionError("must not cross-read Scheduler records")),
+    )
+    monkeypatch.setattr(
+        runtime_remote,
+        "get_outbound_move",
+        lambda *args, **kwargs: {
+            "agent_id": "sunny",
+            "target_instance": "HASHI2",
+        },
+    )
+    confirm = Mock(
+        return_value={
+            "status": "copied_inactive",
+            "agent_id": "sunny",
+            "target_instance": "HASHI2",
+            "source_instance": "HASHI_TEST",
+        }
+    )
+    monkeypatch.setattr(runtime_remote, "confirm_outbound_move", confirm)
+    update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
+
+    await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
+
+    preflight.assert_awaited_once_with("sunny")
+    confirm.assert_called_once()
+    assert selected._agent_move_quiesced is False
+    assert "AGENT COPIED INACTIVE" in update.callback_query.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_handle_move_callback_failure_keeps_recovery_actions(
     tmp_path, monkeypatch
 ):
@@ -329,6 +374,86 @@ async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
         "Source and target configuration were not changed"
         in runtime.replies[-1]["text"]
     )
+
+
+@pytest.mark.asyncio
+async def test_do_move_other_agent_uses_worker_preflight(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime.global_config.project_root = tmp_path / "code-generation"
+    selected = SimpleNamespace(name="sunny")
+    preflight = AsyncMock(return_value={"busy": False, "delayed_count": 0})
+    runtime.orchestrator = SimpleNamespace(
+        runtimes=[selected],
+        agent_move_preflight=preflight,
+    )
+    monkeypatch.setattr(
+        runtime_pending,
+        "delayed_count",
+        AsyncMock(side_effect=AssertionError("must not cross-read Scheduler records")),
+    )
+    preview = Mock(
+        return_value={
+            "agent_id": "sunny",
+            "target_instance": "HASHI2",
+            "source_environment": "windows",
+            "target_environment": "wsl",
+            "package_bytes": 1024,
+            "workspace_files": 5,
+            "schedule_count": 0,
+        }
+    )
+    monkeypatch.setattr(runtime_remote, "preview_outbound_move", preview)
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99))
+
+    await runtime_remote.do_move(
+        runtime,
+        update,
+        "sunny",
+        "hashi2",
+        {"hashi2": {"display_name": "HASHI2"}},
+        dry_run=True,
+    )
+
+    preflight.assert_awaited_once_with("sunny")
+    preview.assert_called_once()
+    assert "AGENT MOVE PREVIEW" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preflight_result", "expected"),
+    [
+        ({"busy": False, "delayed_count": 1}, "Move is blocked"),
+        ({"busy": True, "delayed_count": 0}, "busy"),
+    ],
+)
+async def test_do_move_worker_preflight_preserves_move_guards(
+    tmp_path,
+    monkeypatch,
+    preflight_result,
+    expected,
+):
+    runtime = _runtime(tmp_path)
+    runtime.orchestrator = SimpleNamespace(
+        runtimes=[SimpleNamespace(name="sunny")],
+        agent_move_preflight=AsyncMock(return_value=preflight_result),
+    )
+    preview = Mock(side_effect=AssertionError("blocked move must not be previewed"))
+    monkeypatch.setattr(runtime_remote, "preview_outbound_move", preview)
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99))
+
+    await runtime_remote.do_move(
+        runtime,
+        update,
+        "sunny",
+        "hashi2",
+        {"hashi2": {"display_name": "HASHI2"}},
+        dry_run=True,
+    )
+
+    preview.assert_not_called()
+    assert expected in runtime.replies[-1]["text"]
 
 
 @pytest.mark.asyncio
