@@ -27,6 +27,34 @@ def _record(tmp_path):
     }
 
 
+def test_onboarding_runs_as_a_module_from_the_program_root(tmp_path, monkeypatch):
+    record = _record(tmp_path)
+    code_root = tmp_path / "program"
+    captured = {}
+
+    monkeypatch.setattr(
+        hashi_instance_cli,
+        "_select_runtime",
+        lambda _code_root, *, full: ["python-runtime"],
+    )
+
+    def run(command, **options):
+        captured["command"] = command
+        captured["options"] = options
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(hashi_instance_cli.subprocess, "run", run)
+
+    assert hashi_instance_cli.run_onboarding(record, code_root) == 0
+    assert captured["command"] == [
+        "python-runtime",
+        "-m",
+        "onboarding.onboarding_main",
+    ]
+    assert captured["options"]["cwd"] == code_root
+    assert captured["options"]["env"]["HASHI_ONBOARD_NO_LAUNCH"] == "1"
+
+
 def test_python_manager_rejects_the_other_os_runtime_path():
     if os.name == "nt":
         unsafe = Path(r"\\wsl.localhost\ExampleDistro\srv\hashi")

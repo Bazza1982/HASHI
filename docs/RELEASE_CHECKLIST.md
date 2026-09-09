@@ -22,6 +22,8 @@
     package name is not claimed) while its executable is `hashi`
   - post-install either verifies a versioned user-scoped Python environment or
     explicitly reports an incomplete runtime; it never prints ready early
+  - onboarding runs as a module from the selected program root so installed
+    packages import their own Function modules instead of the script directory
   - `python -m pytest -q tests/test_instance_registry.py tests/test_hashi_instance_cli.py`
   - selection precedence is explicit instance, longest cwd binding, default,
     only instance, then interactive choice/non-interactive ambiguity

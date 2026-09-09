@@ -435,7 +435,7 @@ def run_onboarding(record: dict[str, Any], code_root: Path) -> int:
     environment = _launch_environment(record, code_root)
     environment["HASHI_ONBOARD_NO_LAUNCH"] = "1"
     return subprocess.run(
-        [*runtime, str(code_root / "onboarding" / "onboarding_main.py")],
+        [*runtime, "-m", "onboarding.onboarding_main"],
         cwd=code_root,
         env=environment,
         check=False,
