@@ -31,6 +31,8 @@
     registries and never select another environment's runtime through PATH
   - existing Git registration preserves exact identity/data bytes; managed
     instance creation allocates isolated homes and non-conflicting ports
+  - start accepts the explicit Telegram-only local-service state only when all
+    Function workers are active and no agent is failed, pending, or connecting
   - repeat start is idempotent; status verifies instance/API/lock identity;
     stop refuses Agent work, non-terminal background jobs, or unverifiable
     activity endpoints and never force-kills

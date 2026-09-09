@@ -246,6 +246,35 @@ def _nonnegative_int(value: Any) -> int:
         return 0
 
 
+def _telegram_only_local_services_ready(health: dict[str, Any]) -> bool:
+    startup = health.get("startup")
+    if not isinstance(startup, dict):
+        return False
+    if startup.get("phase") != "degraded" or startup.get("services_ready") is not True:
+        return False
+    for field in ("failed_agents", "pending_agents", "connecting_agents"):
+        if type(startup.get(field)) is not int or startup[field] != 0:
+            return False
+    issues = startup.get("issues")
+    if not isinstance(issues, list) or not issues:
+        return False
+    if any(
+        not isinstance(issue, dict)
+        or issue.get("code") != "agent_telegram_unavailable"
+        or issue.get("severity") != "warning"
+        for issue in issues
+    ):
+        return False
+    workers = health.get("function_workers")
+    return bool(workers) and isinstance(workers, list) and all(
+        isinstance(worker, dict)
+        and worker.get("phase") == "ACTIVE"
+        and worker.get("alive") is True
+        and worker.get("accepting") is True
+        for worker in workers
+    )
+
+
 def _http_json(
     method: str,
     port: int,
@@ -407,6 +436,11 @@ def inspect_instance(record: dict[str, Any], code_root: Path) -> dict[str, Any]:
         "foreign_endpoint": bool(health and not endpoint_matches),
         "health_error": health_error,
         "ready": health.get("ready") is True if endpoint_matches else False,
+        "services_ready": (
+            _telegram_only_local_services_ready(health)
+            if endpoint_matches
+            else False
+        ),
         "busy": bool(busy_agents or busy_background_jobs),
         "busy_agents": busy_agents,
         "busy_background_jobs": busy_background_jobs,
@@ -530,11 +564,18 @@ def start_instance(
     deadline = time.monotonic() + max(1.0, timeout)
     while time.monotonic() < deadline:
         snapshot = inspect_instance(record, code_root)
-        if snapshot["running"] and snapshot["ready"]:
+        if snapshot["running"] and (
+            snapshot["ready"] or snapshot.get("services_ready") is True
+        ):
             if not quiet:
+                state = (
+                    "ready"
+                    if snapshot["ready"]
+                    else "local services ready; Telegram unavailable"
+                )
                 print(
                     f"Started HASHI instance {record['name']} (PID {snapshot['pid']}, "
-                    f"API 127.0.0.1:{snapshot['api_port']})."
+                    f"API 127.0.0.1:{snapshot['api_port']}; {state})."
                 )
             return 0
         if process.poll() is not None:
@@ -652,7 +693,12 @@ def _status_output(
         _emit(snapshot, as_json=True)
     else:
         if snapshot["running"]:
-            state = "running/ready" if snapshot["ready"] else "running/not-ready"
+            if snapshot["ready"]:
+                state = "running/ready"
+            elif snapshot.get("services_ready") is True:
+                state = "running/local-services-ready"
+            else:
+                state = "running/not-ready"
         elif snapshot["lock_held"]:
             state = "unverified/locked"
         elif snapshot["healthy"]:

@@ -322,6 +322,21 @@ def test_status_text_does_not_call_healthy_or_not_ready_process_stopped(
             {
                 "running": True,
                 "ready": False,
+                "services_ready": True,
+                "lock_held": True,
+                "healthy": True,
+                "instance_id": "ALPHA",
+                "pid": 123,
+                "api_port": 18800,
+                "busy": False,
+                "activity_verified": True,
+            },
+            "State: running/local-services-ready",
+        ),
+        (
+            {
+                "running": True,
+                "ready": False,
                 "lock_held": True,
                 "healthy": True,
                 "instance_id": "ALPHA",
@@ -547,6 +562,95 @@ def test_repeat_start_is_idempotent(tmp_path, monkeypatch, capsys):
 
     assert hashi_instance_cli.start_instance(registry, record) == 0
     assert "already running" in capsys.readouterr().out
+
+
+def test_start_accepts_telegram_only_degraded_local_services(
+    tmp_path, monkeypatch, capsys
+):
+    record = _record(tmp_path)
+    program = tmp_path / "program"
+    program.mkdir()
+    registry = instance_registry.InstanceRegistry(
+        program_root=program,
+        program_version="test",
+        registry_root=tmp_path / "registry",
+        data_root=tmp_path / "data",
+        environment_id="test-os",
+    )
+    snapshots = iter(
+        [
+            {
+                "running": False,
+                "lock_held": False,
+                "healthy": False,
+                "foreign_endpoint": False,
+            },
+            {
+                "running": True,
+                "ready": False,
+                "services_ready": True,
+                "pid": 456,
+                "api_port": 18800,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        hashi_instance_cli, "inspect_instance", lambda *_args: next(snapshots)
+    )
+    monkeypatch.setattr(hashi_instance_cli, "_is_provisioned", lambda *_args: True)
+    monkeypatch.setattr(
+        hashi_instance_cli, "_select_runtime", lambda *_args, **_kwargs: ["python"]
+    )
+
+    class Process:
+        returncode = 91
+
+        @staticmethod
+        def poll():
+            return 91
+
+    monkeypatch.setattr(hashi_instance_cli.subprocess, "Popen", lambda *_a, **_k: Process())
+
+    assert hashi_instance_cli.start_instance(registry, record) == 0
+    assert "local services ready" in capsys.readouterr().out
+
+
+def test_local_service_acceptance_rejects_other_degradation():
+    health = {
+        "startup": {
+            "phase": "degraded",
+            "services_ready": True,
+            "failed_agents": 0,
+            "pending_agents": 0,
+            "connecting_agents": 0,
+            "issues": [
+                {
+                    "code": "agent_telegram_unavailable",
+                    "severity": "warning",
+                }
+            ],
+        },
+        "function_workers": [
+            {
+                "phase": "ACTIVE",
+                "alive": True,
+                "accepting": True,
+            }
+        ],
+    }
+    assert hashi_instance_cli._telegram_only_local_services_ready(health)
+
+    failed_agent = json.loads(json.dumps(health))
+    failed_agent["startup"]["failed_agents"] = 1
+    assert not hashi_instance_cli._telegram_only_local_services_ready(failed_agent)
+
+    other_issue = json.loads(json.dumps(health))
+    other_issue["startup"]["issues"][0]["code"] = "agent_startup_failed"
+    assert not hashi_instance_cli._telegram_only_local_services_ready(other_issue)
+
+    unready_worker = json.loads(json.dumps(health))
+    unready_worker["function_workers"][0]["accepting"] = False
+    assert not hashi_instance_cli._telegram_only_local_services_ready(unready_worker)
 
 
 def test_start_refuses_matching_api_without_instance_lock(
