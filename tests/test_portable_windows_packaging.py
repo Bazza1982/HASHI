@@ -581,6 +581,20 @@ def test_builder_copies_the_real_runtime_contract_inputs(tmp_path):
     builder.validate_portable_runtime_inputs(destination)
 
 
+def test_builder_copies_and_validates_the_runtime_entry_profile(tmp_path):
+    builder = _load_builder()
+    destination = tmp_path / "portable-app"
+
+    builder.copy_hashi_source(destination)
+
+    runtime_entry = destination / "runtime-entry.json"
+    assert runtime_entry.read_bytes() == (ROOT / "runtime-entry.json").read_bytes()
+
+    runtime_entry.unlink()
+    with pytest.raises(RuntimeError, match=r"runtime-entry\.json"):
+        builder.validate_portable_runtime_inputs(destination)
+
+
 def test_portable_dependency_generation_matches_the_runtime_standard_lock():
     builder = _load_builder()
 
@@ -760,6 +774,7 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
     assert set(builder.ROOT_SOURCE_FILES) == {
         "__main__.py",
         "main.py",
+        "runtime-entry.json",
         "tui.py",
         "pyproject.toml",
         "LICENSE",

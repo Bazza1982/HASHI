@@ -121,11 +121,13 @@ hash comparison for `data`. Capacity is checked conservatively using 32 KiB
 allocation units; NTFS with its default 4 KiB allocation unit is recommended.
 
 Only Git-tracked files from the explicit source allowlist enter `app/hashi`.
-The allowlist includes `__main__.py`, `pyproject.toml`, the standard dependency
-lock named by `[tool.hashi.runtime]`, and every protected Core source required
-to recompute the runtime fingerprint. The bundled Python executes the shared
-runtime-contract checker after dependencies are installed and before the image
-can be published.
+The allowlist includes `__main__.py`, `runtime-entry.json`, `pyproject.toml`,
+the standard dependency lock named by `[tool.hashi.runtime]`, and every
+protected Core source required to recompute the runtime fingerprint. The
+Function qualification/execution profile in `runtime-entry.json` is copied
+byte-for-byte and is a required runtime-contract input. The bundled Python
+executes the shared runtime-contract checker after dependencies are installed
+and before the image can be published.
 Untracked development state, logs, local secrets, project-private workflows,
 instance-local Skills, and generated workflow runs cannot leak into a newly
 built image. The tracked HASHI input must be clean, and its revision is checked

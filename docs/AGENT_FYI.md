@@ -16,7 +16,7 @@ checks and reviewed original evidence. Keep an independent next step for every
 remaining check. Reports derive from taskboard facts but are not delivery. See
 the [contract](SUPERLOOP_FUNCTION_CONTRACT.md).
 
-Reference updated: 2026-09-08. This orientation is neither a task queue,
+Reference updated: 2026-09-09. This orientation is neither a task queue,
 permission grant, nor live-adoption proof. `/fyi` reloads it and identifies the
 revision. Verify live status before claiming any Engine, model, tool, or route.
 
@@ -27,10 +27,13 @@ backfill; merging the tool repairs neither history nor live renderers. See the
 [cost contract](METER_COST_DISPLAY_PLAN.md).
 
 Portable Windows derives Python and its standard dependency lock from shared
-runtime policy. Its source payload includes `__main__.py`, `pyproject.toml`, the
-selected lock and full protected-Core manifest. Releases require an exact clean
-commit/tree plus the shared runtime check on the bundled interpreter. A source
-checkpoint proves no bundle, install, or adoption; see the
+runtime policy. Its source payload includes `__main__.py`,
+`runtime-entry.json`, `pyproject.toml`, the selected lock and full
+protected-Core manifest. The Function qualification/execution profile is a
+byte-verified runtime input, so a bundle that omits it fails closed before
+publication. Releases require an exact clean commit/tree plus the shared
+runtime check on the bundled interpreter. A source checkpoint proves no bundle,
+install, or adoption; see the
 [builder](../packaging/portable_windows/README.md).
 
 ## Engineering rules and authority

@@ -131,7 +131,15 @@ SOURCE_DIRS = (
     "tui",
     "veritas",
 )
-ROOT_SOURCE_FILES = ("__main__.py", "main.py", "tui.py", "pyproject.toml", "LICENSE")
+RUNTIME_ENTRY_FILE = "runtime-entry.json"
+ROOT_SOURCE_FILES = (
+    "__main__.py",
+    "main.py",
+    RUNTIME_ENTRY_FILE,
+    "tui.py",
+    "pyproject.toml",
+    "LICENSE",
+)
 RUNTIME_POLICY_FILES = (_RUNTIME_POLICY.standard_lock,)
 ROOT_PACKAGE_FILES = (
     "exp/__init__.py",
@@ -324,7 +332,14 @@ def copy_hashi_source(destination: Path) -> None:
 
 def _runtime_input_paths(policy: RuntimePolicy) -> tuple[str, ...]:
     return tuple(
-        dict.fromkeys(("pyproject.toml", policy.standard_lock, *CORE_SOURCE_PATHS))
+        dict.fromkeys(
+            (
+                "pyproject.toml",
+                policy.standard_lock,
+                RUNTIME_ENTRY_FILE,
+                *CORE_SOURCE_PATHS,
+            )
+        )
     )
 
 
