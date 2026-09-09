@@ -126,8 +126,8 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("language", "cmd_language", "Choose interface language", "session"),
     CommandSpec("terminal", "cmd_terminal", "Control terminal detail level", "session"),
     CommandSpec("verbose", "cmd_verbose", "Show technical execution telemetry", "session"),
-    CommandSpec("think", "cmd_think", "Show commentary and provider reasoning", "session"),
-    CommandSpec("commentary", "cmd_commentary", "Show HER Persona interim reports", "session"),
+    CommandSpec("think", "cmd_think", "Show genuine provider reasoning", "session"),
+    CommandSpec("commentary", "cmd_commentary", "Show model-authored interim commentary", "session"),
     CommandSpec("typing", "cmd_typing", "Control Telegram typing indicators", "session"),
     CommandSpec("meter", "cmd_meter", "Toggle per-turn cost tail", "session"),
     CommandSpec(

@@ -399,12 +399,19 @@ async def test_her_commentary_command_persists_without_changing_think_or_verbose
 
 
 @pytest.mark.asyncio
-async def test_commentary_command_on_non_her_backend_reports_only_and_does_not_mutate(tmp_path):
+async def test_commentary_command_uses_codex_backend_capability(tmp_path):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.workspace_dir = tmp_path / "workspaces" / "sunny"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
     runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
+    runtime.backend_manager = SimpleNamespace(
+        current_backend=SimpleNamespace(
+            effort="unknown",
+            capabilities=SimpleNamespace(supports_commentary_stream=True),
+        )
+    )
     runtime._commentary = False
+    runtime._commentary_buffer = []
     runtime._verbose = True
     runtime._think = True
     runtime._is_authorized_user = lambda _user_id: True
@@ -423,11 +430,10 @@ async def test_commentary_command_on_non_her_backend_reports_only_and_does_not_m
         SimpleNamespace(args=["on"]),
     )
 
-    assert runtime._commentary is False
-    assert telegram_stream_policy.get_display_preference(runtime, "commentary") is False
-    assert "HER ONLY" in replies[-1][0]
+    assert runtime._commentary is True
+    assert telegram_stream_policy.get_display_preference(runtime, "commentary") is True
     assert "codex-cli" in replies[-1][0]
-    assert "Nothing was changed" in replies[-1][0]
+    assert "Provider reasoning and technical telemetry stay separate" in replies[-1][0]
 
 
 @pytest.mark.asyncio
@@ -802,10 +808,12 @@ async def test_verbose_and_think_receive_disjoint_event_classes():
     runtime._last_openrouter_think_snippet = None
     verbose_queue = asyncio.Queue()
     think_buffer = []
+    commentary_buffer = []
     callback = FlexibleAgentRuntime._make_stream_callback(
         runtime,
         event_queue=verbose_queue,
         think_buffer=think_buffer,
+        commentary_buffer=commentary_buffer,
     )
 
     await callback(StreamEvent(kind=KIND_TEXT_DELTA, summary="draft answer"))
@@ -824,7 +832,76 @@ async def test_verbose_and_think_receive_disjoint_event_classes():
         KIND_VALIDATION,
     ]
     assert verbose_queue.empty()
-    assert think_buffer == ["r" * 160, commentary]
+    assert think_buffer == ["r" * 160]
+    assert commentary_buffer == [commentary]
+
+
+@pytest.mark.asyncio
+async def test_codex_commentary_is_controlled_only_by_commentary_toggle():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace(active_backend="codex-cli")
+    runtime.logger = SimpleNamespace(debug=lambda _message: None)
+    runtime._thinking_chars_this_req = 0
+    runtime._openrouter_think_chunk = ""
+    runtime._last_openrouter_think_snippet = None
+    runtime._think = False
+    runtime._commentary = True
+    think_buffer = []
+    commentary_buffer = []
+    callback = FlexibleAgentRuntime._make_stream_callback(
+        runtime,
+        think_buffer=think_buffer,
+        commentary_buffer=commentary_buffer,
+    )
+
+    await callback(
+        StreamEvent(kind=KIND_COMMENTARY, summary="Codex is checking the tests.")
+    )
+    await callback(StreamEvent(kind=KIND_THINKING, summary="hidden reasoning"))
+
+    assert think_buffer == []
+    assert commentary_buffer == ["Codex is checking the tests."]
+
+    runtime._think = True
+    runtime._commentary = False
+    await callback(StreamEvent(kind=KIND_COMMENTARY, summary="hidden commentary"))
+    await callback(StreamEvent(kind=KIND_THINKING, summary="visible reasoning"))
+
+    assert commentary_buffer == ["Codex is checking the tests."]
+    assert think_buffer == []
+    assert runtime._openrouter_think_chunk == "visible reasoning"
+
+
+@pytest.mark.asyncio
+async def test_long_codex_commentary_is_not_truncated_and_uses_commentary_purpose():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    commentary = "model update\n\n" + ("complete sentence. " * 400)
+    runtime._commentary = True
+    runtime._commentary_buffer = [commentary]
+    runtime.telegram_connected = True
+    runtime.handoff_builder = SimpleNamespace(transcript=[])
+    runtime.handoff_builder.append_transcript = (
+        lambda role, text, source=None: runtime.handoff_builder.transcript.append(
+            (role, text, source)
+        )
+    )
+    delivered = []
+
+    async def _send_long_message(chat_id, text, **kwargs):
+        delivered.append((chat_id, text, kwargs))
+        return 0.1, 2
+
+    runtime.send_long_message = _send_long_message
+
+    await FlexibleAgentRuntime._flush_commentary(runtime, 123)
+
+    assert runtime._commentary_buffer == []
+    assert delivered == [
+        (123, f"💬 {commentary}", {"purpose": "task_commentary"})
+    ]
+    assert runtime.handoff_builder.transcript == [
+        ("commentary", f"💬 {commentary}", "commentary")
+    ]
 
 
 @pytest.mark.asyncio

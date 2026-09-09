@@ -280,7 +280,8 @@ class FlexibleAgentRuntime:
         self._verbose = telegram_stream_policy.get_display_preference(self, "verbose")
         # The same JSON survives sessions, runtime recreation, and host reboot.
         self._think = telegram_stream_policy.get_display_preference(self, "think")
-        # HER persona updates are deliberately independent from think/verbose.
+        # Model-authored commentary is deliberately independent from
+        # provider reasoning and technical progress.
         self._commentary = telegram_stream_policy.get_display_preference(
             self,
             "commentary",
@@ -297,6 +298,7 @@ class FlexibleAgentRuntime:
         self._notify_mode = notification_mode(self)
         self._notify_enabled = self._notify_mode == "on"
         self._think_buffer: list[str] = []
+        self._commentary_buffer: list[str] = []
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
         self._thinking_chars_this_req: int = 0   # CLI thinking token estimation
@@ -5219,7 +5221,7 @@ class FlexibleAgentRuntime:
         commentary_available = bool(getattr(capabilities, "supports_commentary_stream", False))
         return runtime_menu_views.thinking_output_text(
             enabled=self._think,
-            her_backend=self._commentary_available(),
+            her_backend=self._is_her_commentary_backend(),
             reasoning_available=reasoning_available,
             commentary_available=commentary_available,
         )
@@ -5259,12 +5261,19 @@ class FlexibleAgentRuntime:
             reply_markup=self._think_keyboard(),
         )
 
+    def _is_her_commentary_backend(self) -> bool:
+        return canonical_backend_engine(
+            getattr(self.config, "active_backend", "")
+        ) == "her-v2"
+
     def _commentary_available(self) -> bool:
-        return (
-            canonical_backend_engine(
-                getattr(self.config, "active_backend", "")
-            )
-            == "her-v2"
+        backend = getattr(
+            getattr(self, "backend_manager", None), "current_backend", None
+        )
+        capabilities = getattr(backend, "capabilities", None)
+        return bool(
+            getattr(capabilities, "supports_commentary_stream", False)
+            or self._is_her_commentary_backend()
         )
 
     def _set_commentary_enabled(self, enabled: bool) -> None:
@@ -5274,6 +5283,11 @@ class FlexibleAgentRuntime:
             marker.unlink(missing_ok=True)
         else:
             marker.touch()
+            # Visibility changes are a hard boundary: commentary authored
+            # while hidden must never be replayed after a later On selection.
+            buffer = getattr(self, "_commentary_buffer", None)
+            if isinstance(buffer, list):
+                buffer.clear()
         telegram_stream_policy.set_display_preference(
             self,
             "commentary",
@@ -5296,12 +5310,12 @@ class FlexibleAgentRuntime:
     def _commentary_unavailable_text(self) -> str:
         backend = str(getattr(self.config, "active_backend", "unknown") or "unknown")
         return setting_card(
-            "🌿",
-            "HER commentary",
+            "💬",
+            "Model commentary",
             current=f"<b>{html.escape(ui_language.tr('common.unavailable'))}</b>",
             facts=[
                 f"<b>{html.escape(ui_language.tr('common.availability'))}</b> · "
-                f"<code>{html.escape(ui_language.tr('menu.commentary.availability'))}</code>",
+                f"<code>{html.escape(ui_language.tr('menu.commentary.capability_required'))}</code>",
                 f"<b>{html.escape(ui_language.tr('menu.commentary.current_backend'))}</b> · "
                 f"<code>{html.escape(backend)}</code>",
             ],
@@ -5312,8 +5326,10 @@ class FlexibleAgentRuntime:
     def _commentary_menu_text(self) -> str:
         backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
         effort = str(getattr(backend, "effort", "unknown") or "unknown").upper()
-        return runtime_menu_views.her_commentary_text(
+        return runtime_menu_views.commentary_text(
             enabled=self._commentary,
+            backend=str(getattr(self.config, "active_backend", "unknown") or "unknown"),
+            her_backend=self._is_her_commentary_backend(),
             effort=effort,
         )
 
@@ -9489,11 +9505,13 @@ class FlexibleAgentRuntime:
 
     def _make_stream_callback(self, event_queue: asyncio.Queue | None = None,
                               think_buffer: list | None = None,
+                              commentary_buffer: list | None = None,
                               audit_collector: AuditTelemetryCollector | None = None):
         """Present explicit owners; retain legacy kind routing for old adapters."""
         from adapters.stream_events import (
             DELIVERY_REASONING,
             DELIVERY_TECHNICAL,
+            DELIVERY_USER_COMMENTARY,
             KIND_COMMENTARY,
             KIND_ERROR,
             KIND_FILE_EDIT,
@@ -9556,18 +9574,25 @@ class FlexibleAgentRuntime:
                     with suppress(Exception):
                         value = detail.split("=", 1)[1].split(";", 1)[0]
                         self._thinking_chars_this_req += max(0, int(value))
-            if think_buffer is not None and bool(getattr(self, "_think", True)):
-                if not explicit_owner and event.kind == KIND_COMMENTARY:
-                    # Commentary is already a complete model-authored update.
-                    # Preserve it verbatim instead of folding it into the short
-                    # provider-reasoning chunk accumulator.
-                    if self._openrouter_think_chunk:
-                        think_buffer.append(self._openrouter_think_chunk)
-                        self._openrouter_think_chunk = ""
+            if (
+                event.kind == KIND_COMMENTARY
+                and owner == DELIVERY_USER_COMMENTARY
+                and canonical_backend_engine(_engine) != "her-v2"
+            ):
+                # Codex and other capability-bearing adapters identify
+                # commentary by kind (and may also declare its delivery
+                # owner). It belongs exclusively to /commentary; never infer
+                # that model-authored prose is provider reasoning. HER has a
+                # richer event router and is deliberately left to that owner.
+                if (
+                    commentary_buffer is not None
+                    and bool(getattr(self, "_commentary", True))
+                ):
                     commentary = (event.summary or "").strip()
                     if commentary:
-                        think_buffer.append(commentary)
-                    return
+                        commentary_buffer.append(commentary)
+                return
+            if think_buffer is not None and bool(getattr(self, "_think", True)):
                 if owner != DELIVERY_REASONING or event.kind != KIND_THINKING:
                     return
                 # Provider deltas already encode their own word boundaries.
@@ -9666,16 +9691,60 @@ class FlexibleAgentRuntime:
             else:
                 self.telegram_logger.warning(f"Failed to send thinking message: {e}")
 
+    async def _flush_commentary(self, chat_id: int):
+        """Deliver model-authored commentary without recasting it as thought."""
+
+        buffer = getattr(self, "_commentary_buffer", None)
+        if not isinstance(buffer, list):
+            return
+        if not bool(getattr(self, "_commentary", True)):
+            buffer.clear()
+            return
+        if not buffer:
+            return
+        lines = buffer[:]
+        buffer.clear()
+        text = "\n".join(lines)
+        self.handoff_builder.append_transcript(
+            "commentary", f"💬 {text}", "commentary"
+        )
+        if not self.telegram_connected:
+            return
+        raw = f"💬 {text}"
+        rendered = _md_to_html(raw)
+        if len(rendered) > 3_500:
+            await self.send_long_message(
+                chat_id,
+                raw,
+                purpose="task_commentary",
+            )
+            return
+        try:
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=rendered,
+                parse_mode="HTML",
+                disable_notification=disable_notification(
+                    self, purpose="task_commentary"
+                ),
+            )
+        except Exception as exc:
+            self.telegram_logger.warning(
+                f"Failed to send commentary message: {exc}"
+            )
+
     async def _thinking_flush_loop(self, chat_id: int, stop_event: asyncio.Event):
-        """Periodically flush accumulated thinking traces every 6 seconds."""
+        """Periodically flush the independent reasoning/commentary channels."""
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=6)
                 await self._flush_thinking(chat_id)
+                await self._flush_commentary(chat_id)
                 break  # stop_event was set
             except asyncio.TimeoutError:
                 pass  # 6s elapsed — flush
             await self._flush_thinking(chat_id)
+            await self._flush_commentary(chat_id)
 
     def _wrapper_enabled(self) -> bool:
         return runtime_wrapper.wrapper_enabled(self)

@@ -353,7 +353,7 @@ def thinking_output_text(
         else (
             _fact(
                 "menu.think.model_commentary_label",
-                f"<code>{html.escape(_tr('common.available' if commentary_available else 'common.not_exposed'))}</code>",
+                f"<code>{html.escape(_tr('menu.think.owned_commentary') if commentary_available else _tr('common.not_exposed'))}</code>",
             )
         )
     )
@@ -424,6 +424,45 @@ def her_commentary_text(*, enabled: bool, effort: str) -> str:
             _tr("menu.commentary.enabled")
             if enabled
             else _tr("menu.commentary.disabled")
+        ),
+        action=_tr("menu.commentary.action"),
+    )
+
+
+def commentary_text(
+    *,
+    enabled: bool,
+    backend: str,
+    her_backend: bool,
+    effort: str,
+) -> str:
+    """Render the capability-owned commentary control for any backend."""
+
+    if her_backend:
+        return her_commentary_text(enabled=enabled, effort=effort)
+    return setting_card(
+        "💬",
+        "Model commentary",
+        current=f"<b>{status_label(enabled)}</b>",
+        facts=[
+            _fact(
+                "menu.commentary.current_backend",
+                f"<code>{html.escape(backend)}</code>",
+            ),
+            _fact(
+                "menu.commentary.delivery_label",
+                html.escape(_tr("menu.commentary.model_delivery")),
+            ),
+            _fact(
+                "menu.commentary.independent_label",
+                html.escape(_tr("menu.commentary.independent")),
+            ),
+            _fact("common.saved", html.escape(_tr("menu.setting.workspace"))),
+        ],
+        consequence=(
+            _tr("menu.commentary.model_enabled")
+            if enabled
+            else _tr("menu.commentary.model_disabled")
         ),
         action=_tr("menu.commentary.action"),
     )

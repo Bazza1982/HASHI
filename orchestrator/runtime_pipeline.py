@@ -1750,6 +1750,13 @@ async def cleanup_interactive_feedback(
             runtime._flush_thinking(item.chat_id),
             label="thinking-flush-final",
         )
+        flush_commentary = getattr(runtime, "_flush_commentary", None)
+        if callable(flush_commentary):
+            await _run_interactive_feedback_cleanup_step(
+                runtime,
+                flush_commentary(item.chat_id),
+                label="commentary-flush-final",
+            )
 
     if verbose_display_state is None:
         active_placeholder = placeholder
@@ -2663,6 +2670,8 @@ async def setup_interactive_feedback(
         runtime._think = bool(getattr(runtime, "_think", False))
         if not isinstance(getattr(runtime, "_think_buffer", None), list):
             runtime._think_buffer = []
+        if not isinstance(getattr(runtime, "_commentary_buffer", None), list):
+            runtime._commentary_buffer = []
         if not isinstance(getattr(runtime, "_openrouter_think_chunk", None), str):
             runtime._openrouter_think_chunk = ""
         if not hasattr(runtime, "_last_openrouter_think_snippet"):
@@ -2676,12 +2685,14 @@ async def setup_interactive_feedback(
             )
 
         runtime._think_buffer.clear()
+        runtime._commentary_buffer.clear()
         runtime._openrouter_think_chunk = ""
         runtime._last_openrouter_think_snippet = None
         stream_queue = asyncio.Queue(maxsize=200)
         stream_callback = runtime._make_stream_callback(
             event_queue=stream_queue,
             think_buffer=runtime._think_buffer,
+            commentary_buffer=runtime._commentary_buffer,
             audit_collector=None if is_her_backend else audit_collector,
         )
         verbose_display_state = VerboseDisplayState(
