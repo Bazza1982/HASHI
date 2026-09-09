@@ -26,16 +26,11 @@ totals without inventing a delta. Review legacy event matching before real
 backfill; merging the tool repairs neither history nor live renderers. See the
 [cost contract](METER_COST_DISPLAY_PLAN.md).
 
-Portable Windows derives Python and its standard dependency lock from shared
-runtime policy. Its source payload includes `__main__.py`,
-`runtime-entry.json`, `pyproject.toml`, the selected lock and full
-protected-Core manifest. The Function qualification/execution profile is a
-byte-verified runtime input, so a bundle that omits it fails closed before
-publication. The adapter registry covers the whole shared catalogue, while
-Function qualification resolves the adapter subset physically present in a
-distribution; the bundled interpreter checks both runtime and Function
-contracts. Releases require an exact clean commit/tree. A source checkpoint
-proves no bundle, install, or adoption; see the
+Portable Windows inherits shared runtime policy. Tracked inputs include
+`__main__.py`, `runtime-entry.json`, `pyproject.toml`, the lock and protected-Core
+manifest. The builder byte-verifies the Function profile; bundled Python validates
+runtime and the packaged adapter subset against the shared registry. Release needs
+a clean commit/tree; source alone is not a bundle, install or adoption. See the
 [builder](../packaging/portable_windows/README.md).
 
 ## Engineering rules and authority
