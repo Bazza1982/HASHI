@@ -105,6 +105,8 @@ The built-in TUI completes entered slash-command prefixes from its displayed
 canonical matches and rejects unknown slash commands locally. Its sent/received
 sounds and language/layout preferences are local Connector presentation state;
 they do not alter a HASHI Conversation Session.
+Agent mode shown in the TUI comes from live Worker metadata and has no
+Connector-side default.
 
 Distinguish Engine from Model Provider and HASHI Conversation from Engine
 Session. Frontend history is a projection, not another authoritative archive.

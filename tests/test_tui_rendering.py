@@ -151,6 +151,25 @@ async def test_tui_compact_design_has_bilingual_help_and_adjustable_layout(tmp_p
         footer.update_state("Rika", "codex-cli", True, "flex", instance_id="HASHI1")
         assert "HASHI1 · Rika · codex-cli · Flex · API connected" in footer.render().plain
 
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(
+            {
+                "name": "akane",
+                "display_name": "小茜",
+                "active_backend": "codex-cli",
+                "mode": "fixed",
+            }
+        )
+        assert app._agent_mode == "fixed"
+        app._select_agent(
+            {
+                "name": "akane",
+                "display_name": "小茜",
+                "active_backend": "codex-cli",
+            }
+        )
+        assert app._agent_mode == ""
+
 
 async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")

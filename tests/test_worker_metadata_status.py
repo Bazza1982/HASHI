@@ -379,6 +379,21 @@ async def _close_stack(stack, process_task: asyncio.Task | None = None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_projection_reports_actual_agent_mode(tmp_path):
+    stack = await _build_stack(tmp_path, outcome="success")
+    try:
+        stack.runtime.backend_manager.agent_mode = "fixed"
+        await stack.host.emit_metadata()
+        projection = await _wait_for_projection(
+            stack,
+            lambda row: row.get("mode") == "fixed",
+        )
+        assert projection["mode"] == "fixed"
+    finally:
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
 async def test_real_queue_start_updates_worker_list_projection(tmp_path, monkeypatch):
     _install_lifecycle_boundaries(monkeypatch)
     stack = await _build_stack(tmp_path, outcome="success")

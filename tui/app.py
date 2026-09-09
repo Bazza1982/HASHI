@@ -828,7 +828,7 @@ class HASHITuiApp(App):
         self._chat_targets = [self.current_agent] if self.current_agent else []
         self.current_agent_display = agent_data.get("display_name", self.current_agent)
         self.current_backend = agent_data.get("active_backend", agent_data.get("engine", ""))
-        self._agent_mode = agent_data.get("mode", "flex")
+        self._agent_mode = str(agent_data.get("mode") or "").strip().lower()
         client.reset_offset(self.current_agent)
         chat = self.query_one("#chat-history", ChatHistory)
         emoji = agent_data.get("emoji", "")

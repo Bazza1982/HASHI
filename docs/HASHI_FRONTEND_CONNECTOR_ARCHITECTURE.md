@@ -95,6 +95,8 @@ Current implementation boundary:
   unknown slash command is rejected locally and never becomes a model prompt;
 - short sent/received sounds are a local, persisted TUI preference. Windows uses
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
+- Agent mode labels come from live Worker metadata; the TUI omits the label when
+  an older generation has not published it instead of guessing a mode;
 - its cross-instance path proxies only a small named operation set through
   authenticated Hashi Remote peers; and
 - it does not yet implement the complete Persistent Session API v1 multi-
