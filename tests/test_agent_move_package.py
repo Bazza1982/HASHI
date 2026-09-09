@@ -519,3 +519,40 @@ def test_snapshot_fingerprint_is_stable_and_detects_sqlite_changes(tmp_path):
         third,
         secret_passphrase="shared-secret",
     ) != first_fingerprint
+
+
+def test_snapshot_fingerprint_excludes_append_only_slash_audit_but_packages_it(
+    tmp_path,
+):
+    root = _source_root(tmp_path)
+    audit_path = root / "workspaces" / "zelda" / "slash_command_audit.jsonl"
+    audit_path.write_text('{"command":"move","phase":"prepare"}\n', encoding="utf-8")
+    first = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "audit-first.hashi-agent",
+    )
+    first_fingerprint = archive_snapshot_fingerprint(first)
+    assert "workspace/slash_command_audit.jsonl" in first.names
+
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"command":"move","phase":"confirm"}\n')
+    second = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "audit-second.hashi-agent",
+    )
+
+    assert "workspace/slash_command_audit.jsonl" in second.names
+    assert archive_snapshot_fingerprint(second) == first_fingerprint
+
+    (root / "workspaces" / "zelda" / "memory.md").write_text(
+        "real durable change",
+        encoding="utf-8",
+    )
+    third = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "audit-third.hashi-agent",
+    )
+    assert archive_snapshot_fingerprint(third) != first_fingerprint

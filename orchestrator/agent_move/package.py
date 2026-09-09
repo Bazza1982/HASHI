@@ -113,6 +113,12 @@ _SKIP_SUFFIXES = {
     ".sqlite-wal",
 }
 _SECRET_FILE_SUFFIXES = {".key", ".p12", ".pem", ".pfx"}
+# Packaging and freshness are deliberately separate policies.  The append-only
+# command audit remains portable evidence in the archive, but /move's own
+# prepare/confirm audit append must not invalidate the staged source snapshot.
+_FRESHNESS_EXCLUDED_WORKSPACE_PATHS = frozenset(
+    {"slash_command_audit.jsonl"}
+)
 _WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -685,10 +691,13 @@ def archive_snapshot_fingerprint(
 ) -> str:
     """Return a stable digest of the durable source state in an archive.
 
-    Creation timestamps, randomized encryption, and exclusion diagnostics are
-    intentionally omitted. File contents, portable modes, Agent configuration,
-    schedules, access requirements, and Agent-owned credential values remain
-    covered so a staged move cannot silently cut over from a stale snapshot.
+    Creation timestamps, randomized encryption, exclusion diagnostics, and the
+    append-only slash-command audit are intentionally omitted.  The audit file
+    remains in the package; it alone is excluded from freshness because the
+    move confirmation callback appends its own record. File contents, portable
+    modes, Agent configuration, schedules, access requirements, and Agent-owned
+    credential values remain covered so a staged move cannot silently cut over
+    from a stale snapshot.
     """
 
     stable_control = {
@@ -702,15 +711,23 @@ def archive_snapshot_fingerprint(
     file_checksums = {
         name: digest
         for name, digest in package.checksums.items()
-        if name in stable_control or name.startswith("workspace/")
+        if name in stable_control
+        or (
+            name.startswith("workspace/")
+            and name[len("workspace/") :].casefold()
+            not in _FRESHNESS_EXCLUDED_WORKSPACE_PATHS
+        )
     }
     portable_files = []
     for item in package.workspace_metadata.get("files", []) or []:
         if not isinstance(item, Mapping):
             continue
+        relative_path = str(item.get("path") or "")
+        if relative_path.casefold() in _FRESHNESS_EXCLUDED_WORKSPACE_PATHS:
+            continue
         portable_files.append(
             {
-                "path": str(item.get("path") or ""),
+                "path": relative_path,
                 "mode": int(item.get("mode") or 0),
                 "sqlite_snapshot": bool(item.get("sqlite_snapshot")),
                 "materialized_symlink": bool(item.get("materialized_symlink")),

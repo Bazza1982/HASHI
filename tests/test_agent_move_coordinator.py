@@ -445,6 +445,37 @@ def test_confirm_rejects_stale_source_snapshot_and_rolls_back_target(
     assert source_move_guard_state(root, "zelda") is None
 
 
+def test_confirm_ignores_append_only_slash_audit_written_by_callback(
+    tmp_path, monkeypatch
+):
+    root = _source(tmp_path)
+    audit = root / "workspaces" / "zelda" / "slash_command_audit.jsonl"
+    audit.write_text('{"event":"command_started"}\n', encoding="utf-8")
+    receiver = _Receiver()
+    _install_receiver(monkeypatch, receiver)
+    prepared = coordinator.prepare_outbound_move(
+        root,
+        {"hashi2": {}},
+        "zelda",
+        "hashi2",
+        source_instance="HASHI1",
+    )
+
+    with audit.open("a", encoding="utf-8") as handle:
+        handle.write('{"event":"confirmation_callback"}\n')
+
+    result = coordinator.confirm_outbound_move(
+        root,
+        {"hashi2": {}},
+        prepared["package_id"],
+    )
+
+    assert result["status"] == "moved_pending_reboots"
+    assert [call[0] for call in receiver.calls] == ["stage", "commit", "activate"]
+    moved = json.loads((root / "agents.json").read_text())["agents"][0]
+    assert moved["is_active"] is False
+
+
 @pytest.mark.skipif(
     os.name == "nt",
     reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
