@@ -31,9 +31,11 @@ runtime policy. Its source payload includes `__main__.py`,
 `runtime-entry.json`, `pyproject.toml`, the selected lock and full
 protected-Core manifest. The Function qualification/execution profile is a
 byte-verified runtime input, so a bundle that omits it fails closed before
-publication. Releases require an exact clean commit/tree plus the shared
-runtime check on the bundled interpreter. A source checkpoint proves no bundle,
-install, or adoption; see the
+publication. The adapter registry covers the whole shared catalogue, while
+Function qualification resolves the adapter subset physically present in a
+distribution; the bundled interpreter checks both runtime and Function
+contracts. Releases require an exact clean commit/tree. A source checkpoint
+proves no bundle, install, or adoption; see the
 [builder](../packaging/portable_windows/README.md).
 
 ## Engineering rules and authority

@@ -236,8 +236,15 @@ def validate_function_contract(
             "KIND_ACKNOWLEDGEMENT='acknowledgement'"
         )
     resolver = getattr(backend_registry, "get_backend_class", None)
+    registered_engines = getattr(backend_registry, "registered_backend_engines", None)
+    packaged_engines = getattr(backend_registry, "packaged_backend_engines", None)
     supported_adapter = getattr(her_v2, "HERv2Adapter", None)
-    if not callable(resolver) or supported_adapter is None:
+    if (
+        not callable(resolver)
+        or not callable(registered_engines)
+        or not callable(packaged_engines)
+        or supported_adapter is None
+    ):
         raise FunctionContractError(
             "Function contract failed: HER v2 registry contract unavailable"
         )
@@ -247,8 +254,20 @@ def validate_function_contract(
         )
     base_backend = getattr(adapter_base, "BaseBackend", None)
     engines = getattr(backend_catalog, "BACKEND_REGISTRY", {})
+    catalog_engine_ids = frozenset(str(engine) for engine in engines)
+    registered_engine_ids = frozenset(str(engine) for engine in registered_engines())
+    if registered_engine_ids != catalog_engine_ids:
+        raise FunctionContractError(
+            "Function contract failed: backend adapter registry differs from the "
+            "shared backend catalogue"
+        )
+    packaged_engine_ids = frozenset(str(engine) for engine in packaged_engines())
+    if not packaged_engine_ids <= registered_engine_ids:
+        raise FunctionContractError(
+            "Function contract failed: packaged backend adapters are not registered"
+        )
     invalid_adapters: list[str] = []
-    for engine in engines:
+    for engine in sorted(packaged_engine_ids):
         try:
             adapter_class = resolver(engine)
         except Exception as exc:

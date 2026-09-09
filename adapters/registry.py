@@ -1,53 +1,52 @@
 """Backend adapter registry — maps engine names to adapter classes."""
 
+from __future__ import annotations
+
+import importlib
+import importlib.util
+
 from orchestrator.flexible_backend_registry import canonical_backend_engine
 
 
+_BACKEND_ADAPTER_TARGETS: dict[str, tuple[str, str]] = {
+    "gemini-cli": ("adapters.gemini_cli", "GeminiCLIAdapter"),
+    "openrouter-api": ("adapters.openrouter_api", "OpenRouterAdapter"),
+    "deepseek-api": ("adapters.deepseek_api", "DeepSeekAdapter"),
+    "openai-compatible-api": (
+        "adapters.openai_compatible_api",
+        "OpenAICompatibleAdapter",
+    ),
+    "claude-cli": ("adapters.claude_cli", "ClaudeCLIAdapter"),
+    "codex-cli": ("adapters.codex_cli", "CodexCLIAdapter"),
+    "her-v2": ("adapters.her_v2", "HERv2Adapter"),
+    "grok-cli": ("adapters.grok_cli", "GrokCLIAdapter"),
+    "ollama-api": ("adapters.ollama_api", "OllamaAdapter"),
+    "xai-api": ("adapters.xai_api", "XaiApiAdapter"),
+    "hashi-api": ("adapters.hashi_api", "HashiApiAdapter"),
+}
+
+
+def registered_backend_engines() -> frozenset[str]:
+    """Return every canonical Engine ID owned by the adapter registry."""
+
+    return frozenset(_BACKEND_ADAPTER_TARGETS)
+
+
+def packaged_backend_engines() -> frozenset[str]:
+    """Return adapters physically present in this source distribution."""
+
+    return frozenset(
+        engine
+        for engine, (module_name, _class_name) in _BACKEND_ADAPTER_TARGETS.items()
+        if importlib.util.find_spec(module_name) is not None
+    )
+
+
 def get_backend_class(engine_name: str):
-    engine_name = canonical_backend_engine(engine_name)
-    if engine_name == "gemini-cli":
-        from adapters.gemini_cli import GeminiCLIAdapter
-
-        return GeminiCLIAdapter
-    elif engine_name == "openrouter-api":
-        from adapters.openrouter_api import OpenRouterAdapter
-
-        return OpenRouterAdapter
-    elif engine_name == "deepseek-api":
-        from adapters.deepseek_api import DeepSeekAdapter
-
-        return DeepSeekAdapter
-    elif engine_name == "openai-compatible-api":
-        from adapters.openai_compatible_api import OpenAICompatibleAdapter
-
-        return OpenAICompatibleAdapter
-    elif engine_name == "claude-cli":
-        from adapters.claude_cli import ClaudeCLIAdapter
-
-        return ClaudeCLIAdapter
-    elif engine_name == "codex-cli":
-        from adapters.codex_cli import CodexCLIAdapter
-
-        return CodexCLIAdapter
-    elif engine_name == "her-v2":
-        from adapters.her_v2 import HERv2Adapter
-
-        return HERv2Adapter
-    elif engine_name == "grok-cli":
-        from adapters.grok_cli import GrokCLIAdapter
-
-        return GrokCLIAdapter
-    elif engine_name == "ollama-api":
-        from adapters.ollama_api import OllamaAdapter
-
-        return OllamaAdapter
-    elif engine_name == "xai-api":
-        from adapters.xai_api import XaiApiAdapter
-
-        return XaiApiAdapter
-    elif engine_name == "hashi-api":
-        from adapters.hashi_api import HashiApiAdapter
-
-        return HashiApiAdapter
-    else:
-        raise ValueError(f"Unknown engine: {engine_name}")
+    engine = canonical_backend_engine(engine_name)
+    try:
+        module_name, class_name = _BACKEND_ADAPTER_TARGETS[engine]
+    except KeyError as exc:
+        raise ValueError(f"Unknown engine: {engine}") from exc
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)

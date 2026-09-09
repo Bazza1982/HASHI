@@ -126,8 +126,13 @@ the standard dependency lock named by `[tool.hashi.runtime]`, and every
 protected Core source required to recompute the runtime fingerprint. The
 Function qualification/execution profile in `runtime-entry.json` is copied
 byte-for-byte and is a required runtime-contract input. The bundled Python
-executes the shared runtime-contract checker after dependencies are installed
-and before the image can be published.
+executes both the shared runtime-contract checker and the shared Function
+contract after dependencies are installed and before the image can be
+published. The adapter registry must still cover the complete shared backend
+catalogue, while the Function contract resolves only adapter modules physically
+present in the selected distribution. A full source checkout therefore checks
+every adapter; this intentionally pruned HER-only image checks every adapter it
+ships without requiring excluded CLI Engines.
 Untracked development state, logs, local secrets, project-private workflows,
 instance-local Skills, and generated workflow runs cannot leak into a newly
 built image. The tracked HASHI input must be clean, and its revision is checked

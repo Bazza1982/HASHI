@@ -607,6 +607,26 @@ def validate_bundled_runtime_contract(runtime_python: Path, app_hashi: Path) -> 
         )
 
 
+def validate_bundled_function_contract(runtime_python: Path, app_hashi: Path) -> None:
+    status("validate bundled HASHI Function contract")
+    script = (
+        "import sys; "
+        "sys.path.insert(0, sys.argv[1]); "
+        "from orchestrator.function_contract import validate_function_contract; "
+        "validate_function_contract()"
+    )
+    run(
+        [
+            str(runtime_python / "python.exe"),
+            "-I",
+            "-B",
+            "-c",
+            script,
+            str(app_hashi),
+        ]
+    )
+
+
 def install_piper(
     runtime_python: Path, app_hashi: Path, licenses: Path, cache: Path
 ) -> None:
@@ -1139,6 +1159,7 @@ def build(args: argparse.Namespace) -> Path:
         extract_python(runtime_python, args.cache)
         install_python_dependencies(runtime_python)
         validate_bundled_runtime_contract(runtime_python, app_hashi)
+        validate_bundled_function_contract(runtime_python, app_hashi)
         install_piper(runtime_python, app_hashi, licenses, args.cache)
         install_ffmpeg(runtime_bin, licenses, args.cache)
         install_tesseract(app_hashi, licenses, args.cache, build_temp)

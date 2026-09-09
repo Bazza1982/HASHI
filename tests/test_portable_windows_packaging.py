@@ -132,6 +132,33 @@ def test_bundled_runtime_check_cannot_add_source_bytecode(tmp_path, monkeypatch)
         builder.validate_bundled_runtime_contract(runtime, app_hashi)
 
 
+def test_bundled_function_contract_check_uses_packaged_python(tmp_path, monkeypatch):
+    builder = _load_builder()
+    runtime = tmp_path / "runtime"
+    app_hashi = tmp_path / "app" / "hashi"
+    commands = []
+    monkeypatch.setattr(builder, "run", lambda command: commands.append(command))
+
+    builder.validate_bundled_function_contract(runtime, app_hashi)
+
+    assert commands == [
+        [
+            str(runtime / "python.exe"),
+            "-I",
+            "-B",
+            "-c",
+            (
+                "import sys; "
+                "sys.path.insert(0, sys.argv[1]); "
+                "from orchestrator.function_contract import "
+                "validate_function_contract; "
+                "validate_function_contract()"
+            ),
+            str(app_hashi),
+        ]
+    ]
+
+
 def test_portable_profile_has_one_her_engine_and_configurable_regional_providers(
     tmp_path,
 ):
@@ -593,6 +620,27 @@ def test_builder_copies_and_validates_the_runtime_entry_profile(tmp_path):
     runtime_entry.unlink()
     with pytest.raises(RuntimeError, match=r"runtime-entry\.json"):
         builder.validate_portable_runtime_inputs(destination)
+
+
+def test_pruned_portable_source_passes_the_shared_function_contract(tmp_path):
+    builder = _load_builder()
+    destination = tmp_path / "portable-app"
+    builder.copy_hashi_source(destination)
+    script = (
+        "import sys; "
+        "sys.path.insert(0, sys.argv[1]); "
+        "from orchestrator.function_contract import validate_function_contract; "
+        "validate_function_contract()"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script, str(destination)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_portable_dependency_generation_matches_the_runtime_standard_lock():
