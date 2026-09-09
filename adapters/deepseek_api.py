@@ -14,11 +14,17 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+import httpx
+
 from adapters.openrouter_api import (
     OpenRouterAdapter,
     _APIResult,
+    _annotate_stream_exception,
     _assistant_content_text,
+    _iter_provider_stream_lines,
     _message_structured_data,
+    _provider_request_id,
+    _tool_call_protocol_summary,
 )
 from adapters.stream_events import KIND_THINKING, StreamEvent
 
@@ -157,11 +163,27 @@ class DeepSeekAdapter(OpenRouterAdapter):
         data = response.json()
         choices = data.get("choices") or []
         if not choices:
-            return _APIResult(text="", tool_calls=None, finish_reason="error")
+            return _APIResult(
+                text="",
+                tool_calls=None,
+                finish_reason=None,
+                raw_finish_reason=None,
+                finish_reason_present=False,
+                finish_reason_source="missing",
+                provider_response_id=str(data.get("id") or ""),
+                transport_request_id=_provider_request_id(response),
+                transport_state="complete_response_no_choices",
+            )
 
         choice = choices[0]
         message = choice.get("message") or {}
-        finish_reason = choice.get("finish_reason") or "stop"
+        finish_reason_present = "finish_reason" in choice
+        raw_finish_reason = choice.get("finish_reason")
+        finish_reason = (
+            str(raw_finish_reason).strip() or None
+            if raw_finish_reason is not None
+            else None
+        )
         ai_text = _assistant_content_text(message.get("content"))
         reasoning_content = str(message.get("reasoning_content") or "")
 
@@ -198,6 +220,20 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     completion_tokens=completion_tokens,
                     thinking_tokens=thinking_tokens,
                     structured_data=_message_structured_data(message),
+                    raw_finish_reason=raw_finish_reason,
+                    finish_reason_present=finish_reason_present,
+                    finish_reason_source=(
+                        "provider"
+                        if finish_reason is not None
+                        else (
+                            "provider_null" if finish_reason_present else "missing"
+                        )
+                    ),
+                    provider_response_id=str(data.get("id") or ""),
+                    transport_request_id=_provider_request_id(response),
+                    reasoning_state=(
+                        "available" if reasoning_content else "unavailable"
+                    ),
                 ),
                 reasoning_content,
             ),
@@ -209,13 +245,33 @@ class DeepSeekAdapter(OpenRouterAdapter):
         reasoning_chunks: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
         finish_reason = ""
+        finish_reason_present = False
+        finish_reason_field_seen = False
+        raw_finish_reason = None
         stream_usage: dict = {}
         saw_done = False
+        provider_response_id = ""
+        transport_request_id = ""
+        protocol_state = {
+            "raw_finish_reason_present": False,
+            "raw_finish_reason": None,
+            "finish_reason_source": "missing",
+            "normalized_finish_reason": "incomplete",
+            "provider_response_id": "",
+            "transport_request_id": "",
+            "text_provided": False,
+            "text_length": 0,
+            "reasoning_availability": "unavailable",
+            "reasoning_length": 0,
+            "tool_calls": [],
+        }
 
         async with self.client.stream("POST", _DEEPSEEK_URL, json=payload, headers=headers) as response:
             response.raise_for_status()
+            transport_request_id = _provider_request_id(response)
+            protocol_state["transport_request_id"] = transport_request_id
 
-            async for line in response.aiter_lines():
+            async for line in _iter_provider_stream_lines(response, protocol_state):
                 self._touch_activity()
                 if not line.startswith("data: "):
                     continue
@@ -226,8 +282,16 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
                 try:
                     data = json.loads(data_str)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    error = httpx.RemoteProtocolError(
+                        "provider stream contained invalid JSON data"
+                    )
+                    raise _annotate_stream_exception(error, protocol_state) from exc
+                if not isinstance(data, Mapping):
                     continue
+                if data.get("id"):
+                    provider_response_id = str(data.get("id"))
+                    protocol_state["provider_response_id"] = provider_response_id
 
                 if data.get("usage"):
                     stream_usage = data["usage"]
@@ -238,12 +302,43 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
                 choice = choices[0]
                 delta = choice.get("delta", {})
-                finish_reason = choice.get("finish_reason") or finish_reason
+                if "finish_reason" in choice:
+                    finish_reason_field_seen = True
+                    raw_finish_reason = choice.get("finish_reason")
+                    if raw_finish_reason is not None and str(
+                        raw_finish_reason
+                    ).strip():
+                        finish_reason = str(raw_finish_reason).strip()
+                        finish_reason_present = True
+                    protocol_state.update(
+                        {
+                            "raw_finish_reason_present": bool(
+                                finish_reason_present
+                            ),
+                            "raw_finish_reason": (
+                                finish_reason
+                                if finish_reason_present
+                                else raw_finish_reason
+                            ),
+                            "finish_reason_source": (
+                                "provider"
+                                if finish_reason_present
+                                else "provider_null"
+                            ),
+                            "normalized_finish_reason": (
+                                finish_reason.casefold()
+                                if finish_reason_present
+                                else "missing_finish_reason"
+                            ),
+                        }
+                    )
 
                 # DeepSeek streams thinking in "reasoning_content"
                 reasoning_delta = str(delta.get("reasoning_content") or "")
                 if reasoning_delta:
                     reasoning_chunks.append(reasoning_delta)
+                    protocol_state["reasoning_availability"] = "available"
+                    protocol_state["reasoning_length"] += len(reasoning_delta)
                 if reasoning_delta and on_stream_event:
                     await on_stream_event(
                         StreamEvent(
@@ -256,6 +351,8 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 content = delta.get("content", "")
                 if content:
                     text_chunks.append(content)
+                    protocol_state["text_provided"] = True
+                    protocol_state["text_length"] += len(str(content))
                     if on_stream_event:
                         from adapters.stream_events import KIND_TEXT_DELTA
                         await on_stream_event(
@@ -278,10 +375,12 @@ class DeepSeekAdapter(OpenRouterAdapter):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
+                if tool_calls_acc:
+                    protocol_state["tool_calls"] = _tool_call_protocol_summary(
+                        list(tool_calls_acc.values())
+                    )[0]
 
         if not saw_done and not finish_reason:
-            import httpx
-
             raise httpx.RemoteProtocolError(
                 "provider stream ended without a completion marker"
             )
@@ -294,10 +393,34 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 _APIResult(
                     text=full_text,
                     tool_calls=tool_calls,
-                    finish_reason=finish_reason or "stop",
+                    finish_reason=finish_reason or None,
                     prompt_tokens=stream_usage.get("prompt_tokens", 0),
                     completion_tokens=stream_usage.get("completion_tokens", 0),
                     thinking_tokens=comp_details.get("reasoning_tokens", 0),
+                    raw_finish_reason=(
+                        finish_reason if finish_reason_present else raw_finish_reason
+                    ),
+                    finish_reason_present=finish_reason_present,
+                    finish_reason_source=(
+                        "provider"
+                        if finish_reason_present
+                        else (
+                            "provider_null"
+                            if finish_reason_field_seen
+                            else "missing"
+                        )
+                    ),
+                    provider_response_id=provider_response_id,
+                    transport_request_id=transport_request_id,
+                    transport_complete=True,
+                    transport_state=(
+                        "done_marker" if saw_done else "eof_after_finish_reason"
+                    ),
+                    stream_done=saw_done,
+                    stream_eof=not saw_done,
+                    reasoning_state=(
+                        "available" if reasoning_content else "unavailable"
+                    ),
                 ),
                 reasoning_content,
             ),

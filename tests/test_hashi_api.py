@@ -248,6 +248,38 @@ async def test_hashi_api_observes_each_physical_provider_call(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hashi_api_stop_tool_conflict_never_crosses_tool_boundary(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = _MediaFallbackRegistry()
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult(
+            "stop now",
+            [
+                {
+                    "id": "call-conflict",
+                    "type": "function",
+                    "function": {
+                        "name": "media_read",
+                        "arguments": '{"path":"/tmp/file"}',
+                    },
+                }
+            ],
+            "stop",
+        )
+    )
+
+    response = await adapter.generate_response("hello", "request-conflict")
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_FINISH_REASON_CONFLICT"
+    assert response.tool_call_count == 0
+    assert adapter._call_api_once.await_count == 1
+    call = response.stream_metadata["meter"]["provider_calls"][0]
+    assert call["decision"] == "protocol_conflict"
+    assert call["tool_calls"][0]["id"] == "call-conflict"
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_does_not_swallow_or_retry_accounting_failure(tmp_path):
     adapter = _adapter(tmp_path)
     adapter._call_api_once = AsyncMock(

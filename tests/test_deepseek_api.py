@@ -205,6 +205,81 @@ async def test_deepseek_non_stream_captures_prompt_cache_usage(tmp_path):
     assert result.prompt_cache_miss_tokens == 20
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("choice_fields", "expected_source"),
+    [({}, "missing"), ({"finish_reason": None}, "provider_null")],
+)
+async def test_deepseek_non_stream_preserves_missing_finish_reason(
+    tmp_path,
+    choice_fields,
+    expected_source,
+):
+    adapter = _adapter(tmp_path)
+
+    class _Response:
+        headers = {"x-request-id": "wire-response-1"}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "id": "completion-1",
+                "choices": [
+                    {
+                        "message": {"content": "possibly complete"},
+                        **choice_fields,
+                    }
+                ],
+            }
+
+    adapter.client = SimpleNamespace(post=AsyncMock(return_value=_Response()))
+
+    result = await adapter._call_api_once({}, {}, None)
+
+    assert result.finish_reason is None
+    assert result.raw_finish_reason is None
+    assert result.finish_reason_present is ("finish_reason" in choice_fields)
+    assert result.finish_reason_source == expected_source
+    assert result.provider_response_id == "completion-1"
+    assert result.transport_complete is True
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_done_does_not_fabricate_missing_finish_reason(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    class _StreamResponse:
+        headers = {"x-request-id": "wire-stream-1"}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"id":"completion-stream-1","choices":[{"delta":{"content":"done"}}]}'
+            yield "data: [DONE]"
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *args, **kwargs: _StreamContext())
+
+    result = await adapter._stream_api_once({}, {}, None)
+
+    assert result.text == "done"
+    assert result.finish_reason is None
+    assert result.finish_reason_present is False
+    assert result.finish_reason_source == "missing"
+    assert result.transport_complete is True
+    assert result.stream_done is True
+    assert result.stream_eof is False
+
+
 @pytest.mark.parametrize(
     ("status", "code", "retryable"),
     [
@@ -499,19 +574,21 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
     provider_calls = response.stream_metadata["meter"]["provider_calls"]
-    accounting_fields = {
-        "attempt",
-        "retry_count",
-        "recovery_kind",
-        "status",
-        "provider_request_id",
-        "provider_call_latency_ms",
+    usage_fields = {
+        "input",
+        "output",
+        "thinking",
+        "token_source",
+        "thinking_in_output",
+        "cost_usd",
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
     }
     assert [
         {
             key: value
             for key, value in call.items()
-            if key not in accounting_fields
+            if key in usage_fields
         }
         for call in provider_calls
     ] == [
@@ -546,6 +623,193 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
         "completed",
     ]
     assert len({call["provider_request_id"] for call in provider_calls}) == 2
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_with_tool_calls_is_audited_conflict_without_side_effect(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+    tool_calls = [
+        {
+            "id": "call_conflict",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path": "/tmp"}',
+            },
+        }
+    ]
+    provider_calls = 0
+
+    async def fake_call(payload, headers, on_stream_event):
+        nonlocal provider_calls
+        provider_calls += 1
+        return _APIResult(
+            text="I am stopping now.",
+            tool_calls=tool_calls,
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-stop-conflict")
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_FINISH_REASON_CONFLICT"
+    assert response.error_retryable is False
+    assert response.text == "I am stopping now."
+    assert response.tool_call_count == 0
+    assert adapter.tool_registry.calls == []
+    assert provider_calls == 1
+    assert observed[0]["raw_finish_reason"] == "stop"
+    assert observed[0]["finish_reason_source"] == "provider"
+    assert observed[0]["decision"] == "protocol_conflict"
+    assert observed[0]["decision_reason"] == "stop_with_tool_calls"
+    assert observed[0]["tool_calls"] == [
+        {
+            "id": "call_conflict",
+            "name": "file_list",
+            "complete": True,
+            "arguments_state": "valid_object",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_missing_finish_reason_is_unknown_failure_not_natural_stop(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+
+    async def fake_call(payload, headers, on_stream_event):
+        return _APIResult(
+            text="answer without a terminal field",
+            tool_calls=None,
+            finish_reason=None,
+            finish_reason_present=False,
+            raw_finish_reason=None,
+            finish_reason_source="missing",
+        )
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("answer", "req-missing-finish")
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_MISSING_FINISH_REASON"
+    assert response.error_retryable is False
+    assert response.stop_reason == "missing_finish_reason"
+    assert observed[0]["raw_finish_reason_present"] is False
+    assert observed[0]["raw_finish_reason"] is None
+    assert observed[0]["normalized_finish_reason"] == "missing_finish_reason"
+    assert observed[0]["decision"] == "reject_missing_finish_reason"
+
+
+@pytest.mark.asyncio
+async def test_truncation_never_executes_accumulated_tool_calls(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    tool_calls = [
+        {
+            "id": "call_truncated",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path": "/tmp"}',
+            },
+        }
+    ]
+
+    async def fake_call(payload, headers, on_stream_event):
+        return _APIResult("partial", tool_calls, "length")
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-length")
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_OUTPUT_TRUNCATED"
+    assert response.stop_reason == "length"
+    assert response.tool_call_count == 0
+    assert adapter.tool_registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_incomplete_tool_arguments_fail_before_any_tool_side_effect(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+    incomplete = [
+        {
+            "id": "call_partial",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path":',
+            },
+        }
+    ]
+
+    async def fake_call(payload, headers, on_stream_event):
+        return _APIResult("", incomplete, "tool_calls")
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-partial-tool")
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_INVALID_TOOL_CALLS"
+    assert response.tool_call_count == 0
+    assert adapter.tool_registry.calls == []
+    assert observed[0]["decision"] == "reject_invalid_tool_calls"
+    assert observed[0]["tool_calls"][0]["complete"] is False
+    assert observed[0]["tool_calls"][0]["arguments_state"] == "invalid_json"
+
+
+@pytest.mark.asyncio
+async def test_model_text_claiming_stop_does_not_override_valid_tool_signal(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    tool_calls = [
+        {
+            "id": "call_structured",
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "arguments": '{"path": "/tmp"}',
+            },
+        }
+    ]
+    replies = iter(
+        [
+            _APIResult("I must stop.", tool_calls, "tool_calls"),
+            _APIResult("finished", None, "stop"),
+        ]
+    )
+
+    async def fake_call(payload, headers, on_stream_event):
+        return next(replies)
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-structured-wins")
+
+    assert response.is_success is True
+    assert response.text == "finished"
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/tmp"}, "call_structured")
+    ]
 
 
 @pytest.mark.asyncio
@@ -822,3 +1086,104 @@ async def test_deepseek_stream_waits_for_reasoning_capture_before_returning(tmp_
         ("thinking", "reason first"),
         ("text_delta", "result text"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_audits_partial_protocol_before_return(tmp_path):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+
+    class _StreamResponse:
+        headers = {"x-request-id": "wire-partial-1"}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield (
+                'data: {"id":"completion-partial-1","choices":['
+                '{"delta":{"content":"partial"},"finish_reason":null}]}'
+            )
+            raise httpx.RemoteProtocolError("wire ended")
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *args, **kwargs: _StreamContext())
+
+    async def capture(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "answer",
+        "req-partial-protocol",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_INCOMPLETE_STREAM"
+    assert len(observed) == 1
+    assert observed[0]["status"] == "failed_after_partial_response"
+    assert observed[0]["provider_response_id"] == "completion-partial-1"
+    assert observed[0]["transport_request_id"] == "wire-partial-1"
+    assert observed[0]["raw_finish_reason_present"] is False
+    assert observed[0]["finish_reason_source"] == "provider_null"
+    assert observed[0]["text_length"] == 7
+    assert observed[0]["transport_complete"] is False
+    assert observed[0]["stream_truncated"] is True
+    assert observed[0]["decision"] == "return_provider_failure"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_audits_observed_tool_fragment_without_execution(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+
+    class _StreamResponse:
+        headers = {"x-request-id": "wire-cancelled-1"}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield (
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+                '"id":"call-cancelled","type":"function","function":'
+                '{"name":"file_list","arguments":"{\\"path\\":"}}]}}]}'
+            )
+            raise asyncio.CancelledError
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *args, **kwargs: _StreamContext())
+
+    async def capture(_event):
+        return None
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.generate_response(
+            "inspect",
+            "req-cancelled-protocol",
+            on_stream_event=capture,
+        )
+
+    assert adapter.tool_registry.calls == []
+    assert len(observed) == 1
+    assert observed[0]["status"] == "cancelled"
+    assert observed[0]["decision"] == "cancel"
+    assert observed[0]["transport_state"] == "cancelled"
+    assert observed[0]["tool_calls"][0]["id"] == "call-cancelled"
+    assert observed[0]["tool_calls"][0]["complete"] is False

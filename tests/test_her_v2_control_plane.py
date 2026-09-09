@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import pytest
 
 from adapters.her_v2 import HERv2Adapter
 from adapters.her_v2_provider import HashiStageProvider
+from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
 from orchestrator.her_v2.session_store import HerSessionStore, HerSessionStoreError
 
@@ -829,8 +831,13 @@ def test_physical_call_observer_writes_immediately_and_final_response_dedupes(
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     turn = _accept(coordinator, "turn-physical", "Meter the wire request")
     adapter_surface = SimpleNamespace(_session_coordinator=coordinator)
+    audit_path = tmp_path / "logs" / "her_v2_audit.jsonl"
     provider = HashiStageProvider(
         backend_manager=object(),
+        audit_log=DurableAuditLog(
+            primary_path=audit_path,
+            fallback_path=tmp_path / "logs" / "her_v2_audit.fallback.jsonl",
+        ),
         usage_observer=HERv2Adapter._fixed_provider_usage_observer(
             adapter_surface,
             accepted=turn,
@@ -870,6 +877,27 @@ def test_physical_call_observer_writes_immediately_and_final_response_dedupes(
         "retry_count": 0,
         "recovery_kind": "none",
         "status": "completed",
+        "call_serial": 1,
+        "raw_finish_reason_present": True,
+        "raw_finish_reason": "tool_calls",
+        "normalized_finish_reason": "tool_calls",
+        "finish_reason_source": "provider",
+        "transport_complete": True,
+        "transport_state": "done_marker",
+        "stream_done": True,
+        "stream_eof": False,
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "name": "file_read",
+                "complete": True,
+                "arguments_state": "valid_object",
+            }
+        ],
+        "reasoning_availability": "unavailable",
+        "decision": "execute_tools",
+        "decision_reason": "complete_structured_tool_calls",
+        "decision_success": False,
     }
 
     backend.provider_call_observer(physical_call)
@@ -878,6 +906,16 @@ def test_physical_call_observer_writes_immediately_and_final_response_dedupes(
     assert coordinator.store.usage_summary(turn.session_id)["total"][
         "provider_requests"
     ] == 1
+    audit_records = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(audit_records) == 1
+    assert audit_records[0]["turn_id"] == "turn-physical"
+    assert audit_records[0]["request_ref"] == "hashi-request:turn-physical"
+    assert audit_records[0]["event"] == "provider_physical_response_decision"
+    assert audit_records[0]["payload"]["raw_finish_reason"] == "tool_calls"
+    assert audit_records[0]["payload"]["decision"] == "execute_tools"
+    assert audit_records[0]["payload"]["tool_calls"][0]["id"] == "call-1"
     provider._record_usage_line_item(
         request_id="hashi-request:turn-physical",
         phase="execution",

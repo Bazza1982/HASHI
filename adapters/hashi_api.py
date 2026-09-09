@@ -38,8 +38,15 @@ from adapters.openrouter_api import (
     _APIResult,
     _assistant_content_text,
     _backend_failure_response,
+    _effective_protocol_parameters,
     _message_structured_data,
+    _provider_request_id,
+    _provider_protocol_error_message,
+    _provider_response_decision,
+    _response_protocol_record,
     _stream_error_exception,
+    _tool_call_protocol_summary,
+    _utc_timestamp,
     _usage_cost_usd,
     _usage_thinking_tokens,
 )
@@ -520,15 +527,31 @@ class HashiApiAdapter(OpenRouterAdapter):
             raise
         choices = data.get("choices") or []
         if not choices:
-            return _APIResult(text="", tool_calls=None, finish_reason="error")
+            return _APIResult(
+                text="",
+                tool_calls=None,
+                finish_reason=None,
+                raw_finish_reason=None,
+                finish_reason_present=False,
+                finish_reason_source="missing",
+                provider_response_id=str(data.get("id") or ""),
+                transport_request_id=_provider_request_id(response),
+                transport_state="complete_response_no_choices",
+            )
 
         choice = choices[0]
         message = choice.get("message") or {}
-        finish_reason = choice.get("finish_reason") or "stop"
+        finish_reason_present = "finish_reason" in choice
+        raw_finish_reason = choice.get("finish_reason")
+        finish_reason = (
+            str(raw_finish_reason).strip() or None
+            if raw_finish_reason is not None
+            else None
+        )
         ai_text = _assistant_content_text(message.get("content"))
+        reasoning_text = str(message.get("reasoning") or "").strip()
 
         if on_stream_event is not None:
-            reasoning_text = str(message.get("reasoning") or "").strip()
             if reasoning_text:
                 await on_stream_event(
                     StreamEvent(
@@ -548,7 +571,18 @@ class HashiApiAdapter(OpenRouterAdapter):
             completion_tokens=usage.get("completion_tokens", 0),
             thinking_tokens=_usage_thinking_tokens(usage),
             cost_usd=_usage_cost_usd(usage),
+            reasoning_content=reasoning_text,
             structured_data=_message_structured_data(message),
+            raw_finish_reason=raw_finish_reason,
+            finish_reason_present=finish_reason_present,
+            finish_reason_source=(
+                "provider"
+                if finish_reason is not None
+                else ("provider_null" if finish_reason_present else "missing")
+            ),
+            provider_response_id=str(data.get("id") or ""),
+            transport_request_id=_provider_request_id(response),
+            reasoning_state=("available" if reasoning_text else "unavailable"),
         )
 
     async def _stream_api_once(
@@ -560,9 +594,14 @@ class HashiApiAdapter(OpenRouterAdapter):
         text_chunks: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
         finish_reason = ""
+        finish_reason_present = False
+        finish_reason_field_seen = False
+        raw_finish_reason = None
         stream_usage: dict = {}
         saw_done = False
         provider_activity_observed = False
+        provider_response_id = ""
+        reasoning_chunks: list[str] = []
         stream_lines: list[str] = []
         request, audit_refs = self._build_audited_request(
             payload,
@@ -618,10 +657,14 @@ class HashiApiAdapter(OpenRouterAdapter):
 
                 try:
                     data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
+                except json.JSONDecodeError as exc:
+                    raise httpx.RemoteProtocolError(
+                        "provider stream contained invalid JSON data"
+                    ) from exc
                 if not isinstance(data, Mapping):
                     continue
+                if data.get("id"):
+                    provider_response_id = str(data.get("id"))
 
                 hashi_event = data.get("hashi")
                 if (
@@ -664,7 +707,14 @@ class HashiApiAdapter(OpenRouterAdapter):
 
                 choice = choices[0]
                 delta = choice.get("delta", {})
-                finish_reason = choice.get("finish_reason") or finish_reason
+                if "finish_reason" in choice:
+                    finish_reason_field_seen = True
+                    raw_finish_reason = choice.get("finish_reason")
+                    if raw_finish_reason is not None and str(
+                        raw_finish_reason
+                    ).strip():
+                        finish_reason = str(raw_finish_reason).strip()
+                        finish_reason_present = True
 
                 content = delta.get("content", "")
                 reasoning_text = str(delta.get("reasoning") or "")
@@ -673,6 +723,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                     provider_activity_observed = True
 
                 if reasoning_text and on_stream_event:
+                    reasoning_chunks.append(reasoning_text)
                     await on_stream_event(
                         StreamEvent(
                             kind=KIND_THINKING,
@@ -680,6 +731,9 @@ class HashiApiAdapter(OpenRouterAdapter):
                             raw_delta=reasoning_text,
                         )
                     )
+
+                elif reasoning_text:
+                    reasoning_chunks.append(reasoning_text)
 
                 if content:
                     text_chunks.append(content)
@@ -709,6 +763,52 @@ class HashiApiAdapter(OpenRouterAdapter):
                     "provider stream ended without a completion marker"
                 )
         except BaseException as exc:
+            tool_summaries, tool_calls_complete = _tool_call_protocol_summary(
+                list(tool_calls_acc.values()) if tool_calls_acc else None
+            )
+            setattr(
+                exc,
+                "hashi_provider_protocol",
+                {
+                    "raw_finish_reason_present": bool(finish_reason_present),
+                    "raw_finish_reason": (
+                        finish_reason if finish_reason_present else raw_finish_reason
+                    ),
+                    "finish_reason_source": (
+                        "provider"
+                        if finish_reason_present
+                        else (
+                            "provider_null"
+                            if finish_reason_field_seen
+                            else "missing"
+                        )
+                    ),
+                    "normalized_finish_reason": (
+                        finish_reason.casefold()
+                        if finish_reason_present
+                        else "incomplete"
+                    ),
+                    "transport_complete": False,
+                    "transport_state": (
+                        "cancelled"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else "stream_interrupted"
+                    ),
+                    "stream_done": saw_done,
+                    "stream_eof": False,
+                    "stream_truncated": True,
+                    "provider_response_id": provider_response_id,
+                    "transport_request_id": _provider_request_id(response),
+                    "text_provided": bool(text_chunks),
+                    "text_length": len("".join(text_chunks)),
+                    "reasoning_availability": (
+                        "available" if reasoning_chunks else "unavailable"
+                    ),
+                    "reasoning_length": len("".join(reasoning_chunks)),
+                    "tool_calls": tool_summaries,
+                    "tool_calls_complete": tool_calls_complete,
+                },
+            )
             caught_error = exc
             raise
         finally:
@@ -747,11 +847,32 @@ class HashiApiAdapter(OpenRouterAdapter):
         return _APIResult(
             text=full_text,
             tool_calls=tool_calls,
-            finish_reason=finish_reason or "stop",
+            finish_reason=finish_reason or None,
             prompt_tokens=stream_usage.get("prompt_tokens", 0),
             completion_tokens=stream_usage.get("completion_tokens", 0),
             thinking_tokens=_usage_thinking_tokens(stream_usage),
             cost_usd=_usage_cost_usd(stream_usage),
+            reasoning_content="".join(reasoning_chunks),
+            raw_finish_reason=(
+                finish_reason if finish_reason_present else raw_finish_reason
+            ),
+            finish_reason_present=finish_reason_present,
+            finish_reason_source=(
+                "provider"
+                if finish_reason_present
+                else ("provider_null" if finish_reason_field_seen else "missing")
+            ),
+            provider_response_id=provider_response_id,
+            transport_request_id=_provider_request_id(response),
+            transport_complete=True,
+            transport_state=(
+                "done_marker" if saw_done else "eof_after_finish_reason"
+            ),
+            stream_done=saw_done,
+            stream_eof=not saw_done,
+            reasoning_state=(
+                "available" if reasoning_chunks else "unavailable"
+            ),
         )
 
     async def generate_response(
@@ -783,6 +904,8 @@ class HashiApiAdapter(OpenRouterAdapter):
         provider_attempt_count = 0
         gateway_session_id: str | None = None
         gateway_transport_calls: list[dict[str, Any]] = []
+        terminal_decision: dict[str, Any] | None = None
+        last_provider_call_record: dict[str, Any] | None = None
 
         try:
             self._touch_activity()
@@ -858,6 +981,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                     )
 
                     provider_call_started = time.perf_counter()
+                    provider_call_started_at = _utc_timestamp()
+                    effective_parameters = _effective_protocol_parameters(payload)
                     provider_recovery_kind = next_provider_recovery_kind
                     try:
                         self._trace(
@@ -886,7 +1011,10 @@ class HashiApiAdapter(OpenRouterAdapter):
                         # No further provider or tool activity is allowed when
                         # the mandatory raw transport log is unavailable.
                         raise
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError as exc:
+                        partial_protocol = dict(
+                            getattr(exc, "hashi_provider_protocol", {}) or {}
+                        )
                         provider_calls.append(
                             self._provider_call_record(
                                 request_id=request_id,
@@ -909,11 +1037,34 @@ class HashiApiAdapter(OpenRouterAdapter):
                                     "retry_count": 0,
                                     "recovery_kind": provider_recovery_kind,
                                     "status": "cancelled",
+                                    "request_started_at": provider_call_started_at,
+                                    "response_observed_at": _utc_timestamp(),
+                                    "effective_parameters": effective_parameters,
+                                    "transport_complete": False,
+                                    "transport_state": "cancelled",
+                                    "raw_finish_reason_present": False,
+                                    "raw_finish_reason": None,
+                                    "finish_reason_source": "missing",
+                                    "normalized_finish_reason": "cancelled",
+                                    "decision": "cancel",
+                                    "decision_reason": "request_cancelled",
+                                    "decision_success": False,
+                                    **partial_protocol,
                                 },
                             )
                         )
                         raise
                     except Exception as exc:
+                        can_media_fallback = self._can_replay_typed_media_fallback(
+                            exc,
+                            media_routing=media_routing,
+                            fallback_attempted=media_fallback_attempted,
+                            provider_call_count=provider_call_count,
+                            tool_call_count=total_tool_calls,
+                        )
+                        partial_protocol = dict(
+                            getattr(exc, "hashi_provider_protocol", {}) or {}
+                        )
                         provider_calls.append(
                             self._provider_call_record(
                                 request_id=request_id,
@@ -935,17 +1086,32 @@ class HashiApiAdapter(OpenRouterAdapter):
                                     "attempt": 1,
                                     "retry_count": 0,
                                     "recovery_kind": provider_recovery_kind,
-                                    "status": "failed_without_receipt",
+                                    "status": (
+                                        "failed_after_partial_response"
+                                        if partial_protocol
+                                        else "failed_without_receipt"
+                                    ),
+                                    "request_started_at": provider_call_started_at,
+                                    "response_observed_at": _utc_timestamp(),
+                                    "effective_parameters": effective_parameters,
+                                    "transport_complete": False,
+                                    "transport_state": "provider_call_failed",
+                                    "raw_finish_reason_present": False,
+                                    "raw_finish_reason": None,
+                                    "finish_reason_source": "missing",
+                                    "normalized_finish_reason": "incomplete",
+                                    "decision": (
+                                        "retry_with_typed_media_fallback"
+                                        if can_media_fallback
+                                        else "return_provider_failure"
+                                    ),
+                                    "decision_reason": type(exc).__name__,
+                                    "decision_success": False,
+                                    **partial_protocol,
                                 },
                             )
                         )
-                        if not self._can_replay_typed_media_fallback(
-                            exc,
-                            media_routing=media_routing,
-                            fallback_attempted=media_fallback_attempted,
-                            provider_call_count=provider_call_count,
-                            tool_call_count=total_tool_calls,
-                        ):
+                        if not can_media_fallback:
                             raise
                         media_fallback_attempted = True
                         self._enable_request_local_media_fallback(
@@ -983,35 +1149,42 @@ class HashiApiAdapter(OpenRouterAdapter):
                 total_completion += result.completion_tokens
                 total_thinking += result.thinking_tokens
                 provider_call_count += 1
-                provider_calls.append(
-                    self._provider_call_record(
-                        request_id=request_id,
-                        serial=provider_attempt_count,
-                        payload={
-                            "input": int(result.prompt_tokens or 0),
-                            "output": int(result.completion_tokens or 0),
-                            "thinking": int(result.thinking_tokens or 0),
-                            "token_source": "provider",
-                            "thinking_in_output": True,
-                            "cost_usd": result.cost_usd,
-                            "prompt_cache_hit_tokens": getattr(
-                                result, "prompt_cache_hit_tokens", None
-                            ),
-                            "prompt_cache_miss_tokens": getattr(
-                                result, "prompt_cache_miss_tokens", None
-                            ),
-                            "provider_call_latency_ms": round(
-                                (time.perf_counter() - provider_call_started)
-                                * 1000,
-                                3,
-                            ),
-                            "attempt": 1,
-                            "retry_count": 0,
-                            "recovery_kind": provider_recovery_kind,
-                            "status": "completed",
-                        },
-                    )
+                decision = _provider_response_decision(
+                    result,
+                    tool_registry_available=self.tool_registry is not None,
                 )
+                last_provider_call_record = self._provider_call_record(
+                    request_id=request_id,
+                    serial=provider_attempt_count,
+                    payload={
+                        "input": int(result.prompt_tokens or 0),
+                        "output": int(result.completion_tokens or 0),
+                        "thinking": int(result.thinking_tokens or 0),
+                        "token_source": "provider",
+                        "thinking_in_output": True,
+                        "cost_usd": result.cost_usd,
+                        "prompt_cache_hit_tokens": getattr(
+                            result, "prompt_cache_hit_tokens", None
+                        ),
+                        "prompt_cache_miss_tokens": getattr(
+                            result, "prompt_cache_miss_tokens", None
+                        ),
+                        "provider_call_latency_ms": round(
+                            (time.perf_counter() - provider_call_started)
+                            * 1000,
+                            3,
+                        ),
+                        "attempt": 1,
+                        "retry_count": 0,
+                        "recovery_kind": provider_recovery_kind,
+                        "status": "completed",
+                        "request_started_at": provider_call_started_at,
+                        "response_observed_at": _utc_timestamp(),
+                        "effective_parameters": effective_parameters,
+                        **_response_protocol_record(result, decision),
+                    },
+                )
+                provider_calls.append(last_provider_call_record)
                 if result.cost_usd is None:
                     provider_cost_complete = False
                 else:
@@ -1020,7 +1193,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                 last_text = result.text
                 last_structured_data = result.structured_data
 
-                if not result.tool_calls or not self.tool_registry:
+                if not bool(decision.get("execute_tools")):
+                    terminal_decision = dict(decision)
                     break
 
                 tool_loop_count += 1
@@ -1040,6 +1214,12 @@ class HashiApiAdapter(OpenRouterAdapter):
                     native_attachment_ids=native_attachment_ids,
                     native_local_refs=native_local_refs,
                     all_media_native=all_media_native,
+                    provider_call_context={
+                        "provider_call_serial": provider_attempt_count,
+                        "provider_request_id": last_provider_call_record.get(
+                            "provider_request_id", ""
+                        ),
+                    },
                 )
                 outbound_messages = messages[tool_result_start:]
                 self._trace(
@@ -1056,12 +1236,32 @@ class HashiApiAdapter(OpenRouterAdapter):
                 output_tokens=total_completion,
                 thinking_tokens=total_thinking,
             ) if (total_prompt or total_completion) else None
+            protocol_success = bool(
+                terminal_decision and terminal_decision.get("success")
+            )
+            protocol_error_code = str(
+                (terminal_decision or {}).get("error_code") or ""
+            )
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
                 structured_data=last_structured_data,
-                is_success=True,
-                stop_reason=result.finish_reason if "result" in dir() else "stop",
+                is_success=protocol_success,
+                error=(
+                    _provider_protocol_error_message(protocol_error_code)
+                    if not protocol_success
+                    else None
+                ),
+                error_code=protocol_error_code or None,
+                error_retryable=(
+                    bool((terminal_decision or {}).get("error_retryable"))
+                    if not protocol_success
+                    else None
+                ),
+                stop_reason=str(
+                    (terminal_decision or {}).get("normalized_finish_reason")
+                    or "unknown"
+                ),
                 usage=usage,
                 cost_usd=(
                     round(total_cost_usd, 12)
@@ -1080,9 +1280,26 @@ class HashiApiAdapter(OpenRouterAdapter):
                             1 if gateway_session_id is not None else provider_call_count
                         ),
                     },
+                    "provider_protocol": dict(terminal_decision or {}),
                 },
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
+                provider_request_id=(
+                    str(
+                        (last_provider_call_record or {}).get(
+                            "provider_response_id"
+                        )
+                        or (last_provider_call_record or {}).get(
+                            "transport_request_id"
+                        )
+                        or (last_provider_call_record or {}).get(
+                            "provider_request_id"
+                        )
+                        or ""
+                    )
+                    or None
+                ),
+                side_effects_possible=False,
             )
 
         except HashiApiTransportAuditError as exc:

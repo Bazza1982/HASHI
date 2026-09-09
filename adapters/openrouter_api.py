@@ -8,7 +8,8 @@ import json
 import logging
 import time
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from itertools import count
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -216,12 +217,15 @@ def _stream_error_exception(
     return exception
 
 
+_UNSET_FINISH_REASON = object()
+
+
 @dataclass
 class _APIResult:
     """Internal intermediate result from a single API call."""
     text: str
     tool_calls: Optional[list]   # None = no tool calls, just text
-    finish_reason: str
+    finish_reason: str | None
     prompt_tokens: int = 0
     completion_tokens: int = 0
     thinking_tokens: int = 0
@@ -234,6 +238,402 @@ class _APIResult:
     # provider did not report the field; zero remains a real observation.
     prompt_cache_hit_tokens: int | None = None
     prompt_cache_miss_tokens: int | None = None
+    # Preserve Provider protocol truth separately from HASHI's normalized
+    # decision.  In particular, a missing or explicit-null finish_reason must
+    # never be rewritten as a Provider-owned ``stop``.
+    raw_finish_reason: Any = field(default=_UNSET_FINISH_REASON, repr=False)
+    finish_reason_present: bool | None = None
+    finish_reason_source: str = ""
+    provider_response_id: str = ""
+    transport_request_id: str = ""
+    transport_complete: bool = True
+    transport_state: str = "complete_response"
+    stream_done: bool | None = None
+    stream_eof: bool = False
+    stream_truncated: bool = False
+    reasoning_state: str = ""
+
+    def __post_init__(self) -> None:
+        # Test doubles and older compatible adapters construct _APIResult with
+        # only the original three positional fields.  Infer provider truth for
+        # those callers while allowing parsers to state missing/null exactly.
+        if self.raw_finish_reason is _UNSET_FINISH_REASON:
+            self.raw_finish_reason = self.finish_reason
+        if self.finish_reason_present is None:
+            self.finish_reason_present = self.finish_reason is not None
+        if not self.finish_reason_source:
+            if not self.finish_reason_present:
+                self.finish_reason_source = "missing"
+            elif self.raw_finish_reason is None:
+                self.finish_reason_source = "provider_null"
+            else:
+                self.finish_reason_source = "provider"
+        if self.finish_reason is not None:
+            normalized = str(self.finish_reason).strip()
+            self.finish_reason = normalized or None
+        if not self.reasoning_state:
+            self.reasoning_state = (
+                "available" if str(self.reasoning_content or "") else "unavailable"
+            )
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _stop_parameter_summary(value: Any) -> dict[str, Any]:
+    """Describe request-side stop values without logging prompt fragments."""
+
+    if value is None:
+        return {"configured": False, "count": 0, "values": []}
+    values = list(value) if isinstance(value, (list, tuple)) else [value]
+    summaries = []
+    for item in values:
+        encoded = str(item).encode("utf-8")
+        summaries.append(
+            {
+                "length": len(str(item)),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+        )
+    return {"configured": True, "count": len(values), "values": summaries}
+
+
+def _effective_protocol_parameters(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only non-secret parameters that influence wire semantics."""
+
+    result: dict[str, Any] = {
+        "stream": bool(payload.get("stream", False)),
+        "tools_available": bool(payload.get("tools")),
+        "stop": _stop_parameter_summary(payload.get("stop")),
+    }
+    for key in (
+        "tool_choice",
+        "parallel_tool_calls",
+        "max_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "modalities",
+        "reasoning_effort",
+    ):
+        if key in payload:
+            value = payload.get(key)
+            if key == "tool_choice" and isinstance(value, Mapping):
+                function = value.get("function")
+                result[key] = {
+                    "type": str(value.get("type") or ""),
+                    "function_name": (
+                        str(function.get("name") or "")
+                        if isinstance(function, Mapping)
+                        else ""
+                    ),
+                }
+            else:
+                result[key] = value
+    for key in ("reasoning", "thinking", "response_format", "stream_options"):
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            # These protocol controls contain no prompt/tool bodies.  Keep
+            # their scalar values but exclude any unexpected nested content.
+            result[key] = {
+                str(name): item
+                for name, item in value.items()
+                if isinstance(item, (str, int, float, bool, type(None)))
+            }
+    return result
+
+
+def _tool_call_protocol_summary(
+    tool_calls: Any,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Validate complete structured tool requests before any side effect."""
+
+    if tool_calls in (None, []):
+        return [], True
+    if not isinstance(tool_calls, list):
+        return [
+            {
+                "id": "",
+                "name": "",
+                "complete": False,
+                "arguments_state": "invalid_tool_call_container",
+            }
+        ], False
+    summaries: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    all_complete = True
+    for call in tool_calls:
+        call_id = ""
+        name = ""
+        arguments_state = "missing"
+        complete = False
+        if isinstance(call, Mapping):
+            call_id = str(call.get("id") or "").strip()
+            function = call.get("function")
+            if isinstance(function, Mapping):
+                name = str(function.get("name") or "").strip()
+                raw_arguments = function.get("arguments")
+                if isinstance(raw_arguments, str):
+                    try:
+                        decoded = json.loads(raw_arguments or "{}")
+                    except json.JSONDecodeError:
+                        arguments_state = "invalid_json"
+                    else:
+                        arguments_state = (
+                            "valid_object"
+                            if isinstance(decoded, Mapping)
+                            else "non_object_json"
+                        )
+                elif isinstance(raw_arguments, Mapping):
+                    arguments_state = "valid_object"
+                elif raw_arguments is None:
+                    arguments_state = "missing"
+                else:
+                    arguments_state = "invalid_type"
+                complete = bool(
+                    call_id
+                    and name
+                    and arguments_state == "valid_object"
+                    and str(call.get("type") or "function") == "function"
+                    and call_id not in seen_ids
+                )
+        if call_id:
+            if call_id in seen_ids:
+                arguments_state = "duplicate_call_id"
+                complete = False
+            seen_ids.add(call_id)
+        summaries.append(
+            {
+                "id": call_id,
+                "name": name,
+                "complete": complete,
+                "arguments_state": arguments_state,
+            }
+        )
+        all_complete = all_complete and complete
+    return summaries, all_complete
+
+
+def _provider_response_decision(
+    result: _APIResult,
+    *,
+    tool_registry_available: bool,
+) -> dict[str, Any]:
+    """Classify one complete Provider response before executing tools."""
+
+    tool_summaries, tools_complete = _tool_call_protocol_summary(result.tool_calls)
+    has_tools = bool(tool_summaries)
+    raw = result.raw_finish_reason
+    raw_text = str(raw).strip() if raw is not None else ""
+    normalized = raw_text.casefold()
+    if not bool(result.finish_reason_present) or not raw_text:
+        normalized = "missing_finish_reason"
+
+    base = {
+        "normalized_finish_reason": normalized,
+        "finish_reason_source": str(result.finish_reason_source or "missing"),
+        "tool_calls": tool_summaries,
+        "tool_calls_complete": tools_complete,
+        "tool_call_count_received": len(tool_summaries),
+        "execute_tools": False,
+        "success": False,
+        "error_code": "",
+        "error_retryable": False,
+        "decision": "",
+        "decision_reason": "",
+    }
+    if not result.transport_complete:
+        return {
+            **base,
+            "decision": "reject_incomplete_transport",
+            "decision_reason": str(result.transport_state or "transport_incomplete"),
+            "error_code": "PROVIDER_INCOMPLETE_STREAM",
+            "error_retryable": True,
+        }
+    if has_tools and not tools_complete:
+        return {
+            **base,
+            "decision": "reject_invalid_tool_calls",
+            "decision_reason": "tool_calls_incomplete_or_invalid",
+            "error_code": "PROVIDER_INVALID_TOOL_CALLS",
+        }
+    if normalized == "stop":
+        if has_tools:
+            return {
+                **base,
+                "decision": "protocol_conflict",
+                "decision_reason": "stop_with_tool_calls",
+                "error_code": "PROVIDER_FINISH_REASON_CONFLICT",
+            }
+        return {
+            **base,
+            "decision": "complete",
+            "decision_reason": "provider_stop",
+            "success": True,
+        }
+    if normalized in {"tool_calls", "function_call"}:
+        if not has_tools:
+            return {
+                **base,
+                "decision": "protocol_conflict",
+                "decision_reason": "tool_finish_without_tool_calls",
+                "error_code": "PROVIDER_FINISH_REASON_CONFLICT",
+            }
+        if not tool_registry_available:
+            return {
+                **base,
+                "decision": "reject_tools_unavailable",
+                "decision_reason": "tool_registry_unavailable",
+                "error_code": "PROVIDER_TOOL_EXECUTION_UNAVAILABLE",
+            }
+        return {
+            **base,
+            "decision": "execute_tools",
+            "decision_reason": "complete_structured_tool_calls",
+            "execute_tools": True,
+        }
+    if normalized == "missing_finish_reason":
+        return {
+            **base,
+            "decision": "reject_missing_finish_reason",
+            "decision_reason": "provider_finish_reason_missing_or_null",
+            "error_code": "PROVIDER_MISSING_FINISH_REASON",
+        }
+    if normalized in {"length", "max_tokens"}:
+        return {
+            **base,
+            "decision": "reject_truncated_output",
+            "decision_reason": normalized,
+            "error_code": "PROVIDER_OUTPUT_TRUNCATED",
+        }
+    if normalized in {"content_filter", "safety"}:
+        return {
+            **base,
+            "decision": "reject_filtered_output",
+            "decision_reason": normalized,
+            "error_code": "PROVIDER_OUTPUT_FILTERED",
+        }
+    if normalized in {"insufficient_system_resource", "resource_exhausted"}:
+        return {
+            **base,
+            "decision": "reject_resource_failure",
+            "decision_reason": normalized,
+            "error_code": "PROVIDER_CAPACITY_UNAVAILABLE",
+            "error_retryable": True,
+        }
+    return {
+        **base,
+        "decision": "reject_unknown_finish_reason",
+        "decision_reason": normalized or "unknown",
+        "error_code": "PROVIDER_UNKNOWN_FINISH_REASON",
+    }
+
+
+def _response_protocol_record(
+    result: _APIResult,
+    decision: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "raw_finish_reason_present": bool(result.finish_reason_present),
+        "raw_finish_reason": result.raw_finish_reason,
+        "normalized_finish_reason": decision.get("normalized_finish_reason"),
+        "finish_reason_source": decision.get("finish_reason_source"),
+        "transport_complete": bool(result.transport_complete),
+        "transport_state": str(result.transport_state or ""),
+        "stream_done": result.stream_done,
+        "stream_eof": bool(result.stream_eof),
+        "stream_truncated": bool(result.stream_truncated),
+        "provider_response_id": str(result.provider_response_id or ""),
+        "transport_request_id": str(result.transport_request_id or ""),
+        "text_provided": bool(str(result.text or "")),
+        "text_length": len(str(result.text or "")),
+        "reasoning_availability": str(result.reasoning_state or "unavailable"),
+        "reasoning_length": len(str(result.reasoning_content or "")),
+        "structured_data_provided": isinstance(result.structured_data, Mapping),
+        "tool_calls": list(decision.get("tool_calls") or []),
+        "tool_calls_complete": bool(decision.get("tool_calls_complete", True)),
+        "tool_call_count_received": int(
+            decision.get("tool_call_count_received") or 0
+        ),
+        "decision": str(decision.get("decision") or ""),
+        "decision_reason": str(decision.get("decision_reason") or ""),
+        "decision_success": bool(decision.get("success")),
+    }
+
+
+_PROVIDER_PROTOCOL_ERROR_MESSAGES = {
+    "PROVIDER_FINISH_REASON_CONFLICT": (
+        "The Provider response contained conflicting finish and tool-call signals."
+    ),
+    "PROVIDER_MISSING_FINISH_REASON": (
+        "The Provider response did not contain a terminal finish reason."
+    ),
+    "PROVIDER_OUTPUT_TRUNCATED": (
+        "The Provider response ended because its output was truncated."
+    ),
+    "PROVIDER_OUTPUT_FILTERED": (
+        "The Provider response was stopped by a content or safety filter."
+    ),
+    "PROVIDER_CAPACITY_UNAVAILABLE": (
+        "The Provider could not complete the response because resources were unavailable."
+    ),
+    "PROVIDER_INVALID_TOOL_CALLS": (
+        "The Provider returned incomplete or invalid structured tool calls."
+    ),
+    "PROVIDER_TOOL_EXECUTION_UNAVAILABLE": (
+        "The Provider requested tools that are unavailable for this request."
+    ),
+    "PROVIDER_UNKNOWN_FINISH_REASON": (
+        "The Provider returned an unsupported finish reason."
+    ),
+    "PROVIDER_INCOMPLETE_STREAM": (
+        "The Provider response stream ended before a complete decision could be made."
+    ),
+}
+
+
+def _provider_protocol_error_message(error_code: str) -> str:
+    return _PROVIDER_PROTOCOL_ERROR_MESSAGES.get(
+        str(error_code or ""),
+        "The Provider response could not be accepted safely.",
+    )
+
+
+def _annotate_stream_exception(
+    error: BaseException,
+    state: Mapping[str, Any],
+) -> BaseException:
+    snapshot = dict(state)
+    snapshot.update(
+        {
+            "transport_complete": False,
+            "transport_state": (
+                "cancelled"
+                if isinstance(error, asyncio.CancelledError)
+                else "stream_interrupted"
+            ),
+            "stream_done": False,
+            "stream_eof": False,
+            "stream_truncated": True,
+        }
+    )
+    setattr(error, "hashi_provider_protocol", snapshot)
+    return error
+
+
+async def _iter_provider_stream_lines(
+    response: Any,
+    state: Mapping[str, Any],
+):
+    """Attach already observed protocol facts if the wire iterator aborts."""
+
+    try:
+        async for line in response.aiter_lines():
+            yield line
+    except BaseException as exc:
+        _annotate_stream_exception(exc, state)
+        raise
 
 
 def _usage_thinking_tokens(usage: Mapping[str, Any]) -> int:
@@ -281,6 +681,7 @@ def _retry_after_seconds(response: httpx.Response | None) -> float | None:
 def _provider_request_id(response: httpx.Response | None) -> str:
     if response is None:
         return ""
+    headers = getattr(response, "headers", {}) or {}
     for name in (
         "x-hashi-gateway-request-id",
         "x-request-id",
@@ -288,7 +689,7 @@ def _provider_request_id(response: httpx.Response | None) -> str:
         "cf-ray",
         "x-amzn-requestid",
     ):
-        value = str(response.headers.get(name) or "").strip()
+        value = str(headers.get(name) or "").strip()
         if value:
             return value
     return ""
@@ -692,6 +1093,30 @@ class OpenRouterAdapter(BaseBackend):
         """Create and immediately publish one immutable physical-call fact."""
 
         record = dict(payload)
+        record.setdefault("protocol_record_version", 1)
+        record.setdefault("call_serial", max(1, int(serial)))
+        record.setdefault("hashi_request_id", str(request_id or ""))
+        record.setdefault("agent_id", str(getattr(self.config, "name", "") or ""))
+        record.setdefault(
+            "instance_id",
+            str(
+                getattr(self.global_config, "instance_id", "")
+                or getattr(self.global_config, "name", "")
+                or ""
+            ),
+        )
+        record.setdefault(
+            "provider", str(getattr(self.config, "engine", "") or "openrouter-api")
+        )
+        record.setdefault("model", str(getattr(self.config, "model", "") or ""))
+        record.setdefault(
+            "runtime_generation_id",
+            str(
+                getattr(self.config, "runtime_generation_id", "")
+                or getattr(self.config, "generation_id", "")
+                or ""
+            ),
+        )
         record.setdefault(
             "provider_request_id",
             "hashi-provider:"
@@ -1319,6 +1744,7 @@ class OpenRouterAdapter(BaseBackend):
         native_attachment_ids: set[str] | None = None,
         native_local_refs: set[str] | None = None,
         all_media_native: bool = False,
+        provider_call_context: Mapping[str, Any] | None = None,
     ) -> None:
         """Execute all tool_calls and append tool result messages to `messages`."""
         for tc in tool_calls:
@@ -1326,6 +1752,11 @@ class OpenRouterAdapter(BaseBackend):
             tool_name = fn.get("name", "unknown")
             tc_id = tc.get("id", "")
             raw_args = fn.get("arguments", "{}")
+            correlation = {
+                **dict(provider_call_context or {}),
+                "tool_call_id": str(tc_id or ""),
+                "tool_name": str(tool_name or ""),
+            }
 
             # Determine stream event kind
             if tool_name in {"bash", "shell"}:
@@ -1339,7 +1770,11 @@ class OpenRouterAdapter(BaseBackend):
 
             # Parse arguments
             try:
-                arguments = json.loads(raw_args) if raw_args else {}
+                arguments = (
+                    dict(raw_args)
+                    if isinstance(raw_args, Mapping)
+                    else (json.loads(raw_args) if raw_args else {})
+                )
             except json.JSONDecodeError as e:
                 result_text = f"Error: could not parse tool arguments: {e}"
                 await self._emit(
@@ -1347,10 +1782,11 @@ class OpenRouterAdapter(BaseBackend):
                     evt_kind,
                     f"{tool_name}: {raw_args[:120]}",
                     tool_name=tool_name,
+                    metadata=correlation,
                 )
                 await self._emit(on_stream_event, KIND_TOOL_END,
                                  f"{tool_name}: argument parse error", tool_name=tool_name,
-                                 metadata={"is_error": True})
+                                 metadata={**correlation, "is_error": True})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
@@ -1379,7 +1815,7 @@ class OpenRouterAdapter(BaseBackend):
                 f"{tool_name}: {raw_args[:120]}",
                 tool_name=tool_name,
                 file_path=event_path,
-                metadata=event_metadata,
+                metadata={**event_metadata, **correlation},
             )
 
             if tool_name in _MEDIA_FALLBACK_TOOL_NAMES and (
@@ -1399,7 +1835,7 @@ class OpenRouterAdapter(BaseBackend):
                     KIND_TOOL_END,
                     f"{tool_name}: duplicate media fallback blocked",
                     tool_name=tool_name,
-                    metadata={"blocked": True},
+                    metadata={**correlation, "blocked": True},
                 )
                 messages.append(
                     {
@@ -1430,6 +1866,7 @@ class OpenRouterAdapter(BaseBackend):
                 await self._emit(on_stream_event, KIND_TOOL_END,
                                  f"{tool_name}: blocked by policy", tool_name=tool_name,
                                  metadata={
+                                     **correlation,
                                      "blocked": True,
                                      "tool_result_details": denial_details,
                                  })
@@ -1453,6 +1890,7 @@ class OpenRouterAdapter(BaseBackend):
                     f"{tool_name}: cancelled after cleanup",
                     tool_name=tool_name,
                     metadata={
+                        **correlation,
                         "is_error": True,
                         "tool_result_details": details,
                     },
@@ -1463,6 +1901,7 @@ class OpenRouterAdapter(BaseBackend):
             await self._emit(on_stream_event, KIND_TOOL_END,
                              f"{tool_name}: {output_preview}", tool_name=tool_name,
                              metadata={
+                                 **correlation,
                                  "is_error": bool(getattr(result, "is_error", False)),
                                  "tool_result_details": dict(result.details or {})
                              })
@@ -1530,11 +1969,27 @@ class OpenRouterAdapter(BaseBackend):
         data = response.json()
         choices = data.get("choices") or []
         if not choices:
-            return _APIResult(text="", tool_calls=None, finish_reason="error")
+            return _APIResult(
+                text="",
+                tool_calls=None,
+                finish_reason=None,
+                raw_finish_reason=None,
+                finish_reason_present=False,
+                finish_reason_source="missing",
+                provider_response_id=str(data.get("id") or ""),
+                transport_request_id=_provider_request_id(response),
+                transport_state="complete_response_no_choices",
+            )
 
         choice = choices[0]
         message = choice.get("message") or {}
-        finish_reason = choice.get("finish_reason") or "stop"
+        finish_reason_present = "finish_reason" in choice
+        raw_finish_reason = choice.get("finish_reason")
+        finish_reason = (
+            str(raw_finish_reason).strip() or None
+            if raw_finish_reason is not None
+            else None
+        )
         ai_text = _assistant_content_text(message.get("content"))
         audio = message.get("audio")
         audio_bytes = b""
@@ -1545,10 +2000,14 @@ class OpenRouterAdapter(BaseBackend):
             if audio_transcript:
                 ai_text = audio_transcript
 
-        # Emit reasoning if present
-        if on_stream_event is not None:
-            reasoning_text = str(message.get("reasoning") or "").strip()
-            if reasoning_text:
+        # Preserve only reasoning that the Provider actually exposed. Encrypted
+        # reasoning is marked as such and never reconstructed.
+        reasoning_fragments: list[str] = []
+        encrypted_reasoning = False
+        reasoning_text = str(message.get("reasoning") or "").strip()
+        if reasoning_text:
+            reasoning_fragments.append(reasoning_text)
+            if on_stream_event is not None:
                 await on_stream_event(
                     StreamEvent(
                         kind=KIND_THINKING,
@@ -1556,16 +2015,24 @@ class OpenRouterAdapter(BaseBackend):
                         raw_delta=reasoning_text,
                     )
                 )
-            for detail in message.get("reasoning_details") or []:
-                snippet = self._summarize_reasoning_detail(detail)
-                if snippet:
-                    await on_stream_event(
-                        StreamEvent(
-                            kind=KIND_THINKING,
-                            summary=snippet[:400],
-                            raw_delta=self._reasoning_detail_delta(detail),
-                        )
+        for detail in message.get("reasoning_details") or []:
+            if (
+                isinstance(detail, Mapping)
+                and str(detail.get("type") or "") == "reasoning.encrypted"
+            ):
+                encrypted_reasoning = True
+            raw_detail = self._reasoning_detail_delta(detail)
+            if raw_detail:
+                reasoning_fragments.append(raw_detail)
+            snippet = self._summarize_reasoning_detail(detail)
+            if snippet and on_stream_event is not None:
+                await on_stream_event(
+                    StreamEvent(
+                        kind=KIND_THINKING,
+                        summary=snippet[:400],
+                        raw_delta=raw_detail,
                     )
+                )
 
         tool_calls = message.get("tool_calls") or None
 
@@ -1575,14 +2042,30 @@ class OpenRouterAdapter(BaseBackend):
         completion_tokens = usage.get("completion_tokens", 0)
         thinking_tokens = _usage_thinking_tokens(usage)
 
+        reasoning_content = "".join(reasoning_fragments)
         return _APIResult(
             text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=thinking_tokens,
             cost_usd=_usage_cost_usd(usage),
+            reasoning_content=reasoning_content,
             structured_data=_message_structured_data(message),
             audio_bytes=audio_bytes,
             audio_transcript=audio_transcript,
+            raw_finish_reason=raw_finish_reason,
+            finish_reason_present=finish_reason_present,
+            finish_reason_source=(
+                "provider"
+                if finish_reason is not None
+                else ("provider_null" if finish_reason_present else "missing")
+            ),
+            provider_response_id=str(data.get("id") or ""),
+            transport_request_id=_provider_request_id(response),
+            reasoning_state=(
+                "available"
+                if reasoning_content
+                else ("encrypted" if encrypted_reasoning else "unavailable")
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -1599,12 +2082,32 @@ class OpenRouterAdapter(BaseBackend):
         # tool_calls_acc: dict[int, dict] indexed by tool call index
         tool_calls_acc: dict[int, dict] = {}
         finish_reason = ""
+        finish_reason_present = False
+        finish_reason_field_seen = False
+        raw_finish_reason: Any = None
         stream_usage: dict = {}  # usage from final streaming chunk
         saw_done = False
         provider_activity_observed = False
+        provider_response_id = ""
+        transport_request_id = ""
+        reasoning_chunks: list[str] = []
+        encrypted_reasoning = False
         audio_chunks: list[str] = []
         audio_transcript = ""
         audio_encoded_size = 0
+        protocol_state: dict[str, Any] = {
+            "raw_finish_reason_present": False,
+            "raw_finish_reason": None,
+            "finish_reason_source": "missing",
+            "normalized_finish_reason": "incomplete",
+            "provider_response_id": "",
+            "transport_request_id": "",
+            "text_provided": False,
+            "text_length": 0,
+            "reasoning_availability": "unavailable",
+            "reasoning_length": 0,
+            "tool_calls": [],
+        }
 
         async with self.client.stream(
             "POST",
@@ -1613,6 +2116,8 @@ class OpenRouterAdapter(BaseBackend):
             headers=headers,
         ) as response:
             response.raise_for_status()
+            transport_request_id = _provider_request_id(response)
+            protocol_state["transport_request_id"] = transport_request_id
             try:
                 stream_request = response.request
             except (AttributeError, RuntimeError):
@@ -1623,7 +2128,7 @@ class OpenRouterAdapter(BaseBackend):
                     "POST", self._chat_completions_url()
                 )
 
-            async for line in response.aiter_lines():
+            async for line in _iter_provider_stream_lines(response, protocol_state):
                 self._touch_activity()
 
                 if not line.startswith("data: "):
@@ -1635,10 +2140,16 @@ class OpenRouterAdapter(BaseBackend):
 
                 try:
                     data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
+                except json.JSONDecodeError as exc:
+                    error = httpx.RemoteProtocolError(
+                        "provider stream contained invalid JSON data"
+                    )
+                    raise _annotate_stream_exception(error, protocol_state) from exc
                 if not isinstance(data, Mapping):
                     continue
+                if data.get("id"):
+                    provider_response_id = str(data.get("id"))
+                    protocol_state["provider_response_id"] = provider_response_id
 
                 stream_error = _stream_error_exception(
                     data,
@@ -1646,7 +2157,9 @@ class OpenRouterAdapter(BaseBackend):
                     provider_activity_observed=provider_activity_observed,
                 )
                 if stream_error is not None:
-                    raise stream_error
+                    raise _annotate_stream_exception(
+                        stream_error, protocol_state
+                    )
 
                 # Capture usage from streaming chunks (sent in final chunk)
                 if data.get("usage"):
@@ -1659,7 +2172,36 @@ class OpenRouterAdapter(BaseBackend):
 
                 choice = choices[0]
                 delta = choice.get("delta", {})
-                finish_reason = choice.get("finish_reason") or finish_reason
+                if "finish_reason" in choice:
+                    finish_reason_field_seen = True
+                    raw_finish_reason = choice.get("finish_reason")
+                    if raw_finish_reason is not None and str(
+                        raw_finish_reason
+                    ).strip():
+                        finish_reason = str(raw_finish_reason).strip()
+                        finish_reason_present = True
+                    protocol_state.update(
+                        {
+                            "raw_finish_reason_present": bool(
+                                finish_reason_present
+                            ),
+                            "raw_finish_reason": (
+                                finish_reason
+                                if finish_reason_present
+                                else raw_finish_reason
+                            ),
+                            "finish_reason_source": (
+                                "provider"
+                                if finish_reason_present
+                                else "provider_null"
+                            ),
+                            "normalized_finish_reason": (
+                                finish_reason.casefold()
+                                if finish_reason_present
+                                else "missing_finish_reason"
+                            ),
+                        }
+                    )
 
                 # Text content
                 content = delta.get("content", "")
@@ -1678,6 +2220,9 @@ class OpenRouterAdapter(BaseBackend):
                     provider_activity_observed = True
 
                 if reasoning_text and on_stream_event:
+                    reasoning_chunks.append(reasoning_text)
+                    protocol_state["reasoning_availability"] = "available"
+                    protocol_state["reasoning_length"] += len(reasoning_text)
                     await on_stream_event(
                         StreamEvent(
                             kind=KIND_THINKING,
@@ -1685,20 +2230,39 @@ class OpenRouterAdapter(BaseBackend):
                             raw_delta=reasoning_text,
                         )
                     )
-                elif reasoning_details and on_stream_event:
+                elif reasoning_text:
+                    reasoning_chunks.append(reasoning_text)
+                    protocol_state["reasoning_availability"] = "available"
+                    protocol_state["reasoning_length"] += len(reasoning_text)
+                elif reasoning_details:
                     for detail in reasoning_details:
+                        if (
+                            isinstance(detail, Mapping)
+                            and str(detail.get("type") or "")
+                            == "reasoning.encrypted"
+                        ):
+                            encrypted_reasoning = True
+                            if not reasoning_chunks:
+                                protocol_state["reasoning_availability"] = (
+                                    "encrypted"
+                                )
+                            continue
                         raw_delta = self._reasoning_detail_delta(detail)
                         if raw_delta:
-                            await on_stream_event(
-                                StreamEvent(
-                                    kind=KIND_THINKING,
-                                    summary=raw_delta[:400],
-                                    raw_delta=raw_delta,
+                            reasoning_chunks.append(raw_delta)
+                            protocol_state["reasoning_availability"] = "available"
+                            protocol_state["reasoning_length"] += len(raw_delta)
+                            if on_stream_event:
+                                await on_stream_event(
+                                    StreamEvent(
+                                        kind=KIND_THINKING,
+                                        summary=raw_delta[:400],
+                                        raw_delta=raw_delta,
+                                    )
                                 )
-                            )
                             continue
                         snippet = self._summarize_reasoning_detail(detail)
-                        if snippet:
+                        if snippet and on_stream_event:
                             await on_stream_event(
                                 StreamEvent(
                                     kind=KIND_THINKING,
@@ -1708,6 +2272,8 @@ class OpenRouterAdapter(BaseBackend):
 
                 if content:
                     text_chunks.append(content)
+                    protocol_state["text_provided"] = True
+                    protocol_state["text_length"] += len(str(content))
                     if on_stream_event:
                         await on_stream_event(
                             StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
@@ -1758,6 +2324,10 @@ class OpenRouterAdapter(BaseBackend):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
+                if tool_calls_acc:
+                    protocol_state["tool_calls"] = _tool_call_protocol_summary(
+                        list(tool_calls_acc.values())
+                    )[0]
 
         if not saw_done and not finish_reason:
             raise httpx.RemoteProtocolError(
@@ -1783,13 +2353,36 @@ class OpenRouterAdapter(BaseBackend):
         return _APIResult(
             text=full_text,
             tool_calls=tool_calls,
-            finish_reason=finish_reason or "stop",
+            finish_reason=finish_reason or None,
             prompt_tokens=stream_usage.get("prompt_tokens", 0),
             completion_tokens=stream_usage.get("completion_tokens", 0),
             thinking_tokens=_usage_thinking_tokens(stream_usage),
             cost_usd=_usage_cost_usd(stream_usage),
+            reasoning_content="".join(reasoning_chunks),
             audio_bytes=audio_bytes,
             audio_transcript=audio_transcript,
+            raw_finish_reason=(
+                finish_reason if finish_reason_present else raw_finish_reason
+            ),
+            finish_reason_present=finish_reason_present,
+            finish_reason_source=(
+                "provider"
+                if finish_reason_present
+                else ("provider_null" if finish_reason_field_seen else "missing")
+            ),
+            provider_response_id=provider_response_id,
+            transport_request_id=transport_request_id,
+            transport_complete=True,
+            transport_state=(
+                "done_marker" if saw_done else "eof_after_finish_reason"
+            ),
+            stream_done=saw_done,
+            stream_eof=not saw_done,
+            reasoning_state=(
+                "available"
+                if reasoning_chunks
+                else ("encrypted" if encrypted_reasoning else "unavailable")
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -1833,6 +2426,8 @@ class OpenRouterAdapter(BaseBackend):
         last_audio_transcript = ""
         input_derivatives: tuple[Path, ...] = ()
         input_normalization: tuple[dict[str, Any], ...] = ()
+        terminal_decision: dict[str, Any] | None = None
+        last_provider_call_record: dict[str, Any] | None = None
 
         try:
             self._touch_activity()
@@ -1882,6 +2477,7 @@ class OpenRouterAdapter(BaseBackend):
                         ),
                     )
                     provider_call_emitted_text = False
+                    effective_parameters = _effective_protocol_parameters(payload)
 
                     async def _capture_provider_call(event: StreamEvent) -> None:
                         nonlocal provider_call_emitted_text
@@ -1899,6 +2495,7 @@ class OpenRouterAdapter(BaseBackend):
                     )
                     provider_attempt_serial += 1
                     provider_call_started = time.perf_counter()
+                    provider_call_started_at = _utc_timestamp()
                     provider_attempt = provider_call_retry_count + 1
                     provider_recovery_kind = next_provider_recovery_kind
                     try:
@@ -1914,7 +2511,10 @@ class OpenRouterAdapter(BaseBackend):
                                 headers,
                                 call_stream_callback,
                             )
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError as exc:
+                        partial_protocol = dict(
+                            getattr(exc, "hashi_provider_protocol", {}) or {}
+                        )
                         provider_calls.append(
                             self._provider_call_record(
                                 request_id=request_id,
@@ -1937,11 +2537,57 @@ class OpenRouterAdapter(BaseBackend):
                                     "retry_count": provider_call_retry_count,
                                     "recovery_kind": provider_recovery_kind,
                                     "status": "cancelled",
+                                    "request_started_at": provider_call_started_at,
+                                    "response_observed_at": _utc_timestamp(),
+                                    "effective_parameters": effective_parameters,
+                                    "transport_complete": False,
+                                    "transport_state": "cancelled",
+                                    "stream_done": False if use_streaming else None,
+                                    "stream_eof": False,
+                                    "stream_truncated": bool(use_streaming),
+                                    "raw_finish_reason_present": False,
+                                    "raw_finish_reason": None,
+                                    "finish_reason_source": "missing",
+                                    "normalized_finish_reason": "cancelled",
+                                    "reasoning_availability": "unknown",
+                                    "decision": "cancel",
+                                    "decision_reason": "request_cancelled",
+                                    "decision_success": False,
+                                    **partial_protocol,
                                 },
                             )
                         )
                         raise
                     except Exception as exc:
+                        can_media_fallback = self._can_replay_typed_media_fallback(
+                            exc,
+                            media_routing=media_routing,
+                            fallback_attempted=media_fallback_attempted,
+                            provider_call_count=provider_call_count,
+                            tool_call_count=total_tool_calls,
+                        )
+                        retry_limit = max(
+                            0,
+                            int(self.TRANSIENT_PROVIDER_CALL_RETRIES),
+                        )
+                        can_transport_retry = bool(
+                            not can_media_fallback
+                            and provider_call_retry_count < retry_limit
+                            and not provider_call_emitted_text
+                            and _transient_provider_call_error(exc)
+                        )
+                        partial_protocol = dict(
+                            getattr(exc, "hashi_provider_protocol", {}) or {}
+                        )
+                        failure_decision = (
+                            "retry_with_typed_media_fallback"
+                            if can_media_fallback
+                            else (
+                                "retry_unfinished_provider_call"
+                                if can_transport_retry
+                                else "return_provider_failure"
+                            )
+                        )
                         provider_calls.append(
                             self._provider_call_record(
                                 request_id=request_id,
@@ -1963,17 +2609,40 @@ class OpenRouterAdapter(BaseBackend):
                                     "attempt": provider_attempt,
                                     "retry_count": provider_call_retry_count,
                                     "recovery_kind": provider_recovery_kind,
-                                    "status": "failed_without_receipt",
+                                    "status": (
+                                        "failed_after_partial_response"
+                                        if partial_protocol
+                                        or provider_call_emitted_text
+                                        or bool(
+                                            getattr(
+                                                exc,
+                                                "provider_activity_observed",
+                                                False,
+                                            )
+                                        )
+                                        else "failed_without_receipt"
+                                    ),
+                                    "request_started_at": provider_call_started_at,
+                                    "response_observed_at": _utc_timestamp(),
+                                    "effective_parameters": effective_parameters,
+                                    "transport_complete": False,
+                                    "transport_state": "provider_call_failed",
+                                    "stream_done": False if use_streaming else None,
+                                    "stream_eof": False,
+                                    "stream_truncated": bool(use_streaming),
+                                    "raw_finish_reason_present": False,
+                                    "raw_finish_reason": None,
+                                    "finish_reason_source": "missing",
+                                    "normalized_finish_reason": "incomplete",
+                                    "reasoning_availability": "unknown",
+                                    "decision": failure_decision,
+                                    "decision_reason": type(exc).__name__,
+                                    "decision_success": False,
+                                    **partial_protocol,
                                 },
                             )
                         )
-                        if self._can_replay_typed_media_fallback(
-                            exc,
-                            media_routing=media_routing,
-                            fallback_attempted=media_fallback_attempted,
-                            provider_call_count=provider_call_count,
-                            tool_call_count=total_tool_calls,
-                        ):
+                        if can_media_fallback:
                             media_fallback_attempted = True
                             self._enable_request_local_media_fallback(
                                 native_attachment_ids
@@ -1991,15 +2660,7 @@ class OpenRouterAdapter(BaseBackend):
                             all_media_native = False
                             next_provider_recovery_kind = "typed_media_fallback"
                             continue
-                        retry_limit = max(
-                            0,
-                            int(self.TRANSIENT_PROVIDER_CALL_RETRIES),
-                        )
-                        if (
-                            provider_call_retry_count < retry_limit
-                            and not provider_call_emitted_text
-                            and _transient_provider_call_error(exc)
-                        ):
+                        if can_transport_retry:
                             provider_call_retry_count += 1
                             provider_transport_retry_count += 1
                             next_provider_recovery_kind = (
@@ -2029,34 +2690,41 @@ class OpenRouterAdapter(BaseBackend):
                 total_completion += result.completion_tokens
                 total_thinking += result.thinking_tokens
                 provider_call_count += 1
-                provider_calls.append(
-                    self._provider_call_record(
-                        request_id=request_id,
-                        serial=provider_attempt_serial,
-                        payload={
-                            "input": int(result.prompt_tokens or 0),
-                            "output": int(result.completion_tokens or 0),
-                            "thinking": int(result.thinking_tokens or 0),
-                            "token_source": "provider",
-                            # OpenRouter reasoning_tokens is a detail within
-                            # completion_tokens, not an additional token bucket.
-                            "thinking_in_output": True,
-                            "cost_usd": result.cost_usd,
-                            "prompt_cache_hit_tokens": _optional_usage_token_count(
-                                getattr(result, "prompt_cache_hit_tokens", None)
-                            ),
-                            "prompt_cache_miss_tokens": _optional_usage_token_count(
-                                getattr(result, "prompt_cache_miss_tokens", None)
-                            ),
-                            # One physical call only; retries have their own row.
-                            "provider_call_latency_ms": provider_call_latency_ms,
-                            "attempt": provider_attempt,
-                            "retry_count": provider_call_retry_count,
-                            "recovery_kind": provider_recovery_kind,
-                            "status": "completed",
-                        },
-                    )
+                decision = _provider_response_decision(
+                    result,
+                    tool_registry_available=self.tool_registry is not None,
                 )
+                last_provider_call_record = self._provider_call_record(
+                    request_id=request_id,
+                    serial=provider_attempt_serial,
+                    payload={
+                        "input": int(result.prompt_tokens or 0),
+                        "output": int(result.completion_tokens or 0),
+                        "thinking": int(result.thinking_tokens or 0),
+                        "token_source": "provider",
+                        # OpenRouter reasoning_tokens is a detail within
+                        # completion_tokens, not an additional token bucket.
+                        "thinking_in_output": True,
+                        "cost_usd": result.cost_usd,
+                        "prompt_cache_hit_tokens": _optional_usage_token_count(
+                            getattr(result, "prompt_cache_hit_tokens", None)
+                        ),
+                        "prompt_cache_miss_tokens": _optional_usage_token_count(
+                            getattr(result, "prompt_cache_miss_tokens", None)
+                        ),
+                        # One physical call only; retries have their own row.
+                        "provider_call_latency_ms": provider_call_latency_ms,
+                        "attempt": provider_attempt,
+                        "retry_count": provider_call_retry_count,
+                        "recovery_kind": provider_recovery_kind,
+                        "status": "completed",
+                        "request_started_at": provider_call_started_at,
+                        "response_observed_at": _utc_timestamp(),
+                        "effective_parameters": effective_parameters,
+                        **_response_protocol_record(result, decision),
+                    },
+                )
+                provider_calls.append(last_provider_call_record)
                 if result.cost_usd is None:
                     provider_cost_complete = False
                 else:
@@ -2067,8 +2735,10 @@ class OpenRouterAdapter(BaseBackend):
                 last_audio_bytes = result.audio_bytes
                 last_audio_transcript = result.audio_transcript
 
-                # No tool calls — we're done
-                if not result.tool_calls or not self.tool_registry:
+                # The protocol decision is persisted synchronously above. No
+                # tool side effect may occur before that durable boundary.
+                if not bool(decision.get("execute_tools")):
+                    terminal_decision = dict(decision)
                     break
 
                 tool_loop_count += 1
@@ -2093,6 +2763,12 @@ class OpenRouterAdapter(BaseBackend):
                     native_attachment_ids=native_attachment_ids,
                     native_local_refs=native_local_refs,
                     all_media_native=all_media_native,
+                    provider_call_context={
+                        "provider_call_serial": provider_attempt_serial,
+                        "provider_request_id": last_provider_call_record.get(
+                            "provider_request_id", ""
+                        ),
+                    },
                 )
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -2102,14 +2778,25 @@ class OpenRouterAdapter(BaseBackend):
                 output_tokens=total_completion,
                 thinking_tokens=total_thinking,
             ) if (total_prompt or total_completion) else None
-            if audio_output is not None and not last_audio_bytes:
+            protocol_success = bool(
+                terminal_decision and terminal_decision.get("success")
+            )
+            protocol_error_code = str(
+                (terminal_decision or {}).get("error_code") or ""
+            )
+            protocol_error = (
+                _provider_protocol_error_message(protocol_error_code)
+                if not protocol_success
+                else None
+            )
+            if protocol_success and audio_output is not None and not last_audio_bytes:
                 raise MultimodalContractError(
                     "provider completed a native voice request without audio output",
                     code="PROVIDER_AUDIO_OUTPUT_MISSING",
                 )
             output_content: tuple[Mapping[str, Any], ...] = ()
             native_audio_metadata: dict[str, Any] | None = None
-            if last_audio_bytes:
+            if protocol_success and last_audio_bytes:
                 if audio_output is None:
                     raise MultimodalContractError(
                         "provider returned audio without an authorized audio output profile",
@@ -2200,8 +2887,18 @@ class OpenRouterAdapter(BaseBackend):
                 text=last_text,
                 duration_ms=duration_ms,
                 structured_data=last_structured_data,
-                is_success=True,
-                stop_reason=result.finish_reason if "result" in dir() else "stop",
+                is_success=protocol_success,
+                error=protocol_error,
+                error_code=protocol_error_code or None,
+                error_retryable=(
+                    bool((terminal_decision or {}).get("error_retryable"))
+                    if not protocol_success
+                    else None
+                ),
+                stop_reason=str(
+                    (terminal_decision or {}).get("normalized_finish_reason")
+                    or "unknown"
+                ),
                 usage=usage,
                 cost_usd=(
                     round(total_cost_usd, 12)
@@ -2217,10 +2914,27 @@ class OpenRouterAdapter(BaseBackend):
                     "multimodal_fallback_attempted": media_fallback_attempted,
                     "native_audio": native_audio_metadata,
                     "audio_input_normalization": list(input_normalization),
+                    "provider_protocol": dict(terminal_decision or {}),
                 },
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
                 content=output_content,
+                provider_request_id=(
+                    str(
+                        (last_provider_call_record or {}).get(
+                            "provider_response_id"
+                        )
+                        or (last_provider_call_record or {}).get(
+                            "transport_request_id"
+                        )
+                        or (last_provider_call_record or {}).get(
+                            "provider_request_id"
+                        )
+                        or ""
+                    )
+                    or None
+                ),
+                side_effects_possible=False,
             )
 
         except asyncio.CancelledError:

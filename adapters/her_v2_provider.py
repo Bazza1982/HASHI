@@ -306,6 +306,7 @@ def _backend_response_error(
     }
     for key in (
         "provider_http_failure",
+        "provider_protocol",
         "transport_audit_path",
         "gateway_continuation",
     ):
@@ -2766,8 +2767,12 @@ class HashiStageProvider(StageProvider):
         invocation_id: str = "",
         attempt: int = 1,
         recovery_kind: str = "none",
+        turn_id: str = "",
+        request_ref: str = "",
+        role: str = "provider",
+        plan_id: str | None = None,
     ) -> None:
-        """Durably account each physical Provider call as it settles."""
+        """Durably audit and account each physical Provider call as it settles."""
 
         setter = getattr(backend, "set_provider_call_observer", None)
         if not callable(setter):
@@ -2775,6 +2780,55 @@ class HashiStageProvider(StageProvider):
 
         def observe(call: Mapping[str, Any]) -> None:
             payload = dict(call)
+            provider_request_id = str(
+                payload.get("provider_request_id") or ""
+            ).strip()
+            bound_request_ref = str(request_ref or request_id or "")
+            bound_turn_id = str(turn_id or "").strip()
+            if not bound_turn_id:
+                bound_turn_id = bound_request_ref.removeprefix("hashi-request:")
+            if self.audit_log is not None:
+                runtime = self.runtime_context
+                app = getattr(runtime, "app", None)
+                generation = {
+                    "worker_generation_id": str(
+                        getattr(runtime, "generation_id", "") or ""
+                    ),
+                    "functions_generation_id": str(
+                        getattr(app, "shared_generation_id", "") or ""
+                    ),
+                }
+                identity = "|".join(
+                    (
+                        str(invocation_id or bound_turn_id),
+                        provider_request_id,
+                        str(payload.get("call_serial") or 1),
+                    )
+                )
+                self.audit_log.append(
+                    event_id=(
+                        f"{invocation_id or bound_turn_id}:provider-call:"
+                        + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+                    ),
+                    turn_id=bound_turn_id,
+                    request_ref=bound_request_ref,
+                    stage=str(phase or "provider"),
+                    role=str(role or "provider"),
+                    event=(
+                        "provider_physical_response_decision"
+                        if str(payload.get("status") or "") == "completed"
+                        else "provider_physical_call_terminated"
+                    ),
+                    provider=engine,
+                    model=model,
+                    attempt=max(1, int(payload.get("attempt") or attempt or 1)),
+                    plan_id=plan_id,
+                    payload={
+                        **payload,
+                        "invocation_id": str(invocation_id or ""),
+                        "generation": generation,
+                    },
+                )
             response = BackendResponse(
                 text="",
                 duration_ms=float(payload.get("provider_call_latency_ms") or 0.0),
@@ -3545,6 +3599,10 @@ class HashiStageProvider(StageProvider):
                     if request.stage is Stage.JSON_REPAIR
                     else ("fresh_connection_retry" if request.attempt > 1 else "none")
                 ),
+                turn_id=request.turn_id,
+                request_ref=request.request_ref,
+                role=request.role,
+                plan_id=request.plan_id,
             )
             prompt_request = request
             if request.stage in {Stage.PLANNING, Stage.REPLANNING} and (
@@ -4052,6 +4110,10 @@ class HashiStageProvider(StageProvider):
                             ),
                             attempt=request.attempt,
                             recovery_kind="native_audio_fallback",
+                            turn_id=request.turn_id,
+                            request_ref=request.request_ref,
+                            role=request.role,
+                            plan_id=request.plan_id,
                         )
                         provider_request_inflight = (
                             fallback_provider,
@@ -4221,6 +4283,10 @@ class HashiStageProvider(StageProvider):
                     invocation_id=f"{request.invocation_id}:media-fallback",
                     attempt=request.attempt,
                     recovery_kind="media_fallback",
+                    turn_id=request.turn_id,
+                    request_ref=request.request_ref,
+                    role=request.role,
+                    plan_id=request.plan_id,
                 )
                 provider_request_inflight = (
                     profile.engine,
@@ -4649,6 +4715,10 @@ class HashiStageProvider(StageProvider):
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     human_description="The Persona provider could not be initialized.",
                 )
+            persona_turn_id, persona_request_ref = self._persona_audit_contexts.get(
+                str(request_id),
+                ("", ""),
+            )
             self._bind_provider_call_observer(
                 backend,
                 request_id=request_id,
@@ -4658,6 +4728,9 @@ class HashiStageProvider(StageProvider):
                 invocation_id=request_id,
                 attempt=attempt,
                 recovery_kind=("fresh_connection_retry" if attempt > 1 else "none"),
+                turn_id=persona_turn_id,
+                request_ref=persona_request_ref,
+                role="persona_packager",
             )
             effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):
