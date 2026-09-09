@@ -20,7 +20,7 @@ sys.modules.setdefault(
 from orchestrator import remote_lifecycle
 from orchestrator.startup_manager import StartupManager
 from remote.live_endpoints import read_live_endpoints, write_live_endpoints
-from remote.main import HashiRemoteApplication
+from remote.main import HashiRemoteApplication, _build_local_capabilities
 from remote.peer.base import PeerInfo
 from remote.runtime_identity import (
     read_runtime_claim,
@@ -68,6 +68,13 @@ def test_load_settings_reads_default_on_lifecycle(tmp_path):
     assert settings.use_tls is False
     assert settings.backend == "tailscale"
     assert settings.disabled_path == tmp_path / "state" / "remote_disabled.json"
+
+
+def test_remote_advertises_complete_agent_transfer_lifecycle():
+    capabilities = _build_local_capabilities(rescue_start_enabled=False)
+
+    assert "agent_move_receive_v1" in capabilities
+    assert "agent_transfer_lifecycle_v1" in capabilities
 
 
 def test_load_settings_defaults_remote_and_supervisor_on(tmp_path):

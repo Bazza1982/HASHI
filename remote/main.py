@@ -32,7 +32,10 @@ import uvicorn
 # Add parent to path if running as script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from orchestrator.agent_move.package import AGENT_MOVE_CAPABILITY
+from orchestrator.agent_move.package import (
+    AGENT_MOVE_CAPABILITY,
+    AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
+)
 from orchestrator.remote_lifecycle import read_disabled_state
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from orchestrator.stable_port_allocator import (
@@ -63,6 +66,22 @@ from remote.security.tls import load_or_generate_cert
 from remote.terminal.executor import AuthLevel, TerminalExecutor
 
 logger = logging.getLogger(__name__)
+
+
+def _build_local_capabilities(*, rescue_start_enabled: bool) -> list[str]:
+    capabilities = build_default_capabilities(
+        rescue_start_enabled=rescue_start_enabled
+    )
+    for capability in (
+        "file_transfer_hmac_v1",
+        "message_attachments_v1",
+        AGENT_MOVE_CAPABILITY,
+        AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
+    ):
+        if capability not in capabilities:
+            capabilities.append(capability)
+    return capabilities
+
 
 def _load_remote_config(hashi_root: Path) -> dict:
     config_path = hashi_root / "remote" / "config.yaml"
@@ -368,16 +387,9 @@ class HashiRemoteApplication:
             lan_mode=self._lan_mode,
             max_allowed_level=self._max_terminal_level,
         )
-        local_capabilities = build_default_capabilities(
+        local_capabilities = _build_local_capabilities(
             rescue_start_enabled=terminal_executor.allows_level(AuthLevel.L3_RESTART)
         )
-        for capability in (
-            "file_transfer_hmac_v1",
-            "message_attachments_v1",
-            AGENT_MOVE_CAPABILITY,
-        ):
-            if capability not in local_capabilities:
-                local_capabilities.append(capability)
         instance_info["remote_supervisor"] = {
             "mode": "supervised" if self._supervised else "child",
             "source": "flag_or_env" if self._supervised else "hashi_child_or_manual",
