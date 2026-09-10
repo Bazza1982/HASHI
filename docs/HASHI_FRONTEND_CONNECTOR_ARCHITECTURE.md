@@ -92,13 +92,21 @@ Current implementation boundary:
   so a TUI window is a projection of the same formal Conversation rather than
   the owner of a private TUI Session;
 - its local command palette derives Agent commands from the canonical command
-  metadata, shows at most five prefix matches, and keeps TUI-only navigation and
-  layout commands inside the Connector;
-- submitting a command prefix selects the first displayed prefix match, while an
-  unknown slash command is rejected locally and never becomes a model prompt;
+  metadata, shows complete typed syntax plus localized option/example guidance,
+  and keeps TUI-only navigation and layout commands inside the Connector;
+- after an exact command and a space, the palette shows at most five parameter
+  matches at a time. Runtime-owned backend, model, provider, effort and Agent
+  choices are derived from live metadata and the qualified Functions catalogue,
+  while bounded command grammar stays in canonical command metadata;
+- submitting a command or parameter prefix selects the first displayed prefix
+  match, while an unknown slash command is rejected locally and never becomes a
+  model prompt;
 - unified slash-command response `messages` are rendered immediately by the
   TUI with target-safe Telegram HTML/Markdown conversion. They are not inserted
-  into the transcript, so later polling cannot duplicate them;
+  into the transcript, so later polling cannot duplicate them. A successful
+  no-argument command with typed parameters also receives a local, copyable
+  Options/Usage/Example guide because Telegram inline keyboards do not render
+  in the terminal;
 - chat history remains a Rich/Markdown projection while exposing mouse
   selection, a visible selection style, selection-first `Ctrl+C`, and
   selection-fenced follow-tail behaviour;

@@ -58,6 +58,38 @@ def test_binding_and_menu_views_are_derived_from_command_specs():
     ]
 
 
+def test_parameterized_menu_commands_publish_typed_input_guidance():
+    no_parameter_commands = {
+        "help",
+        "credit",
+        "say",
+        "fyi",
+        "fresh",
+        "current",
+        "archive",
+        "clear",
+        "stop",
+        "terminate",
+        "retry",
+        "jobs",
+        "logo",
+        "wa_on",
+        "wa_off",
+        "end",
+    }
+    visible_without_guidance = {
+        spec.name
+        for spec in COMMAND_SPECS
+        if spec.menu_visible and spec.guide is None
+    }
+    assert visible_without_guidance == no_parameter_commands
+    for spec in COMMAND_SPECS:
+        if not spec.menu_visible or spec.guide is None:
+            continue
+        assert spec.guide.usage.startswith(f"/{spec.name}")
+        assert all(choice and " " not in choice for choice in spec.guide.choices)
+
+
 def test_retired_working_mode_commands_are_hidden_compatibility_notices():
     retired = {
         spec.name: spec

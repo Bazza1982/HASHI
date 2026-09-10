@@ -20,7 +20,15 @@ from textual.strip import Strip
 from textual.suggester import SuggestFromList
 from textual.widgets import Input, RichLog, Static
 
-from orchestrator.command_specs import COMMAND_SPECS
+from orchestrator import ui_language
+from orchestrator.command_specs import COMMAND_SPECS, CommandGuide
+from orchestrator.flexible_backend_registry import (
+    HER_V2_ENGINE,
+    canonical_backend_engine,
+    get_available_models,
+    is_selectable_backend,
+)
+from orchestrator.runtime_effort_options import get_available_efforts
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
 from tui.clipboard import copy_to_windows_clipboard
@@ -62,6 +70,51 @@ TUI_COMMAND_HELP["telegram"] = (
     "\u67e5\u770b\u6216\u8bbe\u7f6e TUI Telegram \u955c\u50cf",
     "Inspect or set TUI Telegram mirroring",
 )
+TUI_COMMAND_GUIDES = {
+    "help": CommandGuide("/help [zh|en]", ("zh", "en"), example="/help zh"),
+    "to": CommandGuide("/to <agent|all>", choice_source="agents"),
+    "instance": CommandGuide(
+        "/instance [name|refresh]", ("refresh",), example="/instance refresh"
+    ),
+    "layout": CommandGuide(
+        "/layout [chat|balanced|compact|reset]",
+        ("chat", "balanced", "compact", "reset"),
+        example="/layout balanced",
+    ),
+    "log": CommandGuide(
+        "/log [show|hide|pause]",
+        ("show", "hide", "pause"),
+        example="/log hide",
+    ),
+    "tui": CommandGuide(
+        "/tui <language|sound|typing|telegram> <value>",
+        ("language", "sound", "typing", "telegram"),
+        example="/tui language zh",
+    ),
+    "telegram": CommandGuide(
+        "/telegram [on|off]", ("on", "off"), example="/telegram off"
+    ),
+}
+TUI_NESTED_CHOICES = {
+    ("tui", "language"): ("zh", "en"),
+    ("tui", "sound"): ("on", "off", "test"),
+    ("tui", "typing"): ("on", "off"),
+    ("tui", "telegram"): ("on", "off"),
+}
+TUI_LOCALIZED_EXAMPLES = {
+    "handoff": ("继续当前任务", "continue the current task"),
+    "ticket": ("TUI 命令菜单不清楚", "TUI command menu is unclear"),
+    "park": ("chat 稍后继续", "chat follow up later"),
+    "new": ("研究笔记", "research notes"),
+    "nudge": ("15 直到任务完成", "15 until the task is complete"),
+    "debug": ("诊断这个故障", "diagnose this failure"),
+    "exp": ("审查这个结果", "review this result"),
+    "steer": ("保留当前文件", "keep the current files"),
+    "focus": ("只检查测试", "tests only"),
+    "wa_send": ("+61400000000 您好", "+61400000000 Hello"),
+    "browser": ("3 搜索今天的天气", "3 search today's weather"),
+    "long": ("审查这些文件", "review these files"),
+}
 TUI_DISCOVERY_COMMANDS = ("/help", "/to", "/mode", "/model", "/backend")
 
 
@@ -213,7 +266,7 @@ class CommandPreview(Static):
     CommandPreview {
         display: none;
         height: auto;
-        max-height: 5;
+        max-height: 10;
         padding: 0 1;
         background: #101d28;
         color: #9be7ff;
@@ -224,17 +277,23 @@ class CommandPreview(Static):
         self,
         matches: list[tuple[str, str, str]],
         selected_index: int = 0,
+        details: tuple[str, ...] = (),
     ):
         rows = Text()
         for index, (command, description, scope) in enumerate(matches):
             selected = index == selected_index
             rows.append("› " if selected else "  ", style="bold #63ffd9" if selected else "#39566e")
-            rows.append(f"{command:<18}", style="bold #71b7ff" if selected else "#7dc6ff")
+            rows.append(command, style="bold #71b7ff" if selected else "#7dc6ff")
+            rows.append(" " * max(2, 34 - len(command)))
             rows.append(description, style="#dff6ff" if selected else "#9fb3c8")
             rows.append(f"  {scope}", style="dim #7fb6c7")
             if index < len(matches) - 1:
                 rows.append("\n")
-        self.styles.height = len(matches)
+        for detail in details:
+            if rows:
+                rows.append("\n")
+            rows.append(f"  {detail}", style="dim #9be7ff")
+        self.styles.height = "auto"
         self.update(rows)
         self.display = True
 
@@ -640,6 +699,7 @@ class HASHITuiApp(App):
         command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
         command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._command_names = list(dict.fromkeys(command_names))
+        self._command_specs = {spec.name: spec for spec in COMMAND_SPECS}
         known_command_names = [f"/{spec.name}" for spec in COMMAND_SPECS]
         known_command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._known_command_names = list(dict.fromkeys(known_command_names))
@@ -653,6 +713,8 @@ class HASHITuiApp(App):
         self._current_command_match: str | None = None
         self._command_matches: list[str] = []
         self._command_match_index = 0
+        self._parameter_command_name: str | None = None
+        self._parameter_path: tuple[str, ...] = ()
         self.api = TuiApiClient(
             base_url=local_urls[0],
             fallback_base_urls=local_urls[1:],
@@ -1339,14 +1401,16 @@ class HASHITuiApp(App):
             )
 
     def on_input_changed(self, event: Input.Changed):
-        """Show a Codex-style palette for an incomplete slash command."""
+        """Show command syntax first, then valid parameter completions."""
 
-        value = event.value.strip().casefold()
+        value = event.value.lstrip().casefold()
         preview = self.query_one("#command-preview", CommandPreview)
         self._current_command_match = None
         self._command_matches = []
         self._command_match_index = 0
-        if not value.startswith("/") or " " in value or len(value) < 2:
+        self._parameter_command_name = None
+        self._parameter_path = ()
+        if not value.startswith("/") or len(value) < 2:
             if value == "/":
                 self._command_matches = [
                     command for command in TUI_DISCOVERY_COMMANDS if command in self._command_names
@@ -1354,6 +1418,33 @@ class HASHITuiApp(App):
                 self._show_command_matches()
             else:
                 preview.hide_match()
+            return
+        command, separator, arguments = value.partition(" ")
+        canonical = next(
+            (
+                candidate
+                for candidate in self._known_command_names
+                if candidate.casefold() == command
+            ),
+            None,
+        )
+        if separator and canonical:
+            self._parameter_command_name = canonical[1:]
+            matches, path = self._parameter_matches(
+                self._parameter_command_name,
+                arguments,
+            )
+            self._parameter_path = path
+            self._command_matches = matches
+            if self._command_matches:
+                self._show_command_matches()
+            elif self._command_guide(self._parameter_command_name):
+                self._show_parameter_usage(self._parameter_command_name)
+            else:
+                preview.hide_match()
+            return
+        if separator:
+            preview.hide_match()
             return
         self._command_matches = self._ranked_command_matches(value)
         if not self._command_matches:
@@ -1385,12 +1476,24 @@ class HASHITuiApp(App):
                 return None
             selected = self._current_command_match
             canonical = selected if selected in matches else matches[0]
-        return canonical + (separator + arguments if separator else "")
+        resolved = canonical + (separator + arguments if separator else "")
+        selected = self._current_command_match
+        if (
+            separator
+            and self._parameter_command_name == canonical[1:]
+            and selected
+            and " " in selected
+            and selected.casefold().startswith(resolved.casefold())
+        ):
+            return selected
+        return resolved
 
     def _hide_command_preview(self):
         self._command_matches = []
         self._current_command_match = None
         self._command_match_index = 0
+        self._parameter_command_name = None
+        self._parameter_path = ()
         self.query_one("#command-preview", CommandPreview).hide_match()
 
     def _show_command_matches(self):
@@ -1403,37 +1506,406 @@ class HASHITuiApp(App):
         local_names = set(TUI_COMMAND_HELP)
         tui_scope = "TUI"
         agent_scope = "Agent"
-        matches = [
-            (
-                command,
-                self._command_description(command[1:]),
-                tui_scope if command[1:] in local_names else agent_scope,
-            )
-            for command in self._command_matches
-        ]
+        window_start = min(
+            max(0, self._command_match_index - 4),
+            max(0, len(self._command_matches) - 5),
+        )
+        visible_matches = self._command_matches[window_start : window_start + 5]
+        matches: list[tuple[str, str, str]] = []
+        if self._parameter_command_name:
+            name = self._parameter_command_name
+            for command in visible_matches:
+                matches.append(
+                    (
+                        command,
+                        self._parameter_description(name, command),
+                        tui_scope if name in local_names else agent_scope,
+                    )
+                )
+        else:
+            for command in visible_matches:
+                name = command[1:]
+                matches.append(
+                    (
+                        self._command_usage(name),
+                        self._command_description(name),
+                        tui_scope if name in local_names else agent_scope,
+                    )
+                )
+        detail_name = self._parameter_command_name or self._current_command_match[1:]
         self.query_one("#command-preview", CommandPreview).show_matches(
             matches,
-            self._command_match_index,
+            self._command_match_index - window_start,
+            self._command_guide_details(detail_name),
         )
 
     def _command_description(self, name: str) -> str:
         local = TUI_COMMAND_HELP.get(name)
         if local:
             return local[0 if self._ui_language == "zh" else 1]
-        spec = next((item for item in COMMAND_SPECS if item.name == name), None)
+        spec = self._command_specs.get(name)
         if spec is None:
             return ""
-        chinese = {
-            "backend": "选择或查看后端",
-            "language": "选择界面语言",
-            "mode": "选择或查看工作模式",
-            "model": "选择模型与推理强度",
-            "status": "查看 Agent 状态",
-            "version": "查看实际运行版本",
+        locale = "zh-CN" if self._ui_language == "zh" else "en"
+        return ui_language.command_description(name, spec.description, locale=locale)
+
+    def _command_guide(self, name: str) -> CommandGuide | None:
+        local = TUI_COMMAND_GUIDES.get(name)
+        if local:
+            return local
+        spec = self._command_specs.get(name)
+        if spec is None:
+            return None
+        if spec.alias_of:
+            owner = self._command_specs.get(spec.alias_of)
+            return owner.guide if owner else None
+        return spec.guide
+
+    def _command_usage(self, name: str) -> str:
+        guide = self._command_guide(name)
+        return guide.usage if guide else f"/{name}"
+
+    @staticmethod
+    def _dedupe_options(values) -> list[str]:
+        choices: list[str] = []
+        for value in values:
+            option = str(value or "").strip()
+            if option and option not in choices:
+                choices.append(option)
+        return choices
+
+    def _runtime_selection(self) -> tuple[str, str, dict, list[dict]]:
+        facts = self._current_agent_metadata
+        presentation = facts.get("presentation_status")
+        presentation = dict(presentation) if isinstance(presentation, dict) else {}
+        engine = canonical_backend_engine(
+            presentation.get("engine")
+            or facts.get("active_backend")
+            or facts.get("engine")
+        )
+        model = str(
+            presentation.get("model") or facts.get("model") or ""
+        ).strip()
+        raw_backends = facts.get("allowed_backends")
+        backends = [
+            dict(item)
+            for item in raw_backends or []
+            if isinstance(item, dict)
+        ]
+        return engine, model, presentation, backends
+
+    def _command_choices(
+        self,
+        name: str,
+        *,
+        path: tuple[str, ...] = (),
+    ) -> list[str]:
+        nested = TUI_NESTED_CHOICES.get((name, *path))
+        if nested is not None:
+            return list(nested)
+        guide = self._command_guide(name)
+        if guide is None:
+            return []
+        if not guide.choice_source:
+            return list(guide.choices)
+
+        engine, model, presentation, backends = self._runtime_selection()
+        if guide.choice_source == "agents":
+            rows = [row for row in self._agents_cache if isinstance(row, dict)]
+            if name == "start":
+                rows = [
+                    row
+                    for row in rows
+                    if row.get("is_active", row.get("isActive", True))
+                    and not row.get("online")
+                ]
+            choices = [row.get("name") or row.get("id") for row in rows]
+            choices.extend(self._chat_targets)
+            if name == "to":
+                choices.append("all")
+            return self._dedupe_options(choices)
+        if guide.choice_source == "backends":
+            return self._dedupe_options(
+                [
+                    item.get("engine")
+                    for item in backends
+                    if is_selectable_backend(item.get("engine"))
+                ]
+                + [engine]
+            )
+        if guide.choice_source == "models":
+            if engine == HER_V2_ENGINE:
+                return [
+                    "quick",
+                    "pro",
+                    "routes",
+                    "route",
+                    "reasoning",
+                    "apply",
+                    "discard",
+                    "compact",
+                ]
+            choices = [model]
+            for item in backends:
+                if canonical_backend_engine(item.get("engine")) != engine:
+                    continue
+                configured = item.get("models")
+                if isinstance(configured, list):
+                    choices.extend(configured)
+                choices.extend((item.get("model"), item.get("default_model")))
+            if engine:
+                choices.extend(get_available_models(engine))
+            return self._dedupe_options(choices)
+        if guide.choice_source == "efforts":
+            try:
+                return self._dedupe_options(
+                    get_available_efforts(
+                        engine,
+                        model or None,
+                        allowed_backends=backends,
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                return []
+        if guide.choice_source == "providers":
+            if engine != HER_V2_ENGINE:
+                return []
+            choices = [
+                "hybrid",
+                self._current_agent_metadata.get("provider"),
+                *[
+                    item.get("engine")
+                    for item in backends
+                    if not is_selectable_backend(item.get("engine"))
+                ],
+            ]
+            her = presentation.get("her_v2")
+            if isinstance(her, dict):
+                for slot in ("quick", "pro"):
+                    target = her.get(slot)
+                    if isinstance(target, dict):
+                        choices.append(target.get("provider"))
+            return self._dedupe_options(choices)
+        return list(guide.choices)
+
+    def _parameter_matches(
+        self,
+        name: str,
+        arguments: str,
+    ) -> tuple[list[str], tuple[str, ...]]:
+        trailing_space = arguments.endswith(" ")
+        tokens = arguments.split()
+        if trailing_space:
+            path = tuple(token.casefold() for token in tokens)
+            partial = ""
+        elif tokens:
+            path = tuple(token.casefold() for token in tokens[:-1])
+            partial = tokens[-1].casefold()
+        else:
+            path = ()
+            partial = ""
+
+        choices = self._command_choices(name, path=path)
+        if not choices and path:
+            return [], path
+        prefix = f"/{name}"
+        if path:
+            prefix += " " + " ".join(path)
+        matches = [
+            f"{prefix} {choice}"
+            for choice in choices
+            if choice.casefold().startswith(partial)
+        ]
+        return matches, path
+
+    def _current_choice(self, name: str, path: tuple[str, ...] = ()) -> str | None:
+        engine, model, presentation, _backends = self._runtime_selection()
+        if name == "backend":
+            return engine or None
+        if name == "model":
+            return model or None
+        if name == "effort":
+            return str(presentation.get("effort") or "").strip() or None
+        if name == "mode":
+            return str(self._current_agent_metadata.get("mode") or "").strip() or None
+        if name == "layout":
+            return self._layout_mode
+        if name == "telegram" or (name == "tui" and path == ("telegram",)):
+            return "on" if self._telegram_mirror_enabled else "off"
+        if name == "tui" and path == ("language",):
+            return self._ui_language
+        if name == "tui" and path == ("sound",):
+            return "on" if self._sound_enabled else "off"
+        if name == "tui" and path == ("typing",):
+            return "on" if self._tui_typing_enabled else "off"
+        return None
+
+    def _parameter_description(self, name: str, completion: str) -> str:
+        tokens = completion.split()
+        option = tokens[-1] if tokens else ""
+        path = tuple(token.casefold() for token in tokens[1:-1])
+        current = self._current_choice(name, path)
+        if current and option.casefold() == current.casefold():
+            return "当前选择" if self._ui_language == "zh" else "Current selection"
+        explanations = {
+            "zh": {
+                "low": "较少推理，响应更快",
+                "medium": "平衡速度与推理",
+                "high": "更深入地处理困难任务",
+                "xhigh": "很高的推理强度",
+                "max": "最高推理强度",
+                "fixed": "保持连续的模型会话",
+                "flex": "每轮重新注入完整上下文",
+                "on": "开启",
+                "off": "关闭",
+                "status": "查看当前状态",
+                "full": "显示完整详情",
+                "all": "全部",
+                "more": "显示更多详情",
+                "show": "显示",
+                "list": "列出可用项目",
+                "refresh": "刷新",
+                "reset": "恢复默认设置",
+                "pause": "暂停",
+                "resume": "继续",
+                "run": "立即运行",
+                "stop": "停止",
+                "add": "新增",
+                "delete": "删除",
+                "create": "创建",
+                "edit": "编辑",
+                "help": "查看帮助",
+                "find": "查找",
+                "enable": "启用",
+                "disable": "停用",
+                "validate": "验证",
+                "apply": "应用更改",
+                "discard": "放弃更改",
+                "compact": "压缩或整理",
+                "quiet": "仅显示必要信息",
+                "activity": "显示执行活动",
+                "raw": "显示原始详情",
+                "summary": "显示汇总",
+                "test": "播放测试",
+                "language": "设置 TUI 语言",
+                "sound": "设置 TUI 声音",
+                "typing": "设置输入提示",
+                "telegram": "设置 Telegram 镜像",
+                "chat": "聊天优先布局",
+                "balanced": "均衡布局",
+                "hide": "隐藏",
+                "zh": "简体中文",
+                "en": "English",
+            },
+            "en": {
+                "low": "Less reasoning, faster responses",
+                "medium": "Balanced speed and reasoning",
+                "high": "Deeper reasoning for difficult tasks",
+                "xhigh": "Very high reasoning effort",
+                "max": "Maximum reasoning effort",
+                "fixed": "Persistent engine session",
+                "flex": "Re-inject full context each turn",
+                "on": "Enable",
+                "off": "Disable",
+                "status": "Show current status",
+                "full": "Show full details",
+                "all": "All",
+                "more": "Show more details",
+                "show": "Show",
+                "list": "List available items",
+                "refresh": "Refresh",
+                "reset": "Restore defaults",
+                "pause": "Pause",
+                "resume": "Resume",
+                "run": "Run now",
+                "stop": "Stop",
+                "add": "Add",
+                "delete": "Delete",
+                "create": "Create",
+                "edit": "Edit",
+                "help": "Show help",
+                "find": "Find",
+                "enable": "Enable",
+                "disable": "Disable",
+                "validate": "Validate",
+                "apply": "Apply changes",
+                "discard": "Discard changes",
+                "compact": "Compact or organize",
+                "quiet": "Essential messages only",
+                "activity": "Show execution activity",
+                "raw": "Show raw detail",
+                "summary": "Show summary",
+                "test": "Play a test",
+                "language": "Set TUI language",
+                "sound": "Set TUI sounds",
+                "typing": "Set typing indicator",
+                "telegram": "Set Telegram mirroring",
+                "chat": "Chat-first layout",
+                "balanced": "Balanced layout",
+                "hide": "Hide",
+                "zh": "Simplified Chinese",
+                "en": "English",
+            },
         }
-        if self._ui_language == "zh" and name in chinese:
-            return chinese[name]
-        return spec.description
+        localized = explanations[self._ui_language]
+        if option.casefold() in localized:
+            return localized[option.casefold()]
+        if name == "backend":
+            return "可用后端" if self._ui_language == "zh" else "Available backend"
+        if name == "model":
+            return "可用模型" if self._ui_language == "zh" else "Available model"
+        if name in {"to", "start", "transfer", "fork", "hchat"}:
+            return "可用 Agent" if self._ui_language == "zh" else "Available Agent"
+        return "可用参数" if self._ui_language == "zh" else "Available option"
+
+    def _guide_example(self, name: str, choices: list[str]) -> str | None:
+        guide = self._command_guide(name)
+        if guide is None:
+            return None
+        localized = TUI_LOCALIZED_EXAMPLES.get(name)
+        if localized:
+            suffix = localized[0 if self._ui_language == "zh" else 1]
+            return f"/{name} {suffix}"
+        if name == "hchat" and choices:
+            message = "请检查状态" if self._ui_language == "zh" else "please check status"
+            return f"/hchat {choices[0]} {message}"
+        if guide.example:
+            return guide.example
+        preferred = "high" if name == "effort" and "high" in choices else None
+        selected = preferred or next(iter(choices), None)
+        return f"/{name} {selected}" if selected else None
+
+    def _command_guide_details(
+        self,
+        name: str,
+        *,
+        include_usage: bool = False,
+    ) -> tuple[str, ...]:
+        guide = self._command_guide(name)
+        if guide is None:
+            return ()
+        choices = self._command_choices(name, path=self._parameter_path)
+        labels = (
+            {"usage": "用法", "options": "可选", "example": "示例"}
+            if self._ui_language == "zh"
+            else {"usage": "Usage", "options": "Options", "example": "Example"}
+        )
+        details: list[str] = []
+        if choices:
+            details.append(f"{labels['options']} · {' · '.join(choices)}")
+        if include_usage:
+            details.append(f"{labels['usage']} · {guide.usage}")
+        example = self._guide_example(name, choices)
+        if example:
+            details.append(f"{labels['example']} · {example}")
+        return tuple(details)
+
+    def _show_parameter_usage(self, name: str) -> None:
+        scope = "TUI" if name in TUI_COMMAND_HELP else "Agent"
+        self.query_one("#command-preview", CommandPreview).show_matches(
+            [(self._command_usage(name), self._command_description(name), scope)],
+            details=self._command_guide_details(name),
+        )
 
     def action_complete_command(self):
         input_box = self.query_one("#chat-input", ChatInput)
@@ -1800,7 +2272,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             return
 
         if result.get("slash_command"):
-            self._render_command_result(result, agent=agent)
+            self._render_command_result(result, agent=agent, submitted_text=text)
             if str(result.get("command") or "").casefold() in {"stop", "cancel"}:
                 self._clear_typing_indicator()
             await self._refresh_runtime_state(client=client, generation=generation)
@@ -1883,7 +2355,13 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             )
             await asyncio.sleep(0.5)
 
-    def _render_command_result(self, result: dict, *, agent: str) -> None:
+    def _render_command_result(
+        self,
+        result: dict,
+        *,
+        agent: str,
+        submitted_text: str = "",
+    ) -> None:
         chat = self.query_one("#chat-history", ChatHistory)
         messages = result.get("messages")
         rendered = False
@@ -1901,6 +2379,17 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 if isinstance(message, dict)
             ):
                 chat.write(Text(f"Command failed ({agent}): {error}", style="red"))
+        command = str(result.get("command") or "").strip().casefold()
+        submitted_parts = submitted_text.strip().split()
+        if (
+            result.get("ok", True)
+            and command
+            and len(submitted_parts) == 1
+            and submitted_parts[0].casefold() == f"/{command}"
+        ):
+            details = self._command_guide_details(command, include_usage=True)
+            if details:
+                chat.write(Text("\n".join(details), style="dim #9be7ff"))
 
     async def _refresh_runtime_state(
         self,

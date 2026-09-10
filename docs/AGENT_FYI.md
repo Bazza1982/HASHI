@@ -104,13 +104,17 @@ See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 - **Frontend Connectors** expose Telegram, WhatsApp, TUI, Backend API and Remote.
   Workbench is retired; names such as `workbench_port` are API compatibility.
 
-The built-in TUI completes entered slash-command prefixes from its displayed
-canonical matches and rejects unknown slash commands locally. Its sent/received
-sounds, language/layout, typing indicator and default Telegram mirror choice are
-local Connector presentation state; they do not alter a HASHI Conversation
-Session. Unified command `messages` render immediately and are not transcript
-entries. Mouse selection pauses follow-tail; `Ctrl+C` copies the selection to
-the Windows clipboard and `Esc` clears it.
+The built-in TUI completes entered slash-command and bounded parameter prefixes
+from its displayed canonical matches and rejects unknown slash commands locally.
+The palette shows localized command descriptions, typed syntax, available
+values and an example; live backend/model/provider/effort/Agent values come from
+runtime metadata and the Functions catalogue. Successful no-argument commands
+with parameters receive the same copyable Options/Usage/Example guide beneath
+their response. Its sent/received sounds, language/layout, typing indicator and
+default Telegram mirror choice are local Connector presentation state; they do
+not alter a HASHI Conversation Session. Unified command `messages` render
+immediately and are not transcript entries. Mouse selection pauses follow-tail;
+`Ctrl+C` copies the selection to the Windows clipboard and `Esc` clears it.
 
 `/telegram` and `/telegram on|off` inspect or change the current TUI's default;
 `/tui telegram on|off` is the explicit alias. The setting is snapshotted at

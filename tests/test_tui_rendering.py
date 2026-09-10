@@ -216,6 +216,109 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
     }
 
 
+async def test_tui_command_preview_discovers_dynamic_parameters_in_both_languages(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(132, 42)) as pilot:
+        app._current_agent_metadata = {
+            "allowed_backends": [
+                {
+                    "engine": "codex-cli",
+                    "model": "gpt-6-astra",
+                    "models": ["gpt-5.6-sol", "gpt-6-astra"],
+                    "model_efforts": {
+                        "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"]
+                    },
+                },
+                {"engine": "claude-cli", "model": "claude-sonnet-4-6"},
+            ],
+            "presentation_status": {
+                "engine": "codex-cli",
+                "model": "gpt-6-astra",
+                "effort": "max",
+            },
+        }
+        input_box = app.query_one("#chat-input", ChatInput)
+        input_box.focus()
+
+        app._handle_tui_cmd("/tui language zh")
+        input_box.value = "/eff"
+        await pilot.pause()
+        preview = app.query_one("#command-preview", CommandPreview)
+        rendered = _render_plain(preview.render())
+        assert "/effort [level]" in rendered
+        assert "可选" in rendered
+        assert "low · medium · high · xhigh · max" in rendered
+        assert "示例" in rendered
+        assert "/effort high" in rendered
+
+        input_box.value = "/effort "
+        await pilot.pause()
+        assert app._command_matches == [
+            "/effort low",
+            "/effort medium",
+            "/effort high",
+            "/effort xhigh",
+            "/effort max",
+        ]
+        rendered = _render_plain(preview.render())
+        assert "较少推理，响应更快" in rendered
+        assert "当前选择" in rendered
+
+        app._handle_tui_cmd("/tui language en")
+        input_box.value = "/mode "
+        await pilot.pause()
+        assert app._command_matches == ["/mode fixed", "/mode flex"]
+        rendered = _render_plain(preview.render())
+        assert "Persistent engine session" in rendered
+        assert "Options" in rendered
+        assert "Example" in rendered
+
+
+async def test_tui_no_argument_command_result_adds_local_parameter_guide(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(120, 40)):
+        app._ui_language = "zh"
+        app._current_agent_metadata = {
+            "allowed_backends": [
+                {
+                    "engine": "codex-cli",
+                    "model": "gpt-6-astra",
+                    "model_efforts": {"gpt-6-astra": ["high", "max"]},
+                }
+            ],
+            "presentation_status": {
+                "engine": "codex-cli",
+                "model": "gpt-6-astra",
+                "effort": "max",
+            },
+        }
+        app._render_command_result(
+            {
+                "ok": True,
+                "command": "effort",
+                "messages": [
+                    {
+                        "text": "<b>模型推理强度</b>\n当前 · max",
+                        "meta": {"parse_mode": "HTML"},
+                    }
+                ],
+            },
+            agent="akane",
+            submitted_text="/effort",
+        )
+
+        rendered = "\n".join(
+            line.text for line in app.query_one("#chat-history", ChatHistory).lines
+        )
+        assert "可选 · high · max" in rendered
+        assert "用法 · /effort [level]" in rendered
+        assert "示例 · /effort high" in rendered
+
+
 async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_path):
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
     app._schedule_startup_sequence = lambda: None
@@ -236,9 +339,15 @@ async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_
         await pilot.press("enter")
         assert sent == ["/mode"]
 
+        input_box.value = "/mode fl"
+        await pilot.pause()
+        assert app._current_command_match == "/mode flex"
+        await pilot.press("enter")
+        assert sent == ["/mode", "/mode flex"]
+
         input_box.value = "/effortt"
         await pilot.press("enter")
-        assert sent == ["/mode"]
+        assert sent == ["/mode", "/mode flex"]
         chat = app.query_one("#chat-history", ChatHistory)
         rendered = "\n".join(line.text for line in chat.lines)
         assert "Unknown command: /effortt" in rendered
@@ -246,7 +355,7 @@ async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_
         # Exact non-menu commands remain valid even though they are not previewed.
         input_box.value = "/move"
         await pilot.press("enter")
-        assert sent == ["/mode", "/move"]
+        assert sent == ["/mode", "/mode flex", "/move"]
 
 
 async def test_tui_sound_setting_is_persisted_and_can_be_previewed(tmp_path):
