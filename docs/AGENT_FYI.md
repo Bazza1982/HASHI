@@ -376,3 +376,10 @@ a fresh preflight is required, while incomplete rollback retains recovery checks
   history and are adopted through a one-time backend-state revision; new
   explicit `tools.enabled=false` cannot inherit global tool wildcards. Windows
   new private credential files receive an owner/SYSTEM/Administrators DACL.
+
+- Native acceptance follow-up: Windows CRT `isatty()` reports true for NUL.
+  Terminal input detection now verifies a real console input handle before
+  permitting implicit interactive instance creation or local onboarding.
+  The Windows compatibility batch entry stays in Windows and delegates to the
+  npm command, with no hard-coded WSL checkout. npm excludes runtime logs/PIDs
+  and the operator-specific deployment template from its payload.

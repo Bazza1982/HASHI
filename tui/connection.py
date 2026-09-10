@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tools.terminal_environment import has_interactive_input
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll, Horizontal
@@ -147,7 +148,7 @@ class ConnectionApp(App):
 
 def main():
     import os, sys
-    if not sys.stdin.isatty():
+    if not has_interactive_input():
         print('ONBOARDING_REQUIRED: Open interactive hashi onboard.', file=sys.stderr)
         return 78
     home=Path(os.environ.get('BRIDGE_HOME') or Path.cwd())

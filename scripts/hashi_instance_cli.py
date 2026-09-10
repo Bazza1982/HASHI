@@ -20,6 +20,7 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from scripts.terminal_support import record_effect, record_instance
+from tools.terminal_environment import has_interactive_input
 
 from tools.instance_registry import (  # noqa: E402
     InstanceRegistry,
@@ -742,7 +743,7 @@ def _selected_record(
     result = registry.select(
         explicit=args.instance,
         cwd=invocation_cwd,
-        interactive=sys.stdin.isatty() and not args.non_interactive and not args.json,
+        interactive=has_interactive_input() and not args.non_interactive and not args.json,
     )
     record_instance(result[0]["name"])
     return result
@@ -915,7 +916,7 @@ def _handle_instance_command(
             )
             return 0
         confirmation = args.confirm
-        if args.purge and not confirmation and sys.stdin.isatty() and not args.non_interactive and not args.json:
+        if args.purge and not confirmation and has_interactive_input() and not args.non_interactive and not args.json:
             confirmation = input(
                 f"Type the exact instance name {record['name']!r} to permanently purge: "
             )
@@ -1007,7 +1008,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 _emit({"instances": []}, as_json=args.json)
                 return EXIT_NOT_READY if args.check else 0
             can_bootstrap = args.command in {None, "tui", "onboard"} and not getattr(args, "attach_only", False)
-            if not can_bootstrap or not sys.stdin.isatty() or args.non_interactive or args.json:
+            if not can_bootstrap or not has_interactive_input() or args.non_interactive or args.json:
                 raise InstanceSelectionError(
                     "No HASHI instance exists. Run interactive `hashi` or "
                     "`hashi instance create <name>`."
@@ -1048,7 +1049,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         if command == "start":
             return start_instance(registry, record, timeout=args.timeout)
         if command == "tui" and not getattr(args, "attach_only", False) and not _is_provisioned(record, registry.resolved_code_root(record)):
-            if args.non_interactive or not sys.stdin.isatty():
+            if args.non_interactive or not has_interactive_input():
                 raise TerminalUsageError("ONBOARDING_REQUIRED: Run interactive hashi onboard")
             connected = run_onboarding(record, registry.resolved_code_root(record))
             if connected:

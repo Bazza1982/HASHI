@@ -128,6 +128,7 @@
     "scripts/terminal-help.json",
     "scripts/terminal_language.py",
     "!**/*.log",
-    "!**/*.pid"
+    "!**/*.pid",
+    "!superloops/templates/aptenra_kvm_deployment_acceptance/**"
   ]
 }

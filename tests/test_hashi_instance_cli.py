@@ -281,7 +281,7 @@ def test_first_interactive_onboarding_creates_one_isolated_default_instance(
     monkeypatch.setenv("HASHI_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("HASHI_INVOCATION_CWD", str(tmp_path / "project"))
     monkeypatch.setattr(instance_registry, "_port_available", lambda _port: True)
-    monkeypatch.setattr(hashi_instance_cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(hashi_instance_cli, "has_interactive_input", lambda: True)
     onboarded = []
     monkeypatch.setattr(hashi_instance_cli, "_run_tui", lambda *a, **k: 0)
     monkeypatch.setattr(

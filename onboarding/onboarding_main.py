@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from tools.terminal_environment import has_interactive_input
 from uuid import uuid4
 
 def _atomic_write_json(path: Path, payload: dict, *, private: bool = False) -> None:
@@ -22,6 +23,10 @@ def _atomic_write_json(path: Path, payload: dict, *, private: bool = False) -> N
 
 
 def run_onboarding():
+    import sys
+    if not has_interactive_input():
+        print("ONBOARDING_REQUIRED: Open interactive hashi onboard.", file=sys.stderr)
+        return 78
     from tui.connection import main
     return main()
 
