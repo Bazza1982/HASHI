@@ -11,6 +11,7 @@ from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
     materialize_openai_user_content,
+    native_media_failure_reason,
     resolve_input_capability,
     route_request_content,
 )
@@ -78,7 +79,7 @@ def test_unknown_model_fails_closed_to_local_fallback(tmp_path):
     )
 
     assert decisions[0].route == "local_fallback"
-    assert decisions[0].reason == "native_capability_unavailable"
+    assert decisions[0].reason == "model_capability_unknown"
 
 
 def test_local_fallback_materialisation_exposes_ordered_tool_references(tmp_path):
@@ -150,6 +151,24 @@ def test_explicit_audio_only_capability_does_not_implicitly_gain_text():
     assert capability.supports("audio", "inline") is True
 
 
+def test_manual_model_override_cannot_invent_adapter_transport():
+    capability = resolve_input_capability(
+        "codex-cli",
+        "configured/audio-model",
+        config={
+            "input_modalities": ["audio"],
+            "input_transports": {"audio": ["inline"]},
+        },
+    )
+
+    assert capability.status_for("audio") == "supported"
+    assert capability.supports("audio", "inline") is False
+    assert (
+        native_media_failure_reason(capability, "audio")
+        == "adapter_transport_unimplemented"
+    )
+
+
 def test_explicit_null_input_modalities_fail_instead_of_inventing_text():
     with pytest.raises(MultimodalContractError):
         resolve_input_capability(
@@ -173,7 +192,7 @@ def test_deepseek_vision_capability_is_exact_and_size_bounded():
     text_only = resolve_input_capability("deepseek-api", "deepseek-v4-flash")
 
     assert vision.supports("image", "data_url") is True
-    assert vision.supports("image", "remote_url") is True
+    assert vision.supports("image", "remote_url") is False
     assert vision.limits == {
         "item_count": 600,
         "item_bytes": 32 * 1024 * 1024,
@@ -237,7 +256,7 @@ def test_privacy_policy_can_force_local_processing(tmp_path):
     )
 
     assert decisions[0].route == "local_fallback"
-    assert decisions[0].reason == "privacy_policy_requires_local"
+    assert decisions[0].reason == "media_policy_blocked"
     assert capability.supports("text") is True
 
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.base import BackendResponse
+from adapters.her_v2 import HERv2Adapter
 from adapters.her_v2_provider import HashiStageProvider, _MediaRoutingToolRegistry
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_TOOL_START, StreamEvent
 from orchestrator.her_v2.config import ProviderProfile
@@ -572,7 +573,7 @@ async def test_tool_free_stage_fails_instead_of_silently_dropping_unsupported_me
             _request(Stage.TRIAGE, content, allow_tools=False),
         )
 
-    assert captured.value.code is ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED
+    assert captured.value.code is ProviderFailureCode.MODEL_MODALITY_UNSUPPORTED
     assert backend.calls == []
 
 
@@ -696,3 +697,192 @@ async def test_unsafe_or_unrelated_provider_failures_do_not_trigger_media_replay
 
     assert captured.value.code is error_code
     assert len(backend.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_stage_modality_cache_follows_capability_fact_revision(
+    tmp_path,
+    monkeypatch,
+):
+    backend = _Backend([])
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="native-image-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        modality_status={"image": "unknown", "text": "supported"},
+        source="dynamic_unknown",
+    )
+
+    class CountingManager(_Manager):
+        def __init__(self, selected_backend):
+            super().__init__(selected_backend)
+            self.create_calls = 0
+
+        def create_ephemeral_backend(self, engine, target_model=None):
+            self.create_calls += 1
+            return super().create_ephemeral_backend(engine, target_model)
+
+    manager = CountingManager(backend)
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        capability_cache_path=tmp_path / "capabilities.json",
+    )
+    current_fact = SimpleNamespace(
+        status="unknown",
+        source_revision=None,
+        fetched_at="2026-09-10T00:00:00+00:00",
+        expires_at="2026-09-10T00:15:00+00:00",
+        unknown_reason="timeout",
+        stale=False,
+        last_known_revision=None,
+    )
+    monkeypatch.setattr(
+        "tools.model_capability_sources.get_cached_capability_fact",
+        lambda *_args, **_kwargs: current_fact,
+    )
+
+    first = await provider.resolve_stage_modalities(_profile())
+    repeated = await provider.resolve_stage_modalities(_profile())
+
+    assert first["input_modalities"] == ("text",)
+    assert repeated == first
+    assert manager.create_calls == 1
+
+    current_fact.status = "known"
+    current_fact.source_revision = "openrouter-capability:sha256:" + "a" * 64
+    current_fact.fetched_at = "2026-09-10T00:01:00+00:00"
+    current_fact.expires_at = "2026-09-11T00:01:00+00:00"
+    current_fact.unknown_reason = None
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="native-image-model",
+        input_modalities=frozenset({"image", "text"}),
+        input_transports={"image": ("data_url",)},
+        modality_status={"image": "supported", "text": "supported"},
+        source="dynamic_capability_cache",
+    )
+
+    revision_a = await provider.resolve_stage_modalities(_profile())
+
+    assert revision_a["input_modalities"] == ("image", "text")
+    assert manager.create_calls == 2
+
+    current_fact.source_revision = "openrouter-capability:sha256:" + "b" * 64
+    current_fact.fetched_at = "2026-09-10T00:02:00+00:00"
+    current_fact.expires_at = "2026-09-11T00:02:00+00:00"
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="native-image-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        modality_status={"image": "unsupported", "text": "supported"},
+        source="dynamic_capability_cache",
+    )
+
+    revision_b = await provider.resolve_stage_modalities(_profile())
+
+    assert revision_b["input_modalities"] == ("text",)
+    assert manager.create_calls == 3
+
+
+def test_her_rejection_names_only_models_matching_selected_reason(monkeypatch):
+    profiles = (
+        ProviderProfile("unsupported", "fake-api", "unsupported-model"),
+        ProviderProfile("unknown", "fake-api", "unknown-model"),
+    )
+    adapter = object.__new__(HERv2Adapter)
+    adapter._v2_config = SimpleNamespace(all_provider_profiles=lambda: profiles)
+    adapter._backend_manager = lambda: SimpleNamespace()
+    adapter._model_capability_cache_path = lambda: None
+
+    def capability_for(_engine, model, **_kwargs):
+        status = "unknown" if model == "unknown-model" else "unsupported"
+        return InputCapability(
+            provider="fake-api",
+            model=model,
+            input_modalities=frozenset({"text"}),
+            input_transports={},
+            modality_status={"image": status, "text": "supported"},
+            source=(
+                "dynamic_unknown"
+                if status == "unknown"
+                else "dynamic_capability_cache"
+            ),
+        )
+
+    monkeypatch.setattr("adapters.her_v2.resolve_input_capability", capability_for)
+
+    result = adapter.media_input_diagnostic("image")
+
+    assert result["reason"] == "model_capability_unknown"
+    assert result["code"] == "MODEL_CAPABILITY_UNKNOWN"
+    assert result["model"] == "unknown-model"
+
+
+@pytest.mark.asyncio
+async def test_native_voice_triage_uses_exact_model_failure_code():
+    content = canonical_request_content(
+        [
+            {
+                "type": "media",
+                "item_index": 1,
+                "attachment_id": "attachment-voice",
+                "modality": "audio",
+                "kind": "voice",
+                "semantic_role": "voice_message",
+                "mime_type": "audio/ogg",
+                "filename": "voice.ogg",
+                "caption": "",
+                "local_ref": "/authorized/voice.ogg",
+                "size_bytes": 12,
+                "sha256": "3" * 64,
+                "transport": {"message_id": 3},
+            }
+        ]
+    )
+    backend = _Backend([])
+    provider = HashiStageProvider(backend_manager=_Manager(backend))
+
+    with pytest.raises(StageInvocationError) as captured:
+        await provider.invoke(
+            ProviderProfile(
+                "test",
+                "fake-api",
+                "native-image-model",
+                options={"_voice_triage_input_policy": "native"},
+            ),
+            _request(Stage.TRIAGE, content),
+        )
+
+    assert captured.value.code is ProviderFailureCode.MODEL_MODALITY_UNSUPPORTED
+    assert captured.value.details["model"] == "native-image-model"
+    assert captured.value.details["modality"] == "audio"
+
+
+@pytest.mark.asyncio
+async def test_declared_native_route_without_request_content_parameter_is_adapter_error():
+    class NoStructuredRequestBackend(_Backend):
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            *,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            raise AssertionError("adapter must fail before provider invocation")
+
+    backend = NoStructuredRequestBackend([])
+    provider = HashiStageProvider(backend_manager=_Manager(backend))
+
+    with pytest.raises(StageInvocationError) as captured:
+        await provider.invoke(
+            _profile(),
+            _request(Stage.TRIAGE, _content()),
+        )
+
+    assert captured.value.code is ProviderFailureCode.ADAPTER_MEDIA_ROUTE_UNIMPLEMENTED
+    assert captured.value.details["model"] == "native-image-model"
+    assert captured.value.details["modality"] == "image"

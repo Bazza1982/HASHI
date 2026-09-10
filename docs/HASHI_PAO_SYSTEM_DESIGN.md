@@ -118,6 +118,12 @@ A Model Provider Adapter belongs to the Engine that uses it. Provider-native
 IDs and continuation state may optimise transport, but they are never PAO
 Conversation Session authority.
 
+Exact model media metadata follows the independent
+[Model Capability Discovery](HASHI_MODEL_CAPABILITY_DISCOVERY.md) decision.
+PAO owns the derived fact, each Engine Adapter owns its implemented transport,
+and instance policy owns permission; native support is their intersection.
+Message admission is cache-only and never waits for catalogue network I/O.
+
 ## 5. State model
 
 ```text

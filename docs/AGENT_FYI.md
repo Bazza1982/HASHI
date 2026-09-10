@@ -190,6 +190,15 @@ assembly evidence is written only to a restricted local forensic file, while
 normal errors expose a safe summary and its path. Explicit Adapter failure
 codes survive HER unchanged; this mechanism never reruns a PAO or Cron Run.
 
+Model media capability is exact and cache-backed. A new model may be refreshed
+asynchronously after configuration, but a Message never performs synchronous
+catalogue I/O. Native media requires model semantics, an implemented Adapter
+transport, and instance policy; local tools remain a separate authorized
+fallback. `file` in an external catalogue does not grant arbitrary document,
+audio, video, or local-path transport. Treat `MODEL_CAPABILITY_UNKNOWN`,
+`MODEL_MODALITY_UNSUPPORTED`, `ADAPTER_MEDIA_ROUTE_UNIMPLEMENTED`,
+`MEDIA_POLICY_BLOCKED`, and `MEDIA_FALLBACK_UNAVAILABLE` as distinct causes.
+
 ## Conversation, memory and recovery
 
 - `/new` creates/selects a HASHI Conversation Session; `/fresh` advances context

@@ -47,6 +47,7 @@ from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
     materialize_openai_user_content,
+    media_failure_code,
     native_attachment_reference_aliases,
     normalize_request_content,
     request_content_has_media,
@@ -1848,11 +1849,7 @@ class OpenRouterAdapter(BaseBackend):
         unsupported = [item for item in decisions if item.route == "unsupported"]
         if unsupported:
             first = unsupported[0]
-            error_code = (
-                "MEDIA_LIMIT_EXCEEDED"
-                if "limit_exceeded" in first.reason
-                else "PROVIDER_MODALITY_UNSUPPORTED"
-            )
+            error_code = media_failure_code(first.reason)
             raise MultimodalContractError(
                 f"{capability.provider}/{capability.model} cannot consume "
                 f"{first.modality} attachment {first.attachment_id!r} and no "

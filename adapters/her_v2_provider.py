@@ -98,6 +98,8 @@ from orchestrator.multimodal_contract import (
     MultimodalContractError,
     attachment_manifest,
     canonical_request_content,
+    media_failure_code,
+    native_media_failure_reason,
     native_attachment_reference_aliases,
     route_request_content,
     routing_decisions_payload,
@@ -2243,6 +2245,7 @@ class HashiStageProvider(StageProvider):
         runtime_context: Any = None,
         usage_observer: Callable[[PerCallUsageLineItem], None] | None = None,
         default_recovery_kind: str = "none",
+        capability_cache_path: Path | str | None = None,
         **removed_options: Any,
     ) -> None:
         # One-generation hot-reload membrane: an already-running HER adapter
@@ -2266,6 +2269,11 @@ class HashiStageProvider(StageProvider):
         self.runtime_context = runtime_context
         self.usage_observer = usage_observer
         self.default_recovery_kind = str(default_recovery_kind or "none")
+        self.capability_cache_path = (
+            Path(capability_cache_path).expanduser().resolve()
+            if capability_cache_path is not None
+            else None
+        )
         self._active_backend_lock = threading.RLock()
         self._active_backends: dict[int, Any] = {}
         self._persona_invocation_serial = 0
@@ -2275,7 +2283,9 @@ class HashiStageProvider(StageProvider):
         self.cost_usd = 0.0
         self.tool_call_count = 0
         self.tool_loop_count = 0
-        self._stage_modality_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._stage_modality_cache: dict[
+            tuple[str, str, str, str], dict[str, Any]
+        ] = {}
         self._derived_text_audio_cache: dict[str, Mapping[str, Any]] = {}
         self._derived_text_audio_paths: set[Path] = set()
         self._derived_text_audio_lock = asyncio.Lock()
@@ -2313,6 +2323,48 @@ class HashiStageProvider(StageProvider):
                 )
         return interrupted
 
+    def _stage_capability_fact_identity(self, profile: ProviderProfile) -> str:
+        """Return a stable cache-only identity for the current derived fact."""
+
+        if self.capability_cache_path is None:
+            return "capability-cache-disabled"
+        try:
+            from tools.model_capability_sources import get_cached_capability_fact
+
+            fact = get_cached_capability_fact(
+                profile.engine,
+                profile.model,
+                cache_path=self.capability_cache_path,
+            )
+        except (OSError, TypeError, ValueError):
+            return "capability-cache-read-error"
+
+        unknown_reason = str(getattr(fact, "unknown_reason", None) or "")
+        # Cache misses and stale projections are synthesized at read time, so
+        # their timestamps are not durable fact identity. Keep the key stable
+        # until a real fact is atomically installed.
+        ephemeral_read = unknown_reason in {"cache_miss", "stale_cache"}
+        return json.dumps(
+            {
+                "status": str(getattr(fact, "status", "unknown") or "unknown"),
+                "revision": str(getattr(fact, "source_revision", None) or ""),
+                "fetched_at": (
+                    "" if ephemeral_read else str(getattr(fact, "fetched_at", "") or "")
+                ),
+                "expires_at": (
+                    "" if ephemeral_read else str(getattr(fact, "expires_at", "") or "")
+                ),
+                "unknown_reason": unknown_reason,
+                "stale": bool(getattr(fact, "stale", False)),
+                "last_known_revision": str(
+                    getattr(fact, "last_known_revision", None) or ""
+                ),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
     async def resolve_stage_modalities(
         self, profile: ProviderProfile
     ) -> Mapping[str, Any]:
@@ -2346,7 +2398,13 @@ class HashiStageProvider(StageProvider):
                 default=str,
             ).encode("utf-8")
         ).hexdigest()
-        cache_key = (profile.engine, profile.model, options_fingerprint)
+        capability_fact_identity = self._stage_capability_fact_identity(profile)
+        cache_key = (
+            profile.engine,
+            profile.model,
+            options_fingerprint,
+            capability_fact_identity,
+        )
         cached = self._stage_modality_cache.get(cache_key)
         if cached is not None:
             return dict(cached)
@@ -3262,15 +3320,25 @@ class HashiStageProvider(StageProvider):
                 triage_capability is not None and triage_capability.supports("audio")
             )
             if triage_input_policy == "native" and not triage_hears_audio:
+                reason = (
+                    native_media_failure_reason(triage_capability, "audio")
+                    if triage_capability is not None
+                    else "model_capability_unknown"
+                )
                 self._untrack_active_backend(backend)
                 await backend.shutdown()
                 raise StageInvocationError(
                     "voice Triage is configured native but its exact model cannot consume audio",
                     retryable=False,
-                    code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                    code=media_failure_code(reason),
                     human_description=(
                         "The configured native voice Triage model has no verified audio input capability."
                     ),
+                    details={
+                        "model": profile.model,
+                        "modality": "audio",
+                        "reason": reason,
+                    },
                 )
             needs_text_transcript = (
                 triage_input_policy == "transcript" or not triage_hears_audio
@@ -3487,42 +3555,56 @@ class HashiStageProvider(StageProvider):
                     first = decisions[0]
                     media_preflight_error = StageInvocationError(
                         "A previous typed media fallback cannot be safely resumed for "
-                        f"attachment {first.attachment_id}",
+                        f"{profile.model}/{first.modality} attachment "
+                        f"{first.attachment_id}",
                         retryable=False,
-                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        code=ProviderFailureCode.MEDIA_FALLBACK_UNAVAILABLE,
                         human_description=(
                             "The sole automatic media fallback was already consumed, "
                             "and the selected stage no longer exposes the required "
                             "authorized local media route."
                         ),
-                        details={"media_routing": list(media_routing)},
+                        details={
+                            "media_routing": list(media_routing),
+                            "model": profile.model,
+                            "modality": first.modality,
+                        },
                     )
                 elif request.stage is Stage.IMMEDIATE_RESPONSE and non_native:
                     first = non_native[0]
                     media_preflight_error = StageInvocationError(
                         "Immediate Response cannot consume every required attachment: "
-                        f"{first.attachment_id}",
+                        f"{profile.model}/{first.modality}/{first.attachment_id}",
                         retryable=False,
-                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        code=media_failure_code(first.reason),
                         human_description=(
-                            "The Immediate Response model cannot consume every required "
-                            "attachment; the turn must use the local media work path."
+                            f"Model {profile.model} cannot consume required "
+                            f"{first.modality} input in Immediate Response; the turn "
+                            "must use the local media work path."
                         ),
-                        details={"media_routing": list(media_routing)},
+                        details={
+                            "media_routing": list(media_routing),
+                            "model": profile.model,
+                            "modality": first.modality,
+                        },
                     )
                 elif unsupported:
                     first = unsupported[0]
                     media_preflight_error = StageInvocationError(
                         "Stage cannot consume or locally interpret required attachment: "
-                        f"{first.attachment_id}",
+                        f"{profile.model}/{first.modality}/{first.attachment_id}",
                         retryable=False,
-                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        code=media_failure_code(first.reason),
                         human_description=(
-                            "The selected stage model has no verified native input "
-                            "route, and this stage has no authorized local media "
-                            "fallback for a required attachment."
+                            f"Model {profile.model} has no usable {first.modality} "
+                            "input route, and this stage has no authorized local "
+                            "media fallback for the required attachment."
                         ),
-                        details={"media_routing": list(media_routing)},
+                        details={
+                            "media_routing": list(media_routing),
+                            "model": profile.model,
+                            "modality": first.modality,
+                        },
                     )
         reasoning_chunks: list[str] = []
         provider_tool_activity = False
@@ -3965,11 +4047,19 @@ class HashiStageProvider(StageProvider):
                     raise StageInvocationError(
                         f"{profile.engine}/{profile.model} cannot accept structured request content",
                         retryable=False,
-                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        code=ProviderFailureCode.ADAPTER_MEDIA_ROUTE_UNIMPLEMENTED,
                         human_description=(
                             "The selected stage adapter cannot serialize its declared media capability."
                         ),
-                        details={"media_routing": list(media_routing)},
+                        details={
+                            "media_routing": list(media_routing),
+                            "model": profile.model,
+                            "modality": (
+                                media_routing[0].get("modality")
+                                if media_routing
+                                else None
+                            ),
+                        },
                     )
                 generation_kwargs["request_content"] = provider_request_content
             provider_request_inflight = (

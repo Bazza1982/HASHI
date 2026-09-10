@@ -1794,7 +1794,7 @@ class FlexibleBackendManager:
                                 f"content for attachment {first.attachment_id!r}"
                             ),
                             is_success=False,
-                            error_code="MEDIA_TRANSPORT_UNSUPPORTED",
+                            error_code="ADAPTER_MEDIA_ROUTE_UNIMPLEMENTED",
                             error_retryable=False,
                             stream_metadata={
                                 "attachment_id": first.attachment_id,

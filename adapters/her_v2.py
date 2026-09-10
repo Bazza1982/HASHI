@@ -64,6 +64,8 @@ from orchestrator.her_v2.retry import (
 from orchestrator.her_v2.runtime import HERv2Runtime
 from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.multimodal_contract import (
+    media_failure_code,
+    native_media_failure_reason,
     request_content_is_voice_origin,
     resolve_input_capability,
 )
@@ -415,33 +417,59 @@ class HERv2Adapter(BaseBackend):
         fallbacks are evaluated separately by the runtime.
         """
 
+        return bool(self.media_input_diagnostic(modality)["accepted"])
+
+    def media_input_diagnostic(self, modality: str) -> Mapping[str, Any]:
+        """Return exact stage-model evidence for an ingress rejection."""
+
+        normalized_modality = str(modality or "").strip().casefold()
         resolved = self._v2_config
         if resolved is None:
             raw = self._extra.get("her_v2")
             if not isinstance(raw, Mapping):
-                return False
+                return {
+                    "accepted": False,
+                    "reason": "model_capability_unknown",
+                    "code": "MODEL_CAPABILITY_UNKNOWN",
+                    "model": "HER v2",
+                }
             try:
                 resolved = HERv2Config.from_mapping(raw)
             except HERv2ConfigurationError:
-                return False
+                return {
+                    "accepted": False,
+                    "reason": "model_capability_unknown",
+                    "code": "MODEL_CAPABILITY_UNKNOWN",
+                    "model": "HER v2",
+                }
 
-        normalized_modality = str(modality or "").strip().casefold()
         if normalized_modality == "audio":
             runtime = self._runtime_context()
             voice_manager = getattr(runtime, "voice_manager", None)
             native_enabled = getattr(voice_manager, "native_audio_enabled", None)
             if not callable(native_enabled) or not native_enabled():
-                return False
+                return {
+                    "accepted": False,
+                    "reason": "media_policy_blocked",
+                    "code": "MEDIA_POLICY_BLOCKED",
+                    "model": "HER v2",
+                }
             policy = getattr(voice_manager, "native_policy", None)
             try:
                 resolved = resolved.activate_voice_origin(
                     policy if isinstance(policy, Mapping) else None
                 )
             except HERv2ConfigurationError:
-                return False
+                return {
+                    "accepted": False,
+                    "reason": "media_policy_blocked",
+                    "code": "MEDIA_POLICY_BLOCKED",
+                    "model": "HER v2",
+                }
 
         manager = self._backend_manager()
         select_backend = getattr(manager, "_select_backend_cfg", None)
+        rejected: list[tuple[str, str]] = []
         for profile in resolved.all_provider_profiles():
             capability_config: dict[str, Any] = {}
             if callable(select_backend):
@@ -462,6 +490,7 @@ class HERv2Adapter(BaseBackend):
                 profile.engine,
                 profile.model,
                 config=capability_config,
+                capability_cache_path=self._model_capability_cache_path(),
             )
             transports = capability.input_transports.get(
                 normalized_modality,
@@ -471,8 +500,46 @@ class HERv2Adapter(BaseBackend):
                 capability.supports(normalized_modality, transport)
                 for transport in transports
             ):
-                return True
-        return False
+                return {
+                    "accepted": True,
+                    "reason": "native_capability_available",
+                    "code": "",
+                    "model": profile.model,
+                }
+            rejected.append(
+                (
+                    profile.model,
+                    native_media_failure_reason(
+                        capability,
+                        normalized_modality,
+                    ),
+                )
+            )
+        priorities = (
+            "model_capability_unknown",
+            "adapter_transport_unimplemented",
+            "media_policy_blocked",
+            "model_modality_unsupported",
+        )
+        reason = next(
+            (
+                candidate
+                for candidate in priorities
+                if any(item_reason == candidate for _model, item_reason in rejected)
+            ),
+            "media_fallback_unavailable",
+        )
+        models = ", ".join(
+            dict.fromkeys(
+                model for model, item_reason in rejected if item_reason == reason
+            )
+        )
+        return {
+            "accepted": False,
+            "reason": reason,
+            "code": media_failure_code(reason),
+            "model": models or "HER v2",
+        }
 
     def supports_media_output(self, modality: str) -> bool:
         """Resolve explicit Direct/Immediate output capability by exact profile."""
@@ -980,6 +1047,7 @@ class HERv2Adapter(BaseBackend):
             runtime_context=self._runtime_context(),
             usage_observer=usage_observer,
             default_recovery_kind=default_recovery_kind,
+            capability_cache_path=self._model_capability_cache_path(),
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:
@@ -1816,6 +1884,7 @@ class HERv2Adapter(BaseBackend):
             retry_policy=self._provider_retry_policy(),
             workzone_ref=str(self.effective_workdir.resolve()),
             skills_catalogue=self._direct_skill_catalogue(),
+            capability_cache_path=self._model_capability_cache_path(),
         )
         if wip_journal is not None:
             self._wip_active_journals[request_ref] = wip_journal

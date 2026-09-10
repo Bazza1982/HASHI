@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from adapters.codex_cli import CodexCLIAdapter
 from adapters.stream_events import KIND_COMMENTARY, KIND_THINKING
 from orchestrator.multimodal_contract import canonical_request_content
 from tests.mocks.mock_adapters import SimpleGlobalConfig, SimpleTestConfig
+from tools import model_capability_sources, pricing_sources
 
 
 class _FakeStdout:
@@ -69,10 +71,11 @@ class _HangingProc:
         self._exit_event.set()
 
 
-def _build_adapter(tmp_path: Path) -> CodexCLIAdapter:
+def _build_adapter(tmp_path: Path, *, model: str = "gpt-5.4") -> CodexCLIAdapter:
     cfg = SimpleTestConfig(name="hashiko", workspace_dir=str(tmp_path))
-    cfg.model = "gpt-5.4"
+    cfg.model = model
     global_cfg = SimpleGlobalConfig()
+    global_cfg.project_root = tmp_path
     return CodexCLIAdapter(cfg, global_cfg)
 
 
@@ -80,7 +83,32 @@ def _build_adapter(tmp_path: Path) -> CodexCLIAdapter:
 async def test_codex_normal_generate_attaches_validated_native_image_path(
     tmp_path, monkeypatch
 ):
-    adapter = _build_adapter(tmp_path)
+    source_model = "openai/gpt-6-astra"
+    evidence = pricing_sources.HttpEvidence(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "data": {
+                    "id": source_model,
+                    "canonical_slug": source_model,
+                    "architecture": {
+                        "input_modalities": ["file", "image", "text"],
+                        "output_modalities": ["text"],
+                    },
+                }
+            }
+        ).encode("utf-8"),
+        fetched_at=datetime.now(timezone.utc),
+        url=f"https://openrouter.ai/api/v1/model/{source_model}",
+    )
+    model_capability_sources.refresh_capability_fact(
+        "codex-cli",
+        "gpt-6-astra",
+        cache_path=tmp_path / "tmp" / "model-capability-facts-v1.json",
+        fetcher=lambda _url: evidence,
+    )
+    adapter = _build_adapter(tmp_path, model="gpt-6-astra")
     image = tmp_path / "one.png"
     payload = b"\x89PNG\r\n\x1a\nimage"
     image.write_bytes(payload)

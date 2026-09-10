@@ -580,3 +580,8 @@ docs/her_multimedia_multimodal_plan.md 记录的是现有 HER 媒体工具结果
 - 尚未完成真实 Momo Telegram 多图和各代表性 Provider 的专项 canary，因此不得把
   通用热重载结果写成所有 Provider 多模态生产验收；
 - 下一步按第 10、11 节执行真实媒体专项验收，再决定是否扩大能力声明或部署范围。
+
+2026-09-10 补充：新模型不再依赖扩充静态家族名单。精确能力事实、异步刷新、
+陈旧失败关闭、Adapter 传输交集及分类拒绝契约由
+[HASHI Model Capability Discovery](HASHI_MODEL_CAPABILITY_DISCOVERY.md) 统一定义；
+本文件原有逐附件路由、回退隔离与真实 Provider 验收要求继续有效。

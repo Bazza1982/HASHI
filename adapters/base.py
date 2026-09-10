@@ -8,7 +8,7 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -151,13 +151,7 @@ class BaseBackend(ABC):
         if image_input not in {"none", "native", "tool"}:
             raise ValueError("image_input must be one of: none, native, tool")
         capability = self.resolve_input_capability()
-        self.input_capability = capability
-        self.capabilities.input_modalities = capability.input_modalities
-        self.capabilities.input_transports = dict(capability.input_transports)
-        self.capabilities.input_limits = dict(capability.limits)
-        self.capabilities.input_capability_source = capability.source
-        self.capabilities.supports_native_vision = capability.supports("image")
-        self._apply_declared_multimodal_capabilities(extra)
+        self._apply_input_capability_snapshot(capability, extra=extra)
         self.image_input_mode = (
             image_input
             if configured_image_input is not None
@@ -202,39 +196,51 @@ class BaseBackend(ABC):
     def _apply_declared_multimodal_capabilities(
         self, extra: Mapping[str, Any]
     ) -> None:
+        self.capabilities = self._declared_multimodal_capabilities(
+            self.capabilities,
+            extra,
+        )
+
+    def _declared_multimodal_capabilities(
+        self,
+        base: BackendCapabilities,
+        extra: Mapping[str, Any],
+    ) -> BackendCapabilities:
+        updates: dict[str, Any] = {}
         if "input_policy" in extra:
             input_policy = str(extra.get("input_policy") or "auto").strip().casefold()
             if input_policy not in {"auto", "audio_required"}:
                 raise ValueError(
                     "input_policy must be one of: auto, audio_required"
                 )
-            self.capabilities.input_policy = input_policy
+            updates["input_policy"] = input_policy
         output_modalities = self._configured_tuple(extra.get("output_modalities"))
         if output_modalities:
-            self.capabilities.output_modalities = frozenset(output_modalities)
-        self.capabilities.api_surface = str(
-            extra.get("api_surface") or self.capabilities.api_surface
+            updates["output_modalities"] = frozenset(output_modalities)
+        updates["api_surface"] = str(
+            extra.get("api_surface") or base.api_surface
         ).strip().casefold()
         input_formats = self._configured_formats(extra.get("input_formats"))
         if input_formats:
-            self.capabilities.input_formats = input_formats
+            updates["input_formats"] = input_formats
         output_formats = self._configured_formats(extra.get("output_formats"))
         if output_formats:
-            self.capabilities.output_formats = output_formats
+            updates["output_formats"] = output_formats
         voices = self._configured_tuple(
             extra.get("supported_voices") or extra.get("native_audio_voices")
         )
         if voices:
-            self.capabilities.supported_voices = voices
-        self.capabilities.output_streaming = str(
-            extra.get("output_streaming") or self.capabilities.output_streaming
+            updates["supported_voices"] = voices
+        updates["output_streaming"] = str(
+            extra.get("output_streaming") or base.output_streaming
         ).strip().casefold()
         if "provider_output_transcript" in extra:
-            self.capabilities.provider_output_transcript = bool(
+            updates["provider_output_transcript"] = bool(
                 extra.get("provider_output_transcript")
             )
         if "function_calling" in extra:
-            self.capabilities.function_calling = bool(extra.get("function_calling"))
+            updates["function_calling"] = bool(extra.get("function_calling"))
+        return replace(base, **updates)
 
     def resolve_input_capability(self):
         """Resolve the current exact model on demand.
@@ -257,7 +263,54 @@ class BaseBackend(ABC):
             engine,
             getattr(self.config, "model", ""),
             config=dict(getattr(self.config, "extra", {}) or {}),
+            capability_cache_path=self._model_capability_cache_path(),
         )
+
+    def _model_capability_cache_path(self) -> Path | None:
+        global_config = getattr(self, "global_config", None)
+        root = getattr(global_config, "bridge_home", None) or getattr(
+            global_config,
+            "project_root",
+            None,
+        )
+        if not root:
+            return None
+        return Path(root) / "tmp" / "model-capability-facts-v1.json"
+
+    def _apply_input_capability_snapshot(
+        self,
+        capability,
+        *,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        # Publish one immutable-reference replacement. Capability refresh can
+        # complete on a metadata thread while request code reads this object;
+        # mutating seven fields in place would expose a mixed revision.
+        updated = replace(
+            self.capabilities,
+            input_modalities=capability.input_modalities,
+            input_transports=dict(capability.input_transports),
+            input_limits=dict(capability.limits),
+            input_capability_source=capability.source,
+            supports_native_vision=capability.supports("image"),
+            output_modalities=capability.output_modalities,
+        )
+        if extra is not None:
+            updated = self._declared_multimodal_capabilities(updated, extra)
+        self.capabilities = updated
+        self.input_capability = capability
+
+    def refresh_input_capability(self):
+        """Atomically refresh compatibility views from the current model fact."""
+
+        capability = self.resolve_input_capability()
+        extra = dict(getattr(self.config, "extra", {}) or {})
+        self._apply_input_capability_snapshot(capability, extra=extra)
+        if "image_input" not in extra:
+            self.image_input_mode = (
+                "native" if capability.supports("image") else "none"
+            )
+        return capability
 
     def authorized_media_roots(self) -> tuple[Path, ...]:
         candidates: list[Any] = [getattr(self.config, "workspace_dir", None)]

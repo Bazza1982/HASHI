@@ -6,6 +6,7 @@ import pytest
 from telegram.error import TimedOut
 
 from orchestrator import runtime_long, runtime_media
+from orchestrator.multimodal_contract import InputCapability
 
 
 class _Logger:
@@ -175,6 +176,12 @@ def test_legacy_supports_files_does_not_imply_all_media_modalities():
     assert runtime_media._backend_accepts_media_bridge(
         backend, "audio", "voice.ogg"
     ) is False
+    rejection = runtime_media._backend_media_acceptance(
+        backend,
+        "photo",
+        "photo.jpg",
+    )
+    assert rejection.code == "MEDIA_FALLBACK_UNAVAILABLE"
 
 
 def test_her_ingress_uses_exact_stage_capability_resolver():
@@ -196,6 +203,123 @@ def test_her_ingress_uses_exact_stage_capability_resolver():
         "audio",
         "voice.ogg",
     ) is False
+
+
+def test_current_resolver_cannot_be_reopened_by_stale_capability_snapshot():
+    backend = SimpleNamespace(
+        config=SimpleNamespace(model="new-text-model"),
+        capabilities=SimpleNamespace(
+            supports_files=False,
+            input_modalities=frozenset({"text", "image"}),
+        ),
+        resolve_input_capability=lambda: InputCapability(
+            provider="openrouter-api",
+            model="new-text-model",
+            input_modalities=frozenset({"text"}),
+            modality_status={"text": "supported", "image": "unsupported"},
+            source="dynamic_capability_cache",
+        ),
+    )
+
+    result = runtime_media._backend_media_acceptance(
+        backend,
+        "photo",
+        "photo.jpg",
+    )
+
+    assert result.accepted is False
+    assert result.code == "MODEL_MODALITY_UNSUPPORTED"
+    assert result.reason == "model_modality_unsupported"
+
+
+@pytest.mark.parametrize(
+    ("capability", "code", "reason"),
+    [
+        (
+            InputCapability(
+                provider="codex-cli",
+                model="unknown-model",
+                input_modalities=frozenset({"text"}),
+                source="dynamic_unknown",
+            ),
+            "MODEL_CAPABILITY_UNKNOWN",
+            "model_capability_unknown",
+        ),
+        (
+            InputCapability(
+                provider="codex-cli",
+                model="audio-model",
+                input_modalities=frozenset({"text"}),
+                modality_status={"audio": "supported"},
+                source="dynamic_capability_cache",
+            ),
+            "ADAPTER_MEDIA_ROUTE_UNIMPLEMENTED",
+            "adapter_transport_unimplemented",
+        ),
+        (
+            InputCapability(
+                provider="openrouter-api",
+                model="policy-model",
+                input_modalities=frozenset({"text", "image"}),
+                input_transports={"image": ("data_url",)},
+                modality_status={"image": "supported"},
+                privacy_eligible=False,
+                source="explicit_config",
+            ),
+            "MEDIA_POLICY_BLOCKED",
+            "media_policy_blocked",
+        ),
+    ],
+)
+def test_media_acceptance_classifies_native_failure(capability, code, reason):
+    backend = SimpleNamespace(
+        config=SimpleNamespace(model=capability.model),
+        capabilities=SimpleNamespace(
+            supports_files=False,
+            input_modalities=frozenset({"text"}),
+        ),
+        resolve_input_capability=lambda: capability,
+    )
+
+    result = runtime_media._backend_media_acceptance(
+        backend,
+        "audio" if "audio" in capability.modality_status else "photo",
+        "voice.ogg" if "audio" in capability.modality_status else "photo.jpg",
+    )
+
+    assert result.accepted is False
+    assert result.code == code
+    assert result.reason == reason
+
+
+@pytest.mark.asyncio
+async def test_rejection_names_current_model_media_and_stable_code(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(model="vendor/text-only"),
+        capabilities=SimpleNamespace(
+            supports_files=False,
+            input_modalities=frozenset({"text", "image"}),
+        ),
+        resolve_input_capability=lambda: InputCapability(
+            provider="openrouter-api",
+            model="vendor/text-only",
+            input_modalities=frozenset({"text"}),
+            modality_status={"image": "unsupported"},
+            source="dynamic_capability_cache",
+        ),
+    )
+    update = _update(
+        photo=[SimpleNamespace(file_id="photo-1")],
+        caption="",
+    )
+
+    await runtime_media.handle_photo(runtime, update, SimpleNamespace())
+
+    assert runtime.enqueued == []
+    assert runtime.app.bot.get_file_calls == 0
+    assert "vendor/text-only" in runtime.replies[0]["text"]
+    assert "MODEL_MODALITY_UNSUPPORTED" in runtime.replies[0]["text"]
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ from adapters.stream_events import (
 )
 from orchestrator.multimodal_contract import (
     local_fallback_attachment_text,
+    media_failure_code,
     MultimodalContractError,
     normalize_request_content,
     request_content_has_media,
@@ -843,11 +844,7 @@ class CodexCLIAdapter(BaseBackend):
                             f"{first.modality} attachment {first.attachment_id!r}"
                         ),
                         is_success=False,
-                        error_code=(
-                            "MEDIA_LIMIT_EXCEEDED"
-                            if "limit_exceeded" in first.reason
-                            else "PROVIDER_MODALITY_UNSUPPORTED"
-                        ),
+                        error_code=media_failure_code(first.reason),
                         error_retryable=False,
                         stream_metadata={"attachment_id": first.attachment_id},
                     )

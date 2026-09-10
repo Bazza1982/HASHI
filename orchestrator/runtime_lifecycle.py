@@ -135,6 +135,11 @@ async def initialize(runtime: Any) -> bool:
             )
     runtime.reload_post_turn_observers()
     if result:
+        from orchestrator.runtime_model_selection import (
+            schedule_current_model_metadata,
+        )
+
+        schedule_current_model_metadata(runtime)
         backend = runtime.backend_manager.current_backend
         supports_sessions = bool(
             getattr(getattr(backend, "capabilities", None), "supports_sessions", False)

@@ -128,6 +128,10 @@ navigation labels, and that `/help` is derived from registered command metadata.
 - Agent/model replies, provider reasoning, user content, exact provider errors,
   identifiers, model names, commands, paths, terminal output, transcripts, and
   file logs are never translated.
+- HASHI-authored media preflight notices name the exact current model and media
+  type. They distinguish confirmed model non-support, unknown capability,
+  unimplemented Adapter transport, policy blocking, and unavailable local
+  fallback; the stable error code remains visible in both languages.
 - Chinese wording follows formal product terminology. In particular, user-facing
   `agent` is `代理`; use `已启用的代理`, `正在运行的代理`, and `已配置的代理`
   when those states differ. Do not leave `Agent` in a Chinese menu.

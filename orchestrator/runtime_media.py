@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,9 @@ from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
     infer_mime_type,
+    media_failure_code,
     modality_for_attachment,
+    native_media_failure_reason,
     request_content_is_voice_origin,
 )
 from orchestrator.runtime_common import _print_user_message
@@ -116,31 +119,22 @@ def _is_her_backend(runtime: Any, backend: Any) -> bool:
     return backend_engine in {"her", "her-v2"}
 
 
-def _backend_accepts_media_bridge(backend: Any, media_kind: str, filename: str) -> bool:
+@dataclass(frozen=True)
+class MediaBridgeAcceptance:
+    accepted: bool
+    code: str = ""
+    reason: str = ""
+    model: str = "unknown"
+    modality: str = "document"
+
+
+def _local_media_fallback_available(
+    backend: Any,
+    *,
+    media_kind: str,
+    filename: str,
+) -> bool:
     capabilities = getattr(backend, "capabilities", None)
-    modality = modality_for_attachment(
-        media_kind,
-        filename=filename,
-        mime_type=infer_mime_type(filename),
-    )
-    resolver = getattr(backend, "resolve_input_capability", None)
-    if callable(resolver):
-        try:
-            if resolver().supports(modality):
-                return True
-        except (TypeError, ValueError):
-            pass
-    if modality in set(getattr(capabilities, "input_modalities", ()) or ()):
-        return True
-
-    ingress_resolver = getattr(backend, "accepts_media_input", None)
-    if callable(ingress_resolver):
-        try:
-            if ingress_resolver(modality):
-                return True
-        except (TypeError, ValueError):
-            pass
-
     registry = getattr(backend, "tool_registry", None)
     is_allowed = getattr(registry, "is_allowed", None)
     supports_files = bool(getattr(capabilities, "supports_files", False))
@@ -164,6 +158,98 @@ def _backend_accepts_media_bridge(backend: Any, media_kind: str, filename: str) 
             )
         )
     return False
+
+
+def _backend_media_acceptance(
+    backend: Any,
+    media_kind: str,
+    filename: str,
+) -> MediaBridgeAcceptance:
+    capabilities = getattr(backend, "capabilities", None)
+    config = getattr(backend, "config", None)
+    model = str(getattr(config, "model", "") or "unknown")
+    modality = modality_for_attachment(
+        media_kind,
+        filename=filename,
+        mime_type=infer_mime_type(filename),
+    )
+    resolver = getattr(backend, "resolve_input_capability", None)
+    capability = None
+    resolved = False
+    if callable(resolver):
+        try:
+            capability = resolver()
+            resolved = capability is not None
+            if resolved:
+                model = str(getattr(capability, "model", "") or model)
+                if capability.supports(modality):
+                    return MediaBridgeAcceptance(True, model=model, modality=modality)
+        except (OSError, TypeError, ValueError):
+            capability = None
+            resolved = False
+
+    ingress_diagnostic = None
+    diagnostic_resolver = getattr(backend, "media_input_diagnostic", None)
+    if callable(diagnostic_resolver):
+        try:
+            candidate = diagnostic_resolver(modality)
+            if isinstance(candidate, dict):
+                ingress_diagnostic = candidate
+            if ingress_diagnostic and bool(ingress_diagnostic.get("accepted")):
+                return MediaBridgeAcceptance(True, model=model, modality=modality)
+        except (OSError, TypeError, ValueError):
+            pass
+    else:
+        ingress_resolver = getattr(backend, "accepts_media_input", None)
+        if callable(ingress_resolver):
+            try:
+                if ingress_resolver(modality):
+                    return MediaBridgeAcceptance(True, model=model, modality=modality)
+            except (OSError, TypeError, ValueError):
+                pass
+
+    if _local_media_fallback_available(
+        backend,
+        media_kind=media_kind,
+        filename=filename,
+    ):
+        return MediaBridgeAcceptance(True, model=model, modality=modality)
+
+    if ingress_diagnostic:
+        reason = str(
+            ingress_diagnostic.get("reason") or "media_fallback_unavailable"
+        )
+        model = str(ingress_diagnostic.get("model") or model)
+        code = str(ingress_diagnostic.get("code") or media_failure_code(reason))
+        return MediaBridgeAcceptance(
+            False,
+            code=code,
+            reason=reason,
+            model=model,
+            modality=modality,
+        )
+    if resolved:
+        reason = native_media_failure_reason(capability, modality)
+    elif not callable(resolver) and modality in set(
+        getattr(capabilities, "input_modalities", ()) or ()
+    ):
+        # Compatibility for adapters that predate the dynamic resolver.  Once
+        # a resolver exists its current result is authoritative and this old
+        # snapshot must never reopen a route after a model switch.
+        return MediaBridgeAcceptance(True, model=model, modality=modality)
+    else:
+        reason = "media_fallback_unavailable"
+    return MediaBridgeAcceptance(
+        False,
+        code=media_failure_code(reason),
+        reason=reason,
+        model=model,
+        modality=modality,
+    )
+
+
+def _backend_accepts_media_bridge(backend: Any, media_kind: str, filename: str) -> bool:
+    return _backend_media_acceptance(backend, media_kind, filename).accepted
 
 
 def _available_media_path(media_dir: Path, filename: str) -> Path:
@@ -327,10 +413,34 @@ async def handle_media_message(
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
     backend = getattr(runtime.backend_manager, "current_backend", None)
-    if backend and not _backend_accepts_media_bridge(backend, media_kind, filename):
+    acceptance = (
+        _backend_media_acceptance(backend, media_kind, filename)
+        if backend
+        else MediaBridgeAcceptance(
+            False,
+            code="MEDIA_FALLBACK_UNAVAILABLE",
+            reason="media_fallback_unavailable",
+        )
+    )
+    if not acceptance.accepted:
+        message_keys = {
+            "model_modality_unsupported": "media.model_unsupported",
+            "model_capability_unknown": "media.capability_unknown",
+            "adapter_transport_unimplemented": "media.adapter_unavailable",
+            "media_policy_blocked": "media.policy_blocked",
+            "media_fallback_unavailable": "media.fallback_unavailable",
+        }
         await runtime._reply_text(
             update,
-            ui_language.tr("media.unsupported", kind=_media_kind_label(media_kind)),
+            ui_language.tr(
+                message_keys.get(
+                    acceptance.reason,
+                    "media.fallback_unavailable",
+                ),
+                kind=_media_kind_label(media_kind),
+                model=acceptance.model,
+                code=acceptance.code,
+            ),
         )
         return
     _print_user_message(runtime.name, summary, media_tag=media_kind)
@@ -449,14 +559,16 @@ def _backend_supports_native_audio_chat(
         if not enabled:
             return False
     capability = None
+    capability_resolved = False
     resolver = getattr(backend, "resolve_input_capability", None)
     if callable(resolver):
         try:
             capability = resolver()
+            capability_resolved = capability is not None
         except (TypeError, ValueError):
             capability = None
     accepts_audio = bool(capability and capability.supports("audio"))
-    if not accepts_audio:
+    if not accepts_audio and not capability_resolved:
         accepts_audio = "audio" in set(
             getattr(getattr(backend, "capabilities", None), "input_modalities", ())
             or ()

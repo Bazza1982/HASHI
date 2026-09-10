@@ -16,7 +16,7 @@ import mimetypes
 import os
 import re
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -26,6 +26,7 @@ HASHI_API_MAX_REQUEST_BYTES = 256 * 1024 * 1024
 HASHI_API_MAX_IMAGE_BYTES = 50 * 1024 * 1024
 INPUT_MODALITIES = frozenset({"text", "image", "audio", "video", "document"})
 MEDIA_MODALITIES = INPUT_MODALITIES - {"text"}
+OUTPUT_MODALITIES = frozenset({"text", "image", "audio", "video", "file"})
 CANONICAL_AUDIO_SEMANTIC_ROLES = frozenset(
     {"voice_message", "audio_attachment"}
 )
@@ -84,6 +85,30 @@ _VERIFIED_NATIVE_IMAGE_MODELS: Mapping[str, frozenset[str]] = {
     ),
 }
 
+# Physical transports implemented by each adapter are separate from a model's
+# semantic capability.  Dynamic catalogue facts are intersected with this
+# table; a catalogue declaration alone cannot invent a command/API shape.
+_ADAPTER_INPUT_TRANSPORTS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
+    "codex-cli": {"image": ("local_path", "data_url", "remote_url")},
+    "openrouter-api": {
+        "image": ("data_url",),
+        "audio": ("data_url", "inline"),
+    },
+    "hashi-api": {
+        "image": ("data_url",),
+        "audio": ("data_url", "inline"),
+    },
+    "deepseek-api": {"image": ("data_url",)},
+    "openai-compatible-api": {
+        "image": ("data_url",),
+        "audio": ("data_url", "inline"),
+    },
+    "xai-api": {
+        "image": ("data_url",),
+        "audio": ("data_url", "inline"),
+    },
+}
+
 
 class MultimodalContractError(ValueError):
     """A stable, attachment-aware failure at the multimodal boundary."""
@@ -109,6 +134,18 @@ class InputCapability:
     limits: Mapping[str, int] = field(default_factory=dict)
     privacy_eligible: bool = True
     source: str = "unknown"
+    output_modalities: frozenset[str] = frozenset({"text"})
+    modality_status: Mapping[str, str] = field(default_factory=dict)
+    output_modality_status: Mapping[str, str] = field(default_factory=dict)
+    source_model_id: str | None = None
+    canonical_model_id: str | None = None
+    source_url: str | None = None
+    fetched_at: str | None = None
+    expires_at: str | None = None
+    source_revision: str | None = None
+    evidence_sha256: str | None = None
+    unknown_reason: str | None = None
+    stale: bool = False
 
     def supports(self, modality: str, transport: str | None = None) -> bool:
         normalized = _normalise_modality(modality)
@@ -123,6 +160,32 @@ class InputCapability:
         return str(transport).strip().casefold() in self.input_transports.get(
             normalized, ()
         )
+
+    def status_for(self, modality: str) -> str:
+        """Return semantic model support independently from adapter transport."""
+
+        normalized = _normalise_modality(modality)
+        declared = str(self.modality_status.get(normalized) or "").casefold()
+        if declared in {"supported", "unsupported", "unknown"}:
+            return declared
+        if normalized in self.input_modalities:
+            return "supported"
+        if self.source.startswith(("unknown", "dynamic_unknown")):
+            return "unknown"
+        return "unsupported"
+
+    def output_status_for(self, modality: str) -> str:
+        normalized = _normalise_output_modality(modality)
+        declared = str(
+            self.output_modality_status.get(normalized) or ""
+        ).casefold()
+        if declared in {"supported", "unsupported", "unknown"}:
+            return declared
+        if normalized in self.output_modalities:
+            return "supported"
+        if self.source.startswith(("unknown", "dynamic_unknown")):
+            return "unknown"
+        return "unsupported"
 
 
 @dataclass(frozen=True)
@@ -166,6 +229,18 @@ def _normalise_modality(value: Any) -> str:
         "voice": "audio",
         "pdf": "document",
         "file": "document",
+    }
+    return aliases.get(modality, modality)
+
+
+def _normalise_output_modality(value: Any) -> str:
+    modality = str(value or "").strip().casefold()
+    aliases = {
+        "photo": "image",
+        "picture": "image",
+        "voice": "audio",
+        "pdf": "file",
+        "document": "file",
     }
     return aliases.get(modality, modality)
 
@@ -715,6 +790,43 @@ def _explicit_capability(
     )
 
 
+def _intersect_adapter_transports(
+    capability: InputCapability,
+) -> InputCapability:
+    """Apply the physical Adapter boundary to any semantic declaration."""
+
+    implemented = _ADAPTER_INPUT_TRANSPORTS.get(capability.provider)
+    if implemented is None:
+        # Replaceable third-party/test adapters own their explicit declaration;
+        # this table is authoritative only for HASHI's built-in adapters.
+        return capability
+    semantic_status = dict(capability.modality_status)
+    effective_modalities: set[str] = set()
+    effective_transports: dict[str, tuple[str, ...]] = {}
+    if "text" in capability.input_modalities:
+        effective_modalities.add("text")
+        semantic_status.setdefault("text", "supported")
+    for modality in MEDIA_MODALITIES:
+        if modality not in capability.input_modalities:
+            continue
+        semantic_status.setdefault(modality, "supported")
+        allowed = set(implemented.get(modality, ()))
+        transports = tuple(
+            transport
+            for transport in capability.input_transports.get(modality, ())
+            if transport in allowed
+        )
+        if transports:
+            effective_modalities.add(modality)
+            effective_transports[modality] = transports
+    return replace(
+        capability,
+        input_modalities=frozenset(effective_modalities),
+        input_transports=effective_transports,
+        modality_status=semantic_status,
+    )
+
+
 def _privacy_eligibility_override(
     config: Mapping[str, Any] | None,
 ) -> bool | None:
@@ -738,14 +850,85 @@ def _apply_privacy_override(
 ) -> InputCapability:
     if override is None or override == capability.privacy_eligible:
         return capability
-    return InputCapability(
-        provider=capability.provider,
-        model=capability.model,
-        input_modalities=capability.input_modalities,
-        input_transports=capability.input_transports,
-        limits=capability.limits,
+    return replace(
+        capability,
         privacy_eligible=override,
         source=f"{capability.source}+privacy_config",
+    )
+
+
+def _dynamic_cache_capability(
+    provider: str,
+    model: str,
+    *,
+    cache_path: Path | str,
+) -> InputCapability:
+    """Project one cache-only semantic fact through an adapter transport."""
+
+    from tools.model_capability_sources import get_cached_capability_fact
+
+    fact = get_cached_capability_fact(
+        provider,
+        model,
+        cache_path=cache_path,
+    )
+    semantic_input = {
+        str(name): str(status)
+        for name, status in fact.input_modalities.items()
+        if str(name) in INPUT_MODALITIES
+    }
+    semantic_output = {
+        str(name): str(status)
+        for name, status in fact.output_modalities.items()
+        if str(name) in OUTPUT_MODALITIES
+    }
+    implemented = _ADAPTER_INPUT_TRANSPORTS.get(provider, {})
+    effective_modalities: set[str] = set()
+    transports: dict[str, tuple[str, ...]] = {}
+    if semantic_input.get("text") == "supported":
+        effective_modalities.add("text")
+    for modality in MEDIA_MODALITIES:
+        adapter_transports = tuple(implemented.get(modality, ()))
+        if semantic_input.get(modality) == "supported" and adapter_transports:
+            effective_modalities.add(modality)
+            transports[modality] = adapter_transports
+
+    if fact.status == "known":
+        source = "dynamic_capability_cache"
+    else:
+        # Text remains usable for backward-compatible model invocation, but
+        # every media dimension is explicitly unknown and fails closed.
+        effective_modalities.add("text")
+        source = "dynamic_unknown"
+
+    effective_outputs = frozenset(
+        modality
+        for modality, status in semantic_output.items()
+        if status == "supported"
+    )
+    if fact.status != "known":
+        effective_outputs = frozenset({"text"})
+
+    return InputCapability(
+        provider=provider,
+        model=model,
+        input_modalities=frozenset(effective_modalities),
+        input_transports=transports,
+        limits={},
+        privacy_eligible=True,
+        source=source,
+        output_modalities=effective_outputs,
+        modality_status=semantic_input,
+        output_modality_status=semantic_output,
+        source_model_id=fact.source_model_id,
+        canonical_model_id=fact.canonical_model_id,
+        source_url=fact.source_url,
+        fetched_at=fact.fetched_at,
+        expires_at=fact.expires_at,
+        source_revision=fact.source_revision,
+        evidence_sha256=fact.evidence_sha256,
+        unknown_reason=fact.unknown_reason,
+        stale=fact.stale,
     )
 
 
@@ -755,6 +938,7 @@ def resolve_input_capability(
     *,
     config: Mapping[str, Any] | None = None,
     verified_registry: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
+    capability_cache_path: Path | str | None = None,
 ) -> InputCapability:
     """Resolve exact provider/model input support, failing closed by default."""
 
@@ -770,14 +954,8 @@ def resolve_input_capability(
         )
         if capability is not None:
             return _apply_privacy_override(
-                InputCapability(
-                    provider=capability.provider,
-                    model=capability.model,
-                    input_modalities=capability.input_modalities,
-                    input_transports=capability.input_transports,
-                    limits=capability.limits,
-                    privacy_eligible=capability.privacy_eligible,
-                    source="verified_registry",
+                _intersect_adapter_transports(
+                    replace(capability, source="verified_registry")
                 ),
                 privacy_override,
             )
@@ -786,10 +964,36 @@ def resolve_input_capability(
             normalized_provider, normalized_model, config
         )
         if explicit is not None:
-            return _apply_privacy_override(explicit, privacy_override)
+            return _apply_privacy_override(
+                _intersect_adapter_transports(explicit),
+                privacy_override,
+            )
+    dynamic: InputCapability | None = None
+    if capability_cache_path is not None:
+        try:
+            dynamic = _dynamic_cache_capability(
+                normalized_provider,
+                normalized_model,
+                cache_path=capability_cache_path,
+            )
+        except (OSError, TypeError, ValueError):
+            dynamic = None
+        if dynamic is not None and dynamic.source == "dynamic_capability_cache":
+            return _apply_privacy_override(
+                _intersect_adapter_transports(dynamic),
+                privacy_override,
+            )
     registered = _registry_capability(normalized_provider, normalized_model)
     if registered is not None:
-        return _apply_privacy_override(registered, privacy_override)
+        return _apply_privacy_override(
+            _intersect_adapter_transports(registered),
+            privacy_override,
+        )
+    if dynamic is not None:
+        return _apply_privacy_override(
+            _intersect_adapter_transports(dynamic),
+            privacy_override,
+        )
     return _apply_privacy_override(
         InputCapability(
             provider=normalized_provider,
@@ -828,6 +1032,27 @@ def _preferred_transport(
     return ""
 
 
+def native_media_failure_reason(
+    capability: InputCapability,
+    modality: str,
+    *,
+    transport: str | None = None,
+) -> str:
+    """Classify why one native route is unavailable without checking tools."""
+
+    normalized = _normalise_modality(modality)
+    if not capability.privacy_eligible:
+        return "media_policy_blocked"
+    semantic_status = capability.status_for(normalized)
+    if semantic_status == "unsupported":
+        return "model_modality_unsupported"
+    if semantic_status == "unknown":
+        return "model_capability_unknown"
+    if not capability.supports(normalized, transport):
+        return "adapter_transport_unimplemented"
+    return "native_capability_available"
+
+
 def route_request_content(
     request_content: Mapping[str, Any] | None,
     capability: InputCapability,
@@ -850,15 +1075,10 @@ def route_request_content(
     for part in media_parts:
         attachment_id = part["attachment_id"]
         modality = part["modality"]
-        native_reason = "native_capability_available"
+        native_reason = native_media_failure_reason(capability, modality)
         native = capability.supports(modality)
         transport = ""
-        if not capability.privacy_eligible:
-            native = False
-            native_reason = "privacy_policy_requires_local"
-        elif not native:
-            native_reason = "native_capability_unavailable"
-        else:
+        if native and capability.privacy_eligible:
             transport = _preferred_transport(
                 capability,
                 modality,
@@ -866,7 +1086,7 @@ def route_request_content(
             )
         if native and not transport:
             native = False
-            native_reason = "native_transport_unavailable"
+            native_reason = "adapter_transport_unimplemented"
         elif native and modality == "image" and capability.limits.get("dimensions"):
             native = False
             native_reason = "native_dimensions_limit_exceeded_unverified"
@@ -943,6 +1163,25 @@ def route_request_content(
             )
         )
     return tuple(decisions)
+
+
+def media_failure_code(reason: str, *, fallback_available: bool = False) -> str:
+    """Map one typed routing reason to a stable public failure code."""
+
+    normalized = str(reason or "").strip().casefold()
+    if "limit_exceeded" in normalized or "limit_unverified" in normalized:
+        return "MEDIA_LIMIT_EXCEEDED"
+    if normalized == "model_modality_unsupported":
+        return "MODEL_MODALITY_UNSUPPORTED"
+    if normalized == "model_capability_unknown":
+        return "MODEL_CAPABILITY_UNKNOWN"
+    if normalized == "adapter_transport_unimplemented":
+        return "ADAPTER_MEDIA_ROUTE_UNIMPLEMENTED"
+    if normalized == "media_policy_blocked":
+        return "MEDIA_POLICY_BLOCKED"
+    if not fallback_available:
+        return "MEDIA_FALLBACK_UNAVAILABLE"
+    return "MEDIA_ROUTE_UNAVAILABLE"
 
 
 def _is_within(path: Path, root: Path) -> bool:

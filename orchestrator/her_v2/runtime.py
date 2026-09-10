@@ -11,6 +11,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from orchestrator.multimodal_contract import (
@@ -294,6 +295,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         checkpoint_clock: Callable[[], float] = time.monotonic,
         timing_clock: Callable[[], float] = time.perf_counter,
         skills_catalogue: Sequence[Mapping[str, Any]] | None = None,
+        capability_cache_path: Path | str | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -318,6 +320,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             for item in (skills_catalogue or ())
             if isinstance(item, Mapping)
         )
+        self.capability_cache_path = capability_cache_path
         self._controls: dict[str, TurnControl] = {}
         self._turn_tasks: dict[str, asyncio.Task] = {}
         self._background_tasks: set[asyncio.Task] = set()
@@ -520,6 +523,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 profile.engine,
                 profile.model,
                 config=profile.options,
+                capability_cache_path=self.capability_cache_path,
             )
             input_modalities = capability.input_modalities
             raw_output = profile.options.get("output_modalities")
@@ -532,7 +536,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     if str(item or "").strip()
                 )
                 if isinstance(raw_output, (list, tuple, set, frozenset))
-                else frozenset({"text"})
+                else capability.output_modalities
             )
             input_policy = str(
                 profile.options.get("input_policy") or "auto"

@@ -95,6 +95,71 @@ def _schedule_pricing_prewarm(runtime, *targets: tuple[str, str]) -> None:
 
 
 def _schedule_her_v2_pricing_prewarm(runtime, selected) -> None:
+    _schedule_pricing_prewarm(runtime, *_her_v2_targets(selected))
+
+
+def _schedule_capability_prewarm(runtime, *targets: tuple[str, str]) -> None:
+    """Warm cache-only model facts and refresh the still-current adapter."""
+
+    manager = getattr(runtime, "backend_manager", None)
+    current_backend = getattr(manager, "current_backend", None)
+    refresh_current = getattr(current_backend, "refresh_input_capability", None)
+    if not callable(refresh_current):
+        return
+    try:
+        from tools.model_capability_sources import (
+            normalize_engine,
+            schedule_prewarm,
+        )
+
+        bridge_home = getattr(
+            getattr(runtime, "global_config", None), "bridge_home", None
+        ) or getattr(
+            getattr(runtime, "global_config", None), "project_root", None
+        )
+        cache_path = (
+            Path(bridge_home) / "tmp" / "model-capability-facts-v1.json"
+            if bridge_home
+            else None
+        )
+
+        def refreshed(fact) -> None:
+            backend = getattr(
+                getattr(runtime, "backend_manager", None),
+                "current_backend",
+                None,
+            )
+            refresher = getattr(backend, "refresh_input_capability", None)
+            config = getattr(backend, "config", None)
+            if not callable(refresher) or config is None:
+                return
+            current_engine = str(getattr(config, "engine", "") or "")
+            current_model = str(getattr(config, "model", "") or "")
+            if (
+                normalize_engine(current_engine) == fact.engine
+                and current_model == fact.requested_model_id
+            ):
+                refresher()
+
+        normalized = (
+            (str(provider or "").strip(), str(model or "").strip())
+            for provider, model in targets
+        )
+        for provider, model in dict.fromkeys(
+            target for target in normalized if all(target)
+        ):
+            schedule_prewarm(
+                provider,
+                model,
+                cache_path=cache_path,
+                on_complete=refreshed,
+            )
+    except Exception:
+        # Discovery is advisory metadata and never rolls back model selection.
+        return
+
+
+def _her_v2_targets(selected) -> tuple[tuple[str, str], ...]:
     targets: list[tuple[str, str]] = []
     for prefix in ("fast", "pro"):
         provider = getattr(selected, f"{prefix}_provider", "")
@@ -109,7 +174,32 @@ def _schedule_her_v2_pricing_prewarm(runtime, selected) -> None:
             model = getattr(target, "model", "")
         if provider and model:
             targets.append((str(provider), str(model)))
-    _schedule_pricing_prewarm(runtime, *targets)
+    return tuple(dict.fromkeys(targets))
+
+
+def _schedule_her_v2_capability_prewarm(runtime, selected) -> None:
+    _schedule_capability_prewarm(runtime, *_her_v2_targets(selected))
+
+
+def schedule_current_model_metadata(runtime) -> None:
+    """Schedule cache refresh after startup without blocking Agent intake."""
+
+    engine = str(getattr(runtime.config, "active_backend", "") or "")
+    if engine == HER_V2_ENGINE:
+        try:
+            selected = runtime.backend_manager.get_her_v2_configuration()
+        except (AttributeError, OSError, TypeError, ValueError):
+            return
+        _schedule_her_v2_pricing_prewarm(runtime, selected)
+        _schedule_her_v2_capability_prewarm(runtime, selected)
+        return
+    backend = getattr(runtime.backend_manager, "current_backend", None)
+    model = str(
+        getattr(getattr(backend, "config", None), "model", "") or ""
+    )
+    if engine and model:
+        _schedule_pricing_prewarm(runtime, (engine, model))
+        _schedule_capability_prewarm(runtime, (engine, model))
 
 
 def _her_v2_indexed_choice(values, raw_index: str):
@@ -1033,6 +1123,7 @@ def apply_her_v2_configuration(runtime, selected) -> str | None:
     except (OSError, TypeError, ValueError) as exc:
         return str(exc)
     _schedule_her_v2_pricing_prewarm(runtime, selected)
+    _schedule_her_v2_capability_prewarm(runtime, selected)
     return None
 
 
@@ -1052,6 +1143,7 @@ def save_her_v2_candidate(runtime, selected) -> str | None:
     except (OSError, TypeError, ValueError) as exc:
         return str(exc)
     _schedule_her_v2_pricing_prewarm(runtime, selected)
+    _schedule_her_v2_capability_prewarm(runtime, selected)
     return None
 
 
@@ -1085,10 +1177,18 @@ def set_backend_model(runtime, engine: str, requested: str) -> None:
             runtime.backend_manager.current_backend.effort = None
             if backend_cfg is not None:
                 backend_cfg.pop("effort", None)
+        refresh_capability = getattr(
+            runtime.backend_manager.current_backend,
+            "refresh_input_capability",
+            None,
+        )
+        if callable(refresh_capability):
+            refresh_capability()
     runtime.backend_manager.persist_state(
         active_model=normalized,
     )
     _schedule_pricing_prewarm(runtime, (engine, normalized))
+    _schedule_capability_prewarm(runtime, (engine, normalized))
 
 
 async def cmd_provider(runtime, update, context: Any) -> None:
@@ -1239,9 +1339,9 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
     if action == "apply" and len(args) == 1:
         try:
             runtime.backend_manager.apply_her_v2_configuration_draft()
-            _schedule_her_v2_pricing_prewarm(
-                runtime, _her_v2_edit_configuration(runtime)
-            )
+            selected = _her_v2_edit_configuration(runtime)
+            _schedule_her_v2_pricing_prewarm(runtime, selected)
+            _schedule_her_v2_capability_prewarm(runtime, selected)
         except (OSError, TypeError, ValueError) as exc:
             await runtime._reply_text(
                 update,

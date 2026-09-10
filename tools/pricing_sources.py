@@ -47,6 +47,10 @@ _PLAIN_DECIMAL = re.compile(r"^(?:0|[0-9]+\.[0-9]+)$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SCHEDULE_GUARD = threading.Lock()
 _SCHEDULED: set[str] = set()
+_EVIDENCE_GUARD = threading.Lock()
+_EVIDENCE_IN_FLIGHT: dict[str, "_EvidenceFetch"] = {}
+_RECENT_EVIDENCE: dict[str, tuple[float, "HttpEvidence"]] = {}
+_RECENT_EVIDENCE_SECONDS = 2.0
 
 
 class PricingSourceError(RuntimeError):
@@ -62,6 +66,15 @@ class HttpEvidence:
     body: bytes
     fetched_at: datetime
     url: str
+
+
+@dataclass
+class _EvidenceFetch:
+    """One process-local HTTP fetch shared by independent fact validators."""
+
+    ready: threading.Event
+    evidence: HttpEvidence | None = None
+    error: BaseException | None = None
 
 
 @dataclass(frozen=True)
@@ -565,6 +578,58 @@ def bounded_https_get(url: str) -> HttpEvidence:
         connection.close()
 
 
+def shared_bounded_https_get(url: str) -> HttpEvidence:
+    """Coalesce one allowlisted evidence fetch across metadata consumers.
+
+    Pricing and capability discovery validate and persist the response
+    independently.  Only the bounded raw HTTP evidence is shared, including a
+    very short process-local reuse window so back-to-back prewarm threads do
+    not make duplicate catalogue requests.
+    """
+
+    selected_url = str(url or "").strip()
+    now = time.monotonic()
+    with _EVIDENCE_GUARD:
+        recent = _RECENT_EVIDENCE.get(selected_url)
+        if recent is not None and now - recent[0] <= _RECENT_EVIDENCE_SECONDS:
+            return recent[1]
+        fetch = _EVIDENCE_IN_FLIGHT.get(selected_url)
+        owner = fetch is None
+        if owner:
+            fetch = _EvidenceFetch(ready=threading.Event())
+            _EVIDENCE_IN_FLIGHT[selected_url] = fetch
+
+    assert fetch is not None
+    if owner:
+        try:
+            fetch.evidence = bounded_https_get(selected_url)
+        except BaseException as exc:
+            fetch.error = exc
+        finally:
+            with _EVIDENCE_GUARD:
+                if fetch.evidence is not None:
+                    _RECENT_EVIDENCE[selected_url] = (
+                        time.monotonic(),
+                        fetch.evidence,
+                    )
+                    cutoff = time.monotonic() - _RECENT_EVIDENCE_SECONDS
+                    for cached_url, (stored_at, _evidence) in tuple(
+                        _RECENT_EVIDENCE.items()
+                    ):
+                        if stored_at < cutoff:
+                            _RECENT_EVIDENCE.pop(cached_url, None)
+                _EVIDENCE_IN_FLIGHT.pop(selected_url, None)
+                fetch.ready.set()
+    elif not fetch.ready.wait(TOTAL_TIMEOUT_SECONDS + CONNECT_TIMEOUT_SECONDS + 1):
+        raise PricingSourceError("timeout")
+
+    if fetch.error is not None:
+        raise fetch.error
+    if fetch.evidence is None:
+        raise PricingSourceError("fetch_failed")
+    return fetch.evidence
+
+
 def _rate(value: Any, *, required: bool, field: str) -> float | None:
     if value is None and not required:
         return None
@@ -692,7 +757,7 @@ def refresh_pricing_fact(
     model: str,
     *,
     cache_path: Path | str | None = None,
-    fetcher: Callable[[str], HttpEvidence] = bounded_https_get,
+    fetcher: Callable[[str], HttpEvidence] | None = None,
     now: datetime | None = None,
     force: bool = False,
 ) -> PricingFact:
@@ -712,7 +777,7 @@ def refresh_pricing_fact(
             if normalize_engine(engine) != OPENROUTER_ENGINE:
                 raise PricingSourceError("source_not_qualified")
             url = _openrouter_url(model)
-            evidence = fetcher(url)
+            evidence = (fetcher or shared_bounded_https_get)(url)
             fact = _openrouter_fact(
                 engine,
                 model,

@@ -6776,6 +6776,7 @@ class FlexibleAgentRuntime:
         if not switch_ok:
             return False, ui_language.tr("backend.switch.failed", backend=target_engine)
         self._sync_workzone_to_backend_config()
+        runtime_model_selection.schedule_current_model_metadata(self)
         backend = self.backend_manager.current_backend
         supports_sessions = bool(
             backend and getattr(getattr(backend, "capabilities", None), "supports_sessions", False)

@@ -55,6 +55,8 @@ from orchestrator.api_gateway_preflight import check_gateway_engines
 from orchestrator.flexible_backend_registry import get_available_efforts
 from orchestrator.multimodal_contract import (
     contains_persistent_inline_media,
+    media_failure_code,
+    native_media_failure_reason,
     resolve_input_capability,
 )
 from orchestrator.service_endpoints import select_service_bind_host
@@ -332,8 +334,13 @@ def _validate_structured_conversation(
     *,
     engine: str,
     model: str,
+    capability_cache_path: Path | str | None = None,
 ) -> web.Response | None:
-    capability = resolve_input_capability(engine, model)
+    capability = resolve_input_capability(
+        engine,
+        model,
+        capability_cache_path=capability_cache_path,
+    )
     image_count = 0
     inline_total_bytes = 0
     for message_index, message in enumerate(messages):
@@ -388,9 +395,15 @@ def _validate_structured_conversation(
                 "data_url" if url.casefold().startswith("data:") else "remote_url"
             )
             if not capability.supports("image", transport):
+                reason = native_media_failure_reason(
+                    capability,
+                    "image",
+                    transport=transport,
+                )
                 return _external_tool_error(
-                    f"model {model!r} does not support image input via {transport}",
-                    code="unsupported_media",
+                    f"model {model!r} cannot accept image input via {transport}: "
+                    f"{reason}",
+                    code=media_failure_code(reason),
                     param=param,
                 )
             error, decoded_bytes = _validate_inline_image_url(
@@ -1007,6 +1020,11 @@ class APIGatewayServer:
         if configured_model_efforts is None:
             configured_model_efforts = instance_efforts
         self._engine_for_model = dict(_ENGINE_FOR_MODEL)
+        self._instance_configured_models = frozenset(
+            str(model or "").strip()
+            for model in (configured_model_engines or {})
+            if str(model or "").strip()
+        )
         for raw_model, raw_engine in (configured_model_engines or {}).items():
             model = str(raw_model or "").strip()
             engine = str(raw_engine or "").strip()
@@ -1046,6 +1064,16 @@ class APIGatewayServer:
             else DEFAULT_API_MODEL
         )
         self._workspace_root = Path(workspace_root).resolve()
+        capability_root = getattr(global_config, "bridge_home", None) or getattr(
+            global_config,
+            "project_root",
+            None,
+        )
+        self._model_capability_cache_path = (
+            Path(capability_root) / "tmp" / "model-capability-facts-v1.json"
+            if capability_root
+            else None
+        )
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
         logs_root = Path(
@@ -1245,6 +1273,10 @@ class APIGatewayServer:
             "gateway_started",
             bind_host=self.bind_host,
             port=self.port,
+        )
+        self._schedule_capability_refresh(
+            self.default_model,
+            *sorted(self._instance_configured_models),
         )
         available = [e for e, s in self._engine_status.items() if s.get("available")]
         unavailable = [e for e, s in self._engine_status.items() if not s.get("available")]
@@ -1522,6 +1554,25 @@ class APIGatewayServer:
         if normalized not in self._engine_for_model:
             raise ValueError(f"unknown API gateway model: {model}")
         self.default_model = normalized
+        self._schedule_capability_refresh(normalized)
+
+    def _schedule_capability_refresh(self, *models: str) -> None:
+        try:
+            from tools.model_capability_sources import schedule_prewarm
+
+            for model in dict.fromkeys(
+                str(value or "").strip() for value in models if str(value or "").strip()
+            ):
+                engine = self._engine_for_model.get(model)
+                if engine:
+                    schedule_prewarm(
+                        engine,
+                        model,
+                        cache_path=self._model_capability_cache_path,
+                    )
+        except Exception:
+            # Model configuration succeeds independently from public metadata.
+            return
 
     def _select_bind_host(self) -> str:
         return select_service_bind_host(
@@ -1635,6 +1686,7 @@ class APIGatewayServer:
                 messages,
                 engine=engine,
                 model=model,
+                capability_cache_path=self._model_capability_cache_path,
             )
             if structured_error is not None:
                 return structured_error
@@ -1815,6 +1867,7 @@ class APIGatewayServer:
                     messages,
                     engine=engine,
                     model=model,
+                    capability_cache_path=self._model_capability_cache_path,
                 )
                 if structured_error is not None:
                     return structured_error
