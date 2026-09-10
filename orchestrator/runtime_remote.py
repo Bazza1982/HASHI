@@ -11,6 +11,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import remote_lifecycle, runtime_pending, ui_language
+from orchestrator.agent_move.manager import record_agent_move_admin_outcome
 from orchestrator.agent_move.coordinator import (
     cancel_outbound_move,
     confirm_outbound_move,
@@ -88,6 +89,56 @@ async def _move_preflight(
     delayed = await runtime_pending.delayed_count(runtime, agent_name=agent_id)
     busy_check = getattr(selected_runtime, "_backend_busy", None)
     return delayed, bool(callable(busy_check) and busy_check())
+
+
+async def _submit_transfer_completion(
+    runtime: Any,
+    update: Any,
+    package_id: str,
+    instances: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Transfer terminal ownership to shared Functions before this Worker exits."""
+
+    orchestrator = getattr(runtime, "orchestrator", None)
+    submit = getattr(orchestrator, "submit_agent_move", None)
+    if not callable(submit):
+        manager = getattr(orchestrator, "agent_move_manager", None)
+        submit = getattr(manager, "submit", None)
+    if not callable(submit):
+        raise AgentMoveError(
+            "persistent Agent move manager is unavailable; the source was not changed"
+        )
+    query = getattr(update, "callback_query", None)
+    chat = getattr(update, "effective_chat", None) or getattr(query, "message", None)
+    user = getattr(query, "from_user", None) or getattr(update, "effective_user", None)
+    message = getattr(query, "message", None)
+    origin = {
+        "surface": "telegram",
+        "actor_id": getattr(user, "id", None),
+        "chat_id": getattr(chat, "id", None) or getattr(chat, "chat_id", None),
+        "thread_id": getattr(message, "message_thread_id", None),
+    }
+    origin = {key: value for key, value in origin.items() if value is not None}
+    locale = str(
+        getattr(getattr(runtime, "global_config", None), "ui_language", None) or ""
+    )
+    result = submit(package_id, instances, origin=origin, locale=locale)
+    if asyncio.iscoroutine(result):
+        result = await result
+    if not isinstance(result, dict) or result.get("accepted") is not True:
+        raise AgentMoveError("persistent Agent move manager rejected the transfer")
+    return result
+
+
+def _render_transfer_accepted(package_id: str, *, clone: bool = False) -> str:
+    progress_key = "remote.clone.committing" if clone else "remote.move.committing"
+    return (
+        f"{ui_language.tr(progress_key)}\n\n"
+        f"<b>{html.escape(ui_language.tr('remote.move.package_id'))}</b> · "
+        f"<code>{html.escape(package_id)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.status'))}</b> · "
+        "<code>accepted</code>"
+    )
 
 
 def _move_recovery_markup(package_id: str) -> InlineKeyboardMarkup:
@@ -1089,52 +1140,25 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                     )
                     return
             if action == "commit":
-                if outbound.get("status") in {
-                    "source_disabled_target_committed",
-                    "activating_target",
-                    "move_completed_cleanup_pending",
-                    "moved_pending_reboots",
-                }:
-                    result = await asyncio.to_thread(
-                        continue_outbound_move,
-                        project_root,
-                        instances,
-                        package_id,
+                accepted = await _submit_transfer_completion(
+                    runtime,
+                    update,
+                    package_id,
+                    instances,
+                )
+                operation = accepted.get("operation") or {}
+                if operation.get("status") == "completed" and isinstance(
+                    operation.get("result"), dict
+                ):
+                    await query.edit_message_text(
+                        _render_move_complete(operation["result"]),
+                        parse_mode="HTML",
                     )
                 else:
-                    result = await asyncio.to_thread(
-                        confirm_outbound_move,
-                        project_root,
-                        instances,
-                        package_id,
+                    await query.edit_message_text(
+                        _render_transfer_accepted(package_id),
+                        parse_mode="HTML",
                     )
-                if (
-                    result.get("status") == "source_disabled_target_committed"
-                    and agent_id != str(getattr(runtime, "name", "") or "")
-                ):
-                    orchestrator = getattr(runtime, "orchestrator", None)
-                    stop_agent = getattr(orchestrator, "stop_agent", None)
-                    if callable(stop_agent):
-                        ok, message = await stop_agent(agent_id)
-                        if not ok and "not running" not in str(message).lower():
-                            raise AgentMoveError(
-                                f"source connector could not be stopped: {message}"
-                            )
-                        result = await asyncio.to_thread(
-                            continue_outbound_move,
-                            project_root,
-                            instances,
-                            package_id,
-                        )
-                await query.edit_message_text(
-                    _render_move_complete(result),
-                    parse_mode="HTML",
-                )
-                if (
-                    selected_runtime is not None
-                    and result.get("status") == "copied_inactive"
-                ):
-                    selected_runtime._agent_move_quiesced = False
             elif action == "continue":
                 result = await asyncio.to_thread(
                     continue_outbound_move,
@@ -1142,16 +1166,28 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                     instances,
                     package_id,
                 )
+                await asyncio.to_thread(
+                    record_agent_move_admin_outcome,
+                    project_root,
+                    package_id,
+                    result,
+                )
                 await query.edit_message_text(
                     _render_move_complete(result),
                     parse_mode="HTML",
                 )
             else:
-                await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     cancel_outbound_move,
                     project_root,
                     instances,
                     package_id,
+                )
+                await asyncio.to_thread(
+                    record_agent_move_admin_outcome,
+                    project_root,
+                    package_id,
+                    result,
                 )
                 await query.edit_message_text(
                     ui_language.tr("remote.move.prepared_cancelled"),
@@ -1250,22 +1286,37 @@ async def _handle_clone_callback(runtime: Any, update: Any, context: Any) -> Non
         )
         try:
             if action == "commit":
-                result = await asyncio.to_thread(
-                    confirm_outbound_move,
-                    root,
-                    instances,
+                accepted = await _submit_transfer_completion(
+                    runtime,
+                    update,
                     package_id,
+                    instances,
                 )
-                await query.edit_message_text(
-                    _render_clone_complete(result),
-                    parse_mode="HTML",
-                )
+                operation = accepted.get("operation") or {}
+                if operation.get("status") == "completed" and isinstance(
+                    operation.get("result"), dict
+                ):
+                    await query.edit_message_text(
+                        _render_clone_complete(operation["result"]),
+                        parse_mode="HTML",
+                    )
+                else:
+                    await query.edit_message_text(
+                        _render_transfer_accepted(package_id, clone=True),
+                        parse_mode="HTML",
+                    )
             else:
-                await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     cancel_outbound_move,
                     root,
                     instances,
                     package_id,
+                )
+                await asyncio.to_thread(
+                    record_agent_move_admin_outcome,
+                    root,
+                    package_id,
+                    result,
                 )
                 await query.edit_message_text(
                     ui_language.tr("remote.clone.prepared_cancelled"),

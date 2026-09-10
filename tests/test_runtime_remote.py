@@ -220,25 +220,19 @@ async def test_stale_keep_source_callback_redirects_to_clone_without_staging(tmp
 
 
 @pytest.mark.asyncio
-async def test_handle_move_callback_commit_runs_two_phase_cutover(
+async def test_handle_move_callback_confirmation_hands_off_to_background_owner(
     tmp_path, monkeypatch
 ):
     runtime = _runtime(tmp_path)
     runtime.global_config.bridge_home = tmp_path
     runtime.global_config.project_root = tmp_path / "code-generation"
-    result = {
-        "status": "moved_pending_reboots",
-        "agent_id": "zelda",
-        "target_instance": "HASHI2",
-        "source_instance": "HASHI_TEST",
-        "reboot_order": ["HASHI_TEST", "HASHI2"],
-    }
-
-    def _confirm(root, instances, package_id):
-        assert root == tmp_path
-        assert instances["hashi2"]["host"] == "127.0.0.1"
-        assert package_id == "12345678-abcd"
-        return result
+    submit = AsyncMock(
+        return_value={"accepted": True, "operation": {"status": "accepted"}}
+    )
+    runtime.orchestrator = SimpleNamespace(
+        runtimes=[],
+        submit_agent_move=submit,
+    )
 
     monkeypatch.setattr(
         runtime_remote,
@@ -248,15 +242,15 @@ async def test_handle_move_callback_commit_runs_two_phase_cutover(
             "target_instance": "HASHI2",
         },
     )
-    monkeypatch.setattr(runtime_remote, "confirm_outbound_move", _confirm)
     update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
 
     await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
 
-    assert "AGENT MOVE COMMITTED" in update.callback_query.edits[-1]["text"]
-    assert (
-        "No reboot was started automatically" in update.callback_query.edits[-1]["text"]
-    )
+    submit.assert_awaited_once()
+    assert submit.await_args.args[0] == "12345678-abcd"
+    assert submit.await_args.args[1]["hashi2"]["host"] == "127.0.0.1"
+    assert "12345678-abcd" in update.callback_query.edits[-1]["text"]
+    assert "<code>accepted</code>" in update.callback_query.edits[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -271,6 +265,9 @@ async def test_handle_move_callback_other_agent_uses_worker_preflight(
     runtime.orchestrator = SimpleNamespace(
         runtimes=[selected],
         agent_move_preflight=preflight,
+        submit_agent_move=AsyncMock(
+            return_value={"accepted": True, "operation": {"status": "accepted"}}
+        ),
     )
     monkeypatch.setattr(
         runtime_pending,
@@ -285,23 +282,13 @@ async def test_handle_move_callback_other_agent_uses_worker_preflight(
             "target_instance": "HASHI2",
         },
     )
-    confirm = Mock(
-        return_value={
-            "status": "copied_inactive",
-            "agent_id": "sunny",
-            "target_instance": "HASHI2",
-            "source_instance": "HASHI_TEST",
-        }
-    )
-    monkeypatch.setattr(runtime_remote, "confirm_outbound_move", confirm)
     update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
 
     await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
 
     preflight.assert_awaited_once_with("sunny")
-    confirm.assert_called_once()
-    assert selected._agent_move_quiesced is False
-    assert "AGENT COPIED INACTIVE" in update.callback_query.edits[-1]["text"]
+    runtime.orchestrator.submit_agent_move.assert_awaited_once()
+    assert selected._agent_move_quiesced is True
 
 
 @pytest.mark.asyncio
@@ -310,8 +297,13 @@ async def test_handle_move_callback_failure_keeps_recovery_actions(
 ):
     runtime = _runtime(tmp_path)
 
-    def _fail(*args, **kwargs):
+    async def _fail(*args, **kwargs):
         raise AgentMoveError("target response uncertain")
+
+    runtime.orchestrator = SimpleNamespace(
+        runtimes=[],
+        submit_agent_move=_fail,
+    )
 
     monkeypatch.setattr(
         runtime_remote,
@@ -321,7 +313,6 @@ async def test_handle_move_callback_failure_keeps_recovery_actions(
             "target_instance": "HASHI2",
         },
     )
-    monkeypatch.setattr(runtime_remote, "confirm_outbound_move", _fail)
     update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
 
     await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
@@ -340,12 +331,42 @@ async def test_handle_move_callback_failure_keeps_recovery_actions(
 
 
 @pytest.mark.asyncio
+async def test_handle_clone_confirmation_uses_same_background_owner(tmp_path):
+    runtime = _runtime(tmp_path)
+    submit = AsyncMock(
+        return_value={"accepted": True, "operation": {"status": "accepted"}}
+    )
+    runtime.orchestrator = SimpleNamespace(
+        runtimes=[],
+        submit_agent_move=submit,
+    )
+    update = SimpleNamespace(callback_query=_Query("clone:commit:clone-1234"))
+
+    await runtime_remote.handle_clone_callback(
+        runtime,
+        update,
+        SimpleNamespace(),
+    )
+
+    submit.assert_awaited_once()
+    assert submit.await_args.args[0] == "clone-1234"
+    assert "hashi_test" in submit.await_args.args[1]
+    assert "clone-1234" in update.callback_query.edits[-1]["text"]
+    assert "<code>accepted</code>" in update.callback_query.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_handle_move_callback_rechecks_agent_busy_before_cutover(
     tmp_path, monkeypatch
 ):
     runtime = _runtime(tmp_path)
     selected = SimpleNamespace(name="zelda", _backend_busy=lambda: True)
-    runtime.orchestrator = SimpleNamespace(runtimes=[selected])
+    runtime.orchestrator = SimpleNamespace(
+        runtimes=[selected],
+        submit_agent_move=AsyncMock(
+            side_effect=AssertionError("busy Agent must not reach cutover")
+        ),
+    )
     monkeypatch.setattr(runtime_pending, "delayed_count", AsyncMock(return_value=0))
     monkeypatch.setattr(
         runtime_remote,
@@ -356,15 +377,12 @@ async def test_handle_move_callback_rechecks_agent_busy_before_cutover(
         },
     )
 
-    def _unexpected_confirm(*args, **kwargs):
-        raise AssertionError("busy Agent must not reach cutover")
-
-    monkeypatch.setattr(runtime_remote, "confirm_outbound_move", _unexpected_confirm)
     update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
 
     await runtime_remote.handle_move_callback(runtime, update, SimpleNamespace())
 
     assert selected._agent_move_quiesced is False
+    runtime.orchestrator.submit_agent_move.assert_not_awaited()
     assert "busy" in update.callback_query.edits[-1]["text"]
     assert update.callback_query.edits[-1]["reply_markup"] is not None
 

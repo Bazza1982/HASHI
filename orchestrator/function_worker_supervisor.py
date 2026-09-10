@@ -1692,6 +1692,25 @@ class FunctionWorkerSupervisor:
             return await self._chief_of_staff_query(client, params)
         if method == "core.agent_move.preflight":
             return await self._agent_move_preflight(client, params)
+        if method in {"core.agent_move.submit", "core.agent_move.status"}:
+            handle = self.kernel._runtime_map().get(client.agent_name)
+            if handle is None or handle.client is not client:
+                raise FunctionWorkerProtocolError(
+                    "Agent move request came from an inactive Worker"
+                )
+            manager = getattr(self.kernel, "agent_move_manager", None)
+            if manager is None:
+                raise FunctionWorkerError("Agent move manager is unavailable")
+            package_id = str(params.get("package_id") or "").strip()
+            if method == "core.agent_move.status":
+                return manager.status(package_id)
+            return manager.submit(
+                package_id,
+                params.get("instances") or {},
+                requested_by=client.agent_name,
+                origin=params.get("origin") or {},
+                locale=str(params.get("locale") or ""),
+            )
         if method.startswith("core.service."):
             return await self._service_request(method, params)
         if method.startswith("core.background_jobs."):

@@ -28,8 +28,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
+from orchestrator.pcm_transfer import is_portable_memory_path
 from orchestrator.pcm import (
-    is_portable_memory_path,
     PCM_FILENAME,
     PCMValidationError,
     canonical_agent_md,

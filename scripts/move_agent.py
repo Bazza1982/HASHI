@@ -9,6 +9,7 @@ Usage:
   # Instance-to-instance (agent-move-v1 over authenticated HASHI Remote)
   python scripts/move_agent.py zelda hashi2
   python scripts/move_agent.py --confirm <move-id>
+  python scripts/move_agent.py --status <move-id>
   python scripts/move_agent.py --continue <move-id>
   python scripts/move_agent.py --cancel <move-id>
 
@@ -50,10 +51,14 @@ if str(HASHI_ROOT) not in sys.path:
 
 from orchestrator.agent_move.coordinator import (
     cancel_outbound_move,
-    confirm_outbound_move,
     continue_outbound_move,
     prepare_outbound_move,
     preview_outbound_move,
+)
+from orchestrator.agent_move.manager import (
+    enqueue_agent_move,
+    get_agent_move_execution_status,
+    record_agent_move_admin_outcome,
 )
 from orchestrator.agent_move.package import AgentMoveError
 
@@ -68,6 +73,18 @@ INSTANCES_FILE_CANDIDATES = [
     Path.home() / ".hashi" / "instances.json",  # user-level
     Path("/mnt/c/Users") / os.environ.get("USER", "user") / ".hashi" / "instances.json",
 ]
+
+
+def _submit_confirmation(package_id: str, instances: dict) -> dict:
+    """Persist confirmation for the long-lived shared Functions owner."""
+
+    return enqueue_agent_move(
+        HASHI_ROOT,
+        instances,
+        package_id,
+        requested_by="cli",
+        origin={"surface": "cli"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -784,13 +801,18 @@ def main():
     parser.add_argument(
         "--confirm",
         metavar="MOVE_ID",
-        help="Commit a staged move and disable its source registry entry",
+        help="Submit one staged transfer for automatic background completion",
+    )
+    parser.add_argument(
+        "--status",
+        metavar="MOVE_ID",
+        help="Show persisted automatic completion status",
     )
     parser.add_argument(
         "--continue",
         dest="continue_move",
         metavar="MOVE_ID",
-        help="Activate and verify a committed move after its source Worker stops",
+        help="Recover an interrupted move from its persisted transaction state",
     )
     parser.add_argument(
         "--cancel",
@@ -814,26 +836,40 @@ def main():
         sys.exit(2)
 
     lifecycle_actions = [
-        value for value in (args.confirm, args.continue_move, args.cancel) if value
+        value
+        for value in (args.confirm, args.status, args.continue_move, args.cancel)
+        if value
     ]
     if len(lifecycle_actions) > 1:
         print(
-            "Error: choose only one of --confirm, --continue, or --cancel.",
+            "Error: choose only one of --confirm, --status, --continue, or --cancel.",
             file=sys.stderr,
         )
         sys.exit(2)
     if lifecycle_actions:
         try:
             if args.confirm:
-                result = confirm_outbound_move(HASHI_ROOT, instances, args.confirm)
+                result = _submit_confirmation(args.confirm, instances)
+            elif args.status:
+                result = get_agent_move_execution_status(HASHI_ROOT, args.status)
+                if result is None:
+                    raise AgentMoveError(
+                        f"unknown automatic Agent move {args.status!r}"
+                    )
             elif args.continue_move:
                 result = continue_outbound_move(
                     HASHI_ROOT,
                     instances,
                     args.continue_move,
                 )
+                record_agent_move_admin_outcome(
+                    HASHI_ROOT,
+                    args.continue_move,
+                    result,
+                )
             else:
                 result = cancel_outbound_move(HASHI_ROOT, instances, args.cancel)
+                record_agent_move_admin_outcome(HASHI_ROOT, args.cancel, result)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
         except (AgentMoveError, OSError) as exc:
@@ -993,14 +1029,8 @@ def main():
                 f"or --cancel {prepared['package_id']} to roll it back."
             )
             return
-        result = confirm_outbound_move(HASHI_ROOT, instances, prepared["package_id"])
+        result = _submit_confirmation(prepared["package_id"], instances)
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        if result.get("status") == "source_disabled_target_committed":
-            print(
-                "\nSource registry is disabled and the target remains inactive. "
-                "Stop or adopt the source Worker change, then run "
-                f"scripts/move_agent.py --continue {prepared['package_id']}."
-            )
     except (AgentMoveError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

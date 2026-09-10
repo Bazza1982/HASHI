@@ -448,6 +448,9 @@ class ServiceManager:
         reboot_manager = getattr(self.kernel, "reboot_manager", None)
         if reboot_manager is not None:
             reboot_manager.start_delivery()
+        agent_move_manager = getattr(self.kernel, "agent_move_manager", None)
+        if agent_move_manager is not None:
+            await agent_move_manager.start()
         workers = getattr(self.kernel, "function_workers", None)
         if workers is not None:
             await workers.broadcast_topology()
@@ -530,6 +533,9 @@ class ServiceManager:
             return True
 
     async def stop_runtime_services(self):
+        agent_move_manager = getattr(self.kernel, "agent_move_manager", None)
+        if agent_move_manager is not None:
+            await agent_move_manager.stop()
         reboot_manager = getattr(self.kernel, "reboot_manager", None)
         if reboot_manager is not None:
             await reboot_manager.stop_delivery()

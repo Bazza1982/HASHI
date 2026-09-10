@@ -326,5 +326,7 @@ uses a decimal 1 GB pre-compression inventory limit. Preview/confirmation states
 excluded files and permanent source-workspace deletion after target verification.
 PCM owns the selected memory paths. New receivers advertise transfer-mode support;
 source implementation and live Worker/Remote adoption remain separate facts.
-Self-move automatic background completion remains pending; see
-[Agent Move](HASHI_AGENT_MOVE_V1.md).
+Move/Clone confirmation now persists intent for the shared Functions
+AgentMoveManager, which owns stop/continue, crash recovery and final notice
+delivery beyond the initiating Worker lifetime. `accepted` is not `completed`;
+CLI `--status` reads the receipt. See [Agent Move](HASHI_AGENT_MOVE_V1.md).

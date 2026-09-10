@@ -487,3 +487,13 @@ The accepted assertion migration, retained-test boundaries and minimum
 [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md). The upgrade is
 not complete merely because existing tests remain green; the Engine-neutral
 PCM contract in that plan must also pass.
+
+### Portable Agent continuity
+
+`orchestrator.pcm_transfer` owns the exact local continuity export plan used by
+Agent transfers. It selects canonical identity, bridge memory, canonical
+transcripts, saved system/context/observer state, and registered Memory+ state,
+index, notepad and archive paths. Arbitrary Markdown and project directories do
+not become memory by filename resemblance. Missing optional paths are normal;
+links and junctions are never followed by the continuity inventory. PAO consumes
+this scope and owns packaging, checksums, target verification and deletion.

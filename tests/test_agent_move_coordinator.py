@@ -541,7 +541,8 @@ def test_move_of_last_active_agent_is_rejected_before_target_or_outbound_mutatio
     assert not (root / "state" / "agent_moves" / "outbound").exists()
 
 
-def test_last_active_agent_can_be_cloned_locally_and_source_stays_unchanged(
+@pytest.mark.asyncio
+async def test_last_active_agent_can_be_cloned_locally_and_source_stays_unchanged(
     tmp_path,
     monkeypatch,
 ):
@@ -565,7 +566,17 @@ def test_last_active_agent_can_be_cloned_locally_and_source_stays_unchanged(
     assert prepared["transfer_mode"] == "identity_memory"
     assert any(item["path"] == "artifact.bin" for item in prepared["discarded_files"])
     assert prepared["target_agent_id"] == "zelda_1"
-    result = coordinator.confirm_outbound_move(root, {}, prepared["package_id"])
+    from types import SimpleNamespace
+    from orchestrator.agent_move.manager import AgentMoveManager
+    manager = AgentMoveManager(SimpleNamespace(paths=SimpleNamespace(bridge_home=root)))
+    await manager.start()
+    try:
+        manager.submit(prepared["package_id"], {})
+        receipt = await manager.wait(prepared["package_id"])
+        assert receipt["status"] == "completed"
+        result = receipt["result"]
+    finally:
+        await manager.stop()
 
     assert result["status"] == "completed"
     assert result["target_agent_id"] == "zelda_1"

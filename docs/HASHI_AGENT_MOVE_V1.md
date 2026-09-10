@@ -67,7 +67,8 @@ schema 1–3 packages retain their existing bounded 2 GiB expansion guard.
 
 Explicit `identity_memory` exports canonical identity plus PCM-owned memory
 paths (`is_portable_memory_path`), including the bridge SQLite database,
-transcripts and the local `memory/` tree. It inventories ordinary work files
+transcripts, saved system/context/observer state, and the registered Memory+
+state, index, notepad and archive paths in `pcm_transfer`. It inventories ordinary work files
 without reading their content. Oversized discarded work files do not prevent
 this mode. Root `AGENT.md` is excluded in this mode and preserved as the existing
 non-authoritative attachment in `workspace` mode. Nested project documents,
@@ -86,8 +87,9 @@ the existing exclusion for the command audit. Files changing during packaging
 cause preparation to fail without publishing a new package. SQLite snapshots
 and receiver payload validation retain bounded expansion checks.
 
-This scope addition does not yet replace the self-move manual continuation
-mechanism documented below; background automatic completion is tracked separately.
+Confirmation is durably accepted by the shared Functions `AgentMoveManager`;
+acceptance is distinct from terminal completion. A missing background owner fails
+before the source is changed.
 
 ## Transaction
 
@@ -96,7 +98,8 @@ mechanism documented below; background automatic completion is tracked separatel
 2. Preview builds and verifies a disposable package and changes neither side.
 3. Prepare creates a checksummed package and stages it on the target. The
    target verifies it without modifying live Agent configuration.
-4. An explicit operator confirmation commits the target Agent inactive.
+4. An explicit operator confirmation persists an execution intent; the shared
+   Functions manager commits the target Agent inactive.
 5. Before a move cutover, the source rebuilds a disposable durable-state
    snapshot and compares it to the staged package. If memory, configuration,
    schedules, permissions, or Agent-owned credentials changed, the target is
@@ -106,8 +109,8 @@ mechanism documented below; background automatic completion is tracked separatel
    is unconfigured and imported schedules stay disabled.
 7. For a move, the source registry entry and schedules are disabled first. The
    target remains inactive until the source Worker and Telegram ingress are
-   demonstrably stopped. `/move continue <transaction-id>` then activates and
-   hot-starts the target.
+   demonstrably stopped. The background manager then continues the transaction
+   to activate and hot-start the target.
 8. The receiver verifies target identity, canonical PCM, durable workspace and
    memory digests, remapped Agent credentials, portable paths, disabled
    schedules, capability declaration, and live Workbench availability.
@@ -120,9 +123,12 @@ mechanism documented below; background automatic completion is tracked separatel
 
 During the final freshness check the source Agent is briefly quiesced. Once
 its source configuration is disabled, the still-running process refuses new
-work. If another local Agent initiated the move, HASHI can stop the source
-Worker and continue automatically; when an Agent moves itself, the operator
-continues the recorded transaction from another Agent on the source instance.
+work. The shared manager stops the source Worker and continues automatically,
+including self-moves. It persists retry state and delivery receipts independently
+of the initiating Worker; shared Functions recovery resumes accepted work.
+`/move continue` and CLI `--continue` remain explicit recovery actions. CLI
+`--status` reads the persisted background receipt. Normal confirmation does not
+require an operator to stop, start, or continue the transfer manually.
 The target cannot become active before the source process is absent, which
 mechanically prevents two Telegram pollers.
 

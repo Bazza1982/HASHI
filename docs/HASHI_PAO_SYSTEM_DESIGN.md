@@ -308,3 +308,14 @@ New PAO work must:
 6. keep Engine-internal cognitive policy inside the selected Engine;
 7. expose transport-neutral Events and controls where practical; and
 8. remain hot-reloadable unless a change genuinely alters the Core contract.
+
+### Agent transfer terminal ownership
+
+The shared Functions `AgentMoveManager` owns durable confirmation intent,
+execution retries and terminal delivery for Move/Clone. The existing coordinator
+journal remains authoritative for migration state; Worker RPC and CLI enqueue
+submit the same intent. The manager stops the source Worker and then continues
+the coordinator after successful disablement, including self-moves. Accepted
+work survives shared Functions replacement; recovery commands reconcile the
+background receipt. Detailed workspace inventories remain in the coordinator
+journal, not duplicated in the bounded background receipt.

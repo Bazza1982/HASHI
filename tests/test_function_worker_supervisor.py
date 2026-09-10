@@ -291,6 +291,60 @@ async def test_worker_move_preflight_reads_only_cross_agent_guards(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_worker_hands_move_confirmation_to_shared_manager(tmp_path):
+    kernel = _Kernel()
+    client = _Client("zelda", 101)
+    kernel.runtimes.append(_handle(kernel, client))
+    submissions = []
+    kernel.agent_move_manager = SimpleNamespace(
+        submit=lambda package_id, instances, requested_by=None, **kwargs: submissions.append(
+            (package_id, instances, requested_by, kwargs)
+        )
+        or {"accepted": True, "operation": {"status": "accepted"}},
+        status=lambda package_id: {"package_id": package_id, "status": "running"},
+    )
+    supervisor = FunctionWorkerSupervisor(kernel)
+    core_connection, worker_connection = multiprocessing.Pipe(duplex=True)
+
+    async def handle_request(method, params):
+        return await supervisor.handle_worker_request(client, method, params)
+
+    core_peer = JsonConnectionPeer(
+        core_connection,
+        label="move-manager-core",
+        request_handler=handle_request,
+    )
+    worker_peer = JsonConnectionPeer(worker_connection, label="move-manager-worker")
+    core_peer.start()
+    worker_peer.start()
+    facade = WorkerKernelFacade(
+        peer=worker_peer,
+        paths=SimpleNamespace(),
+        global_cfg=SimpleNamespace(),
+        skill_manager=SimpleNamespace(),
+        agent_name="zelda",
+    )
+    try:
+        accepted = await facade.submit_agent_move(
+            "move-1", {"hashi2": {"instance_id": "HASHI2"}}
+        )
+        status = await facade.agent_move_status("move-1")
+
+        assert accepted["accepted"] is True
+        assert status == {"package_id": "move-1", "status": "running"}
+        assert submissions == [
+            (
+                "move-1",
+                {"hashi2": {"instance_id": "HASHI2"}},
+                "zelda",
+                {"origin": {}, "locale": ""},
+            )
+        ]
+    finally:
+        await asyncio.gather(core_peer.close(), worker_peer.close())
+
+
+@pytest.mark.asyncio
 async def test_shutdown_status_change_does_not_call_exiting_worker():
     kernel = _Kernel()
     kernel.is_stopping = True

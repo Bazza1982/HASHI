@@ -27,6 +27,7 @@ def test_manager_registry_is_single_complete_manifest():
         "config_admin",
         "backend_preflight",
         "agent_lifecycle",
+        "agent_move_manager",
         "service_manager",
         "reboot_manager",
         "shutdown_manager",

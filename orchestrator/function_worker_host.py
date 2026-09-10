@@ -515,6 +515,34 @@ class WorkerKernelFacade:
             "delayed_count": max(0, int(result.get("delayed_count") or 0)),
         }
 
+    async def submit_agent_move(
+        self,
+        package_id: str,
+        instances: Mapping[str, Any],
+        *,
+        origin: Mapping[str, Any] | None = None,
+        locale: str | None = None,
+    ) -> dict[str, Any]:
+        """Hand terminal ownership to the persistent shared Functions manager."""
+
+        result = await self.peer.request(
+            "core.agent_move.submit",
+            {
+                "package_id": str(package_id),
+                "instances": dict(instances),
+                "origin": dict(origin or {}),
+                "locale": str(locale or ""),
+            },
+        )
+        return dict(result or {})
+
+    async def agent_move_status(self, package_id: str) -> dict[str, Any] | None:
+        result = await self.peer.request(
+            "core.agent_move.status",
+            {"package_id": str(package_id)},
+        )
+        return dict(result) if isinstance(result, Mapping) else None
+
     async def refresh_capability_status(self) -> dict[str, Any]:
         result = await self.peer.request("core.capability.status", {})
         self._capabilities = dict(result or {})
