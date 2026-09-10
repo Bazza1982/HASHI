@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.workbench_api import WorkbenchApiServer
+from orchestrator.private_authorization import authorization_content_sha256
 
 
 class _Request:
@@ -30,6 +31,37 @@ class _Request:
 
     async def read(self):
         return self._body
+
+
+class _MultipartPart:
+    filename = None
+    headers = {}
+
+    def __init__(self, name: str, value: str):
+        self.name = name
+        self._value = value
+
+    async def text(self):
+        return self._value
+
+
+class _MultipartReader:
+    def __init__(self, fields: dict[str, str]):
+        self._parts = iter(_MultipartPart(key, value) for key, value in fields.items())
+
+    async def next(self):
+        return next(self._parts, None)
+
+
+class _MultipartRequest(_Request):
+    content_type = "multipart/form-data"
+
+    def __init__(self, fields: dict[str, str]):
+        super().__init__()
+        self._fields = fields
+
+    async def multipart(self):
+        return _MultipartReader(self._fields)
 
 
 class _Runtime:
@@ -143,6 +175,11 @@ async def test_unqualified_session_api_is_not_advertised(tmp_path):
     unavailable = await server.handle_v1_session_not_ready(_Request())
 
     assert "session_api_version" not in capabilities
+    assert capabilities["message_source"]["external_declarations_supported"] is True
+    assert capabilities["private_authorization"]["proof_type"] == (
+        "hashi.private-authorization-proof"
+    )
+    assert capabilities["private_authorization"]["raw_secret_on_wire"] is False
     assert unavailable.status == 503
     assert json.loads(unavailable.text)["code"] == "session_api_not_ready"
 
@@ -294,6 +331,87 @@ async def test_tui_chat_rejects_untyped_or_mismatched_mirror_policy(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_open_external_message_source_is_preserved_and_reserved_claim_rejected(
+    tmp_path,
+):
+    server, runtime = _server(tmp_path)
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "from an open frontend",
+            "message_source": {
+                "id": "example.frontend",
+                "display_name": "示例前端",
+            },
+            "request_metadata": {
+                "message_context_snapshot": {"forged": True},
+                "_private_authorization_results": [
+                    {"credential_id": "finance", "state": "success"}
+                ],
+            },
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+
+    assert response.status == 200
+    metadata = runtime.api_request_metadata[-1]
+    assert metadata["message_source_claim"] == {
+        "id": "example.frontend",
+        "display_name": "示例前端",
+    }
+    assert "message_context_snapshot" not in metadata
+    assert "_private_authorization_results" not in metadata
+
+    reserved = _Request(
+        {
+            "agent": "lily",
+            "text": "pretend",
+            "message_source": {"id": "telegram"},
+        }
+    )
+    reserved.content_type = "application/json"
+    rejected = await server.handle_chat(reserved)
+    assert rejected.status == 400
+    assert json.loads(rejected.text)["error_code"] == "invalid_message_source"
+
+
+@pytest.mark.asyncio
+async def test_multipart_chat_uses_the_same_open_message_source_contract(tmp_path):
+    server, runtime = _server(tmp_path)
+    response = await server.handle_chat(
+        _MultipartRequest(
+            {
+                "agent": "lily",
+                "text": "multipart input",
+                "message_source": json.dumps(
+                    {"id": "media.frontend", "display_name": "Media Frontend"}
+                ),
+            }
+        )
+    )
+
+    assert response.status == 200
+    assert runtime.api_request_metadata[-1]["message_source_claim"] == {
+        "id": "media.frontend",
+        "display_name": "Media Frontend",
+    }
+
+    rejected = await server.handle_chat(
+        _MultipartRequest(
+            {
+                "agent": "lily",
+                "text": "reserved claim",
+                "message_source": json.dumps({"id": "tui"}),
+            }
+        )
+    )
+    assert rejected.status == 400
+    assert json.loads(rejected.text)["error_code"] == "invalid_message_source"
+
+
+@pytest.mark.asyncio
 async def test_tui_legacy_transcript_reads_shared_canonical_session(tmp_path):
     server, runtime = _server(tmp_path)
     session = server.session_store.resolve_session(
@@ -403,6 +521,27 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
             {
                 "idempotency_key": "api-key",
                 "surface": "desktop-client",
+                "message_source": {
+                    "id": "desktop.client",
+                    "display_name": "Desktop Client",
+                },
+                "private_authorization_proofs": [
+                    {
+                        "type": "hashi.private-authorization-proof",
+                        "credential_id": "synthetic",
+                    }
+                ],
+                "private_authorization_binding": {
+                    "message_id": "client-message-1",
+                    "from_instance": "HASHI1",
+                    "from_agent": "client",
+                    "to_instance": "HASHI1",
+                    "to_agent": "lily",
+                    "content_sha256": authorization_content_sha256(
+                        "hello Session"
+                    ),
+                    "resources": [],
+                },
                 "message": {"content": [{"type": "text", "text": "hello Session"}]},
             },
             match_info={"session_id": session_id},
@@ -414,6 +553,13 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
     assert run_payload["session_id"] == session_id
     assert run_payload["message_id"].startswith("msg_")
     assert _runtime.last_request_metadata["session_surface"] == "desktop-client"
+    assert _runtime.last_request_metadata["message_source_claim"] == {
+        "id": "desktop.client",
+        "display_name": "Desktop Client",
+    }
+    assert _runtime.last_request_metadata["_private_authorization_proofs"][0][
+        "credential_id"
+    ] == "synthetic"
 
     server.session_store.mark_request_running(
         run_payload["request_id"], worker_id="test"

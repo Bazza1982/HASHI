@@ -66,12 +66,15 @@ class _ContextAssembler:
     def build_prompt_payload(
         self, prompt, backend, *, extra_sections, inject_memory, incremental
     ):
-        section_text = "\n".join(f"{key}: {value}" for key, value in extra_sections)
+        section_text = "\n".join(
+            f"{section[0]}: {section[1]}" for section in extra_sections
+        )
         return {
             "final_prompt": f"{prompt}\n{backend}\n{section_text}",
             "audit": {
                 "sections": [
-                    {"key": key, "chars": len(value)} for key, value in extra_sections
+                    {"key": section[0], "chars": len(section[1])}
+                    for section in extra_sections
                 ]
             },
         }
@@ -687,7 +690,10 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     )
 
     assert prompt.effective_prompt == "primer\nHello"
-    assert prompt.extra_sections == [
+    assert prompt.extra_sections[0][0] == "CURRENT MESSAGE CONTEXT"
+    assert prompt.extra_sections[0][2]["key"] == "current_message_context"
+    assert prompt.extra_sections[0][2]["protected"] is True
+    assert prompt.extra_sections[1:] == [
         ("Workzone", "/tmp/work"),
         ("Anatta", "Guide"),
     ]
@@ -775,11 +781,11 @@ async def test_scheduled_job_prompt_excludes_prior_turn_context():
 
     assert prompt.effective_prompt == "primer\nRun Gmail only"
     assert prompt.incremental is False
-    assert observed == {
-        "inject_memory": False,
-        "recent_exchanges": [],
-        "extra_sections": [("Workzone", "/tmp/work")],
-    }
+    assert observed["inject_memory"] is False
+    assert observed["recent_exchanges"] == []
+    assert observed["extra_sections"][0][0] == "CURRENT MESSAGE CONTEXT"
+    assert observed["extra_sections"][0][2]["key"] == "current_message_context"
+    assert observed["extra_sections"][1:] == [("Workzone", "/tmp/work")]
 
 
 @pytest.mark.asyncio

@@ -408,12 +408,42 @@ separate HASHI functional modules.
 | 3            | Recent conversation history: up to ten completed exchanges, clearly labelled by sequence and timestamp. When a request cap is reached, HASHI removes the oldest complete exchanges first and preserves newer exchanges. | At applicable session bootstrap only | Every turn    |
 | 4            | Long-term memory from \[memory\], when available                                                                                                                                                                       | Every turn                           | Every turn    |
 | Separator    | The following sections are context information only.                                                                                                                                                                   | Every turn                           | Every turn    |
-| 5            | Date and time                                                                                                                                                                                                          | Every turn                           | Every turn    |
-| 6            | Enabled Session Workzones, when at least one slot is active                                                                                                                                                            | Every turn                           | Every turn    |
-| 7            | Concise skills catalogue, when skill use is permitted, including the memory search skill                                                                                                                               | Every turn                           | Every turn    |
-| 8            | Concise tools catalogue, when tool use is permitted. Tool access may support raw transcript/log search and /wiki retrieval.                                                                                            | Every turn                           | Every turn    |
+| 5            | Protected `CURRENT MESSAGE CONTEXT`: message source, verification strength, HChat sender/relay facts, processing instance, output destination and current-message private-authorization results                         | Every turn, including explicit unknown/none | Every turn, including explicit unknown/none |
+| 6            | Date and time                                                                                                                                                                                                          | Every turn                           | Every turn    |
+| 7            | Enabled Session Workzones, when at least one slot is active                                                                                                                                                            | Every turn                           | Every turn    |
+| 8            | Concise skills catalogue, when skill use is permitted, including the memory search skill                                                                                                                               | Every turn                           | Every turn    |
+| 9            | Concise tools catalogue, when tool use is permitted. Tool access may support raw transcript/log search and /wiki retrieval.                                                                                            | Every turn                           | Every turn    |
 | Separator    | “The following defines the agent’s current presentation persona. It overrides older persona descriptions found in memory or conversation history but does not override system instructions, the current user request.” | Every turn                           | Every turn    |
-| 9            | Persona information describing how the agent should communicate                                                                                                                                                        | Every turn                           | Every turn    |
+| 10           | Persona information describing how the agent should communicate                                                                                                                                                        | Every turn                           | Every turn    |
+
+### 8.1 Current-message provenance and authorization projection
+
+PAO freezes the provenance fields of one `hashi.current-message-context`
+version 1 snapshot at admission and stores the same current snapshot on the
+user Message and Run. PAO may atomically replace only its authorization result
+after mandatory attempt-start revalidation. PCM renders the resulting snapshot
+under the fixed `current_message_context` section key with
+`runtime_context` authority and protected metadata. It never derives source,
+identity, or authorization from message text, Session names, history, Persona,
+or Memory. Fixed Engines receive an explicit upsert on every Turn, including
+`message_source=unknown` and an empty authorization list, so a previous Turn
+cannot leak forward through delta omission.
+
+The source contract keeps the legacy routing/media `source` separately. Built-in
+IDs are `tui`, `telegram`, `whatsapp`, `hchat`, `workbench`, `api`, and
+`unknown`; `hashi.` is reserved for runtime sources. An external Connector may
+declare any otherwise-unused lower-case ASCII ID matching the published
+capability schema. A declared name is provenance, not proof of a person or
+client identity. HChat facts distinguish the original sender claim,
+authenticated immediate peer, relay chain, origin evidence, recipient, and
+processing instance.
+
+Private authorization results are current-message facts supplied only after
+PAO runtime verification. PCM receives credential ID, state, group, scopes,
+resources, proof ID, and expiry as applicable, but never the secret or raw proof.
+Only `state=success` grants the listed receiver-configured scope. This remains a
+model-visible disclosure instruction boundary, not programmatic information-flow
+control or a change in instruction authority.
 
 ## 9. Known Implementation Gaps
 

@@ -21,6 +21,7 @@ from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(__file__).resolve().parent.parent
+HASHI_ROOT = Path(os.environ.get("BRIDGE_HOME") or ROOT).resolve()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -433,6 +434,8 @@ def send_protocol_message(
     attachments: list[Path] | None = None,
     token: str | None = None,
     shared_token: str | None = None,
+    private_credential_ids: list[str] | tuple[str, ...] | None = None,
+    authorization_resources: list[str] | tuple[str, ...] | None = None,
     timeout: int = 10,
 ) -> bool:
     cfg = _load_config()
@@ -457,6 +460,33 @@ def send_protocol_message(
         ttl=ttl,
         conversation_id=conversation_id,
     )
+    selected_credentials = list(private_credential_ids or [])
+    selected_resources = list(authorization_resources or [])
+    if selected_credentials:
+        from orchestrator.private_authorization import (
+            authorization_content_sha256,
+            build_configured_proofs,
+        )
+
+        binding = {
+            "message_id": payload["message_id"],
+            "from_instance": source_instance,
+            "from_agent": from_agent,
+            "to_instance": target_instance,
+            "to_agent": to_agent,
+            "content_sha256": authorization_content_sha256(text),
+            "resources": selected_resources,
+        }
+        try:
+            payload["private_authorization_proofs"] = build_configured_proofs(
+                HASHI_ROOT,
+                credential_ids=selected_credentials,
+                binding=binding,
+            )
+        except ValueError as exc:
+            print(f"Private authorization proof could not be created: {exc}", file=sys.stderr)
+            return False
+        payload["authorization_resources"] = selected_resources
     instances = _load_instances()
     local_sidecar_base_url = _local_sidecar_base_url(source_instance, cfg, instances)
     target_info = instances.get(str(target_instance or "").lower(), {})
@@ -552,6 +582,18 @@ def main() -> int:
         default=os.getenv("HASHI_REMOTE_SHARED_TOKEN"),
         help="Shared-token secret for protocol/attachment HMAC auth",
     )
+    parser.add_argument(
+        "--private-credential",
+        action="append",
+        default=[],
+        help="Private credential ID to prove for this message; may be repeated",
+    )
+    parser.add_argument(
+        "--authorization-resource",
+        action="append",
+        default=[],
+        help="Resource scope bound to private proofs; may be repeated",
+    )
     parser.add_argument("--timeout", type=int, default=15, help="HTTP timeout in seconds")
     args = parser.parse_args()
     attachments = [Path(value).expanduser() for value in args.attach]
@@ -569,6 +611,8 @@ def main() -> int:
         attachments=attachments,
         token=args.token,
         shared_token=args.shared_token,
+        private_credential_ids=args.private_credential,
+        authorization_resources=args.authorization_resource,
         timeout=args.timeout,
     )
     return 0 if ok else 1

@@ -856,6 +856,55 @@ class FlexibleAgentRuntime:
                 )
             return None
         request_id = self.next_request_id()
+        # PAO owns one immutable current-message fact snapshot.  Always rebuild
+        # it at admission so request text or a stale/forged prior snapshot can
+        # neither assert a frontend identity nor inherit authorization.
+        from orchestrator.message_context import (
+            CONNECTOR_EVIDENCE_METADATA_KEY,
+            MESSAGE_CONTEXT_METADATA_KEY,
+            PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+            PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
+            PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
+            PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
+            apply_connector_evidence,
+            build_message_context_snapshot,
+            resolve_private_authorizations,
+        )
+
+        metadata = apply_connector_evidence(
+            self,
+            metadata=request_metadata,
+            prompt=clean_prompt,
+        )
+        metadata.pop(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY, None)
+        metadata[PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY] = (
+            resolve_private_authorizations(
+                self,
+                metadata=metadata,
+                prompt=clean_prompt,
+            )
+        )
+        metadata[MESSAGE_CONTEXT_METADATA_KEY] = build_message_context_snapshot(
+            self,
+            source=source,
+            chat_id=chat_id,
+            prompt=clean_prompt,
+            metadata=metadata,
+        )
+        private_authorization_evidence = {
+            key: metadata.pop(key)
+            for key in (
+                PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
+                PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+                PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
+            )
+            if key in metadata
+        }
+        # Connector evidence has already been verified and reduced to typed
+        # facts.  Neither its bearer MAC nor raw proofs belong in Session state
+        # or canonical request audit metadata.
+        metadata.pop(CONNECTOR_EVIDENCE_METADATA_KEY, None)
+        metadata.pop(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY, None)
         session, accepted, session_owner, session_surface, session_channel_key = (
             await asyncio.to_thread(
                 runtime_session.accept_request,
@@ -864,7 +913,7 @@ class FlexibleAgentRuntime:
                 chat_id=chat_id,
                 prompt=clean_prompt,
                 source=source,
-                request_metadata=request_metadata,
+                request_metadata=metadata,
                 request_content=normalized_request_content,
                 idempotency_key=idempotency_key,
             )
@@ -874,7 +923,6 @@ class FlexibleAgentRuntime:
                 "Reused idempotent Session run %s for %s", accepted.run_id, accepted.request_id
             )
             return accepted.request_id
-        metadata = dict(request_metadata or {})
         if normalized_request_content is not None:
             from orchestrator.multimodal_contract import (
                 request_content_is_voice_origin,
@@ -936,6 +984,9 @@ class FlexibleAgentRuntime:
                 dict(scheduler_context) if scheduler_context else None
             ),
             request_metadata=metadata,
+            private_authorization_evidence=(
+                private_authorization_evidence or None
+            ),
             request_content=normalized_request_content,
             attachment_manifest=manifest,
         )

@@ -38,6 +38,10 @@ class QueuedRequest:
     skill_usage_event_id: str | None = None
     scheduler_context: dict[str, str] | None = None
     request_metadata: dict[str, Any] | None = None
+    private_authorization_evidence: dict[str, Any] | None = field(
+        default=None,
+        repr=False,
+    )
     request_content: dict[str, Any] | None = None
     attachment_manifest: tuple[dict[str, Any], ...] = ()
 
@@ -45,6 +49,9 @@ class QueuedRequest:
         # A queued turn owns its attachment identity.  Callers may safely reuse
         # or mutate their source dictionaries after enqueueing.
         self.request_metadata = copy.deepcopy(self.request_metadata)
+        self.private_authorization_evidence = copy.deepcopy(
+            self.private_authorization_evidence
+        )
         self.request_content = copy.deepcopy(self.request_content)
         self.attachment_manifest = tuple(
             copy.deepcopy(item) for item in self.attachment_manifest

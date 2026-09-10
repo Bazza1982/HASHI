@@ -396,3 +396,20 @@ Phase E gate, before removing legacy behavior:
 [ ] audit/log output includes attempt id, parsed draft, final payload, status, and retry count
 [ ] legacy compatibility flag can be removed without changing user syntax
 ```
+
+## 11. Current-message private authorization extension
+
+The optional version 1 extension adds repeatable `--private-credential` and
+`--authorization-resource` selections to direct HChat/protocol sending. The
+sender creates a short-lived HMAC proof for only the selected IDs; the proof is
+bound to sender-authored content, message ID, source/target identities and
+resources. Cross-instance proof-bearing traffic requires the authenticated
+protocol route and never silently falls back to a transport that would discard
+the proof.
+
+This extension does not change delivery admission: an absent, invalid, expired
+or revoked proof yields no additional scope but leaves otherwise permitted
+ordinary HChat intact. The receiver owns group/scope/resource mapping in its
+ignored local configuration. PAO verifies and persists sanitized results for
+one Message/Run; PCM projects only those results. Raw secrets and raw proofs are
+not model, transcript, generic audit, receipt, or user-facing payloads.

@@ -108,6 +108,68 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
     assert "Message:\nhello there" in output
 
 
+def test_protocol_send_attaches_only_explicit_private_proofs(monkeypatch, capsys):
+    from orchestrator import private_authorization
+
+    captured = {}
+    synthetic_secret = "synthetic-secret-must-not-be-on-wire"
+
+    def fake_urlopen(req, timeout=0):
+        del timeout
+        captured.update(json.loads((req.data or b"{}").decode("utf-8")))
+        return _FakeResponse({"ok": True, "state": "accepted"})
+
+    def build_proofs(_root, *, credential_ids, binding):
+        assert credential_ids == ["finance", "marketing"]
+        assert binding["resources"] == ["user:synthetic"]
+        assert binding["content_sha256"] == (
+            private_authorization.authorization_content_sha256(
+                "synthetic report request"
+            )
+        )
+        return [
+            {
+                "type": "hashi.private-authorization-proof",
+                "version": 1,
+                "credential_id": credential_id,
+                "digest": "a" * 64,
+            }
+            for credential_id in credential_ids
+        ]
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        protocol_send,
+        "_load_config",
+        lambda: {"global": {"instance_id": "HASHI1"}},
+    )
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(private_authorization, "build_configured_proofs", build_proofs)
+
+    assert protocol_send.send_protocol_message(
+        "sunny@HASHI2",
+        "sender",
+        "synthetic report request",
+        shared_token="network-secret",
+        private_credential_ids=["finance", "marketing"],
+        authorization_resources=["user:synthetic"],
+    )
+
+    assert [
+        item["credential_id"]
+        for item in captured["private_authorization_proofs"]
+    ] == ["finance", "marketing"]
+    assert captured["authorization_resources"] == ["user:synthetic"]
+    assert synthetic_secret not in json.dumps(captured)
+    capsys.readouterr()
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     [

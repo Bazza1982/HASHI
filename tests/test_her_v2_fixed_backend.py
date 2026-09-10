@@ -310,6 +310,49 @@ def test_incremental_pcm_sends_non_text_typed_field_changes(tmp_path):
     ]
 
 
+def test_current_message_context_is_explicitly_upserted_and_cleared_each_turn(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    first_context = {
+        "key": "current_message_context",
+        "title": "CURRENT MESSAGE CONTEXT",
+        "text": '{"message_source":"hchat","private_authorization_state":"success"}',
+        "authority": "runtime_context",
+        "rank": 5,
+        "protected": True,
+        "metadata": {"schema": "hashi.current-message-context"},
+        "order": 3,
+    }
+    first_transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-1",
+        message="First",
+        sections=_sections() + [first_context],
+    )
+    first = coordinator.accept(first_transport)
+    coordinator.complete(first, assistant_text="Done")
+
+    cleared_context = {
+        **first_context,
+        "text": '{"message_source":"unknown","private_authorization_state":"none"}',
+    }
+    second_transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-2",
+        message="Second",
+        sections=_sections() + [cleared_context],
+    )
+    payload = json.loads(second_transport.split("\n", 1)[1])
+    operations = payload["pcm_delta"]["operations"]
+
+    assert [operation["key"] for operation in operations] == [
+        "current_message_context"
+    ]
+    assert operations[0]["op"] == "upsert"
+    assert '"private_authorization_state":"none"' in operations[0]["section"][
+        "text"
+    ]
+
+
 def test_resource_delta_sends_only_additions_and_explicit_revocations(tmp_path):
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     first_resource = {

@@ -198,6 +198,11 @@ def accept_request(
             if isinstance(metadata.get("response_preferences"), Mapping)
             else None
         ),
+        message_context=(
+            metadata.get("message_context_snapshot")
+            if isinstance(metadata.get("message_context_snapshot"), Mapping)
+            else None
+        ),
     )
     return session, accepted, resolved_owner, surface, channel_key
 
@@ -446,9 +451,66 @@ def runtime_busy(runtime: Any) -> bool:
 
 def mark_running(runtime: Any, item: Any) -> None:
     if getattr(item, "run_id", None):
+        from orchestrator.message_context import (
+            MESSAGE_CONTEXT_METADATA_KEY,
+            PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+            PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
+            PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
+            PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
+            build_message_context_snapshot,
+            resolve_private_authorizations,
+        )
+
+        metadata = getattr(item, "request_metadata", None)
+        metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+        private_evidence = getattr(item, "private_authorization_evidence", None)
+        verification_metadata = dict(metadata)
+        if isinstance(private_evidence, Mapping):
+            verification_metadata.update(private_evidence)
+        else:
+            # Compatibility for queued objects created before the private slot
+            # existed. Production admission removes these keys from ordinary
+            # request metadata before persistence or audit.
+            private_evidence = {
+                key: metadata.pop(key)
+                for key in (
+                    PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
+                    PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+                    PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
+                )
+                if key in metadata
+            }
+            verification_metadata.update(private_evidence)
+            item.private_authorization_evidence = private_evidence or None
+        message_context = metadata.get(MESSAGE_CONTEXT_METADATA_KEY)
+        if verification_metadata.get(PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY):
+            # Authorization is not a Session-level grant. Recheck live
+            # receiver policy, expiry and revocation at each execution attempt
+            # after any queue delay, then atomically persist the attempt view.
+            authorization_results = resolve_private_authorizations(
+                runtime,
+                metadata=verification_metadata,
+                prompt=str(getattr(item, "prompt", "") or ""),
+            )
+            message_context = build_message_context_snapshot(
+                runtime,
+                source=str(getattr(item, "source", "") or ""),
+                chat_id=getattr(item, "chat_id", None),
+                prompt=str(getattr(item, "prompt", "") or ""),
+                metadata={
+                    **metadata,
+                    PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY: authorization_results,
+                },
+            )
+            metadata[MESSAGE_CONTEXT_METADATA_KEY] = message_context
+        metadata.pop(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY, None)
+        item.request_metadata = metadata
         ensure_store(runtime).mark_request_running(
             item.request_id,
             worker_id=f"{getattr(runtime.global_config, 'instance_id', 'HASHI')}:{runtime.name}",
+            message_context=(
+                message_context if isinstance(message_context, Mapping) else None
+            ),
         )
 
 

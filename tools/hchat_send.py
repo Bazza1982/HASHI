@@ -26,6 +26,7 @@ import re
 import ssl
 import sys
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from urllib import request as urllib_request
@@ -763,6 +764,8 @@ def _send_via_local_workbench(
     text: str,
     source_instance: str,
     reply_route: dict | None = None,
+    private_credential_ids: list[str] | tuple[str, ...] | None = None,
+    authorization_resources: list[str] | tuple[str, ...] | None = None,
 ) -> bool:
     expected_instance = _get_instance_id(cfg)
     for host in _local_workbench_hosts(cfg):
@@ -777,6 +780,8 @@ def _send_via_local_workbench(
             source_instance,
             reply_route,
             expected_instance=expected_instance,
+            private_credential_ids=private_credential_ids,
+            authorization_resources=authorization_resources,
         ):
             return True
     return False
@@ -951,6 +956,9 @@ def _send_via_protocol_transport(
     target_instance: str,
     from_agent: str,
     text: str,
+    *,
+    private_credential_ids: list[str] | tuple[str, ...] | None = None,
+    authorization_resources: list[str] | tuple[str, ...] | None = None,
 ) -> bool:
     shared_token = _shared_token_for_protocol()
     if not shared_token:
@@ -960,12 +968,18 @@ def _send_via_protocol_transport(
     except Exception as exc:
         print(f"⚠️ Protocol transport unavailable: {format_delivery_result(transport_error=str(exc))}", file=sys.stderr)
         return False
+    authorization_kwargs = {}
+    if private_credential_ids:
+        authorization_kwargs["private_credential_ids"] = private_credential_ids
+    if authorization_resources:
+        authorization_kwargs["authorization_resources"] = authorization_resources
     return send_protocol_message(
         f"{to_agent}@{target_instance}",
         from_agent,
         text,
         target_instance=target_instance,
         shared_token=shared_token,
+        **authorization_kwargs,
     )
 
 
@@ -979,6 +993,8 @@ def _send_via_workbench(
     reply_route: dict | None = None,
     label: str = "local",
     expected_instance: str | None = None,
+    private_credential_ids: list[str] | tuple[str, ...] | None = None,
+    authorization_resources: list[str] | tuple[str, ...] | None = None,
 ) -> bool:
     if not expected_instance:
         print("❌ Hchat Workbench route has no expected instance identity.", file=sys.stderr)
@@ -991,7 +1007,59 @@ def _send_via_workbench(
         return False
     url = f"http://{host}:{port}/api/chat"
     full_text = format_hchat_message(from_agent, source_instance, text)
-    payload = {"agent": to_agent.lower(), "text": full_text}
+    message_id = f"hchat-{uuid.uuid4().hex[:20]}"
+    target_instance = _normalize_instance_id(expected_instance)
+    from orchestrator.private_authorization import authorization_content_sha256
+
+    binding = {
+        "message_id": message_id,
+        "from_instance": source_instance,
+        "from_agent": from_agent,
+        "to_instance": target_instance,
+        "to_agent": to_agent,
+        "content_sha256": authorization_content_sha256(full_text),
+        "resources": list(authorization_resources or []),
+    }
+    payload = {
+        "agent": to_agent.lower(),
+        "text": full_text,
+        "source": "hchat",
+        "idempotency_key": f"hchat:{message_id}",
+        "hchat_context": {
+            "from_agent": from_agent,
+            "from_instance": source_instance,
+            "to_agent": to_agent,
+            "to_instance": target_instance,
+            "sender_assurance": "declared",
+            "network_authentication": "not_verified",
+        },
+    }
+    selected = list(private_credential_ids or [])
+    if selected:
+        from orchestrator.private_authorization import build_configured_proofs
+
+        try:
+            payload["private_authorization_proofs"] = build_configured_proofs(
+                ROOT,
+                credential_ids=selected,
+                binding=binding,
+            )
+        except ValueError as exc:
+            print(f"Private authorization proof could not be created: {exc}", file=sys.stderr)
+            return False
+        payload["private_authorization_binding"] = binding
+    from orchestrator.message_context import seal_connector_evidence
+
+    evidence = seal_connector_evidence(
+        ROOT,
+        claims={
+            "_message_source_reserved": "hchat",
+            "_hchat_context": payload["hchat_context"],
+        },
+        prompt=full_text,
+    )
+    if evidence is not None:
+        payload["request_metadata"] = {"_connector_evidence": evidence}
     if reply_route:
         payload["reply_route"] = reply_route
     data = json.dumps(payload).encode("utf-8")
@@ -1209,6 +1277,8 @@ def send_hchat(
     *,
     source_instance: str | None = None,
     reply_route_override: dict | None = None,
+    private_credential_ids: list[str] | tuple[str, ...] | None = None,
+    authorization_resources: list[str] | tuple[str, ...] | None = None,
 ) -> bool:
     cfg = _load_config()
     local_port = _get_workbench_port(cfg)
@@ -1217,6 +1287,11 @@ def send_hchat(
     reply_route = reply_route_override or _build_reply_route(cfg)
     to_agent, inline_instance = _split_target_address(to_agent)
     target_instance = _normalize_instance_id(target_instance) or inline_instance
+    authorization_kwargs = {}
+    if private_credential_ids:
+        authorization_kwargs["private_credential_ids"] = private_credential_ids
+    if authorization_resources:
+        authorization_kwargs["authorization_resources"] = authorization_resources
 
     if to_agent.startswith("@"):
         if target_instance:
@@ -1227,7 +1302,16 @@ def send_hchat(
         if not members:
             print(f"❌ Group '{group_name}' not found or has no members.", file=sys.stderr)
             return False
-        results = [send_hchat(member, from_agent, text, target_instance=target_instance) for member in members]
+        results = [
+            send_hchat(
+                member,
+                from_agent,
+                text,
+                target_instance=target_instance,
+                **authorization_kwargs,
+            )
+            for member in members
+        ]
         succeeded = sum(results)
         print(f"📢 Group @{group_name}: {succeeded}/{len(members)} queued.")
         return succeeded > 0
@@ -1243,7 +1327,16 @@ def send_hchat(
 
     if not target_instance:
         if _is_local_agent(cfg, to_agent):
-            if _send_via_local_workbench(cfg, local_port, to_agent, from_agent, text, source_instance, reply_route):
+            if _send_via_local_workbench(
+                cfg,
+                local_port,
+                to_agent,
+                from_agent,
+                text,
+                source_instance,
+                reply_route,
+                **authorization_kwargs,
+            ):
                 return True
             print(f"❌ Local API failed for {to_agent}.", file=sys.stderr)
             return False
@@ -1254,7 +1347,16 @@ def send_hchat(
 
     if target_instance == instance_id.upper():
         if _is_local_agent(cfg, to_agent):
-            if _send_via_local_workbench(cfg, local_port, to_agent, from_agent, text, source_instance, reply_route):
+            if _send_via_local_workbench(
+                cfg,
+                local_port,
+                to_agent,
+                from_agent,
+                text,
+                source_instance,
+                reply_route,
+                **authorization_kwargs,
+            ):
                 return True
             print(f"❌ Local API failed for {to_agent}@{target_instance}.", file=sys.stderr)
             return False
@@ -1263,8 +1365,21 @@ def send_hchat(
         print(f"❌ {to_agent}@{target_instance} is not a local active agent.", file=sys.stderr)
         return False
 
-    if _send_via_protocol_transport(to_agent, target_instance, from_agent, text):
+    if _send_via_protocol_transport(
+        to_agent,
+        target_instance,
+        from_agent,
+        text,
+        **authorization_kwargs,
+    ):
         return True
+    if private_credential_ids:
+        print(
+            "Private authorization was selected, but the authenticated protocol "
+            "transport was unavailable; refusing an unproved fallback.",
+            file=sys.stderr,
+        )
+        return False
 
     exchange_instances = _load_instances()
     exchange_instance_id = _configured_exchange_instance(cfg, exchange_instances)
@@ -1536,6 +1651,18 @@ def main() -> None:
     parser.add_argument("--from", dest="from_agent", help="Sender agent name (e.g. rain)")
     parser.add_argument("--text", help="Message text to send")
     parser.add_argument("--instance", default=None, help="Target instance (e.g. HASHI9) - forces routing to specific instance")
+    parser.add_argument(
+        "--private-credential",
+        action="append",
+        default=[],
+        help="Private credential ID to prove for this message; may be repeated",
+    )
+    parser.add_argument(
+        "--authorization-resource",
+        action="append",
+        default=[],
+        help="Resource scope bound to private proofs; may be repeated",
+    )
     parser.add_argument("--check", "--dry-run", action="store_true", help="Validate route availability without sending a message")
     args = parser.parse_args()
 
@@ -1549,7 +1676,14 @@ def main() -> None:
     if not args.to or not args.from_agent or not args.text:
         parser.error("--to, --from, and --text are required for sending messages")
 
-    success = send_hchat(args.to, args.from_agent, args.text, target_instance=args.instance)
+    success = send_hchat(
+        args.to,
+        args.from_agent,
+        args.text,
+        target_instance=args.instance,
+        private_credential_ids=args.private_credential,
+        authorization_resources=args.authorization_resource,
+    )
     if not success:
         target = args.to
         if args.instance and "@" not in target:

@@ -86,7 +86,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, db_path: str | Path, *, instance_id: str = "HASHI"):
         self.db_path = Path(db_path)
@@ -211,6 +211,7 @@ class SessionStore:
                     role TEXT NOT NULL,
                     author_id TEXT NOT NULL,
                     source TEXT NOT NULL,
+                    message_context_json TEXT NOT NULL DEFAULT '{}',
                     content_json TEXT NOT NULL,
                     text TEXT NOT NULL,
                     visibility TEXT NOT NULL DEFAULT 'visible',
@@ -233,6 +234,7 @@ class SessionStore:
                     idempotency_key TEXT NOT NULL,
                     request_digest TEXT NOT NULL,
                     source TEXT NOT NULL,
+                    message_context_json TEXT NOT NULL DEFAULT '{}',
                     requested_mode TEXT,
                     effective_mode TEXT,
                     response_preferences_json TEXT NOT NULL DEFAULT '{}',
@@ -524,6 +526,20 @@ class SessionStore:
                     "ALTER TABLE runs ADD COLUMN "
                     "response_preferences_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "message_context_json" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN "
+                    "message_context_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            message_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if "message_context_json" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN "
+                    "message_context_json TEXT NOT NULL DEFAULT '{}'"
+                )
             session_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -567,6 +583,10 @@ class SessionStore:
     def _message_dict(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["content"] = json.loads(result.pop("content_json") or "[]")
+        if "message_context_json" in result:
+            result["message_context"] = _json_object(
+                result.pop("message_context_json")
+            )
         result["history_eligible"] = bool(result.get("history_eligible"))
         return result
 
@@ -576,6 +596,10 @@ class SessionStore:
         if "response_preferences_json" in result:
             result["response_preferences"] = _json_object(
                 result.pop("response_preferences_json")
+            )
+        if "message_context_json" in result:
+            result["message_context"] = _json_object(
+                result.pop("message_context_json")
             )
         return result
 
@@ -894,6 +918,7 @@ class SessionStore:
         content: Iterable[Mapping[str, Any]] | None = None,
         parent_run_id: str | None = None,
         response_preferences: Mapping[str, Any] | None = None,
+        message_context: Mapping[str, Any] | None = None,
     ) -> AcceptedRun:
         clean = str(text or "").strip()
         blocks = list(content or ({"type": "text", "text": clean},))
@@ -990,6 +1015,7 @@ class SessionStore:
                 "execution_mode": str(execution_mode or ""),
                 "parent_run_id": str(parent_run_id or ""),
                 "response_preferences": dict(response_preferences or {}),
+                "message_context": dict(message_context or {}),
             }
             digest = hashlib.sha256(
                 _json(digest_payload).encode("utf-8")
@@ -1025,8 +1051,9 @@ class SessionStore:
                 """
                 INSERT INTO messages(
                     message_id, session_id, run_id, ordinal, context_generation,
-                    role, author_id, source, content_json, text, content_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, ?)
+                    role, author_id, source, message_context_json, content_json,
+                    text, content_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -1036,6 +1063,7 @@ class SessionStore:
                     generation,
                     str(owner_id),
                     str(source),
+                    _json(dict(message_context or {})),
                     content_json,
                     clean,
                     content_hash,
@@ -1047,10 +1075,10 @@ class SessionStore:
                 INSERT INTO runs(
                     run_id, session_id, user_message_id, agent_id, request_id,
                     idempotency_key, request_digest, source, requested_mode,
-                    effective_mode, response_preferences_json,
+                    effective_mode, response_preferences_json, message_context_json,
                     context_generation, state, parent_run_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -1064,6 +1092,7 @@ class SessionStore:
                     execution_mode,
                     execution_mode,
                     _json(dict(response_preferences or {})),
+                    _json(dict(message_context or {})),
                     generation,
                     parent_run_id,
                     now,
@@ -1129,7 +1158,13 @@ class SessionStore:
             context_generation=generation,
         )
 
-    def mark_request_running(self, request_id: str, *, worker_id: str) -> int | None:
+    def mark_request_running(
+        self,
+        request_id: str,
+        *,
+        worker_id: str,
+        message_context: Mapping[str, Any] | None = None,
+    ) -> int | None:
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1140,16 +1175,24 @@ class SessionStore:
                 return None
             attempt = int(row["attempt"]) + 1
             token = int(row["fencing_token"]) + 1
+            current_message_context = (
+                dict(message_context)
+                if isinstance(message_context, Mapping)
+                else _json_object(row["message_context_json"])
+            )
+            message_context_json = _json(current_message_context)
             updated = connection.execute(
                 """
                 UPDATE runs SET state = 'running', attempt = ?, fencing_token = ?,
-                    worker_id = ?, started_at = ?, updated_at = ?
+                    worker_id = ?, message_context_json = ?,
+                    started_at = ?, updated_at = ?
                 WHERE run_id = ? AND state = 'queued' AND fencing_token = ?
                 """,
                 (
                     attempt,
                     token,
                     str(worker_id),
+                    message_context_json,
                     now,
                     now,
                     row["run_id"],
@@ -1159,12 +1202,35 @@ class SessionStore:
             if updated.rowcount != 1:
                 return None
             connection.execute(
+                """UPDATE messages SET message_context_json = ?
+                   WHERE message_id = ? AND run_id = ?""",
+                (message_context_json, row["user_message_id"], row["run_id"]),
+            )
+            authorization_snapshot = {
+                "scope": "current_message",
+                "state": str(
+                    current_message_context.get("private_authorization_state")
+                    or "none"
+                ),
+                "private_authorizations": list(
+                    current_message_context.get("private_authorizations") or []
+                ),
+            }
+            connection.execute(
                 """
                 INSERT INTO run_attempts(
-                    run_id, attempt, fencing_token, worker_id, started_at, state
-                ) VALUES (?, ?, ?, ?, ?, 'running')
+                    run_id, attempt, fencing_token, worker_id,
+                    authorization_json, started_at, state
+                ) VALUES (?, ?, ?, ?, ?, ?, 'running')
                 """,
-                (row["run_id"], attempt, token, str(worker_id), now),
+                (
+                    row["run_id"],
+                    attempt,
+                    token,
+                    str(worker_id),
+                    _json(authorization_snapshot),
+                    now,
+                ),
             )
             self._append_event(
                 connection,

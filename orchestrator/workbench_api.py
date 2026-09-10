@@ -78,6 +78,21 @@ from orchestrator.frontend_delivery import (
     normalize_tui_run_delivery_policy,
     tui_request_metadata,
 )
+from orchestrator.message_context import (
+    CONNECTOR_EVIDENCE_METADATA_KEY,
+    HCHAT_CONTEXT_METADATA_KEY,
+    MESSAGE_CONTEXT_METADATA_KEY,
+    MESSAGE_SOURCE_CLAIM_METADATA_KEY,
+    MESSAGE_SOURCE_RESERVED_METADATA_KEY,
+    PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+    PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
+    PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
+    normalize_external_source,
+    public_source_capabilities,
+)
+from orchestrator.private_authorization import (
+    public_private_authorization_capabilities,
+)
 from orchestrator.ui_language import normalize_locale
 from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.pathing import resolve_path_value
@@ -598,6 +613,9 @@ class WorkbenchApiServer:
             "/api/project-chat/{name}/{project}", self.handle_project_chat_log
         )
         self.app.router.add_post("/api/chat", self.handle_chat)
+        self.app.router.add_get(
+            "/api/capabilities/message-source", self.handle_message_source_capabilities
+        )
         self.app.router.add_post(
             "/api/browser/chat/send", self.handle_browser_chat_send
         )
@@ -4108,7 +4126,12 @@ class WorkbenchApiServer:
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
-        capabilities: dict[str, Any] = {"ok": True}
+        capabilities: dict[str, Any] = {
+            "ok": True,
+            "message_source": public_source_capabilities(),
+            "private_authorization": public_private_authorization_capabilities(),
+            "private_authorization_proof_version": 1,
+        }
         if self._persistent_session_v1_ready():
             capabilities.update(
                 {
@@ -4615,6 +4638,23 @@ class WorkbenchApiServer:
                 else:
                     raise ValueError(f"unsupported message content type {block_type!r}")
             canonical_content = canonical_request_content(canonical_parts)
+            source_declaration = payload.get("message_source")
+            normalized_source_declaration = None
+            if source_declaration is not None:
+                normalized_source_declaration = normalize_external_source(
+                    source_declaration
+                )
+            proofs = payload.get("private_authorization_proofs")
+            binding = payload.get("private_authorization_binding")
+            authorization_metadata: dict[str, Any] = {}
+            if isinstance(proofs, list):
+                authorization_metadata[PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY] = [
+                    dict(item) for item in proofs if isinstance(item, Mapping)
+                ]
+            if isinstance(binding, Mapping):
+                authorization_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = (
+                    dict(binding)
+                )
             transcript_state = self._begin_session_voice_transcription(
                 runtime=runtime,
                 canonical_content=canonical_content,
@@ -4640,6 +4680,16 @@ class WorkbenchApiServer:
                         "response_preferences": dict(
                             payload.get("response_preferences") or {}
                         ),
+                        **(
+                            {
+                                MESSAGE_SOURCE_CLAIM_METADATA_KEY: (
+                                    normalized_source_declaration
+                                )
+                            }
+                            if normalized_source_declaration is not None
+                            else {}
+                        ),
+                        **authorization_metadata,
                     },
                     request_content=canonical_content,
                 )
@@ -5178,6 +5228,22 @@ class WorkbenchApiServer:
                 "session_surface": fields.get("surface") or "workbench",
                 "session_channel_key": fields.get("client_id") or "default",
             }
+            source_declaration_text = str(fields.get("message_source") or "").strip()
+            if source_declaration_text:
+                try:
+                    source_declaration = json.loads(source_declaration_text)
+                    session_metadata[MESSAGE_SOURCE_CLAIM_METADATA_KEY] = (
+                        normalize_external_source(source_declaration)
+                    )
+                except (json.JSONDecodeError, ValueError) as exc:
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": str(exc),
+                            "error_code": "invalid_message_source",
+                        },
+                        status=400,
+                    )
             base_idempotency_key = (
                 str(fields.get("idempotency_key") or "").strip() or None
             )
@@ -5281,7 +5347,35 @@ class WorkbenchApiServer:
             "session_channel_key": payload.get("client_id") or "default",
         }
         if isinstance(supplied_metadata, dict):
-            session_metadata.update(supplied_metadata)
+            # Connector-owned facts are rebuilt below.  Public callers cannot
+            # smuggle a previous PCM snapshot or a fabricated verification
+            # result through the general compatibility metadata bag.
+            protected_keys = {
+                CONNECTOR_EVIDENCE_METADATA_KEY,
+                MESSAGE_CONTEXT_METADATA_KEY,
+                MESSAGE_SOURCE_CLAIM_METADATA_KEY,
+                MESSAGE_SOURCE_RESERVED_METADATA_KEY,
+                HCHAT_CONTEXT_METADATA_KEY,
+                PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
+                PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
+                PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+            }
+            session_metadata.update(
+                {
+                    key: value
+                    for key, value in supplied_metadata.items()
+                    if key not in protected_keys and not str(key).startswith("_")
+                }
+            )
+            connector_evidence = supplied_metadata.get(
+                CONNECTOR_EVIDENCE_METADATA_KEY
+            )
+            if isinstance(connector_evidence, Mapping):
+                # This is still untrusted here.  PAO verifies its HMAC and
+                # prompt binding during admission before applying any claim.
+                session_metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = dict(
+                    connector_evidence
+                )
         telegram_mirror = True
         supplied_delivery_policy = payload.get("delivery_policy")
         if source.casefold() == "tui":
@@ -5321,6 +5415,7 @@ class WorkbenchApiServer:
                         telegram_mirror=telegram_mirror,
                         client_id=client_id,
                     ),
+                    MESSAGE_SOURCE_RESERVED_METADATA_KEY: "tui",
                 }
             )
         elif supplied_delivery_policy is not None:
@@ -5332,6 +5427,33 @@ class WorkbenchApiServer:
                 },
                 status=400,
             )
+        else:
+            declaration = payload.get("message_source")
+            if declaration is not None:
+                try:
+                    session_metadata[MESSAGE_SOURCE_CLAIM_METADATA_KEY] = (
+                        normalize_external_source(declaration)
+                    )
+                except ValueError as exc:
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": str(exc),
+                            "error_code": "invalid_message_source",
+                        },
+                        status=400,
+                    )
+        hchat_context = payload.get("hchat_context")
+        if source.casefold() == "hchat" and isinstance(hchat_context, Mapping):
+            session_metadata[HCHAT_CONTEXT_METADATA_KEY] = dict(hchat_context)
+        proofs = payload.get("private_authorization_proofs")
+        binding = payload.get("private_authorization_binding")
+        if isinstance(proofs, list):
+            session_metadata[PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY] = [
+                dict(item) for item in proofs if isinstance(item, Mapping)
+            ]
+        if isinstance(binding, Mapping):
+            session_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = dict(binding)
         slash_result = await try_execute_slash_command_text(
             runtime,
             text,
@@ -5370,6 +5492,19 @@ class WorkbenchApiServer:
             except SessionNotFound:
                 pass
         return web.json_response(response_payload)
+
+    async def handle_message_source_capabilities(self, _request):
+        """Publish the single source-name contract used by admission validation."""
+
+        return web.json_response(
+            {
+                "ok": True,
+                "message_source": public_source_capabilities(),
+                "private_authorization": (
+                    public_private_authorization_capabilities()
+                ),
+            }
+        )
 
     async def handle_hchat_exchange(self, request):
         payload = await request.json()
@@ -5450,7 +5585,21 @@ class WorkbenchApiServer:
             message_text = format_hchat_message(from_agent, from_instance, text)
             if reply_route and isinstance(reply_route, dict):
                 self._learn_reply_route(message_text, reply_route)
-            await runtime.enqueue_api_text(message_text)
+            await runtime.enqueue_api_text(
+                message_text,
+                source="hchat",
+                request_metadata={
+                    HCHAT_CONTEXT_METADATA_KEY: {
+                        "from_agent": from_agent,
+                        "from_instance": from_instance,
+                        "to_agent": to_agent,
+                        "to_instance": to_instance,
+                        "sender_assurance": "declared",
+                        "network_authentication": "not_verified",
+                        "relay_chain": [local_instance],
+                    }
+                },
+            )
             return web.json_response({"ok": True, "relayed": True, "exchange": True})
 
         gate_result = self._enterprise_channel_gate().check_egress(

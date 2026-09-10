@@ -23,9 +23,11 @@ class _Runtime:
     def __init__(self, name: str):
         self.name = name
         self.enqueued = []
+        self.enqueue_kwargs = []
 
-    async def enqueue_api_text(self, text: str):
+    async def enqueue_api_text(self, text: str, **kwargs):
         self.enqueued.append(text)
+        self.enqueue_kwargs.append(kwargs)
         return "req-1"
 
 
@@ -110,6 +112,10 @@ async def test_enterprise_hchat_exchange_allows_bound_target_agent(tmp_path):
     assert json.loads(response.text)["ok"] is True
     assert len(runtime.enqueued) == 1
     assert runtime.enqueued[0].startswith("[hchat from zelda@HASHI2]")
+    assert runtime.enqueue_kwargs[0]["source"] == "hchat"
+    context = runtime.enqueue_kwargs[0]["request_metadata"]["_hchat_context"]
+    assert context["from_agent"] == "zelda"
+    assert context["from_instance"] == "HASHI2"
     assert _audit_events(tmp_path) == []
 
 

@@ -1209,7 +1209,23 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             ),
         )
     )
-    extra_sections = runtime._workzone_prompt_section()
+    from orchestrator.message_context import (
+        MESSAGE_CONTEXT_METADATA_KEY,
+        pcm_message_context_section,
+    )
+
+    item_metadata = getattr(item, "request_metadata", None)
+    message_context = (
+        item_metadata.get(MESSAGE_CONTEXT_METADATA_KEY)
+        if isinstance(item_metadata, dict)
+        else None
+    )
+    # This is a mandatory PAO -> PCM projection, not an optional observer.
+    # Supplying the same fixed key on every Turn makes HER fixed-session
+    # transport issue an upsert whenever the source or authorization changes,
+    # including an explicit ``unknown``/``none`` reset.
+    extra_sections = [pcm_message_context_section(message_context)]
+    extra_sections += runtime._workzone_prompt_section()
     pre_turn_builder = runtime._build_pre_turn_context_sections
     pre_turn_kwargs = {"is_bridge_request": is_bridge_request}
     if "metadata" in inspect.signature(pre_turn_builder).parameters:

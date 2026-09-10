@@ -92,6 +92,8 @@ DEFAULT_CAPABILITIES = [
     "agent_reply_v1",
     "rescue_control",
     "tui_proxy_v1",
+    "message_source_context_v1",
+    "private_authorization_proof_v1",
 ]
 TERMINAL_INFLIGHT_STATES = {
     "reply_sent",
@@ -1029,6 +1031,25 @@ class ProtocolManager:
             conversation_id=conversation_id,
             from_instance=from_instance,
             from_agent=from_agent,
+            to_instance=local_instance,
+            to_agent=to_agent,
+            route_trace=route_trace,
+            authenticated_peer=str(
+                payload.get("_network_authenticated_instance") or ""
+            ),
+            network_authentication=str(
+                payload.get("_network_authentication") or "not_verified"
+            ),
+            private_authorization_proofs=list(
+                payload.get("private_authorization_proofs") or []
+            ),
+            authorization_resources=list(payload.get("authorization_resources") or []),
+            authorization_content_text=str(
+                payload.get("_private_authorization_content_text")
+                if payload.get("_private_authorization_content_text") is not None
+                else (payload.get("body") or {}).get("text")
+                or ""
+            ),
         )
         if not request_id:
             return 502, self._error_payload("local_enqueue_failed", "Workbench enqueue failed", retryable=True, payload=payload)
@@ -1211,6 +1232,14 @@ class ProtocolManager:
         conversation_id: str,
         from_instance: str,
         from_agent: str,
+        to_instance: str | None = None,
+        to_agent: str | None = None,
+        route_trace: list[str] | None = None,
+        authenticated_peer: str | None = None,
+        network_authentication: str = "not_verified",
+        private_authorization_proofs: list[dict[str, Any]] | None = None,
+        authorization_resources: list[str] | None = None,
+        authorization_content_text: str | None = None,
         terminal_response_text: str | None = None,
     ) -> str | None:
         terminal = exchange_kind == "reply"
@@ -1223,6 +1252,98 @@ class ProtocolManager:
             "protocol_from_instance": from_instance,
             "protocol_from_agent": from_agent,
         }
+        resolved_target_instance = str(
+            to_instance
+            or getattr(self, "_instance_info", {}).get("instance_id")
+            or ""
+        ).strip().upper()
+        resolved_target_agent = str(to_agent or agent_name).strip().casefold()
+        resolved_peer = str(authenticated_peer or "").strip().upper()
+        relay_chain = [
+            str(item).strip().upper()
+            for item in route_trace or ()
+            if str(item).strip().upper()
+            not in {str(from_instance).strip().upper(), resolved_target_instance}
+        ]
+        request_metadata.update(
+            {
+                "_message_source_reserved": "hchat",
+                "_hchat_context": {
+                    "from_agent": from_agent,
+                    "from_instance": from_instance,
+                    "to_agent": resolved_target_agent,
+                    "to_instance": resolved_target_instance,
+                    "authenticated_peer": resolved_peer,
+                    "network_authentication": network_authentication,
+                    "sender_assurance": (
+                        "shared_network_member_declared"
+                        if resolved_peer
+                        else "declared"
+                    ),
+                    "relay_chain": relay_chain,
+                    "origin_instance": {
+                        "id": from_instance,
+                        "assurance": (
+                            "shared_network_hmac"
+                            if resolved_peer == str(from_instance).strip().upper()
+                            else "declared"
+                        ),
+                    },
+                },
+            }
+        )
+        if private_authorization_proofs:
+            from orchestrator.private_authorization import (
+                authorization_content_sha256,
+            )
+
+            content_digest = authorization_content_sha256(
+                text if authorization_content_text is None else authorization_content_text
+            )
+            request_metadata["_private_authorization_proofs"] = [
+                dict(item)
+                for item in private_authorization_proofs
+                if isinstance(item, dict)
+            ]
+            request_metadata["_private_authorization_binding"] = {
+                "message_id": message_id,
+                "from_instance": from_instance,
+                "from_agent": from_agent,
+                "to_instance": resolved_target_instance,
+                "to_agent": resolved_target_agent,
+                "content_sha256": content_digest,
+                "resources": list(authorization_resources or []),
+            }
+            request_metadata["_private_authorization_content_sha256"] = (
+                content_digest
+            )
+        from orchestrator.message_context import seal_connector_evidence
+
+        connector_claims = {
+            key: request_metadata[key]
+            for key in (
+                "_message_source_reserved",
+                "_hchat_context",
+                "_private_authorization_proofs",
+                "_private_authorization_binding",
+                "_private_authorization_content_sha256",
+            )
+            if key in request_metadata
+        }
+        connector_root = getattr(self, "_hashi_root", None)
+        connector_evidence = (
+            seal_connector_evidence(
+                connector_root,
+                claims=connector_claims,
+                prompt=text,
+            )
+            if connector_root is not None
+            else None
+        )
+        for key in connector_claims:
+            request_metadata.pop(key, None)
+        if connector_evidence is not None:
+            request_metadata["_connector_evidence"] = connector_evidence
         if terminal:
             # A reply is presentation-only.  Freezing the tool catalogue at
             # the Workbench boundary prevents a model-generated ACK/Hchat

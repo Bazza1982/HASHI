@@ -2596,6 +2596,55 @@ def test_protocol_status_counts_only_active_inflight_messages():
     assert "reply_hard_timeout_seconds" not in status
 
 
+def test_protocol_message_preserves_hchat_sender_relay_and_private_proofs(tmp_path):
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI3"}
+    manager._max_allowed_ttl = 8
+    manager._inflight = {}
+    manager._inflight_path = tmp_path / "inflight.json"
+    manager._peer_registry = None
+    manager.get_local_agents_snapshot = lambda: [{"agent_name": "sunny"}]
+    async def transcript_offset(_agent):
+        return 0
+
+    manager._get_transcript_offset = transcript_offset
+    manager._save_inflight = lambda: None
+
+    async def enqueue(agent_name, text, **kwargs):
+        manager._captured_enqueue = (agent_name, text, kwargs)
+        return "req-private"
+
+    manager._enqueue_local_prompt = enqueue
+    proof = {"credential_id": "finance", "digest": "a" * 64}
+    payload = {
+        "message_type": "agent_message",
+        "message_id": "wire-private-1",
+        "conversation_id": "conv-private-1",
+        "from_instance": "HASHI1",
+        "from_agent": "sender",
+        "to_instance": "HASHI3",
+        "to_agent": "sunny",
+        "body": {"text": "synthetic report"},
+        "ttl": 8,
+        "route_trace": ["HASHI1", "HASHI2"],
+        "private_authorization_proofs": [proof],
+        "authorization_resources": ["user:synthetic"],
+        "_network_authenticated_instance": "HASHI2",
+        "_network_authentication": "shared_network_hmac",
+    }
+
+    status, result = asyncio.run(manager.handle_protocol_message(payload))
+
+    assert status == 202
+    assert result["request_id"] == "req-private"
+    agent, _prompt, kwargs = manager._captured_enqueue
+    assert agent == "sunny"
+    assert kwargs["authenticated_peer"] == "HASHI2"
+    assert kwargs["route_trace"] == ["HASHI1", "HASHI2"]
+    assert kwargs["private_authorization_proofs"] == [proof]
+    assert kwargs["authorization_resources"] == ["user:synthetic"]
+
+
 def test_protocol_ignores_legacy_reply_deadline_instead_of_timing_out():
     manager = ProtocolManager.__new__(ProtocolManager)
     manager._inflight = {

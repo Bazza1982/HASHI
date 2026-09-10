@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import remote.api.server as remote_server
 from orchestrator.frontend_delivery import tui_run_delivery_policy
+from orchestrator.message_context import verify_connector_evidence
 from remote.api.server import ProtocolTuiRequest, create_app
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import build_auth_headers
@@ -244,3 +245,54 @@ def test_tui_proxy_rejects_invalid_policy_and_accepts_typed_run_identity():
         "invalid_delivery_policy",
     )
     assert remote_server._validate_tui_proxy_payload(valid_run) == (True, "ok")
+
+
+def test_authenticated_cross_instance_tui_seals_origin_evidence(
+    tmp_path, monkeypatch
+):
+    _client(tmp_path)
+    captured = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit=-1):
+            return json.dumps({"ok": True, "request_id": "req-tui"}).encode()
+
+    def _urlopen(request, timeout=15):
+        del timeout
+        captured.update(json.loads(request.data.decode("utf-8")))
+        return _Response()
+
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", _urlopen)
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    policy = tui_run_delivery_policy(
+        telegram_mirror=False, client_id="tui-origin-test"
+    )
+    status, _result = remote_server._local_workbench_tui_request(
+        ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation="chat",
+            agent="akane",
+            text="origin evidence",
+            client_id="tui-origin-test",
+            delivery_policy=policy,
+        )
+    )
+
+    assert status == 200
+    evidence = captured["request_metadata"]["_connector_evidence"]
+    claims = verify_connector_evidence(
+        tmp_path,
+        evidence=evidence,
+        prompt="origin evidence",
+    )
+    assert claims["_message_source_reserved"] == "tui"
+    assert claims["_origin_instance_evidence"] == {
+        "id": "HASHI1",
+        "assurance": "shared_network_hmac",
+    }

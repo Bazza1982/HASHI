@@ -194,6 +194,44 @@ effort and current switches come from the active runtime; HER v2 alone supplies
 its structured Quick/Pro Model Provider routing. Frontends may format these
 facts but must not infer them from files or become another catalogue owner.
 
+### 6.4 Per-message source and private authorization
+
+PAO owns the `hashi.current-message-context` version 1 snapshot. Its provenance
+fields are frozen at admission and the same current snapshot is persisted on
+Message and Run. Immediately before an execution attempt, PAO revalidates the
+authorization portion and atomically refreshes both records before recording
+the attempt projection. Retried or recovered work retains the original message
+identity and source evidence but revalidates proof expiry, revocation, target,
+content digest, and resource binding before granting scope.
+An exact idempotent retry may reuse the same nonce only for the same proof and
+binding. Reuse on another binding is rejected by the persistent PAO nonce
+ledger.
+
+Optional private authorization uses `hashi.private-authorization-proof` version
+1 with HMAC-SHA-256. One proof binds message ID, source and target Agent/instance,
+the SHA-256 of the sender-authored content, requested resources, issue time,
+expiry, and a random nonce. The sender explicitly selects at most 16 credential
+IDs for one message; HASHI never auto-attaches every credential held by an
+Agent. The receiver's protected configuration alone maps a credential to group,
+scopes, allowed source/target identities, resources, expiry and revocation.
+Sender-claimed scopes are not accepted.
+
+Credential material is stored only in the existing ignored `secrets.json`
+boundary under `hashi_private_shared_credentials.credentials`. The minimal
+management path is deliberate and local: generate or import a high-entropy
+secret out of band into every authorized sender and receiver, define the
+receiver-side mapping, and select its ID with HChat's repeatable
+`--private-credential` option. Rotation replaces the shared secret; revocation
+sets `revoked=true`; expiry uses an ISO-8601 timestamp or Unix time. Receiver
+configuration is reread on every verification, so those changes affect queued
+revalidation without a reboot. Raw values must never be placed in a prompt,
+command argument, Agent configuration, tracked file, generic audit, or receipt.
+
+Private authorization adds disclosure scope but never admits network traffic.
+Ordinary HChat continues through its existing network/channel policy when no
+private proof is supplied or when a proof is invalid, expired, or revoked.
+Network authentication failure retains its existing fail-closed behavior.
+
 ## 7. Command ownership
 
 Commands are connector entry points into domain contracts.

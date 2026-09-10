@@ -175,6 +175,37 @@ The detailed state and qualification contracts are defined in:
 - [HASHI Persistent Multi-Session Frontend Design](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md)
 - [Multi-Session Frontend Insertion Plan](MULTI_SESSION_FRONTEND_INSERTION_PLAN.md)
 
+### 6.1 Message-source and optional private-proof wire contracts
+
+Backend API JSON and Persistent Session API submissions may include a public
+`message_source` object with separate stable `id` and localized
+`display_name`. Multipart chat accepts the same object as JSON text in its
+`message_source` form field. Clients must discover the canonical reserved IDs,
+pattern and limits from `/api/capabilities/message-source` or
+`/api/v1/capabilities`; a custom valid ID needs no HASHI source release.
+Structured declarations cannot claim reserved IDs or `hashi.` runtime names;
+their owning Connector supplies those protected facts. A legacy `source` may
+still map to a reserved source with accurately weaker assurance for
+compatibility. Missing API declarations fall back to `api`; other indeterminate
+ingress is projected as `unknown`. The legacy `source` field retains its routing
+and media compatibility meaning.
+
+HChat and protocol senders may explicitly select repeatable
+`--private-credential ID` values and repeatable `--authorization-resource`
+values. HASHI transports only short-lived typed HMAC proofs. The proof is bound
+to the message content, identities, target and resources, and the receiver maps
+it to non-secret scopes. No option means ordinary HChat with no additional
+authorization; an unsuccessful private proof also does not turn into a general
+communication denial. A private-proof cross-instance send refuses an
+unauthenticated legacy fallback instead of silently dropping the proof.
+
+Connector evidence forwarded across a local Backend API hop is time- and
+prompt-bound with the existing Remote network secret. It may preserve facts
+observed by the owning Remote/TUI/HChat Connector, but it cannot convert a
+declared sender into a uniquely authenticated Agent. PCM and external clients
+receive only sanitized verification results, never shared secrets or raw
+proofs.
+
 ## 7. Retired Workbench boundary
 
 Workbench is retired. A successor frontend is maintained separately and is not

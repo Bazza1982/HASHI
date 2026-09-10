@@ -212,6 +212,9 @@ class HchatPayload(BaseModel):
     to_instance: Optional[str] = None  # Final target when a configured exchange relays
     source_hchat_format: bool = False  # If True, text is raw hchat format
     reply_route: Optional[dict] = None  # Sender's routing info for reply delivery
+    authorization_message_id: Optional[str] = None
+    authorization_resources: list[str] = []
+    private_authorization_proofs: list[dict[str, Any]] = []
 
 
 class TerminalExecPayload(BaseModel):
@@ -300,6 +303,8 @@ class ProtocolMessagePayload(BaseModel):
     route_trace: list[str] = []
     message_type: str = "agent_message"
     created_at: Optional[str] = None
+    private_authorization_proofs: list[dict[str, Any]] = []
+    authorization_resources: list[str] = []
 
 
 class ProtocolOutboundRegisterPayload(BaseModel):
@@ -396,6 +401,8 @@ class ProtocolMessageWithAttachmentsPayload(BaseModel):
     route_trace: list[str] = []
     message_type: str = "agent_message"
     created_at: Optional[str] = None
+    private_authorization_proofs: list[dict[str, Any]] = []
+    authorization_resources: list[str] = []
 
 
 # ─────────────────────────────────────────────────────────────
@@ -622,6 +629,23 @@ def _local_workbench_tui_request(
                     "delivery_policy": dict(payload.delivery_policy),
                 }
             )
+        from orchestrator.message_context import seal_connector_evidence
+
+        connector_evidence = seal_connector_evidence(
+            Path(_hashi_root) if _hashi_root else Path.cwd(),
+            claims={
+                "_message_source_reserved": "tui",
+                "_origin_instance_evidence": {
+                    "id": str(payload.from_instance or "").strip().upper(),
+                    "assurance": "shared_network_hmac",
+                },
+            },
+            prompt=str(payload.text or ""),
+        )
+        if connector_evidence is not None:
+            body["request_metadata"] = {
+                "_connector_evidence": connector_evidence
+            }
         body_bytes = json.dumps(body).encode("utf-8")
     elif operation == "run_info":
         path = (
@@ -1662,6 +1686,10 @@ def create_app(
         )
         if not validation.ok:
             return JSONResponse(status_code=validation.status_code, content=validation.error)
+        validation.payload["_network_authenticated_instance"] = str(
+            _auth_identity or ""
+        ).strip().upper()
+        validation.payload["_network_authentication"] = "shared_network_hmac"
         status, result = await _protocol_manager.handle_protocol_message(validation.payload)
         return JSONResponse(status_code=status, content=result)
 
@@ -1864,8 +1892,21 @@ def create_app(
             route_trace=payload.route_trace,
             message_type=payload.message_type,
             created_at=payload.created_at,
+            private_authorization_proofs=payload.private_authorization_proofs,
+            authorization_resources=payload.authorization_resources,
         )
-        status, result = await _protocol_manager.handle_protocol_message(local_payload.model_dump())
+        local_data = local_payload.model_dump()
+        # Preserve the sender-authored body for the private proof binding.  The
+        # local prompt adds an attachment summary after transport validation;
+        # that presentation-only expansion must not invalidate the proof.
+        local_data["_private_authorization_content_text"] = str(
+            (payload.body or {}).get("text") or ""
+        )
+        local_data["_network_authenticated_instance"] = str(
+            _auth_identity or ""
+        ).strip().upper()
+        local_data["_network_authentication"] = "shared_network_hmac"
+        status, result = await _protocol_manager.handle_protocol_message(local_data)
         if isinstance(result, dict):
             result = dict(result)
             result["attachments"] = normalized_attachments
@@ -1964,6 +2005,14 @@ def create_app(
             )
 
         # Format for workbench injection
+        from tools.hchat_send import parse_hchat_message
+
+        parsed_hchat = parse_hchat_message(
+            payload.text, default_instance=payload.from_instance
+        )
+        claimed_agent = str(
+            (parsed_hchat or {}).get("agent") or payload.from_instance.lower()
+        ).strip().casefold()
         if payload.source_hchat_format:
             message_text = payload.text  # already formatted
         else:
@@ -1974,7 +2023,49 @@ def create_app(
         wb_payload = {
             "agent": payload.to_agent.lower(),
             "text": message_text,
+            "source": "hchat",
+            "hchat_context": {
+                "from_agent": claimed_agent,
+                "from_instance": payload.from_instance,
+                "to_agent": payload.to_agent,
+                "to_instance": local_instance_id,
+                "authenticated_peer": str(client_id or ""),
+                "network_authentication": "pairing_bearer",
+                "sender_assurance": "authenticated_client_declared",
+                "relay_chain": [],
+            },
         }
+        if payload.private_authorization_proofs:
+            from orchestrator.private_authorization import (
+                authorization_content_sha256,
+            )
+
+            wb_payload["private_authorization_proofs"] = list(
+                payload.private_authorization_proofs
+            )
+            wb_payload["private_authorization_binding"] = {
+                "message_id": str(payload.authorization_message_id or ""),
+                "from_instance": payload.from_instance,
+                "from_agent": claimed_agent,
+                "to_instance": local_instance_id,
+                "to_agent": payload.to_agent,
+                "content_sha256": authorization_content_sha256(message_text),
+                "resources": list(payload.authorization_resources),
+            }
+        from orchestrator.message_context import seal_connector_evidence
+
+        connector_evidence = seal_connector_evidence(
+            Path(_hashi_root) if _hashi_root else Path.cwd(),
+            claims={
+                "_message_source_reserved": "hchat",
+                "_hchat_context": wb_payload["hchat_context"],
+            },
+            prompt=message_text,
+        )
+        if connector_evidence is not None:
+            wb_payload["request_metadata"] = {
+                "_connector_evidence": connector_evidence
+            }
         if payload.reply_route:
             wb_payload["reply_route"] = payload.reply_route
         post_data = json.dumps(wb_payload).encode("utf-8")
