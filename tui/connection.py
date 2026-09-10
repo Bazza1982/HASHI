@@ -110,7 +110,7 @@ class ConnectionScreen(ModalScreen[dict | None]):
                 result = await connect_telegram(self.home,key,self.query_one('#connection-user-id',Input).value,
                     confirmed=self.query_one('#connection-consent',Checkbox).value,
                     replace_confirmed=self.query_one('#connection-replace',Checkbox).value)
-                adoption = await adopt_if_running(self.home)
+                adoption = await self._adopt_saved()
                 self.dismiss({**result, **adoption})
                 return
             engine = self.query_one('#connection-backend',Select).value
@@ -121,10 +121,12 @@ class ConnectionScreen(ModalScreen[dict | None]):
                 confirmed=self.query_one('#connection-consent',Checkbox).value)
             result = save(self.home,engine,model,key,verified=proof,
                 replace_confirmed=self.query_one('#connection-replace',Checkbox).value,language=self.language)
-            adoption = await adopt_if_running(self.home)
+            adoption = await self._adopt_saved()
             self.dismiss({**result, **adoption})
         except ConnectionError as exc:
-            self.query_one('#connection-result',Static).update(exc.code + '\n' + self.t('Retry, choose another backend, or cancel.','可重试、换后端或取消。'))
+            detail = self.t('Settings are saved; live adoption is still pending. Retry when Hashiko is idle.',
+                            '设置已保存，尚未完成运行采用。请在小乔空闲后重试。') if exc.code=='SAVED_ADOPTION_PENDING' else self.t('Retry, choose another backend, or cancel.','可重试、换后端或取消。')
+            self.query_one('#connection-result',Static).update(exc.code + '\n' + detail)
         except Exception:
             # Provider exceptions may contain request headers; never display raw errors.
             self.query_one('#connection-result',Static).update('CONNECTION_FAILED')
@@ -135,6 +137,12 @@ class ConnectionScreen(ModalScreen[dict | None]):
                 for control in self.query(Select):
                     control.disabled = False
                 self.query_one('#connection-submit',Button).disabled = False
+
+    async def _adopt_saved(self):
+        self.query_one('#connection-result',Static).update(self.t(
+            'Saved. Waiting for Hashiko to finish active work and load the settings.',
+            '已保存，正在等待小乔完成当前工作并加载设置。'))
+        return await adopt_if_running(self.home)
 
 
 class ConnectionApp(App):

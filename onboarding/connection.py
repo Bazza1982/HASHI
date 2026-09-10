@@ -181,6 +181,8 @@ async def adopt_if_running(home):
     """Request only Hashiko's existing controlled reload; never restart an instance."""
     import aiohttp
     home=Path(home)
+    config=_read(home/'agents.json')
+    hashiko=next((a for a in config.get('agents',[]) if a.get('name')=='hashiko'),{})
     endpoints=_read(home/'state'/'service_endpoints.json')
     url=endpoints.get('services',{}).get('workbench',{}).get('base_url','')
     if not url:
@@ -194,14 +196,43 @@ async def adopt_if_running(home):
             async with session.get(url+'/api/health') as response:
                 if response.status != 200:
                     return {'running':False,'adopted':False}
+                health=await response.json()
+                expected=str(config.get('global',{}).get('instance_id') or '')
+                if expected and health.get('instance_id') != expected:
+                    raise ConnectionError('LOCAL_ENDPOINT_MISMATCH')
         except (aiohttp.ClientError,TimeoutError):
             return {'running':False,'adopted':False}
-        async with session.post(url+'/api/admin/command',
-                headers={'X-Workbench-Token':secret},json={'agent':'hashiko','command':'/reboot min'}) as response:
-            result=await response.json()
-            if response.status != 200 or not result.get('ok'):
-                raise ConnectionError('SAVED_ADOPTION_PENDING')
-    return {'running':True,'adopted':False,'reload_requested':True}
+        deadline=asyncio.get_running_loop().time()+90
+        request_key='connection-'+str(hashiko.get('connection_revision') or uuid4().hex)
+        operation_id=None
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                if operation_id is None:
+                    async with session.post(url+'/api/admin/reboot-agent',
+                            headers={'X-Workbench-Token':secret},
+                            json={'agent':'hashiko','request_key':request_key}) as response:
+                        result=await response.json()
+                        if response.status==409 and result.get('error')=='AGENT_BUSY':
+                            pass
+                        elif response.status==200 and result.get('accepted') is True and result.get('operation_id'):
+                            operation_id=str(result['operation_id'])
+                        else:
+                            raise ConnectionError('SAVED_ADOPTION_PENDING')
+                else:
+                    async with session.get(url+'/api/admin/reboot-agent/'+operation_id,
+                            headers={'X-Workbench-Token':secret}) as response:
+                        result=await response.json()
+                        if response.status != 200 or result.get('targets') != ['hashiko']:
+                            raise ConnectionError('SAVED_ADOPTION_PENDING')
+                        if result.get('status')=='succeeded':
+                            return {'running':True,'adopted':True,'reload_requested':True,
+                                    'operation_id':operation_id}
+                        if result.get('status') not in {'accepted','running'}:
+                            raise ConnectionError('SAVED_ADOPTION_PENDING')
+                await asyncio.sleep(.5)
+        except (aiohttp.ClientError,TimeoutError,ValueError):
+            raise ConnectionError('SAVED_ADOPTION_PENDING') from None
+        raise ConnectionError('SAVED_ADOPTION_PENDING')
 
 
 async def connect_telegram(home, token, user_id, *, confirmed=False, replace_confirmed=False):
