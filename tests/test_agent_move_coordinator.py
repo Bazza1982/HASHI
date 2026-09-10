@@ -617,6 +617,7 @@ def test_remote_clone_runs_full_lifecycle_without_disabling_source(
         target_agent_id="sheik",
     )
 
+    assert prepared["transfer_mode"] == "workspace"
     result = coordinator.confirm_outbound_move(
         root,
         {"hashi2": {}},

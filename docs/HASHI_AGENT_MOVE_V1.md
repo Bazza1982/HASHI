@@ -81,7 +81,8 @@ The compatibility CLI uses `--transfer-mode identity_memory|workspace`.
 Preview/prepared state exposes `transfer_mode`, `workspace_inventory`,
 `discarded_files`, and `total_workspace_bytes`. Confirmation warns that successful
 Move deletes the entire source workspace, including excluded files. Clone keeps
-its source. Changing scope requires a fresh preparation and confirmation.
+its source and defaults to the same explicit full-workspace scope and 1 GB
+preflight; legacy schema export requires an explicit compatibility request. Changing scope requires a fresh preparation and confirmation.
 Source freshness covers the selected content and deletion inventory, retaining
 the existing exclusion for the command audit. Files changing during packaging
 cause preparation to fail without publishing a new package. SQLite snapshots

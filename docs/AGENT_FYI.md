@@ -340,3 +340,6 @@ outside that context retains its normal chunking and delivery behavior.
 Version provenance accepts Git identity only when the repository top level is
 the HASHI code root. A portable/npm artifact nested inside a different checkout
 uses its own build metadata and never inherits the enclosing repository branch.
+
+New Clone preparations default to schema-4 workspace scope and its 1 GB
+preflight, sharing Move package validation while retaining the source.

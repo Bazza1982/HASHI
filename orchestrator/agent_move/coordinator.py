@@ -192,7 +192,7 @@ def preview_outbound_clone(
     *,
     source_instance: str,
     target_agent_id: str | None = None,
-    transfer_mode: str | None = None,
+    transfer_mode: str | None = "workspace",
 ) -> dict[str, Any]:
     return _preview_outbound_transfer(
         hashi_root,
@@ -325,7 +325,7 @@ def prepare_outbound_clone(
     *,
     source_instance: str,
     target_agent_id: str | None = None,
-    transfer_mode: str | None = None,
+    transfer_mode: str | None = "workspace",
 ) -> dict[str, Any]:
     return _prepare_outbound_transfer(
         hashi_root,
