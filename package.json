@@ -126,6 +126,8 @@
     "!skills/instances.json",
     "scripts/terminal_support.py",
     "scripts/terminal-help.json",
-    "scripts/terminal_language.py"
+    "scripts/terminal_language.py",
+    "!**/*.log",
+    "!**/*.pid"
   ]
 }
