@@ -402,6 +402,26 @@ def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
         / "package.hashi-agent"
     ).exists()
 
+    config = json.loads((source / "agents.json").read_text())
+    config["groups"] = {
+        "local": {"members": ["zelda", "anchor", "zelda@HASHI2"], "description": "zelda"},
+        "dynamic": {"members": "@active", "exclude_from_broadcast": ["zelda", "anchor"]},
+    }
+    config["agents"][1]["display_name"] = "zelda"
+    _write_json(source / "agents.json", config)
+
+    # A real credential consumer must block cleanup without changing any files.
+    config["agents"][1]["telegram_token_key"] = "zelda"
+    _write_json(source / "agents.json", config)
+    before = (source / "agents.json").read_bytes()
+    with pytest.raises(AgentMoveError, match="remaining Agents reference"):
+        cleanup_source_agent(source, staged["package_id"], source_secret_keys=["zelda"],
+                             target_instance="HASHI2", target_agent_id="zelda")
+    assert (source / "agents.json").read_bytes() == before
+    assert (source / "workspaces" / "zelda").exists()
+    del config["agents"][1]["telegram_token_key"]
+    _write_json(source / "agents.json", config)
+
     cleaned = cleanup_source_agent(
         source,
         staged["package_id"],
@@ -410,6 +430,12 @@ def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
         target_agent_id="zelda",
     )
     assert cleaned["status"] == "source_cleaned"
+    remaining = json.loads((source / "agents.json").read_text())
+    assert remaining["groups"]["local"]["members"] == ["anchor", "zelda@HASHI2"]
+    assert remaining["groups"]["local"]["description"] == "zelda"
+    assert remaining["groups"]["dynamic"]["members"] == "@active"
+    assert remaining["groups"]["dynamic"]["exclude_from_broadcast"] == ["anchor"]
+    assert remaining["agents"][0]["display_name"] == "zelda"
     assert [
         row["name"]
         for row in json.loads((source / "agents.json").read_text())["agents"]

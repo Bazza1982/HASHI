@@ -253,3 +253,14 @@ original runtime-session bytes. No mutation was saved to product sources.
 This is an offline review checkpoint on `fix/move-review-evidence-20260908`.
 HASHI1 runtime adoption and user-terminal acceptance remain pending; shared
 source equivalence and passing tests do not establish either outcome.
+
+### Source membership and credential cleanup
+
+After target verification, source cleanup uses Agent Directory membership semantics
+inside the journaled config transaction to remove local group membership and
+broadcast exclusions. It preserves dynamic selectors, qualified remote addresses,
+and descriptive text. Credential protection checks declared Telegram token keys
+and the canonical backend secret lookup order of remaining Agents, including
+inactive Agents. A real consumer blocks cleanup before configuration or workspace
+deletion; an ordinary string equal to the moved Agent ID does not. Retrying cleanup
+uses the existing source journal and remains idempotent.

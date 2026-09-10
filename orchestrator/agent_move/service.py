@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from orchestrator.agent_directory import AgentDirectory
 from orchestrator.config import (
     SESSION_MODE_BACKENDS,
     SUPPORTED_AGENT_MODES,
@@ -26,6 +27,7 @@ from orchestrator.config import (
     default_agent_mode_for_backend,
 )
 from orchestrator.flexible_backend_registry import (
+    get_secret_lookup_order,
     migrate_provider_only_active_backend,
     normalize_allowed_backends,
 )
@@ -1086,6 +1088,7 @@ def cleanup_source_agent(
                 "reference: " + ", ".join(sorted(retained_secret_keys))
             )
 
+        AgentDirectory.remove_local_memberships(agents, agent_id)
         capabilities = _load_json_or_default(capabilities_path, {"agents": []})
         _remove_source_agent_capability(capabilities, agent_id)
 
@@ -2073,11 +2076,18 @@ def _imported_task_hashes(
 
 
 def _value_references_secret(value: Any, secret_key: str) -> bool:
-    if isinstance(value, Mapping):
-        return any(_value_references_secret(item, secret_key) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_value_references_secret(item, secret_key) for item in value)
-    return isinstance(value, str) and value == secret_key
+    """Check runtime credential consumers, never arbitrary config strings."""
+    for row in _agent_rows(value):
+        name = str(row.get("name") or row.get("id") or "")
+        if str(row.get("telegram_token_key") or name) == secret_key:
+            return True
+        engines = {str(row.get("active_backend") or row.get("engine") or "")}
+        for backend in row.get("allowed_backends", []) or []:
+            if isinstance(backend, Mapping):
+                engines.add(str(backend.get("engine") or ""))
+        if any(secret_key in get_secret_lookup_order(engine, name) for engine in engines if engine):
+            return True
+    return False
 
 
 def _source_workspace_path(

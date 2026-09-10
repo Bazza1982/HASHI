@@ -260,7 +260,8 @@ their own content. Cards use shared helpers and escaped HTML, meaningful labels,
 current effective values, consequences and safe navigation.
 
 `/verbose` shows deterministic activity; `/think` controls actual provider
-reasoning; `/commentary` controls explicit HER Persona updates. These are
+reasoning; `/commentary` controls explicit Engine commentary, including Codex CLI updates
+and HER Persona updates, independently of `/think`. These are
 independent. `/typing` and `/notify` control Telegram indicators and notification
 sound. `/terminal` controls local console verbosity without changing transcript
 storage. `/voice`, `/say` and `/whisper` control the configured media paths.
@@ -287,3 +288,9 @@ Failed/cancelled/exhausted Runs need existing supervisor/heartbeat attention.
 Execution never proves delivery. Inspect exact-request Connector evidence; lead
 reports with user outcomes and next owner/action. No new Core or cron authority.
 See `SUPERLOOP_FUNCTION_CONTRACT.md` for delivery opt-ins and adoption boundaries.
+
+Move source cleanup checks declared Telegram credential keys and the backend
+registry's credential lookup order. Ordinary display text and group member names
+are not credential references. The Agent Directory removes obsolete local group
+memberships and broadcast exclusions in the cleanup config transaction, preserving
+remote addresses and dynamic group selectors.

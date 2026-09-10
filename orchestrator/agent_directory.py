@@ -191,6 +191,21 @@ class AgentDirectory:
         self._save_groups()
         return True, f"Removed '{agent_name}' from group '{group_name}'."
 
+    @staticmethod
+    def remove_local_memberships(config: dict[str, Any], agent_name: str) -> None:
+        """Project removal into a caller-owned config transaction, without writing.
+
+        Qualified remote addresses and descriptive text are not local membership.
+        Dynamic groups retain their selector but drop obsolete local exclusions.
+        """
+        for group in (config.get("groups") or {}).values():
+            if not isinstance(group, dict):
+                continue
+            for field in ("members", "exclude_from_broadcast"):
+                values = group.get(field)
+                if isinstance(values, list):
+                    group[field] = [value for value in values if value != agent_name]
+
     def group_rename(self, old_name: str, new_name: str) -> tuple[bool, str]:
         if old_name not in self._groups:
             return False, f"Group '{old_name}' not found."
