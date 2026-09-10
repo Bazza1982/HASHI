@@ -383,3 +383,10 @@ a fresh preflight is required, while incomplete rollback retains recovery checks
   The Windows compatibility batch entry stays in Windows and delegates to the
   npm command, with no hard-coded WSL checkout. npm excludes runtime logs/PIDs
   and the operator-specific deployment template from its payload.
+
+- Fresh-instance acceptance found and fixed default focus on the log pane and
+  misleading status-API errors after accepted chat. Chat input now receives
+  initial focus; `session_api_not_ready` uses transcript delivery without
+  repeated unsupported status requests. A real isolated CLI→save→start→TUI
+  response passed and the fixture stopped gracefully. Purge confirmation and
+  external-data refusals now retain their distinct exit-77 categories.

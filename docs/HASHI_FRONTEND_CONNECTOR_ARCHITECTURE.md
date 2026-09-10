@@ -357,3 +357,10 @@ Optional Telegram setup uses a separate masked Bot Token and positive numeric
 user ID, verifies getMe, refuses conflicting existing ownership, and saves no
 open-to-everyone fallback. It does not send a test message or change TUI mirror
 preferences. Real Telegram round trips require their own authorized evidence.
+
+Fresh TUI startup focuses the chat input, so typing starts work immediately.
+When the optional persistent Session status API reports `session_api_not_ready`,
+the accepted chat continues through the existing transcript channel; the client
+stops unsupported status polling without presenting the accepted task as failed.
+Terminal purge confirmation and external-data denials use exit 77 and distinct
+stable error codes while preserving the selected external instance.

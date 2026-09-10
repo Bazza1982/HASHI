@@ -762,3 +762,26 @@ def test_terminal_global_options_json_errors_and_attach_only_are_read_only(tmp_p
         assert envelope['exit_code']==code and not envelope['ok']
     assert not (tmp_path/'registry').exists()
     assert not (tmp_path/'data').exists()
+
+
+def test_terminal_purge_error_codes_preserve_external_data(tmp_path, monkeypatch, capsys):
+    program=tmp_path/'program';program.mkdir()
+    external=tmp_path/'external';external.mkdir()
+    config=external/'agents.json'
+    config.write_text('{"global":{"instance_id":"EXTERNAL","workbench_port":19991},"agents":[]}')
+    before=config.read_bytes()
+    (external/'main.py').write_text('')
+    (external/'runtime-entry.json').write_text('{}')
+    (external/'scripts').mkdir()
+    (external/'scripts/check_runtime_contract.py').write_text('')
+    monkeypatch.setenv('HASHI_PROGRAM_ROOT',str(program))
+    monkeypatch.setenv('HASHI_REGISTRY_ROOT',str(tmp_path/'registry'))
+    monkeypatch.setenv('HASHI_DATA_ROOT',str(tmp_path/'data'))
+    registry=instance_registry.InstanceRegistry(program_root=program,program_version='development')
+    registry.create('external',source_root=external)
+    for extra,expected in [([], 'CONFIRMATION_REQUIRED'),(['--confirm','external'],'PURGE_DENIED')]:
+        assert hashi_instance_cli.main(['instance','remove','external','--purge','--json',*extra])==77
+        envelope=json.loads(capsys.readouterr().out)
+        assert envelope['error']['code']==expected
+        assert config.read_bytes()==before
+        assert registry.get('external')['name']=='external'

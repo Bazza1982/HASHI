@@ -142,6 +142,7 @@ async def test_tui_compact_design_has_bilingual_help_and_adjustable_layout(tmp_p
     app._schedule_startup_sequence = lambda: None
 
     async with app.run_test(size=(120, 40)) as pilot:
+        assert isinstance(app.focused, ChatInput)
         app._handle_help_cmd("/help zh")
         await pilot.pause()
         chat = app.query_one("#chat-history", ChatHistory)
@@ -1099,3 +1100,23 @@ async def test_theme_switch_recolors_history_preserves_draft_and_preferences(tmp
         assert saved["theme"] == "atm" and saved["future_option"] == 42
     reopened = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
     assert reopened.theme == "hashi-atm"
+
+
+async def test_fresh_tui_keeps_accepted_chat_when_optional_status_api_is_disabled(tmp_path):
+    class Client:
+        checks = 0
+        async def send_chat(self, *args, **kwargs):
+            return {'ok':True,'session_id':'session','run_id':'run','request_id':'request'}
+        async def run_info(self, *args):
+            self.checks += 1
+            return {'ok':False,'code':'session_api_not_ready','error':'Optional status API disabled'}
+    app=HASHITuiApp(bridge_home=tmp_path,launch_instance_id='TEST')
+    app._schedule_startup_sequence=lambda:None
+    client=Client();app.api=client
+    async with app.run_test() as pilot:
+        app.gateway_ok=True;app.current_agent='hashiko'
+        field=app.query_one(ChatInput);field.value='hello'
+        await pilot.press('enter');await pilot.pause(1.2)
+        assert client.checks==1
+        assert 'Run status unavailable' not in '\n'.join(line.text for line in app.query_one(ChatHistory).lines)
+        assert app._active_run_ref is None

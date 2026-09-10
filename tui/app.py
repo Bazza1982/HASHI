@@ -878,6 +878,7 @@ class HASHITuiApp(App):
         self._apply_layout(self._layout_mode, persist=False)
         self._apply_side_panel_visibility(persist=False)
         self._refresh_chrome()
+        self.query_one(ChatInput).focus()
         # Start the intro only after the first screen refresh so frames are visible.
         self.call_after_refresh(self._schedule_startup_sequence)
 
@@ -2680,6 +2681,11 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             ):
                 return
             if not status.get("ok"):
+                if status.get("code") == "session_api_not_ready":
+                    # Fresh instances may expose legacy chat/transcript without
+                    # the separately qualified persistent Session status API.
+                    self._clear_typing_indicator(run_ref)
+                    return
                 status_failures += 1
                 logger.warning(
                     "TUI could not track submitted Run: agent=%s session=%s run=%s error=%s",

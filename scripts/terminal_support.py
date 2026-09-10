@@ -99,9 +99,26 @@ def invoke(run, argv, usage_error):
         code = 'UNKNOWN_COMMAND'
     if 'unrecognized arguments' in stderr and result == 64:
         code = 'INVALID_ARGUMENT'
+    categories = (
+        ('Permanent purge requires', 'CONFIRMATION_REQUIRED', 77),
+        ('Refusing to purge external', 'PURGE_DENIED', 77),
+        ('Managed data path is not', 'PURGE_DENIED', 77),
+        ('Managed data marker does not match', 'PURGE_DENIED', 77),
+        ('cannot launch a WSL checkout', 'ENVIRONMENT_MISMATCH', 78),
+        ('cannot adopt a Windows executable', 'ENVIRONMENT_MISMATCH', 78),
+        ('No approved CPython', 'RUNTIME_INCOMPLETE', 78),
+        ('has not adopted it', 'UPDATE_PENDING', 78),
+        ('must explicitly adopt program', 'UPDATE_PENDING', 78),
+        ('could not be verified', 'ACTIVITY_UNVERIFIED', 75),
+        ('cannot be verified through the local API', 'ACTIVITY_UNVERIFIED', 75),
+    )
+    for fragment, category, exit_code in categories:
+        if result and fragment in stderr:
+            code, result = category, exit_code
+            break
     effects = {'steps': list(context['steps']), 'unknown': list(context['unknown'])}
     if 'Start was sent' in stderr:
-        effects['steps'].append('start_requested')
+        effects['steps'] = list(dict.fromkeys([*effects['steps'], 'start_requested']))
         effects['unknown'].append('readiness')
     if 'Shutdown was accepted' in stderr:
         effects['steps'].append('stop_accepted')
