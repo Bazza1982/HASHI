@@ -104,13 +104,17 @@ See [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 - **Frontend Connectors** expose Telegram, WhatsApp, TUI, Backend API and Remote.
   Workbench is retired; names such as `workbench_port` are API compatibility.
 
-The built-in TUI completes entered slash-command prefixes from its displayed
-canonical matches and rejects unknown slash commands locally. Its sent/received
-sounds, language/layout, typing indicator and default Telegram mirror choice are
-local Connector presentation state; they do not alter a HASHI Conversation
-Session. Unified command `messages` render immediately and are not transcript
-entries. Mouse selection pauses follow-tail; `Ctrl+C` copies the selection to
-the Windows clipboard and `Esc` clears it.
+The built-in TUI completes entered slash-command and bounded parameter prefixes
+from its displayed canonical matches and rejects unknown slash commands locally.
+The palette shows localized command descriptions, typed syntax, available
+values and an example; live backend/model/provider/effort/Agent values come from
+runtime metadata and the Functions catalogue. Successful no-argument commands
+with parameters receive the same copyable Options/Usage/Example guide beneath
+their response. Its sent/received sounds, language/layout, typing indicator and
+default Telegram mirror choice are local Connector presentation state; they do
+not alter a HASHI Conversation Session. Unified command `messages` render
+immediately and are not transcript entries. Mouse selection pauses follow-tail;
+`Ctrl+C` copies the selection to the Windows clipboard and `Esc` clears it.
 
 `/telegram` and `/telegram on|off` inspect or change the current TUI's default;
 `/tui telegram on|off` is the explicit alias. The setting is snapshotted at
@@ -122,9 +126,26 @@ and is independent of Telegram `/typing`.
 
 The TUI connection footer uses live runtime `presentation_status`; offline
 unknown values remain unknown. Model Provider and structured Quick/Pro routing
-appear only for HER v2. It intentionally omits working mode. Use `/mode` when
-the current mode is relevant. Source presence is not live adoption proof;
-confirm the active Function generation/provenance on each instance.
+appear only for HER v2. It collapses identical Quick/Pro Provider IDs, and
+collapses the model only when both Provider and model IDs are identical;
+distinct Providers retain full Q/P pairing. It intentionally omits working
+mode. Use `/mode` when the current mode is relevant. Source presence is not
+live adoption proof; confirm the active Function generation/provenance on each
+instance.
+
+The side panel is closed by default. `/sidepanel` opens the TUI's persisted,
+scrollable read-only information panel;
+`/sidepanel off` closes it, while `on`, `toggle`, and `refresh` are explicit
+options. It starts with canonical Token and job data instead of repeating the
+already-visible instance and Agent header, followed by system-prompt,
+parked-topic, and live Agent-directory summaries. The visible scrollbar and
+mouse wheel work directly; click-to-focus enables Arrow, Page Up/Down, Home,
+and End. `/sidepanel auto on|off|toggle` controls a persisted, default-off slow
+tour that loops after a short bottom hold and temporarily pauses for manual
+navigation. The panel remains display-only and all operations still use slash
+commands in the input. Do not add panel-owned copies or state writers.
+Cross-instance panel reads use only the named, Agent-scoped Hashi Remote
+allowlist operations.
 
 Distinguish Engine from Model Provider and HASHI Conversation from Engine
 Session. Frontend history is a projection, not another authoritative archive.

@@ -8,9 +8,10 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.text import Text
-from textual.events import MouseMove
+from textual.events import MouseMove, MouseScrollDown
 from textual.geometry import Offset
 from textual.selection import Selection
+from textual.widgets import Static
 
 from tui import sounds
 from tui.app import (
@@ -24,6 +25,7 @@ from tui.app import (
     chat_message_renderable,
 )
 from tui.telegram_rendering import command_message_renderable
+from tui.side_panel import SidePanel
 
 
 def _render_plain(renderable) -> str:
@@ -213,7 +215,136 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
         "sounds": True,
         "typing": True,
         "telegram_mirror": True,
+        "sidepanel": False,
+        "sidepanel_auto": False,
     }
+
+
+async def test_tui_command_preview_discovers_dynamic_parameters_in_both_languages(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(132, 42)) as pilot:
+        app._current_agent_metadata = {
+            "allowed_backends": [
+                {
+                    "engine": "codex-cli",
+                    "model": "gpt-6-astra",
+                    "models": ["gpt-5.6-sol", "gpt-6-astra"],
+                    "model_efforts": {
+                        "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"]
+                    },
+                },
+                {"engine": "claude-cli", "model": "claude-sonnet-4-6"},
+            ],
+            "presentation_status": {
+                "engine": "codex-cli",
+                "model": "gpt-6-astra",
+                "effort": "max",
+            },
+        }
+        input_box = app.query_one("#chat-input", ChatInput)
+        input_box.focus()
+
+        app._handle_tui_cmd("/tui language zh")
+        input_box.value = "/eff"
+        await pilot.pause()
+        preview = app.query_one("#command-preview", CommandPreview)
+        rendered = _render_plain(preview.render())
+        assert "/effort [level]" in rendered
+        assert "可选" in rendered
+        assert "low · medium · high · xhigh · max" in rendered
+        assert "示例" in rendered
+        assert "/effort high" in rendered
+
+        input_box.value = "/effort "
+        await pilot.pause()
+        assert app._command_matches == [
+            "/effort low",
+            "/effort medium",
+            "/effort high",
+            "/effort xhigh",
+            "/effort max",
+        ]
+        rendered = _render_plain(preview.render())
+        assert "较少推理，响应更快" in rendered
+        assert "当前选择" in rendered
+
+        app._handle_tui_cmd("/tui language en")
+        input_box.value = "/mode "
+        await pilot.pause()
+        assert app._command_matches == ["/mode fixed", "/mode flex"]
+        rendered = _render_plain(preview.render())
+        assert "Persistent engine session" in rendered
+        assert "Options" in rendered
+        assert "Example" in rendered
+
+        input_box.value = "/sidepanel "
+        await pilot.pause()
+        assert app._command_matches == [
+            "/sidepanel on",
+            "/sidepanel off",
+            "/sidepanel toggle",
+            "/sidepanel refresh",
+            "/sidepanel auto",
+        ]
+        rendered = _render_plain(preview.render())
+        assert "Current selection" in rendered
+        assert "/sidepanel on" in rendered
+
+        input_box.value = "/sidepanel auto "
+        await pilot.pause()
+        assert app._command_matches == [
+            "/sidepanel auto on",
+            "/sidepanel auto off",
+            "/sidepanel auto toggle",
+        ]
+        rendered = _render_plain(preview.render())
+        assert "Options" in rendered
+        assert "Enable automatic tour" in rendered
+
+
+async def test_tui_no_argument_command_result_adds_local_parameter_guide(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(120, 40)):
+        app._ui_language = "zh"
+        app._current_agent_metadata = {
+            "allowed_backends": [
+                {
+                    "engine": "codex-cli",
+                    "model": "gpt-6-astra",
+                    "model_efforts": {"gpt-6-astra": ["high", "max"]},
+                }
+            ],
+            "presentation_status": {
+                "engine": "codex-cli",
+                "model": "gpt-6-astra",
+                "effort": "max",
+            },
+        }
+        app._render_command_result(
+            {
+                "ok": True,
+                "command": "effort",
+                "messages": [
+                    {
+                        "text": "<b>模型推理强度</b>\n当前 · max",
+                        "meta": {"parse_mode": "HTML"},
+                    }
+                ],
+            },
+            agent="akane",
+            submitted_text="/effort",
+        )
+
+        rendered = "\n".join(
+            line.text for line in app.query_one("#chat-history", ChatHistory).lines
+        )
+        assert "可选 · high · max" in rendered
+        assert "用法 · /effort [level]" in rendered
+        assert "示例 · /effort high" in rendered
 
 
 async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_path):
@@ -236,9 +367,15 @@ async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_
         await pilot.press("enter")
         assert sent == ["/mode"]
 
+        input_box.value = "/mode fl"
+        await pilot.pause()
+        assert app._current_command_match == "/mode flex"
+        await pilot.press("enter")
+        assert sent == ["/mode", "/mode flex"]
+
         input_box.value = "/effortt"
         await pilot.press("enter")
-        assert sent == ["/mode"]
+        assert sent == ["/mode", "/mode flex"]
         chat = app.query_one("#chat-history", ChatHistory)
         rendered = "\n".join(line.text for line in chat.lines)
         assert "Unknown command: /effortt" in rendered
@@ -246,7 +383,7 @@ async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_
         # Exact non-menu commands remain valid even though they are not previewed.
         input_box.value = "/move"
         await pilot.press("enter")
-        assert sent == ["/mode", "/move"]
+        assert sent == ["/mode", "/mode flex", "/move"]
 
 
 async def test_tui_sound_setting_is_persisted_and_can_be_previewed(tmp_path):
@@ -424,6 +561,78 @@ async def test_footer_shows_her_routes_but_never_invents_other_engine_provider(t
         assert "Provider" not in plain
 
 
+async def test_footer_collapses_her_details_only_for_identical_providers(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(120, 30)):
+        footer = app.query_one("#footer-info-box", FooterInfoBox)
+        footer.update_state(
+            "临时员工",
+            "her-v2",
+            True,
+            current_agent="temp",
+            instance_id="HASHI1",
+            language="zh",
+            metadata={
+                "id": "temp",
+                "display_name": "临时员工",
+                "presentation_status": {
+                    "engine": "her-v2",
+                    "effort": "zero",
+                    "her_v2": {
+                        "routing_mode": "single",
+                        "quick": {
+                            "provider": "openrouter-api",
+                            "model": "deepseek/deepseek-v3.2-exp",
+                        },
+                        "pro": {
+                            "provider": "openrouter-api",
+                            "model": "deepseek/deepseek-v3.2-exp",
+                        },
+                    },
+                },
+            },
+        )
+        plain = footer.render().plain
+        assert "模型 deepseek/deepseek-v3.2-exp" in plain
+        assert "模型 Q:" not in plain
+        assert "模型提供商 openrouter-api" in plain
+        assert "模型提供商 Q:" not in plain
+
+        footer.update_state(
+            "Temp",
+            "her-v2",
+            True,
+            current_agent="temp",
+            instance_id="HASHI1",
+            language="en",
+            metadata={
+                "id": "temp",
+                "display_name": "Temp",
+                "presentation_status": {
+                    "engine": "her-v2",
+                    "effort": "medium",
+                    "her_v2": {
+                        "routing_mode": "hybrid",
+                        "quick": {
+                            "provider": "openrouter-api",
+                            "model": "deepseek/quick",
+                        },
+                        "pro": {
+                            "provider": "openrouter-api",
+                            "model": "deepseek/pro",
+                        },
+                    },
+                },
+            },
+        )
+        plain = footer.render().plain
+        assert "Model Q:deepseek/quick / P:deepseek/pro" in plain
+        assert "Provider openrouter-api" in plain
+        assert "Provider Q:" not in plain
+
+
 async def test_chat_selection_pauses_follow_tail_copies_and_escape_resumes(
     tmp_path,
     monkeypatch,
@@ -515,3 +724,347 @@ async def test_typing_and_telegram_preferences_are_persistent_and_run_fenced(tmp
     reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
     assert reloaded._tui_typing_enabled is True
     assert reloaded._telegram_mirror_enabled is False
+
+
+async def test_sidepanel_is_read_only_bilingual_and_persistent(tmp_path):
+    class SidePanelClient:
+        proxied = False
+
+        def __init__(self):
+            self.sent = []
+
+        async def agent_overview(self, agent):
+            assert agent == "akane"
+            return {
+                "ok": True,
+                "overview": {
+                    "usage": {
+                        "session": {
+                            "requests": 2,
+                            "input": 120,
+                            "output": 80,
+                            "thinking": 30,
+                            "total": 230,
+                            "cost_usd": 0.12,
+                            "unknown_cost_requests": 1,
+                        },
+                        "all_time": {
+                            "requests": 12,
+                            "input": 2_500,
+                            "output": 1_400,
+                            "thinking": 300,
+                            "total": 4_200,
+                            "cost_usd": 1.5,
+                            "unknown_cost_requests": 0,
+                        },
+                    },
+                    "system_prompts": {
+                        "active_count": 2,
+                        "configured_count": 3,
+                        "total_count": 4,
+                        "slots": [
+                            {
+                                "slot": "persona",
+                                "state": "on",
+                                "characters": 321,
+                                "preview": "Friendly assistant",
+                            }
+                        ],
+                    },
+                    "parked_topics": {
+                        "count": 1,
+                        "topics": [
+                            {
+                                "slot": 2,
+                                "title": "TUI polish",
+                                "followup": {"status": "parked"},
+                            }
+                        ],
+                    },
+                },
+            }
+
+        async def scheduler_jobs(self, agent):
+            assert agent == "akane"
+            return {
+                "ok": True,
+                "jobs": [
+                    {
+                        "id": "nightly-mail",
+                        "kind": "cron",
+                        "enabled": True,
+                        "last_status": "completed",
+                    }
+                ],
+            }
+
+        async def background_jobs(self, agent, limit=20):
+            assert (agent, limit) == ("akane", 20)
+            return {
+                "ok": True,
+                "jobs": [{"job_id": "job-7", "status": "running"}],
+            }
+
+        async def send_chat(self, agent, text, **kwargs):
+            self.sent.append((agent, text, kwargs))
+            return {"ok": True}
+
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+    client = SidePanelClient()
+    app.api = client
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.gateway_ok = True
+        app.current_agent = "akane"
+        app.current_agent_display = "Akane"
+        app.current_backend = "her-v2"
+        app._agents_cache = [
+            {
+                "name": "akane",
+                "display_name": "Akane",
+                "active_backend": "her-v2",
+                "online": True,
+                "queue_depth": 1,
+            },
+            {
+                "name": "rika",
+                "display_name": "Rika",
+                "active_backend": "codex-cli",
+                "online": False,
+                "queue_depth": 0,
+            },
+        ]
+        app._ui_language = "zh"
+        input_box = app.query_one("#chat-input", ChatInput)
+        input_box.focus()
+        input_box.value = "/sidepanel"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.query_one("#side-panel", SidePanel)
+        assert panel.display is True
+        plain = panel.content_text.plain
+        assert panel.border_title == "信息面板"
+        assert plain.splitlines()[0] == "Token 用量"
+        assert "Token 用量" in plain
+        assert "本次会话" in plain and "230" in plain
+        assert "任务" in plain and "nightly-mail" in plain and "job-7" in plain
+        assert "HASHI 上下文" in plain and "Friendly assistant" in plain
+        assert "暂存主题" in plain and "TUI polish" in plain
+        assert "代理" in plain and "Akane" in plain and "Rika" in plain
+        assert "只读" not in plain
+        assert "HASHI1" not in plain
+        assert client.sent == []
+
+        app._handle_tui_cmd("/tui language en")
+        plain = panel.content_text.plain
+        assert panel.border_title == "Information"
+        assert plain.splitlines()[0] == "Token usage"
+        assert "Token usage" in plain
+        assert "Jobs" in plain
+        assert "HASHI context" in plain
+        assert "Parked topics" in plain
+        assert "Agents" in plain
+        assert "Read only" not in plain
+
+        input_box.value = "/sidepanel off"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert panel.display is False
+        assert client.sent == []
+
+    preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
+    assert preferences["sidepanel"] is False
+    assert preferences["sidepanel_auto"] is False
+    reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    assert reloaded._side_panel_enabled is False
+    assert reloaded._side_panel_auto_scroll is False
+
+
+async def test_sidepanel_keeps_chat_visible_in_narrow_terminal(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(72, 28)) as pilot:
+        app._side_panel_enabled = True
+        app._apply_side_panel_visibility(persist=False)
+        await pilot.pause()
+
+        panel = app.query_one("#side-panel")
+        chat = app.query_one("#chat-container")
+        assert panel.display is True
+        assert panel.region.width <= 32
+        assert chat.region.width >= 30
+
+
+async def test_sidepanel_is_actually_scrollable_by_pointer_and_keyboard(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    overview = {
+        "usage": {
+            "session": {"requests": 1, "total": 10},
+            "all_time": {"requests": 2, "total": 20},
+        },
+        "system_prompts": {"slots": []},
+        "parked_topics": {"topics": []},
+    }
+    agents = [
+        {
+            "name": f"agent-{index}",
+            "display_name": f"Agent {index}",
+            "online": True,
+        }
+        for index in range(18)
+    ]
+
+    async with app.run_test(size=(72, 20)) as pilot:
+        app._side_panel_enabled = True
+        app._apply_side_panel_visibility(persist=False)
+        panel = app.query_one("#side-panel", SidePanel)
+        panel.update_dashboard(
+            instance_id="HASHI1",
+            current_agent="agent-0",
+            current_agent_display="Agent 0",
+            current_backend="her-v2",
+            gateway_ok=True,
+            overview=overview,
+            scheduler_jobs=[],
+            background_jobs=[],
+            agents=agents,
+            language="zh",
+        )
+        await pilot.pause()
+
+        assert panel.max_scroll_y > 0
+        assert panel.show_vertical_scrollbar is True
+        await pilot.click(panel, offset=(2, 2))
+        assert app.focused is panel
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert panel.scroll_y > 0
+
+        before_page = panel.scroll_y
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert panel.scroll_y > before_page
+
+        await pilot.press("end")
+        await pilot.pause()
+        assert panel.scroll_y == panel.max_scroll_y
+        await pilot.press("home")
+        await pilot.pause()
+        assert panel.scroll_y == 0
+
+        content = panel.query_one("#side-panel-content", Static)
+        content.post_message(
+            MouseScrollDown(
+                content,
+                x=2,
+                y=2,
+                delta_x=0,
+                delta_y=1,
+                button=0,
+                shift=False,
+                meta=False,
+                ctrl=False,
+                screen_x=content.region.x + 2,
+                screen_y=content.region.y + 2,
+            )
+        )
+        await pilot.pause()
+        assert panel.scroll_y > 0
+
+        panel.update_dashboard(
+            instance_id="HASHI1",
+            current_agent="agent-0",
+            current_agent_display="Agent 0",
+            current_backend="her-v2",
+            gateway_ok=True,
+            overview=overview,
+            scheduler_jobs=[],
+            background_jobs=[],
+            agents=agents,
+            language="en",
+        )
+        await pilot.pause()
+        assert panel.content_text.plain.splitlines()[0] == "Token usage"
+        assert panel.max_scroll_y > 0
+        await pilot.press("end")
+        await pilot.pause()
+        assert panel.scroll_y == panel.max_scroll_y
+        await pilot.press("home")
+        await pilot.pause()
+        assert panel.scroll_y == 0
+
+
+async def test_sidepanel_auto_tour_is_bilingual_looping_and_persistent(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(SidePanel, "AUTO_SCROLL_INTERVAL_S", 3_600.0)
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(72, 20)) as pilot:
+        await app._handle_sidepanel_cmd("/sidepanel auto on")
+        panel = app.query_one("#side-panel", SidePanel)
+        panel.update_dashboard(
+            instance_id="HASHI1",
+            current_agent="agent-0",
+            current_agent_display="Agent 0",
+            current_backend="her-v2",
+            gateway_ok=True,
+            overview={
+                "usage": {
+                    "session": {"requests": 1, "total": 10},
+                    "all_time": {"requests": 2, "total": 20},
+                },
+                "system_prompts": {"slots": []},
+                "parked_topics": {"topics": []},
+            },
+            scheduler_jobs=[],
+            background_jobs=[],
+            agents=[
+                {
+                    "name": f"agent-{index}",
+                    "display_name": f"Agent {index}",
+                    "online": True,
+                }
+                for index in range(18)
+            ],
+            language="zh",
+        )
+        await pilot.pause()
+
+        assert app._side_panel_enabled is True
+        assert app._side_panel_auto_scroll is True
+        assert panel.auto_scroll_enabled is True
+        assert panel.border_title == "信息面板 · 自动巡览"
+        panel.scroll_home(animate=False)
+        panel.advance_auto_scroll()
+        await pilot.pause()
+        assert panel.scroll_y > 0
+
+        panel.scroll_end(animate=False)
+        await pilot.pause()
+        for _ in range(panel.AUTO_SCROLL_BOTTOM_HOLD_TICKS):
+            panel.advance_auto_scroll()
+        await pilot.pause()
+        assert panel.scroll_y == 0
+
+        app._handle_tui_cmd("/tui language en")
+        assert panel.border_title == "Information · Auto tour"
+        await app._handle_sidepanel_cmd("/sidepanel auto off")
+        assert app._side_panel_enabled is True
+        assert app._side_panel_auto_scroll is False
+        assert panel.auto_scroll_enabled is False
+        assert panel.border_title == "Information"
+
+    preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
+    assert preferences["sidepanel"] is True
+    assert preferences["sidepanel_auto"] is False
+    reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    assert reloaded._side_panel_enabled is True
+    assert reloaded._side_panel_auto_scroll is False

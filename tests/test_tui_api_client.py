@@ -57,3 +57,50 @@ async def test_remote_tui_run_status_uses_typed_proxy_fields(monkeypatch):
         "run_id": "run_2",
         "timeout": 5,
     }
+
+
+@pytest.mark.asyncio
+async def test_sidepanel_reads_authoritative_direct_endpoints(monkeypatch):
+    client = TuiApiClient("http://127.0.0.1:18800")
+    calls = []
+
+    async def _request(method, path, *, json_body=None, timeout=10):
+        calls.append((method, path, json_body, timeout))
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_direct_request", _request)
+
+    await client.agent_overview("agent name")
+    await client.scheduler_jobs("agent name")
+    await client.background_jobs("agent name", limit=7)
+
+    assert calls == [
+        ("GET", "/api/agents/agent%20name/overview", None, 8),
+        ("GET", "/api/agents/agent%20name/scheduler/jobs", None, 8),
+        ("GET", "/api/background-jobs?agent=agent%20name&limit=7", None, 8),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sidepanel_reads_use_typed_remote_proxy_operations(monkeypatch):
+    client = TuiApiClient(
+        remote_url="http://127.0.0.1:8766",
+        target_instance="HASHI2",
+    )
+    calls = []
+
+    async def _proxy(operation, **kwargs):
+        calls.append((operation, kwargs))
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_proxy_request", _proxy)
+
+    await client.agent_overview("akane")
+    await client.scheduler_jobs("akane")
+    await client.background_jobs("akane", limit=7)
+
+    assert calls == [
+        ("agent_overview", {"agent": "akane", "timeout": 8}),
+        ("scheduler_jobs", {"agent": "akane", "timeout": 8}),
+        ("background_jobs", {"agent": "akane", "limit": 7, "timeout": 8}),
+    ]

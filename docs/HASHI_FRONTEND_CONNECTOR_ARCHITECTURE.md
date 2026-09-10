@@ -92,13 +92,21 @@ Current implementation boundary:
   so a TUI window is a projection of the same formal Conversation rather than
   the owner of a private TUI Session;
 - its local command palette derives Agent commands from the canonical command
-  metadata, shows at most five prefix matches, and keeps TUI-only navigation and
-  layout commands inside the Connector;
-- submitting a command prefix selects the first displayed prefix match, while an
-  unknown slash command is rejected locally and never becomes a model prompt;
+  metadata, shows complete typed syntax plus localized option/example guidance,
+  and keeps TUI-only navigation and layout commands inside the Connector;
+- after an exact command and a space, the palette shows at most five parameter
+  matches at a time. Runtime-owned backend, model, provider, effort and Agent
+  choices are derived from live metadata and the qualified Functions catalogue,
+  while bounded command grammar stays in canonical command metadata;
+- submitting a command or parameter prefix selects the first displayed prefix
+  match, while an unknown slash command is rejected locally and never becomes a
+  model prompt;
 - unified slash-command response `messages` are rendered immediately by the
   TUI with target-safe Telegram HTML/Markdown conversion. They are not inserted
-  into the transcript, so later polling cannot duplicate them;
+  into the transcript, so later polling cannot duplicate them. A successful
+  no-argument command with typed parameters also receives a local, copyable
+  Options/Usage/Example guide because Telegram inline keyboards do not render
+  in the terminal;
 - chat history remains a Rich/Markdown projection while exposing mouse
   selection, a visible selection style, selection-first `Ctrl+C`, and
   selection-fenced follow-tail behaviour;
@@ -106,12 +114,29 @@ Current implementation boundary:
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
 - language, layout, sounds, the TUI typing indicator, and the default Telegram
   mirror choice are local persisted Connector preferences;
+- the side panel is closed by default. `/sidepanel` opens the TUI's persisted,
+  read-only information panel;
+  `/sidepanel off` closes it and `/sidepanel refresh` refreshes it. The panel
+  starts directly with the selected Agent's canonical token summary, then
+  projects Scheduler and background jobs, system-prompt summaries,
+  parked-topic summaries, and the live Agent directory. Its content is a real
+  focusable scroll region with a visible scrollbar: the mouse wheel works over
+  the panel, while click-to-focus enables Arrow, Page Up/Down, Home, and End.
+  `/sidepanel auto on|off|toggle` controls a persisted, default-off automatic
+  tour that advances one row per second, briefly holds at the bottom, then
+  loops to the top; manual navigation temporarily pauses it. The panel remains
+  an information surface only: actions stay as slash commands in the input,
+  and the panel owns no competing state;
 - the connection footer projects live Agent metadata for Engine, model, effort,
   Think, Verbose, Commentary and Connector state. Model Provider and structured
-  Quick/Pro routing are shown only for HER v2. The footer intentionally omits
+  Quick/Pro routing are shown only for HER v2. Identical HER Quick/Pro Provider
+  IDs are rendered once; their model is also rendered once only when both model
+  IDs are identical. Distinct Provider routes retain their complete Q/P pairing.
+  The footer intentionally omits
   working mode; `/mode` remains its authoritative control surface;
 - its cross-instance path proxies only a small named operation set through
-  authenticated Hashi Remote peers; and
+  authenticated Hashi Remote peers. Side-panel reads use explicit, Agent-scoped
+  allowlist operations rather than an arbitrary Backend API proxy; and
 - it does not yet implement the complete Persistent Session API v1 multi-
   Session surface.
 
