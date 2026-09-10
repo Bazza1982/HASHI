@@ -15,6 +15,8 @@ TUI-only commands:
   /instance      List trusted local/LAN HASHI instances
   /instance <id> Switch through authenticated Hashi Remote
   /instance current  Return to the launch instance
+  /sidepanel     Open the read-only information panel
+  /sidepanel off Close the information panel
   /log           Pause/resume log scrolling
   /quit          Graceful shutdown
   All other /commands are forwarded to the active agent.

@@ -1625,6 +1625,8 @@ python tui.py
 **Panels:**
 - **Log panel** (upper) — real-time stdout/stderr from the bridge process
 - **Chat input bar** (lower) — send messages to any active agent
+- **Information side panel** (optional) — read-only Token, job, context,
+  parked-topic, and Agent summaries
 - **Status bar** — current Agent, Engine (legacy backend label), bridge uptime
 - **Agent selector** — hotkey to switch which agent receives input
 
@@ -1637,6 +1639,8 @@ python tui.py
 /instance <id>       switch to a peer after authenticated handshake
 /instance current    return to the instance that launched this TUI
 /instance refresh    refresh Remote peer state
+/sidepanel           open the read-only information panel
+/sidepanel off       close the information panel
 /log                 pause or resume the launch instance's local log
 /quit                close the TUI
 ```

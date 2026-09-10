@@ -38,10 +38,14 @@ The proxy accepts only these named operations:
 | --- | --- |
 | `health` | `GET /api/health` |
 | `agents` | `GET /api/agents` |
+| `agent_overview` | `GET /api/agents/{agent}/overview` |
+| `scheduler_jobs` | `GET /api/agents/{agent}/scheduler/jobs` |
+| `background_jobs` | `GET /api/background-jobs?agent={agent}` |
 | `chat` | `POST /api/chat` |
 | `transcript_recent` | `GET /api/transcript/{agent}` |
 | `transcript_poll` | `GET /api/transcript/{agent}/poll` |
 
+The three information-panel operations are read-only and Agent-scoped.
 Arbitrary paths are not represented in the protocol. Text, agent, offset,
 limit, and response sizes are bounded before forwarding.
 
