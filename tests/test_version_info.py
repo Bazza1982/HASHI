@@ -143,7 +143,7 @@ def test_source_checkout_uses_commit_ancestry_not_timestamps(tmp_path: Path) -> 
 
 
 def test_packaged_provenance_never_invents_a_branch(tmp_path: Path) -> None:
-    root = tmp_path / "package"
+    root = _checkout(tmp_path) / "package"
     root.mkdir()
     (root / "pyproject.toml").write_text(
         '[project]\nname = "hashi-bridge"\nversion = "4.0.0a2"\n',

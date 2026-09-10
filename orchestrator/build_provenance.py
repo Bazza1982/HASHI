@@ -120,6 +120,9 @@ def _git_text(root: Path, *args: str) -> str | None:
 
 
 def _git_source(root: Path) -> dict[str, Any] | None:
+    checkout_root = _git_text(root, "rev-parse", "--show-toplevel")
+    if not checkout_root or Path(checkout_root).resolve() != root.resolve():
+        return None
     commit = _git_text(root, "rev-parse", "--verify", "HEAD")
     if not commit:
         return None

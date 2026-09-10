@@ -305,3 +305,7 @@ output in the request's async context. This keeps `/version` and other long
 command results in the API `messages` response for TUI rendering. Capture is
 scoped to the runtime and ends with the command; ordinary Telegram delivery
 outside that context retains its normal chunking and delivery behavior.
+
+Version provenance accepts Git identity only when the repository top level is
+the HASHI code root. A portable/npm artifact nested inside a different checkout
+uses its own build metadata and never inherits the enclosing repository branch.
