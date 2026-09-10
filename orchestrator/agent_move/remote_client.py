@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import ssl
+import tempfile
+from urllib.parse import urlencode
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +26,7 @@ from .package import (
     package_sha256,
     read_agent_move_package,
 )
-from .transport_crypto import ENVELOPE_SCHEME, encrypt_package_transport
+from .transport_crypto import ENVELOPE_SCHEME, encrypt_package_transport, encrypt_package_file
 
 
 class AgentMoveRemoteError(AgentMoveError):
@@ -80,6 +82,8 @@ class AgentMoveRemoteClient:
                 f"Agent move package is {package_bytes} bytes; "
                 f"receiver limit is {receiver_limit} bytes"
             )
+        if self.capabilities.get("streaming_upload") == "authenticated-query-gcm-v1":
+            return self._stage_stream(path, operation, target_agent_id, timeout)
         content = path.read_bytes()
         digest = package_sha256(path)
         envelope = encrypt_package_transport(
@@ -102,6 +106,52 @@ class AgentMoveRemoteClient:
             },
             timeout=timeout,
         )
+
+    def _stage_stream(self, path, operation, target_agent_id, timeout):
+        digest = package_sha256(path)
+        query = urlencode({
+            "from_instance": self.source_instance, "sha256": digest,
+            "operation": operation, "target_agent_id": target_agent_id or "",
+        })
+        url = f"{self.base_url}/agent-move/v1/stage-stream?{query}"
+        with tempfile.TemporaryDirectory(prefix="hashi-move-wire-") as directory:
+            envelope = Path(directory) / "package.enc"
+            encrypt_package_file(path, envelope, shared_token=self.shared_token,
+                                 source_instance=self.source_instance,
+                                 target_instance=self.target_instance, package_sha256=digest)
+            # HMAC binds the entire query; GCM authenticates the streamed body to
+            # the signed plaintext digest and both peers. No body-sized JSON.
+            headers = build_client_auth_headers(
+                url=url, method="POST", data=b"", token=None,
+                shared_token=self.shared_token, from_instance=self.source_instance,
+                normalize_instance=_normalize_instance)
+            headers["Content-Type"] = "application/octet-stream"
+            headers["Content-Length"] = str(envelope.stat().st_size)
+            kwargs = {"timeout": timeout}
+            if url.lower().startswith("https://"):
+                kwargs["context"] = ssl.create_default_context()
+            with envelope.open("rb") as reader:
+                request = urllib_request.Request(url, data=reader, headers=headers, method="POST")
+                try:
+                    with urllib_request.urlopen(request, **kwargs) as response:
+                        raw = response.read(4 * 1024 * 1024 + 1)
+                except (HTTPError, URLError, OSError) as exc:
+                    raise AgentMoveRemoteError(f"streaming receiver request failed: {exc}") from exc
+            if len(raw) > 4 * 1024 * 1024:
+                raise AgentMoveRemoteError("receiver response exceeds the control limit")
+            try:
+                result = json.loads(raw)
+            except (ValueError, UnicodeError) as exc:
+                raise AgentMoveRemoteError("receiver returned invalid JSON") from exc
+            if not isinstance(result, dict) or not verify_response_auth(
+                shared_token=self.shared_token, request_nonce=headers[HEADER_NONCE],
+                payload={key: value for key, value in result.items() if key != "response_auth"},
+                response_auth=result.get("response_auth")):
+                raise AgentMoveRemoteError("receiver response authentication failed")
+            result.pop("response_auth", None)
+            if result.get("ok") is False:
+                raise AgentMoveRemoteError(str(result.get("error") or result))
+            return result
 
     def ensure_package_compatible(self, package: AgentMoveArchive) -> None:
         """Reject unsupported schemas before any package bytes leave the source."""

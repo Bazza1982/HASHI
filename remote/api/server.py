@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import platform
 import re
 import socket
@@ -2631,6 +2632,54 @@ def create_app(
         result["authenticated_instance"] = authenticated_instance
         result["authenticated_response_proof"] = True
         return _agent_move_response(request, result)
+
+    @app.post("/agent-move/v1/stage-stream")
+    async def agent_move_stage_stream(request: Request, from_instance: str,
+                                     sha256: str, operation: str = "move",
+                                     target_agent_id: str = ""):
+        # The query carries the signed control envelope. The body is separately
+        # authenticated by GCM, bound to both peers and the signed package hash.
+        ok, reason, sender = verify_protocol_request(
+            request, body_bytes=b"", from_instance=from_instance)
+        if not ok:
+            return JSONResponse(status_code=401, content={"ok": False, "error": reason})
+        if not _hashi_root:
+            return _agent_move_response(request, status_code=503,
+                                        content={"ok": False, "error": "HASHI root is unavailable"})
+        from orchestrator.agent_move.transport_crypto import decrypt_package_file
+        limit = MAX_PACKAGE_BYTES + ENVELOPE_OVERHEAD_BYTES
+        try:
+            length = request.headers.get("content-length")
+            if length and (int(length) > limit or int(length) <= ENVELOPE_OVERHEAD_BYTES):
+                raise AgentMoveError("Agent move transport envelope size is invalid")
+            with tempfile.TemporaryDirectory(prefix="hashi-move-receive-") as directory:
+                envelope, plaintext = Path(directory) / "wire.enc", Path(directory) / "package.hashi-agent"
+                count = 0
+                with envelope.open("xb") as writer:
+                    os.chmod(envelope, 0o600)
+                    async for chunk in request.stream():
+                        count += len(chunk)
+                        if count > limit:
+                            raise AgentMoveError("Agent move transport exceeds receiver limit")
+                        writer.write(chunk)
+                if length and count != int(length):
+                    raise AgentMoveError("Agent move transport envelope was truncated")
+                await asyncio.to_thread(
+                    decrypt_package_file, envelope, plaintext, max_plaintext_bytes=MAX_PACKAGE_BYTES,
+                    shared_token=load_shared_token(Path(_hashi_root)) or "",
+                    source_instance=sender or from_instance,
+                    target_instance=str(_instance_info.get("instance_id") or "HASHI"),
+                    package_sha256=sha256)
+                result = await asyncio.to_thread(
+                    stage_agent_move, Path(_hashi_root), plaintext, expected_sha256=sha256,
+                    source_instance=sender or from_instance,
+                    target_instance=str(_instance_info.get("instance_id") or "HASHI"),
+                    secret_passphrase=load_shared_token(Path(_hashi_root)),
+                    operation=operation, target_agent_id=target_agent_id or None)
+                return _agent_move_response(request, result)
+        except (AgentMoveError, OSError, ValueError) as exc:
+            return _agent_move_response(request, status_code=400,
+                                        content={"ok": False, "error": str(exc)})
 
     @app.post("/agent-move/v1/stage")
     async def agent_move_stage(request: Request, payload: AgentMoveStagePayload):

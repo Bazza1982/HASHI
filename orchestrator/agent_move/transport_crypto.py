@@ -113,3 +113,82 @@ def _associated_data(
     if not source or not target or len(digest) != 64:
         raise AgentMoveError("Agent move transport binding is invalid")
     return f"{ENVELOPE_SCHEME}\n{source}\n{target}\n{digest}".encode("utf-8")
+
+
+STREAM_CHUNK_BYTES = 1024 * 1024
+
+
+def encrypt_package_file(source, destination, **binding) -> None:
+    """Write the existing AES-GCM envelope with bounded memory."""
+    from pathlib import Path
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    salt, nonce = os.urandom(_SALT_BYTES), os.urandom(_NONCE_BYTES)
+    encryptor = Cipher(algorithms.AES(_derive_key(binding["shared_token"], salt)),
+                       modes.GCM(nonce)).encryptor()
+    encryptor.authenticate_additional_data(_associated_data(
+        binding["source_instance"], binding["target_instance"], binding["package_sha256"]))
+    digest = hashlib.sha256()
+    output = Path(destination)
+    writer = output.open("xb")
+    try:
+        with writer, Path(source).open("rb") as reader:
+            os.chmod(output, 0o600)
+            writer.write(_MAGIC + salt + nonce)
+            while chunk := reader.read(STREAM_CHUNK_BYTES):
+                digest.update(chunk)
+                writer.write(encryptor.update(chunk))
+            writer.write(encryptor.finalize())
+            writer.write(encryptor.tag)
+        if digest.hexdigest() != binding["package_sha256"].lower():
+            raise AgentMoveError("Agent move package changed during encryption")
+    except BaseException:
+        output.unlink(missing_ok=True)
+        raise
+
+
+def decrypt_package_file(source, destination, *, max_plaintext_bytes: int, **binding) -> None:
+    """Publish plaintext only after the complete GCM tag and digest validate."""
+    from pathlib import Path
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    source, destination = Path(source), Path(destination)
+    size = source.stat().st_size
+    if size <= ENVELOPE_OVERHEAD_BYTES or size > max_plaintext_bytes + ENVELOPE_OVERHEAD_BYTES:
+        raise AgentMoveError("Agent move transport envelope size is invalid")
+    temporary = destination.with_name(destination.name + ".unauthenticated")
+    writer = temporary.open("xb")
+    try:
+        with writer, source.open("rb") as reader:
+            os.chmod(temporary, 0o600)
+            if reader.read(len(_MAGIC)) != _MAGIC:
+                raise AgentMoveError("Agent move transport envelope is invalid")
+            salt, nonce = reader.read(_SALT_BYTES), reader.read(_NONCE_BYTES)
+            reader.seek(-_TAG_BYTES, os.SEEK_END)
+            tag = reader.read(_TAG_BYTES)
+            reader.seek(len(_MAGIC) + _SALT_BYTES + _NONCE_BYTES)
+            decryptor = Cipher(algorithms.AES(_derive_key(binding["shared_token"], salt)),
+                               modes.GCM(nonce, tag)).decryptor()
+            decryptor.authenticate_additional_data(_associated_data(
+                binding["source_instance"], binding["target_instance"], binding["package_sha256"]))
+            digest = hashlib.sha256()
+            remaining = size - ENVELOPE_OVERHEAD_BYTES
+            while remaining:
+                chunk = reader.read(min(STREAM_CHUNK_BYTES, remaining))
+                if not chunk:
+                    raise AgentMoveError("Agent move transport envelope was truncated")
+                remaining -= len(chunk)
+                plaintext = decryptor.update(chunk)
+                digest.update(plaintext)
+                writer.write(plaintext)
+            plaintext = decryptor.finalize()
+            digest.update(plaintext)
+            writer.write(plaintext)
+            if digest.hexdigest() != binding["package_sha256"].lower():
+                raise AgentMoveError("Agent move transport plaintext SHA-256 does not match")
+        os.replace(temporary, destination)
+    except BaseException as exc:
+        temporary.unlink(missing_ok=True)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, AgentMoveError, OSError)):
+            raise
+        raise AgentMoveError("Agent move transport envelope authentication failed") from exc

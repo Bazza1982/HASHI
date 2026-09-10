@@ -97,6 +97,7 @@ def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
         "staged_inactive": True,
         "encrypted_agent_secrets": True,
         "package_encryption": [ENVELOPE_SCHEME],
+        "streaming_upload": "authenticated-query-gcm-v1",
         "source_workspace_retained": True,
         "retained_identity_attachment": True,
         "move_clone_lifecycle": True,
@@ -156,7 +157,7 @@ def resolve_agent_transfer_target(
 
 def stage_agent_move(
     hashi_root: Path | str,
-    package_bytes: bytes,
+    package_bytes: bytes | Path,
     *,
     expected_sha256: str,
     source_instance: str,
@@ -171,20 +172,42 @@ def stage_agent_move(
     root = _root(hashi_root)
     source = _normalize_instance(source_instance)
     transfer_operation = _normalize_operation(operation)
-    if not package_bytes:
+    source_file = package_bytes if isinstance(package_bytes, Path) else None
+    size = source_file.stat().st_size if source_file else len(package_bytes)
+    if not size:
         raise AgentMoveError("Agent move package is empty")
-    if len(package_bytes) > MAX_PACKAGE_BYTES:
+    if size > MAX_PACKAGE_BYTES:
         raise AgentMoveError("Agent move package exceeds the receiver size limit")
-    digest = hashlib.sha256(package_bytes).hexdigest()
-    if not expected_sha256 or digest.lower() != str(expected_sha256).strip().lower():
-        raise AgentMoveError("Agent move package SHA-256 does not match the request")
 
     move_root = _move_root(root)
     target_kind = target_platform or detect_environment_kind()
     inbox = move_root / "incoming"
     inbox.mkdir(parents=True, exist_ok=True)
     upload = inbox / f".upload-{uuid4().hex}.hashi-agent"
-    _atomic_bytes(upload, package_bytes, mode=0o600)
+    digest_state = hashlib.sha256()
+    try:
+        with upload.open("xb") as writer:
+            os.chmod(upload, 0o600)
+            if source_file:
+                copied = 0
+                with source_file.open("rb") as reader:
+                    while chunk := reader.read(1024 * 1024):
+                        copied += len(chunk)
+                        if copied > MAX_PACKAGE_BYTES:
+                            raise AgentMoveError("Agent move package exceeds the receiver size limit")
+                        digest_state.update(chunk)
+                        writer.write(chunk)
+                size = copied
+            else:
+                digest_state.update(package_bytes)
+                writer.write(package_bytes)
+        digest = digest_state.hexdigest()
+        if not expected_sha256 or digest != str(expected_sha256).strip().lower():
+            raise AgentMoveError("Agent move package SHA-256 does not match the request")
+    except BaseException:
+        upload.unlink(missing_ok=True)
+        raise
+
     incomplete_record_dir: Path | None = None
     try:
         package = read_agent_move_package(
@@ -297,7 +320,7 @@ def stage_agent_move(
                 "source_environment": package.manifest.get("source_environment"),
                 "target_environment": target_kind,
                 "sha256": digest,
-                "package_bytes": len(package_bytes),
+                "package_bytes": size,
                 "package_schema": package.manifest.get("schema_version"),
                 "status": "staged",
                 "staged_at": utc_now_iso(),

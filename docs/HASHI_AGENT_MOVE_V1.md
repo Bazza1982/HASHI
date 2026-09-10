@@ -264,3 +264,19 @@ and the canonical backend secret lookup order of remaining Agents, including
 inactive Agents. A real consumer blocks cleanup before configuration or workspace
 deletion; an ordinary string equal to the moved Agent ID does not. Retrying cleanup
 uses the existing source journal and remains idempotent.
+
+### Authenticated streaming upload
+
+Receivers advertise `streaming_upload=authenticated-query-gcm-v1`. Such peers
+use `POST /agent-move/v1/stage-stream` with signed query fields `from_instance`,
+`sha256`, `operation`, and `target_agent_id`. Request HMAC covers the canonical
+query and an empty control body; the binary body retains the AES-256-GCM envelope,
+binding both instance identities and the signed plaintext digest. Nonce/expiry
+checks precede stream consumption. The existing authenticated JSON response proof
+is still mandatory. Older peers retain the legacy JSON upload for old contracts.
+
+Encryption, upload, decryption and service staging use bounded file reads. The
+receiver caps incoming bytes, keeps temporary files private, verifies the full
+GCM tag and digest before staging, and removes temporary state on truncation,
+authentication or disk failures. No plaintext is imported before verification.
+This transport addition does not itself change the workspace size/mode contract.

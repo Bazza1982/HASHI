@@ -315,3 +315,7 @@ registry's credential lookup order. Ordinary display text and group member names
 are not credential references. The Agent Directory removes obsolete local group
 memberships and broadcast exclusions in the cleanup config transaction, preserving
 remote addresses and dynamic group selectors.
+
+Agent Move peers advertising authenticated streaming upload transfer binary
+AES-GCM files with bounded buffers and authenticate the full payload before
+staging. Older transaction recovery retains its existing upload compatibility.

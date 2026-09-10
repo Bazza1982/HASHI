@@ -485,3 +485,60 @@ def test_agent_move_tls_configuration_does_not_silently_downgrade():
         },
         8767,
     ) == ["https://example.test:8767", "http://example.test:8767"]
+
+
+def test_streamed_move_authenticates_before_staging_and_cleans_failed_upload(tmp_path):
+    from urllib.parse import urlencode
+    from orchestrator.agent_move.transport_crypto import encrypt_package_file
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    package_path = tmp_path / "stream.hashi-agent"
+    create_agent_move_package(source, "zelda", package_path, source_instance="HASHI1")
+    digest = hashlib.sha256(package_path.read_bytes()).hexdigest()
+    encrypted = tmp_path / "wire.enc"
+    encrypt_package_file(package_path, encrypted, shared_token=TOKEN,
+                         source_instance="HASHI1", target_instance="HASHI2", package_sha256=digest)
+    wire = encrypted.read_bytes()
+    path = "/agent-move/v1/stage-stream?" + urlencode(sorted({
+        "from_instance": "HASHI1", "sha256": digest, "operation": "move", "target_agent_id": "zelda"}.items()))
+    client = _client(target)
+    assert client.post(path, content=wire).status_code == 401
+    for broken in (wire[:-1], wire[:-1] + bytes([wire[-1] ^ 1])):
+        response = client.post(path, content=broken, headers=_headers("POST", path))
+        assert response.status_code == 400
+        assert json.loads((target / "agents.json").read_text())["agents"] == []
+        assert not list((target / "state" / "agent_moves").glob("incoming/*/state.json"))
+    response = client.post(path, content=iter([wire[:31], wire[31:]]), headers=_headers("POST", path))
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "staged"
+    assert json.loads((target / "agents.json").read_text())["agents"] == []
+
+
+def test_streaming_client_uses_file_body_and_verifies_receiver_proof(tmp_path, monkeypatch):
+    from urllib.parse import urlsplit
+    from orchestrator.agent_move.service import receiver_capabilities
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    path = tmp_path / "stream.hashi-agent"
+    create_agent_move_package(source, "zelda", path, source_instance="HASHI1")
+    client = _client(target)
+
+    class Response:
+        def __init__(self, raw): self.raw = raw
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, limit): return self.raw[:limit]
+
+    def send(request, **kwargs):
+        assert hasattr(request.data, "read")
+        url = urlsplit(request.full_url)
+        def chunks():
+            while chunk := request.data.read(127):
+                yield chunk
+        response = client.post(url.path + "?" + url.query, content=chunks(), headers=dict(request.header_items()))
+        assert response.status_code == 200, response.text
+        return Response(response.content)
+
+    monkeypatch.setattr("orchestrator.agent_move.remote_client.urllib_request.urlopen", send)
+    remote = AgentMoveRemoteClient("http://receiver", "HASHI2", "HASHI1", TOKEN, receiver_capabilities(target))
+    assert remote.stage(path, operation="move", target_agent_id="zelda")["status"] == "staged"

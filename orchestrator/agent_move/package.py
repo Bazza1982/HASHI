@@ -1137,7 +1137,8 @@ def _prepare_workspace_entries(
             )
         except (OSError, sqlite3.DatabaseError) as exc:
             try:
-                is_sqlite = item.source.read_bytes()[:16] == b"SQLite format 3\x00"
+                with item.source.open("rb") as reader:
+                    is_sqlite = reader.read(16) == b"SQLite format 3\x00"
             except OSError:
                 is_sqlite = True
             if is_sqlite:
