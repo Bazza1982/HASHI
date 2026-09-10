@@ -40,6 +40,22 @@ def test_connection_save_preserves_identity_history_and_existing_credentials(tmp
     assert (tmp_path/'secrets.json').read_bytes()==before
 
 
+def test_private_connection_save_protects_empty_temporary_before_secret_write(tmp_path, monkeypatch):
+    from onboarding.onboarding_main import _atomic_write_json
+    from tools import private_files
+    original = private_files.protect_private_file
+    observed = []
+    def protect(path):
+        observed.append(path.read_bytes())
+        original(path)
+    monkeypatch.setattr(private_files, 'protect_private_file', protect)
+    path = tmp_path / 'secrets.json'
+    _atomic_write_json(path, {'test_key': 'synthetic-private-value'}, private=True)
+    assert observed == [b''], 'secret bytes must never precede protection of the temporary file'
+    assert json.loads(path.read_text())['test_key'] == 'synthetic-private-value'
+    assert list(tmp_path.iterdir()) == [path]
+
+
 async def test_connection_consent_and_secret_control_never_submit_chat(tmp_path):
     with pytest.raises(ConnectionError,match='CONFIRMATION_REQUIRED'):
         await validate(tmp_path,'openrouter-api','openai/gpt-4o','secret',confirmed=False)

@@ -400,3 +400,11 @@ a fresh preflight is required, while incomplete rollback retains recovery checks
 Repeated signed requests retain their admission identity: verification-only
 retry observations do not change PCM authorization claims. Attempt-start
 revocation checks and per-message proof bindings still apply.
+
+Local connection credentials are written only after the empty temporary file
+has owner-only access; the fully flushed file is then atomically published.
+This applies to first save and replacement on both POSIX and Windows.
+
+HER session database handles now close after each read or transaction, including
+rollback. This fixes native Windows temporary connection-validation cleanup
+without changing Core or production-state retention.

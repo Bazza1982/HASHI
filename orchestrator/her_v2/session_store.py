@@ -129,14 +129,21 @@ class HerSessionStore:
         self._lock = threading.RLock()
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=30.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 30000")
-        if removable_storage_profile():
-            connection.execute("PRAGMA synchronous = NORMAL")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 30000")
+            if removable_storage_profile():
+                connection.execute("PRAGMA synchronous = NORMAL")
+            with connection:
+                yield connection
+        finally:
+            # sqlite3's transaction context does not close the OS handle.
+            # Release it before Windows removes a validation workspace.
+            connection.close()
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:

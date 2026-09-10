@@ -374,3 +374,7 @@ be reopened to adopt them.
 
 Footer fact changes trigger layout measurement as well as repaint, preserving
 all status fields after long model/route metadata arrives in a narrow window.
+
+Local connection credentials are written only after the empty temporary file
+has owner-only access; the fully flushed file is then atomically published.
+This applies to first save and replacement on both POSIX and Windows.

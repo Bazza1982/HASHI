@@ -83,6 +83,31 @@ def _runtime_event(turn_id: str, event_id: str, event: str, **payload):
     }
 
 
+def test_session_store_closes_database_handles_after_success_and_failure(tmp_path, monkeypatch):
+    from orchestrator.her_v2 import session_store
+
+    opened = []
+    connect = sqlite3.connect
+    def tracked_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        opened.append(connection)
+        return connection
+    monkeypatch.setattr(session_store.sqlite3, "connect", tracked_connect)
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-1", "Keep the durable state")
+    assert coordinator.store.session(turn.session_id)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        with coordinator.store._transaction() as connection:
+            connection.execute("DELETE FROM her_sessions")
+            raise RuntimeError("interrupted")
+    assert coordinator.store.session(turn.session_id)
+    assert opened
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    coordinator.store.path.rename(tmp_path / "closed.sqlite3")
+
+
 def test_route_revision_rebuilds_from_settled_checkpoint_without_new_session(tmp_path):
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     first = _accept(coordinator, "turn-1", "Build it")

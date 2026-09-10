@@ -1333,6 +1333,12 @@ explicit broad grants are replaced as well as inherited grants.
 
 ## 18. Failure, Retry, and Recovery
 
+HER's durable session store closes each SQLite connection when its read or
+transaction scope exits, including rollback and initialization failures.
+SQLite's transaction context alone does not release its file handle; connection
+validation must be able to remove its temporary state immediately on Windows,
+without depending on garbage collection or deleting durable production state.
+
 ### 18.1 Stage-local provider recovery
 
 HER permits exactly one fresh-connection provider recovery within the active

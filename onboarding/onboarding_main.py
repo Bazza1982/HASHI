@@ -10,13 +10,22 @@ def _atomic_write_json(path: Path, payload: dict, *, private: bool = False) -> N
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     try:
-        temporary.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        content = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         if private:
             from tools.private_files import protect_private_file
-            protect_private_file(temporary)
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                protect_private_file(temporary)
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+                    descriptor = -1
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        else:
+            temporary.write_text(content, encoding='utf-8')
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
