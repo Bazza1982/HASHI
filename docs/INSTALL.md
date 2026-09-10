@@ -404,7 +404,7 @@ Use `hashi status --all`, `hashi status --check`, `hashi doctor`,
 `stop` accept `--timeout 1..300`; a timeout never force-kills a process.
 `hashi instance default` reads the current default; `hashi instance unbind`
 removes only the current directory binding. Completion scripts are printed by
-`hashi completion powershell|bash|zsh|fish` and are not installed automatically.
+`hashi completion powershell|bash|zsh|fish` and are not installed automatically. Completions query the command parser for the current subcommand, option and value; they do not offer unrelated destructive flags.
 
 For first connection, interactive `hashi` asks for one detected CLI or one API
 provider. Confirm a minimal adapter call, then enter Hashiko's TUI conversation.

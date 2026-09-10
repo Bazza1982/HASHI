@@ -954,10 +954,10 @@ async def test_sidepanel_is_actually_scrollable_by_pointer_and_keyboard(tmp_path
         assert panel.scroll_y > before_page
 
         await pilot.press("end")
-        await pilot.pause()
+        await pilot.wait_for_scheduled_animations()
         assert panel.scroll_y == panel.max_scroll_y
         await pilot.press("home")
-        await pilot.pause()
+        await pilot.wait_for_scheduled_animations()
         assert panel.scroll_y == 0
 
         content = panel.query_one("#side-panel-content", Static)
@@ -995,10 +995,10 @@ async def test_sidepanel_is_actually_scrollable_by_pointer_and_keyboard(tmp_path
         assert panel.content_text.plain.splitlines()[0] == "Token usage"
         assert panel.max_scroll_y > 0
         await pilot.press("end")
-        await pilot.pause()
+        await pilot.wait_for_scheduled_animations()
         assert panel.scroll_y == panel.max_scroll_y
         await pilot.press("home")
-        await pilot.pause()
+        await pilot.wait_for_scheduled_animations()
         assert panel.scroll_y == 0
 
 

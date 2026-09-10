@@ -785,3 +785,12 @@ def test_terminal_purge_error_codes_preserve_external_data(tmp_path, monkeypatch
         assert envelope['error']['code']==expected
         assert config.read_bytes()==before
         assert registry.get('external')['name']=='external'
+
+
+def test_completion_uses_selected_command_and_option_value_context(capsys):
+    assert hashi_instance_cli.main(['--complete','status','--c'])==0
+    assert capsys.readouterr().out.split()==['--check']
+    assert hashi_instance_cli.main(['--complete','status','--p'])==0
+    assert not capsys.readouterr().out.strip()
+    assert hashi_instance_cli.main(['--complete','--lang','z'])==0
+    assert capsys.readouterr().out.split()==['zh']

@@ -90,6 +90,7 @@ function selectManagementPython() {
 }
 
 function normalizeGlobalArguments(argv) {
+  if (argv[0] === '--complete') return argv;
   const globals = [];
   const rest = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -123,7 +124,7 @@ function run(argv = process.argv.slice(2)) {
     else if (argv[i].startsWith('--lang=')) { language = argv[i].split('=')[1]; }
     else { helpArgv.push(argv[i]); }
   }
-  const helpIndex = helpArgv.findIndex(x => ['help', '--help', '-h'].includes(x));
+  const helpIndex = argv[0] === '--complete' ? -1 : helpArgv.findIndex(x => ['help', '--help', '-h'].includes(x));
   if (helpIndex >= 0 && !argv.includes('--json')) {
     let topic = helpArgv[helpIndex] === 'help' ? helpArgv.slice(helpIndex + 1) : helpArgv.slice(0, helpIndex);
     topic = topic.filter(x => x !== '--all');

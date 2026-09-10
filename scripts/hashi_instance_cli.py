@@ -77,6 +77,8 @@ def _lines(value):
 
 
 def _normalize_args(argv):
+    if argv[:1] == ["--complete"]:
+        return argv
     globals_, rest, targets = [], [], []
     iterator = iter(argv)
     for token in iterator:
@@ -106,6 +108,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-i", "--instance", help="Select an exact registered instance name.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable output.")
+    parser.add_argument("--complete", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     parser.add_argument("--lang", choices=("auto", "zh", "en"), default="auto")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--non-interactive", action="store_true")
@@ -940,6 +943,10 @@ def _handle_instance_command(
 def _main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(_normalize_args(list(argv) if argv is not None else sys.argv[1:]))
+    if args.complete is not None:
+        from scripts.terminal_support import completion_candidates
+        print("\n".join(completion_candidates(parser, args.complete)))
+        return 0
     if args.json and args.command in {None, "tui", "onboard", "ui"}:
         parser.error("--json is not supported by interactive commands")
     if args.command == "instance" and args.instance and getattr(args,"name",None) and args.instance.casefold() != args.name.casefold():

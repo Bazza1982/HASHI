@@ -35,9 +35,9 @@ def _safe(value):
 def invoke(run, argv, usage_error):
     context={'steps':[], 'unknown':[], 'instance':None}
     _RESULT.set(context)
-    as_json = '--json' in argv
+    as_json = '--json' in argv and argv[:1] != ['--complete']
     # Streaming is intentionally not captured into an unbounded StringIO.
-    follow = 'logs' in argv and any(x in argv for x in ('-f', '--follow'))
+    follow = argv[:1] != ['--complete'] and 'logs' in argv and any(x in argv for x in ('-f', '--follow'))
     if follow:
         try:
             return run(argv)
@@ -236,22 +236,65 @@ def stream_logs(record, root, args):
     return 0
 
 
+def completion_candidates(parser, words):
+    tokens = list(words)
+    prefix = tokens.pop() if tokens else ""
+    root_options = {option:action for action in parser._actions for option in action.option_strings}
+    selected = parser
+    expecting = None
+    for token in tokens:
+        if expecting is not None:
+            expecting = None
+            continue
+        options = {**root_options, **{option:action for action in selected._actions for option in action.option_strings}}
+        option = options.get(token.split("=", 1)[0])
+        if option is not None:
+            if option.nargs != 0 and "=" not in token:
+                expecting = option
+            continue
+        sub = next((action for action in selected._actions if isinstance(action, argparse._SubParsersAction)), None)
+        if sub is not None and token in sub.choices:
+            selected = sub.choices[token]
+    if expecting is not None:
+        values = [str(value) for value in (expecting.choices or [])]
+    else:
+        values = list(root_options)
+        for action in selected._actions:
+            if action.help == argparse.SUPPRESS:
+                continue
+            values.extend(action.option_strings)
+            if isinstance(action, argparse._SubParsersAction):
+                values.extend(action.choices)
+    return sorted({value for value in values if value != "--complete" and value.startswith(prefix)})
+
+
 def completion_script(parser, shell):
-    words = set()
-    def visit(p):
-        for action in p._actions:
-            words.update(action.option_strings)
-            if isinstance(action,argparse._SubParsersAction):
-                for name, child in action.choices.items():
-                    words.add(name); visit(child)
-            elif action.choices:
-                words.update(str(x) for x in action.choices)
-    visit(parser)
-    choices = ' '.join(sorted(words))
+    # Query the actual parser at completion time; no copied command/flag table.
     if shell == 'bash':
-        return f"complete -W '{choices}' hashi"
+        return '''_hashi_complete() {
+  local choices
+  choices=$(hashi --complete "${COMP_WORDS[@]:1:$COMP_CWORD}" 2>/dev/null)
+  COMPREPLY=($(compgen -W "$choices" -- "${COMP_WORDS[COMP_CWORD]}"))
+}
+complete -F _hashi_complete hashi'''
     if shell == 'zsh':
-        return f"#compdef hashi\n_arguments '*:command:({choices})'"
+        return '''#compdef hashi
+_hashi_complete() {
+  local -a matches
+  matches=("${(@f)$(hashi --complete "${words[@]:1:$((CURRENT-1))}" 2>/dev/null)}")
+  compadd -a matches
+}
+compdef _hashi_complete hashi'''
     if shell == 'fish':
-        return f"complete -c hashi -f -a '{choices}'"
-    return "Register-ArgumentCompleter -Native -CommandName hashi -ScriptBlock { param($wordToComplete) '" + choices + "'.Split(' ') | Where-Object { $_ -like \"$wordToComplete*\" } }"
+        return '''function __hashi_complete
+  set -l parts (commandline -opc)
+  hashi --complete $parts[2..-1] (commandline -ct) 2>/dev/null
+end
+complete -c hashi -f -a '(__hashi_complete)'
+'''
+    return '''Register-ArgumentCompleter -Native -CommandName hashi -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+  $parts = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.Extent.Text })
+  if (-not $wordToComplete) { $parts += '' }
+  & hashi --complete @parts 2>$null
+}'''
