@@ -534,7 +534,8 @@ class StartupManager:
                         # Worker readiness precedes shared Connector activation.
                         new_state = "online"
                     boot_state[agent_name] = new_state
-                    if new_state == "local":
+                    if (new_state == "local" and (not callable(snapshot)
+                            or snapshot(agent_name).get("configured", True))):
                         boot_reason[agent_name] = "Telegram unavailable"
                     bridge_logger.info("%s: connecting -> %s", agent_name, new_state)
                 else:
@@ -652,7 +653,8 @@ class StartupManager:
                 }
             )
         local_names = sorted(
-            name for name, state in boot_state.items() if state == "local"
+            name for name, state in boot_state.items()
+            if state == "local" and boot_reason.get(name) == "Telegram unavailable"
         )
         if local_names:
             _add_issue(
@@ -760,7 +762,15 @@ class StartupManager:
         snapshot = getattr(workers, "telegram_ingress_snapshot", None)
         unavailable = []
         connecting = []
-        for name, handle in self.kernel._runtime_map().items():
+        runtimes = self.kernel._runtime_map()
+        # Successful startup entries are projections, not a second Agent registry.
+        # Keep failed/pending entries so missing Workers cannot hide startup failures.
+        removed = {name for name, state in states.items()
+                   if state in {"online", "local"} and name not in runtimes}
+        for name in removed:
+            states.pop(name, None)
+            reasons.pop(name, None)
+        for name, handle in runtimes.items():
             ingress = dict(snapshot(name) or {}) if callable(snapshot) else {}
             configured = ingress.get("configured", name in getattr(workers, "_telegram_ingress", {}))
             connected = bool(ingress.get("running") and ingress.get("connected")
@@ -775,8 +785,10 @@ class StartupManager:
                     unavailable.append(name)
                     states[name] = "local"
                     reasons[name] = "Telegram unavailable"
-            elif states.get(name) == "local":
-                unavailable.append(name)
+            else:
+                # A tokenless Clone is deliberately usable through local APIs.
+                states[name] = "local"
+                reasons.pop(name, None)
 
         errors = dict(status.get("connector_errors") or {}) if errors is None else dict(errors)
         issues = [issue for issue in previous_issues if issue.get("code") not in {
@@ -794,11 +806,17 @@ class StartupManager:
                 "details": errors, "automatic_retry": True})
         degraded = bool(status.get("failed_agents") or any(
             issue.get("severity") in {"warning", "error", "critical"} for issue in issues))
-        status.update(issues=issues, connector_errors=errors, degraded=degraded,
+        order = [name for name in status.get("agent_order", states) if name not in removed]
+        order.extend(name for name in states if name not in order)
+        ready_agents = sum(state in {"online", "local"} for state in states.values())
+        status.update(agent_order=order, total=len(states), ready_agents=ready_agents,
+            completed=ready_agents + sum(state == "failed" for state in states.values()),
+            issues=issues, connector_errors=errors, degraded=degraded,
             ready=not pending and not degraded,
             phase="connecting" if pending else "degraded" if degraded else "ready",
             agent_states=states, agent_reasons=reasons,
-            connecting_agents=len(connecting), local_agents=len(unavailable),
+            connecting_agents=len(connecting),
+            local_agents=sum(state == "local" for state in states.values()),
             waiting_for=sorted(connecting))
         self.kernel.startup_status = status
         if pending or not publish:

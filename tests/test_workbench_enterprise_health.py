@@ -414,3 +414,40 @@ async def test_shared_handoff_rejects_new_http_work_and_can_resume(tmp_path):
         assert owner._handoff_requests == 0
         owner._handoff_draining = False
         assert (await client.post("/test-handoff-work")).status == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_health_after_local_clone_removal_keeps_unrelated_failures(tmp_path, failed):
+    from orchestrator.startup_manager import StartupManager
+
+    states = {"local-clone": "local", "removed-clone": "local"}
+    issues = [{"code": "agent_telegram_unavailable", "severity": "warning",
+               "details": {"agents": list(states)}}]
+    if failed:
+        states["failed-agent"] = "failed"
+        issues.append({"code": "agent_startup_failed", "severity": "warning"})
+    app = SimpleNamespace(
+        runtimes=[], api_gateway=None,
+        _runtime_map=lambda: {"local-clone": SimpleNamespace(telegram_connected=False)},
+        function_workers=SimpleNamespace(telegram_ingress_snapshot=lambda name: {"configured": False}),
+        startup_status={"phase": "degraded", "services_ready": True,
+                        "agent_order": list(states), "agent_states": states,
+                        "agent_reasons": {"removed-clone": "Telegram unavailable",
+                                          "local-clone": "Telegram unavailable"},
+                        "total": len(states), "completed": len(states),
+                        "ready_agents": 2, "failed_agents": int(failed), "issues": issues})
+    app.startup_manager = StartupManager(app, None)
+    server = _server(tmp_path, profile="personal")
+    server.orchestrator = app
+    payload = json.loads((await server.handle_health(_FakeRequest())).text)
+    assert payload["ready"] is (not failed)
+    assert payload["degraded"] is failed
+    assert [issue["code"] for issue in payload["issues"]] == (["agent_startup_failed"] if failed else [])
+    startup = payload["startup"]
+    assert "removed-clone" not in startup["agent_states"]
+    assert "removed-clone" not in startup["agent_order"]
+    assert not startup["agent_reasons"]
+    assert startup["total"] == startup["completed"] == 1 + int(failed)
+    assert startup["ready_agents"] == 1
+    assert startup["local_agents"] == 1

@@ -6828,6 +6828,12 @@ class WorkbenchApiServer:
             "agents": running_agents,
         }
         startup = dict(getattr(orchestrator, "startup_status", {}) or {})
+        manager = getattr(orchestrator, "startup_manager", None)
+        if (manager is not None and startup.get("services_ready")
+                and startup.get("phase") in {"ready", "degraded"}
+                and not getattr(orchestrator, "_handoff_draining", False)):
+            manager.reconcile_connector_status(publish=False)
+            startup = dict(orchestrator.startup_status)
         if startup:
             payload["ready"] = bool(startup.get("ready", False))
             payload["degraded"] = bool(startup.get("degraded", False))

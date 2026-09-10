@@ -353,3 +353,10 @@ memory checksums. A read-only backup must not invalidate its own transfer.
 Move/Clone start and stop requests allow the PAO lifecycle readiness budget on
 local and Remote hops. Completed rollback stops automatic retry of that package;
 a fresh preflight is required, while incomplete rollback retains recovery checks.
+
+- 2026-09-10: Windows Move/Clone validation exposed stale health after deleting
+  the tokenless test Clone. PAO Functions now distinguish intentionally local
+  Workers from configured Telegram outages, and completed-startup health reads
+  refresh the shared owner's projection without hiding failed startup entries.
+  HTTP regression: two failures before fix, 17 focused tests pass afterward;
+  Windows adoption and final cross-instance evidence are recorded in the nightly inbox.

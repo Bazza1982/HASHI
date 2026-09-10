@@ -319,3 +319,12 @@ the coordinator after successful disablement, including self-moves. Accepted
 work survives shared Functions replacement; recovery commands reconcile the
 background receipt. Detailed workspace inventories remain in the coordinator
 journal, not duplicated in the bounded background receipt.
+
+### Health after local Clone and Move (2026-09-10)
+
+PAO startup health is a projection of current Worker/connector state. A Worker
+with no configured Telegram ingress is intentionally local, not a Telegram
+failure. After startup, health reads reconcile through StartupManager: removed
+successful Worker entries leave the projection, while failed/pending startup
+entries and unrelated service failures remain visible. Reads must not reconcile
+across startup or a shared Functions handoff. This does not alter Core lifecycle.
