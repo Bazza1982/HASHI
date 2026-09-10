@@ -330,3 +330,9 @@ Move/Clone confirmation now persists intent for the shared Functions
 AgentMoveManager, which owns stop/continue, crash recovery and final notice
 delivery beyond the initiating Worker lifetime. `accepted` is not `completed`;
 CLI `--status` reads the receipt. See [Agent Move](HASHI_AGENT_MOVE_V1.md).
+
+Local command responses capture both short replies and `send_long_message`
+output in the request's async context. This keeps `/version` and other long
+command results in the API `messages` response for TUI rendering. Capture is
+scoped to the runtime and ends with the command; ordinary Telegram delivery
+outside that context retains its normal chunking and delivery behavior.

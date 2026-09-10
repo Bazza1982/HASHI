@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +35,7 @@ def _json_safe(value: Any):
 @dataclass
 class _CaptureStore:
     messages: list[dict[str, Any]]
+    active: bool = True
 
     async def capture_reply(self, text: str, **kwargs):
         self.messages.append(
@@ -55,6 +58,27 @@ class _CaptureStore:
             }
         )
         return SimpleNamespace(ok=True)
+
+
+_LOCAL_OUTPUT_CAPTURE: ContextVar[Any] = ContextVar("local_command_output", default=None)
+
+
+@contextmanager
+def _capture_local_output(runtime, store):
+    token = _LOCAL_OUTPUT_CAPTURE.set((runtime, store))
+    try:
+        yield
+    finally:
+        store.active = False
+        _LOCAL_OUTPUT_CAPTURE.reset(token)
+
+
+async def capture_local_command_output(runtime, chat_id, text, **kwargs) -> bool:
+    capture = _LOCAL_OUTPUT_CAPTURE.get()
+    if capture is None or capture[0] is not runtime or not capture[1].active:
+        return False
+    await capture[1].capture_send(chat_id, text, **kwargs)
+    return True
 
 
 class _FakeMessage:
@@ -310,6 +334,7 @@ async def execute_local_command(
                 runtime._send_text = store.capture_send
             try:
                 with (
+                    _capture_local_output(runtime, store),
                     ui_language.language_scope(
                         runtime,
                         update,

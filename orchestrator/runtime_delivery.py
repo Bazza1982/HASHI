@@ -198,6 +198,13 @@ async def send_long_message(
     error_context: Mapping[str, Any] | None = None,
 ):
     """Send Markdown or pre-rendered Telegram HTML with safe chunking."""
+    from orchestrator.admin_local_testing import capture_local_command_output
+
+    if await capture_local_command_output(
+        runtime, chat_id, text, request_id=request_id, purpose=purpose,
+        parse_mode=parse_mode,
+    ):
+        return 0.0, 1
     canonical = getattr(runtime, "canonical_audit", None)
 
     def record_delivery(stage: str, **fields: Any) -> None:

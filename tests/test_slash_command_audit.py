@@ -163,9 +163,19 @@ class _Runtime:
 
 @pytest.mark.asyncio
 async def test_execute_local_command_writes_success_audit(tmp_path):
-    runtime = _Runtime(tmp_path)
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.runtime_version import _send
+
+    class _LongRuntime(_Runtime):
+        send_long_message = FlexibleAgentRuntime.send_long_message
+
+        async def cmd_status(self, update, context):
+            await _send(self, update, "<b>version facts</b>" + "x" * 5000)
+
+    runtime = _LongRuntime(tmp_path)
     result = await execute_local_command(runtime, "/status", chat_id=99)
     assert result["ok"] is True
+    assert [m["text"] for m in result["messages"]] == ["<b>version facts</b>" + "x" * 5000]
     rows = _read_jsonl(default_audit_path(tmp_path))
     assert len(rows) == 1
     assert rows[0]["status"] == "success"

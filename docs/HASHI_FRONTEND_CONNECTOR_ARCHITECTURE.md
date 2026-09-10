@@ -299,3 +299,9 @@ New Connector work must:
 7. avoid private external product names and client-specific runtime branches;
    and
 8. preserve compatibility identifiers only where migration requires them.
+
+Local command responses capture both short replies and `send_long_message`
+output in the request's async context. This keeps `/version` and other long
+command results in the API `messages` response for TUI rendering. Capture is
+scoped to the runtime and ends with the command; ordinary Telegram delivery
+outside that context retains its normal chunking and delivery behavior.
