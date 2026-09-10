@@ -210,6 +210,7 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
 
     preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
     assert preferences == {
+        "theme": "retro",
         "language": "zh",
         "layout": "balanced",
         "sounds": True,
@@ -1068,3 +1069,33 @@ async def test_sidepanel_auto_tour_is_bilingual_looping_and_persistent(
     reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
     assert reloaded._side_panel_enabled is True
     assert reloaded._side_panel_auto_scroll is False
+
+
+async def test_theme_switch_recolors_history_preserves_draft_and_preferences(tmp_path):
+    from tui.themes import PALETTES
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "tui_preferences.json").write_text('{"future_option": 42}')
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+    async with app.run_test(size=(80, 30)) as pilot:
+        chat = app.query_one(ChatHistory)
+        draft = app.query_one(ChatInput)
+        draft.value = "unfinished 中文 draft"
+        chat.write(chat_message_renderable("assistant", "Agent", "Existing **message**\n```python\nprint(42)\n```"))
+        await pilot.pause()
+        original = chat.lines[0]
+        for name in PALETTES:
+            app._handle_theme_cmd("/theme " + name)
+            await pilot.pause()
+            assert app.theme == "hashi-" + name
+            assert "Existing" in "\n".join(line.text for line in chat.lines)
+            assert draft.value == "unfinished 中文 draft"
+            if name == "win32":
+                assert list(chat.lines[0]) != list(original)
+                assert app.query_one(ChatHistory).styles.background.hex == "#EEEEEE"
+        app._handle_theme_cmd("/theme nonsense")
+        assert app.theme == "hashi-atm"
+        saved = json.loads(app._preferences_path.read_text())
+        assert saved["theme"] == "atm" and saved["future_option"] == 42
+    reopened = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    assert reopened.theme == "hashi-atm"

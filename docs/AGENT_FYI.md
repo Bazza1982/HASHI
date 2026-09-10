@@ -360,3 +360,9 @@ a fresh preflight is required, while incomplete rollback retains recovery checks
   refresh the shared owner's projection without hiding failed startup entries.
   HTTP regression: two failures before fix, 17 focused tests pass afterward;
   Windows adoption and final cross-instance evidence are recorded in the nightly inbox.
+
+- 2026-09-10: Frontend Functions candidate adds local `/theme` with Retro,
+  Apple II, Nintendo, Win32 and ATM palettes. Switching recolors displayed
+  history and persists through the existing TUI preferences while preserving
+  other keys and the draft. WSL renderer checks pass; Windows and actual client
+  adoption must be recorded separately. No Core change or reboot is needed.

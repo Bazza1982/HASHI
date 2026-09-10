@@ -97,24 +97,24 @@ class SidePanel(VerticalScroll):
         height: 1fr;
         margin-left: 1;
         padding: 0 1;
-        background: #08131d;
-        color: #dff6ff;
-        border: solid #2a5b82;
+        background: $hashi-surface;
+        color: $hashi-text;
+        border: solid $hashi-border;
         border-title-align: left;
         overflow-x: hidden;
         overflow-y: scroll;
-        scrollbar-background: #050b12;
-        scrollbar-color: #2a5b82;
-        scrollbar-color-hover: #71b7ff;
-        scrollbar-color-active: #63ffd9;
+        scrollbar-background: $hashi-background;
+        scrollbar-color: $hashi-border;
+        scrollbar-color-hover: $hashi-primary;
+        scrollbar-color-active: $hashi-accent;
     }
     SidePanel:focus {
-        border: solid #63ffd9;
+        border: solid $hashi-accent;
     }
     SidePanel > #side-panel-content {
         width: 1fr;
         height: auto;
-        color: #dff6ff;
+        color: $hashi-text;
     }
     """
 
@@ -257,7 +257,7 @@ class SidePanel(VerticalScroll):
             return "$0.0000"
 
     @staticmethod
-    def _line(rows: Text, value: str, style: str = "#dff6ff") -> None:
+    def _line(rows: Text, value: str, style: str = "hashi.text") -> None:
         rows.append(value, style=style)
         rows.append("\n")
 
@@ -265,7 +265,7 @@ class SidePanel(VerticalScroll):
     def _section(cls, rows: Text, value: str) -> None:
         if rows:
             rows.append("\n")
-        cls._line(rows, value, "bold #63ffd9")
+        cls._line(rows, value, "bold hashi.accent")
 
     @classmethod
     def _usage(cls, rows: Text, overview: dict | None, labels: dict) -> None:
@@ -278,7 +278,7 @@ class SidePanel(VerticalScroll):
         ):
             period = usage.get(key)
             if not isinstance(period, dict):
-                cls._line(rows, f"{title} · {labels['unavailable']}", "dim #9fb3c8")
+                cls._line(rows, f"{title} · {labels['unavailable']}", "dim hashi.muted")
                 continue
             requests = int(period.get("requests", 0) or 0)
             unknown = int(period.get("unknown_cost_requests", 0) or 0)
@@ -292,7 +292,7 @@ class SidePanel(VerticalScroll):
                 f"  {labels['input']} {cls._number(period.get('input'))} · "
                 f"{labels['output']} {cls._number(period.get('output'))} · "
                 f"{labels['thinking']} {cls._number(period.get('thinking'))}",
-                "dim #9be7ff",
+                "dim hashi.secondary",
             )
             if unknown and (not requests or unknown >= requests):
                 cost = labels["cost_unknown_all"]
@@ -300,7 +300,7 @@ class SidePanel(VerticalScroll):
                 cost = cls._cost(period.get("cost_usd"))
                 if unknown:
                     cost += f" · {unknown} {labels['cost_unknown']}"
-            cls._line(rows, f"  {cost}", "dim #9be7ff")
+            cls._line(rows, f"  {cost}", "dim hashi.secondary")
 
     @classmethod
     def _jobs(
@@ -313,11 +313,11 @@ class SidePanel(VerticalScroll):
         scheduled: bool,
     ) -> None:
         if jobs is None:
-            cls._line(rows, f"{title} · {labels['unavailable']}", "dim #9fb3c8")
+            cls._line(rows, f"{title} · {labels['unavailable']}", "dim hashi.muted")
             return
         cls._line(rows, f"{title} · {len(jobs)}")
         if not jobs:
-            cls._line(rows, f"  {labels['none']}", "dim #9fb3c8")
+            cls._line(rows, f"  {labels['none']}", "dim hashi.muted")
         for item in jobs[:8]:
             if not isinstance(item, dict):
                 continue
@@ -346,7 +346,7 @@ class SidePanel(VerticalScroll):
                 detail = str(item.get("state") or item.get("status") or "—")
             cls._line(rows, f"  {identifier} · {detail}")
         if len(jobs) > 8:
-            cls._line(rows, f"  … +{len(jobs) - 8}", "dim #9fb3c8")
+            cls._line(rows, f"  … +{len(jobs) - 8}", "dim hashi.muted")
 
     @classmethod
     def _context_section(cls, rows: Text, overview: dict | None, labels: dict) -> None:
@@ -354,7 +354,7 @@ class SidePanel(VerticalScroll):
         prompts = overview.get("system_prompts") if isinstance(overview, dict) else None
         if not isinstance(prompts, dict):
             cls._line(
-                rows, f"{labels['prompts']} · {labels['unavailable']}", "dim #9fb3c8"
+                rows, f"{labels['prompts']} · {labels['unavailable']}", "dim hashi.muted"
             )
             return
         cls._line(
@@ -377,20 +377,20 @@ class SidePanel(VerticalScroll):
             )
             preview = str(item.get("preview") or "").strip()
             if preview:
-                cls._line(rows, f"    {preview}", "dim #9fb3c8")
+                cls._line(rows, f"    {preview}", "dim hashi.muted")
         if len(configured) > 8:
-            cls._line(rows, f"  … +{len(configured) - 8}", "dim #9fb3c8")
+            cls._line(rows, f"  … +{len(configured) - 8}", "dim hashi.muted")
 
     @classmethod
     def _parked(cls, rows: Text, overview: dict | None, labels: dict) -> None:
         cls._section(rows, labels["parked"])
         parked = overview.get("parked_topics") if isinstance(overview, dict) else None
         if not isinstance(parked, dict):
-            cls._line(rows, labels["unavailable"], "dim #9fb3c8")
+            cls._line(rows, labels["unavailable"], "dim hashi.muted")
             return
         topics = parked.get("topics") if isinstance(parked.get("topics"), list) else []
         if not topics:
-            cls._line(rows, labels["none"], "dim #9fb3c8")
+            cls._line(rows, labels["none"], "dim hashi.muted")
         for item in topics[:8]:
             if not isinstance(item, dict):
                 continue
@@ -405,7 +405,7 @@ class SidePanel(VerticalScroll):
                 + (f" · {state}" if state else ""),
             )
         if len(topics) > 8:
-            cls._line(rows, f"  … +{len(topics) - 8}", "dim #9fb3c8")
+            cls._line(rows, f"  … +{len(topics) - 8}", "dim hashi.muted")
 
     @classmethod
     def _agents(
@@ -413,7 +413,7 @@ class SidePanel(VerticalScroll):
     ) -> None:
         cls._section(rows, labels["agents"])
         if not agents:
-            cls._line(rows, labels["none"], "dim #9fb3c8")
+            cls._line(rows, labels["none"], "dim hashi.muted")
         for item in agents:
             if not isinstance(item, dict):
                 continue
@@ -437,7 +437,7 @@ class SidePanel(VerticalScroll):
                 value += f" · {engine}"
             if queue_depth:
                 value += f" · {labels['queue']} {queue_depth}"
-            cls._line(rows, value, "#c7ff8a" if name == selected else "#dff6ff")
+            cls._line(rows, value, "hashi.success" if name == selected else "hashi.text")
 
     def update_dashboard(
         self,
@@ -460,11 +460,11 @@ class SidePanel(VerticalScroll):
         self._update_border_title()
         rows = Text()
         if not gateway_ok:
-            self._line(rows, labels["offline"], "#ff7a7a")
+            self._line(rows, labels["offline"], "hashi.error")
         elif loading:
-            self._line(rows, labels["refreshing"], "dim #9be7ff")
+            self._line(rows, labels["refreshing"], "dim hashi.secondary")
         elif incomplete:
-            self._line(rows, labels["partial"], "#ffd479")
+            self._line(rows, labels["partial"], "hashi.warning")
 
         self._usage(rows, overview, labels)
         self._section(rows, labels["jobs"])

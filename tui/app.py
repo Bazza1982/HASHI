@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from rich.console import Group
-from rich.markdown import Markdown
+from tui.themes import ThemedMarkdown as Markdown, ThemedLog, PALETTES, register_themes, apply_rich_theme
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
@@ -57,6 +57,7 @@ STARTUP_LOGO = (
 )
 
 TUI_COMMAND_HELP = {
+    "theme": ("查看或切换终端主题", "Inspect or change the terminal theme"),
     "help": ("查看 TUI 与 Agent 命令", "Show TUI and Agent commands"),
     "to": ("切换聊天目标", "Change the chat target"),
     "instance": ("查看或切换 HASHI 实例", "List or switch HASHI instances"),
@@ -76,6 +77,7 @@ TUI_COMMAND_HELP["sidepanel"] = (
     "Control the read-only information panel and automatic tour",
 )
 TUI_COMMAND_GUIDES = {
+    "theme": CommandGuide("/theme [" + "|".join((*PALETTES, "reset")) + "]", (*PALETTES, "reset"), example="/theme apple2"),
     "help": CommandGuide("/help [zh|en]", ("zh", "en"), example="/help zh"),
     "to": CommandGuide("/to <agent|all>", choice_source="agents"),
     "instance": CommandGuide(
@@ -147,14 +149,14 @@ def chat_message_renderable(role: str, prefix: str, body: str) -> Group:
 
     header = Text()
     if str(role).strip().casefold() == "assistant":
-        header.append(f"{prefix}:", style="bold #63ffd9")
+        header.append(f"{prefix}:", style="bold hashi.accent")
         content = Markdown(
             str(body),
             code_theme="monokai",
             hyperlinks=True,
         )
     else:
-        header.append(f"{prefix}:", style="bold #71b7ff")
+        header.append(f"{prefix}:", style="bold hashi.primary")
         # User input is literal text.  In particular, square brackets must not
         # be interpreted as Rich markup tags.
         content = Text(str(body))
@@ -163,19 +165,19 @@ def chat_message_renderable(role: str, prefix: str, body: str) -> Group:
 
 # ── Widgets ─────────────────────────────────────────────────────────────────
 
-class LogPanel(RichLog):
+class LogPanel(ThemedLog):
     """Upper panel — streams stdout from the bridge subprocess."""
     DEFAULT_CSS = """
     LogPanel {
         height: 1fr;
-        background: #08131d;
-        color: #dff6ff;
-        border: solid #2a5b82;
+        background: $hashi-surface;
+        color: $hashi-text;
+        border: solid $hashi-border;
         border-title-align: left;
-        scrollbar-background: #050b12;
-        scrollbar-color: #2a5b82;
-        scrollbar-color-hover: #71b7ff;
-        scrollbar-color-active: #63ffd9;
+        scrollbar-background: $hashi-background;
+        scrollbar-color: $hashi-border;
+        scrollbar-color-hover: $hashi-primary;
+        scrollbar-color-active: $hashi-accent;
     }
     """
 
@@ -184,20 +186,20 @@ class LogPanel(RichLog):
         self.wrap = True
 
 
-class ChatHistory(RichLog):
+class ChatHistory(ThemedLog):
     """Chat display area showing agent replies."""
     DEFAULT_CSS = """
     ChatHistory {
         height: 1fr;
-        background: #091722;
-        color: #dff6ff;
-        border: solid #2a5b82;
+        background: $hashi-surface;
+        color: $hashi-text;
+        border: solid $hashi-border;
         border-title-align: left;
         min-height: 6;
-        scrollbar-background: #050b12;
-        scrollbar-color: #2a5b82;
-        scrollbar-color-hover: #71b7ff;
-        scrollbar-color-active: #63ffd9;
+        scrollbar-background: $hashi-background;
+        scrollbar-color: $hashi-border;
+        scrollbar-color-hover: $hashi-primary;
+        scrollbar-color-active: $hashi-accent;
     }
     """
 
@@ -260,12 +262,12 @@ class ChatInput(Input):
     DEFAULT_CSS = """
     ChatInput {
         height: 3;
-        background: #0b1824;
-        color: #dff6ff;
-        border: solid #2a5b82;
+        background: $hashi-surface;
+        color: $hashi-text;
+        border: solid $hashi-border;
     }
     ChatInput:focus {
-        border: solid #63ffd9;
+        border: solid $hashi-accent;
     }
     """
 
@@ -279,8 +281,8 @@ class CommandPreview(Static):
         height: auto;
         max-height: 10;
         padding: 0 1;
-        background: #101d28;
-        color: #9be7ff;
+        background: $hashi-panel;
+        color: $hashi-secondary;
     }
     """
 
@@ -293,17 +295,17 @@ class CommandPreview(Static):
         rows = Text()
         for index, (command, description, scope) in enumerate(matches):
             selected = index == selected_index
-            rows.append("› " if selected else "  ", style="bold #63ffd9" if selected else "#39566e")
-            rows.append(command, style="bold #71b7ff" if selected else "#7dc6ff")
+            rows.append("› " if selected else "  ", style="bold hashi.accent" if selected else "hashi.muted")
+            rows.append(command, style="bold hashi.primary" if selected else "hashi.primary")
             rows.append(" " * max(2, 34 - len(command)))
-            rows.append(description, style="#dff6ff" if selected else "#9fb3c8")
-            rows.append(f"  {scope}", style="dim #7fb6c7")
+            rows.append(description, style="hashi.text" if selected else "hashi.muted")
+            rows.append(f"  {scope}", style="dim hashi.muted")
             if index < len(matches) - 1:
                 rows.append("\n")
         for detail in details:
             if rows:
                 rows.append("\n")
-            rows.append(f"  {detail}", style="dim #9be7ff")
+            rows.append(f"  {detail}", style="dim hashi.secondary")
         self.styles.height = "auto"
         self.update(rows)
         self.display = True
@@ -320,8 +322,8 @@ class TypingIndicator(Static):
         display: none;
         height: 1;
         padding: 0 1;
-        background: #091722;
-        color: #9be7ff;
+        background: $hashi-surface;
+        color: $hashi-secondary;
     }
     """
 
@@ -376,7 +378,7 @@ class TypingIndicator(Static):
                 if self._language == "zh"
                 else f"{self._agent} is typing{suffix}"
             )
-        self.update(Text(value, style="italic #9be7ff"))
+        self.update(Text(value, style="italic hashi.secondary"))
 
 
 class FooterInfoBox(Static):
@@ -386,9 +388,9 @@ class FooterInfoBox(Static):
     FooterInfoBox {
         height: auto;
         min-height: 4;
-        background: #050b12;
-        color: #dff6ff;
-        border: solid #2a5b82;
+        background: $hashi-background;
+        color: $hashi-text;
+        border: solid $hashi-border;
         padding: 0 1;
         margin-top: 0;
     }
@@ -529,7 +531,7 @@ class FooterInfoBox(Static):
         self._refresh_footer()
 
     def _refresh_footer(self):
-        self._content = Text(self._status_line, style="bold #63ffd9")
+        self._content = Text(self._status_line, style="bold hashi.accent")
         self.refresh()
 
     def render(self) -> Text:
@@ -640,12 +642,12 @@ class HASHITuiApp(App):
     TITLE = "HASHI \u30cf\u30b7 \u6a4b"
     CSS = """
     Screen {
-        background: #050b12;
-        color: #dff6ff;
+        background: $hashi-background;
+        color: $hashi-text;
     }
     Screen > .screen--selection {
-        background: #ffdf6b;
-        color: #050b12;
+        background: $hashi-selection;
+        color: $hashi-background;
     }
     #main-container {
         height: 1fr;
@@ -709,6 +711,12 @@ class HASHITuiApp(App):
         self._submission_sequence = 0
         self._latest_submission_ref: tuple[int, str, int] | None = None
         preferences = self._load_tui_preferences()
+        register_themes(self)
+        self._theme_name = preferences.get("theme", "retro")
+        if self._theme_name not in PALETTES:
+            self._theme_name = "retro"
+        self.theme = "hashi-" + self._theme_name
+        apply_rich_theme(self, self._theme_name)
         requested_layout = str(
             os.environ.get("HASHI_TUI_LAYOUT") or preferences.get("layout") or "chat"
         ).casefold()
@@ -827,6 +835,8 @@ class HASHITuiApp(App):
             self._preferences_path.write_text(
                 json.dumps(
                     {
+                        **self._load_tui_preferences(),
+                        "theme": self._theme_name,
                         "language": self._ui_language,
                         "layout": self._layout_mode,
                         "sounds": self._sound_enabled,
@@ -904,12 +914,12 @@ class HASHITuiApp(App):
         log = self.query_one("#log-panel", LogPanel)
         log.clear()
         if self._layout_mode == "balanced":
-            colors = ("#71b7ff", "#7dc6ff", "#87d4ff", "#92e1ff", "#9eeed8", "#c7ff8a")
+            colors = ("hashi.primary", "hashi.primary", "hashi.primary", "hashi.primary", "hashi.accent", "hashi.success")
             logo = "\n".join(
                 f"[bold {color}]{line}[/]" for color, line in zip(colors, STARTUP_LOGO)
             )
             status = "终端已连接" if self._ui_language == "zh" else "Terminal connected"
-            log.write(markup(f"{logo}\n[#9be7ff]{self.launch_instance_id} · {status}[/]"))
+            log.write(markup(f"{logo}\n[hashi.secondary]{self.launch_instance_id} · {status}[/]"))
         else:
             status = (
                 "终端已连接 · 正在准备本地服务…"
@@ -917,7 +927,7 @@ class HASHITuiApp(App):
                 else "Terminal connected · preparing local services…"
             )
             log.write(markup(
-                f"[bold #63ffd9]HASHI · {self.launch_instance_id}[/]\n[#9be7ff]{status}[/]"
+                f"[bold hashi.accent]HASHI · {self.launch_instance_id}[/]\n[hashi.secondary]{status}[/]"
             ))
 
     # ── Onboarding ──────────────────────────────────────────────────────
@@ -1389,7 +1399,7 @@ class HASHITuiApp(App):
                     if self._ui_language == "zh"
                     else f"Unknown command: {command}"
                 )
-                chat.write(Text(message, style="dim #9fb3c8"))
+                chat.write(Text(message, style="dim hashi.muted"))
                 return
             normalized = resolved
 
@@ -1415,6 +1425,9 @@ class HASHITuiApp(App):
         if normalized == "/help" or normalized.startswith("/help "):
             self._handle_help_cmd(normalized)
             return
+        if normalized == "/theme" or normalized.startswith("/theme "):
+            self._handle_theme_cmd(normalized)
+            return
         if normalized == "/layout" or normalized.startswith("/layout "):
             self._handle_layout_cmd(normalized)
             return
@@ -1437,7 +1450,7 @@ class HASHITuiApp(App):
         # Everything else → send to agent
         if not self.gateway_ok:
             chat = self.query_one("#chat-history", ChatHistory)
-            chat.write(markup("[#ff7a7a]Local HASHI API not connected. Chat unavailable.[/]"))
+            chat.write(markup("[hashi.error]Local HASHI API not connected. Chat unavailable.[/]"))
             return
 
         chat = self.query_one("#chat-history", ChatHistory)
@@ -2064,16 +2077,16 @@ class HASHITuiApp(App):
             typing = "ON" if self._tui_typing_enabled else "OFF"
             mirror = "ON" if self._telegram_mirror_enabled else "OFF"
             chat.write(markup(
-                f"[#c7ff8a]TUI language · {current} · sound · {sound} · "
+                f"[hashi.success]TUI language · {current} · sound · {sound} · "
                 f"typing · {typing} · TG mirror · {mirror}[/]\n"
-                "[#9be7ff]/tui language zh|en · /tui sound on|off|test · "
+                "[hashi.secondary]/tui language zh|en · /tui sound on|off|test · "
                 "/tui typing on|off · /tui telegram on|off[/]"
             ))
             return
         if len(parts) == 2 and parts[1].casefold() in {"language", "lang"}:
             current = "中文" if self._ui_language == "zh" else "English"
             chat.write(markup(
-                f"[#c7ff8a]TUI language · {current} · /tui language zh|en[/]"
+                f"[hashi.success]TUI language · {current} · /tui language zh|en[/]"
             ))
             return
         if len(parts) == 3 and parts[1].casefold() in {"language", "lang"}:
@@ -2083,13 +2096,13 @@ class HASHITuiApp(App):
             elif requested in {"en", "english"}:
                 self._ui_language = "en"
             else:
-                chat.write(markup("[#ff7a7a]Use /tui language zh|en.[/]"))
+                chat.write(markup("[hashi.error]Use /tui language zh|en.[/]"))
                 return
             self._save_tui_preferences()
             self._refresh_chrome()
             self._render_host_header()
             message = "✓ TUI 已切换为中文。" if self._ui_language == "zh" else "✓ TUI switched to English."
-            chat.write(markup(f"[#63ffd9]{message}[/]"))
+            chat.write(markup(f"[hashi.accent]{message}[/]"))
             return
         if len(parts) == 2 and parts[1].casefold() == "sound":
             state = (
@@ -2098,7 +2111,7 @@ class HASHITuiApp(App):
                 else ("on" if self._sound_enabled else "off")
             )
             chat.write(markup(
-                f"[#c7ff8a]TUI sound · {state} · /tui sound on|off|test[/]"
+                f"[hashi.success]TUI sound · {state} · /tui sound on|off|test[/]"
             ))
             return
         if len(parts) == 3 and parts[1].casefold() == "sound":
@@ -2117,7 +2130,7 @@ class HASHITuiApp(App):
                         if self._ui_language == "zh"
                         else " No audio output is available on this system."
                     )
-                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                chat.write(markup(f"[hashi.accent]{message}[/]"))
                 return
             if action in {"off", "0", "no"}:
                 self._sound_enabled = False
@@ -2126,7 +2139,7 @@ class HASHITuiApp(App):
                     "✓ TUI 提示音已关闭。" if self._ui_language == "zh"
                     else "✓ TUI sounds disabled."
                 )
-                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                chat.write(markup(f"[hashi.accent]{message}[/]"))
                 return
             if action == "test":
                 played = self._play_message_sound("sent")
@@ -2140,10 +2153,10 @@ class HASHITuiApp(App):
                     message = "当前系统没有可用的音频输出。"
                 else:
                     message = "No audio output is available on this system."
-                chat.write(markup(f"[#63ffd9]{message}[/]"))
+                chat.write(markup(f"[hashi.accent]{message}[/]"))
                 return
         chat.write(markup(
-            "[#ff7a7a]Use /tui language zh|en, /tui sound on|off|test, "
+            "[hashi.error]Use /tui language zh|en, /tui sound on|off|test, "
             "/tui typing on|off, or /tui telegram on|off.[/]"
         ))
 
@@ -2156,11 +2169,11 @@ class HASHITuiApp(App):
                 if self._ui_language == "zh"
                 else f"TUI typing indicator {state}. This is independent of Telegram /typing."
             )
-            chat.write(Text(message, style="#c7ff8a"))
+            chat.write(Text(message, style="hashi.success"))
             return
         action = arguments[0].casefold()
         if len(arguments) != 1 or action not in {"on", "off"}:
-            chat.write(Text("Use /tui typing on|off.", style="#ff7a7a"))
+            chat.write(Text("Use /tui typing on|off.", style="hashi.error"))
             return
         self._tui_typing_enabled = action == "on"
         self._save_tui_preferences()
@@ -2170,13 +2183,13 @@ class HASHITuiApp(App):
             if self._ui_language == "zh"
             else f"\u2713 TUI typing indicator {'enabled' if self._tui_typing_enabled else 'disabled'}."
         )
-        chat.write(Text(message, style="#63ffd9"))
+        chat.write(Text(message, style="hashi.accent"))
 
     def _handle_telegram_cmd(self, text: str) -> None:
         chat = self.query_one("#chat-history", ChatHistory)
         parts = text.split()
         if len(parts) > 2 or (len(parts) == 2 and parts[1].casefold() not in {"on", "off"}):
-            chat.write(Text("Use /telegram on|off.", style="#ff7a7a"))
+            chat.write(Text("Use /telegram on|off.", style="hashi.error"))
             return
         changed = len(parts) == 2
         if changed:
@@ -2203,7 +2216,7 @@ class HASHITuiApp(App):
                 f"{prefix}TUI Telegram mirror {state} (Bot {connector_state}). "
                 "This affects only future Runs submitted by this TUI; the Conversation remains shared and no history is replayed."
             )
-        chat.write(Text(message, style="#63ffd9" if changed else "#c7ff8a"))
+        chat.write(Text(message, style="hashi.accent" if changed else "hashi.success"))
 
     def _play_message_sound(self, event: str) -> bool:
         return play_message_sound(event, enabled=self._sound_enabled)
@@ -2324,6 +2337,33 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         if persist:
             self._save_tui_preferences()
 
+    def _handle_theme_cmd(self, text: str):
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split()
+        choices = " · ".join(PALETTES)
+        if len(parts) == 1:
+            title = "当前主题" if self._ui_language == "zh" else "Current theme"
+            descriptions = ("Retro 默认 · Apple II 黑绿 · Nintendo 奶油红黑 · Win32 灰蓝 · ATM 深蓝银色"
+                            if self._ui_language == "zh" else
+                            "Retro default · Apple II green · Nintendo cream/red · Win32 gray/blue · ATM navy/silver")
+            chat.write(Text(f"{title}: {self._theme_name}\n{descriptions}\n/theme {choices} · reset\n/theme apple2", style="hashi.secondary"))
+            return
+        name = "retro" if parts[1] == "reset" else parts[1]
+        if len(parts) != 2 or name not in PALETTES:
+            title = "无效主题" if self._ui_language == "zh" else "Invalid theme"
+            chat.write(Text(f"{title}: {choices} · reset", style="hashi.error"))
+            return
+        self._theme_name = name
+        self.theme = "hashi-" + name
+        apply_rich_theme(self, name)
+        for log in self.query(ThemedLog):
+            log.retheme()
+        self._refresh_chrome()
+        self.refresh(layout=True)
+        self._save_tui_preferences()
+        title = "主题" if self._ui_language == "zh" else "Theme"
+        chat.write(Text(f"✓ {title}: {name}", style="hashi.success"))
+
     def _handle_layout_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)
         parts = text.split(maxsplit=1)
@@ -2331,13 +2371,13 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         aliases = {"reset": "chat", "default": "chat"}
         mode = aliases.get(requested, requested)
         if not mode:
-            chat.write(markup(f"[#c7ff8a]Layout · {self._layout_mode} · Use /layout chat|balanced|compact[/]"))
+            chat.write(markup(f"[hashi.success]Layout · {self._layout_mode} · Use /layout chat|balanced|compact[/]"))
             return
         if mode not in {"chat", "balanced", "compact"}:
-            chat.write(markup("[#ff7a7a]Unknown layout. Use /layout chat|balanced|compact|reset.[/]"))
+            chat.write(markup("[hashi.error]Unknown layout. Use /layout chat|balanced|compact|reset.[/]"))
             return
         self._apply_layout(mode)
-        chat.write(markup(f"[#63ffd9]✓ Layout · {mode}[/]"))
+        chat.write(markup(f"[hashi.accent]✓ Layout · {mode}[/]"))
 
     def _reset_side_panel_data(self) -> None:
         self._side_panel_overview = None
@@ -2476,7 +2516,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                     if self._ui_language == "zh"
                     else f"Automatic tour · {state}. Usage · /sidepanel auto on|off|toggle"
                 )
-                chat.write(Text(message, style="#c7ff8a"))
+                chat.write(Text(message, style="hashi.success"))
                 return
             auto_action = parts[2].casefold() if len(parts) == 3 else ""
             if auto_action not in {"on", "off", "toggle"}:
@@ -2485,7 +2525,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                     if self._ui_language == "zh"
                     else "Use /sidepanel auto on|off|toggle."
                 )
-                chat.write(Text(message, style="#ff7a7a"))
+                chat.write(Text(message, style="hashi.error"))
                 return
             self._side_panel_auto_scroll = (
                 not self._side_panel_auto_scroll
@@ -2513,7 +2553,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 if self._ui_language == "zh"
                 else f"✓ Automatic tour set to {state}."
             )
-            chat.write(Text(message, style="#63ffd9"))
+            chat.write(Text(message, style="hashi.accent"))
             return
         action = parts[1].casefold() if len(parts) == 2 else "on"
         if len(parts) > 2 or action not in {"on", "off", "toggle", "refresh"}:
@@ -2522,7 +2562,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 if self._ui_language == "zh"
                 else "Use /sidepanel on|off|toggle|refresh or /sidepanel auto on|off|toggle."
             )
-            chat.write(Text(message, style="#ff7a7a"))
+            chat.write(Text(message, style="hashi.error"))
             return
         self._side_panel_enabled = (
             not self._side_panel_enabled if action == "toggle" else action != "off"
@@ -2539,7 +2579,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             message = f"✓ 只读信息面板{'已打开' if self._side_panel_enabled else '已关闭'}。"
         else:
             message = f"✓ Read-only information panel {'opened' if self._side_panel_enabled else 'closed'}."
-        chat.write(Text(message, style="#63ffd9"))
+        chat.write(Text(message, style="hashi.accent"))
 
     def _handle_log_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)
@@ -2547,16 +2587,16 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         action = parts[1].strip().casefold() if len(parts) > 1 else "pause"
         if action == "show":
             self._apply_layout("chat")
-            chat.write(markup("[#63ffd9]✓ Host log shown.[/]"))
+            chat.write(markup("[hashi.accent]✓ Host log shown.[/]"))
         elif action == "hide":
             self._apply_layout("compact")
-            chat.write(markup("[#63ffd9]✓ Host log hidden.[/]"))
+            chat.write(markup("[hashi.accent]✓ Host log hidden.[/]"))
         elif action == "pause":
             self.action_toggle_log_pause()
             state = "paused" if self._log_paused else "following"
-            chat.write(markup(f"[#63ffd9]✓ Host log · {state}.[/]"))
+            chat.write(markup(f"[hashi.accent]✓ Host log · {state}.[/]"))
         else:
-            chat.write(markup("[#ff7a7a]Use /log show|hide|pause.[/]"))
+            chat.write(markup("[hashi.error]Use /log show|hide|pause.[/]"))
 
     @work()
     async def _send_message(
@@ -2698,7 +2738,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         ):
             details = self._command_guide_details(command, include_usage=True)
             if details:
-                chat.write(Text("\n".join(details), style="dim #9be7ff"))
+                chat.write(Text("\n".join(details), style="dim hashi.secondary"))
 
     async def _refresh_runtime_state(
         self,
@@ -2792,7 +2832,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         chat = self.query_one("#chat-history", ChatHistory)
         parts = text.split()[1:]  # strip "/to"
         if not parts:
-            chat.write(markup("[#c7ff8a]Usage: /to <agent> or /to all[/]"))
+            chat.write(markup("[hashi.success]Usage: /to <agent> or /to all[/]"))
             return
 
         # Refresh agent list
@@ -2818,7 +2858,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self._cancel_side_panel_refresh()
             self._reset_side_panel_data()
             chat.border_title = "Chat \u2014 \U0001f4e2 Broadcasting to ALL agents"
-            chat.write(markup("[#63ffd9]\u2705 Broadcasting mode: messages will be sent to all active agents.[/]"))
+            chat.write(markup("[hashi.accent]\u2705 Broadcasting mode: messages will be sent to all active agents.[/]"))
             self._update_status_bar()
             self._render_side_panel()
             return
@@ -2826,26 +2866,26 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         # Single or multi agent
         if target in agent_map:
             self._select_agent(agent_map[target])
-            chat.write(markup(f"[#63ffd9]\u2705 Switched to {self.current_agent_display}[/]"))
+            chat.write(markup(f"[hashi.accent]\u2705 Switched to {self.current_agent_display}[/]"))
         else:
-            chat.write(markup(f"[#ff7a7a]Agent '{target}' not found. Use /agents to list.[/]"))
+            chat.write(markup(f"[hashi.error]Agent '{target}' not found. Use /agents to list.[/]"))
 
     async def _handle_agents_cmd(self):
         chat = self.query_one("#chat-history", ChatHistory)
         agents = await self.api.list_agents()
         self._adopt_agent_directory(agents)
         if not agents:
-            chat.write(markup("[#c7ff8a]No agents found.[/]"))
+            chat.write(markup("[hashi.success]No agents found.[/]"))
             return
-        chat.write(markup("[bold #9be7ff]Available agents:[/]"))
+        chat.write(markup("[bold hashi.secondary]Available agents:[/]"))
         for a in agents:
             emoji = a.get("emoji", "")
             name = a.get("name", "?")
             display = a.get("display_name", name)
             engine = a.get("active_backend", a.get("engine", "?"))
-            online = "[#63ffd9]\U0001f7e2[/]" if a.get("online") else "[#7fb6c7]\u26aa[/]"
+            online = "[hashi.accent]\U0001f7e2[/]" if a.get("online") else "[hashi.muted]\u26aa[/]"
             marker = " \u25c0" if name == self.current_agent else ""
-            chat.write(markup(f"  {online} {emoji} [#dff6ff]{name}[/] ([#9be7ff]{display}[/]) [#71b7ff]\u2014[/] [#7fb6c7]{engine}[/]{marker}"))
+            chat.write(markup(f"  {online} {emoji} [hashi.text]{name}[/] ([hashi.secondary]{display}[/]) [hashi.primary]\u2014[/] [hashi.muted]{engine}[/]{marker}"))
 
     # ── /instance command ──────────────────────────────────────────────
 
@@ -2866,27 +2906,27 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     async def _show_instances(self, *, refresh: bool = True) -> list[InstanceTarget]:
         chat = self.query_one("#chat-history", ChatHistory)
         targets = await self._instance_resolver.discover(refresh=refresh)
-        chat.write(markup("[bold #9be7ff]HASHI instances:[/]"))
+        chat.write(markup("[bold hashi.secondary]HASHI instances:[/]"))
         for target in targets:
             selected = target.instance_id == self.current_instance_id
             if selected:
-                icon = "[#63ffd9]●[/]"
+                icon = "[hashi.accent]●[/]"
                 state = "current · connected"
             elif target.available:
-                icon = "[#9be7ff]○[/]"
+                icon = "[hashi.secondary]○[/]"
                 state = f"available · {target.route_kind}"
             else:
-                icon = "[#ff7a7a]×[/]"
+                icon = "[hashi.error]×[/]"
                 state = target.reason or "unavailable"
-            chat.write(markup(f"  {icon} [#dff6ff]{target.instance_id}[/]  [#7fb6c7]{state}[/]"))
+            chat.write(markup(f"  {icon} [hashi.text]{target.instance_id}[/]  [hashi.muted]{state}[/]"))
         if len(targets) == 1:
             chat.write(
                 markup(
-                    "[#c7ff8a]No trusted peers available. Hashi Remote must be "
+                    "[hashi.success]No trusted peers available. Hashi Remote must be "
                     "on and handshaken on both instances.[/]"
                 )
             )
-        chat.write(markup("[#c7ff8a]Use: /instance <id> · /instance current · /instance refresh[/]"))
+        chat.write(markup("[hashi.success]Use: /instance <id> · /instance current · /instance refresh[/]"))
         return targets
 
     async def _handle_instance_cmd(self, text: str):
@@ -2899,17 +2939,17 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
         requested = self.launch_instance_id if argument.lower() == "current" else argument.upper()
         if requested == self.current_instance_id:
-            chat.write(markup(f"[#c7ff8a]Already connected to {self.current_instance_id}.[/]"))
+            chat.write(markup(f"[hashi.success]Already connected to {self.current_instance_id}.[/]"))
             return
 
         async with self._instance_switch_lock:
             targets = await self._instance_resolver.discover(refresh=True)
             target = next((item for item in targets if item.instance_id == requested), None)
             if target is None:
-                chat.write(markup(f"[#ff7a7a]Instance '{requested}' was not found through local Hashi Remote.[/]"))
+                chat.write(markup(f"[hashi.error]Instance '{requested}' was not found through local Hashi Remote.[/]"))
                 return
             if not target.available:
-                chat.write(markup(f"[#ff7a7a]Cannot switch to {requested}: {target.reason or 'unavailable'}.[/]"))
+                chat.write(markup(f"[hashi.error]Cannot switch to {requested}: {target.reason or 'unavailable'}.[/]"))
                 return
 
             candidate = self._client_for_instance(target)
@@ -2926,7 +2966,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                     reason,
                 )
                 self._write_log_line(f"[TUI] Instance switch rejected; keeping {self.current_instance_id}: {reason}")
-                chat.write(markup(f"[#ff7a7a]Switch failed: {reason}. Current connection was kept.[/]"))
+                chat.write(markup(f"[hashi.error]Switch failed: {reason}. Current connection was kept.[/]"))
                 return
             agent_result = await candidate.agents_info()
             if not agent_result.get("ok") or not isinstance(agent_result.get("agents"), list):
@@ -2938,7 +2978,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                     reason,
                 )
                 self._write_log_line(f"[TUI] Instance switch rejected; keeping {self.current_instance_id}: {reason}")
-                chat.write(markup(f"[#ff7a7a]Switch failed: {reason}. Current connection was kept.[/]"))
+                chat.write(markup(f"[hashi.error]Switch failed: {reason}. Current connection was kept.[/]"))
                 return
             agents = agent_result["agents"]
 
@@ -2979,7 +3019,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 f"[TUI] Connected to {self.current_instance_id} via "
                 f"{'local Workbench' if target.transport == 'direct' else 'authenticated Hashi Remote'}."
             )
-            chat.write(markup(f"[#63ffd9]✅ Connected to {self.current_instance_id}.[/]"))
+            chat.write(markup(f"[hashi.accent]✅ Connected to {self.current_instance_id}.[/]"))
 
     # ── Status bar ──────────────────────────────────────────────────────
 

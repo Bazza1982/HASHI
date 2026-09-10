@@ -311,3 +311,15 @@ outside that context retains its normal chunking and delivery behavior.
 Version provenance accepts Git identity only when the repository top level is
 the HASHI code root. A portable/npm artifact nested inside a different checkout
 uses its own build metadata and never inherits the enclosing repository branch.
+
+### Local terminal themes (2026-09-10)
+
+The reference TUI owns `/theme [retro|apple2|nintendo|win32|atm|reset]`.
+Retro remains the default. The local preference writer preserves unrelated
+settings; missing or invalid saved names fall back to Retro. Themes change CSS
+surfaces and Rich semantic styles together, including already displayed chat
+and log content, Markdown, code, command discovery and the information panel.
+Changing appearance retains the input draft, selected Agent and Session. It
+requires no backend call or Worker restart. Native terminal fonts and host
+window settings remain user managed. Platform/client adoption is recorded
+separately from headless renderer evidence.

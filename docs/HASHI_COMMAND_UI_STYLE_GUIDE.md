@@ -171,3 +171,9 @@ Move scope selection must precede preparation: `--identity-memory` and
 shows the selected scope, workspace size, excluded count and source deletion
 consequence. It must not silently downgrade an oversized workspace into a
 memory-only transfer. Detailed inventory remains in the prepared transaction.
+
+TUI `/theme` lists the current local theme with bilingual descriptions and
+syntax. Valid values are derived from the TUI palette owner; `reset` selects
+Retro and invalid arguments leave the selected theme unchanged. Light themes
+use dark foregrounds and an appropriate code syntax palette. Error, warning
+and success messages retain their textual meaning alongside color.
