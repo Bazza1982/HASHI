@@ -378,3 +378,13 @@ all status fields after long model/route metadata arrives in a narrow window.
 Local connection credentials are written only after the empty temporary file
 has owner-only access; the fully flushed file is then atomically published.
 This applies to first save and replacement on both POSIX and Windows.
+
+Local connection adoption uses the authenticated `/api/admin/reboot-agent`
+boundary and the existing PAO RebootManager. It binds one named Agent and a
+saved connection revision, checks actual Worker activity, and returns a durable
+operation ID. A busy Agent is left running while the local client waits up to
+90 seconds; unresolved adoption remains explicitly pending. Telegram identity
+is never fabricated to authorize a local configuration operation. The client
+checks the selected instance identity before submitting and waits for the
+authenticated PAO receipt to reach succeeded before dismissing the local page.
+Acceptance alone never claims completed adoption.

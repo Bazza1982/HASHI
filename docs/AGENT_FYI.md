@@ -408,3 +408,8 @@ This applies to first save and replacement on both POSIX and Windows.
 HER session database handles now close after each read or transaction, including
 rollback. This fixes native Windows temporary connection-validation cleanup
 without changing Core or production-state retention.
+
+Connection repair after skipping Telegram now uses authenticated local Agent
+reboot admission with a durable receipt. The client waits for idle, preserves
+busy work, and reports pending adoption on refusal. A successful slash-command
+HTTP response is not a reboot receipt; saved configuration is not live adoption.

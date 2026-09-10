@@ -644,6 +644,8 @@ class WorkbenchApiServer:
             "/api/admin/commands/{name}", self.handle_admin_commands
         )
         self.app.router.add_post("/api/admin/command", self.handle_admin_command)
+        self.app.router.add_post("/api/admin/reboot-agent", self.handle_admin_reboot_agent)
+        self.app.router.add_get("/api/admin/reboot-agent/{operation_id}", self.handle_admin_reboot_agent_status)
         self.app.router.add_post(
             "/api/agents/{name}/command", self.handle_agent_command
         )
@@ -7065,6 +7067,57 @@ class WorkbenchApiServer:
         return web.json_response(
             {"ok": ok, "message": message, "job_id": job.get("id")}
         )
+
+    async def handle_admin_reboot_agent(self, request):
+        """A local configuration save uses admin authority, independently of Telegram."""
+        if not self._check_admin_auth(request):
+            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        name = str(payload.get("agent") or "").strip()
+        request_key = str(payload.get("request_key") or "").strip()
+        runtime = self._runtime_map().get(name)
+        if runtime is None or not request_key or len(request_key) > 200:
+            return web.json_response({"ok": False, "error": "invalid agent or request key"}, status=400)
+        submit = getattr(self.orchestrator, "request_reboot", None)
+        if not callable(submit) or not getattr(runtime, "is_function_worker_proxy", False):
+            return web.json_response({"ok": False, "error": "reboot unavailable"}, status=503)
+        try:
+            state = await runtime.client.call("worker.metadata", timeout=10)
+        except Exception:
+            return web.json_response({"ok": False, "error": "activity unavailable"}, status=503)
+        if (not isinstance(state, dict) or type(state.get("is_generating")) is not bool
+                or type(state.get("queue_depth")) is not int or state["queue_depth"] < 0):
+            return web.json_response({"ok": False, "error": "activity unavailable"}, status=503)
+        if state["is_generating"] or state["queue_depth"]:
+            return web.json_response({"ok": False, "error": "AGENT_BUSY"}, status=409)
+        result = await submit(mode="min", agent_name=name, request_key=request_key,
+            origin={"surface": "workbench"}, locale=str(payload.get("locale") or "en"))
+        record = result.get("record") or {}
+        accepted = result.get("accepted") is True and record.get("status") in {"accepted", "running", "succeeded"}
+        return web.json_response({"ok": accepted, "accepted": accepted,
+            "operation_id": record.get("id"), "status": record.get("status"),
+            "error": None if accepted else result.get("reason") or record.get("reason") or "reboot rejected"},
+            status=200 if accepted else 409)
+
+    async def handle_admin_reboot_agent_status(self, request):
+        if not self._check_admin_auth(request):
+            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+        manager = getattr(self.orchestrator, "reboot_manager", None)
+        if manager is None:
+            return web.json_response({"ok": False, "error": "reboot unavailable"}, status=503)
+        try:
+            record = manager.receipts.get(request.match_info["operation_id"])
+        except (OSError, ValueError):
+            return web.json_response({"ok": False, "error": "receipt unavailable"}, status=503)
+        if record is None:
+            return web.json_response({"ok": False, "error": "operation not found"}, status=404)
+        return web.json_response({"ok": True, "operation_id": record["id"],
+            "status": record["status"], "targets": record["targets"], "reason": record.get("reason")})
 
     async def handle_admin_start_agent(self, request):
         if not self._check_admin_auth(request):
