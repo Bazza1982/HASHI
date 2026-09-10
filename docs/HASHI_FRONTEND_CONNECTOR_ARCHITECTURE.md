@@ -109,7 +109,9 @@ Current implementation boundary:
   in the terminal;
 - chat history remains a Rich/Markdown projection while exposing mouse
   selection, a visible selection style, selection-first `Ctrl+C`, and
-  selection-fenced follow-tail behaviour;
+  selection-fenced follow-tail behaviour. Native Windows copy preserves the
+  full UTF-16 text, including supplementary characters, and transfers allocation
+  ownership only after the clipboard accepts it;
 - short sent/received sounds are a local, persisted TUI preference. Windows uses
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
 - language, layout, sounds, the TUI typing indicator, and the default Telegram

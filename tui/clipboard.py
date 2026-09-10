@@ -23,15 +23,15 @@ def _copy_native_windows(text: str) -> bool:
     kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
     user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
     user32.SetClipboardData.restype = ctypes.c_void_p
-    payload = str(text)
-    handle = kernel32.GlobalAlloc(gmem_moveable, (len(payload) + 1) * 2)
+    payload = str(text).encode("utf-16-le") + b"\x00\x00"
+    handle = kernel32.GlobalAlloc(gmem_moveable, len(payload))
     if not handle:
         return False
     pointer = kernel32.GlobalLock(handle)
     if not pointer:
         kernel32.GlobalFree(handle)
         return False
-    ctypes.memmove(pointer, ctypes.create_unicode_buffer(payload), (len(payload) + 1) * 2)
+    ctypes.memmove(pointer, payload, len(payload))
     kernel32.GlobalUnlock(handle)
     if not user32.OpenClipboard(None):
         kernel32.GlobalFree(handle)
@@ -39,7 +39,6 @@ def _copy_native_windows(text: str) -> bool:
     try:
         user32.EmptyClipboard()
         if not user32.SetClipboardData(cf_unicode_text, handle):
-            kernel32.GlobalFree(handle)
             return False
         handle = None  # The clipboard owns the allocation after success.
         return True

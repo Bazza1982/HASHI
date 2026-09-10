@@ -115,6 +115,8 @@ default Telegram mirror choice are local Connector presentation state; they do
 not alter a HASHI Conversation Session. Unified command `messages` render
 immediately and are not transcript entries. Mouse selection pauses follow-tail;
 `Ctrl+C` copies the selection to the Windows clipboard and `Esc` clears it.
+Native copy preserves Emoji and supplementary CJK characters without truncating
+the trailing text; a rejected clipboard transfer frees its allocation once.
 
 `/telegram` and `/telegram on|off` inspect or change the current TUI's default;
 `/tui telegram on|off` is the explicit alias. The setting is snapshotted at
