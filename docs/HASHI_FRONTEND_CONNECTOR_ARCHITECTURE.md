@@ -323,3 +323,37 @@ Changing appearance retains the input draft, selected Agent and Session. It
 requires no backend call or Worker restart. Native terminal fonts and host
 window settings remain user managed. Platform/client adoption is recorded
 separately from headless renderer evidence.
+
+### Terminal connection and management (2026-09-10 candidate)
+
+The npm `hashi` entry delegates to the existing instance CLI. The parser owns
+commands and options; the no-Python help cache is generated with
+`python -m scripts.export_terminal_help`, while shell completion traverses that
+same parser. Global selection, JSON, locale and non-interactive flags are
+normalized before any operation. Unknown or conflicting targets fail before
+instance creation. Start never runs onboarding or kills a process on timeout;
+attach-only never starts one. One-shot JSON wraps the result, error and observed
+effects, while log follow uses events. The existing registry owns default and
+binding changes, including read-only default inspection and unbind.
+
+The local `/connect` page and `hashi onboard` compatibility route use masked
+secret controls and explicit consent. Discovery lists same-environment CLI
+executables and catalogue models without claiming authentication. The selected
+backend is probed through FlexibleBackendManager and its real adapter in a
+disposable workspace. API choices configure HER v2 and its internal provider
+profiles; a model-list response is not success. Unavailable models and failed
+streams remain errors. Probe, save, reload request and actual chat readiness are
+separate facts.
+
+Only Hashiko's connection fields and scoped credential references are merged.
+Existing Agents, identities, history, optional integrations and TUI mirroring
+are retained. A connection revision is consumed once by the backend state
+owner to supersede old overrides. New Hashiko uses workspace access and no
+inherited HASHI tool wildcard. A local save may request only the existing
+controlled `/reboot min` for idle Hashiko; rejection leaves adoption pending,
+never triggers a whole-instance restart, and does not report ready.
+
+Optional Telegram setup uses a separate masked Bot Token and positive numeric
+user ID, verifies getMe, refuses conflicting existing ownership, and saves no
+open-to-everyone fallback. It does not send a test message or change TUI mirror
+preferences. Real Telegram round trips require their own authorized evidence.

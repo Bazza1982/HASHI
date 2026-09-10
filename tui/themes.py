@@ -27,7 +27,8 @@ def register_themes(app):
             accent=p['accent'], foreground=p['text'], background=p['background'],
             surface=p['surface'], panel=p['panel'], success=p['success'],
             error=p['error'], warning=p['warning'], dark=name not in {'nintendo','win32'},
-            variables={'hashi-' + role: value for role, value in p.items()},
+            variables={**{'hashi-' + role: value for role, value in p.items()},
+                       'hashi-selection-text':p['text'] if name in {'nintendo','win32'} else p['background']},
         ))
 
 

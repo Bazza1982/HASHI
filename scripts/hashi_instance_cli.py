@@ -14,9 +14,12 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
+
 CODE_ROOT = Path(__file__).resolve().parent.parent
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
+
+from scripts.terminal_support import record_effect, record_instance
 
 from tools.instance_registry import (  # noqa: E402
     InstanceRegistry,
@@ -32,21 +35,103 @@ EXIT_RUNTIME = 78
 DEFAULT_START_TIMEOUT_SECONDS = 45.0
 
 
+class TerminalSubparsers(argparse._SubParsersAction):
+    def add_parser(self, name, **kwargs):
+        kwargs.setdefault("description", kwargs.get("help"))
+        return super().add_parser(name, **kwargs)
+
+
+class TerminalParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", argparse.ArgumentDefaultsHelpFormatter)
+        super().__init__(*args, **kwargs)
+        self.register("action", "parsers", TerminalSubparsers)
+
+    def error(self, message):
+        raise TerminalUsageError(message)
+
+
+class TerminalUsageError(ValueError):
+    pass
+
+
+def _timeout(value):
+    try:
+        parsed = int(value)
+        if 1 <= parsed <= 300:
+            return parsed
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("timeout must be an integer from 1 to 300")
+
+
+def _lines(value):
+    try:
+        parsed = int(value)
+        if 1 <= parsed <= 10000:
+            return parsed
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("lines must be an integer from 1 to 10000")
+
+
+def _normalize_args(argv):
+    globals_, rest, targets = [], [], []
+    iterator = iter(argv)
+    for token in iterator:
+        key, equals, value = token.partition("=")
+        if key in {"--instance", "-i", "--lang"}:
+            if not equals:
+                value = next(iterator, None)
+            if value is None:
+                raise TerminalUsageError("Missing value for " + key)
+            if key in {"--instance", "-i"}:
+                targets.append(value.casefold())
+                key = "--instance"
+            globals_.extend((key, value))
+        elif token in {"--json", "--no-color", "--non-interactive", "--verbose"}:
+            globals_.append(token)
+        else:
+            rest.append("version" if token == "--version" else token)
+    if len(set(targets)) > 1:
+        raise TerminalUsageError("Conflicting instance targets")
+    return globals_ + rest
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = TerminalParser(
         prog="hashi",
         description="One HASHI program, with isolated named instances.",
     )
-    parser.add_argument("--instance", help="Select an exact registered instance name.")
+    parser.add_argument("-i", "--instance", help="Select an exact registered instance name.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable output.")
+    parser.add_argument("--lang", choices=("auto", "zh", "en"), default="auto")
+    parser.add_argument("--no-color", action="store_true")
+    parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
     commands = parser.add_subparsers(dest="command")
-    commands.add_parser("start", help="Start the selected instance in the background.")
-    commands.add_parser("tui", help="Open the terminal UI for the selected instance.")
-    commands.add_parser("status", help="Show selected instance and live process state.")
-    commands.add_parser("stop", help="Gracefully stop an idle selected instance.")
-    commands.add_parser("onboard", help=argparse.SUPPRESS)
+    start = commands.add_parser("start", help="Start the selected instance in the background.")
+    start.add_argument("--timeout", type=_timeout, default=45, help="Readiness wait in seconds (1-300); timeout does not kill the process.")
+    tui = commands.add_parser("tui", help="Open the terminal UI for the selected instance.")
+    tui.add_argument("--attach-only", action="store_true", help="Connect without starting or configuring the instance.")
+    status = commands.add_parser("status", help="Show selected instance and live process state.")
+    status.add_argument("--all", action="store_true")
+    status.add_argument("--check", action="store_true")
+    stop = commands.add_parser("stop", help="Gracefully stop an idle selected instance.")
+    stop.add_argument("--timeout", type=_timeout, default=30, help="Graceful stop wait in seconds (1-300); no forced termination.")
+    commands.add_parser("onboard", help="Open local connection or Hashiko assistance.")
     commands.add_parser("ui", help="Open an installed external HASHI UI.")
-    commands.add_parser("help", help="Show this help.")
+    help_parser = commands.add_parser("help", help="Show this help.")
+    help_parser.add_argument("topic", nargs="*")
+    help_parser.add_argument("--all", action="store_true")
+    commands.add_parser("version", help="Show installed and selected runtime versions.")
+    commands.add_parser("doctor", help="Inspect installation and local health without changing it.")
+    logs = commands.add_parser("logs", help="Read sanitized instance runtime logs.")
+    logs.add_argument("--lines", type=_lines, default=100)
+    logs.add_argument("-f", "--follow", action="store_true")
+    logs.add_argument("--agent")
+    completion = commands.add_parser("completion", help="Print shell completion; profiles are not changed.")
+    completion.add_argument("shell", choices=("powershell", "bash", "zsh", "fish"))
 
     instance = commands.add_parser("instance", help="Manage isolated instances.")
     instance_commands = instance.add_subparsers(dest="instance_command", required=True)
@@ -73,10 +158,12 @@ def _parser() -> argparse.ArgumentParser:
 
     instance_commands.add_parser("list", help="List registered instances.")
     default = instance_commands.add_parser("default", help="Set the default instance.")
-    default.add_argument("name")
+    default.add_argument("name", nargs="?")
     bind = instance_commands.add_parser("bind", help="Bind a directory to an instance.")
     bind.add_argument("name")
     bind.add_argument("path", nargs="?", type=Path, default=Path.cwd())
+    unbind = instance_commands.add_parser("unbind", help="Remove a directory binding without deleting files.")
+    unbind.add_argument("path", nargs="?", type=Path)
     remove = instance_commands.add_parser(
         "remove", help="Unregister and retain recoverable data by default."
     )
@@ -469,7 +556,7 @@ def run_onboarding(record: dict[str, Any], code_root: Path) -> int:
     environment = _launch_environment(record, code_root)
     environment["HASHI_ONBOARD_NO_LAUNCH"] = "1"
     return subprocess.run(
-        [*runtime, "-m", "onboarding.onboarding_main"],
+        [*runtime, "-m", "tui.connection"],
         cwd=code_root,
         env=environment,
         check=False,
@@ -481,13 +568,14 @@ def start_instance(
     record: dict[str, Any],
     *,
     quiet: bool = False,
+    timeout: float = DEFAULT_START_TIMEOUT_SECONDS,
 ) -> int:
     code_root = registry.resolved_code_root(record)
     snapshot = inspect_instance(record, code_root)
     if snapshot["running"]:
         if not quiet:
             print(f"HASHI instance {record['name']} is already running (PID {snapshot['pid']}).")
-        return 0
+        return 0 if snapshot.get("ready") or snapshot.get("services_ready") else EXIT_BUSY
     if (
         snapshot["lock_held"]
         or snapshot.get("healthy")
@@ -508,16 +596,8 @@ def start_instance(
         )
         return EXIT_NOT_READY
     if not _is_provisioned(record, code_root):
-        if not sys.stdin.isatty():
-            print(
-                f"Instance {record['name']} needs onboarding; run an interactive "
-                f"`hashi --instance {record['name']} onboard`.",
-                file=sys.stderr,
-            )
-            return EXIT_NOT_READY
-        result = run_onboarding(record, code_root)
-        if result != 0 or not _is_provisioned(record, code_root):
-            return result or EXIT_NOT_READY
+        print(f"ONBOARDING_REQUIRED: Instance {record['name']} needs a backend. Run `hashi --instance {record['name']} onboard`. Start was not sent.", file=sys.stderr)
+        return EXIT_RUNTIME
 
     try:
         runtime = _select_runtime(code_root, full=True)
@@ -547,6 +627,7 @@ def start_instance(
         options["start_new_session"] = True
     try:
         process = subprocess.Popen(command, **options)
+        record_effect("start_requested")
     except OSError as exc:
         log_handle.close()
         print(f"Failed to start HASHI: {exc}", file=sys.stderr)
@@ -554,13 +635,6 @@ def start_instance(
     finally:
         log_handle.close()
 
-    try:
-        timeout = float(
-            os.environ.get("HASHI_CLI_START_TIMEOUT")
-            or DEFAULT_START_TIMEOUT_SECONDS
-        )
-    except ValueError:
-        timeout = DEFAULT_START_TIMEOUT_SECONDS
     deadline = time.monotonic() + max(1.0, timeout)
     while time.monotonic() < deadline:
         snapshot = inspect_instance(record, code_root)
@@ -585,13 +659,11 @@ def start_instance(
             )
             return EXIT_NOT_READY
         time.sleep(0.25)
-    if process.poll() is None:
-        process.terminate()
-    print(f"HASHI did not become ready; see {log_path}.", file=sys.stderr)
-    return EXIT_NOT_READY
+    print(f"START_TIMEOUT: Start was sent; readiness is unconfirmed. Process was not killed. Check `hashi status` and `hashi logs`; see {log_path}.", file=sys.stderr)
+    return EXIT_BUSY
 
 
-def stop_instance(registry: InstanceRegistry, record: dict[str, Any]) -> int:
+def stop_instance(registry: InstanceRegistry, record: dict[str, Any], *, timeout: float = 30.0) -> int:
     code_root = registry.resolved_code_root(record)
     snapshot = inspect_instance(record, code_root)
     if not snapshot["lock_held"] and not snapshot["healthy"]:
@@ -627,6 +699,7 @@ def stop_instance(registry: InstanceRegistry, record: dict[str, Any]) -> int:
         )
         return EXIT_BUSY
     token = _admin_token(record, code_root)
+    record_effect("stop_requested")
     try:
         status, payload = _http_json(
             "POST",
@@ -637,7 +710,8 @@ def stop_instance(registry: InstanceRegistry, record: dict[str, Any]) -> int:
             timeout=5.0,
         )
     except Exception as exc:
-        print(f"Graceful stop was not accepted: {type(exc).__name__}.", file=sys.stderr)
+        record_effect("stop_acceptance", unknown=True)
+        print(f"Stop response was unavailable: {type(exc).__name__}; acceptance is unknown.", file=sys.stderr)
         return EXIT_BUSY
     if status != 200 or payload.get("ok") is not True:
         print(
@@ -646,7 +720,7 @@ def stop_instance(registry: InstanceRegistry, record: dict[str, Any]) -> int:
         )
         return EXIT_BUSY
     lock_path = Path(_instance_paths(record)[1])
-    deadline = time.monotonic() + 30.0
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not _lock_is_held(lock_path):
             print(f"Stopped HASHI instance {record['name']} gracefully.")
@@ -665,11 +739,13 @@ def _selected_record(
     *,
     invocation_cwd: Path,
 ) -> tuple[dict[str, Any], str]:
-    return registry.select(
+    result = registry.select(
         explicit=args.instance,
         cwd=invocation_cwd,
-        interactive=sys.stdin.isatty(),
+        interactive=sys.stdin.isatty() and not args.non_interactive and not args.json,
     )
+    record_instance(result[0]["name"])
+    return result
 
 
 def _status_output(
@@ -721,16 +797,22 @@ def _status_output(
     return 0
 
 
-def _run_tui(registry: InstanceRegistry, record: dict[str, Any]) -> int:
-    started = start_instance(registry, record, quiet=True)
+def _run_tui(registry: InstanceRegistry, record: dict[str, Any], *, attach_only=False) -> int:
+    if attach_only:
+        snapshot = inspect_instance(record, registry.resolved_code_root(record))
+        started = 0 if snapshot.get("running") and (snapshot.get("ready") or snapshot.get("services_ready")) else EXIT_NOT_READY
+    else:
+        started = start_instance(registry, record, quiet=True)
     if started != 0:
         return started
     code_root = registry.resolved_code_root(record)
     runtime = _select_runtime(code_root, full=True)
+    environment = _launch_environment(record, code_root)
+    environment["HASHI_TUI_ATTACH_ONLY"] = "1"
     return subprocess.run(
         [*runtime, str(code_root / "tui.py")],
         cwd=code_root,
-        env=_launch_environment(record, code_root),
+        env=environment,
         check=False,
     ).returncode
 
@@ -771,6 +853,8 @@ def _handle_instance_command(
             bind_path=args.bind,
             make_default=args.default,
         )
+        record_instance(record["name"])
+        record_effect("instance_registered")
         _emit(record, as_json=args.json)
         return 0
     if command == "list":
@@ -789,16 +873,27 @@ def _handle_instance_command(
                     flags.append("update-pending")
                 print(f"{record['name']}\t{record['instance_id']}\t{','.join(flags)}")
         return 0
+    if command == "unbind":
+        _emit(registry.unbind(args.path or invocation_cwd), as_json=args.json)
+        return 0
     if command == "default":
+        if not args.name:
+            _emit({"default_instance": registry.load()["default_instance"]}, as_json=args.json)
+            return 0
         record = registry.set_default(args.name)
+        record_instance(record["name"])
+        record_effect("default_updated")
         print(f"Default HASHI instance is now {record['name']}.")
         return 0
     if command == "bind":
         record = registry.bind(args.name, args.path or invocation_cwd)
+        record_instance(record["name"])
+        record_effect("binding_updated")
         print(f"Bound {Path(args.path or invocation_cwd).resolve()} to {record['name']}.")
         return 0
     if command == "restore":
         record = registry.restore(args.name)
+        record_effect("instance_restored")
         print(f"Restored HASHI instance {record['name']} and its retained data.")
         return 0
     if command in {"remove", "adopt"}:
@@ -813,13 +908,14 @@ def _handle_instance_command(
             return EXIT_BUSY
         if command == "adopt":
             adopted = registry.adopt(args.name)
+            record_effect("program_adopted")
             print(
                 f"Instance {adopted['name']} adopted program "
                 f"{adopted['adopted_program_version']}."
             )
             return 0
         confirmation = args.confirm
-        if args.purge and not confirmation and sys.stdin.isatty():
+        if args.purge and not confirmation and sys.stdin.isatty() and not args.non_interactive and not args.json:
             confirmation = input(
                 f"Type the exact instance name {record['name']!r} to permanently purge: "
             )
@@ -828,6 +924,7 @@ def _handle_instance_command(
             purge=args.purge,
             confirmation=confirmation,
         )
+        record_effect("instance_purged" if removed.get("purged_at") else "instance_unregistered")
         if removed.get("purged_at"):
             print(f"Permanently purged managed instance {record['name']}.")
         else:
@@ -839,11 +936,25 @@ def _handle_instance_command(
     raise InstanceRegistryError(f"Unsupported instance command: {command}")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    args = parser.parse_args(_normalize_args(list(argv) if argv is not None else sys.argv[1:]))
+    if args.json and args.command in {None, "tui", "onboard", "ui"}:
+        parser.error("--json is not supported by interactive commands")
+    if args.command == "instance" and args.instance and getattr(args,"name",None) and args.instance.casefold() != args.name.casefold():
+        parser.error("Conflicting instance targets")
+    if args.command in {None,"tui","ui","onboard"} and args.non_interactive:
+        parser.error("Interactive command is unavailable in --non-interactive mode")
+    if args.command == "status" and args.all and args.instance:
+        parser.error("--all and --instance cannot be combined")
     if args.command == "help":
-        parser.print_help()
+        selected = parser
+        for topic in args.topic:
+            sub = next((a for a in selected._actions if isinstance(a, argparse._SubParsersAction)), None)
+            if sub is None or topic not in sub.choices:
+                parser.error("Unknown help topic: " + topic)
+            selected = sub.choices[topic]
+        selected.print_help()
         return 0
     program_root = Path(
         os.environ.get("HASHI_PROGRAM_ROOT") or CODE_ROOT
@@ -859,18 +970,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         program_version=program_version,
     )
     try:
+        if args.command == "version":
+            data = {"installed_program_version": program_version}
+            if args.instance:
+                record, _ = _selected_record(registry, args, invocation_cwd=invocation_cwd)
+                data["adopted_program_version"] = record.get("adopted_program_version")
+                root = registry.resolved_code_root(record)
+                snapshot = inspect_instance(record, root)
+                data["running_version"] = None
+                if snapshot.get("running"):
+                    status, value = _http_json("GET", snapshot["api_port"], "/api/version", token=_admin_token(record, root))
+                    if status == 200:
+                        data["running_version"] = value
+            _emit(data, as_json=args.json)
+            return 0
+        if args.command == "completion":
+            from scripts.terminal_support import completion_script
+            print(completion_script(parser, args.shell))
+            return 0
+        if args.command == "doctor":
+            from scripts.terminal_support import doctor
+            _emit(doctor(registry, inspect_instance), as_json=args.json)
+            return 0
         if args.command == "instance":
             return _handle_instance_command(
                 registry, args, invocation_cwd=invocation_cwd
             )
 
         records = registry.records()
+        if args.command == "status" and args.all:
+            snapshots = [inspect_instance(r, registry.resolved_code_root(r)) for r in records]
+            _emit({"instances": snapshots}, as_json=args.json)
+            return EXIT_NOT_READY if args.check and (not snapshots or not all(x.get("ready") for x in snapshots)) else 0
         if not records:
             if args.command == "status" and not args.instance:
                 _emit({"instances": []}, as_json=args.json)
-                return 0
-            can_bootstrap = args.command in {None, "start", "tui", "onboard"}
-            if not can_bootstrap or not sys.stdin.isatty():
+                return EXIT_NOT_READY if args.check else 0
+            can_bootstrap = args.command in {None, "tui", "onboard"} and not getattr(args, "attach_only", False)
+            if not can_bootstrap or not sys.stdin.isatty() or args.non_interactive or args.json:
                 raise InstanceSelectionError(
                     "No HASHI instance exists. Run interactive `hashi` or "
                     "`hashi instance create <name>`."
@@ -880,12 +1017,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             registry, args, invocation_cwd=invocation_cwd
         )
         command = args.command or "tui"
+        if command == "logs":
+            from scripts.terminal_support import stream_logs
+            return stream_logs(record, registry.resolved_code_root(record), args)
         if command == "status":
+            if args.check and not inspect_instance(record, registry.resolved_code_root(record)).get("ready"):
+                _status_output(registry, record, source, as_json=args.json)
+                return EXIT_NOT_READY
             return _status_output(
                 registry, record, source, as_json=args.json
             )
         if command == "stop":
-            return stop_instance(registry, record)
+            return stop_instance(registry, record, timeout=args.timeout)
         if command == "onboard":
             if record.get("managed") and record.get(
                 "adopted_program_version"
@@ -894,11 +1037,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Instance {record['name']} must explicitly adopt program "
                     f"{registry.program_version} before onboarding."
                 )
-            return run_onboarding(record, registry.resolved_code_root(record))
-        if command == "start":
-            return start_instance(registry, record)
-        if command == "tui":
+            root = registry.resolved_code_root(record)
+            configured = json.loads(_config_path(record, root).read_text(encoding="utf-8-sig")) if _config_path(record, root).exists() else {}
+            if not any(a.get("name") == "hashiko" for a in configured.get("agents", [])):
+                result = run_onboarding(record, root)
+                if result:
+                    return result
+            os.environ["HASHI_TUI_INITIAL_AGENT"] = "hashiko"
             return _run_tui(registry, record)
+        if command == "start":
+            return start_instance(registry, record, timeout=args.timeout)
+        if command == "tui" and not getattr(args, "attach_only", False) and not _is_provisioned(record, registry.resolved_code_root(record)):
+            if args.non_interactive or not sys.stdin.isatty():
+                raise TerminalUsageError("ONBOARDING_REQUIRED: Run interactive hashi onboard")
+            connected = run_onboarding(record, registry.resolved_code_root(record))
+            if connected:
+                return connected
+        if command == "tui":
+            return _run_tui(registry, record, attach_only=getattr(args, "attach_only", False))
         if command == "ui":
             return _run_external_ui(registry, record)
         parser.error(f"unsupported command: {command}")
@@ -906,6 +1062,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"HASHI: {exc}", file=sys.stderr)
         return EXIT_USAGE
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    from scripts.terminal_support import invoke
+    return invoke(_main, list(argv) if argv is not None else sys.argv[1:], TerminalUsageError)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ STARTUP_LOGO = (
 )
 
 TUI_COMMAND_HELP = {
+    "connect": ("打开本地后端接通／修复页", "Open local backend connection/repair"),
     "theme": ("查看或切换终端主题", "Inspect or change the terminal theme"),
     "help": ("查看 TUI 与 Agent 命令", "Show TUI and Agent commands"),
     "to": ("切换聊天目标", "Change the chat target"),
@@ -647,7 +648,7 @@ class HASHITuiApp(App):
     }
     Screen > .screen--selection {
         background: $hashi-selection;
-        color: $hashi-background;
+        color: $hashi-selection-text;
     }
     #main-container {
         height: 1fr;
@@ -899,10 +900,8 @@ class HASHITuiApp(App):
             except Exception as exc:
                 logger.warning("TUI startup config unreadable: path=%s error=%s", agents_path, exc)
 
-        if self._onboarding_mode and not is_onboarding_complete(self.bridge_home):
-            self._start_light_onboarding()
-        elif needs_onboarding:
-            self._start_onboarding()
+        if needs_onboarding:
+            self._start_connection()
         else:
             self._start_bridge()
 
@@ -931,6 +930,15 @@ class HASHITuiApp(App):
             ))
 
     # ── Onboarding ──────────────────────────────────────────────────────
+
+    def _start_connection(self):
+        from tui.connection import ConnectionScreen
+        self.push_screen(ConnectionScreen(self.bridge_home, language=self._ui_language), self._connection_saved)
+
+    def _connection_saved(self, result):
+        if result:
+            self._inject_wakeup = "Connection setup is saved. Greet the user briefly and let them start work. Further setup, including Telegram, is optional. Never request secrets in chat."
+            self._start_bridge()
 
     def _start_onboarding(self):
         self._onboarding = OnboardingPhase(self.bridge_home)
@@ -1186,6 +1194,11 @@ class HASHITuiApp(App):
             return
         self._adopt_agent_directory(agents)
         self._update_status_bar()
+        if agents and (self._inject_wakeup or os.environ.get("HASHI_TUI_INITIAL_AGENT") == "hashiko"):
+            hashiko = next((a for a in agents if a.get("name") == "hashiko"), None)
+            if hashiko is not None:
+                self._select_agent(hashiko, client=client, generation=generation)
+                return
         if agents and not self.current_agent:
             # Auto-select first active agent
             for a in agents:
@@ -1424,6 +1437,9 @@ class HASHITuiApp(App):
             return
         if normalized == "/help" or normalized.startswith("/help "):
             self._handle_help_cmd(normalized)
+            return
+        if normalized == "/connect":
+            self._start_connection()
             return
         if normalized == "/theme" or normalized.startswith("/theme "):
             self._handle_theme_cmd(normalized)

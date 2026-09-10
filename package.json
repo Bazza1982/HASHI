@@ -1,7 +1,7 @@
 {
   "name": "hashi-bridge",
   "version": "4.0.0-alpha.2",
-  "description": "HASHI — local-first, multi-backend AI agent orchestration with owner-controlled credentials and governed automation.",
+  "description": "HASHI \u2014 local-first, multi-backend AI agent orchestration with owner-controlled credentials and governed automation.",
   "keywords": [
     "ai",
     "agent",
@@ -123,6 +123,9 @@
     "!flow/evaluation_kb/workflow_versions/**",
     "!superloops/loops/**",
     "!superloops/recordings/**",
-    "!skills/instances.json"
+    "!skills/instances.json",
+    "scripts/terminal_support.py",
+    "scripts/terminal-help.json",
+    "scripts/terminal_language.py"
   ]
 }

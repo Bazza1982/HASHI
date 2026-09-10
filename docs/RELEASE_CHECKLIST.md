@@ -255,3 +255,12 @@ rollout.
 - Update known limitations
 - Record contract and smoke commands used for verification
 - Note any fidelity gaps between HASHI host behavior and standalone `nagare`
+
+- 2026-09-10 terminal/connection candidate: verify the actual PowerShell, CMD
+  and WSL installed entry, not only source invocation. Keep legacy-entry backup
+  and exact data hashes. Run local connection, instance CLI/registry, TUI,
+  backend-state consumers and the Core gate. Check Windows credential ACLs,
+  masked input, missing consent, replacement confirmation, scoped HER HTTP
+  authorization, failed-stream rejection and persistence recovery. Real provider
+  availability, TUI desktop interaction and Telegram round trips are separate
+  acceptance evidence; do not mark unexercised platforms complete.

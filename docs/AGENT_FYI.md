@@ -366,3 +366,13 @@ a fresh preflight is required, while incomplete rollback retains recovery checks
   history and persists through the existing TUI preferences while preserving
   other keys and the draft. WSL renderer checks pass; Windows and actual client
   adoption must be recorded separately. No Core change or reboot is needed.
+
+- 2026-09-10 candidate: terminal management retains the existing registry and
+  lifecycle owners, adds diagnostics/help/JSON and refuses ambiguous or implicit
+  scripted setup. Start timeout no longer kills the process. Local `/connect`
+  provides masked, consented backend repair, actual CLI/HER adapter validation
+  and optional Telegram ownership setup. Hashiko's guidance now permits direct
+  work without Telegram or an identity questionnaire. Connection changes retain
+  history and are adopted through a one-time backend-state revision; new
+  explicit `tools.enabled=false` cannot inherit global tool wildcards. Windows
+  new private credential files receive an owner/SYSTEM/Administrators DACL.

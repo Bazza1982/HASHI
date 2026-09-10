@@ -535,6 +535,15 @@ class InstanceRegistry:
             self._write(payload)
             return dict(payload["instances"][key])
 
+    def unbind(self, path: str | Path) -> dict[str, Any]:
+        canonical = _path_identity(path)
+        with _exclusive_lock(self.lock_path):
+            payload = self.load()
+            previous = payload["bindings"].pop(canonical, None)
+            if previous is not None:
+                self._write(payload)
+            return {"path": canonical, "previous_instance": previous, "removed": previous is not None}
+
     def adopt(self, name: str) -> dict[str, Any]:
         key = instance_key(name)
         with _exclusive_lock(self.lock_path):

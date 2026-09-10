@@ -394,3 +394,26 @@ npm run build
 ```
 
 The current release gate for `nagare-viz` is a clean production build.
+
+### Terminal and local connection additions (2026-09-10 candidate)
+
+Run `hashi help`, `hashi help tui` or `hashi help instance create` for syntax.
+Use `hashi status --all`, `hashi status --check`, `hashi doctor`,
+`hashi logs --lines 100`, and `hashi version` for inspection. `hashi tui
+--attach-only` connects without starting or creating an instance. `start` and
+`stop` accept `--timeout 1..300`; a timeout never force-kills a process.
+`hashi instance default` reads the current default; `hashi instance unbind`
+removes only the current directory binding. Completion scripts are printed by
+`hashi completion powershell|bash|zsh|fish` and are not installed automatically.
+
+For first connection, interactive `hashi` asks for one detected CLI or one API
+provider. Confirm a minimal adapter call, then enter Hashiko's TUI conversation.
+API credentials use masked local input and configure HER v2 internally.
+`/connect` opens the same local repair page when a model is unavailable.
+Telegram can be skipped; its optional local page requires a Bot Token and your
+numeric user ID. Do not paste credentials into ordinary chat.
+
+Before replacing a legacy npm 1.0.1 entry, back up the installed program and
+verify where its instance data resides. Installation, stopped-instance program
+adoption, and actual running generations remain separate. Replacing the npm
+entry does not authorize stopping or migrating a live instance.

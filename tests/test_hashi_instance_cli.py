@@ -49,7 +49,7 @@ def test_onboarding_runs_as_a_module_from_the_program_root(tmp_path, monkeypatch
     assert captured["command"] == [
         "python-runtime",
         "-m",
-        "onboarding.onboarding_main",
+        "tui.connection",
     ]
     assert captured["options"]["cwd"] == code_root
     assert captured["options"]["env"]["HASHI_ONBOARD_NO_LAUNCH"] == "1"
@@ -265,7 +265,7 @@ def test_status_with_no_registry_is_read_only_and_successful(
     result = hashi_instance_cli.main(["--json", "status"])
 
     assert result == 0
-    assert capsys.readouterr().out.strip() == '{"instances": []}'
+    assert json.loads(capsys.readouterr().out)["data"] == {"instances": []}
     assert not (tmp_path / "registry").exists()
     assert not (tmp_path / "data").exists()
 
@@ -283,6 +283,7 @@ def test_first_interactive_onboarding_creates_one_isolated_default_instance(
     monkeypatch.setattr(instance_registry, "_port_available", lambda _port: True)
     monkeypatch.setattr(hashi_instance_cli.sys.stdin, "isatty", lambda: True)
     onboarded = []
+    monkeypatch.setattr(hashi_instance_cli, "_run_tui", lambda *a, **k: 0)
     monkeypatch.setattr(
         hashi_instance_cli,
         "run_onboarding",
@@ -557,6 +558,7 @@ def test_repeat_start_is_idempotent(tmp_path, monkeypatch, capsys):
         lambda _record, _root: {
             "running": True,
             "pid": 456,
+            "ready": True,
         },
     )
 
@@ -717,3 +719,46 @@ def test_stopped_managed_instance_cannot_implicitly_adopt_update(
 
     assert result == hashi_instance_cli.EXIT_NOT_READY
     assert "has not adopted" in capsys.readouterr().err
+
+
+def test_start_timeout_preserves_actual_child_and_reports_unknown_readiness(tmp_path, monkeypatch, capsys):
+    import subprocess
+    import sys
+    record = _record(tmp_path)
+    root = tmp_path / 'program'
+    root.mkdir()
+    (root / 'main.py').write_text('import time\ntime.sleep(60)\n')
+    registry = instance_registry.InstanceRegistry(program_root=root,program_version='test',
+        registry_root=tmp_path/'registry',data_root=tmp_path/'data',environment_id='test-os')
+    monkeypatch.setattr(hashi_instance_cli,'_is_provisioned',lambda *_:True)
+    monkeypatch.setattr(hashi_instance_cli,'_select_runtime',lambda *a,**k:[sys.executable])
+    monkeypatch.setattr(hashi_instance_cli,'inspect_instance',lambda *_:{
+        'running':False,'lock_held':False,'healthy':False,'foreign_endpoint':False})
+    children=[]
+    original=subprocess.Popen
+    def launch(*a,**kw):
+        child=original(*a,**kw);children.append(child);return child
+    monkeypatch.setattr(subprocess,'Popen',launch)
+    try:
+        assert hashi_instance_cli.start_instance(registry,record,timeout=.01)==75
+        assert children[0].poll() is None
+        assert 'START_TIMEOUT' in capsys.readouterr().err
+    finally:
+        for child in children:
+            child.terminate();child.wait(timeout=10)
+
+
+def test_terminal_global_options_json_errors_and_attach_only_are_read_only(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('HASHI_PROGRAM_ROOT',str(tmp_path/'program'))
+    monkeypatch.setenv('HASHI_REGISTRY_ROOT',str(tmp_path/'registry'))
+    monkeypatch.setenv('HASHI_DATA_ROOT',str(tmp_path/'data'))
+    for argv, code in [(['status','--check','--json'],69),
+                       (['status','--instance','one','-i','two','--json'],64),
+                       (['status','--all','-i','one','--json'],64),
+                       (['tui','--attach-only','--non-interactive','--json'],64),
+                       (['start','--timeout','0','--json'],64)]:
+        assert hashi_instance_cli.main(argv)==code
+        envelope=json.loads(capsys.readouterr().out)
+        assert envelope['exit_code']==code and not envelope['ok']
+    assert not (tmp_path/'registry').exists()
+    assert not (tmp_path/'data').exists()

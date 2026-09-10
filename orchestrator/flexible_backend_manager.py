@@ -162,6 +162,15 @@ class FlexibleBackendManager:
                 state = self.state_store.read()
                 restore_backend_overrides = True
                 state_needs_repair = False
+                # A verified local connection change supersedes old persisted
+                # backend overrides once, through this state owner.
+                connection_revision = (self.config.extra or {}).get("connection_revision")
+                if connection_revision and state.get("connection_revision") != connection_revision:
+                    state["active_backend"] = configured_backend
+                    for key in ("active_model", "active_provider", HER_V2_CONFIGURATION_STATE_KEY, HER_V2_CONFIGURATION_DRAFT_STATE_KEY):
+                        state.pop(key, None)
+                    state["connection_revision"] = connection_revision
+                    state_needs_repair = True
                 if "active_backend" in state:
                     persisted_backend = canonical_backend_engine(state["active_backend"])
                     if (
@@ -1462,6 +1471,8 @@ class FlexibleBackendManager:
         global_raw = getattr(self, '_agents_json_global', None) or {}
         global_tools = global_raw.get("default_tools", {})
         backend_tools = backend_cfg_raw.get("tools", {})
+        if isinstance(backend_tools, dict) and backend_tools.get("enabled") is False:
+            return None
 
         if not global_tools and not backend_tools:
             return None

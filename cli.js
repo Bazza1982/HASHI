@@ -11,24 +11,8 @@ const PACKAGE = require(path.join(HASHI_ROOT, 'package.json'));
 const RUNTIME_CHECK = path.join(HASHI_ROOT, 'scripts', 'check_runtime_contract.py');
 const INSTANCE_CLI = path.join(HASHI_ROOT, 'scripts', 'hashi_instance_cli.py');
 
-const HELP = `Usage: hashi [--instance NAME] [--json] <command>
-
-Commands:
-  hashi                         Start/attach the selected instance TUI
-  hashi start                   Start the selected instance in the background
-  hashi tui                     Attach the terminal UI
-  hashi status                  Show process, API, and busy state
-  hashi stop                    Gracefully stop only when work is idle
-  hashi ui                      Open an installed external UI
-  hashi instance create NAME    Create an isolated instance
-  hashi instance list           List instances
-  hashi instance default NAME   Set the default instance
-  hashi instance bind NAME      Bind the current directory
-  hashi instance remove NAME    Recoverable removal (use --purge --confirm NAME for deletion)
-  hashi instance restore NAME   Restore retained managed data
-  hashi instance adopt NAME     Explicitly adopt this installed program version
-  hashi help                    Show this help
-`;
+const HELP_PAGES = require('./scripts/terminal-help.json');
+const HELP = HELP_PAGES[''];
 
 function dataRoot() {
   if (process.env.HASHI_DATA_ROOT) return path.resolve(process.env.HASHI_DATA_ROOT);
@@ -110,13 +94,13 @@ function normalizeGlobalArguments(argv) {
   const rest = [];
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
-    if (value === '--instance') {
+    if (['--instance', '-i', '--lang'].includes(value)) {
       if (index + 1 >= argv.length) return argv;
-      globals.push(value, argv[index + 1]);
+      globals.push(value === '-i' ? '--instance' : value, argv[index + 1]);
       index += 1;
     } else if (value.startsWith('--instance=')) {
       globals.push('--instance', value.slice('--instance='.length));
-    } else if (value === '--json') {
+    } else if (['--json', '--non-interactive', '--no-color', '--verbose'].includes(value)) {
       globals.push(value);
     } else {
       rest.push(value);
@@ -126,16 +110,38 @@ function normalizeGlobalArguments(argv) {
 }
 
 function run(argv = process.argv.slice(2)) {
-  if (argv.length === 1 && ['help', '--help', '-h'].includes(argv[0])) {
-    process.stdout.write(HELP);
+  const normalized = normalizeGlobalArguments(argv);
+  const versionOnly = argv.length === 1 && ['version', '--version'].includes(argv[0]);
+  if (versionOnly) {
+    process.stdout.write(`HASHI ${PACKAGE.version}\n`);
     return 0;
+  }
+  let language = Intl.DateTimeFormat().resolvedOptions().locale.startsWith('zh') ? 'zh' : 'en';
+  const helpArgv = [];
+  for (let i=0; i<argv.length; i++) {
+    if (argv[i] === '--lang') { language = argv[++i]; }
+    else if (argv[i].startsWith('--lang=')) { language = argv[i].split('=')[1]; }
+    else { helpArgv.push(argv[i]); }
+  }
+  const helpIndex = helpArgv.findIndex(x => ['help', '--help', '-h'].includes(x));
+  if (helpIndex >= 0 && !argv.includes('--json')) {
+    let topic = helpArgv[helpIndex] === 'help' ? helpArgv.slice(helpIndex + 1) : helpArgv.slice(0, helpIndex);
+    topic = topic.filter(x => x !== '--all');
+    const key = (language === 'zh' ? 'zh:' : '') + topic.join(' ');
+    if (Object.hasOwn(HELP_PAGES, key)) {
+      process.stdout.write(HELP_PAGES[key]);
+      return 0;
+    }
   }
   const python = selectManagementPython();
   if (!python) {
-    process.stderr.write(
-      'HASHI installation is incomplete: approved CPython 3.12.13 is unavailable.\n' +
-      'Install the required runtime, then reinstall hashi-bridge so its isolated dependencies can be prepared.\n',
-    );
+    const error = { code: 'RUNTIME_INCOMPLETE', message: 'Approved CPython 3.12.13 is unavailable.', next_step: 'Install the required runtime and prepare HASHI dependencies.' };
+    if (argv.includes('--json')) {
+      process.stdout.write(JSON.stringify({schema_version:1,ok:false,command:argv.find(x => !x.startsWith('-')) || 'tui',instance:null,exit_code:78,data:null,warnings:[],error,effects:{steps:[],unknown:[]}}) + '\n');
+    } else {
+      process.stderr.write(`${error.code}: ${error.message}\n${error.next_step}\n`);
+      if (argv.includes('doctor')) process.stdout.write(JSON.stringify({entry:__filename,platform:process.platform,node:process.version,path:process.env.PATH}) + '\n');
+    }
     return 78;
   }
   const child = spawn(

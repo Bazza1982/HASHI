@@ -177,3 +177,11 @@ syntax. Valid values are derived from the TUI palette owner; `reset` selects
 Retro and invalid arguments leave the selected theme unchanged. Light themes
 use dark foregrounds and an appropriate code syntax palette. Error, warning
 and success messages retain their textual meaning alongside color.
+
+Terminal management adds `version`, `doctor`, `logs`, `completion`, status
+`--all/--check`, TUI `--attach-only`, bounded lifecycle timeouts and registry
+`default` inspection / `unbind`. `--json` is one result envelope for one-shot
+commands and is rejected by interactive views. `--lang zh|en|auto` is invocation
+local. `/connect` opens a model-independent local page; API keys and Bot Tokens
+are entered only in password controls, whose events never reach chat or command
+preview handlers. Telegram remains optional after a backend is connected.

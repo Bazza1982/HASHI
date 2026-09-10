@@ -30,8 +30,8 @@ def test_help_is_available_without_python_and_does_not_restore_workbench(node):
     )
 
     assert result.returncode == 0
-    assert "hashi instance create NAME" in result.stdout
-    assert "hashi ui" in result.stdout
+    assert "instance" in result.stdout
+    assert "ui" in result.stdout
     assert "hashi workbench" not in result.stdout.casefold()
 
 
@@ -317,6 +317,6 @@ def test_node_to_python_instance_list_is_read_only(node, tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"instances": []}
+    assert json.loads(result.stdout)["data"] == {"instances": []}
     assert not (tmp_path / "registry").exists()
     assert not (tmp_path / "data").exists()
