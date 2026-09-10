@@ -276,6 +276,18 @@ async def test_tui_command_preview_discovers_dynamic_parameters_in_both_language
         assert "Options" in rendered
         assert "Example" in rendered
 
+        input_box.value = "/sidepanel "
+        await pilot.pause()
+        assert app._command_matches == [
+            "/sidepanel on",
+            "/sidepanel off",
+            "/sidepanel toggle",
+            "/sidepanel refresh",
+        ]
+        rendered = _render_plain(preview.render())
+        assert "Current selection" in rendered
+        assert "/sidepanel on" in rendered
+
 
 async def test_tui_no_argument_command_result_adds_local_parameter_guide(tmp_path):
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
