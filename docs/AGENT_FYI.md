@@ -126,9 +126,12 @@ and is independent of Telegram `/typing`.
 
 The TUI connection footer uses live runtime `presentation_status`; offline
 unknown values remain unknown. Model Provider and structured Quick/Pro routing
-appear only for HER v2. It intentionally omits working mode. Use `/mode` when
-the current mode is relevant. Source presence is not live adoption proof;
-confirm the active Function generation/provenance on each instance.
+appear only for HER v2. It collapses identical Quick/Pro Provider IDs, and
+collapses the model only when both Provider and model IDs are identical;
+distinct Providers retain full Q/P pairing. It intentionally omits working
+mode. Use `/mode` when the current mode is relevant. Source presence is not
+live adoption proof; confirm the active Function generation/provenance on each
+instance.
 
 Distinguish Engine from Model Provider and HASHI Conversation from Engine
 Session. Frontend history is a projection, not another authoritative archive.

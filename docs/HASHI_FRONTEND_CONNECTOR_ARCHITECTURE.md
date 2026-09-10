@@ -116,7 +116,10 @@ Current implementation boundary:
   mirror choice are local persisted Connector preferences;
 - the connection footer projects live Agent metadata for Engine, model, effort,
   Think, Verbose, Commentary and Connector state. Model Provider and structured
-  Quick/Pro routing are shown only for HER v2. The footer intentionally omits
+  Quick/Pro routing are shown only for HER v2. Identical HER Quick/Pro Provider
+  IDs are rendered once; their model is also rendered once only when both model
+  IDs are identical. Distinct Provider routes retain their complete Q/P pairing.
+  The footer intentionally omits
   working mode; `/mode` remains its authoritative control surface;
 - its cross-instance path proxies only a small named operation set through
   authenticated Hashi Remote peers; and

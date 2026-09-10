@@ -463,12 +463,33 @@ class FooterInfoBox(Static):
         if engine == "her-v2" and isinstance(her, dict):
             quick = her.get("quick") if isinstance(her.get("quick"), dict) else {}
             pro = her.get("pro") if isinstance(her.get("pro"), dict) else {}
-            second.append(
-                f"{labels['model']} Q:{quick.get('model') or '?'} / P:{pro.get('model') or '?'}"
+            quick_model = str(quick.get("model") or "").strip()
+            pro_model = str(pro.get("model") or "").strip()
+            quick_provider = str(quick.get("provider") or "").strip()
+            pro_provider = str(pro.get("provider") or "").strip()
+            identical_provider = bool(
+                quick_provider
+                and pro_provider
+                and quick_provider == pro_provider
             )
-            second.append(
-                f"{labels['provider']} Q:{quick.get('provider') or '?'} / P:{pro.get('provider') or '?'}"
+            identical_model = bool(
+                identical_provider
+                and quick_model
+                and pro_model
+                and quick_model == pro_model
             )
+            if identical_model:
+                second.append(f"{labels['model']} {quick_model}")
+            else:
+                second.append(
+                    f"{labels['model']} Q:{quick_model or '?'} / P:{pro_model or '?'}"
+                )
+            if identical_provider:
+                second.append(f"{labels['provider']} {quick_provider}")
+            else:
+                second.append(
+                    f"{labels['provider']} Q:{quick_provider or '?'} / P:{pro_provider or '?'}"
+                )
             if her.get("routing_mode"):
                 second.append(f"{labels['route']} {her['routing_mode']}")
         else:

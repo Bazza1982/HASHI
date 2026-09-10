@@ -533,6 +533,78 @@ async def test_footer_shows_her_routes_but_never_invents_other_engine_provider(t
         assert "Provider" not in plain
 
 
+async def test_footer_collapses_her_details_only_for_identical_providers(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(120, 30)):
+        footer = app.query_one("#footer-info-box", FooterInfoBox)
+        footer.update_state(
+            "临时员工",
+            "her-v2",
+            True,
+            current_agent="temp",
+            instance_id="HASHI1",
+            language="zh",
+            metadata={
+                "id": "temp",
+                "display_name": "临时员工",
+                "presentation_status": {
+                    "engine": "her-v2",
+                    "effort": "zero",
+                    "her_v2": {
+                        "routing_mode": "single",
+                        "quick": {
+                            "provider": "openrouter-api",
+                            "model": "deepseek/deepseek-v3.2-exp",
+                        },
+                        "pro": {
+                            "provider": "openrouter-api",
+                            "model": "deepseek/deepseek-v3.2-exp",
+                        },
+                    },
+                },
+            },
+        )
+        plain = footer.render().plain
+        assert "模型 deepseek/deepseek-v3.2-exp" in plain
+        assert "模型 Q:" not in plain
+        assert "模型提供商 openrouter-api" in plain
+        assert "模型提供商 Q:" not in plain
+
+        footer.update_state(
+            "Temp",
+            "her-v2",
+            True,
+            current_agent="temp",
+            instance_id="HASHI1",
+            language="en",
+            metadata={
+                "id": "temp",
+                "display_name": "Temp",
+                "presentation_status": {
+                    "engine": "her-v2",
+                    "effort": "medium",
+                    "her_v2": {
+                        "routing_mode": "hybrid",
+                        "quick": {
+                            "provider": "openrouter-api",
+                            "model": "deepseek/quick",
+                        },
+                        "pro": {
+                            "provider": "openrouter-api",
+                            "model": "deepseek/pro",
+                        },
+                    },
+                },
+            },
+        )
+        plain = footer.render().plain
+        assert "Model Q:deepseek/quick / P:deepseek/pro" in plain
+        assert "Provider openrouter-api" in plain
+        assert "Provider Q:" not in plain
+
+
 async def test_chat_selection_pauses_follow_tail_copies_and_escape_resumes(
     tmp_path,
     monkeypatch,
