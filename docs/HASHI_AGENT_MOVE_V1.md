@@ -33,6 +33,10 @@ receiver. The source never writes a target filesystem path directly.
 - canonical `agent.md`;
 - durable workspace files, including transcripts and memory databases;
 - consistent SQLite snapshots rather than live WAL sidecars;
+  Windows reader bookkeeping can change a SQLite `-shm` timestamp during
+  backup, so that timestamp is normalized in freshness inventories. Its path
+  and size still count toward deletion/size checks; database and WAL changes
+  remain fenced, and the snapshot checksum detects durable memory edits;
 - the Agent's schedules, imported disabled for review;
 - Agent-owned secret keys, encrypted with the paired HASHI Remote shared
   secret. A move includes its Telegram credential for a single-consumer

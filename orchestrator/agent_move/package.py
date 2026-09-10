@@ -1042,9 +1042,15 @@ def _workspace_inventory(workspace: Path) -> list[dict[str, Any]]:
             path = parent / name
             info = path.lstat()
             link = path.is_symlink() or _is_windows_junction(path)
+            # SQLite readers update WAL-index (-shm) bookkeeping on Windows.
+            # That timestamp is not durable content. Keep its existence/size in
+            # the deletion/limit inventory; main database and WAL remain fenced.
+            sqlite_shm = not link and path.name.casefold().endswith(
+                tuple(suffix + "-shm" for suffix in _SQLITE_SUFFIXES)
+            )
             entries.append({"path": path.relative_to(workspace).as_posix(),
                             "size": 0 if link else info.st_size,
-                            "mtime_ns": info.st_mtime_ns, "link": link})
+                            "mtime_ns": 0 if sqlite_shm else info.st_mtime_ns, "link": link})
             if len(entries) > MAX_ARCHIVE_MEMBERS:
                 raise AgentMoveError("workspace inventory exceeds the file-count limit")
     return sorted(entries, key=lambda item: item["path"])

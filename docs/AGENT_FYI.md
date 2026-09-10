@@ -345,3 +345,7 @@ uses its own build metadata and never inherits the enclosing repository branch.
 
 New Clone preparations default to schema-4 workspace scope and its 1 GB
 preflight, sharing Move package validation while retaining the source.
+
+Windows Move/Clone snapshots ignore SQLite `-shm` reader-bookkeeping timestamps
+while retaining file inventory, size limits, database/WAL freshness and durable
+memory checksums. A read-only backup must not invalidate its own transfer.

@@ -522,44 +522,66 @@ def test_schema2_rejects_retained_identity_metadata_mismatch(tmp_path):
         read_agent_move_package(replacement)
 
 
-def test_snapshot_fingerprint_is_stable_and_detects_sqlite_changes(tmp_path):
+@pytest.mark.parametrize("transfer_mode", [None, "workspace"])
+def test_snapshot_fingerprint_is_stable_and_detects_sqlite_changes(tmp_path, transfer_mode, monkeypatch):
     root = _source_root(tmp_path)
-    first = create_agent_move_package(
-        root,
-        "zelda",
-        tmp_path / "first.hashi-agent",
-        include_agent_secrets=True,
-        secret_passphrase="shared-secret",
-    )
-    second = create_agent_move_package(
-        root,
-        "zelda",
-        tmp_path / "second.hashi-agent",
-        include_agent_secrets=True,
-        secret_passphrase="shared-secret",
-    )
-    first_fingerprint = archive_snapshot_fingerprint(
-        first,
-        secret_passphrase="shared-secret",
-    )
-    assert archive_snapshot_fingerprint(
-        second,
-        secret_passphrase="shared-secret",
-    ) == first_fingerprint
+    from contextlib import closing
+    with closing(sqlite3.connect(root / "workspaces" / "zelda" / "bridge_memory.sqlite")) as live_db:
+        live_db.execute("PRAGMA journal_mode=WAL")
+        live_db.execute("INSERT INTO memories VALUES ('live WAL content')")
+        live_db.commit()
+        # Windows can update the shared-memory reader bookkeeping on a read-only
+        # backup. Reproduce that metadata-only change independent of OS timing.
+        from orchestrator.agent_move import package as package_module
+        prepare = package_module._prepare_workspace_entries
+        shm = root / "workspaces" / "zelda" / "bridge_memory.sqlite-shm"
 
-    with sqlite3.connect(root / "workspaces" / "zelda" / "bridge_memory.sqlite") as db:
-        db.execute("INSERT INTO memories VALUES ('newer')")
-    third = create_agent_move_package(
-        root,
-        "zelda",
-        tmp_path / "third.hashi-agent",
-        include_agent_secrets=True,
-        secret_passphrase="shared-secret",
-    )
-    assert archive_snapshot_fingerprint(
-        third,
-        secret_passphrase="shared-secret",
-    ) != first_fingerprint
+        def prepare_with_reader_bookkeeping(entries, temp_dir):
+            result = prepare(entries, temp_dir)
+            stat = shm.stat()
+            os.utime(shm, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+            return result
+
+        monkeypatch.setattr(package_module, "_prepare_workspace_entries", prepare_with_reader_bookkeeping)
+        first = create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "first.hashi-agent",
+            include_agent_secrets=True,
+            secret_passphrase="shared-secret",
+            transfer_mode=transfer_mode,
+        )
+        second = create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "second.hashi-agent",
+            include_agent_secrets=True,
+            secret_passphrase="shared-secret",
+            transfer_mode=transfer_mode,
+        )
+        first_fingerprint = archive_snapshot_fingerprint(
+            first,
+            secret_passphrase="shared-secret",
+        )
+        assert archive_snapshot_fingerprint(
+            second,
+            secret_passphrase="shared-secret",
+        ) == first_fingerprint
+
+        with sqlite3.connect(root / "workspaces" / "zelda" / "bridge_memory.sqlite") as db:
+            db.execute("INSERT INTO memories VALUES ('newer')")
+        third = create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "third.hashi-agent",
+            include_agent_secrets=True,
+            secret_passphrase="shared-secret",
+            transfer_mode=transfer_mode,
+        )
+        assert archive_snapshot_fingerprint(
+            third,
+            secret_passphrase="shared-secret",
+        ) != first_fingerprint
 
 
 def test_snapshot_fingerprint_excludes_append_only_slash_audit_but_packages_it(
