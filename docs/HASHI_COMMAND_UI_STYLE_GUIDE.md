@@ -165,3 +165,9 @@ than reopening their former configuration surfaces.
 Local command extensions are outside this migration inventory because they are installed
 per machine. HASHI2's local `/oll` command follows the same card structure but
 is not part of the public repository or public static command registry.
+
+Move scope selection must precede preparation: `--identity-memory` and
+`--workspace` select the same two choices as the interactive picker. Confirmation
+shows the selected scope, workspace size, excluded count and source deletion
+consequence. It must not silently downgrade an oversized workspace into a
+memory-only transfer. Detailed inventory remains in the prepared transaction.

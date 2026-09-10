@@ -750,6 +750,8 @@ def main():
         action="store_true",
         help="Retired compatibility option; agent-move-v1 includes durable memory",
     )
+    parser.add_argument("--transfer-mode", choices=("identity_memory", "workspace"),
+                        help="Required for direct moves: carry identity/memory or the full workspace (1 GB)")
     parser.add_argument(
         "--dry-run", action="store_true", help="Preview actions without making changes"
     )
@@ -958,6 +960,9 @@ def main():
         )
         sys.exit(1)
 
+    if not args.transfer_mode:
+        parser.error("direct move requires --transfer-mode identity_memory|workspace")
+
     try:
         if args.dry_run:
             result = preview_outbound_move(
@@ -966,6 +971,7 @@ def main():
                 args.agent_id,
                 args.target_instance,
                 source_instance=source_instance,
+                transfer_mode=args.transfer_mode,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
@@ -976,6 +982,7 @@ def main():
             args.agent_id,
             args.target_instance,
             source_instance=source_instance,
+            transfer_mode=args.transfer_mode,
             keep_source=args.keep_source,
         )
         print(json.dumps(prepared, ensure_ascii=False, indent=2))

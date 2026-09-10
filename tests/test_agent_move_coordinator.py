@@ -551,13 +551,19 @@ def test_last_active_agent_can_be_cloned_locally_and_source_stays_unchanged(
     _write_json(root / "agents.json", data)
     running = _install_local_lifecycle(monkeypatch, "zelda")
 
+    workspace = root / "workspaces" / "zelda"
+    (workspace / "transcript.jsonl").write_text('{"message":"retain history"}\n')
+    (workspace / "artifact.bin").write_bytes(b"ordinary work")
     prepared = coordinator.prepare_outbound_clone(
         root,
         {},
         "zelda",
         "HASHI1",
         source_instance="HASHI1",
+        transfer_mode="identity_memory",
     )
+    assert prepared["transfer_mode"] == "identity_memory"
+    assert any(item["path"] == "artifact.bin" for item in prepared["discarded_files"])
     assert prepared["target_agent_id"] == "zelda_1"
     result = coordinator.confirm_outbound_move(root, {}, prepared["package_id"])
 
@@ -568,7 +574,10 @@ def test_last_active_agent_can_be_cloned_locally_and_source_stays_unchanged(
     assert all(row["is_active"] is True for row in rows)
     assert {"zelda", "zelda_1"}.issubset(running)
     assert (root / "workspaces" / "zelda" / "memory.md").read_text() == "durable"
-    assert (root / "workspaces" / "zelda_1" / "memory.md").read_text() == "durable"
+    target = root / "workspaces" / "zelda_1"
+    assert (target / "transcript.jsonl").read_bytes() == (workspace / "transcript.jsonl").read_bytes()
+    assert not (target / "artifact.bin").exists()
+    assert (workspace / "artifact.bin").read_bytes() == b"ordinary work"
     secrets = json.loads((root / "secrets.json").read_text())
     assert secrets["zelda"] == "telegram-token"
     assert "zelda_1" not in secrets

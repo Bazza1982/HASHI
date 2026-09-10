@@ -15,7 +15,9 @@ receiver. The source never writes a target filesystem path directly.
 
 - An outbound instance must implement this protocol.
 - A target must advertise `agent_move_receive_v1`. New move/clone transactions
-  use schema version 3 and require `agent_transfer_lifecycle_v1`; an exact root
+  use schema version 3 for legacy callers, or schema 4 for explicit transfer modes,
+  and require `agent_transfer_lifecycle_v1`; schema 4 also requires
+  `agent_transfer_modes_v1`; an exact root
   `AGENT.md` additionally requires `agent_move_retained_identity_v1`.
 - Schema versions 1 and 2 remain readable so historical transaction journals
   can still be reconciled or rolled back. New clients do not expose their old
@@ -50,17 +52,42 @@ not remove that preservation copy. A staging failure before the transaction
 record is durable removes only that incomplete transaction and its upload.
 
 The archive excludes active sessions, runtime state directories, queues and
-in-progress work, virtual environments, caches, nested repositories, external
+in-progress work, virtual environments, caches, external
 symlinks, source workzone/absolute paths, and common plaintext credential
 files. Instance-level provider/OAuth, browser, filesystem, and
 operating-system access remains target-owned. Imported schedules are always
 disabled drafts.
 
 Every preview reports included file count, package size, and excluded-path
-count. The v1 receiver accepts packages up to 256 MiB and archives expanding to
-at most 2 GiB. Oversized workspaces fail before publication; HASHI does not
-silently truncate them. Project branches and large artifacts should be moved by
-their own repository/artifact workflow.
+count. Explicit `workspace` transfers inspect the complete logical workspace
+inventory before compression and reject more than 1,000,000,000 bytes (1 GB).
+Equality is accepted. Required archive/control overhead is budgeted separately;
+the receiver no longer imposes an independent 256 MiB package cap. Historical
+schema 1–3 packages retain their existing bounded 2 GiB expansion guard.
+
+Explicit `identity_memory` exports canonical identity plus PCM-owned memory
+paths (`is_portable_memory_path`), including the bridge SQLite database,
+transcripts and the local `memory/` tree. It inventories ordinary work files
+without reading their content. Oversized discarded work files do not prevent
+this mode. Root `AGENT.md` is excluded in this mode and preserved as the existing
+non-authoritative attachment in `workspace` mode. Nested project documents,
+including nested `agent.md`, are ordinary files in full-workspace mode; a `.git`
+marker no longer excludes the containing project. External links remain excluded.
+
+`/move <agent> <target>` opens the explicit scope picker. `--identity-memory` or
+`--workspace` chooses the scope directly; `--dry-run` previews that choice.
+The compatibility CLI uses `--transfer-mode identity_memory|workspace`.
+Preview/prepared state exposes `transfer_mode`, `workspace_inventory`,
+`discarded_files`, and `total_workspace_bytes`. Confirmation warns that successful
+Move deletes the entire source workspace, including excluded files. Clone keeps
+its source. Changing scope requires a fresh preparation and confirmation.
+Source freshness covers the selected content and deletion inventory, retaining
+the existing exclusion for the command audit. Files changing during packaging
+cause preparation to fail without publishing a new package. SQLite snapshots
+and receiver payload validation retain bounded expansion checks.
+
+This scope addition does not yet replace the self-move manual continuation
+mechanism documented below; background automatic completion is tracked separately.
 
 ## Transaction
 

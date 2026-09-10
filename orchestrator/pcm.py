@@ -356,3 +356,18 @@ def atomic_write_pcm(path: str | Path, content: str) -> Path:
         temporary.unlink(missing_ok=True)
         raise
     return target
+
+
+def is_portable_memory_path(relative_path: str) -> bool:
+    """PCM-owned durable Agent export scope; never infer memory from substrings.
+
+    The memory directory is the registered local PCM/Memory+ store. Runtime
+    locks and SQLite sidecars are excluded by the archive's snapshot policy.
+    Shared Wiki and external projects are not Agent-owned export roots.
+    """
+    from pathlib import PurePosixPath
+    path = PurePosixPath(relative_path)
+    return path.as_posix() in {
+        "agent.md", "MEMORY.md", "bridge_memory.sqlite", "transcript.jsonl",
+        "core_transcript.jsonl", "audit_transcript.jsonl",
+    } or (len(path.parts) > 1 and path.parts[0] == "memory")

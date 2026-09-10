@@ -358,25 +358,13 @@ async def move_show_target_picker(runtime: Any, update: Any, agent_id: str, inst
 async def move_show_options(runtime: Any, update: Any, agent_id: str, target: str) -> None:
     """Step 3: show move options."""
     markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                ui_language.tr("remote.move.button.safe_move"),
-                callback_data=_move_callback_data(
-                    runtime, f"move:exec:{agent_id}:{target}:move"
-                ),
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                ui_language.tr("remote.move.button.preview"),
-                callback_data=_move_callback_data(
-                    runtime, f"move:exec:{agent_id}:{target}:dry"
-                ),
-            ),
-        ],
-        [InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")],
-    ])
-    await update.callback_query.edit_message_text(
+        [InlineKeyboardButton(
+            ui_language.tr(f"remote.move.mode.{mode}"),
+            callback_data=_move_callback_data(runtime, f"move:exec:{agent_id}:{target}:{mode}"),
+        )] for mode in ("identity_memory", "workspace")
+    ] + [[InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")]])
+    sender = update.callback_query.edit_message_text if getattr(update, "callback_query", None) else lambda text, **kwargs: runtime._reply_text(update, text, **kwargs)
+    await sender(
         f"{card_title('📦', 'Move agent')}\n\n"
         f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
         f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
@@ -396,6 +384,7 @@ async def do_move(
     keep_source: bool = False,
     sync: bool = False,
     dry_run: bool = False,
+    transfer_mode: str | None = None,
 ) -> None:
     chat_id = update.effective_chat.id
 
@@ -439,6 +428,10 @@ async def do_move(
         )
         return
 
+    if transfer_mode not in {"identity_memory", "workspace"}:
+        await move_show_options(runtime, update, agent_id, target)
+        return
+
     operation = "preview" if dry_run else "prepare"
     await runtime._send_text(
         chat_id,
@@ -462,6 +455,7 @@ async def do_move(
                 agent_id,
                 resolved_target,
                 source_instance=source_instance,
+                transfer_mode=transfer_mode,
             )
             await runtime._send_text(
                 chat_id,
@@ -477,6 +471,7 @@ async def do_move(
             agent_id,
             resolved_target,
             source_instance=source_instance,
+            transfer_mode=transfer_mode,
             keep_source=keep_source,
         )
         package_id = str(result["package_id"])
@@ -819,6 +814,15 @@ def _render_move_prepared(result: dict[str, Any]) -> str:
 
 def _render_move_review_notes(result: dict[str, Any]) -> list[str]:
     lines: list[str] = []
+    mode = result.get("transfer_mode")
+    if mode in {"identity_memory", "workspace"}:
+        discarded = result.get("discarded_files") or []
+        lines.append(ui_language.tr("remote.move.scope", mode=html.escape(ui_language.tr(f"remote.move.mode.{mode}")), total=f"{int(result.get('total_workspace_bytes') or 0):,}", count=len(discarded)))
+        if result.get("operation") != "clone":
+            lines.append(ui_language.tr("remote.move.scope_delete"))
+        lines.extend(f"  • <code>{html.escape(str(item['path']))}</code> ({int(item['size']):,} B)" for item in discarded[:12])
+        if len(discarded) > 12:
+            lines.append(ui_language.tr("remote.move.scope_more", count=len(discarded) - 12))
     retained = result.get("retained_identity")
     if isinstance(retained, dict):
         storage_path = str(retained.get("storage_path") or "").strip()
@@ -1020,33 +1024,7 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
         if target_error:
             await query.edit_message_text(target_error, parse_mode="HTML")
             return
-        markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    ui_language.tr("remote.move.button.safe_move"),
-                    callback_data=_move_callback_data(
-                        runtime, f"move:exec:{agent_id}:{target}:move"
-                    ),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    ui_language.tr("remote.move.button.preview"),
-                    callback_data=_move_callback_data(
-                        runtime, f"move:exec:{agent_id}:{target}:dry"
-                    ),
-                ),
-            ],
-            [InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")],
-        ])
-        await query.edit_message_text(
-            f"{card_title('📦', 'Move agent')}\n\n"
-            f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
-            f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
-            f"{ui_language.tr('remote.move.choose_safe')}",
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
+        await move_show_options(runtime, update, agent_id, target)
         return
 
     if action == "exec" and len(parts) >= 4:
@@ -1065,7 +1043,7 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                 parse_mode="HTML",
             )
             return
-        await runtime._do_move(update, agent_id, target, instances, keep_source=False, sync=sync, dry_run=dry)
+        await runtime._do_move(update, agent_id, target, instances, keep_source=False, sync=sync, dry_run=dry, transfer_mode=mode if mode in {"identity_memory", "workspace"} else None)
         return
 
     if action in {"commit", "continue", "abort"} and len(parts) >= 3:

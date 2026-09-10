@@ -169,13 +169,13 @@ async def test_move_show_options_edits_callback_message(tmp_path):
 
     await runtime_remote.move_show_options(runtime, update, "zelda", "hashi2")
 
-    assert "Safe move transfers identity" in update.callback_query.edits[-1]["text"]
     callbacks = [
         button.callback_data
         for row in update.callback_query.edits[-1]["reply_markup"].inline_keyboard
         for button in row
     ]
-    assert "move:exec:zelda:hashi2:move" in callbacks
+    assert "move:exec:zelda:hashi2:identity_memory" in callbacks
+    assert "move:exec:zelda:hashi2:workspace" in callbacks
     assert "move:cancel" in callbacks
 
 
@@ -378,7 +378,8 @@ async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_pending, "delayed_count", AsyncMock(return_value=0))
     calls = []
 
-    def _preview(root, instances, agent_id, target, *, source_instance):
+    def _preview(root, instances, agent_id, target, *, source_instance, transfer_mode):
+        assert transfer_mode == "workspace"
         calls.append((root, instances, agent_id, target, source_instance))
         return {
             "agent_id": agent_id,
@@ -402,6 +403,7 @@ async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
         "hashi2",
         {"hashi2": {"display_name": "HASHI2"}},
         dry_run=True,
+        transfer_mode="workspace",
     )
 
     assert calls
@@ -451,6 +453,7 @@ async def test_do_move_other_agent_uses_worker_preflight(tmp_path, monkeypatch):
         "hashi2",
         {"hashi2": {"display_name": "HASHI2"}},
         dry_run=True,
+        transfer_mode="workspace",
     )
 
     preflight.assert_awaited_once_with("sunny")
@@ -488,6 +491,7 @@ async def test_do_move_worker_preflight_preserves_move_guards(
         "hashi2",
         {"hashi2": {"display_name": "HASHI2"}},
         dry_run=True,
+        transfer_mode="workspace",
     )
 
     preview.assert_not_called()

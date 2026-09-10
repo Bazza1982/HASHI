@@ -29,6 +29,7 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator.pcm import (
+    is_portable_memory_path,
     PCM_FILENAME,
     PCMValidationError,
     canonical_agent_md,
@@ -39,7 +40,10 @@ from orchestrator.process_execution import is_wsl
 
 PACKAGE_TYPE = "hashi-agent-move"
 PACKAGE_SCHEMA_MIN_VERSION = 1
-PACKAGE_SCHEMA_VERSION = 3
+PACKAGE_SCHEMA_VERSION = 4
+TRANSFER_MODES_CAPABILITY = "agent_transfer_modes_v1"
+WORKSPACE_LIMIT_BYTES = 1_000_000_000
+TRANSFER_MODES = {"identity_memory", "workspace"}
 AGENT_MOVE_CAPABILITY = "agent_move_receive_v1"
 RETAINED_IDENTITY_CAPABILITY = "agent_move_retained_identity_v1"
 AGENT_TRANSFER_LIFECYCLE_CAPABILITY = "agent_transfer_lifecycle_v1"
@@ -63,6 +67,8 @@ _CONTROL_MEMBER_LIMITS = {
     "secrets/agent.enc": 16 * 1024 * 1024,
     "checksums.json": 64 * 1024 * 1024,
 }
+
+MAX_TRANSFER_PACKAGE_BYTES = WORKSPACE_LIMIT_BYTES + sum(_CONTROL_MEMBER_LIMITS.values()) + MAX_ARCHIVE_MEMBERS * 4096
 
 _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SQLITE_SUFFIXES = {".sqlite", ".sqlite3", ".db"}
@@ -322,6 +328,7 @@ def create_agent_move_package(
     operation: str = "move",
     include_telegram_secret: bool = True,
     schema_version: int | None = None,
+    transfer_mode: str | None = None,
 ) -> AgentMoveArchive:
     """Create one checksummed Agent move archive.
 
@@ -350,11 +357,22 @@ def create_agent_move_package(
             f"source Agent '{name}' has already moved to another instance"
         )
     workspace = _resolve_workspace(root, raw_config, name)
-    retained_identity_bytes, retained_identity = _read_retained_identity(
-        workspace, name
+    if transfer_mode is not None and transfer_mode not in TRANSFER_MODES:
+        raise AgentMoveError("unknown Agent transfer mode")
+    inventory = _workspace_inventory(workspace) if transfer_mode else []
+    total_workspace_bytes = sum(item["size"] for item in inventory)
+    if transfer_mode == "workspace" and total_workspace_bytes > WORKSPACE_LIMIT_BYTES:
+        raise AgentMoveError(
+            f"Workspace is {total_workspace_bytes:,} bytes; full move limit is 1 GB "
+            "(1,000,000,000 bytes). Move large projects outside the Agent workspace or clean it first.")
+    retained_identity_bytes, retained_identity = (
+        (None, None) if transfer_mode == "identity_memory"
+        else _read_retained_identity(workspace, name)
     )
     pcm_text = _read_canonical_pcm(workspace, name)
-    requested_schema = int(schema_version) if schema_version is not None else 3
+    requested_schema = int(schema_version) if schema_version is not None else (4 if transfer_mode else 3)
+    if transfer_mode and requested_schema < 4:
+        raise AgentMoveError("explicit transfer modes require schema 4")
     if requested_schema not in range(PACKAGE_SCHEMA_MIN_VERSION, PACKAGE_SCHEMA_VERSION + 1):
         raise AgentMoveError(f"unsupported requested Agent package schema {requested_schema}")
     if retained_identity is not None and requested_schema == 1:
@@ -384,12 +402,15 @@ def create_agent_move_package(
         else None
     )
 
+    if transfer_mode == "identity_memory":
+        retained_identity_bytes, retained_identity = None, None
     entries: list[WorkspaceEntry] = []
     exclusions: list[dict[str, str]] = []
-    if include_workspace:
+    if include_workspace or transfer_mode:
         entries, exclusions = _scan_workspace(
             workspace,
-            max_workspace_bytes=MAX_WORKSPACE_BYTES,
+            max_workspace_bytes=WORKSPACE_LIMIT_BYTES if transfer_mode else MAX_WORKSPACE_BYTES,
+            transfer_mode=transfer_mode,
         )
 
     source_kind = detect_environment_kind()
@@ -438,6 +459,17 @@ def create_agent_move_package(
         "excluded": exclusions,
         "source_bytes": sum(item.size for item in entries),
     }
+    if transfer_mode:
+        selected = {item.relative_path for item in entries} | {"agent.md"}
+        if retained_identity is not None:
+            selected.add("AGENT.md")
+        workspace_metadata.update({
+            "transfer_mode": transfer_mode,
+            "policy": "explicit-transfer-scope-v1",
+            "inventory": inventory,
+            "total_workspace_bytes": total_workspace_bytes,
+            "discarded": [item for item in inventory if item["path"] not in selected],
+        })
     manifest = {
         "package_type": PACKAGE_TYPE,
         "schema_version": package_schema,
@@ -488,6 +520,10 @@ def create_agent_move_package(
             1, AGENT_TRANSFER_LIFECYCLE_CAPABILITY
         )
 
+    if transfer_mode:
+        manifest["transfer_mode"] = transfer_mode
+        manifest["required_receiver_capabilities"].append(TRANSFER_MODES_CAPABILITY)
+
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.{package_key}.tmp")
     temporary.unlink(missing_ok=True)
@@ -497,7 +533,10 @@ def create_agent_move_package(
         temp_dir = Path(temp_name)
         prepared_entries = _prepare_workspace_entries(entries, temp_dir)
         prepared_bytes = sum(item.size for item in prepared_entries)
-        if prepared_bytes > MAX_WORKSPACE_BYTES:
+        snapshot_growth = prepared_bytes - sum(item.size for item in entries)
+        if transfer_mode == "workspace" and total_workspace_bytes + snapshot_growth > WORKSPACE_LIMIT_BYTES:
+            raise AgentMoveError("consistent workspace snapshots exceed the 1 GB full move limit")
+        if prepared_bytes > (WORKSPACE_LIMIT_BYTES if transfer_mode else MAX_WORKSPACE_BYTES):
             raise AgentMoveError(
                 "consistent Agent workspace snapshots exceed the portable move "
                 f"limit of {MAX_WORKSPACE_BYTES} bytes"
@@ -579,6 +618,10 @@ def create_agent_move_package(
             # existing output. This also catches files that grew after the
             # initial workspace scan.
             read_agent_move_package(temporary, verify=True)
+            if transfer_mode:
+                final_inventory = _workspace_inventory(workspace)
+                if final_inventory != inventory:
+                    raise AgentMoveError("workspace changed while packaging; prepare a fresh transfer")
             os.replace(temporary, output)
         except Exception:
             temporary.unlink(missing_ok=True)
@@ -646,6 +689,20 @@ def read_agent_move_package(
                 raise AgentMoveError("clone package declares a Telegram credential")
         schedules = _read_json(archive, "schedules/tasks.json")
         workspace_metadata = _read_json(archive, "metadata/workspace.json")
+        if int(manifest.get("schema_version") or 0) >= 4:
+            mode = manifest.get("transfer_mode")
+            if mode not in TRANSFER_MODES or workspace_metadata.get("transfer_mode") != mode:
+                raise AgentMoveError("package transfer mode is invalid or inconsistent")
+            if TRANSFER_MODES_CAPABILITY not in manifest.get("required_receiver_capabilities", []):
+                raise AgentMoveError("package omits explicit transfer mode capability")
+            actual_bytes = sum(info.file_size for info in infos if info.filename.startswith("workspace/") or info.filename == "identity/agent.md")
+            if actual_bytes > WORKSPACE_LIMIT_BYTES:
+                raise AgentMoveError("Agent transfer payload exceeds the 1 GB limit")
+            if mode == "workspace" and int(workspace_metadata.get("total_workspace_bytes", -1)) not in range(WORKSPACE_LIMIT_BYTES + 1):
+                raise AgentMoveError("workspace inventory exceeds the 1 GB limit")
+            if mode == "identity_memory" and any(name.startswith("workspace/") and not is_portable_memory_path(name[len("workspace/"):]) for name in names):
+                raise AgentMoveError("identity-memory package contains files outside PCM scope")
+
         pcm_text = _read_required(archive, "identity/agent.md").decode("utf-8")
         try:
             parse_pcm_text(pcm_text, path=Path("agent.md"))
@@ -822,6 +879,9 @@ def archive_snapshot_fingerprint(
         "file_checksums": dict(sorted(file_checksums.items())),
         "portable_files": sorted(portable_files, key=lambda item: item["path"]),
         "agent_credentials": credentials,
+        "transfer_mode": package.manifest.get("transfer_mode"),
+        "deletion_inventory": [item for item in package.workspace_metadata.get("inventory", [])
+                               if str(item.get("path", "")).casefold() not in _FRESHNESS_EXCLUDED_WORKSPACE_PATHS],
     }
     return hashlib.sha256(_json_bytes(payload)).hexdigest()
 
@@ -967,10 +1027,34 @@ def _collect_agent_secrets(
     return values, required, token_key
 
 
+def _workspace_inventory(workspace: Path) -> list[dict[str, Any]]:
+    entries = []
+    def fail(error):
+        raise AgentMoveError(f"workspace inventory cannot be inspected: {error}") from error
+    for current, dirs, files in os.walk(workspace, followlinks=False, onerror=fail):
+        parent = Path(current)
+        for name in list(dirs):
+            path = parent / name
+            if path.is_symlink() or _is_windows_junction(path):
+                dirs.remove(name)
+                files.append(name)
+        for name in sorted(files):
+            path = parent / name
+            info = path.lstat()
+            link = path.is_symlink() or _is_windows_junction(path)
+            entries.append({"path": path.relative_to(workspace).as_posix(),
+                            "size": 0 if link else info.st_size,
+                            "mtime_ns": info.st_mtime_ns, "link": link})
+            if len(entries) > MAX_ARCHIVE_MEMBERS:
+                raise AgentMoveError("workspace inventory exceeds the file-count limit")
+    return sorted(entries, key=lambda item: item["path"])
+
+
 def _scan_workspace(
     workspace: Path,
     *,
     max_workspace_bytes: int,
+    transfer_mode: str | None = None,
 ) -> tuple[list[WorkspaceEntry], list[dict[str, str]]]:
     entries: list[WorkspaceEntry] = []
     excluded: list[dict[str, str]] = []
@@ -984,16 +1068,19 @@ def _scan_workspace(
             relative = child.relative_to(workspace).as_posix()
             normalized_directory = directory.casefold()
             reason = ""
-            if normalized_directory == PCM_FILENAME.casefold():
+            if normalized_directory == PCM_FILENAME.casefold() and (not transfer_mode or current_path == workspace):
                 raise AgentMoveError(
                     f"workspace/{relative} conflicts with the reserved Agent identity; "
                     "only exact root AGENT.md may be retained as a non-authoritative attachment"
                 )
-            if normalized_directory in _SKIP_DIR_NAMES:
+            if normalized_directory in _SKIP_DIR_NAMES and (
+                not transfer_mode or current_path == workspace
+                or normalized_directory not in {"state", "tmp", "undelivered", "backend_state"}
+            ):
                 reason = "ephemeral_or_environment_directory"
             elif child.is_symlink() or _is_windows_junction(child):
                 reason = "directory_symlink_not_portable"
-            elif (child / ".git").exists():
+            elif not transfer_mode and (child / ".git").exists():
                 reason = "nested_project_not_agent_state"
             if reason:
                 excluded.append({"path": relative, "reason": reason})
@@ -1007,7 +1094,7 @@ def _scan_workspace(
             if relative == "agent.md":
                 continue
             normalized_filename = filename.casefold()
-            if normalized_filename == PCM_FILENAME.casefold():
+            if normalized_filename == PCM_FILENAME.casefold() and (not transfer_mode or current_path == workspace):
                 if relative == "AGENT.md":
                     continue
                 raise AgentMoveError(
@@ -1050,6 +1137,9 @@ def _scan_workspace(
                     else "ephemeral_runtime_file"
                 )
                 excluded.append({"path": relative, "reason": reason})
+                continue
+            if transfer_mode == "identity_memory" and not is_portable_memory_path(relative):
+                excluded.append({"path": relative, "reason": "not_in_pcm_export_scope"})
                 continue
             materialized = False
             actual = source
@@ -1240,7 +1330,7 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
             raise AgentMoveError(
                 "schema 1 manifest cannot declare an Agent capability attachment"
             )
-    elif schema == 3:
+    elif schema >= 3:
         if str(manifest.get("operation") or "").strip().lower() not in {
             "move",
             "clone",
@@ -1312,7 +1402,7 @@ def _read_and_validate_retained_identity(
                 "schema 1 package cannot contain a retained identity attachment"
             )
         return None
-    if schema == 3 and not bool(
+    if schema >= 3 and not bool(
         (manifest.get("sections") or {}).get("retained_identity")
     ):
         if retained_members:
@@ -1381,10 +1471,7 @@ def _validate_workspace_members(names: Iterable[str], target_platform: str) -> N
     windows = str(target_platform or "").lower() == "windows"
     for relative in workspace_names:
         _safe_member_name(relative)
-        if any(
-            component.casefold() == PCM_FILENAME.casefold()
-            for component in PurePosixPath(relative).parts
-        ):
+        if PurePosixPath(relative).parts[0].casefold() == PCM_FILENAME.casefold():
             raise AgentMoveError(
                 "workspace Agent identity aliases are reserved for control members"
             )
@@ -1425,10 +1512,7 @@ def _validate_workspace_metadata(
         if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
             raise AgentMoveError("workspace metadata file entries must contain a path")
         path = _safe_member_name(str(item["path"]))
-        if any(
-            component.casefold() == PCM_FILENAME.casefold()
-            for component in PurePosixPath(path).parts
-        ):
+        if PurePosixPath(path).parts[0].casefold() == PCM_FILENAME.casefold():
             raise AgentMoveError(
                 "workspace Agent identity aliases are reserved for control members"
             )

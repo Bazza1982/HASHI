@@ -1542,7 +1542,7 @@
     "remote.move.cancelled": "Move cancelled.",
     "remote.move.no_targets": "⚠️ /move has no connected destination instances. Make sure HASHI Remote is on at the destination and the handshake has completed. Use /remote list to check connections.",
     "remote.move.button.safe_move": "Safe move",
-    "remote.move.choose_safe": "Safe move transfers identity, durable workspace/memories, disabled schedule drafts, and encrypted Agent-only credentials. The source is removed only after the target is live and verified. Preview changes nothing.",
+    "remote.move.choose_safe": "Choose what to carry. Identity and memory excludes ordinary work files; full workspace permits up to 1 GB before compression. Review the excluded files before confirming. Both modes remove the source only after the target is verified.",
     "remote.move.sync_retired": "⚠️ <code>--sync</code> is retired. A safe move already includes durable memory; use <code>/clone</code> when the source must remain active.",
     "remote.move.keep_source_retired": "⚠️ <code>--keep-source</code> copy mode has moved to <code>/clone</code>. No transfer was prepared.",
     "remote.move.unknown_target": "⚠️ /move cannot find <code>{target}</code> in Remote connections. Use /remote list to check the instance name and connection.",
@@ -2336,7 +2336,12 @@
     "version.usage": "Usage: /version | /version full | /version all | /version <instance>",
     "version.remote_unavailable": "HASHI Remote's authenticated peer view is unavailable.",
     "version.error.unknown_instance": "Unknown authenticated instance: {instance}",
-    "version.error.ambiguous_instance": "Ambiguous instance name: {instance}"
+    "version.error.ambiguous_instance": "Ambiguous instance name: {instance}",
+    "remote.move.mode.identity_memory": "Identity and memory only",
+    "remote.move.mode.workspace": "Full workspace · up to 1 GB",
+    "remote.move.scope": "Scope · {mode}; workspace · {total} B; files excluded · {count}.",
+    "remote.move.scope_delete": "After the target is verified, the entire source workspace is permanently removed, including every excluded file. Cancel to retain the source.",
+    "remote.move.scope_more": "{count} more excluded files; the complete list is in the prepared transaction."
   },
   "commands": {
     "help": "Show help menu",

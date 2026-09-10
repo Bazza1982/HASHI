@@ -111,7 +111,7 @@ class _LocalAgentTransferClient:
         path = Path(package_path)
         return stage_agent_move(
             self.root,
-            path.read_bytes(),
+            path,
             expected_sha256=package_sha256(path),
             source_instance=self.source_instance,
             target_instance=self.target_instance,
@@ -169,6 +169,7 @@ def preview_outbound_move(
     target_instance: str,
     *,
     source_instance: str,
+    transfer_mode: str | None = None,
 ) -> dict[str, Any]:
     """Validate both sides and build a disposable package; target is untouched."""
 
@@ -179,6 +180,7 @@ def preview_outbound_move(
         target_instance,
         source_instance=source_instance,
         operation="move",
+        transfer_mode=transfer_mode,
     )
 
 
@@ -190,6 +192,7 @@ def preview_outbound_clone(
     *,
     source_instance: str,
     target_agent_id: str | None = None,
+    transfer_mode: str | None = None,
 ) -> dict[str, Any]:
     return _preview_outbound_transfer(
         hashi_root,
@@ -198,6 +201,7 @@ def preview_outbound_clone(
         target_instance,
         source_instance=source_instance,
         operation="clone",
+        transfer_mode=transfer_mode,
         requested_agent_id=target_agent_id,
     )
 
@@ -211,6 +215,7 @@ def _preview_outbound_transfer(
     source_instance: str,
     operation: str,
     requested_agent_id: str | None = None,
+    transfer_mode: str | None = None,
 ) -> dict[str, Any]:
 
     root = Path(hashi_root).expanduser().resolve()
@@ -249,6 +254,7 @@ def _preview_outbound_transfer(
             max_package_bytes=_receiver_package_limit(client),
             operation=operation,
             include_telegram_secret=operation == "move",
+            transfer_mode=transfer_mode,
         )
         compatibility_check = getattr(client, "ensure_package_compatible", None)
         if callable(compatibility_check):
@@ -264,6 +270,10 @@ def _preview_outbound_transfer(
             "target_instance": client.target_instance,
             "target_environment": client.capabilities.get("environment_kind"),
             "package_schema": package.manifest.get("schema_version"),
+            "transfer_mode": package.manifest.get("transfer_mode"),
+            "workspace_inventory": package.workspace_metadata.get("inventory", []),
+            "discarded_files": package.workspace_metadata.get("discarded", []),
+            "total_workspace_bytes": package.workspace_metadata.get("total_workspace_bytes"),
             "retained_identity": _retained_identity_preview(package.retained_identity),
             "package_bytes": path.stat().st_size,
             "workspace_files": len(package.workspace_metadata.get("files") or []),
@@ -291,6 +301,7 @@ def prepare_outbound_move(
     *,
     source_instance: str,
     keep_source: bool = False,
+    transfer_mode: str | None = None,
 ) -> dict[str, Any]:
     """Build and remotely stage a package, ready for explicit confirmation."""
 
@@ -301,6 +312,7 @@ def prepare_outbound_move(
         target_instance,
         source_instance=source_instance,
         operation="legacy_move" if keep_source else "move",
+        transfer_mode=transfer_mode,
         keep_source=keep_source,
     )
 
@@ -313,6 +325,7 @@ def prepare_outbound_clone(
     *,
     source_instance: str,
     target_agent_id: str | None = None,
+    transfer_mode: str | None = None,
 ) -> dict[str, Any]:
     return _prepare_outbound_transfer(
         hashi_root,
@@ -321,6 +334,7 @@ def prepare_outbound_clone(
         target_instance,
         source_instance=source_instance,
         operation="clone",
+        transfer_mode=transfer_mode,
         requested_agent_id=target_agent_id,
     )
 
@@ -335,6 +349,7 @@ def _prepare_outbound_transfer(
     operation: str,
     requested_agent_id: str | None = None,
     keep_source: bool = False,
+    transfer_mode: str | None = None,
 ) -> dict[str, Any]:
 
     root = Path(hashi_root).expanduser().resolve()
@@ -396,6 +411,7 @@ def _prepare_outbound_transfer(
             max_package_bytes=_receiver_package_limit(client),
             operation="clone" if operation == "clone" else "move",
             include_telegram_secret=operation != "clone",
+            transfer_mode=transfer_mode,
         )
         compatibility_check = getattr(client, "ensure_package_compatible", None)
         if callable(compatibility_check):
@@ -408,6 +424,10 @@ def _prepare_outbound_transfer(
                 "package_bytes": package_path.stat().st_size,
                 "source_environment": package.manifest.get("source_environment"),
                 "package_schema": package.manifest.get("schema_version"),
+                "transfer_mode": package.manifest.get("transfer_mode"),
+                "workspace_inventory": package.workspace_metadata.get("inventory", []),
+                "discarded_files": package.workspace_metadata.get("discarded", []),
+                "total_workspace_bytes": package.workspace_metadata.get("total_workspace_bytes"),
                 "retained_identity": _retained_identity_preview(
                     package.retained_identity
                 ),
@@ -1583,6 +1603,7 @@ def _assert_source_snapshot_current(
             operation=str(original.manifest.get("operation") or "move"),
             include_telegram_secret=True,
             schema_version=int(original.manifest.get("schema_version") or 1),
+            transfer_mode=original.manifest.get("transfer_mode"),
         )
         actual = archive_snapshot_fingerprint(current, secret_passphrase=token)
     if actual != expected:

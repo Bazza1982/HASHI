@@ -597,3 +597,41 @@ def test_snapshot_fingerprint_excludes_append_only_slash_audit_but_packages_it(
         tmp_path / "audit-third.hashi-agent",
     )
     assert archive_snapshot_fingerprint(third) != first_fingerprint
+
+
+def test_explicit_transfer_modes_preserve_memory_and_preflight_whole_workspace(tmp_path, monkeypatch):
+    from orchestrator.agent_move import package as owner
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    (workspace / "memory").mkdir(exist_ok=True)
+    (workspace / "memory" / "memory_plus_state.json").write_text('{"fact":"keep"}')
+    (workspace / "transcript.jsonl").write_text('{"message":"history"}\n')
+    project = workspace / "project"
+    project.mkdir()
+    (project / ".git").write_text("gitdir: /external")
+    (project / "agent.md").write_text("ordinary project document")
+    big = workspace / "artifact.bin"
+    with big.open("wb") as stream:
+        stream.truncate(1_000_000_001)
+    output = tmp_path / "explicit.hashi-agent"
+    with pytest.raises(AgentMoveError, match="1 GB"):
+        create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
+    assert not output.exists()
+    memory = create_agent_move_package(root, "zelda", output, transfer_mode="identity_memory")
+    assert "workspace/transcript.jsonl" in memory.names
+    assert "workspace/memory/memory_plus_state.json" in memory.names
+    assert "workspace/artifact.bin" not in memory.names
+    assert any(row["path"] == "artifact.bin" and row["size"] == 1_000_000_001
+               for row in memory.workspace_metadata["discarded"])
+    big.unlink()
+    full = create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
+    assert "workspace/project/agent.md" in full.names
+    assert full.manifest["schema_version"] == 4
+    # Boundaries use the complete logical inventory, including excluded runtime
+    # material, with exact equality accepted before any compression begins.
+    total = full.workspace_metadata["total_workspace_bytes"]
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", total)
+    create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
+    (workspace / "extra").write_bytes(b"x")
+    with pytest.raises(AgentMoveError, match="1 GB"):
+        create_agent_move_package(root, "zelda", output, transfer_mode="workspace")

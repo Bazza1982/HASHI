@@ -3417,7 +3417,7 @@ class FlexibleAgentRuntime:
             keep = "--keep-source" in args
             sync = "--sync" in args
             dry = "--dry-run" in args
-            await self._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry)
+            await self._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry, transfer_mode=("identity_memory" if "--identity-memory" in args else "workspace" if "--workspace" in args else None))
             return
 
         if not any(inst.get("active") for inst in instances.values()):
@@ -3443,7 +3443,7 @@ class FlexibleAgentRuntime:
         await runtime_remote.move_show_options(self, update, agent_id, target)
 
     async def _do_move(self, update, agent_id: str, target: str, instances: dict,
-                       keep_source: bool = False, sync: bool = False, dry_run: bool = False):
+                       keep_source: bool = False, sync: bool = False, dry_run: bool = False, transfer_mode: str | None = None):
         await runtime_remote.do_move(
             self,
             update,
@@ -3453,6 +3453,7 @@ class FlexibleAgentRuntime:
             keep_source=keep_source,
             sync=sync,
             dry_run=dry_run,
+            transfer_mode=transfer_mode,
         )
 
     async def callback_move(self, update: Update, context: Any):

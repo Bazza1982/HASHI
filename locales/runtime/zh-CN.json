@@ -1542,7 +1542,7 @@
     "remote.move.cancelled": "已取消移动。",
     "remote.move.no_targets": "⚠️ /move 当前没有已连接的迁移目标。请确认目标实例的 HASHI Remote 已开启并完成握手；可用 /remote list 查看连接状态。",
     "remote.move.button.safe_move": "安全移动",
-    "remote.move.choose_safe": "安全移动会传输身份、持久工作区与记忆、禁用状态的计划任务草稿，以及加密后的代理专属凭据。只有目标实际上线并通过核验后才删除来源；预览不会产生更改。",
+    "remote.move.choose_safe": "请选择携带范围。仅迁移代理会排除普通工作文件；搬家允许压缩前最多 1 GB 工作区。确认前请核对未携带文件；两种模式都只在目标验证成功后删除来源。",
     "remote.move.sync_retired": "⚠️ <code>--sync</code> 已停用。安全移动已包含持久记忆；若要让来源保持活动，请使用 <code>/clone</code>。",
     "remote.move.keep_source_retired": "⚠️ <code>--keep-source</code> 复制模式已迁移到 <code>/clone</code>。本次未准备任何传输。",
     "remote.move.unknown_target": "⚠️ /move 在 Remote 连接中找不到 <code>{target}</code>。请用 /remote list 检查实例名称和连接状态。",
@@ -2336,7 +2336,12 @@
     "version.usage": "用法：/version | /version full | /version all | /version <实例>",
     "version.remote_unavailable": "HASHI Remote 的认证实例视图不可用。",
     "version.error.unknown_instance": "未知的已认证实例：{instance}",
-    "version.error.ambiguous_instance": "实例名称不唯一：{instance}"
+    "version.error.ambiguous_instance": "实例名称不唯一：{instance}",
+    "remote.move.mode.identity_memory": "仅迁移代理身份与记忆",
+    "remote.move.mode.workspace": "搬家 · 工作区上限 1 GB",
+    "remote.move.scope": "范围 · {mode}；工作区 · {total} B；不携带文件 · {count} 个。",
+    "remote.move.scope_delete": "目标验证成功后，整个来源工作区将被永久删除，包括所有未携带文件。取消可保留来源。",
+    "remote.move.scope_more": "另有 {count} 个未携带文件；完整清单保存在已准备的事务中。"
   },
   "commands": {
     "help": "显示帮助菜单",

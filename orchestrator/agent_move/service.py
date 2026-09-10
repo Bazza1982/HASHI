@@ -38,6 +38,8 @@ from .package import (
     AGENT_MOVE_CAPABILITY,
     AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
     MAX_UNPACKED_BYTES,
+    MAX_TRANSFER_PACKAGE_BYTES,
+    TRANSFER_MODES_CAPABILITY,
     PACKAGE_SCHEMA_MIN_VERSION,
     PACKAGE_SCHEMA_VERSION,
     RETAINED_IDENTITY_CAPABILITY,
@@ -53,7 +55,7 @@ from .package import (
 )
 from .transport_crypto import ENVELOPE_SCHEME
 
-MAX_PACKAGE_BYTES = 256 * 1024 * 1024
+MAX_PACKAGE_BYTES = MAX_TRANSFER_PACKAGE_BYTES
 MOVE_STATE_SCHEMA_VERSION = 2
 _ACCESS_RANK = {"workspace": 0, "project": 1, "drive": 2}
 _SOURCE_TRANSFER_FIELDS = (
@@ -83,6 +85,7 @@ def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
         "capability": AGENT_MOVE_CAPABILITY,
         "capabilities": [
             AGENT_MOVE_CAPABILITY,
+            TRANSFER_MODES_CAPABILITY,
             RETAINED_IDENTITY_CAPABILITY,
             AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
         ],

@@ -319,3 +319,12 @@ remote addresses and dynamic group selectors.
 Agent Move peers advertising authenticated streaming upload transfer binary
 AES-GCM files with bounded buffers and authenticate the full payload before
 staging. Older transaction recovery retains its existing upload compatibility.
+
+Move schema 4 adds explicit `identity_memory` / `workspace` scopes. The slash
+entry requires a scope choice and the CLI accepts `--transfer-mode`; full workspace
+uses a decimal 1 GB pre-compression inventory limit. Preview/confirmation states
+excluded files and permanent source-workspace deletion after target verification.
+PCM owns the selected memory paths. New receivers advertise transfer-mode support;
+source implementation and live Worker/Remote adoption remain separate facts.
+Self-move automatic background completion remains pending; see
+[Agent Move](HASHI_AGENT_MOVE_V1.md).
