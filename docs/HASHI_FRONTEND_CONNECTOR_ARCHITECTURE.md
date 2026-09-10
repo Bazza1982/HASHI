@@ -364,3 +364,13 @@ the accepted chat continues through the existing transcript channel; the client
 stops unsupported status polling without presenting the accepted task as failed.
 Terminal purge confirmation and external-data denials use exit 77 and distinct
 stable error codes while preserving the selected external instance.
+
+Terminal log following reopens a replaced file and tolerates the gap during
+rotation. Windows readers share deletion so they cannot block the writer's
+rename. Chat selection offsets are assigned after highlight segments are split,
+so continuous physical mouse drags retain the exact selected text across redraws.
+These are Frontend Connector Functions changes; existing TUI clients need to
+be reopened to adopt them.
+
+Footer fact changes trigger layout measurement as well as repaint, preserving
+all status fields after long model/route metadata arrives in a narrow window.

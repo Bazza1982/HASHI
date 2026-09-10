@@ -910,6 +910,15 @@ async def test_invalid_tool_arguments_exhaust_three_repairs_with_precise_error(
     tmp_path,
 ):
     adapter = _adapter(tmp_path)
+    import os
+    import time
+    forensic_root = tmp_path / 'logs' / 'provider_protocol_forensics'
+    forensic_root.mkdir(parents=True)
+    expired = forensic_root / 'invalid-tool-calls-expired.jsonl'
+    expired.write_text('old private evidence\n')
+    os.utime(expired, (time.time() - 8 * 86400,) * 2)
+    unrelated = forensic_root / 'unrelated.jsonl'
+    unrelated.write_text('keep\n')
     bad_tool = [
         {
             "id": "call_broken",
@@ -946,6 +955,14 @@ async def test_invalid_tool_arguments_exhaust_three_repairs_with_precise_error(
         response.stream_metadata["provider_protocol_forensic_path"]
     )
     assert str(forensic_path) in response.error
+    if os.name == 'nt':
+        import subprocess
+        acl = subprocess.run(['icacls.exe', str(forensic_path)], capture_output=True, text=True, check=True)
+        assert '(I)' not in acl.stdout, 'private protocol evidence must not inherit readers'
+    else:
+        assert forensic_path.stat().st_mode & 0o777 == 0o600
+    assert not expired.exists(), 'expired private raw evidence must be removed'
+    assert unrelated.read_text() == 'keep\n'
     records = [
         json.loads(line)
         for line in forensic_path.read_text(encoding="utf-8").splitlines()

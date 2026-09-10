@@ -184,6 +184,30 @@ def doctor(registry, inspect):
             'effects':[]}
 
 
+def _open_log_reader(path):
+    """Allow Windows writers to rotate a log while a terminal follows it."""
+    if os.name != 'nt':
+        return path.open(encoding='utf-8', errors='replace')
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    # GENERIC_READ, FILE_SHARE_READ | WRITE | DELETE, OPEN_EXISTING.
+    handle = kernel.CreateFileW(str(path), 0x80000000, 7, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+    return os.fdopen(descriptor, encoding='utf-8', errors='replace')
+
+
 def stream_logs(record, root, args):
     home = Path(record['bridge_home'])
     if args.agent:
@@ -218,7 +242,8 @@ def stream_logs(record, root, args):
             print(json.dumps({'schema_version':1,'ok':True,'command':'logs','instance':record['name'], 'data':{'line':line}},ensure_ascii=False),flush=True)
         else:
             print(line,flush=True)
-    with path.open(encoding='utf-8', errors='replace') as handle:
+    handle = _open_log_reader(path)
+    try:
         tail = deque(handle,maxlen=args.lines)
         if args.json and not args.follow:
             print(json.dumps({'lines':[value for x in tail if (value := filtered(x)) is not None]},ensure_ascii=False))
@@ -231,8 +256,23 @@ def stream_logs(record, root, args):
                 emit(line)
             else:
                 time.sleep(.2)
-                if path.stat().st_size < handle.tell():
+                try:
+                    current = path.stat()
+                except FileNotFoundError:
+                    # Rotation may leave a short gap before the replacement exists.
+                    continue
+                opened = os.fstat(handle.fileno())
+                if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                    try:
+                        replacement = _open_log_reader(path)
+                    except FileNotFoundError:
+                        continue
+                    handle.close()
+                    handle = replacement
+                elif current.st_size < handle.tell():
                     handle.seek(0)
+    finally:
+        handle.close()
     return 0
 
 

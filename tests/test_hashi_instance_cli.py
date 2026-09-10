@@ -794,3 +794,43 @@ def test_completion_uses_selected_command_and_option_value_context(capsys):
     assert not capsys.readouterr().out.strip()
     assert hashi_instance_cli.main(['--complete','--lang','z'])==0
     assert capsys.readouterr().out.split()==['zh']
+def test_terminal_follow_tracks_replaced_and_temporarily_missing_log(tmp_path):
+    """Exercise actual file replacement while the terminal reader stays running."""
+    import queue
+    import subprocess
+    import sys
+    import threading
+    from pathlib import Path
+
+    log_dir = tmp_path / 'logs'
+    log_dir.mkdir()
+    log = log_dir / 'bridge.log'
+    log.write_text('before rotation\n')
+    code = (
+        'import sys; from types import SimpleNamespace; '
+        'from scripts.terminal_support import stream_logs; '
+        "stream_logs({'bridge_home':sys.argv[1],'name':'fixture'}, None, "
+        'SimpleNamespace(agent=None,json=False,follow=True,lines=10))'
+    )
+    process = subprocess.Popen([sys.executable, '-u', '-c', code, str(tmp_path)],
+                               cwd=Path(__file__).resolve().parents[1],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    output = queue.Queue()
+    reader = threading.Thread(target=lambda: [output.put(line.strip()) for line in process.stdout], daemon=True)
+    reader.start()
+    try:
+        assert output.get(timeout=5) == 'before rotation'
+        # A rename/recreate differs from truncating the existing open inode.
+        log.rename(log_dir / 'bridge.log.1')
+        log.write_text('after rotation, longer than the original log\n')
+        assert output.get(timeout=3) == 'after rotation, longer than the original log'
+        log.unlink()
+        import time
+        time.sleep(.4)
+        assert process.poll() is None, 'a normal rotation gap must not stop log following'
+        log.write_text('after gap\n')
+        assert output.get(timeout=3) == 'after gap'
+    finally:
+        process.terminate()
+        process.communicate(timeout=5)
+        reader.join(timeout=2)

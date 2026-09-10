@@ -1201,7 +1201,7 @@ class FlexibleAgentRuntime:
     def get_agent_emoji(self) -> str:
         if self.config.extra and self.config.extra.get("emoji"):
             return self.config.extra["emoji"]
-        return "ðŸ¤–"
+        return "🤖"
 
     def get_current_model(self) -> str:
         if self.backend_manager.current_backend:

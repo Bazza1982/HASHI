@@ -1322,6 +1322,15 @@ Backend API errors and user cards receive only a safe summary and the local
 path. Failure to persist this mandatory evidence stops execution without a
 tool side effect.
 
+The JSONL audit projection rotates at 16 MiB with five retained files; replay
+checks retained event IDs so rotation cannot duplicate a pending fallback event.
+The fallback spool is not rotated before replay. Invalid-tool-call forensic
+files expire after seven days when the next incident is written, except for
+the currently active incident. Only files owned by that writer are eligible.
+POSIX uses 0700 directories and 0600 files. Windows installs a protected DACL
+for the current user, SYSTEM and Administrators before writing; existing
+explicit broad grants are replaced as well as inherited grants.
+
 ## 18. Failure, Retry, and Recovery
 
 ### 18.1 Stage-local provider recovery

@@ -1427,6 +1427,7 @@ class OpenRouterAdapter(BaseBackend):
         )
         record = {
             "format": "hashi-provider-tool-forensic-v1",
+            "retention_seconds": 7 * 24 * 60 * 60,
             "recorded_at": _utc_timestamp(),
             "hashi": {
                 "request_id": str(request_id or ""),
@@ -1490,11 +1491,27 @@ class OpenRouterAdapter(BaseBackend):
             default=str,
         ) + "\n"
         try:
+            from tools.private_files import protect_private_file
             forensic_root.mkdir(parents=True, exist_ok=True)
-            forensic_root.chmod(0o700)
+            if os.name == 'nt':
+                protect_private_file(forensic_root)
+            else:
+                forensic_root.chmod(0o700)
+            # Incidents have separate files; keep the current incident complete.
+            # Only expired files owned by this writer are eligible for deletion.
+            cutoff = time.time() - record['retention_seconds']
+            with _PROVIDER_FORENSIC_WRITE_LOCK:
+                for previous in forensic_root.glob('invalid-tool-calls-*.jsonl'):
+                    if previous != path and not previous.is_symlink():
+                        try:
+                            if previous.is_file() and previous.stat().st_mtime < cutoff:
+                                previous.unlink()
+                        except FileNotFoundError:
+                            pass
             flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
             descriptor = os.open(path, flags, 0o600)
             try:
+                protect_private_file(path)
                 with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
                     descriptor = -1
                     with _PROVIDER_FORENSIC_WRITE_LOCK:
@@ -1504,7 +1521,6 @@ class OpenRouterAdapter(BaseBackend):
             finally:
                 if descriptor >= 0:
                     os.close(descriptor)
-            path.chmod(0o600)
         except OSError as exc:
             raise ProviderProtocolForensicError(
                 f"private Provider protocol forensic persistence failed: {exc}"

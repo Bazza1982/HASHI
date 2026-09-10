@@ -220,23 +220,25 @@ class ChatHistory(ThemedLog):
         # RichLog omits the per-cell selection offsets that Textual's newer
         # Log widget supplies. Add them so mouse drags resolve to character
         # positions rather than selecting the entire widget as one block.
-        line = super()._render_line(y, scroll_x, width).apply_offsets(scroll_x, y)
+        line = super()._render_line(y, scroll_x, width)
         selection = self.text_selection
         if selection is None or (span := selection.get_span(y)) is None:
-            return line
+            return line.apply_offsets(scroll_x, y)
         start, end = span
         visible_start = max(0, start - scroll_x)
         visible_end = width if end == -1 else min(width, end - scroll_x)
         if visible_end <= visible_start:
-            return line
+            return line.apply_offsets(scroll_x, y)
         selection_style = self.screen.get_component_rich_style("screen--selection")
+        # Cropping creates new segment starts; annotate only after splitting so
+        # the next real mouse event does not resolve against stale offsets.
         return Strip.join(
             (
                 line.crop(0, visible_start),
                 line.crop(visible_start, visible_end).apply_style(selection_style),
                 line.crop(visible_end, width),
             )
-        )
+        ).apply_offsets(scroll_x, y)
 
     def get_selection(self, selection):
         """Extract selected text from RichLog's rendered line buffer.
@@ -425,7 +427,7 @@ class FooterInfoBox(Static):
         labels = (
             {
                 "instance": "实例",
-                "agent": "Agent",
+                "agent": "代理",
                 "engine": "Engine",
                 "model": "模型",
                 "provider": "模型提供商",
@@ -460,7 +462,7 @@ class FooterInfoBox(Static):
             or backend
             or ""
         ).strip()
-        no_agent = "未选择 Agent" if language == "zh" else "No agent"
+        no_agent = "未选择代理" if language == "zh" else "No agent"
         agent_label = display_name or agent_id or no_agent
         if agent_id and display_name and agent_id != display_name:
             agent_label = f"{display_name} ({agent_id})"
@@ -533,7 +535,7 @@ class FooterInfoBox(Static):
 
     def _refresh_footer(self):
         self._content = Text(self._status_line, style="bold hashi.accent")
-        self.refresh()
+        self.refresh(layout=True)
 
     def render(self) -> Text:
         return self._content

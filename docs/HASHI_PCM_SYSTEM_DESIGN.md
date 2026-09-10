@@ -421,7 +421,11 @@ separate HASHI functional modules.
 PAO freezes the provenance fields of one `hashi.current-message-context`
 version 1 snapshot at admission and stores the same current snapshot on the
 user Message and Run. PAO may atomically replace only its authorization result
-after mandatory attempt-start revalidation. PCM renders the resulting snapshot
+after mandatory attempt-start revalidation. The verification-only
+`idempotent_revalidation` observation is excluded from that snapshot: repeating
+the same signed request must retain the original admission digest and Run.
+Revocation and changed scopes remain authorization facts and are rechecked.
+PCM renders the resulting snapshot
 under the fixed `current_message_context` section key with
 `runtime_context` authority and protected metadata. It never derives source,
 identity, or authorization from message text, Session names, history, Persona,

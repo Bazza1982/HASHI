@@ -567,7 +567,7 @@ async def test_footer_collapses_her_details_only_for_identical_providers(tmp_pat
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
     app._schedule_startup_sequence = lambda: None
 
-    async with app.run_test(size=(120, 30)):
+    async with app.run_test(size=(72, 35)) as pilot:
         footer = app.query_one("#footer-info-box", FooterInfoBox)
         footer.update_state(
             "临时员工",
@@ -601,6 +601,11 @@ async def test_footer_collapses_her_details_only_for_identical_providers(tmp_pat
         assert "模型 Q:" not in plain
         assert "模型提供商 openrouter-api" in plain
         assert "模型提供商 Q:" not in plain
+        await pilot.pause()
+        from textual.geometry import Region
+        visible = "\n".join(strip.text for strip in footer.render_lines(
+            Region(0, 0, footer.region.width, footer.region.height)))
+        assert "TG 镜像 ON" in visible, "updated footer must grow to show its last fields"
 
         footer.update_state(
             "Temp",
@@ -679,15 +684,16 @@ async def test_mouse_drag_creates_chat_selection(tmp_path):
         await pilot.pause()
 
         await pilot.mouse_down(chat, offset=(1, 1))
-        await pilot._post_mouse_events(
-            [MouseMove],
-            chat,
-            offset=(6, 1),
-            button=1,
-        )
-        await pilot.mouse_up(chat, offset=(6, 1))
+        for column in range(2, 11):
+            await pilot._post_mouse_events(
+                [MouseMove], chat, offset=(column, 1), button=1,
+            )
+            # Each highlight redraw must preserve offsets for the next event.
+            await pilot.pause()
+            assert app.screen.get_selected_text() == "mouse copy"[:column].rstrip()
+        await pilot.mouse_up(chat, offset=(10, 1))
 
-        assert app.screen.get_selected_text() == "mouse"
+        assert app.screen.get_selected_text() == "mouse copy"
         assert chat.auto_scroll is False
 
 

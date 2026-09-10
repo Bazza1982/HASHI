@@ -307,8 +307,9 @@ def _normalized_authorization_results(value: Any) -> list[dict[str, Any]]:
                     item["expires_at"] = int(raw["expires_at"])
                 except (TypeError, ValueError):
                     pass
-            if raw.get("idempotent_revalidation") is True:
-                item["idempotent_revalidation"] = True
+            # Revalidation is an observation about verification, not a changed
+            # authorization claim. Keep identical wire retries identical at
+            # the Session admission digest boundary.
         results.append(item)
     return results
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from orchestrator.storage_profile import flush_projection
+from tools.private_files import protect_private_file
 
 
 class AuditPersistenceError(RuntimeError):
@@ -80,17 +81,49 @@ def _redact(value: Any, *, key: str = "") -> Any:
 
 
 class JsonlAuditWriter:
-    def __init__(self, path: Path):
+    MAX_BYTES = 16 * 1024 * 1024
+    BACKUP_COUNT = 5
+
+    def __init__(self, path: Path, *, rotate: bool = True):
         self.path = Path(path)
         self._lock = threading.Lock()
+        self.rotate = rotate
+        self._protected_identity = None
+
+    def _rotate(self, incoming_bytes: int) -> None:
+        if not self.rotate or not self.path.exists():
+            return
+        size = self.path.stat().st_size
+        if not size or size + incoming_bytes <= self.MAX_BYTES:
+            return
+        self.path.with_name(self.path.name + f'.{self.BACKUP_COUNT}').unlink(missing_ok=True)
+        for index in range(self.BACKUP_COUNT - 1, 0, -1):
+            older = self.path.with_name(self.path.name + f'.{index}')
+            if older.exists():
+                older.replace(self.path.with_name(self.path.name + f'.{index + 1}'))
+        self.path.replace(self.path.with_name(self.path.name + '.1'))
+        self._protected_identity = None
 
     def append(self, record: Mapping[str, Any]) -> str:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-        with self._lock, self.path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-            flush_projection(handle)
-        self.path.chmod(0o600)
+        with self._lock:
+            self._rotate(len(line.encode('utf-8')))
+            descriptor = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                info = os.fstat(descriptor)
+                identity = (info.st_dev, info.st_ino)
+                if identity != self._protected_identity:
+                    # Protect an empty new file before any sensitive record is written.
+                    protect_private_file(self.path)
+                    self._protected_identity = identity
+                with os.fdopen(descriptor, 'a', encoding='utf-8') as handle:
+                    descriptor = -1
+                    handle.write(line)
+                    flush_projection(handle)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
         return f"hashi-log:{self.path.name}:{record['event_id']}"
 
 
@@ -119,7 +152,8 @@ class DurableAuditLog:
         self.primary_path = Path(primary_path) if primary_path is not None else None
         self.fallback_path = Path(fallback_path) if fallback_path is not None else None
         self.primary_writer = primary_writer or JsonlAuditWriter(self.primary_path)  # type: ignore[arg-type]
-        self.fallback_writer = fallback_writer or JsonlAuditWriter(self.fallback_path)  # type: ignore[arg-type]
+        # Pending fallback evidence must never be aged out before replay.
+        self.fallback_writer = fallback_writer or JsonlAuditWriter(self.fallback_path, rotate=False)  # type: ignore[arg-type]
         self.redactor = redactor or _redact
         self.observer = observer
         self.canonical_observer = canonical_observer
@@ -130,16 +164,23 @@ class DurableAuditLog:
 
     @staticmethod
     def _read_ids(path: Path | None) -> set[str]:
-        if path is None or not path.exists():
+        if path is None:
             return set()
         result: set[str] = set()
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                row = json.loads(line)
-                if isinstance(row, Mapping) and row.get("event_id"):
-                    result.add(str(row["event_id"]))
-        except (OSError, json.JSONDecodeError):
-            return result
+        paths = [path, *(path.with_name(path.name + f'.{n}')
+                         for n in range(1, JsonlAuditWriter.BACKUP_COUNT + 1))]
+        for candidate in paths:
+            try:
+                with candidate.open(encoding='utf-8') as handle:
+                    for line in handle:
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(row, Mapping) and row.get('event_id'):
+                            result.add(str(row['event_id']))
+            except OSError:
+                continue
         return result
 
     def append(
@@ -272,5 +313,5 @@ class DurableAuditLog:
                 handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        self.fallback_path.chmod(0o600)
+        protect_private_file(self.fallback_path)
         return replayed

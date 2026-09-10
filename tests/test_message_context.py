@@ -390,6 +390,19 @@ def test_private_authorization_is_revalidated_after_queue_delay(tmp_path):
         idempotency_key="queued-auth",
         message_context=snapshot,
     )
+    retry_metadata = dict(metadata)
+    retry_metadata[PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY] = resolve_private_authorizations(
+        runtime, metadata=metadata, prompt="queued request",
+    )
+    retry_snapshot = build_message_context_snapshot(
+        runtime, source="hchat", chat_id=0, prompt="queued request", metadata=retry_metadata,
+    )
+    retried = store.accept_run(
+        session_id=session["session_id"], owner_id="user:1", agent_id="sunny",
+        request_id="req-queued-auth-retry", text="queued request", source="hchat",
+        idempotency_key="queued-auth", message_context=retry_snapshot,
+    )
+    assert retried.replayed and retried.run_id == accepted.run_id
     item = SimpleNamespace(
         run_id=accepted.run_id,
         request_id=accepted.request_id,

@@ -690,6 +690,28 @@ def test_fallback_replay_is_deduplicated(tmp_path):
     assert [row["event_id"] for row in rows] == ["event-1"]
 
 
+def test_audit_rotation_preserves_retained_event_ids_and_fallback(tmp_path, monkeypatch):
+    from orchestrator.her_v2.audit import JsonlAuditWriter
+    monkeypatch.setattr(JsonlAuditWriter, 'MAX_BYTES', 1024, raising=False)
+    primary, fallback = tmp_path / 'primary.jsonl', tmp_path / 'fallback.jsonl'
+    log = DurableAuditLog(primary, fallback)
+    for n in range(5):
+        log.append(event_id=f'rotation-{n}', turn_id='turn', request_ref='request',
+                   stage='execution', role='execution', event='provider',
+                   payload={'content': 'synthetic ' * 50, 'api_key': 'private-value'})
+    archives = sorted(tmp_path.glob('primary.jsonl.*'))
+    assert archives, 'bounded audit projections must rotate on disk'
+    retained = [json.loads(line) for p in [primary, *archives] for line in p.read_text().splitlines()]
+    assert len({r['event_id'] for r in retained}) == 5
+    assert all('private-value' not in p.read_text() for p in [primary, *archives])
+    reopened = DurableAuditLog(primary, fallback)
+    assert reopened.append(event_id='rotation-0', turn_id='turn', request_ref='request',
+                           stage='execution', role='execution', event='provider').startswith('hashi-log:deduplicated:')
+    fallback.write_text(json.dumps(retained[-1]) + '\n')
+    assert reopened.replay_fallback() == 0
+    assert fallback.read_text() == ''
+
+
 def test_reasoning_unavailability_is_explicitly_audited():
     primary = _MemoryWriter()
     log = DurableAuditLog(primary_writer=primary, fallback_writer=_MemoryWriter())

@@ -212,6 +212,12 @@ format-repair requests; completed tools are not replayed. Full raw wire and
 assembly evidence is written only to a restricted local forensic file, while
 normal errors expose a safe summary and its path. Explicit Adapter failure
 codes survive HER unchanged; this mechanism never reruns a PAO or Cron Run.
+Audit projections rotate at 16 MiB with five backups; pending fallback records
+are retained until replay. Raw protocol incident files have seven-day retention.
+Windows private files replace broad explicit ACLs, not just inherited readers.
+Terminal log following survives rename/recreation. TUI selection remains stable
+through continuous mouse drags, and the footer grows when longer metadata
+arrives; reopen the client to adopt these corrections.
 
 Model media capability is exact and cache-backed. A new model may be refreshed
 asynchronously after configuration, but a Message never performs synchronous
@@ -390,3 +396,7 @@ a fresh preflight is required, while incomplete rollback retains recovery checks
   repeated unsupported status requests. A real isolated CLI→save→start→TUI
   response passed and the fixture stopped gracefully. Purge confirmation and
   external-data refusals now retain their distinct exit-77 categories.
+
+Repeated signed requests retain their admission identity: verification-only
+retry observations do not change PCM authorization claims. Attempt-start
+revocation checks and per-message proof bindings still apply.
