@@ -8,9 +8,10 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.text import Text
-from textual.events import MouseMove
+from textual.events import MouseMove, MouseScrollDown
 from textual.geometry import Offset
 from textual.selection import Selection
+from textual.widgets import Static
 
 from tui import sounds
 from tui.app import (
@@ -24,6 +25,7 @@ from tui.app import (
     chat_message_renderable,
 )
 from tui.telegram_rendering import command_message_renderable
+from tui.side_panel import SidePanel
 
 
 def _render_plain(renderable) -> str:
@@ -214,6 +216,7 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
         "typing": True,
         "telegram_mirror": True,
         "sidepanel": False,
+        "sidepanel_auto": False,
     }
 
 
@@ -283,10 +286,22 @@ async def test_tui_command_preview_discovers_dynamic_parameters_in_both_language
             "/sidepanel off",
             "/sidepanel toggle",
             "/sidepanel refresh",
+            "/sidepanel auto",
         ]
         rendered = _render_plain(preview.render())
         assert "Current selection" in rendered
         assert "/sidepanel on" in rendered
+
+        input_box.value = "/sidepanel auto "
+        await pilot.pause()
+        assert app._command_matches == [
+            "/sidepanel auto on",
+            "/sidepanel auto off",
+            "/sidepanel auto toggle",
+        ]
+        rendered = _render_plain(preview.render())
+        assert "Options" in rendered
+        assert "Enable automatic tour" in rendered
 
 
 async def test_tui_no_argument_command_result_adds_local_parameter_guide(tmp_path):
@@ -827,28 +842,31 @@ async def test_sidepanel_is_read_only_bilingual_and_persistent(tmp_path):
         await pilot.press("enter")
         await pilot.pause()
 
-        panel = app.query_one("#side-panel")
+        panel = app.query_one("#side-panel", SidePanel)
         assert panel.display is True
-        plain = panel.render().plain
+        plain = panel.content_text.plain
         assert panel.border_title == "信息面板"
+        assert plain.splitlines()[0] == "Token 用量"
         assert "Token 用量" in plain
         assert "本次会话" in plain and "230" in plain
         assert "任务" in plain and "nightly-mail" in plain and "job-7" in plain
         assert "HASHI 上下文" in plain and "Friendly assistant" in plain
         assert "暂存主题" in plain and "TUI polish" in plain
         assert "代理" in plain and "Akane" in plain and "Rika" in plain
-        assert "只读" in plain
+        assert "只读" not in plain
+        assert "HASHI1" not in plain
         assert client.sent == []
 
         app._handle_tui_cmd("/tui language en")
-        plain = panel.render().plain
+        plain = panel.content_text.plain
         assert panel.border_title == "Information"
+        assert plain.splitlines()[0] == "Token usage"
         assert "Token usage" in plain
         assert "Jobs" in plain
         assert "HASHI context" in plain
         assert "Parked topics" in plain
         assert "Agents" in plain
-        assert "Read only" in plain
+        assert "Read only" not in plain
 
         input_box.value = "/sidepanel off"
         await pilot.press("enter")
@@ -858,8 +876,10 @@ async def test_sidepanel_is_read_only_bilingual_and_persistent(tmp_path):
 
     preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
     assert preferences["sidepanel"] is False
+    assert preferences["sidepanel_auto"] is False
     reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
     assert reloaded._side_panel_enabled is False
+    assert reloaded._side_panel_auto_scroll is False
 
 
 async def test_sidepanel_keeps_chat_visible_in_narrow_terminal(tmp_path):
@@ -876,3 +896,175 @@ async def test_sidepanel_keeps_chat_visible_in_narrow_terminal(tmp_path):
         assert panel.display is True
         assert panel.region.width <= 32
         assert chat.region.width >= 30
+
+
+async def test_sidepanel_is_actually_scrollable_by_pointer_and_keyboard(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    overview = {
+        "usage": {
+            "session": {"requests": 1, "total": 10},
+            "all_time": {"requests": 2, "total": 20},
+        },
+        "system_prompts": {"slots": []},
+        "parked_topics": {"topics": []},
+    }
+    agents = [
+        {
+            "name": f"agent-{index}",
+            "display_name": f"Agent {index}",
+            "online": True,
+        }
+        for index in range(18)
+    ]
+
+    async with app.run_test(size=(72, 20)) as pilot:
+        app._side_panel_enabled = True
+        app._apply_side_panel_visibility(persist=False)
+        panel = app.query_one("#side-panel", SidePanel)
+        panel.update_dashboard(
+            instance_id="HASHI1",
+            current_agent="agent-0",
+            current_agent_display="Agent 0",
+            current_backend="her-v2",
+            gateway_ok=True,
+            overview=overview,
+            scheduler_jobs=[],
+            background_jobs=[],
+            agents=agents,
+            language="zh",
+        )
+        await pilot.pause()
+
+        assert panel.max_scroll_y > 0
+        assert panel.show_vertical_scrollbar is True
+        await pilot.click(panel, offset=(2, 2))
+        assert app.focused is panel
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert panel.scroll_y > 0
+
+        before_page = panel.scroll_y
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert panel.scroll_y > before_page
+
+        await pilot.press("end")
+        await pilot.pause()
+        assert panel.scroll_y == panel.max_scroll_y
+        await pilot.press("home")
+        await pilot.pause()
+        assert panel.scroll_y == 0
+
+        content = panel.query_one("#side-panel-content", Static)
+        content.post_message(
+            MouseScrollDown(
+                content,
+                x=2,
+                y=2,
+                delta_x=0,
+                delta_y=1,
+                button=0,
+                shift=False,
+                meta=False,
+                ctrl=False,
+                screen_x=content.region.x + 2,
+                screen_y=content.region.y + 2,
+            )
+        )
+        await pilot.pause()
+        assert panel.scroll_y > 0
+
+        panel.update_dashboard(
+            instance_id="HASHI1",
+            current_agent="agent-0",
+            current_agent_display="Agent 0",
+            current_backend="her-v2",
+            gateway_ok=True,
+            overview=overview,
+            scheduler_jobs=[],
+            background_jobs=[],
+            agents=agents,
+            language="en",
+        )
+        await pilot.pause()
+        assert panel.content_text.plain.splitlines()[0] == "Token usage"
+        assert panel.max_scroll_y > 0
+        await pilot.press("end")
+        await pilot.pause()
+        assert panel.scroll_y == panel.max_scroll_y
+        await pilot.press("home")
+        await pilot.pause()
+        assert panel.scroll_y == 0
+
+
+async def test_sidepanel_auto_tour_is_bilingual_looping_and_persistent(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(SidePanel, "AUTO_SCROLL_INTERVAL_S", 3_600.0)
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(72, 20)) as pilot:
+        await app._handle_sidepanel_cmd("/sidepanel auto on")
+        panel = app.query_one("#side-panel", SidePanel)
+        panel.update_dashboard(
+            instance_id="HASHI1",
+            current_agent="agent-0",
+            current_agent_display="Agent 0",
+            current_backend="her-v2",
+            gateway_ok=True,
+            overview={
+                "usage": {
+                    "session": {"requests": 1, "total": 10},
+                    "all_time": {"requests": 2, "total": 20},
+                },
+                "system_prompts": {"slots": []},
+                "parked_topics": {"topics": []},
+            },
+            scheduler_jobs=[],
+            background_jobs=[],
+            agents=[
+                {
+                    "name": f"agent-{index}",
+                    "display_name": f"Agent {index}",
+                    "online": True,
+                }
+                for index in range(18)
+            ],
+            language="zh",
+        )
+        await pilot.pause()
+
+        assert app._side_panel_enabled is True
+        assert app._side_panel_auto_scroll is True
+        assert panel.auto_scroll_enabled is True
+        assert panel.border_title == "信息面板 · 自动巡览"
+        panel.scroll_home(animate=False)
+        panel.advance_auto_scroll()
+        await pilot.pause()
+        assert panel.scroll_y > 0
+
+        panel.scroll_end(animate=False)
+        await pilot.pause()
+        for _ in range(panel.AUTO_SCROLL_BOTTOM_HOLD_TICKS):
+            panel.advance_auto_scroll()
+        await pilot.pause()
+        assert panel.scroll_y == 0
+
+        app._handle_tui_cmd("/tui language en")
+        assert panel.border_title == "Information · Auto tour"
+        await app._handle_sidepanel_cmd("/sidepanel auto off")
+        assert app._side_panel_enabled is True
+        assert app._side_panel_auto_scroll is False
+        assert panel.auto_scroll_enabled is False
+        assert panel.border_title == "Information"
+
+    preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
+    assert preferences["sidepanel"] is True
+    assert preferences["sidepanel_auto"] is False
+    reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    assert reloaded._side_panel_enabled is True
+    assert reloaded._side_panel_auto_scroll is False

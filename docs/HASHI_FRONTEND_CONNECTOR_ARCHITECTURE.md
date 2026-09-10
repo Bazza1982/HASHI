@@ -117,10 +117,16 @@ Current implementation boundary:
 - the side panel is closed by default. `/sidepanel` opens the TUI's persisted,
   read-only information panel;
   `/sidepanel off` closes it and `/sidepanel refresh` refreshes it. The panel
-  projects the selected Agent's canonical token summary, Scheduler and
-  background jobs, system-prompt summaries, parked-topic summaries, and the
-  live Agent directory. It is a scrollable information surface only: actions
-  remain slash commands in the input, and the panel owns no competing state;
+  starts directly with the selected Agent's canonical token summary, then
+  projects Scheduler and background jobs, system-prompt summaries,
+  parked-topic summaries, and the live Agent directory. Its content is a real
+  focusable scroll region with a visible scrollbar: the mouse wheel works over
+  the panel, while click-to-focus enables Arrow, Page Up/Down, Home, and End.
+  `/sidepanel auto on|off|toggle` controls a persisted, default-off automatic
+  tour that advances one row per second, briefly holds at the bottom, then
+  loops to the top; manual navigation temporarily pauses it. The panel remains
+  an information surface only: actions stay as slash commands in the input,
+  and the panel owns no competing state;
 - the connection footer projects live Agent metadata for Engine, model, effort,
   Think, Verbose, Commentary and Connector state. Model Provider and structured
   Quick/Pro routing are shown only for HER v2. Identical HER Quick/Pro Provider

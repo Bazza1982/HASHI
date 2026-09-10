@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from rich.text import Text
+from textual import events
+from textual.containers import VerticalScroll
+from textual.timer import Timer
 from textual.widgets import Static
 
 
 LABELS = {
     "zh": {
         "title": "信息面板",
-        "readonly": "只读 · 操作请使用输入框中的 /commands",
+        "title_auto": "信息面板 · 自动巡览",
         "offline": "API 离线",
         "refreshing": "正在刷新…",
         "unavailable": "暂不可用",
@@ -43,7 +46,7 @@ LABELS = {
     },
     "en": {
         "title": "Information",
-        "readonly": "Read only · use /commands in the input to act",
+        "title_auto": "Information · Auto tour",
         "offline": "API offline",
         "refreshing": "Refreshing…",
         "unavailable": "Unavailable",
@@ -78,10 +81,13 @@ LABELS = {
 }
 
 
-class SidePanel(Static):
+class SidePanel(VerticalScroll):
     """Scrollable projection of canonical HASHI state, with no actions."""
 
-    can_focus = False
+    can_focus = True
+    AUTO_SCROLL_INTERVAL_S = 1.0
+    AUTO_SCROLL_BOTTOM_HOLD_TICKS = 3
+    AUTO_SCROLL_MANUAL_PAUSE_TICKS = 8
     DEFAULT_CSS = """
     SidePanel {
         display: none;
@@ -95,17 +101,146 @@ class SidePanel(Static):
         color: #dff6ff;
         border: solid #2a5b82;
         border-title-align: left;
-        overflow-y: auto;
+        overflow-x: hidden;
+        overflow-y: scroll;
         scrollbar-background: #050b12;
         scrollbar-color: #2a5b82;
         scrollbar-color-hover: #71b7ff;
         scrollbar-color-active: #63ffd9;
     }
+    SidePanel:focus {
+        border: solid #63ffd9;
+    }
+    SidePanel > #side-panel-content {
+        width: 1fr;
+        height: auto;
+        color: #dff6ff;
+    }
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__("", *args, **kwargs)
+    def __init__(self, *args, auto_scroll: bool = False, **kwargs):
+        body = Static("", id="side-panel-content", markup=False)
+        super().__init__(body, *args, can_focus_children=False, **kwargs)
+        self._body = body
         self._content = Text("")
+        self._language = "en"
+        self._auto_scroll_enabled = bool(auto_scroll)
+        self._auto_scroll_timer: Timer | None = None
+        self._auto_scroll_bottom_ticks = 0
+        self._auto_scroll_manual_pause_ticks = 0
+
+    @property
+    def content_text(self) -> Text:
+        """Return the current read-only projection for render verification."""
+
+        return self._content
+
+    @property
+    def auto_scroll_enabled(self) -> bool:
+        return self._auto_scroll_enabled
+
+    def on_mount(self) -> None:
+        self._auto_scroll_timer = self.set_interval(
+            self.AUTO_SCROLL_INTERVAL_S,
+            self.advance_auto_scroll,
+            pause=True,
+        )
+        self._sync_auto_scroll_timer()
+
+    def on_show(self) -> None:
+        self._sync_auto_scroll_timer()
+
+    def on_hide(self) -> None:
+        self._sync_auto_scroll_timer()
+
+    def on_click(self, event: events.Click) -> None:
+        if event.button == 1:
+            self.focus()
+
+    def on_mouse_scroll_down(self, _event: events.MouseScrollDown) -> None:
+        self._pause_auto_scroll_for_manual_navigation()
+
+    def on_mouse_scroll_up(self, _event: events.MouseScrollUp) -> None:
+        self._pause_auto_scroll_for_manual_navigation()
+
+    def action_scroll_up(self) -> None:
+        self._pause_auto_scroll_for_manual_navigation()
+        super().action_scroll_up()
+
+    def action_scroll_down(self) -> None:
+        self._pause_auto_scroll_for_manual_navigation()
+        super().action_scroll_down()
+
+    def action_page_up(self) -> None:
+        self._pause_auto_scroll_for_manual_navigation()
+        super().action_page_up()
+
+    def action_page_down(self) -> None:
+        self._pause_auto_scroll_for_manual_navigation()
+        super().action_page_down()
+
+    def action_scroll_home(self) -> None:
+        self._pause_auto_scroll_for_manual_navigation()
+        super().action_scroll_home()
+
+    def action_scroll_end(self) -> None:
+        self._pause_auto_scroll_for_manual_navigation()
+        super().action_scroll_end()
+
+    def _pause_auto_scroll_for_manual_navigation(self) -> None:
+        if self._auto_scroll_enabled:
+            self._auto_scroll_manual_pause_ticks = (
+                self.AUTO_SCROLL_MANUAL_PAUSE_TICKS
+            )
+            self._auto_scroll_bottom_ticks = 0
+
+    def _update_border_title(self) -> None:
+        labels = LABELS[self._language]
+        self.border_title = (
+            labels["title_auto"]
+            if self._auto_scroll_enabled
+            else labels["title"]
+        )
+
+    def _sync_auto_scroll_timer(self) -> None:
+        if self._auto_scroll_timer is None:
+            return
+        if self._auto_scroll_enabled and self.display:
+            self._auto_scroll_timer.resume()
+        else:
+            self._auto_scroll_timer.pause()
+
+    def set_auto_scroll(self, enabled: bool, *, reset: bool = False) -> None:
+        """Enable or disable the optional read-only automatic tour."""
+
+        self._auto_scroll_enabled = bool(enabled)
+        self._auto_scroll_bottom_ticks = 0
+        self._auto_scroll_manual_pause_ticks = 0
+        if reset and self._auto_scroll_enabled:
+            self.scroll_home(animate=False)
+        self._update_border_title()
+        self._sync_auto_scroll_timer()
+
+    def advance_auto_scroll(self) -> None:
+        """Advance the automatic tour by one terminal row."""
+
+        if not self._auto_scroll_enabled or not self.display:
+            return
+        if self._auto_scroll_manual_pause_ticks:
+            self._auto_scroll_manual_pause_ticks -= 1
+            return
+        maximum = self.max_scroll_y
+        if maximum <= 0:
+            self._auto_scroll_bottom_ticks = 0
+            return
+        if self.scroll_y >= maximum:
+            self._auto_scroll_bottom_ticks += 1
+            if self._auto_scroll_bottom_ticks >= self.AUTO_SCROLL_BOTTOM_HOLD_TICKS:
+                self.scroll_home(animate=False)
+                self._auto_scroll_bottom_ticks = 0
+            return
+        self._auto_scroll_bottom_ticks = 0
+        self.scroll_relative(y=1, animate=False)
 
     @staticmethod
     def _number(value) -> str:
@@ -320,23 +455,10 @@ class SidePanel(Static):
         loading: bool = False,
         incomplete: bool = False,
     ) -> None:
-        labels = LABELS["zh" if language == "zh" else "en"]
-        self.border_title = labels["title"]
+        self._language = "zh" if language == "zh" else "en"
+        labels = LABELS[self._language]
+        self._update_border_title()
         rows = Text()
-        self._line(rows, instance_id or "HASHI", "bold #9be7ff")
-        agent_label = current_agent_display or current_agent or "—"
-        if (
-            current_agent
-            and current_agent_display
-            and current_agent != current_agent_display
-        ):
-            agent_label = f"{current_agent_display} [{current_agent}]"
-        self._line(
-            rows,
-            agent_label + (f" · {current_backend}" if current_backend else ""),
-            "bold #dff6ff",
-        )
-        self._line(rows, labels["readonly"], "dim #9be7ff")
         if not gateway_ok:
             self._line(rows, labels["offline"], "#ff7a7a")
         elif loading:
@@ -352,7 +474,4 @@ class SidePanel(Static):
         self._parked(rows, overview, labels)
         self._agents(rows, agents, current_agent, labels)
         self._content = rows
-        self.update(rows)
-
-    def render(self) -> Text:
-        return self._content
+        self._body.update(rows)

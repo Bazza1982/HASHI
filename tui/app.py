@@ -72,8 +72,8 @@ TUI_COMMAND_HELP["telegram"] = (
     "Inspect or set TUI Telegram mirroring",
 )
 TUI_COMMAND_HELP["sidepanel"] = (
-    "打开、关闭或刷新只读信息面板",
-    "Open, close, or refresh the read-only information panel",
+    "控制只读信息面板及自动巡览",
+    "Control the read-only information panel and automatic tour",
 )
 TUI_COMMAND_GUIDES = {
     "help": CommandGuide("/help [zh|en]", ("zh", "en"), example="/help zh"),
@@ -100,8 +100,8 @@ TUI_COMMAND_GUIDES = {
         "/telegram [on|off]", ("on", "off"), example="/telegram off"
     ),
     "sidepanel": CommandGuide(
-        "/sidepanel [on|off|toggle|refresh]",
-        ("on", "off", "toggle", "refresh"),
+        "/sidepanel [on|off|toggle|refresh|auto <on|off|toggle>]",
+        ("on", "off", "toggle", "refresh", "auto"),
         example="/sidepanel on",
     ),
 }
@@ -110,6 +110,7 @@ TUI_NESTED_CHOICES = {
     ("tui", "sound"): ("on", "off", "test"),
     ("tui", "typing"): ("on", "off"),
     ("tui", "telegram"): ("on", "off"),
+    ("sidepanel", "auto"): ("on", "off", "toggle"),
 }
 TUI_LOCALIZED_EXAMPLES = {
     "handoff": ("继续当前任务", "continue the current task"),
@@ -738,6 +739,13 @@ class HASHITuiApp(App):
             os.environ.get("HASHI_TUI_SIDEPANEL", preferences.get("sidepanel")),
             default=False,
         )
+        self._side_panel_auto_scroll = _enabled_setting(
+            os.environ.get(
+                "HASHI_TUI_SIDEPANEL_AUTO",
+                preferences.get("sidepanel_auto"),
+            ),
+            default=False,
+        )
         command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
         command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._command_names = list(dict.fromkeys(command_names))
@@ -825,6 +833,7 @@ class HASHITuiApp(App):
                         "typing": self._tui_typing_enabled,
                         "telegram_mirror": self._telegram_mirror_enabled,
                         "sidepanel": self._side_panel_enabled,
+                        "sidepanel_auto": self._side_panel_auto_scroll,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -848,7 +857,10 @@ class HASHITuiApp(App):
                             id="chat-input",
                         )
                         yield CommandPreview(id="command-preview")
-                yield SidePanel(id="side-panel")
+                yield SidePanel(
+                    id="side-panel",
+                    auto_scroll=self._side_panel_auto_scroll,
+                )
             yield FooterInfoBox(id="footer-info-box")
 
     def on_mount(self):
@@ -1796,6 +1808,8 @@ class HASHITuiApp(App):
         if name == "layout":
             return self._layout_mode
         if name == "sidepanel":
+            if path == ("auto",):
+                return "on" if self._side_panel_auto_scroll else "off"
             return "on" if self._side_panel_enabled else "off"
         if name == "telegram" or (name == "tui" and path == ("telegram",)):
             return "on" if self._telegram_mirror_enabled else "off"
@@ -1814,6 +1828,21 @@ class HASHITuiApp(App):
         current = self._current_choice(name, path)
         if current and option.casefold() == current.casefold():
             return "当前选择" if self._ui_language == "zh" else "Current selection"
+        if name == "sidepanel" and path == ("auto",):
+            descriptions = {
+                "zh": {
+                    "on": "开启自动巡览",
+                    "off": "关闭自动巡览",
+                    "toggle": "切换自动巡览",
+                },
+                "en": {
+                    "on": "Enable automatic tour",
+                    "off": "Disable automatic tour",
+                    "toggle": "Toggle automatic tour",
+                },
+            }
+            if option.casefold() in descriptions[self._ui_language]:
+                return descriptions[self._ui_language][option.casefold()]
         explanations = {
             "zh": {
                 "low": "较少推理，响应更快",
@@ -1858,6 +1887,7 @@ class HASHITuiApp(App):
                 "sound": "设置 TUI 声音",
                 "typing": "设置输入提示",
                 "telegram": "设置 Telegram 镜像",
+                "auto": "设置自动巡览",
                 "toggle": "切换当前状态",
                 "chat": "聊天优先布局",
                 "balanced": "均衡布局",
@@ -1908,6 +1938,7 @@ class HASHITuiApp(App):
                 "sound": "Set TUI sounds",
                 "typing": "Set typing indicator",
                 "telegram": "Set Telegram mirroring",
+                "auto": "Configure automatic tour",
                 "toggle": "Toggle the current state",
                 "chat": "Chat-first layout",
                 "balanced": "Balanced layout",
@@ -1931,6 +1962,8 @@ class HASHITuiApp(App):
         guide = self._command_guide(name)
         if guide is None:
             return None
+        if name == "sidepanel" and self._parameter_path == ("auto",):
+            return "/sidepanel auto on"
         localized = TUI_LOCALIZED_EXAMPLES.get(name)
         if localized:
             suffix = localized[0 if self._ui_language == "zh" else 1]
@@ -2201,6 +2234,7 @@ class HASHITuiApp(App):
 `/layout [chat|balanced|compact|reset]`　调整窗口比例
 `/log [show|hide|pause]`　控制本地日志
 `/sidepanel [on|off|toggle|refresh]`　控制只读信息面板
+`/sidepanel auto on|off|toggle`　设置自动巡览
 `/tui language zh|en`　切换界面语言
 `/tui sound on|off|test`　设置或试听提示音
 `/clear`　清空当前显示　　`/quit`　退出
@@ -2223,6 +2257,7 @@ class HASHITuiApp(App):
 `/layout [chat|balanced|compact|reset]`　Resize the panes
 `/log [show|hide|pause]`　Control the host log
 `/sidepanel [on|off|toggle|refresh]`　Control the read-only information panel
+`/sidepanel auto on|off|toggle`　Configure the automatic tour
 `/tui language zh|en`　Change the interface language
 `/tui sound on|off|test`　Configure or preview message sounds
 `/clear`　Clear this view　　`/quit`　Exit
@@ -2340,7 +2375,9 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             if persist:
                 self._save_tui_preferences()
             return
-        self.query_one("#side-panel", SidePanel).display = self._side_panel_enabled
+        panel = self.query_one("#side-panel", SidePanel)
+        panel.set_auto_scroll(self._side_panel_auto_scroll)
+        panel.display = self._side_panel_enabled
         if self._side_panel_enabled:
             self._render_side_panel()
         else:
@@ -2431,12 +2468,59 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     async def _handle_sidepanel_cmd(self, text: str) -> None:
         chat = self.query_one("#chat-history", ChatHistory)
         parts = text.split()
+        if len(parts) >= 2 and parts[1].casefold() == "auto":
+            if len(parts) == 2:
+                state = "ON" if self._side_panel_auto_scroll else "OFF"
+                message = (
+                    f"自动巡览 · {state}。用法 · /sidepanel auto on|off|toggle"
+                    if self._ui_language == "zh"
+                    else f"Automatic tour · {state}. Usage · /sidepanel auto on|off|toggle"
+                )
+                chat.write(Text(message, style="#c7ff8a"))
+                return
+            auto_action = parts[2].casefold() if len(parts) == 3 else ""
+            if auto_action not in {"on", "off", "toggle"}:
+                message = (
+                    "请使用 /sidepanel auto on|off|toggle。"
+                    if self._ui_language == "zh"
+                    else "Use /sidepanel auto on|off|toggle."
+                )
+                chat.write(Text(message, style="#ff7a7a"))
+                return
+            self._side_panel_auto_scroll = (
+                not self._side_panel_auto_scroll
+                if auto_action == "toggle"
+                else auto_action == "on"
+            )
+            if self._side_panel_auto_scroll:
+                self._side_panel_enabled = True
+            panel = self.query_one("#side-panel", SidePanel)
+            panel.set_auto_scroll(
+                self._side_panel_auto_scroll,
+                reset=self._side_panel_auto_scroll,
+            )
+            self._cancel_side_panel_refresh()
+            self._apply_side_panel_visibility()
+            if self._side_panel_enabled and self.gateway_ok and self.current_agent:
+                await self._refresh_side_panel(
+                    client=self.api,
+                    generation=self._connection_generation,
+                    agent=self.current_agent,
+                )
+            state = "ON" if self._side_panel_auto_scroll else "OFF"
+            message = (
+                f"✓ 自动巡览已设为 {state}。"
+                if self._ui_language == "zh"
+                else f"✓ Automatic tour set to {state}."
+            )
+            chat.write(Text(message, style="#63ffd9"))
+            return
         action = parts[1].casefold() if len(parts) == 2 else "on"
         if len(parts) > 2 or action not in {"on", "off", "toggle", "refresh"}:
             message = (
-                "请使用 /sidepanel on|off|toggle|refresh。"
+                "请使用 /sidepanel on|off|toggle|refresh 或 /sidepanel auto on|off|toggle。"
                 if self._ui_language == "zh"
-                else "Use /sidepanel on|off|toggle|refresh."
+                else "Use /sidepanel on|off|toggle|refresh or /sidepanel auto on|off|toggle."
             )
             chat.write(Text(message, style="#ff7a7a"))
             return

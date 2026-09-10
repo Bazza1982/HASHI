@@ -1641,9 +1641,18 @@ python tui.py
 /instance refresh    refresh Remote peer state
 /sidepanel           open the read-only information panel
 /sidepanel off       close the information panel
+/sidepanel auto on   start the optional automatic information tour
+/sidepanel auto off  stop the automatic information tour
 /log                 pause or resume the launch instance's local log
 /quit                close the TUI
 ```
+
+The information panel starts with Token and job summaries and remains entirely
+read-only. It has a visible scrollbar and accepts the mouse wheel over the
+panel, or Arrow, Page Up/Down, Home, and End after click-to-focus. Automatic
+tour is off by default, scrolls the same content slowly in a loop, and is
+persisted as a local TUI preference; all state-changing operations still use
+slash commands in the input bar.
 
 The launch repository is always the default instance, regardless of the shell's
 current directory. Windows/WSL co-located instances and LAN instances use the
