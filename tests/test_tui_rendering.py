@@ -213,6 +213,7 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
         "sounds": True,
         "typing": True,
         "telegram_mirror": True,
+        "sidepanel": False,
     }
 
 
@@ -696,3 +697,170 @@ async def test_typing_and_telegram_preferences_are_persistent_and_run_fenced(tmp
     reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
     assert reloaded._tui_typing_enabled is True
     assert reloaded._telegram_mirror_enabled is False
+
+
+async def test_sidepanel_is_read_only_bilingual_and_persistent(tmp_path):
+    class SidePanelClient:
+        proxied = False
+
+        def __init__(self):
+            self.sent = []
+
+        async def agent_overview(self, agent):
+            assert agent == "akane"
+            return {
+                "ok": True,
+                "overview": {
+                    "usage": {
+                        "session": {
+                            "requests": 2,
+                            "input": 120,
+                            "output": 80,
+                            "thinking": 30,
+                            "total": 230,
+                            "cost_usd": 0.12,
+                            "unknown_cost_requests": 1,
+                        },
+                        "all_time": {
+                            "requests": 12,
+                            "input": 2_500,
+                            "output": 1_400,
+                            "thinking": 300,
+                            "total": 4_200,
+                            "cost_usd": 1.5,
+                            "unknown_cost_requests": 0,
+                        },
+                    },
+                    "system_prompts": {
+                        "active_count": 2,
+                        "configured_count": 3,
+                        "total_count": 4,
+                        "slots": [
+                            {
+                                "slot": "persona",
+                                "state": "on",
+                                "characters": 321,
+                                "preview": "Friendly assistant",
+                            }
+                        ],
+                    },
+                    "parked_topics": {
+                        "count": 1,
+                        "topics": [
+                            {
+                                "slot": 2,
+                                "title": "TUI polish",
+                                "followup": {"status": "parked"},
+                            }
+                        ],
+                    },
+                },
+            }
+
+        async def scheduler_jobs(self, agent):
+            assert agent == "akane"
+            return {
+                "ok": True,
+                "jobs": [
+                    {
+                        "id": "nightly-mail",
+                        "kind": "cron",
+                        "enabled": True,
+                        "last_status": "completed",
+                    }
+                ],
+            }
+
+        async def background_jobs(self, agent, limit=20):
+            assert (agent, limit) == ("akane", 20)
+            return {
+                "ok": True,
+                "jobs": [{"job_id": "job-7", "status": "running"}],
+            }
+
+        async def send_chat(self, agent, text, **kwargs):
+            self.sent.append((agent, text, kwargs))
+            return {"ok": True}
+
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+    client = SidePanelClient()
+    app.api = client
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.gateway_ok = True
+        app.current_agent = "akane"
+        app.current_agent_display = "Akane"
+        app.current_backend = "her-v2"
+        app._agents_cache = [
+            {
+                "name": "akane",
+                "display_name": "Akane",
+                "active_backend": "her-v2",
+                "online": True,
+                "queue_depth": 1,
+            },
+            {
+                "name": "rika",
+                "display_name": "Rika",
+                "active_backend": "codex-cli",
+                "online": False,
+                "queue_depth": 0,
+            },
+        ]
+        app._ui_language = "zh"
+        input_box = app.query_one("#chat-input", ChatInput)
+        input_box.focus()
+        input_box.value = "/sidepanel"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.query_one("#side-panel")
+        assert panel.display is True
+        plain = panel.render().plain
+        assert panel.border_title == "信息面板"
+        assert "Token 用量" in plain
+        assert "本次会话" in plain and "230" in plain
+        assert "任务" in plain and "nightly-mail" in plain and "job-7" in plain
+        assert "HASHI 上下文" in plain and "Friendly assistant" in plain
+        assert "暂存主题" in plain and "TUI polish" in plain
+        assert "代理" in plain and "Akane" in plain and "Rika" in plain
+        assert "只读" in plain
+        assert client.sent == []
+
+        app._handle_tui_cmd("/tui language en")
+        plain = panel.render().plain
+        assert panel.border_title == "Information"
+        assert "Token usage" in plain
+        assert "Jobs" in plain
+        assert "HASHI context" in plain
+        assert "Parked topics" in plain
+        assert "Agents" in plain
+        assert "Read only" in plain
+
+        input_box.value = "/sidepanel off"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert panel.display is False
+        assert client.sent == []
+
+    preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
+    assert preferences["sidepanel"] is False
+    reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    assert reloaded._side_panel_enabled is False
+
+
+async def test_sidepanel_keeps_chat_visible_in_narrow_terminal(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(72, 28)) as pilot:
+        app._side_panel_enabled = True
+        app._apply_side_panel_visibility(persist=False)
+        await pilot.pause()
+
+        panel = app.query_one("#side-panel")
+        chat = app.query_one("#chat-container")
+        assert panel.display is True
+        assert panel.region.width <= 32
+        assert chat.region.width >= 30

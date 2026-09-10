@@ -244,3 +244,63 @@ def test_tui_proxy_rejects_invalid_policy_and_accepts_typed_run_identity():
         "invalid_delivery_policy",
     )
     assert remote_server._validate_tui_proxy_payload(valid_run) == (True, "ok")
+
+
+def test_tui_proxy_accepts_only_agent_scoped_sidepanel_reads():
+    for operation in ("agent_overview", "scheduler_jobs", "background_jobs"):
+        missing_agent = ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation=operation,
+        )
+        valid = ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation=operation,
+            agent="akane",
+            limit=7,
+        )
+
+        assert remote_server._validate_tui_proxy_payload(missing_agent) == (
+            False,
+            "invalid_agent",
+        )
+        assert remote_server._validate_tui_proxy_payload(valid) == (True, "ok")
+
+
+def test_sidepanel_proxy_maps_to_read_only_workbench_paths(monkeypatch):
+    captured = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"ok":true}'
+
+    def urlopen(request, timeout):
+        captured.append((request.get_method(), request.full_url, timeout))
+        return Response()
+
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
+
+    for operation in ("agent_overview", "scheduler_jobs", "background_jobs"):
+        status, result = remote_server._local_workbench_tui_request(
+            ProtocolTuiRequest(
+                from_instance="HASHI1",
+                operation=operation,
+                agent="agent name",
+                limit=7,
+            )
+        )
+        assert status == 200
+        assert result == {"ok": True}
+
+    assert [item[0] for item in captured] == ["GET", "GET", "GET"]
+    assert captured[0][1].endswith("/api/agents/agent%20name/overview")
+    assert captured[1][1].endswith("/api/agents/agent%20name/scheduler/jobs")
+    assert captured[2][1].endswith("/api/background-jobs?agent=agent%20name&limit=7")

@@ -153,6 +153,9 @@ _WORKBENCH_GATEWAY_RESPONSE_HEADERS = frozenset(
 TUI_PROXY_OPERATIONS = {
     "health",
     "agents",
+    "agent_overview",
+    "scheduler_jobs",
+    "background_jobs",
     "chat",
     "run_info",
     "transcript_recent",
@@ -558,7 +561,14 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
     operation = str(payload.operation or "").strip().lower()
     if operation not in TUI_PROXY_OPERATIONS:
         return False, "operation_not_allowed"
-    if operation in {"chat", "transcript_recent", "transcript_poll"}:
+    if operation in {
+        "agent_overview",
+        "scheduler_jobs",
+        "background_jobs",
+        "chat",
+        "transcript_recent",
+        "transcript_poll",
+    }:
         agent = str(payload.agent or "").strip()
         if not agent or len(agent) > 128 or any(ord(ch) < 32 for ch in agent):
             return False, "invalid_agent"
@@ -606,6 +616,15 @@ def _local_workbench_tui_request(
     path = "/api/health"
     if operation == "agents":
         path = "/api/agents"
+    elif operation == "agent_overview":
+        path = f"/api/agents/{quote(agent, safe='')}/overview"
+    elif operation == "scheduler_jobs":
+        path = f"/api/agents/{quote(agent, safe='')}/scheduler/jobs"
+    elif operation == "background_jobs":
+        path = (
+            f"/api/background-jobs?agent={quote(agent, safe='')}&limit="
+            f"{int(payload.limit)}"
+        )
     elif operation == "chat":
         path = "/api/chat"
         method = "POST"

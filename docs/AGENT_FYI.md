@@ -133,6 +133,15 @@ mode. Use `/mode` when the current mode is relevant. Source presence is not
 live adoption proof; confirm the active Function generation/provenance on each
 instance.
 
+The side panel is closed by default. `/sidepanel` opens the TUI's persisted,
+scrollable read-only information panel;
+`/sidepanel off` closes it, while `on`, `toggle`, and `refresh` are explicit
+options. It projects canonical Agent overview, token, Scheduler/background-job,
+system-prompt-summary, parked-topic-summary, and live Agent-directory data.
+The Agent list is display-only and all operations still use slash commands in
+the input. Do not add panel-owned copies or state writers. Cross-instance panel
+reads use only the named, Agent-scoped Hashi Remote allowlist operations.
+
 Distinguish Engine from Model Provider and HASHI Conversation from Engine
 Session. Frontend history is a projection, not another authoritative archive.
 

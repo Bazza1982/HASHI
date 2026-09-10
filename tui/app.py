@@ -15,7 +15,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.strip import Strip
 from textual.suggester import SuggestFromList
 from textual.widgets import Input, RichLog, Static
@@ -42,6 +42,7 @@ from tui.onboarding import (
     write_config,
 )
 from tui.sounds import play_message_sound
+from tui.side_panel import SidePanel
 from tui.telegram_rendering import command_message_renderable
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,10 @@ TUI_COMMAND_HELP["telegram"] = (
     "\u67e5\u770b\u6216\u8bbe\u7f6e TUI Telegram \u955c\u50cf",
     "Inspect or set TUI Telegram mirroring",
 )
+TUI_COMMAND_HELP["sidepanel"] = (
+    "打开、关闭或刷新只读信息面板",
+    "Open, close, or refresh the read-only information panel",
+)
 TUI_COMMAND_GUIDES = {
     "help": CommandGuide("/help [zh|en]", ("zh", "en"), example="/help zh"),
     "to": CommandGuide("/to <agent|all>", choice_source="agents"),
@@ -93,6 +98,11 @@ TUI_COMMAND_GUIDES = {
     ),
     "telegram": CommandGuide(
         "/telegram [on|off]", ("on", "off"), example="/telegram off"
+    ),
+    "sidepanel": CommandGuide(
+        "/sidepanel [on|off|toggle|refresh]",
+        ("on", "off", "toggle", "refresh"),
+        example="/sidepanel on",
     ),
 }
 TUI_NESTED_CHOICES = {
@@ -640,6 +650,13 @@ class HASHITuiApp(App):
         height: 1fr;
         padding: 0 1 1 1;
     }
+    #content-container {
+        height: 1fr;
+    }
+    #primary-pane {
+        width: 1fr;
+        height: 1fr;
+    }
     #log-panel {
         height: 1fr;
         min-height: 4;
@@ -717,6 +734,10 @@ class HASHITuiApp(App):
             ),
             default=True,
         )
+        self._side_panel_enabled = _enabled_setting(
+            os.environ.get("HASHI_TUI_SIDEPANEL", preferences.get("sidepanel")),
+            default=False,
+        )
         command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
         command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._command_names = list(dict.fromkeys(command_names))
@@ -756,6 +777,13 @@ class HASHITuiApp(App):
         self._attached_log_path: Path | None = None
         self._agent_refresh_tick = 0
         self._startup_task: asyncio.Task | None = None
+        self._side_panel_refresh_task: asyncio.Task | None = None
+        self._side_panel_overview: dict | None = None
+        self._side_panel_scheduler_jobs: list[dict] | None = None
+        self._side_panel_background_jobs: list[dict] | None = None
+        self._side_panel_data_agent: str | None = None
+        self._side_panel_loading = False
+        self._side_panel_incomplete = False
 
     def _find_bridge_home(self) -> Path:
         env = os.environ.get("BRIDGE_HOME")
@@ -796,6 +824,7 @@ class HASHITuiApp(App):
                         "sounds": self._sound_enabled,
                         "typing": self._tui_typing_enabled,
                         "telegram_mirror": self._telegram_mirror_enabled,
+                        "sidepanel": self._side_panel_enabled,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -807,20 +836,24 @@ class HASHITuiApp(App):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-container"):
-            yield LogPanel(id="log-panel")
-            with Vertical(id="chat-container"):
-                yield ChatHistory(id="chat-history")
-                yield TypingIndicator(id="typing-indicator")
-                yield ChatInput(
-                    placeholder="Message · /help · /to <agent> · /instance",
-                    suggester=SuggestFromList(self._suggestion_names, case_sensitive=False),
-                    id="chat-input",
-                )
-                yield CommandPreview(id="command-preview")
+            with Horizontal(id="content-container"):
+                with Vertical(id="primary-pane"):
+                    yield LogPanel(id="log-panel")
+                    with Vertical(id="chat-container"):
+                        yield ChatHistory(id="chat-history")
+                        yield TypingIndicator(id="typing-indicator")
+                        yield ChatInput(
+                            placeholder="Message · /help · /to <agent> · /instance",
+                            suggester=SuggestFromList(self._suggestion_names, case_sensitive=False),
+                            id="chat-input",
+                        )
+                        yield CommandPreview(id="command-preview")
+                yield SidePanel(id="side-panel")
             yield FooterInfoBox(id="footer-info-box")
 
     def on_mount(self):
         self._apply_layout(self._layout_mode, persist=False)
+        self._apply_side_panel_visibility(persist=False)
         self._refresh_chrome()
         # Start the intro only after the first screen refresh so frames are visible.
         self.call_after_refresh(self._schedule_startup_sequence)
@@ -1143,12 +1176,14 @@ class HASHITuiApp(App):
     def _adopt_agent_directory(self, agents: list[dict]) -> None:
         self._agents_cache = list(agents)
         if not self.current_agent:
+            self._render_side_panel()
             return
         selected = next(
             (item for item in agents if item.get("name") == self.current_agent),
             None,
         )
         if selected is None:
+            self._render_side_panel()
             return
         self._current_agent_metadata = dict(selected)
         self.current_agent_display = str(
@@ -1157,6 +1192,8 @@ class HASHITuiApp(App):
         self.current_backend = str(
             selected.get("active_backend") or selected.get("engine") or ""
         )
+        self._render_side_panel()
+        self._schedule_side_panel_refresh()
 
     def _select_agent(
         self,
@@ -1171,6 +1208,8 @@ class HASHITuiApp(App):
         if selected_name != self.current_agent:
             self._clear_typing_indicator()
             self._latest_submission_ref = None
+            self._cancel_side_panel_refresh()
+            self._reset_side_panel_data()
         self.current_agent = selected_name
         self._chat_targets = [self.current_agent] if self.current_agent else []
         self.current_agent_display = agent_data.get("display_name", self.current_agent)
@@ -1186,6 +1225,8 @@ class HASHITuiApp(App):
             f"@{self.current_instance_id} ({location})"
         )
         self._update_status_bar()
+        self._render_side_panel()
+        self._schedule_side_panel_refresh()
         # Load recent transcript
         self._load_initial_transcript(client, self.current_agent, generation)
 
@@ -1352,6 +1393,9 @@ class HASHITuiApp(App):
             return
         if normalized == "/telegram" or normalized.startswith("/telegram "):
             self._handle_telegram_cmd(normalized)
+            return
+        if normalized == "/sidepanel" or normalized.startswith("/sidepanel "):
+            await self._handle_sidepanel_cmd(normalized)
             return
         if normalized == "/tui" or normalized.startswith("/tui "):
             self._handle_tui_cmd(normalized)
@@ -1751,6 +1795,8 @@ class HASHITuiApp(App):
             return str(self._current_agent_metadata.get("mode") or "").strip() or None
         if name == "layout":
             return self._layout_mode
+        if name == "sidepanel":
+            return "on" if self._side_panel_enabled else "off"
         if name == "telegram" or (name == "tui" and path == ("telegram",)):
             return "on" if self._telegram_mirror_enabled else "off"
         if name == "tui" and path == ("language",):
@@ -1812,6 +1858,7 @@ class HASHITuiApp(App):
                 "sound": "设置 TUI 声音",
                 "typing": "设置输入提示",
                 "telegram": "设置 Telegram 镜像",
+                "toggle": "切换当前状态",
                 "chat": "聊天优先布局",
                 "balanced": "均衡布局",
                 "hide": "隐藏",
@@ -1861,6 +1908,7 @@ class HASHITuiApp(App):
                 "sound": "Set TUI sounds",
                 "typing": "Set typing indicator",
                 "telegram": "Set Telegram mirroring",
+                "toggle": "Toggle the current state",
                 "chat": "Chat-first layout",
                 "balanced": "Balanced layout",
                 "hide": "Hide",
@@ -2152,6 +2200,7 @@ class HASHITuiApp(App):
 `/instance [名称]`　查看或切换实例
 `/layout [chat|balanced|compact|reset]`　调整窗口比例
 `/log [show|hide|pause]`　控制本地日志
+`/sidepanel [on|off|toggle|refresh]`　控制只读信息面板
 `/tui language zh|en`　切换界面语言
 `/tui sound on|off|test`　设置或试听提示音
 `/clear`　清空当前显示　　`/quit`　退出
@@ -2173,6 +2222,7 @@ class HASHITuiApp(App):
 `/instance [name]`　List or switch instances
 `/layout [chat|balanced|compact|reset]`　Resize the panes
 `/log [show|hide|pause]`　Control the host log
+`/sidepanel [on|off|toggle|refresh]`　Control the read-only information panel
 `/tui language zh|en`　Change the interface language
 `/tui sound on|off|test`　Configure or preview message sounds
 `/clear`　Clear this view　　`/quit`　Exit
@@ -2214,6 +2264,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 f"{chat_label} · {emoji} {self.current_agent_display} ({self.current_agent})"
                 f"@{self.current_instance_id} ({location})"
             )
+        self._render_side_panel()
         self._update_status_bar()
 
     def _location_label(self) -> str:
@@ -2252,6 +2303,159 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             return
         self._apply_layout(mode)
         chat.write(markup(f"[#63ffd9]✓ Layout · {mode}[/]"))
+
+    def _reset_side_panel_data(self) -> None:
+        self._side_panel_overview = None
+        self._side_panel_scheduler_jobs = None
+        self._side_panel_background_jobs = None
+        self._side_panel_data_agent = None
+        self._side_panel_loading = False
+        self._side_panel_incomplete = False
+
+    def _cancel_side_panel_refresh(self) -> None:
+        if self._side_panel_refresh_task and not self._side_panel_refresh_task.done():
+            self._side_panel_refresh_task.cancel()
+        self._side_panel_refresh_task = None
+
+    def _render_side_panel(self) -> None:
+        if not self.is_mounted:
+            return
+        self.query_one("#side-panel", SidePanel).update_dashboard(
+            instance_id=self.current_instance_id,
+            current_agent=self.current_agent,
+            current_agent_display=self.current_agent_display,
+            current_backend=self.current_backend,
+            gateway_ok=self.gateway_ok,
+            overview=self._side_panel_overview,
+            scheduler_jobs=self._side_panel_scheduler_jobs,
+            background_jobs=self._side_panel_background_jobs,
+            agents=self._agents_cache,
+            language=self._ui_language,
+            loading=self._side_panel_loading,
+            incomplete=self._side_panel_incomplete,
+        )
+
+    def _apply_side_panel_visibility(self, *, persist: bool = True) -> None:
+        if not self.is_mounted:
+            if persist:
+                self._save_tui_preferences()
+            return
+        self.query_one("#side-panel", SidePanel).display = self._side_panel_enabled
+        if self._side_panel_enabled:
+            self._render_side_panel()
+        else:
+            self._cancel_side_panel_refresh()
+        if persist:
+            self._save_tui_preferences()
+
+    def _schedule_side_panel_refresh(self) -> None:
+        if (
+            not self.is_mounted
+            or not self._side_panel_enabled
+            or not self.gateway_ok
+            or not self.current_agent
+        ):
+            self._render_side_panel()
+            return
+        if self._side_panel_refresh_task and not self._side_panel_refresh_task.done():
+            return
+        self._side_panel_refresh_task = asyncio.create_task(
+            self._refresh_side_panel(
+                client=self.api,
+                generation=self._connection_generation,
+                agent=self.current_agent,
+            )
+        )
+
+    async def _refresh_side_panel(
+        self,
+        *,
+        client: TuiApiClient | None = None,
+        generation: int | None = None,
+        agent: str | None = None,
+    ) -> None:
+        if not self._side_panel_enabled:
+            return
+        client = client or self.api
+        generation = self._connection_generation if generation is None else generation
+        agent = agent or self.current_agent
+        if not agent or not self.gateway_ok:
+            self._render_side_panel()
+            return
+        if self._side_panel_data_agent != agent:
+            self._reset_side_panel_data()
+            self._side_panel_data_agent = agent
+        self._side_panel_loading = True
+        self._render_side_panel()
+        results = await asyncio.gather(
+            client.agent_overview(agent),
+            client.scheduler_jobs(agent),
+            client.background_jobs(agent, limit=20),
+            return_exceptions=True,
+        )
+        if (
+            not self._side_panel_enabled
+            or generation != self._connection_generation
+            or client is not self.api
+            or agent != self.current_agent
+        ):
+            logger.debug("Discarded stale TUI side-panel refresh: agent=%s generation=%s", agent, generation)
+            return
+
+        overview_result, scheduler_result, background_result = results
+        incomplete = False
+        if isinstance(overview_result, dict) and overview_result.get("ok"):
+            overview = overview_result.get("overview")
+            self._side_panel_overview = overview if isinstance(overview, dict) else None
+            incomplete = self._side_panel_overview is None
+        else:
+            self._side_panel_overview = None
+            incomplete = True
+        if isinstance(scheduler_result, dict) and scheduler_result.get("ok"):
+            jobs = scheduler_result.get("jobs")
+            self._side_panel_scheduler_jobs = jobs if isinstance(jobs, list) else []
+        else:
+            self._side_panel_scheduler_jobs = None
+            incomplete = True
+        if isinstance(background_result, dict) and background_result.get("ok"):
+            jobs = background_result.get("jobs")
+            self._side_panel_background_jobs = jobs if isinstance(jobs, list) else []
+        else:
+            self._side_panel_background_jobs = None
+            incomplete = True
+        self._side_panel_loading = False
+        self._side_panel_incomplete = incomplete
+        self._side_panel_data_agent = agent
+        self._render_side_panel()
+
+    async def _handle_sidepanel_cmd(self, text: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split()
+        action = parts[1].casefold() if len(parts) == 2 else "on"
+        if len(parts) > 2 or action not in {"on", "off", "toggle", "refresh"}:
+            message = (
+                "请使用 /sidepanel on|off|toggle|refresh。"
+                if self._ui_language == "zh"
+                else "Use /sidepanel on|off|toggle|refresh."
+            )
+            chat.write(Text(message, style="#ff7a7a"))
+            return
+        self._side_panel_enabled = (
+            not self._side_panel_enabled if action == "toggle" else action != "off"
+        )
+        self._cancel_side_panel_refresh()
+        self._apply_side_panel_visibility()
+        if self._side_panel_enabled:
+            await self._refresh_side_panel(
+                client=self.api,
+                generation=self._connection_generation,
+                agent=self.current_agent,
+            )
+        if self._ui_language == "zh":
+            message = f"✓ 只读信息面板{'已打开' if self._side_panel_enabled else '已关闭'}。"
+        else:
+            message = f"✓ Read-only information panel {'opened' if self._side_panel_enabled else 'closed'}."
+        chat.write(Text(message, style="#63ffd9"))
 
     def _handle_log_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)
@@ -2423,6 +2627,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             return
         self._adopt_agent_directory(agents)
         self._update_status_bar()
+        self._schedule_side_panel_refresh()
 
     def _set_typing_run(
         self,
@@ -2508,7 +2713,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
         # Refresh agent list
         agents = await self.api.list_agents()
-        self._agents_cache = agents
+        self._adopt_agent_directory(agents)
         agent_map = {a["name"]: a for a in agents}
 
         target = parts[0].lower()
@@ -2526,9 +2731,12 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self.current_agent_display = "ALL"
             self.current_backend = ""
             self._current_agent_metadata = {}
+            self._cancel_side_panel_refresh()
+            self._reset_side_panel_data()
             chat.border_title = "Chat \u2014 \U0001f4e2 Broadcasting to ALL agents"
             chat.write(markup("[#63ffd9]\u2705 Broadcasting mode: messages will be sent to all active agents.[/]"))
             self._update_status_bar()
+            self._render_side_panel()
             return
 
         # Single or multi agent
@@ -2541,7 +2749,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     async def _handle_agents_cmd(self):
         chat = self.query_one("#chat-history", ChatHistory)
         agents = await self.api.list_agents()
-        self._agents_cache = agents
+        self._adopt_agent_directory(agents)
         if not agents:
             chat.write(markup("[#c7ff8a]No agents found.[/]"))
             return
@@ -2653,6 +2861,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             previous_instance = self.current_instance_id
             self._clear_typing_indicator()
             self._latest_submission_ref = None
+            self._cancel_side_panel_refresh()
+            self._reset_side_panel_data()
             self._connection_generation += 1
             generation = self._connection_generation
             self.api = candidate
@@ -2724,6 +2934,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
     async def _shutdown(self):
         self._clear_typing_indicator()
+        self._cancel_side_panel_refresh()
         if self._log_follow_task and not self._log_follow_task.done():
             self._log_follow_task.cancel()
         if self.bridge_proc and self.bridge_proc.returncode is None:

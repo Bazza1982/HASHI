@@ -224,6 +224,38 @@ class TuiApiClient:
         agents = data.get("agents", [])
         return agents if isinstance(agents, list) else []
 
+    async def agent_overview(self, agent: str) -> dict:
+        """Read the canonical Workbench overview for one Agent."""
+        if self.proxied:
+            return await self._proxy_request("agent_overview", agent=agent, timeout=8)
+        encoded_agent = quote(str(agent), safe="")
+        return await self._direct_request(
+            "GET", f"/api/agents/{encoded_agent}/overview", timeout=8
+        )
+
+    async def scheduler_jobs(self, agent: str) -> dict:
+        """Read this Agent's authoritative HASHI Scheduler jobs."""
+        if self.proxied:
+            return await self._proxy_request("scheduler_jobs", agent=agent, timeout=8)
+        encoded_agent = quote(str(agent), safe="")
+        return await self._direct_request(
+            "GET", f"/api/agents/{encoded_agent}/scheduler/jobs", timeout=8
+        )
+
+    async def background_jobs(self, agent: str, *, limit: int = 20) -> dict:
+        """Read recent background jobs scoped to one Agent."""
+        safe_limit = max(1, min(int(limit), 200))
+        if self.proxied:
+            return await self._proxy_request(
+                "background_jobs", agent=agent, limit=safe_limit, timeout=8
+            )
+        encoded_agent = quote(str(agent), safe="")
+        return await self._direct_request(
+            "GET",
+            f"/api/background-jobs?agent={encoded_agent}&limit={safe_limit}",
+            timeout=8,
+        )
+
     async def send_chat(
         self,
         agent: str,

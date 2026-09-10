@@ -114,6 +114,13 @@ Current implementation boundary:
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
 - language, layout, sounds, the TUI typing indicator, and the default Telegram
   mirror choice are local persisted Connector preferences;
+- the side panel is closed by default. `/sidepanel` opens the TUI's persisted,
+  read-only information panel;
+  `/sidepanel off` closes it and `/sidepanel refresh` refreshes it. The panel
+  projects the selected Agent's canonical token summary, Scheduler and
+  background jobs, system-prompt summaries, parked-topic summaries, and the
+  live Agent directory. It is a scrollable information surface only: actions
+  remain slash commands in the input, and the panel owns no competing state;
 - the connection footer projects live Agent metadata for Engine, model, effort,
   Think, Verbose, Commentary and Connector state. Model Provider and structured
   Quick/Pro routing are shown only for HER v2. Identical HER Quick/Pro Provider
@@ -122,7 +129,8 @@ Current implementation boundary:
   The footer intentionally omits
   working mode; `/mode` remains its authoritative control surface;
 - its cross-instance path proxies only a small named operation set through
-  authenticated Hashi Remote peers; and
+  authenticated Hashi Remote peers. Side-panel reads use explicit, Agent-scoped
+  allowlist operations rather than an arbitrary Backend API proxy; and
 - it does not yet implement the complete Persistent Session API v1 multi-
   Session surface.
 
