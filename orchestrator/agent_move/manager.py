@@ -314,6 +314,8 @@ class AgentMoveManager:
             operation = str(outbound.get("operation") or record.get("operation") or "")
             status = str(outbound.get("status") or "")
 
+            if outbound.get("rollback_completed"):
+                raise AgentMoveError("transfer was rolled back; prepare a fresh transfer")
             if status == "completed":
                 result = outbound
             elif operation == "move" and status in _MOVE_CONTINUATION_STATUSES:
@@ -348,7 +350,11 @@ class AgentMoveManager:
         except Exception as exc:  # noqa: BLE001 - durable recovery boundary
             record = self._require_record(package_id)
             attempts = int(record.get("execution_attempts") or 1)
-            retry = attempts < _MAX_EXECUTION_ATTEMPTS
+            try:
+                failed_outbound = await asyncio.to_thread(get_outbound_move, self.root, package_id)
+            except Exception:
+                failed_outbound = {}
+            retry = attempts < _MAX_EXECUTION_ATTEMPTS and not failed_outbound.get("rollback_completed")
             self._update(
                 package_id,
                 status="retry_wait" if retry else "needs_recovery",

@@ -208,12 +208,14 @@ async def test_failure_stays_persistent_for_explicit_recovery(tmp_path, monkeypa
     assert persisted["operations"]["move-3"]["status"] == "needs_recovery"
 
 
+@pytest.mark.parametrize("rollback_completed", [False, True])
 @pytest.mark.asyncio
 async def test_transient_failure_retries_with_persisted_attempt_count(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, rollback_completed
 ):
     kernel, _stopped = _kernel(tmp_path)
     attempts = []
+    rolled_back = {}
     monkeypatch.setattr(move_manager, "_WATCH_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(
         move_manager,
@@ -223,12 +225,15 @@ async def test_transient_failure_retries_with_persisted_attempt_count(
             "agent_id": "source",
             "operation": "clone",
             "status": "staged_remote",
+            **rolled_back,
         },
     )
 
     def confirm(*_args):
         attempts.append(len(attempts) + 1)
         if len(attempts) == 1:
+            if rollback_completed:
+                rolled_back.update(status="cutover_failed", rollback_completed=True)
             raise OSError("temporary disconnect")
         return {
             "package_id": "clone-retry",
@@ -246,9 +251,9 @@ async def test_transient_failure_retries_with_persisted_attempt_count(
     finally:
         await manager.stop()
 
-    assert result["status"] == "completed"
-    assert result["execution_attempts"] == 2
-    assert attempts == [1, 2]
+    assert result["status"] == ("needs_recovery" if rollback_completed else "completed")
+    assert result["execution_attempts"] == (1 if rollback_completed else 2)
+    assert attempts == ([1] if rollback_completed else [1, 2])
 
 
 @pytest.mark.asyncio

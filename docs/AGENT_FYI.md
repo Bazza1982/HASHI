@@ -349,3 +349,7 @@ preflight, sharing Move package validation while retaining the source.
 Windows Move/Clone snapshots ignore SQLite `-shm` reader-bookkeeping timestamps
 while retaining file inventory, size limits, database/WAL freshness and durable
 memory checksums. A read-only backup must not invalidate its own transfer.
+
+Move/Clone start and stop requests allow the PAO lifecycle readiness budget on
+local and Remote hops. Completed rollback stops automatic retry of that package;
+a fresh preflight is required, while incomplete rollback retains recovery checks.

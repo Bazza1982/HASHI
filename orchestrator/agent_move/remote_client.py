@@ -209,11 +209,17 @@ class AgentMoveRemoteClient:
     def rollback(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
         return self._action("rollback", package_id, timeout=timeout)
 
-    def start(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
-        return self._action("start", package_id, timeout=timeout)
+    def start(self, package_id: str, *, timeout: float | None = None) -> dict[str, Any]:
+        from orchestrator.agent_lifecycle import AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS
 
-    def stop(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
-        return self._action("stop", package_id, timeout=timeout)
+        budget = AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS + 30 if timeout is None else timeout
+        return self._action("start", package_id, timeout=budget)
+
+    def stop(self, package_id: str, *, timeout: float | None = None) -> dict[str, Any]:
+        from orchestrator.agent_lifecycle import AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS
+
+        budget = AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS + 30 if timeout is None else timeout
+        return self._action("stop", package_id, timeout=budget)
 
     def finalize(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
         return self._action("finalize", package_id, timeout=timeout)

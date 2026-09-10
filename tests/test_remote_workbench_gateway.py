@@ -151,6 +151,8 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(mo
         captured["body"] = request.data
         captured["headers"] = {key.lower(): value for key, value in request.header_items()}
         captured["timeout"] = timeout
+        if request.full_url.endswith("/admin/start-agent") and timeout < 35:
+            raise TimeoutError("worker still starting after 30 seconds")
         return _Response()
 
     monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
@@ -175,3 +177,6 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(mo
     assert captured["body"] == b'{"text":"hello"}'
     assert captured["headers"]["x-workbench-token"] == "local-admin"
     assert "x-hashi-digest" not in captured["headers"]
+    started = remote_server._request_workbench_agent_lifecycle("windows-fixture", action="start")
+    assert started["ok"] is True
+    assert captured["timeout"] >= 35

@@ -92,6 +92,13 @@ the existing exclusion for the command audit. Files changing during packaging
 cause preparation to fail without publishing a new package. SQLite snapshots
 and receiver payload validation retain bounded expansion checks.
 
+Lifecycle HTTP calls use the PAO Worker-readiness budget with transport headroom,
+including the Remote-to-local API hop. A Windows Worker taking longer than a
+normal 30-second API request must not be rolled back merely because it is still
+starting. Confirmed rollback is terminal for that package: the durable manager
+retains the original error and requests fresh preparation instead of repeatedly
+committing an already rolled-back receiver package.
+
 Confirmation is durably accepted by the shared Functions `AgentMoveManager`;
 acceptance is distinct from terminal completion. A missing background owner fails
 before the source is changed.

@@ -646,6 +646,9 @@ def _confirm_outbound_move_locked(
                 "rollback_errors": rollback_errors,
                 "source_disabled": not source_restored,
                 "target_active": False if target_rolled_back else None,
+                "rollback_completed": (
+                    target_rolled_back and source_restored and not rollback_errors
+                ),
                 "reboot_required": bool(rollback_errors or not source_restored),
             }
         )
@@ -894,6 +897,7 @@ def _confirm_outbound_clone_locked(
                     "rollback_errors": rollback_errors,
                     "source_disabled": False,
                     "target_active": None if rollback_errors else False,
+                    "rollback_completed": not rollback_errors,
                     "target_stop_required": not target_stop_confirmed,
                     "reboot_required": bool(rollback_errors),
                 }
@@ -1049,6 +1053,9 @@ def continue_outbound_move(
                     "rollback_errors": rollback_errors,
                     "source_disabled": not source_restored,
                     "target_active": False if target_rolled_back else None,
+                    "rollback_completed": (
+                        target_rolled_back and source_restored and not rollback_errors
+                    ),
                     "reboot_required": bool(
                         rollback_errors or not source_restored
                     ),
@@ -1161,6 +1168,9 @@ def _rollback_new_move_cutover(
             "rollback_errors": rollback_errors,
             "source_disabled": not source_restored,
             "target_active": False if target_rolled_back else None,
+            "rollback_completed": (
+                target_rolled_back and source_restored and not rollback_errors
+            ),
             "reboot_required": bool(rollback_errors or not source_restored),
         }
     )
@@ -1481,6 +1491,7 @@ def _local_workbench_json(
     *,
     method: str = "GET",
     payload: Mapping[str, Any] | None = None,
+    timeout: float = 30,
 ) -> dict[str, Any]:
     data = (
         json.dumps(dict(payload), separators=(",", ":")).encode("utf-8")
@@ -1498,7 +1509,7 @@ def _local_workbench_json(
     url = f"{_local_workbench_base_url(root)}{path}"
     request = urllib_request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib_request.urlopen(request, timeout=30) as response:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         try:
@@ -1522,6 +1533,8 @@ def _local_workbench_json(
 
 
 def _local_workbench_lifecycle(root: Path, agent_id: str, action: str) -> dict[str, Any]:
+    from orchestrator.agent_lifecycle import AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS
+
     if action not in {"start", "stop"}:
         raise AgentMoveError("unsupported local Agent lifecycle action")
     return _local_workbench_json(
@@ -1529,6 +1542,7 @@ def _local_workbench_lifecycle(root: Path, agent_id: str, action: str) -> dict[s
         f"/api/admin/{action}-agent",
         method="POST",
         payload={"agent": agent_id},
+        timeout=AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS,
     )
 
 

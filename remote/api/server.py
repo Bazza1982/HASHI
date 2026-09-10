@@ -1024,6 +1024,7 @@ def _forward_workbench_gateway_request(
     query: str,
     body_bytes: bytes,
     request_headers: dict[str, str],
+    timeout: float | None = None,
 ) -> tuple[int, bytes, dict[str, str]]:
     """Relay one authenticated request to this instance's loopback Workbench API."""
     normalized_method = str(method or "").upper()
@@ -1057,7 +1058,7 @@ def _forward_workbench_gateway_request(
         try:
             with urllib_request.urlopen(
                 upstream,
-                timeout=_workbench_gateway_timeout(),
+                timeout=_workbench_gateway_timeout() if timeout is None else timeout,
             ) as response:
                 response_headers = {
                     name.lower(): value
@@ -1106,6 +1107,8 @@ def _request_workbench_agent_lifecycle(
     *,
     action: str,
 ) -> dict[str, Any]:
+    from orchestrator.agent_lifecycle import AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS
+
     normalized_action = str(action or "").strip().lower()
     if normalized_action not in {"start", "stop"}:
         raise AgentMoveError("unsupported Agent lifecycle action")
@@ -1117,6 +1120,7 @@ def _request_workbench_agent_lifecycle(
             query="",
             body_bytes=body,
             request_headers={"content-type": "application/json"},
+            timeout=AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS,
         )
         payload = json.loads(content.decode("utf-8"))
     except Exception as exc:

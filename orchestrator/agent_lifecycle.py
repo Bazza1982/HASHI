@@ -8,11 +8,16 @@ from orchestrator.bootstrap_logging import C_OK, C_RESET, C_WARN, C_STOP
 from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
     WORKER_DRAIN_TIMEOUT_SECONDS,
+    WORKER_READY_TIMEOUT_SECONDS,
 )
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
 RUNTIME_TEARDOWN_TIMEOUT_SECONDS = WORKER_DRAIN_TIMEOUT_SECONDS + 35.0
+# Allow native Worker readiness and transport overhead on lifecycle API calls.
+AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS = max(
+    WORKER_READY_TIMEOUT_SECONDS, RUNTIME_TEARDOWN_TIMEOUT_SECONDS
+) + 60.0
 
 
 class AgentLifecycleManager:
