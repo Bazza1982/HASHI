@@ -87,7 +87,10 @@ Make an HTTP request with full control.
 ## Communication Tools
 
 ### telegram_send
-Send a Telegram message.
+Send an explicitly requested additional Telegram notification or agent-to-agent
+message. If `CURRENT MESSAGE CONTEXT.output_destination` already lists Telegram
+and `automatic=true`, reply normally; do not duplicate the current response with
+this tool.
 | Param | Required | Description |
 |-------|----------|-------------|
 | `text` | Yes | Message text |

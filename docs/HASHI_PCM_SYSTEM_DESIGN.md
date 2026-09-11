@@ -420,7 +420,15 @@ separate HASHI functional modules.
 
 PAO freezes the provenance fields of one `hashi.current-message-context`
 version 1 snapshot at admission and stores the same current snapshot on the
-user Message and Run. PAO may atomically replace only its authorization result
+user Message and Run. Before that snapshot exists, PAO resolves the Session and
+freezes one `hashi.run-delivery-route` version 1 object for the Run. PCM projects
+only its primary surface, mirror surfaces, and automatic-delivery intent; it
+never receives private Connector channel keys. `automatic=true` means the
+ordinary final response will be handled by the listed Connector route, so an
+Agent must not call a send tool merely to duplicate the current reply. It does
+not mean the response has already been delivered.
+
+PAO may atomically replace only its authorization result
 after mandatory attempt-start revalidation. The verification-only
 `idempotent_revalidation` observation is excluded from that snapshot: repeating
 the same signed request must retain the original admission digest and Run.
@@ -441,6 +449,13 @@ capability schema. A declared name is provenance, not proof of a person or
 client identity. HChat facts distinguish the original sender claim,
 authenticated immediate peer, relay chain, origin evidence, recipient, and
 processing instance.
+
+Scheduler, background-job, heartbeat, and proactive events use the reserved
+`hashi.internal` source and `sender.kind=system`, regardless of whether their
+automatic destination is Telegram. HChat uses `sender.kind=agent` even without
+an optional private-authorization proof; proof state changes disclosure scope,
+not the sender category. Connector success, failure, retry, and partial-mirror
+results remain Run events and are not backfilled into the pre-response PCM.
 
 Private authorization results are current-message facts supplied only after
 PAO runtime verification. PCM receives credential ID, state, group, scopes,

@@ -237,3 +237,54 @@ async def test_whatsapp_ingress_passes_chat_key_to_session_routing():
         "session_surface": "whatsapp",
         "session_channel_key": chat_key,
     }
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_response_records_actual_connector_outcome(monkeypatch):
+    from orchestrator import runtime_session
+
+    transport = WhatsAppTransport.__new__(WhatsAppTransport)
+    runtime = SimpleNamespace(name="nana")
+    transport._get_runtime = lambda _name: runtime
+
+    async def allow_egress(**_kwargs):
+        return True
+
+    async def send_text(_chat_key, _text):
+        return True
+
+    transport._check_whatsapp_egress_allowed = allow_egress
+    transport._send_text = send_text
+    receipts = []
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda current_runtime, item, **fields: receipts.append(
+            (current_runtime, item, fields)
+        ),
+    )
+
+    await transport._on_agent_response(
+        "61400000000@s.whatsapp.net",
+        "nana",
+        {"request_id": "req-wa", "success": True, "text": "hello"},
+        "single",
+        ["nana"],
+    )
+
+    assert receipts == [
+        (
+            runtime,
+            None,
+            {
+                "request_id": "req-wa",
+                "delivered": True,
+                "assistant_text": "[nana]: hello",
+                "surface": "whatsapp",
+                "channel_key": "61400000000@s.whatsapp.net",
+                "transport": "whatsapp",
+                "completion_path": "foreground",
+                "disposition": "transport_delivered",
+            },
+        )
+    ]

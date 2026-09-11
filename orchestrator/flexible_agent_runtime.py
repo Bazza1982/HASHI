@@ -806,7 +806,7 @@ class FlexibleAgentRuntime:
         # immutable QueuedRequest snapshots the choice for the full Turn.
         from orchestrator.frontend_delivery import telegram_delivery_for_admission
 
-        deliver_to_telegram = telegram_delivery_for_admission(
+        telegram_requested = telegram_delivery_for_admission(
             source=source,
             request_metadata=request_metadata,
         )
@@ -845,7 +845,7 @@ class FlexibleAgentRuntime:
                 else None
             )
         if move_guard is not None:
-            if deliver_to_telegram and not silent:
+            if telegram_requested and not silent:
                 await self._send_text(
                     chat_id,
                     ui_language.tr(
@@ -863,6 +863,7 @@ class FlexibleAgentRuntime:
         # neither assert a frontend identity nor inherit authorization.
         from orchestrator.message_context import (
             CONNECTOR_EVIDENCE_METADATA_KEY,
+            HCHAT_CONTEXT_METADATA_KEY,
             MESSAGE_CONTEXT_METADATA_KEY,
             PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
             PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
@@ -870,7 +871,13 @@ class FlexibleAgentRuntime:
             PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
             apply_connector_evidence,
             build_message_context_snapshot,
+            resolve_message_source_fact,
             resolve_private_authorizations,
+        )
+        from orchestrator.frontend_delivery import (
+            RUN_DELIVERY_ROUTE_METADATA_KEY,
+            freeze_run_delivery_route,
+            route_destination,
         )
 
         metadata = apply_connector_evidence(
@@ -885,6 +892,61 @@ class FlexibleAgentRuntime:
                 metadata=metadata,
                 prompt=clean_prompt,
             )
+        )
+        # PAO resolves the Session and the complete per-Run Connector route
+        # before PCM is built. Passing that exact Session back into admission
+        # prevents a later binding lookup from silently selecting another
+        # Conversation if a frontend switches while this request is queued.
+        (
+            resolved_session,
+            resolved_owner,
+            resolved_surface,
+            resolved_channel_key,
+        ) = await asyncio.to_thread(
+            runtime_session.resolve_request_session,
+            self,
+            source=source,
+            chat_id=chat_id,
+            metadata=metadata,
+        )
+        metadata.update(
+            {
+                "session_id": resolved_session["session_id"],
+                "owner_id": resolved_owner,
+                "session_surface": resolved_surface,
+                "session_channel_key": resolved_channel_key,
+            }
+        )
+        source_fact = resolve_message_source_fact(
+            source=source,
+            chat_id=chat_id,
+            metadata=metadata,
+        )
+        primary_channel_key = resolved_channel_key
+        hchat_context = metadata.get(HCHAT_CONTEXT_METADATA_KEY)
+        if source_fact["id"] == "hchat" and isinstance(hchat_context, Mapping):
+            from_agent = str(hchat_context.get("from_agent") or "unknown").strip().casefold()
+            from_instance = str(hchat_context.get("from_instance") or "").strip().upper()
+            primary_channel_key = (
+                f"{from_agent}@{from_instance}" if from_instance else from_agent
+            )
+        metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = freeze_run_delivery_route(
+            message_source_id=str(source_fact["id"]),
+            session_surface=resolved_surface,
+            session_channel_key=resolved_channel_key,
+            chat_id=chat_id,
+            telegram_requested=telegram_requested,
+            primary_channel_key=primary_channel_key,
+            terminal_exchange=bool(metadata.get("system_exchange_terminal")),
+        )
+        # The legacy execution flag is now only a derived instruction to the
+        # Telegram Connector. Other connector callbacks use the same frozen
+        # route and cannot be enabled or disabled by this boolean.
+        deliver_to_telegram = (
+            route_destination(
+                metadata[RUN_DELIVERY_ROUTE_METADATA_KEY], "telegram"
+            )
+            is not None
         )
         metadata[MESSAGE_CONTEXT_METADATA_KEY] = build_message_context_snapshot(
             self,
@@ -2269,6 +2331,51 @@ class FlexibleAgentRuntime:
             return
         sender_name = sender["agent"].lower()
         sender_instance = (sender.get("instance_id") or "").upper()
+        reply_channel = (
+            f"{sender_name}@{sender_instance}" if sender_instance else sender_name
+        )
+
+        def outcome(
+            delivered: bool,
+            disposition: str,
+            *,
+            error_type: str = "",
+            state: str | None = None,
+        ) -> dict[str, Any]:
+            result = {
+                "attempted": True,
+                "delivered": bool(delivered),
+                "surface": "hchat",
+                "channel_key": reply_channel,
+                "transport": "hchat",
+                "disposition": disposition,
+                "state": state or ("delivered" if delivered else "failed"),
+            }
+            if error_type:
+                result["error_type"] = error_type
+            return result
+
+        request_metadata = getattr(item, "request_metadata", None)
+        if isinstance(request_metadata, Mapping):
+            from orchestrator.frontend_delivery import (
+                RUN_DELIVERY_ROUTE_METADATA_KEY,
+                route_destination,
+            )
+
+            has_frozen_route = RUN_DELIVERY_ROUTE_METADATA_KEY in request_metadata
+            planned = route_destination(
+                request_metadata.get(RUN_DELIVERY_ROUTE_METADATA_KEY), "hchat"
+            )
+            if has_frozen_route and (
+                planned is None or planned["channel_key"] != reply_channel
+            ):
+                self.logger.error(
+                    "Hchat reply route mismatch for %s: planned=%s observed=%s",
+                    getattr(item, "request_id", "unknown"),
+                    planned["channel_key"] if planned is not None else "none",
+                    reply_channel,
+                )
+                return outcome(False, "route_mismatch")
         try:
             from tools.hchat_send import _get_instance_id, _load_config
             local_instance = str(_get_instance_id(_load_config()) or "").upper()
@@ -2283,15 +2390,35 @@ class FlexibleAgentRuntime:
                 for rt in getattr(orchestrator, "runtimes", []):
                     if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
                         try:
-                            await rt.enqueue_api_text(
+                            request_id = await rt.enqueue_api_text(
                                 reply_text,
                                 source=f"hchat-reply:{self.name}",
                                 deliver_to_telegram=True,
+                                request_metadata={
+                                    "system_exchange": True,
+                                    "system_exchange_kind": "reply",
+                                    "system_exchange_terminal": True,
+                                },
                             )
-                            self.logger.info(f"Hchat reply routed to local runtime '{sender_name}'")
+                            if request_id:
+                                self.logger.info(f"Hchat reply routed to local runtime '{sender_name}'")
+                                return outcome(
+                                    False,
+                                    "local_agent_enqueued",
+                                    state="queued",
+                                )
+                            self.logger.warning(
+                                "Hchat reply to local runtime '%s' was not admitted",
+                                sender_name,
+                            )
+                            return outcome(False, "local_agent_not_admitted")
                         except Exception as e:
                             self.logger.warning(f"Failed to route hchat reply to '{sender_name}': {e}")
-                        return
+                            return outcome(
+                                False,
+                                "local_agent_exception",
+                                error_type=type(e).__name__,
+                            )
 
         # ── 2. Explicit cross-instance reply when sender instance is known ────
         if sender_instance and sender_instance != local_instance:
@@ -2304,8 +2431,12 @@ class FlexibleAgentRuntime:
                     functools.partial(send_hchat, sender_name, self.name, reply_text, target_instance=sender_instance),
                 )
                 if ok:
-                    self.logger.info(f"Hchat reply cross-instance delivered to '{sender_name}@{sender_instance}'")
-                    return
+                    self.logger.info(f"Hchat reply cross-instance enqueued for '{sender_name}@{sender_instance}'")
+                    return outcome(
+                        False,
+                        "cross_instance_enqueued",
+                        state="queued",
+                    )
             except Exception as e:
                 self.logger.warning(f"Hchat reply: cross-instance delivery to '{sender_name}@{sender_instance}' failed: {e}")
 
@@ -2327,11 +2458,16 @@ class FlexibleAgentRuntime:
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                             if resp.status < 300:
-                                self.logger.info(f"Hchat reply delivered to external '{sender_name}' via {url}")
+                                self.logger.info(f"Hchat reply enqueued for external '{sender_name}' via {url}")
+                                return outcome(
+                                    False,
+                                    "contact_http_enqueued",
+                                    state="queued",
+                                )
                             else:
                                 body = await resp.text()
                                 self.logger.warning(f"Hchat reply to '{sender_name}' got HTTP {resp.status}: {body[:200]}")
-                    return
+                                return outcome(False, f"contact_http_{resp.status}")
         except Exception as e:
             self.logger.warning(f"Hchat reply: contacts fallback for '{sender_name}' failed: {e}")
 
@@ -2342,14 +2478,19 @@ class FlexibleAgentRuntime:
             loop = asyncio.get_event_loop()
             ok = await loop.run_in_executor(None, functools.partial(send_hchat, sender_name, self.name, reply_text))
             if ok:
-                self.logger.info(f"Hchat reply cross-instance delivered to '{sender_name}'")
-                return
+                self.logger.info(f"Hchat reply cross-instance enqueued for '{sender_name}'")
+                return outcome(
+                    False,
+                    "cross_instance_discovered_enqueued",
+                    state="queued",
+                )
         except Exception as e:
             self.logger.warning(f"Hchat reply: cross-instance delivery to '{sender_name}' failed: {e}")
 
         self.logger.warning(
             f"Hchat reply: sender '{sender_name}' not found locally, in contacts, or cross-instance"
         )
+        return outcome(False, "route_unavailable")
 
     async def enqueue_api_media(
         self,

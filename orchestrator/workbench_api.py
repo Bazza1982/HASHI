@@ -78,6 +78,7 @@ from orchestrator.flexible_backend_registry import (
     is_selectable_backend,
 )
 from orchestrator.frontend_delivery import (
+    RUN_DELIVERY_ROUTE_METADATA_KEY,
     normalize_tui_run_delivery_policy,
     tui_request_metadata,
 )
@@ -5516,6 +5517,7 @@ class WorkbenchApiServer:
                 PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
                 PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
                 PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+                RUN_DELIVERY_ROUTE_METADATA_KEY,
             }
             session_metadata.update(
                 {

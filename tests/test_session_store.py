@@ -160,6 +160,56 @@ def test_assistant_delivery_receipts_are_route_scoped_and_success_only(tmp_path)
     ) is False
 
 
+def test_delivery_queue_acknowledgement_is_not_a_delivered_receipt(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    accepted = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-hchat-queued",
+        key="hchat-queued",
+        text="peer prompt",
+        answer="peer answer",
+        source="protocol:message",
+    )
+
+    event = store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=False,
+        outcome_state="queued",
+        surface="hchat",
+        channel_key="peer@HASHI2",
+        transport="hchat",
+        completion_path="foreground",
+        disposition="cross_instance_enqueued",
+    )
+
+    assert event["status"] == "queued"
+    assert event["detail"]["outcome_state"] == "queued"
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="hchat", channel_key="peer@HASHI2"
+    ) is None
+    assert store.has_assistant_delivery_outcome(
+        session["session_id"], surface="hchat", channel_key="peer@HASHI2"
+    ) is True
+
+    delivered = store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=True,
+        surface="hchat",
+        channel_key="peer@HASHI2",
+        transport="hchat",
+        completion_path="foreground",
+        disposition="terminal_reply_observed",
+    )
+    assert delivered["status"] == "delivered"
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="hchat", channel_key="peer@HASHI2"
+    ) == "peer answer"
+
+
 def test_say_delivery_lookup_targets_telegram_when_command_arrives_via_workbench(
     tmp_path,
 ):

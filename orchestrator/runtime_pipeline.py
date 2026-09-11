@@ -3838,6 +3838,55 @@ async def handle_backend_error(
     )
 
 
+async def _route_hchat_reply_with_receipt(runtime, item, response_text: str) -> bool:
+    """Execute the HChat leg and persist only the Connector's observed result."""
+
+    outcome = await runtime._hchat_route_reply(item, response_text)
+    if not isinstance(outcome, Mapping) or not outcome.get("attempted"):
+        return False
+    runtime_session.record_assistant_delivery(
+        runtime,
+        item,
+        delivered=bool(outcome.get("delivered")),
+        assistant_text=response_text,
+        transport=str(outcome.get("transport") or "hchat"),
+        completion_path="foreground",
+        disposition=str(outcome.get("disposition") or "transport_returned_no_receipt"),
+        surface=str(outcome.get("surface") or "hchat"),
+        channel_key=str(outcome.get("channel_key") or "default"),
+        outcome_state=str(outcome.get("state") or "") or None,
+    )
+    return bool(outcome.get("delivered"))
+
+
+def _typed_run_delivery_route(item) -> dict[str, Any] | None:
+    metadata = getattr(item, "request_metadata", None)
+    if isinstance(metadata, Mapping):
+        from orchestrator.frontend_delivery import (
+            RUN_DELIVERY_ROUTE_METADATA_KEY,
+            normalize_run_delivery_route,
+        )
+
+        if RUN_DELIVERY_ROUTE_METADATA_KEY in metadata:
+            return normalize_run_delivery_route(
+                metadata.get(RUN_DELIVERY_ROUTE_METADATA_KEY)
+            )
+    return None
+
+
+def _run_delivery_primary_surface(item) -> str:
+    try:
+        route = _typed_run_delivery_route(item)
+    except ValueError:
+        return "invalid"
+    primary = route.get("primary") if isinstance(route, Mapping) else None
+    if isinstance(primary, Mapping):
+        return str(primary.get("surface") or "").strip().casefold()
+    # Archived queued items predate the typed route and reached this delivery
+    # path only because Telegram was their primary transport.
+    return "telegram"
+
+
 async def handle_success_delivery(
     runtime,
     item,
@@ -3894,20 +3943,27 @@ async def handle_success_delivery(
         session_reset_source=session_reset_source,
     )
     if not item.deliver_to_telegram:
+        hchat_delivered = await _route_hchat_reply_with_receipt(
+            runtime, item, visible_text
+        )
         runtime_cross_session.record_turn_result(
             runtime,
             item,
             assistant_text=visible_text,
             response=response,
-            delivered=False,
+            delivered=hchat_delivered,
             completion_path="foreground",
         )
         await record_her_v2_transport_receipt(
             runtime,
             item,
             response,
-            delivered=False,
-            disposition="telegram_delivery_not_requested",
+            delivered=hchat_delivered,
+            disposition=(
+                "alternate_connector_delivered"
+                if hchat_delivered
+                else "telegram_delivery_not_requested"
+            ),
         )
         return
 
@@ -3960,6 +4016,16 @@ async def handle_success_delivery(
     delivery_text = "" if native_policy == "audio_only" and native_parts else response_text
     receipt_disposition = "transport_returned_no_receipt"
     try:
+        typed_route = _typed_run_delivery_route(item)
+        if typed_route is not None:
+            from orchestrator.frontend_delivery import route_destination
+
+            telegram_destination = route_destination(typed_route, "telegram")
+            if (
+                telegram_destination is None
+                or telegram_destination["channel_key"] != str(item.chat_id)
+            ):
+                raise RuntimeError("frozen Telegram delivery route mismatch")
         if delivered_at_initial_resolution:
             stream_finalization = StreamFinalization(
                 streamed=False,
@@ -4017,7 +4083,40 @@ async def handle_success_delivery(
             disposition="transport_exception",
             error_type=type(exc).__name__,
         )
-        raise
+        runtime_session.record_assistant_delivery(
+            runtime,
+            item,
+            delivered=False,
+            assistant_text=response_text,
+            transport="telegram",
+            completion_path="foreground",
+            disposition="transport_exception",
+            surface="telegram",
+            channel_key=str(item.chat_id),
+        )
+        primary_surface = _run_delivery_primary_surface(item)
+        if primary_surface == "telegram":
+            raise
+        hchat_delivered = False
+        if not cos_handled:
+            hchat_delivered = await _route_hchat_reply_with_receipt(
+                runtime, item, response_text
+            )
+        runtime_cross_session.record_turn_result(
+            runtime,
+            item,
+            assistant_text=response_text,
+            response=response,
+            delivered=hchat_delivered,
+            completion_path="foreground",
+        )
+        runtime.logger.warning(
+            "Telegram mirror failed for %s; preserved primary %s route (%s)",
+            item.request_id,
+            primary_surface,
+            type(exc).__name__,
+        )
+        return
     native_delivered = False
     native_delivery_error = None
     if native_delivery_task is not None:
@@ -4090,13 +4189,20 @@ async def handle_success_delivery(
         transport="telegram",
         completion_path="foreground",
         disposition=receipt_disposition,
+        surface="telegram",
+        channel_key=str(item.chat_id),
     )
+    hchat_delivered = False
+    if not cos_handled:
+        hchat_delivered = await _route_hchat_reply_with_receipt(
+            runtime, item, response_text
+        )
     runtime_cross_session.record_turn_result(
         runtime,
         item,
         assistant_text=response_text,
         response=response,
-        delivered=final_delivered,
+        delivered=bool(final_delivered or hchat_delivered),
         completion_path="foreground",
     )
     if not native_parts:
@@ -4164,5 +4270,3 @@ async def handle_success_delivery(
         f"chunks={chunk_count})"
     )
     runtime._log_maintenance(item, "send_success", text_len=len(response_text or ""))
-    if not cos_handled:
-        await runtime._hchat_route_reply(item, response_text)

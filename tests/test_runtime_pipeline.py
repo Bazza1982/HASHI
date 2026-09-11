@@ -3627,8 +3627,10 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
                 "delivered": True,
                 "assistant_text": "visible text",
                 "transport": "telegram",
-                "completion_path": "foreground",
-                "disposition": "transport_delivered",
+                    "completion_path": "foreground",
+                    "disposition": "transport_delivered",
+                    "surface": "telegram",
+                    "channel_key": "123",
             },
         )
     ]
@@ -3711,10 +3713,85 @@ async def test_handle_success_delivery_records_failed_transport_outcome(monkeypa
             "delivered": False,
             "assistant_text": "visible output",
             "transport": "telegram",
-            "completion_path": "foreground",
-            "disposition": "transport_returned_no_receipt",
+                "completion_path": "foreground",
+                "disposition": "transport_returned_no_receipt",
+                "surface": "telegram",
+                "channel_key": "123",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_hchat_primary_survives_failed_telegram_mirror_and_records_both(monkeypatch):
+    from orchestrator.frontend_delivery import (
+        RUN_DELIVERY_ROUTE_METADATA_KEY,
+        freeze_run_delivery_route,
+    )
+
+    runtime = _runtime()
+
+    async def failed_mirror(**_kwargs):
+        raise RuntimeError("synthetic mirror failure")
+
+    async def delivered_hchat(_item, _text):
+        return {
+            "attempted": True,
+            "delivered": True,
+            "surface": "hchat",
+            "channel_key": "rika@HASHI2",
+            "transport": "hchat",
+            "disposition": "cross_instance_delivered",
+        }
+
+    runtime.send_long_message = failed_mirror
+    runtime._hchat_route_reply = delivered_hchat
+    item = _item(
+        source="protocol:message",
+        prompt="[hchat from rika@HASHI2] hello",
+        request_metadata={
+            RUN_DELIVERY_ROUTE_METADATA_KEY: freeze_run_delivery_route(
+                message_source_id="hchat",
+                session_surface="workbench",
+                session_channel_key="default",
+                primary_channel_key="rika@HASHI2",
+                chat_id=123,
+                telegram_requested=True,
+            )
+        },
+    )
+    receipts = []
+    results = []
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda _runtime, _item, **fields: receipts.append(fields),
+    )
+    monkeypatch.setattr(
+        runtime_cross_session,
+        "record_turn_result",
+        lambda _runtime, _item, **fields: results.append(fields),
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="backend output"),
+        visible_text="visible output",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert [(entry["surface"], entry["delivered"]) for entry in receipts] == [
+        ("telegram", False),
+        ("hchat", True),
+    ]
+    assert results[-1]["delivered"] is True
+    assert any("preserved primary hchat route" in msg for msg in runtime.logger.messages)
 
 
 @pytest.mark.asyncio

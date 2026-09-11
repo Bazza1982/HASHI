@@ -2543,7 +2543,7 @@ def test_flex_hchat_cross_instance_reply_is_tagged(monkeypatch):
 
     item = SimpleNamespace(prompt="[hchat from rika@HASHI2] hello")
 
-    asyncio.run(runtime._hchat_route_reply(item, "Roger that"))
+    outcome = asyncio.run(runtime._hchat_route_reply(item, "Roger that"))
 
     assert sent["to_agent"] == "rika"
     assert sent["from_agent"] == "sakura"
@@ -2551,6 +2551,15 @@ def test_flex_hchat_cross_instance_reply_is_tagged(monkeypatch):
     assert sent["text"].startswith("[hchat reply from sakura] Roger that\n\n")
     assert "show the reply body above verbatim" in sent["text"]
     assert sent["text"].count("[hchat reply from sakura]") == 1
+    assert outcome == {
+        "attempted": True,
+        "delivered": False,
+        "surface": "hchat",
+        "channel_key": "rika@HASHI2",
+        "transport": "hchat",
+        "disposition": "cross_instance_enqueued",
+        "state": "queued",
+    }
 
 
 def test_flex_hchat_reply_body_is_not_replied_again(monkeypatch):

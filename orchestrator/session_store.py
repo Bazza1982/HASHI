@@ -235,6 +235,7 @@ class SessionStore:
                     request_digest TEXT NOT NULL,
                     source TEXT NOT NULL,
                     message_context_json TEXT NOT NULL DEFAULT '{}',
+                    delivery_route_json TEXT NOT NULL DEFAULT '{}',
                     requested_mode TEXT,
                     effective_mode TEXT,
                     response_preferences_json TEXT NOT NULL DEFAULT '{}',
@@ -531,6 +532,11 @@ class SessionStore:
                     "ALTER TABLE runs ADD COLUMN "
                     "message_context_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "delivery_route_json" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN "
+                    "delivery_route_json TEXT NOT NULL DEFAULT '{}'"
+                )
             message_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(messages)").fetchall()
@@ -600,6 +606,10 @@ class SessionStore:
         if "message_context_json" in result:
             result["message_context"] = _json_object(
                 result.pop("message_context_json")
+            )
+        if "delivery_route_json" in result:
+            result["delivery_route"] = _json_object(
+                result.pop("delivery_route_json")
             )
         return result
 
@@ -919,6 +929,7 @@ class SessionStore:
         parent_run_id: str | None = None,
         response_preferences: Mapping[str, Any] | None = None,
         message_context: Mapping[str, Any] | None = None,
+        delivery_route: Mapping[str, Any] | None = None,
     ) -> AcceptedRun:
         clean = str(text or "").strip()
         blocks = list(content or ({"type": "text", "text": clean},))
@@ -1016,6 +1027,7 @@ class SessionStore:
                 "parent_run_id": str(parent_run_id or ""),
                 "response_preferences": dict(response_preferences or {}),
                 "message_context": dict(message_context or {}),
+                "delivery_route": dict(delivery_route or {}),
             }
             digest = hashlib.sha256(
                 _json(digest_payload).encode("utf-8")
@@ -1076,9 +1088,10 @@ class SessionStore:
                     run_id, session_id, user_message_id, agent_id, request_id,
                     idempotency_key, request_digest, source, requested_mode,
                     effective_mode, response_preferences_json, message_context_json,
+                    delivery_route_json,
                     context_generation, state, parent_run_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -1093,6 +1106,7 @@ class SessionStore:
                     execution_mode,
                     _json(dict(response_preferences or {})),
                     _json(dict(message_context or {})),
+                    _json(dict(delivery_route or {})),
                     generation,
                     parent_run_id,
                     now,
@@ -1485,6 +1499,7 @@ class SessionStore:
         transport: str,
         completion_path: str,
         disposition: str = "",
+        outcome_state: str | None = None,
     ) -> dict[str, Any] | None:
         """Persist one final-response delivery outcome for a Session Run."""
 
@@ -1509,7 +1524,15 @@ class SessionStore:
             if run is None:
                 return None
 
-            outcome_status = "delivered" if delivered else "failed"
+            outcome_status = str(outcome_state or "").strip().casefold() or (
+                "delivered" if delivered else "failed"
+            )
+            if outcome_status not in {"queued", "delivered", "failed"}:
+                raise ValueError("unsupported assistant delivery outcome state")
+            if delivered != (outcome_status == "delivered"):
+                raise ValueError(
+                    "assistant delivery outcome state contradicts delivered"
+                )
             existing = connection.execute(
                 """
                 SELECT * FROM run_events
@@ -1536,6 +1559,7 @@ class SessionStore:
                 "transport": str(transport or "").strip().lower(),
                 "completion_path": str(completion_path or "").strip().lower(),
                 "disposition": str(disposition or "").strip(),
+                "outcome_state": outcome_status,
             }
             if delivered_text and delivered_text != canonical_text:
                 detail["text_override"] = delivered_text
@@ -1549,7 +1573,11 @@ class SessionStore:
                 summary=(
                     "Assistant final response delivered"
                     if delivered
-                    else "Assistant final response delivery failed"
+                    else (
+                        "Assistant final response queued"
+                        if outcome_status == "queued"
+                        else "Assistant final response delivery failed"
+                    )
                 ),
                 detail=detail,
             )

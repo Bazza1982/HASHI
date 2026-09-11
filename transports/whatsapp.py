@@ -425,7 +425,61 @@ class WhatsAppTransport:
         all_targets: list,
     ):
         """Send an agent's response back to the originating WhatsApp chat."""
+        runtime = self._get_runtime(agent_name)
+        request_id = str(payload.get("request_id") or "").strip()
+
+        def record(delivered: bool, disposition: str, text: str = "") -> None:
+            if runtime is None or not request_id:
+                return
+            from orchestrator import runtime_session
+
+            runtime_session.record_assistant_delivery(
+                runtime,
+                None,
+                request_id=request_id,
+                delivered=delivered,
+                assistant_text=text or None,
+                surface="whatsapp",
+                channel_key=chat_key,
+                transport="whatsapp",
+                completion_path="foreground",
+                disposition=disposition,
+            )
+
+        store = getattr(runtime, "session_store", None)
+        get_run = getattr(store, "get_run_by_request", None)
+        if request_id and callable(get_run):
+            try:
+                run = get_run(request_id)
+                planned_route = (
+                    run.get("delivery_route") if isinstance(run, dict) else None
+                )
+                if planned_route:
+                    from orchestrator.frontend_delivery import route_destination
+
+                    destination = route_destination(planned_route, "whatsapp")
+                    if (
+                        destination is None
+                        or destination["channel_key"] != chat_key
+                    ):
+                        logger.error(
+                            "Blocked WhatsApp reply route mismatch: request=%s chat=%s",
+                            request_id,
+                            chat_key,
+                        )
+                        record(False, "route_mismatch")
+                        return
+            except Exception as exc:
+                logger.error(
+                    "Could not verify WhatsApp reply route: request=%s error=%s",
+                    request_id,
+                    type(exc).__name__,
+                )
+                record(False, "route_verification_failed")
+                return
+
         if not await self._check_whatsapp_egress_allowed(chat_key=chat_key, agent_name=agent_name):
+            record(False, "enterprise_egress_denied")
             return
 
         if not payload.get("success"):
@@ -442,8 +496,14 @@ class WhatsAppTransport:
         # Always prefix agent name for text replies so routing/switching is clear
         full_text = f"[{agent_name}]: {text}"
 
-        await self._send_text(chat_key, full_text)
-        runtime = self._get_runtime(agent_name)
+        delivered = bool(await self._send_text(chat_key, full_text))
+        record(
+            delivered,
+            "transport_delivered" if delivered else "transport_returned_no_receipt",
+            full_text,
+        )
+        if not delivered:
+            return
         if runtime is None or not hasattr(runtime, "voice_manager"):
             return
         try:
@@ -1284,7 +1344,7 @@ class WhatsAppTransport:
         """Send a plain-text message to a WhatsApp chat."""
         if self._client is None:
             logger.warning("Cannot send: WhatsApp client not connected.")
-            return
+            return False
         preview = text[:160].replace("\n", " ")
         if len(text) > 160:
             preview += "..."
@@ -1301,15 +1361,17 @@ class WhatsAppTransport:
                 jid = build_jid(parts[0], server)
             except Exception as e:
                 logger.error(f"Cannot parse JID from '{chat_key}': {e}")
-                return
+                return False
 
         try:
             chunks = _split_text(text, limit=4000)
             for chunk in chunks:
                 logger.info("Sending WhatsApp text: chat=%s chars=%s", chat_key, len(chunk))
                 await self._client.send_message(jid, chunk)
+            return True
         except Exception as e:
             logger.error(f"Failed to send WhatsApp message to {chat_key}: {e}", exc_info=True)
+            return False
 
     async def _send_voice(self, chat_key: str, audio_path: Path):
         if self._client is None:
