@@ -18,7 +18,8 @@ publication. It does not own business schemas or restart/adoption policy.
 | `AgentDirectory` group mutations / `agents.json` | PAO | Second repair batch migrates create, delete, rename and member add/remove; fresh revision before business decisions, publication before cached-view updates |
 | API Gateway configuration and legacy seeding | PAO / shared Functions | Batch 04 migrates `api_gateway_config`; ServiceManager changes its enabled flag only after a successful save |
 | `WorkspaceStateStore` / workspace `state.json` | PAO persistence boundary / Functions | Batch 05 reuses the file primitive for strict revision-checked updates and explicit replacements; per-field business ownership is unchanged |
-| Other writers, Memory/Wiki scan transactions | Respective existing owners | Still require inventory and separate implementation; not covered by the migrated consumers above |
+| Local Memory/Wiki consolidation scanner | Memory consolidation job / Functions | Batch 03 validates all sources before opening the target, scans under one transaction and uses stable cross-instance source identity; the ignored implementation stays machine-local |
+| Other writers | Respective existing owners | Still require inventory and separate implementation; not covered by the migrated consumers above |
 
 Normal configuration edits must still go through the owning business operation.
 Do not turn a scanner into a configuration writer, introduce a parallel storage
@@ -182,10 +183,11 @@ the architecture CI selection; no workflow or collection hook is added. The
 per-batch receipt distinguishes local source-subset evidence from full-import
 CI and native/live adoption.
 
-Memory/Wiki configuration preflight before writes, database rollback, stable
-scan identity, remaining configuration writers, native Windows/macOS evidence,
-and instance adoption are still open. This migration neither inspects nor
-cleans historical database duplicates and must not close W1 as a whole.
+Memory/Wiki configuration preflight before writes, database rollback and stable
+scan identity are implemented in the ignored local scanner and recorded in
+`repairs/NIGHTLY_20260911_BATCH_03.md`. Remaining configuration writers, native
+Windows/macOS evidence and instance adoption are still open. The read-only
+duplicate inventory is not a cleanup and does not by itself close W1.
 
 Gateway focused coverage is `tests/test_api_gateway_config.py`; its direct
 consumer remains `tests/test_api_gateway_command.py`. The new focused module
@@ -193,9 +195,11 @@ is not added to the existing architecture workflow. The dated batch-04 receipt
 states which local import-isolation checks ran and which full-runtime gates
 are still needed. Do not equate the existing CI selection with these tests.
 
-Batch 03 Memory/Wiki scanner work is deferred to the user's local environment
-at the user's request, not completed or force-added to shared Git. That deferral
-does not close W1 or authorize publishing private scanner code or data.
+Batch 03 Memory/Wiki scanner work was completed in the user's local environment
+without force-adding the ignored implementation or its private data to Git.
+The tracked receipt records the candidate hash and isolated evidence. A real
+scan, historical cleanup and adoption on another machine remain explicit,
+separate actions.
 
 Workspace persistence regressions extend the existing
 `tests/test_workspace_state.py`, including real files, spawned processes and the
