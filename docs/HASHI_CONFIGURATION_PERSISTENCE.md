@@ -16,6 +16,7 @@ publication. It does not own business schemas or restart/adoption policy.
 | `ConfigAdmin` / `agents.json` | PAO | Integrated on main at `19e330f9`; retained unchanged by the first repair batch |
 | `ui_language` / `state/ui_language.json` | Frontend Connector | First repair batch migrates set/reset preference operations; catalogs, wording and actor/instance scope are unchanged |
 | `AgentDirectory` group mutations / `agents.json` | PAO | Second repair batch migrates create, delete, rename and member add/remove; fresh revision before business decisions, publication before cached-view updates |
+| API Gateway configuration and legacy seeding | PAO / shared Functions | Batch 04 migrates `api_gateway_config`; ServiceManager changes its enabled flag only after a successful save |
 | Other writers, Memory/Wiki scan transactions | Respective existing owners | Still require inventory and separate implementation; not covered by the migrated consumers above |
 
 Normal configuration edits must still go through the owning business operation.
@@ -85,6 +86,34 @@ the error still propagates. `list_groups()` returns a detached deep copy.
 A view is the last observed snapshot, not a cross-process live subscription;
 an explicit refresh or later mutation may observe newer external changes.
 
+## API Gateway configuration
+
+The canonical `state/api_gateway_config.json` and retained root-level legacy
+file keep their existing paths and owner. Existing canonical reads tolerate
+BOM/CRLF without rewriting. Their effective four-field view still supplies
+defaults for unreadable state, but saving never uses that fallback. Updates
+retain the read revision and unowned fields, including an unselected model
+string not recognized by this generation. Public results remain effective
+values; they are not replacement documents.
+
+Malformed/non-object input, a non-boolean stored `enabled`, or a non-string
+stored `default_model` blocks updates without overwriting the file. The same
+shape checks keep legacy migration from interpreting a string such as
+`"false"` as enabled. No new version field or global schema is introduced.
+Requested model validation and return-view resolution precede publication.
+A failed update cannot first publish a separate legacy migration.
+
+Legacy initialization is create-only and retains the source bytes and unknown
+fields. An initializer losing the creation race returns false without replay;
+the caller reads the canonical winner. Ordinary save conflicts still raise
+`ConfigConflictError`. The shared primitive supplies private candidates,
+UTF-8/LF publication and failure distinctions; it is unchanged here.
+ServiceManager publishes configuration before changing its in-memory enabled
+flag or invoking its existing start/stop path. A committed durability error
+still propagates and does not trigger service effects or automatic rollback:
+reconcile persisted configuration and actual service state before continuing.
+This is not a transaction spanning the filesystem and an external service.
+
 ## Operator and Agent FYI
 
 UTF-8 editor output with or without BOM is supported at these migrated read
@@ -119,3 +148,13 @@ Memory/Wiki configuration preflight before writes, database rollback, stable
 scan identity, remaining configuration writers, native Windows/macOS evidence,
 and instance adoption are still open. This migration neither inspects nor
 cleans historical database duplicates and must not close W1 as a whole.
+
+Gateway focused coverage is `tests/test_api_gateway_config.py`; its direct
+consumer remains `tests/test_api_gateway_command.py`. The new focused module
+is not added to the existing architecture workflow. The dated batch-04 receipt
+states which local import-isolation checks ran and which full-runtime gates
+are still needed. Do not equate the existing CI selection with these tests.
+
+Batch 03 Memory/Wiki scanner work is deferred to the user's local environment
+at the user's request, not completed or force-added to shared Git. That deferral
+does not close W1 or authorize publishing private scanner code or data.
