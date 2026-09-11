@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -76,13 +80,17 @@ async def test_selection_commits_backend_and_mode_together(
         supports_sessions=sessions,
     )
     writes = []
-    replace_state = manager.state_store.replace
+    replace_file = os.replace
+    state_path = manager.state_store.path.resolve()
 
-    def record_write(state):
-        writes.append(dict(state))
-        return replace_state(state)
+    def record_publication(source, destination, *args, **kwargs):
+        result = replace_file(source, destination, *args, **kwargs)
+        if Path(destination).resolve() == state_path:
+            # Observe the actual committed file, not update()'s internal call graph.
+            writes.append(json.loads(state_path.read_text(encoding="utf-8-sig")))
+        return result
 
-    monkeypatch.setattr(manager.state_store, "replace", record_write)
+    monkeypatch.setattr(os, "replace", record_publication)
     assert await manager.switch_backend(target) is True
     expected_mode = "fixed" if sessions else "flex"
     assert manager.current_backend is candidate
@@ -96,6 +104,7 @@ async def test_selection_commits_backend_and_mode_together(
     assert writes[0]["active_backend"] == target
     assert writes[0]["agent_mode"] == expected_mode
     assert writes[0]["memory_plus"]["enabled"] is memory
+    assert json.loads(state_path.read_text(encoding="utf-8-sig")) == writes[0]
     reloaded = FlexibleBackendManager(manager.config, manager.global_config, secrets={})
     assert reloaded.config.active_backend == target
     assert reloaded.agent_mode == expected_mode
@@ -109,6 +118,7 @@ async def test_failed_selection_keeps_live_session_mode_and_saved_state(
     tmp_path, monkeypatch, mode, failure,
 ):
     manager, original, candidate, before = make_selection(tmp_path, monkeypatch, mode=mode)
+    failed_publications = []
     if failure == "initialize_false":
         candidate.initialize.return_value = False
     elif failure == "initialize_error":
@@ -122,7 +132,17 @@ async def test_failed_selection_keeps_live_session_mode_and_saved_state(
     elif failure == "cancel":
         candidate.initialize.side_effect = asyncio.CancelledError()
     else:
-        monkeypatch.setattr(manager.state_store, "replace", Mock(side_effect=OSError("disk full")))
+        replace_file = os.replace
+        state_path = manager.state_store.path.resolve()
+
+        def fail_publication(source, destination, *args, **kwargs):
+            if Path(destination).resolve() == state_path:
+                failed_publications.append(destination)
+                raise OSError(errno.ENOSPC, "disk full")
+            return replace_file(source, destination, *args, **kwargs)
+
+        # Reach the real write boundary through the real state store.
+        monkeypatch.setattr(os, "replace", fail_publication)
     if failure == "cancel":
         with pytest.raises(asyncio.CancelledError):
             await manager.switch_backend("claude-cli")
@@ -136,6 +156,7 @@ async def test_failed_selection_keeps_live_session_mode_and_saved_state(
     assert manager.config.active_backend == "codex-cli"
     assert manager._active_model_override == "gpt-5.4"
     assert (tmp_path / "state.json").read_bytes() == before
+    assert len(failed_publications) == int(failure == "persist")
 
 
 @pytest.mark.asyncio

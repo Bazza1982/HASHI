@@ -133,3 +133,35 @@ old state snapshot, remove stable lock files or change preceding repairs.
 
 W1 is still partial. Other configuration writers, the locally deferred scanner,
 Provider/HER, TUI routing, metadata/media work and live adoption remain open.
+
+## Integration follow-up in the same batch
+
+The initial candidate `dcbd0b4090c457e86711081079b94f6b7670c20a` was
+published on the repair branch and run through unchanged architecture CI
+`34648747260` / job `103425703187`. Both Core checks passed. On Ubuntu /
+CPython 3.12.13 the result was **425 passed, 19 failed** in 56.15 seconds.
+All 28 workspace cases passed; one failure was the established FYI truncation
+issue. The other 18 were new failures and were not dismissed as baseline noise.
+
+Inspection of `tests/test_backend_selection_transaction.py` and the actual
+`FlexibleBackendManager._switch_backend_transaction` showed that 16 cases
+observed `WorkspaceStateStore.replace()` calls and two injected errors there.
+The manager uses `update()`; the new updater publishes with its captured
+revision rather than calling whole-document `replace()` and re-reading a newer
+revision. The old observer/fault no longer reached publication.
+
+The follow-up changes that direct-consumer test, not the product implementation:
+observe the real target file immediately after `os.replace`, and inject ENOSPC
+before publication for that exact target. Retain all existing one-write,
+backend/mode, Memory+, reloaded-state, session-retention and candidate-disposal
+assertions; also assert the observed payload equals the saved JSON and that
+the persistence fault was actually reached once. No case is removed or skipped.
+This protects the persistence/rollback contract rather than an internal call
+sequence. The batch now contains five cumulative paths, still one product file.
+
+The direct-consumer source was materialized and verified against Git blob
+`01aff83bdb96deaaaae3d931f02712a8b7fb3de2` before editing. Compilation and
+whitespace checks passed. The full direct-consumer import graph is not present
+in the local subset, so its execution is delegated to the unchanged CI
+selection; the result must be recorded after the follow-up job completes.
+The 28 workspace cases were rerun locally and remain separate evidence.
