@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import string
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -10,8 +9,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
+from orchestrator.config_json import ConfigDocument, read_config_json, write_config_json
 from orchestrator.process_resources import named_lock
 
 DEFAULT_LOCALE = "en"
@@ -169,17 +168,28 @@ def _preference_actor_key(value: Any) -> str:
     return raw or "default"
 
 
-def _read_preferences(runtime: Any) -> dict[str, Any]:
+def _read_preferences(
+    runtime: Any, *, for_update: bool = False,
+) -> dict[str, Any]:
     path = preferences_path(runtime)
     with _PREFERENCES_LOCK:
-        if not path.exists():
-            return {"version": PREFERENCES_VERSION, "users": {}}
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+            payload = read_config_json(path)
+        except FileNotFoundError:
             return {"version": PREFERENCES_VERSION, "users": {}}
-    if not isinstance(payload, dict):
-        return {"version": PREFERENCES_VERSION, "users": {}}
+        except (OSError, ValueError, UnicodeError):
+            if for_update:
+                raise
+            return {"version": PREFERENCES_VERSION, "users": {}}
+    if for_update:
+        # Display fallbacks are not authorization to replace damaged or newer
+        # state. Keep the snapshot revision and unrelated fields for publication.
+        version = payload.get("version", PREFERENCES_VERSION)
+        if type(version) is not int or version != PREFERENCES_VERSION:
+            raise ValueError("Unsupported UI language preferences version")
+        if not isinstance(payload.get("users", {}), dict):
+            raise ValueError("UI language preference users must be a JSON object")
+        return payload
     users = payload.get("users")
     if not isinstance(users, dict):
         users = {}
@@ -196,21 +206,16 @@ def _read_preferences(runtime: Any) -> dict[str, Any]:
 def _write_preferences(runtime: Any, payload: Mapping[str, Any]) -> Path:
     path = preferences_path(runtime)
     path.parent.mkdir(parents=True, exist_ok=True)
-    normalized = {
-        "version": PREFERENCES_VERSION,
-        "users": dict(payload.get("users") or {}),
-    }
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    # copy() retains ConfigDocument's non-serialized source/revision. A plain
+    # mapping here represents an absent file, never a blind full replacement.
+    normalized = payload.copy() if isinstance(payload, ConfigDocument) else dict(payload)
+    normalized.setdefault("version", PREFERENCES_VERSION)
+    normalized["users"] = dict(payload.get("users") or {})
     with _PREFERENCES_LOCK:
-        try:
-            temporary.write_text(
-                json.dumps(normalized, ensure_ascii=False, indent=2, sort_keys=True)
-                + "\n",
-                encoding="utf-8",
-            )
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        if isinstance(normalized, ConfigDocument):
+            write_config_json(path, normalized)
+        else:
+            write_config_json(path, normalized, expected_revision=None)
     return path
 
 
@@ -275,8 +280,11 @@ def set_preferred_locale(
         fallback_actor = getattr(getattr(runtime, "global_config", None), "authorized_id", None)
     key = actor_id_from_update(update, fallback=fallback_actor)
     with _PREFERENCES_LOCK:
-        payload = _read_preferences(runtime)
-        users = dict(payload.get("users") or {})
+        payload = _read_preferences(runtime, for_update=True)
+        users = {
+            old_key: value for old_key, value in (payload.get("users") or {}).items()
+            if _preference_actor_key(old_key) != key
+        }
         users[key] = selected
         payload["users"] = users
         return _write_preferences(runtime, payload)
@@ -293,9 +301,11 @@ def reset_preferred_locale(
         fallback_actor = getattr(getattr(runtime, "global_config", None), "authorized_id", None)
     key = actor_id_from_update(update, fallback=fallback_actor)
     with _PREFERENCES_LOCK:
-        payload = _read_preferences(runtime)
-        users = dict(payload.get("users") or {})
-        users.pop(key, None)
+        payload = _read_preferences(runtime, for_update=True)
+        users = {
+            old_key: value for old_key, value in (payload.get("users") or {}).items()
+            if _preference_actor_key(old_key) != key
+        }
         payload["users"] = users
         return _write_preferences(runtime, payload)
 

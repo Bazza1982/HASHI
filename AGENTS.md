@@ -33,6 +33,10 @@ choose verification using `docs/TESTING_POLICY.md`.
   A fake switching function or copied expected prose does not verify actual switching.
 - Respect other work in the checkout. Keep local identities, secrets and machine
   paths in ignored configuration. Never infer identity from the folder name.
+- For migrated HASHI JSON configuration, reuse `orchestrator.config_json` and
+  retain the read revision; a display fallback is never a writable snapshot.
+  Do not blindly retry a conflict or a committed durability error. See
+  `docs/HASHI_CONFIGURATION_PERSISTENCE.md` for scope and remaining migrations.
 - Reboot/restart is an operational action, not a test shortcut. Follow the current
   user's scope. If forbidden, finish code and offline checks and explicitly leave
   live adoption unverified. Source changes, qualified artifacts, and running Worker
