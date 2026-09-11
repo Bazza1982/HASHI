@@ -73,6 +73,8 @@ class _Runtime:
         self.last_request_metadata = None
         self.api_request_metadata = []
         self.api_delivery_flags = []
+        self.media_dir = None
+        self.api_media_calls = []
         self._safevoice_enabled = False
         self._native_voice_transcripts = {}
         self.voice_manager = SimpleNamespace(
@@ -138,6 +140,10 @@ class _Runtime:
         self.api_request_metadata.append(dict(request_metadata))
         return f"req-api-{len(self.api_request_metadata)}"
 
+    async def enqueue_api_media(self, **kwargs):
+        self.api_media_calls.append(dict(kwargs))
+        return f"req-media-{len(self.api_media_calls)}"
+
 def _server(
     tmp_path: Path,
     *,
@@ -149,6 +155,8 @@ def _server(
         encoding="utf-8",
     )
     runtime = _Runtime()
+    runtime.media_dir = tmp_path / "media"
+    runtime.media_dir.mkdir(exist_ok=True)
     server = WorkbenchApiServer(
         config_path=config_path,
         global_config=SimpleNamespace(
@@ -264,6 +272,48 @@ async def test_legacy_chat_response_is_queue_ack_without_transport_receipt(tmp_p
     assert payload["request_id"] == "req-api-1"
     assert "delivery_receipt" not in payload
     assert "delivered" not in payload
+
+
+@pytest.mark.asyncio
+async def test_tui_attachment_bytes_and_caption_enter_one_media_request(tmp_path):
+    import base64
+    import hashlib
+
+    from orchestrator.frontend_delivery import tui_run_delivery_policy
+
+    server, runtime = _server(tmp_path)
+    content = b"\x89PNG\r\n\x1a\nactual-image"
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "describe this",
+            "source": "tui",
+            "client_id": "tui-7",
+            "delivery_policy": tui_run_delivery_policy(
+                telegram_mirror=False, client_id="tui-7"
+            ),
+            "attachment": {
+                "filename": "image.png",
+                "media_type": "image/png",
+                "content_b64": base64.b64encode(content).decode("ascii"),
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload == {"ok": True, "request_id": "req-media-1"}
+    assert len(runtime.api_media_calls) == 1
+    call = runtime.api_media_calls[0]
+    assert call["caption"] == "describe this"
+    assert call["deliver_to_telegram"] is False
+    assert call["local_path"].read_bytes() == content
+    assert call["filename"] == "image.png"
 
 
 @pytest.mark.asyncio

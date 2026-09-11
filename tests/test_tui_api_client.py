@@ -35,6 +35,39 @@ async def test_direct_tui_chat_sends_typed_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_direct_tui_attachment_sends_bytes_and_caption_in_one_request(monkeypatch):
+    client = TuiApiClient("http://127.0.0.1:18800")
+    captured = {}
+
+    async def request(method, path, *, json_body=None, timeout=10):
+        captured.update(method=method, path=path, body=json_body, timeout=timeout)
+        return {"ok": True, "request_id": "request-1"}
+
+    monkeypatch.setattr(client, "_direct_request", request)
+    attachment = {
+        "filename": "photo.png",
+        "media_type": "image/png",
+        "size_bytes": 8,
+        "sha256": "digest",
+        "content_b64": "iVBORw0KGgo=",
+    }
+
+    result = await client.send_chat_attachment(
+        "akane",
+        "describe it",
+        attachment=attachment,
+        client_id="tui-1",
+        telegram_mirror=False,
+    )
+
+    assert result["request_id"] == "request-1"
+    assert captured["path"] == "/api/chat"
+    assert captured["body"]["text"] == "describe it"
+    assert captured["body"]["attachment"] == attachment
+    assert captured["body"]["delivery_policy"]["telegram"]["mirror"] is False
+
+
+@pytest.mark.asyncio
 async def test_remote_tui_run_status_uses_typed_proxy_fields(monkeypatch):
     client = TuiApiClient(
         remote_url="http://127.0.0.1:8766",

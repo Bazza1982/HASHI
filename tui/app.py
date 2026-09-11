@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -31,7 +32,8 @@ from orchestrator.flexible_backend_registry import (
 from orchestrator.runtime_effort_options import get_available_efforts
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
-from tui.clipboard import copy_to_windows_clipboard
+from tui.attachments import PendingAttachment, TuiAttachmentError, snapshot_bytes, snapshot_path
+from tui.clipboard import copy_to_windows_clipboard, read_windows_clipboard_png
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
 from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
 from tui.onboarding import (
@@ -58,6 +60,7 @@ STARTUP_LOGO = (
 )
 
 TUI_COMMAND_HELP = {
+    "attach": ("附加文件或剪贴板图片", "Attach a file or clipboard image"),
     "connect": ("打开本地后端接通／修复页", "Open local backend connection/repair"),
     "theme": ("查看或切换终端主题", "Inspect or change the terminal theme"),
     "help": ("查看 TUI 与 Agent 命令", "Show TUI and Agent commands"),
@@ -79,6 +82,9 @@ TUI_COMMAND_HELP["sidepanel"] = (
     "Control the read-only information panel and automatic tour",
 )
 TUI_COMMAND_GUIDES = {
+    "attach": CommandGuide(
+        "/attach <path|clipboard|cancel>", ("clipboard", "cancel"), example='/attach "report.pdf"'
+    ),
     "theme": CommandGuide("/theme [" + "|".join((*PALETTES, "reset")) + "]", (*PALETTES, "reset"), example="/theme apple2"),
     "help": CommandGuide("/help [zh|en]", ("zh", "en"), example="/help zh"),
     "to": CommandGuide("/to <agent|all>", choice_source="agents"),
@@ -714,6 +720,7 @@ class HASHITuiApp(App):
         self._active_run_phase = "idle"
         self._submission_sequence = 0
         self._latest_submission_ref: tuple[int, str, int] | None = None
+        self._pending_attachment: PendingAttachment | None = None
         preferences = self._load_tui_preferences()
         remembered = preferences.get("last_agent_by_instance", {})
         self._last_agent_by_instance = {
@@ -1470,6 +1477,15 @@ class HASHITuiApp(App):
         if not selected_name:
             return False
         if selected_name != self.current_agent:
+            if self._pending_attachment is not None:
+                self._pending_attachment = None
+                if self.is_mounted:
+                    self.query_one("#chat-history", ChatHistory).write(
+                        Text(
+                            "Pending attachment cleared because the Agent changed.",
+                            style="hashi.muted",
+                        )
+                    )
             self._clear_typing_indicator()
             self._latest_submission_ref = None
             self._cancel_side_panel_refresh()
@@ -1667,6 +1683,9 @@ class HASHITuiApp(App):
         if normalized == "/to" or normalized.startswith("/to "):
             await self._handle_to(normalized)
             return
+        if normalized == "/attach" or normalized.startswith("/attach "):
+            await self._handle_attach_cmd(normalized)
+            return
         if normalized == "/agents":
             await self._handle_agents_cmd()
             return
@@ -1714,6 +1733,27 @@ class HASHITuiApp(App):
             return
 
         chat = self.query_one("#chat-history", ChatHistory)
+        workzone_ref, workzone_caption = self._parse_workzone_reference(normalized)
+        if workzone_ref is not None:
+            if not self.current_agent or self.current_agent_display == "ALL":
+                chat.write(markup("[hashi.error]Select one Agent before attaching a Workzone file.[/]"))
+                return
+            chat.write(chat_message_renderable("user", "You", workzone_caption or f"Attached: {Path(workzone_ref).name}"))
+            self._send_attachment_message(
+                workzone_caption,
+                self.current_agent,
+                self.api,
+                self._connection_generation,
+                self.current_instance_id,
+                self._telegram_mirror_enabled,
+                self._ui_language,
+                attachment=None,
+                workzone_ref=workzone_ref,
+            )
+            return
+        if self._looks_like_dropped_path(normalized):
+            await self._stage_path_attachment(normalized)
+            return
         chat.write(chat_message_renderable("user", "You", normalized))
 
         if self.current_agent_display == "ALL":
@@ -1738,6 +1778,29 @@ class HASHITuiApp(App):
             return
         else:
             self._play_message_sound("sent")
+            pending = self._pending_attachment
+            if pending is not None:
+                if (
+                    pending.generation != self._connection_generation
+                    or pending.instance_id != self.current_instance_id
+                    or pending.agent != self.current_agent.casefold()
+                ):
+                    self._pending_attachment = None
+                    chat.write(markup("[hashi.error]The pending attachment belonged to an earlier target and was cleared; nothing was sent.[/]"))
+                    return
+                self._pending_attachment = None
+                self._send_attachment_message(
+                    normalized,
+                    self.current_agent,
+                    self.api,
+                    self._connection_generation,
+                    self.current_instance_id,
+                    self._telegram_mirror_enabled,
+                    self._ui_language,
+                    attachment=pending,
+                    workzone_ref=None,
+                )
+                return
             self._submission_sequence += 1
             submission_ref = (
                 self._connection_generation,
@@ -2878,6 +2941,135 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         else:
             chat.write(markup("[hashi.error]Use /log show|hide|pause|current|local.[/]"))
 
+    @staticmethod
+    def _looks_like_dropped_path(text: str) -> bool:
+        value = str(text or "").strip()
+        return bool(
+            value.startswith(("/", "./", "../", "~", "\\\\", '"'))
+            or (len(value) >= 3 and value[0].isalpha() and value[1:3] in {":\\", ":/"})
+        )
+
+    @staticmethod
+    def _parse_workzone_reference(text: str) -> tuple[str | None, str]:
+        try:
+            parts = shlex.split(str(text or ""), posix=os.name != "nt")
+        except ValueError:
+            return None, text
+        if not parts or not parts[0].startswith("@") or len(parts[0]) == 1:
+            return None, text
+        reference = parts[0][1:]
+        if reference.startswith("@"):
+            return None, text
+        return reference, " ".join(parts[1:]).strip()
+
+    async def _stage_path_attachment(self, value: str) -> bool:
+        chat = self.query_one("#chat-history", ChatHistory)
+        if not self.current_agent or self.current_agent_display == "ALL":
+            chat.write(markup("[hashi.error]Select one Agent before attaching a file.[/]"))
+            return False
+        try:
+            pending = await asyncio.to_thread(
+                snapshot_path,
+                value,
+                generation=self._connection_generation,
+                instance_id=self.current_instance_id,
+                agent=self.current_agent,
+            )
+        except TuiAttachmentError as exc:
+            chat.write(Text(f"Attachment not staged: {exc}", style="hashi.error"))
+            return False
+        self._pending_attachment = pending
+        chat.write(
+            Text(
+                f"✓ Attached {pending.filename} ({len(pending.content)} bytes). "
+                "Type the accompanying message to submit both together, or /attach cancel.",
+                style="hashi.accent",
+            )
+        )
+        return True
+
+    async def _handle_attach_cmd(self, text: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        try:
+            parts = shlex.split(text, posix=os.name != "nt")
+        except ValueError:
+            chat.write(markup("[hashi.error]Invalid quoting. Use /attach \"path with spaces\".[/]"))
+            return
+        if len(parts) == 1:
+            pending = self._pending_attachment.filename if self._pending_attachment else "none"
+            chat.write(Text(f"Pending attachment: {pending}. Use /attach <path|clipboard|cancel>.", style="hashi.secondary"))
+            return
+        argument = " ".join(parts[1:]).strip()
+        if argument.casefold() == "cancel":
+            self._pending_attachment = None
+            chat.write(markup("[hashi.accent]✓ Pending attachment cleared.[/]"))
+            return
+        if argument.casefold() == "clipboard":
+            if not self.current_agent or self.current_agent_display == "ALL":
+                chat.write(markup("[hashi.error]Select one Agent before attaching a clipboard image.[/]"))
+                return
+            payload = await asyncio.to_thread(read_windows_clipboard_png)
+            if payload is None:
+                chat.write(markup("[hashi.error]No supported image is available on the Windows clipboard.[/]"))
+                return
+            try:
+                self._pending_attachment = snapshot_bytes(
+                    payload,
+                    filename="clipboard.png",
+                    media_type="image/png",
+                    generation=self._connection_generation,
+                    instance_id=self.current_instance_id,
+                    agent=self.current_agent,
+                )
+            except TuiAttachmentError as exc:
+                chat.write(Text(f"Clipboard image not staged: {exc}", style="hashi.error"))
+                return
+            chat.write(markup("[hashi.accent]✓ Clipboard image attached. Type the accompanying message to submit it.[/]"))
+            return
+        await self._stage_path_attachment(argument)
+
+    @work()
+    async def _send_attachment_message(
+        self,
+        text: str,
+        agent: str,
+        client: TuiApiClient,
+        generation: int,
+        instance_id: str,
+        telegram_mirror: bool,
+        ui_locale: str,
+        *,
+        attachment: PendingAttachment | None,
+        workzone_ref: str | None,
+    ) -> None:
+        result = await client.send_chat_attachment(
+            agent,
+            text,
+            attachment=attachment.wire_payload() if attachment is not None else None,
+            workzone_ref=workzone_ref,
+            client_id=self._tui_client_id,
+            telegram_mirror=telegram_mirror,
+            ui_locale=ui_locale,
+        )
+        if (
+            generation != self._connection_generation
+            or client is not self.api
+            or instance_id != self.current_instance_id
+        ):
+            logger.info("Discarded stale TUI attachment result: generation=%s", generation)
+            return
+        chat = self.query_one("#chat-history", ChatHistory)
+        if not result.get("ok"):
+            chat.write(
+                Text(
+                    f"Attachment was not sent ({agent}): {result.get('error') or 'request rejected'}",
+                    style="hashi.error",
+                )
+            )
+            return
+        label = attachment.filename if attachment is not None else Path(str(workzone_ref)).name
+        chat.write(Text(f"✓ Attachment submitted: {label}", style="hashi.accent"))
+
     @work()
     async def _send_message(
         self,
@@ -3331,6 +3523,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             )
 
             previous_instance = self.current_instance_id
+            attachment_cleared = self._pending_attachment is not None
+            self._pending_attachment = None
             self._clear_typing_indicator()
             self._latest_submission_ref = None
             self._cancel_side_panel_refresh()
@@ -3380,6 +3574,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 f"{'local Workbench' if target.transport == 'direct' else 'authenticated Hashi Remote'}."
             )
             chat.write(markup(f"[hashi.accent]✅ Connected to {self.current_instance_id}.[/]"))
+            if attachment_cleared:
+                chat.write(markup("[hashi.muted]Pending attachment was cleared for the instance switch; attach it again to confirm the new target.[/]"))
 
     # ── Status bar ──────────────────────────────────────────────────────
 
@@ -3409,6 +3605,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
     async def _shutdown(self):
         self._clear_typing_indicator()
+        self._pending_attachment = None
         self._cancel_side_panel_refresh()
         if self._log_follow_task and not self._log_follow_task.done():
             self._log_follow_task.cancel()

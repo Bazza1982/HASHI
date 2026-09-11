@@ -159,6 +159,7 @@ TUI_PROXY_OPERATIONS = {
     "scheduler_jobs",
     "background_jobs",
     "chat",
+    "chat_attachment",
     "run_info",
     "transcript_recent",
     "transcript_poll",
@@ -166,6 +167,7 @@ TUI_PROXY_OPERATIONS = {
 }
 TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
+TUI_PROXY_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -345,6 +347,8 @@ class TuiProxyRequest(BaseModel):
     delivery_policy: Optional[dict[str, Any]] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
+    attachment: Optional[dict[str, Any]] = None
+    workzone_ref: Optional[str] = None
     offset: int = 0
     limit: int = 20
 
@@ -361,6 +365,8 @@ class ProtocolTuiRequest(BaseModel):
     delivery_policy: Optional[dict[str, Any]] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
+    attachment: Optional[dict[str, Any]] = None
+    workzone_ref: Optional[str] = None
     offset: int = 0
     limit: int = 20
 
@@ -576,15 +582,18 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
         "scheduler_jobs",
         "background_jobs",
         "chat",
+        "chat_attachment",
         "transcript_recent",
         "transcript_poll",
     }:
         agent = str(payload.agent or "").strip()
         if not agent or len(agent) > 128 or any(ord(ch) < 32 for ch in agent):
             return False, "invalid_agent"
-    if operation == "chat":
+    if operation in {"chat", "chat_attachment"}:
         text = str(payload.text or "")
-        if not text or len(text.encode("utf-8")) > TUI_PROXY_MAX_TEXT_BYTES:
+        if operation == "chat" and not text:
+            return False, "invalid_text"
+        if len(text.encode("utf-8")) > TUI_PROXY_MAX_TEXT_BYTES:
             return False, "invalid_text"
         ui_locale = str(payload.ui_locale or "")
         if len(ui_locale) > 32 or any(ord(character) < 32 for character in ui_locale):
@@ -597,6 +606,40 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
                 )
             except ValueError:
                 return False, "invalid_delivery_policy"
+    if operation == "chat_attachment":
+        if bool(payload.attachment) == bool(payload.workzone_ref):
+            return False, "invalid_attachment_source"
+        if payload.workzone_ref is not None:
+            reference = str(payload.workzone_ref or "")
+            if (
+                not reference
+                or len(reference.encode("utf-8")) > 4096
+                or "\x00" in reference
+            ):
+                return False, "invalid_workzone_ref"
+        else:
+            attachment = payload.attachment or {}
+            filename = str(attachment.get("filename") or "")
+            encoded = str(attachment.get("content_b64") or "")
+            if (
+                not filename
+                or Path(filename).name != filename
+                or len(filename) > 255
+                or len(encoded) > ((TUI_PROXY_MAX_ATTACHMENT_BYTES + 2) // 3) * 4 + 16
+            ):
+                return False, "invalid_attachment"
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                return False, "invalid_attachment"
+            if not decoded or len(decoded) > TUI_PROXY_MAX_ATTACHMENT_BYTES:
+                return False, "invalid_attachment"
+            declared_size = attachment.get("size_bytes")
+            if declared_size is not None and int(declared_size) != len(decoded):
+                return False, "attachment_size_mismatch"
+            declared_sha = str(attachment.get("sha256") or "")
+            if declared_sha and declared_sha != hashlib.sha256(decoded).hexdigest():
+                return False, "attachment_digest_mismatch"
     if operation == "run_info":
         for value in (payload.session_id, payload.run_id):
             identifier = str(value or "").strip()
@@ -637,13 +680,18 @@ def _local_workbench_tui_request(
             f"/api/background-jobs?agent={quote(agent, safe='')}&limit="
             f"{int(payload.limit)}"
         )
-    elif operation == "chat":
+    elif operation in {"chat", "chat_attachment"}:
         path = "/api/chat"
         method = "POST"
         body = {
             "agent": agent,
             "text": str(payload.text or ""),
         }
+        if operation == "chat_attachment":
+            if payload.attachment is not None:
+                body["attachment"] = dict(payload.attachment)
+            else:
+                body["workzone_ref"] = str(payload.workzone_ref or "")
         if payload.delivery_policy is not None:
             body.update(
                 {
@@ -1545,6 +1593,8 @@ def create_app(
             delivery_policy=payload.delivery_policy,
             session_id=payload.session_id,
             run_id=payload.run_id,
+            attachment=payload.attachment,
+            workzone_ref=payload.workzone_ref,
             offset=payload.offset,
             limit=payload.limit,
         )
@@ -1563,7 +1613,7 @@ def create_app(
                     lambda u=url: _post_json_with_optional_hmac(
                         u,
                         protocol_payload.model_dump(),
-                        timeout=20,
+                        timeout=40 if payload.operation == "chat_attachment" else 20,
                     ),
                 )
                 status = int(result.pop("__http_status", 200)) if isinstance(result, dict) else 502

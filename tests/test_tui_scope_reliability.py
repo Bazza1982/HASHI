@@ -33,6 +33,10 @@ class _Client:
         self.sent.append((agent, text, kwargs))
         return {"ok": True, "session_id": "s", "run_id": "r", "request_id": "q"}
 
+    async def send_chat_attachment(self, agent, text, **kwargs):
+        self.sent.append((agent, text, kwargs))
+        return {"ok": True, "request_id": "attachment-request"}
+
     async def run_info(self, *_args):
         self.status_checks += 1
         return {"ok": True, "run": {"state": "completed"}}
@@ -160,3 +164,50 @@ def test_preference_store_reads_bom_crlf_and_preserves_concurrent_fields(tmp_pat
     assert not raw.startswith(b"\xef\xbb\xbf")
     assert b"\r\n" not in raw
     assert json.loads(raw) == {"future": 7, "theme": "atm"}
+
+
+@pytest.mark.asyncio
+async def test_attach_command_freezes_real_bytes_into_next_submission(tmp_path):
+    source = tmp_path / "picture.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nfirst-version")
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        await app._handle_attach_cmd(f'/attach "{source}"')
+        source.write_bytes(b"changed-after-staging")
+        field = app.query_one(ChatInput)
+        field.value = "what is shown?"
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert len(client.sent) == 1
+        agent, caption, kwargs = client.sent[0]
+        assert (agent, caption) == ("akane", "what is shown?")
+        assert kwargs["workzone_ref"] is None
+        import base64
+
+        assert base64.b64decode(kwargs["attachment"]["content_b64"]) == b"\x89PNG\r\n\x1a\nfirst-version"
+        assert app._pending_attachment is None
+
+
+@pytest.mark.asyncio
+async def test_workzone_reference_is_target_relative_and_contains_no_client_path(tmp_path):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = '@reports/weekly.pdf "summarize this"'
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert client.sent[0][1] == "summarize this"
+        assert client.sent[0][2]["workzone_ref"] == "reports/weekly.pdf"
+        assert client.sent[0][2]["attachment"] is None

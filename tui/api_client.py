@@ -133,6 +133,8 @@ class TuiApiClient:
         delivery_policy: dict | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        attachment: dict | None = None,
+        workzone_ref: str | None = None,
         offset: int = 0,
         limit: int = 20,
         timeout: float = 25,
@@ -157,6 +159,10 @@ class TuiApiClient:
             payload["session_id"] = session_id
         if run_id is not None:
             payload["run_id"] = run_id
+        if attachment is not None:
+            payload["attachment"] = dict(attachment)
+        if workzone_ref is not None:
+            payload["workzone_ref"] = str(workzone_ref)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
                 async with session.post(f"{self.remote_url}/tui/proxy", json=payload) as response:
@@ -327,6 +333,52 @@ class TuiApiClient:
             "/api/chat",
             json_body=payload,
             timeout=25,
+        )
+
+    async def send_chat_attachment(
+        self,
+        agent: str,
+        text: str,
+        *,
+        attachment: dict | None = None,
+        workzone_ref: str | None = None,
+        client_id: str | None = None,
+        telegram_mirror: bool = True,
+        ui_locale: str = "en",
+    ) -> dict:
+        """Submit one caption and one immutable attachment as one request."""
+        if bool(attachment) == bool(workzone_ref):
+            return {"ok": False, "code": "invalid_attachment", "error": "exactly one attachment source is required"}
+        policy = tui_run_delivery_policy(
+            telegram_mirror=telegram_mirror,
+            client_id=str(client_id or "tui-client"),
+        )
+        if self.proxied:
+            return await self._proxy_request(
+                "chat_attachment",
+                agent=agent,
+                text=text,
+                client_id=client_id,
+                ui_locale=ui_locale,
+                delivery_policy=policy,
+                attachment=attachment,
+                workzone_ref=workzone_ref,
+                timeout=35,
+            )
+        payload = {
+            "agent": agent,
+            "text": text,
+            "source": "tui",
+            "client_id": client_id,
+            "ui_locale": ui_locale,
+            "delivery_policy": policy,
+        }
+        if attachment is not None:
+            payload["attachment"] = dict(attachment)
+        else:
+            payload["workzone_ref"] = str(workzone_ref)
+        return await self._direct_request(
+            "POST", "/api/chat", json_body=payload, timeout=35
         )
 
     async def run_info(self, session_id: str, run_id: str) -> dict:

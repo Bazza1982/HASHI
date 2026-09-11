@@ -1389,6 +1389,7 @@ class FlexibleAgentRuntime:
                 "think": self._think,
             },
             "presentation_status": runtime_presentation_status(self),
+            "workzone_state": dict(getattr(self, "_workzone_state", {}) or {}),
             "channels": {
                 "telegram": self.telegram_connected,
                 "workbench": True,

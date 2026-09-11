@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import hashlib
 import json
 import logging
 import mimetypes
@@ -5185,6 +5187,62 @@ class WorkbenchApiServer:
         local_path.write_bytes(payload)
         return local_path, filename
 
+    def _decode_tui_attachment(self, attachment: Mapping[str, Any]) -> tuple[bytes, str, str]:
+        filename = Path(str(attachment.get("filename") or "")).name
+        if not filename or filename != str(attachment.get("filename") or ""):
+            raise ValueError("invalid attachment filename")
+        try:
+            payload = base64.b64decode(
+                str(attachment.get("content_b64") or ""), validate=True
+            )
+        except (ValueError, binascii.Error):
+            raise ValueError("invalid attachment encoding") from None
+        if not payload or len(payload) > 25 * 1024 * 1024:
+            raise ValueError("attachment must contain at most 25 MiB")
+        declared_size = attachment.get("size_bytes")
+        if declared_size is not None and int(declared_size) != len(payload):
+            raise ValueError("attachment size mismatch")
+        digest = hashlib.sha256(payload).hexdigest()
+        declared_digest = str(attachment.get("sha256") or "")
+        if declared_digest and declared_digest != digest:
+            raise ValueError("attachment digest mismatch")
+        media_type = str(attachment.get("media_type") or "application/octet-stream")
+        return payload, filename, media_type
+
+    def _resolve_workzone_attachment(self, runtime: Any, reference: str) -> tuple[bytes, str, str]:
+        from orchestrator.workzone import active_workzone_slots, normalize_workzone_state
+
+        raw_reference = str(reference or "").strip()
+        relative = Path(raw_reference)
+        if (
+            not raw_reference
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise ValueError("Workzone attachment must be a relative file reference")
+        state = getattr(runtime, "_workzone_state", None)
+        if state is None:
+            state = dict(getattr(runtime, "metadata", {}) or {}).get("workzone_state")
+        slots = active_workzone_slots(normalize_workzone_state(state), available_only=True)
+        if not slots:
+            raise ValueError("no enabled Workzone is available for this Agent")
+        for slot in slots:
+            root = Path(str(slot.get("path") or "")).resolve()
+            candidate = (root / relative).resolve()
+            if candidate.is_relative_to(root) and candidate.is_file():
+                try:
+                    if candidate.stat().st_size > 25 * 1024 * 1024:
+                        raise ValueError("Workzone attachment exceeds the 25 MiB limit")
+                    payload = candidate.read_bytes()
+                except OSError:
+                    raise ValueError("Workzone attachment could not be read") from None
+                return (
+                    payload,
+                    candidate.name,
+                    mimetypes.guess_type(candidate.name)[0] or "application/octet-stream",
+                )
+        raise ValueError("Workzone attachment was not found in an enabled Workzone")
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -5309,6 +5367,8 @@ class WorkbenchApiServer:
         payload = await request.json()
         agent_name = payload.get("agent") or payload.get("agentId")
         text = (payload.get("text") or "").strip()
+        attachment_spec = payload.get("attachment")
+        workzone_ref = str(payload.get("workzone_ref") or "").strip()
         runtime = runtime_map.get(agent_name)
         if runtime is None:
             from orchestrator.agent_move.service import moved_agent_destination
@@ -5330,7 +5390,7 @@ class WorkbenchApiServer:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
-        if not text:
+        if not text and not isinstance(attachment_spec, Mapping) and not workzone_ref:
             return web.json_response(
                 {"ok": False, "error": "text is required"}, status=400
             )
@@ -5456,6 +5516,50 @@ class WorkbenchApiServer:
             ]
         if isinstance(binding, Mapping):
             session_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = dict(binding)
+        if isinstance(attachment_spec, Mapping) or workzone_ref:
+            if isinstance(attachment_spec, Mapping) and workzone_ref:
+                return web.json_response(
+                    {"ok": False, "error": "exactly one attachment source is required"},
+                    status=400,
+                )
+            try:
+                if isinstance(attachment_spec, Mapping):
+                    media_payload, filename, declared_type = self._decode_tui_attachment(
+                        attachment_spec
+                    )
+                else:
+                    media_payload, filename, declared_type = self._resolve_workzone_attachment(
+                        runtime, workzone_ref
+                    )
+                local_path, original_name = self._save_upload(
+                    runtime, filename=filename, payload=media_payload
+                )
+                media_kind = self._classify_upload(
+                    original_name,
+                    declared_media_type="",
+                    content_type=declared_type,
+                )
+                request_id = await runtime.enqueue_api_media(
+                    local_path=local_path,
+                    media_kind=media_kind,
+                    filename=original_name,
+                    caption=text,
+                    source=source,
+                    deliver_to_telegram=telegram_mirror,
+                    request_metadata=session_metadata,
+                    idempotency_key=str(payload.get("idempotency_key") or "") or None,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                return web.json_response(
+                    {"ok": False, "error": str(exc), "error_code": "attachment_rejected"},
+                    status=400,
+                )
+            if not request_id:
+                return web.json_response(
+                    {"ok": False, "error": "attachment request was not accepted"},
+                    status=409,
+                )
+            return web.json_response({"ok": True, "request_id": request_id})
         slash_result = await try_execute_slash_command_text(
             runtime,
             text,

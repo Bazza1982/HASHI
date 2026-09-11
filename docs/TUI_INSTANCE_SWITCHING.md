@@ -72,13 +72,20 @@ The proxy accepts only these named operations:
 | `scheduler_jobs` | `GET /api/agents/{agent}/scheduler/jobs` |
 | `background_jobs` | `GET /api/background-jobs?agent={agent}` |
 | `chat` | `POST /api/chat` |
+| `chat_attachment` | one bounded `POST /api/chat` carrying frozen bytes or a target Workzone reference |
 | `transcript_recent` | `GET /api/transcript/{agent}` |
 | `transcript_poll` | `GET /api/transcript/{agent}/poll` |
 | `log_tail` | bounded instance-owned `logs/bridge.log` tail; no path returned |
 
 The three information-panel operations are read-only and Agent-scoped.
 Arbitrary paths are not represented in the protocol. Text, agent, offset,
-limit, and response sizes are bounded before forwarding.
+limit, attachment bytes, and response sizes are bounded before forwarding.
+An attachment selected on the TUI computer is snapshotted before submission,
+sent as authenticated bytes with size and SHA-256 integrity, and admitted to
+the same target Agent media Run as its caption. A Workzone `@file` reference is
+resolved only by the target instance beneath that Agent's active Workzone;
+the source machine's path is never forwarded. Switching instance or Agent
+invalidates a pending attachment and late generations are discarded.
 
 The TUI is HASHI's permanent built-in reference terminal Connector. This
 switching contract currently proxies the basic Backend API chat/transcript
@@ -112,6 +119,10 @@ continues to follow the launch repository and is labeled `Local log — <id>`.
 /instance <id>        switch to a trusted peer
 /instance current     return to the launch instance
 /instance refresh     refresh and list peers
+/attach <path>        snapshot one local file for the next message
+/attach clipboard     snapshot a local clipboard image for the next message
+/attach cancel        discard the pending attachment
+@relative/path        attach one file from the target Agent's active Workzone
 ```
 
 Remote online and TUI available are distinct states. A peer may be visible but

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -323,6 +325,85 @@ def test_authenticated_cross_instance_tui_seals_origin_evidence(
         "id": "HASHI1",
         "assurance": "shared_network_hmac",
     }
+
+
+def test_tui_attachment_proxy_forwards_frozen_bytes_with_integrity(
+    tmp_path, monkeypatch
+):
+    _client(tmp_path)
+    captured = {}
+    content = b"attachment bytes"
+    encoded = base64.b64encode(content).decode("ascii")
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit=-1):
+            return json.dumps({"ok": True, "request_id": "req-attachment"}).encode()
+
+    def _urlopen(request, timeout=15):
+        del timeout
+        captured.update(json.loads(request.data.decode("utf-8")))
+        return _Response()
+
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", _urlopen)
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    status, _result = remote_server._local_workbench_tui_request(
+        ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation="chat_attachment",
+            agent="akane",
+            text="inspect this",
+            attachment={
+                "filename": "report.txt",
+                "media_type": "text/plain",
+                "content_b64": encoded,
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
+        )
+    )
+
+    assert status == 200
+    assert captured["text"] == "inspect this"
+    assert captured["attachment"]["content_b64"] == encoded
+    assert captured["attachment"]["sha256"] == hashlib.sha256(content).hexdigest()
+
+
+def test_tui_attachment_proxy_rejects_corrupt_or_ambiguous_sources():
+    content = b"attachment bytes"
+    attachment = {
+        "filename": "report.txt",
+        "content_b64": base64.b64encode(content).decode("ascii"),
+        "size_bytes": len(content),
+        "sha256": "0" * 64,
+    }
+    corrupt = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="chat_attachment",
+        agent="akane",
+        attachment=attachment,
+    )
+    ambiguous = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="chat_attachment",
+        agent="akane",
+        attachment={**attachment, "sha256": hashlib.sha256(content).hexdigest()},
+        workzone_ref="report.txt",
+    )
+
+    assert remote_server._validate_tui_proxy_payload(corrupt) == (
+        False,
+        "attachment_digest_mismatch",
+    )
+    assert remote_server._validate_tui_proxy_payload(ambiguous) == (
+        False,
+        "invalid_attachment_source",
+    )
 
 
 def test_tui_proxy_accepts_only_agent_scoped_sidepanel_reads():
