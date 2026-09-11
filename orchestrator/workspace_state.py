@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
-import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.process_resources import path_lock as process_path_lock
 
 
@@ -20,36 +19,51 @@ class WorkspaceStateStore:
         self.path = Path(workspace_dir) / "state.json"
         self._lock = _path_lock(self.path)
 
-    def read(self) -> dict:
-        with self._lock:
-            if not self.path.exists():
-                return {}
-            try:
-                payload = json.loads(self.path.read_text(encoding="utf-8"))
-            except Exception:
-                return {}
-            return payload if isinstance(payload, dict) else {}
+    def _read_for_update(self) -> tuple[dict, str | None]:
+        """Only absence permits an empty writable state; other errors propagate."""
+        try:
+            document = read_config_json(self.path)
+        except FileNotFoundError:
+            return {}, None
+        return dict(document), document.revision
 
-    def replace(self, payload: dict) -> dict:
-        snapshot = dict(payload)
+    def read(self) -> dict:
+        """Return a plain view, retaining the existing read-only error fallback."""
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = self.path.with_name(
-                f".{self.path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-            )
-            temp_path.write_text(
-                json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            temp_path.replace(self.path)
+            try:
+                return self._read_for_update()[0]
+            except (OSError, ValueError):
+                return {}
+
+    def _publish(self, payload: dict, revision: str | None) -> dict:
+        snapshot = dict(payload)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        write_config_json(self.path, snapshot, expected_revision=revision)
         return snapshot
 
-    def update(self, mutator: Callable[[dict], dict | None]) -> dict:
-        """Atomically read, mutate, and replace state within this process."""
+    def replace(self, payload: dict) -> dict:
+        """Explicit whole-document replacement, checked from this call's read.
+
+        This cannot recover the revision of an earlier plain-dict snapshot.
+        Use update() for read/modify/write operations; a read fallback is not
+        a replacement source. An unreadable existing file is never overwritten.
+        """
         with self._lock:
-            current = self.read()
+            _current, revision = self._read_for_update()
+            return self._publish(payload, revision)
+
+    def update(self, mutator: Callable[[dict], dict | None]) -> dict:
+        """Read strictly, mutate once, and reject stale publication across processes.
+
+        The callback should only mutate its supplied document. A conflict or
+        committed durability error propagates without replaying the callback or
+        rolling back a published file. The process lock also retains the existing
+        within-process ordering; interprocess protection is the file primitive's.
+        """
+        with self._lock:
+            current, revision = self._read_for_update()
             result = mutator(current)
             updated = current if result is None else result
             if not isinstance(updated, dict):
                 raise TypeError("Workspace state mutator must return a dict or None")
-            return self.replace(updated)
+            return self._publish(updated, revision)

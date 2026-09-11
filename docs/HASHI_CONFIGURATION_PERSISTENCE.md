@@ -1,6 +1,6 @@
 # HASHI configuration persistence
 
-Scope: HN-20260911-002 / W1, migrated Functions-layer configuration only.
+Scope: HN-20260911-002 / W1, migrated Functions-layer configuration and workspace-state persistence only.
 Parent: [Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 This contract does not claim that all configuration writers have migrated.
 
@@ -17,6 +17,7 @@ publication. It does not own business schemas or restart/adoption policy.
 | `ui_language` / `state/ui_language.json` | Frontend Connector | First repair batch migrates set/reset preference operations; catalogs, wording and actor/instance scope are unchanged |
 | `AgentDirectory` group mutations / `agents.json` | PAO | Second repair batch migrates create, delete, rename and member add/remove; fresh revision before business decisions, publication before cached-view updates |
 | API Gateway configuration and legacy seeding | PAO / shared Functions | Batch 04 migrates `api_gateway_config`; ServiceManager changes its enabled flag only after a successful save |
+| `WorkspaceStateStore` / workspace `state.json` | PAO persistence boundary / Functions | Batch 05 reuses the file primitive for strict revision-checked updates and explicit replacements; per-field business ownership is unchanged |
 | Other writers, Memory/Wiki scan transactions | Respective existing owners | Still require inventory and separate implementation; not covered by the migrated consumers above |
 
 Normal configuration edits must still go through the owning business operation.
@@ -114,6 +115,39 @@ still propagates and does not trigger service effects or automatic rollback:
 reconcile persisted configuration and actual service state before continuing.
 This is not a transaction spanning the filesystem and an external service.
 
+## Workspace shared state
+
+`WorkspaceStateStore` remains the sole boundary for its existing `state.json`.
+Only this HASHI-owned file is covered, not arbitrary workspace files, transcripts,
+Memory databases or Provider evidence. Each field retains its current business
+owner and schema; the file primitive does not interpret backend or memory policy.
+
+`read()` still returns a plain dict and keeps its read-only empty fallback on
+unreadable/non-object state. BOM/CRLF reads have no file effects. `update()` never
+uses that fallback: it reads strictly before invoking the mutator, treats only a
+missing file as empty, and retains the original revision separately even when
+the mutator returns a new plain dict. Publication explicitly checks that revision
+(or absence for first creation) under the existing shared OS lock. A competing
+write or deletion rejects this operation. No callback or business action is
+replayed automatically. Callbacks should only mutate their supplied document.
+
+`replace()` retains its explicit whole-document replacement semantics and plain
+dict result; it can deliberately remove fields. It now validates the current
+file and checks for intervening writes from its own read. It cannot reconstruct
+the revision behind a previously cached plain dict. Use `update()` for business
+read/modify/write operations rather than `replace(read())`; do not treat the
+public read fallback as a recovery document. This batch does not claim to
+inventory or repair every external caller that constructs whole replacements.
+
+Both paths share private candidate publication, UTF-8/LF serialization and the
+existing pre-publication/committed-durability distinction. Malformed JSON, invalid
+encoding or a non-object destination cannot be replaced with defaults. Mutator
+errors, invalid return values and serialization failures do not publish. A
+committed durability error propagates without an automatic rollback. Existing
+backup files are left alone; no migration or historical cleanup is performed.
+Old generations and nonparticipating editors still require the adoption boundary
+stated above; an OS lock cannot retroactively constrain them.
+
 ## Operator and Agent FYI
 
 UTF-8 editor output with or without BOM is supported at these migrated read
@@ -125,6 +159,10 @@ original bytes and any existing backup before a separately authorized repair.
 A group-save conflict is not a successful group change. Re-read before a new
 deliberate edit; do not reconstruct `agents.json` from a cached group list. A
 committed durability error is not permission to undo the published change.
+
+Workspace preference updates that report a conflict or unreadable state are not
+successful saves. Diagnose the original file, and make a new deliberate update
+only after reconciliation; never erase it to restore a default display.
 
 Do not normalize arbitrary user files, Provider wire evidence, Workzones,
 Markdown, images, audio, or documents. Do not remove a persistent lock file as
@@ -158,3 +196,10 @@ are still needed. Do not equate the existing CI selection with these tests.
 Batch 03 Memory/Wiki scanner work is deferred to the user's local environment
 at the user's request, not completed or force-added to shared Git. That deferral
 does not close W1 or authorize publishing private scanner code or data.
+
+Workspace persistence regressions extend the existing
+`tests/test_workspace_state.py`, including real files, spawned processes and the
+actual backend-timeout preference consumer. The unchanged architecture workflow
+already selects this module. The batch-05 receipt and completed PR CI comment
+separate local closure tests, approved-interpreter CI, broader runtime gates and
+native/live adoption. None is a substitute for the others.
