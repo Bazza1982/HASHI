@@ -22,15 +22,18 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from tools.pricing_sources import (
+    EXACT_OPENROUTER_MODEL_MAPPINGS,
     HttpEvidence,
     MAX_RESPONSE_BYTES,
+    OPENROUTER_MODELS_URL,
     PricingSourceError,
+    resolve_source_model_id as _resolve_pricing_source_model_id,
     shared_bounded_https_get,
 )
 
 
-CACHE_SCHEMA_VERSION = 1
-ADAPTER_REVISION = "openrouter-model-capability.v1"
+CACHE_SCHEMA_VERSION = 2
+ADAPTER_REVISION = "openrouter-model-capability.v2"
 SUCCESS_TTL = timedelta(hours=24)
 NEGATIVE_TTL = timedelta(minutes=15)
 LOCK_WAIT_SECONDS = 20.0
@@ -47,12 +50,6 @@ _MODEL_ID = re.compile(
 )
 _MODALITY_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-
-# Cross-engine catalogue aliases are reviewed one by one.  Values are tuples
-# so an accidental ambiguous mapping fails closed instead of picking one.
-EXACT_OPENROUTER_MODEL_MAPPINGS: Mapping[tuple[str, str], tuple[str, ...]] = {
-    ("codex-cli", "gpt-6-astra"): ("openai/gpt-6-astra",),
-}
 
 _SCHEDULE_GUARD = threading.Lock()
 _SCHEDULED_CALLBACKS: dict[str, list[Callable[[Any], None]]] = {}
@@ -188,8 +185,10 @@ def _read_cache(path: Path) -> dict[str, Any]:
     try:
         if path.stat().st_size > 2 * 1024 * 1024:
             return _empty_cache()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        from orchestrator.config_json import read_config_json
+
+        payload = read_config_json(path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return _empty_cache()
     if (
         not isinstance(payload, dict)
@@ -203,19 +202,9 @@ def _read_cache(path: Path) -> dict[str, Any]:
 
 def _write_cache(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        try:
-            temporary.chmod(0o600)
-        except OSError:
-            pass
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    from orchestrator.config_json import write_config_json
+
+    write_config_json(path, payload)
 
 
 @contextmanager
@@ -277,34 +266,18 @@ def resolve_source_model_id(
     model: str,
     *,
     mappings: Mapping[tuple[str, str], str | Sequence[str]] | None = None,
+    catalogue_evidence: HttpEvidence | None = None,
 ) -> str:
     """Return one exact OpenRouter catalogue ID or fail closed."""
-
-    normalized_engine = normalize_engine(engine)
-    requested = str(model or "").strip()
-    if normalized_engine == OPENROUTER_ENGINE:
-        if _MODEL_ID.fullmatch(requested) is None:
-            raise CapabilitySourceError("source_not_qualified")
-        return requested
-
-    selected_mappings = mappings or EXACT_OPENROUTER_MODEL_MAPPINGS
-    raw = selected_mappings.get((normalized_engine, requested.casefold()))
-    if isinstance(raw, str):
-        candidates = (raw,)
-    elif isinstance(raw, Sequence):
-        candidates = tuple(
-            str(item or "").strip() for item in raw if str(item or "").strip()
+    try:
+        return _resolve_pricing_source_model_id(
+            engine,
+            model,
+            mappings=mappings,
+            catalogue_evidence=catalogue_evidence,
         )
-    else:
-        candidates = ()
-    candidates = tuple(dict.fromkeys(candidates))
-    if not candidates:
-        raise CapabilitySourceError("source_not_qualified")
-    if len(candidates) != 1:
-        raise CapabilitySourceError("source_alias_ambiguous")
-    if _MODEL_ID.fullmatch(candidates[0]) is None:
-        raise CapabilitySourceError("invalid_source_model_id")
-    return candidates[0]
+    except PricingSourceError as exc:
+        raise CapabilitySourceError(exc.reason) from exc
 
 
 def _unknown_modalities(values: Sequence[str]) -> dict[str, str]:
@@ -710,14 +683,26 @@ def refresh_capability_fact(
         url: str | None = None
         fact: CapabilityFact | None = None
         failure_reason: str | None = None
+        selected_fetcher = fetcher or shared_bounded_https_get
         try:
-            source_model_id = resolve_source_model_id(
-                engine,
-                model,
-                mappings=source_mappings,
-            )
+            try:
+                source_model_id = resolve_source_model_id(
+                    engine,
+                    model,
+                    mappings=source_mappings,
+                )
+            except CapabilitySourceError as exc:
+                if exc.reason != "catalogue_required":
+                    raise
+                catalogue = selected_fetcher(OPENROUTER_MODELS_URL)
+                source_model_id = resolve_source_model_id(
+                    engine,
+                    model,
+                    mappings=source_mappings,
+                    catalogue_evidence=catalogue,
+                )
             url = _openrouter_url(source_model_id)
-            evidence = (fetcher or shared_bounded_https_get)(url)
+            evidence = selected_fetcher(url)
             fact = _openrouter_fact(
                 engine,
                 model,

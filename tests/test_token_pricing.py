@@ -228,6 +228,37 @@ def test_dynamic_route_price_is_not_used_for_direct_provider(tmp_path, monkeypat
     assert receipt.dominant_cost_source() == "unknown"
 
 
+def test_direct_codex_usage_uses_labeled_openrouter_reference_and_cache(
+    tmp_path, monkeypatch
+):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    fact = pricing_sources.refresh_pricing_fact(
+        "codex-cli",
+        "gpt-brand-new",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence("openai/gpt-brand-new"),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="gpt-brand-new",
+        backend="codex-cli",
+        engine="codex-cli",
+        input_tokens=30_000,
+        output_tokens=100,
+        prompt_cache_hit_tokens=25_472,
+        prompt_cache_miss_tokens=4_528,
+        token_source="provider",
+    )
+
+    assert receipt.prompt_cache_hit_tokens == 25_472
+    assert receipt.prompt_cache_miss_tokens == 4_528
+    assert receipt.dominant_cost_source() == "openrouter_reference"
+    assert receipt.pricing_revisions == (fact.source_revision,)
+    assert receipt.cost_usd is not None
+
+
 def test_usage_finalization_is_cache_only(tmp_path, monkeypatch):
     cache = tmp_path / "pricing-cache.json"
     monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))

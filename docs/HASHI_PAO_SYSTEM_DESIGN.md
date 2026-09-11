@@ -123,6 +123,11 @@ Exact model media metadata follows the independent
 PAO owns the derived fact, each Engine Adapter owns its implemented transport,
 and instance policy owns permission; native support is their intersection.
 Message admission is cache-only and never waits for catalogue network I/O.
+The same exact OpenRouter identity and bounded evidence feed PAO's derived
+price fact. Execution Engine and metadata source remain separate: Provider
+reported cost is actual, while a catalogue valuation for another channel is
+an explicitly labelled OpenRouter reference estimate. Every usage row freezes
+the price revision and observed cache dimensions used at completion.
 
 ## 5. State model
 

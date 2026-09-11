@@ -10600,6 +10600,16 @@ class FlexibleAgentRuntime:
                             engine=self.config.active_backend,
                             line_items=_meter_line_items,
                             token_source="provider",
+                            prompt_cache_hit_tokens=getattr(
+                                response.usage,
+                                "prompt_cache_hit_tokens",
+                                None,
+                            ),
+                            prompt_cache_miss_tokens=getattr(
+                                response.usage,
+                                "prompt_cache_miss_tokens",
+                                None,
+                            ),
                         )
                     else:
                         # CLI backend: estimate from full assembled prompt (includes history)

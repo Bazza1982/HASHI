@@ -19,7 +19,7 @@ from tests.mocks.mock_adapters import SimpleGlobalConfig, SimpleTestConfig
 from tools import model_capability_sources, pricing_sources
 
 
-NOW = datetime(2026, 9, 10, 1, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def _evidence(
@@ -53,7 +53,7 @@ def _evidence(
     )
 
 
-def test_exact_codex_mapping_discovers_image_without_treating_file_as_document(
+def test_codex_namespace_discovers_image_without_treating_file_as_document(
     tmp_path,
 ):
     cache = tmp_path / "capabilities.json"
@@ -86,6 +86,28 @@ def test_exact_codex_mapping_discovers_image_without_treating_file_as_document(
     assert capability.supports("document") is False
     assert capability.output_modalities == frozenset({"text"})
     assert capability.source == "dynamic_capability_cache"
+
+
+def test_new_codex_model_uses_provider_namespace_without_per_model_mapping(
+    tmp_path,
+):
+    model = "gpt-brand-new"
+    fact = model_capability_sources.refresh_capability_fact(
+        "codex-cli",
+        model,
+        cache_path=tmp_path / "capabilities.json",
+        fetcher=lambda _url: _evidence(
+            "openai/gpt-brand-new",
+            inputs=["text", "image"],
+        ),
+        now=NOW,
+    )
+
+    assert fact.status == "known"
+    assert fact.engine == "codex-cli"
+    assert fact.source_engine == "openrouter-api"
+    assert fact.source_model_id == "openai/gpt-brand-new"
+    assert fact.input_status("image") == "supported"
 
 
 def test_confirmed_text_only_model_is_unsupported_not_unknown(tmp_path):

@@ -49,7 +49,8 @@ class PerCallUsageLineItem:
     # Locally estimated thinking is separate from estimated visible output.
     thinking_in_output: bool = False
     cost_usd: float | None = None
-    cost_source: str = "unknown"      # provider / pricing_table / local_zero / unknown
+    # provider / pricing_table / openrouter_reference / local_zero / unknown
+    cost_source: str = "unknown"
     prompt_cache_hit_tokens: int | None = None
     prompt_cache_miss_tokens: int | None = None
     provider_call_latency_ms: float | None = None
@@ -279,7 +280,10 @@ class UsageReceipt:
                     getattr(item, "thinking_in_output", False)
                 ),
             )
-            if cost is None or source != "pricing_table":
+            if cost is None or source not in {
+                "pricing_table",
+                "openrouter_reference",
+            }:
                 return None
             total += cost
         return round(total, 6)
@@ -322,7 +326,10 @@ class UsageReceipt:
         )
         if revisions:
             return tuple(revisions)
-        if self.dominant_cost_source() == "pricing_table":
+        if self.dominant_cost_source() in {
+            "pricing_table",
+            "openrouter_reference",
+        }:
             from tools.token_tracker import PRICING_REVISION
 
             return (PRICING_REVISION,)
@@ -354,8 +361,10 @@ class UsageReceipt:
             return "local_zero"
         if "unknown" in sources:
             return "unknown"
-        if "provider" in sources and "pricing_table" not in sources:
+        if sources == {"provider"}:
             return "provider"
+        if "openrouter_reference" in sources:
+            return "openrouter_reference"
         return "pricing_table"
 
 
@@ -591,6 +600,14 @@ def _format_receipt_lines(
                 if receipt.pricing_revisions
                 else "meter.tail.cost.provider"
             ),
+            locale=locale,
+            icon=icon,
+            label=resolved_label,
+            cost=_fmt_cost(cost, locale=locale),
+        )
+    elif receipt.dominant_cost_source() == "openrouter_reference":
+        cost_line = _translate(
+            "meter.tail.cost.openrouter_reference",
             locale=locale,
             icon=icon,
             label=resolved_label,

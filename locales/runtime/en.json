@@ -551,6 +551,7 @@
     "meter.tail.label.meditation": "Meditation",
     "meter.tail.pricing_unknown": "unknown",
     "meter.tail.cost.pricing": "{icon} {label}: ≈ {cost}",
+    "meter.tail.cost.openrouter_reference": "{icon} {label}: ≈ {cost} (OpenRouter reference estimate)",
     "meter.tail.cost.provider": "{icon} {label}: {cost}",
     "meter.tail.cost.provider_priced": "{icon} {label}: {cost}",
     "meter.tail.cost.local": "{icon} {label}: {cost}",

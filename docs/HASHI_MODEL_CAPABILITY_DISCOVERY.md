@@ -1,7 +1,7 @@
 # HASHI Model Capability Discovery
 
 Status: accepted PAO/Engine Adapter decision; Functions implementation candidate
-dated 2026-09-10. Live adoption is recorded separately per instance.
+updated 2026-09-12. Live adoption is recorded separately per instance.
 
 Parent specifications:
 [HASHI System Architecture](../ARCHITECTURE.md),
@@ -36,7 +36,8 @@ never converted to `unsupported`. An expired or failed fact may preserve its
 last valid snapshot for diagnosis, but stale data grants no native media
 route.
 
-The derived cache is not configuration. It is written atomically under the
+The derived cache is not configuration. It uses the shared revision-aware,
+BOM-tolerant UTF-8/LF persistence boundary under the
 instance `tmp` directory and never overwrites `agents.json`, state selection,
 or a user-authored override. Successful facts are fresh for 24 hours; unknown
 facts retry after 15 minutes. Whole-cache file locks cover only cache
@@ -45,7 +46,7 @@ parallel while duplicate refreshes for one exact fact remain coalesced.
 
 ## Sources and exact mappings
 
-OpenRouter's exact model endpoint is the initial source. Capability discovery
+OpenRouter's exact model endpoint is the primary source. Capability discovery
 reads `architecture.input_modalities` and
 `architecture.output_modalities`. It shares the allowlisted, byte-bounded,
 timeout-bounded raw HTTP evidence fetch and concurrent request coalescing used
@@ -53,17 +54,19 @@ by pricing discovery. Capability and pricing then validate and persist that
 evidence independently, so a pricing-schema failure cannot discard a valid
 capability fact and a capability-schema failure cannot alter a price fact.
 
-An OpenRouter route uses its exact route ID. Cross-Engine aliases are reviewed
-one by one; the initial mapping is:
+An already qualified model uses its exact route ID. Public Engine families map
+to their Provider namespace (for example, `codex-cli` to `openai`) rather than
+to a hard-coded list of model names, so a newly published exact model needs no
+code row. Broker/private Engines may resolve an unqualified name only when the
+bounded OpenRouter catalogue contains one unique exact ID, canonical ID,
+basename, or declared alias. Ambiguity fails closed. There is no prefix,
+family, similarity, or fuzzy-name matching; genuinely private aliases require
+an explicit reviewed override.
 
-```text
-codex-cli:gpt-6-astra -> openai/gpt-6-astra
-```
-
-There is no prefix, family, similarity, or fuzzy-name matching. Capability
-mapping does not widen pricing eligibility: an OpenRouter catalogue record for
-a direct or CLI model is not evidence that the direct/CLI request used the
-OpenRouter price route.
+Price and capability consumers share this identity resolver and raw evidence.
+For a direct or CLI Engine, OpenRouter pricing is labelled a cross-channel
+reference estimate; it is never evidence that the request used OpenRouter or
+that the displayed amount was billed by the execution Provider.
 
 OpenRouter's `file` modality remains a source fact named `file`. It does not
 mean that HASHI may send every document, local path, PDF, audio file, or video

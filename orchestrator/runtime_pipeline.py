@@ -3190,6 +3190,12 @@ def record_foreground_usage_audit(
                 engine=runtime.config.active_backend,
                 line_items=meter_line_items,
                 token_source="provider",
+                prompt_cache_hit_tokens=getattr(
+                    response.usage, "prompt_cache_hit_tokens", None
+                ),
+                prompt_cache_miss_tokens=getattr(
+                    response.usage, "prompt_cache_miss_tokens", None
+                ),
             )
         else:
             input_tokens = estimate_tokens(final_prompt)

@@ -37,6 +37,16 @@ from tools.token_tracker import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_dynamic_pricing_cache(tmp_path, monkeypatch):
+    """Keep local runtime metadata from changing static-price unit fixtures."""
+
+    monkeypatch.setenv(
+        "HASHI_PRICING_CACHE_FILE",
+        str(tmp_path / "isolated-pricing-cache.json"),
+    )
+
+
 # ── Data contract: record_usage returns a structured receipt ─────────────────
 
 def test_record_usage_returns_receipt(tmp_path: Path):
@@ -304,6 +314,33 @@ def test_her_stage_provider_preserves_deepseek_cache_and_call_latency():
     assert item.cost_usd == pytest.approx(0.000058)
 
 
+def test_her_stage_provider_keeps_codex_cache_when_no_call_meter_exists():
+    provider = object.__new__(HashiStageProvider)
+    provider.usage_line_items = []
+    response = BackendResponse(
+        text="done",
+        duration_ms=1,
+        usage=TokenUsage(
+            input_tokens=30_000,
+            output_tokens=100,
+            prompt_cache_hit_tokens=25_472,
+            prompt_cache_miss_tokens=4_528,
+        ),
+    )
+
+    provider._record_usage_line_item(
+        request_id="request-codex-cache",
+        phase="execution",
+        engine="codex-cli",
+        model="gpt-5.4",
+        response=response,
+    )
+
+    [item] = provider.usage_line_items
+    assert item.prompt_cache_hit_tokens == 25_472
+    assert item.prompt_cache_miss_tokens == 4_528
+
+
 def test_her_stage_provider_does_not_invent_call_from_explicit_empty_meter():
     provider = object.__new__(HashiStageProvider)
     provider.usage_line_items = []
@@ -338,6 +375,23 @@ def test_formatter_pricing_table_has_approx():
     assert "价目表" not in tail
     assert "📥 输入 1.0K" in tail
     assert len(tail.splitlines()) == 3
+
+
+def test_formatter_labels_cross_channel_openrouter_reference():
+    receipt = UsageReceipt(line_items=[
+        PerCallUsageLineItem(
+            engine="codex-cli",
+            model="gpt-brand-new",
+            input_tokens=1000,
+            output_tokens=100,
+            cost_usd=0.0026,
+            cost_source="openrouter_reference",
+            pricing_revision="openrouter:sha256:" + "a" * 64,
+        ),
+    ])
+    tail = format_cost_tail(receipt, locale="zh-CN")
+    assert "OpenRouter 参考估价" in tail.splitlines()[0]
+    assert "≈" in tail.splitlines()[0]
 
 
 def test_formatter_provider_no_approx():

@@ -592,12 +592,56 @@ class CodexAppServerToolBridge:
         input_tokens = int(total.get("inputTokens") or 0)
         output_tokens = int(total.get("outputTokens") or 0)
         thinking_tokens = int(total.get("reasoningOutputTokens") or 0)
-        if not (input_tokens or output_tokens or thinking_tokens):
+        cache_key = next(
+            (
+                key
+                for key in (
+                    "cachedInputTokens",
+                    "cached_input_tokens",
+                    "promptCacheHitTokens",
+                )
+                if key in total
+            ),
+            None,
+        )
+        input_details = total.get("inputTokensDetails") or {}
+        if cache_key is None and isinstance(input_details, dict):
+            cache_key = next(
+                (
+                    key
+                    for key in ("cachedTokens", "cached_tokens")
+                    if key in input_details
+                ),
+                None,
+            )
+            cache_source = input_details
+        else:
+            cache_source = total
+        cache_hit = (
+            max(0, int(cache_source.get(cache_key) or 0))
+            if cache_key is not None
+            else None
+        )
+        usage_reported = any(
+            key in total
+            for key in (
+                "inputTokens",
+                "outputTokens",
+                "reasoningOutputTokens",
+            )
+        ) or cache_key is not None
+        if not usage_reported:
             return None
         return TokenUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             thinking_tokens=thinking_tokens,
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=(
+                max(0, input_tokens - cache_hit)
+                if cache_hit is not None and "inputTokens" in total
+                else None
+            ),
         )
 
     async def run(

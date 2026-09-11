@@ -21,15 +21,16 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
-CACHE_SCHEMA_VERSION = 1
-ADAPTER_REVISION = "openrouter-model-api.v1"
+CACHE_SCHEMA_VERSION = 3
+ADAPTER_REVISION = "openrouter-model-api.v3"
 SUCCESS_TTL = timedelta(hours=24)
 NEGATIVE_TTL = timedelta(minutes=15)
 MAX_RESPONSE_BYTES = 64 * 1024
+CATALOG_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 CONNECT_TIMEOUT_SECONDS = 5.0
 TOTAL_TIMEOUT_SECONDS = 15.0
 LOCK_WAIT_SECONDS = 20.0
@@ -42,6 +43,7 @@ OPENROUTER_ENGINES = frozenset(
 )
 OPENROUTER_HOST = "openrouter.ai"
 OPENROUTER_UNIT_SOURCE_URL = "https://openrouter.ai/openapi.json"
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*$")
 _PLAIN_DECIMAL = re.compile(r"^(?:0|[0-9]+\.[0-9]+)$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -51,6 +53,28 @@ _EVIDENCE_GUARD = threading.Lock()
 _EVIDENCE_IN_FLIGHT: dict[str, "_EvidenceFetch"] = {}
 _RECENT_EVIDENCE: dict[str, tuple[float, "HttpEvidence"]] = {}
 _RECENT_EVIDENCE_SECONDS = 2.0
+_REFRESH_GUARD = threading.Lock()
+_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+
+# These are Provider namespaces, not model rows. New exact model names under a
+# known public Provider therefore need no code change. A fully-qualified model
+# ID always wins, and unknown/broker Engines use an exact unique catalogue
+# basename rather than fuzzy or family-prefix matching.
+ENGINE_VENDOR_NAMESPACES: dict[str, str] = {
+    "codex-cli": "openai",
+    "openai-api": "openai",
+    "claude-cli": "anthropic",
+    "anthropic-api": "anthropic",
+    "gemini-cli": "google",
+    "google-api": "google",
+    "deepseek-api": "deepseek",
+    "xai-api": "x-ai",
+    "grok-cli": "x-ai",
+}
+
+EXACT_OPENROUTER_MODEL_MAPPINGS: dict[
+    tuple[str, str], tuple[str, ...]
+] = {}
 
 
 class PricingSourceError(RuntimeError):
@@ -104,11 +128,21 @@ class PricingFact:
     unknown_reason: str | None
     last_known_revision: str | None = None
     last_known_fetched_at: str | None = None
+    source_engine: str | None = None
+    source_model_id: str | None = None
+    conditional_price_tiers: tuple[Mapping[str, Any], ...] = ()
+    additional_per_unit: tuple[tuple[str, float], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["cache_write_tiers"] = [
             [name, rate] for name, rate in self.cache_write_tiers
+        ]
+        payload["conditional_price_tiers"] = [
+            dict(item) for item in self.conditional_price_tiers
+        ]
+        payload["additional_per_unit"] = [
+            [name, rate] for name, rate in self.additional_per_unit
         ]
         return payload
 
@@ -121,6 +155,16 @@ class PricingFact:
         fields["cache_write_tiers"] = tuple(
             (str(item[0]), float(item[1]))
             for item in raw_tiers
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        )
+        fields["conditional_price_tiers"] = tuple(
+            dict(item)
+            for item in (fields.get("conditional_price_tiers") or [])
+            if isinstance(item, dict)
+        )
+        fields["additional_per_unit"] = tuple(
+            (str(item[0]), float(item[1]))
+            for item in (fields.get("additional_per_unit") or [])
             if isinstance(item, (list, tuple)) and len(item) == 2
         )
         fact = cls(**fields)
@@ -146,14 +190,28 @@ def _parse_time(value: str) -> datetime:
 
 
 def normalize_engine(engine: str) -> str:
-    normalized = str(engine or "").strip().casefold()
-    if normalized in OPENROUTER_ENGINES:
+    normalized = str(engine or "").strip().casefold().replace("_", "-")
+    if normalized in {item.replace("_", "-") for item in OPENROUTER_ENGINES}:
         return OPENROUTER_ENGINE
-    return normalized
+    return {
+        "codex": "codex-cli",
+        "hashi": "hashi-api",
+        "xai": "xai-api",
+    }.get(normalized, normalized)
 
 
 def source_scope(engine: str) -> str:
-    return OPENROUTER_SCOPE if normalize_engine(engine) == OPENROUTER_ENGINE else "direct_provider"
+    return (
+        OPENROUTER_SCOPE
+        if normalize_engine(engine) == OPENROUTER_ENGINE
+        else "openrouter_reference"
+    )
+
+
+def _refresh_lock(path: Path, key: str) -> threading.Lock:
+    lock_key = f"{path}@{key}"
+    with _REFRESH_GUARD:
+        return _REFRESH_LOCKS.setdefault(lock_key, threading.Lock())
 
 
 def _cache_key(engine: str, model: str) -> str:
@@ -199,8 +257,10 @@ def _read_cache(path: Path) -> dict[str, Any]:
     try:
         if path.stat().st_size > 2 * 1024 * 1024:
             return _empty_cache()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        from orchestrator.config_json import read_config_json
+
+        payload = read_config_json(path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return _empty_cache()
     if (
         not isinstance(payload, dict)
@@ -214,19 +274,9 @@ def _read_cache(path: Path) -> dict[str, Any]:
 
 def _write_cache(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        try:
-            temporary.chmod(0o600)
-        except OSError:
-            pass
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    from orchestrator.config_json import write_config_json
+
+    write_config_json(path, payload)
 
 
 @contextmanager
@@ -278,6 +328,7 @@ def _unknown_fact(
     now: datetime,
     previous: PricingFact | None = None,
     source_url: str | None = None,
+    source_model_id: str | None = None,
 ) -> PricingFact:
     last_known = previous if previous and previous.status in {"known", "known_zero"} else None
     return PricingFact(
@@ -296,16 +347,8 @@ def _unknown_fact(
         thinking_per_unit=None,
         request_per_unit=None,
         source_url=source_url,
-        unit_source_url=(
-            OPENROUTER_UNIT_SOURCE_URL
-            if normalize_engine(engine) == OPENROUTER_ENGINE
-            else None
-        ),
-        source_kind=(
-            "openrouter_models_api"
-            if normalize_engine(engine) == OPENROUTER_ENGINE
-            else None
-        ),
+        unit_source_url=(OPENROUTER_UNIT_SOURCE_URL if source_model_id else None),
+        source_kind=("openrouter_models_api" if source_model_id else None),
         fetched_at=_iso(now),
         expires_at=_iso(now + NEGATIVE_TTL),
         source_revision=None,
@@ -314,6 +357,8 @@ def _unknown_fact(
         unknown_reason=reason,
         last_known_revision=(last_known.source_revision if last_known else None),
         last_known_fetched_at=(last_known.fetched_at if last_known else None),
+        source_engine=(OPENROUTER_ENGINE if source_model_id else None),
+        source_model_id=source_model_id,
     )
 
 
@@ -371,18 +416,62 @@ def _valid_cached_fact(fact: PricingFact, engine: str, model: str) -> bool:
         ):
             return False
         tier_names.add(name)
+    additional_names: set[str] = set()
+    for name, value in fact.additional_per_unit:
+        if (
+            re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) is None
+            or name in additional_names
+            or not _safe_stored_rate(value, required=True)
+        ):
+            return False
+        additional_names.add(name)
+    previous_minimum = -1
+    tier_rate_fields = {
+        "input_per_unit",
+        "output_per_unit",
+        "cache_read_per_unit",
+        "cache_write_per_unit",
+        "thinking_per_unit",
+        "request_per_unit",
+    }
+    for tier in fact.conditional_price_tiers:
+        if not isinstance(tier, Mapping):
+            return False
+        if set(tier) - (
+            {"min_prompt_tokens", "additional_per_unit"} | tier_rate_fields
+        ):
+            return False
+        minimum = tier.get("min_prompt_tokens")
+        if (
+            isinstance(minimum, bool)
+            or not isinstance(minimum, int)
+            or minimum < 0
+            or minimum <= previous_minimum
+        ):
+            return False
+        previous_minimum = minimum
+        if not any(field in tier for field in tier_rate_fields) and not tier.get(
+            "additional_per_unit"
+        ):
+            return False
+        if any(
+            not _safe_stored_rate(tier.get(field), required=True)
+            for field in tier_rate_fields
+            if field in tier
+        ):
+            return False
+        tier_additional = tier.get("additional_per_unit", {})
+        if not isinstance(tier_additional, Mapping) or any(
+            re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(name)) is None
+            or not _safe_stored_rate(value, required=True)
+            for name, value in tier_additional.items()
+        ):
+            return False
 
     if fact.status == "unknown":
-        expected_kind = (
-            "openrouter_models_api"
-            if normalized_engine == OPENROUTER_ENGINE
-            else None
-        )
-        expected_unit_url = (
-            OPENROUTER_UNIT_SOURCE_URL
-            if normalized_engine == OPENROUTER_ENGINE
-            else None
-        )
+        has_source = bool(fact.source_model_id)
+        expected_kind = "openrouter_models_api" if has_source else None
+        expected_unit_url = OPENROUTER_UNIT_SOURCE_URL if has_source else None
         if (
             fact.canonical_model_id is not None
             or fact.currency is not None
@@ -392,22 +481,30 @@ def _valid_cached_fact(fact: PricingFact, engine: str, model: str) -> bool:
             or fact.cache_read_per_unit is not None
             or fact.cache_write_per_unit is not None
             or fact.cache_write_tiers
+            or fact.conditional_price_tiers
+            or fact.additional_per_unit
             or fact.thinking_per_unit is not None
             or fact.request_per_unit is not None
             or fact.source_kind != expected_kind
             or fact.unit_source_url != expected_unit_url
+            or fact.source_engine
+            != (OPENROUTER_ENGINE if has_source else None)
             or fact.source_revision is not None
             or fact.revision_kind is not None
             or fact.evidence_sha256 is not None
             or not str(fact.unknown_reason or "").strip()
         ):
             return False
-        if fact.source_url is not None:
+        if has_source:
             try:
-                if fact.source_url != _openrouter_url(requested):
+                if fact.source_url != _openrouter_url(
+                    str(fact.source_model_id)
+                ):
                     return False
             except PricingSourceError:
                 return False
+        elif fact.source_url is not None:
+            return False
         if fact.last_known_revision is not None:
             if not fact.last_known_revision.startswith("openrouter:sha256:"):
                 return False
@@ -419,15 +516,15 @@ def _valid_cached_fact(fact: PricingFact, engine: str, model: str) -> bool:
             return False
         return True
 
-    if normalized_engine != OPENROUTER_ENGINE:
-        return False
     evidence_hash = str(fact.evidence_sha256 or "")
     try:
-        expected_url = _openrouter_url(requested)
+        expected_url = _openrouter_url(str(fact.source_model_id or ""))
     except PricingSourceError:
         return False
     if (
-        _MODEL_ID.fullmatch(str(fact.canonical_model_id or "")) is None
+        fact.source_engine != OPENROUTER_ENGINE
+        or _MODEL_ID.fullmatch(str(fact.source_model_id or "")) is None
+        or _MODEL_ID.fullmatch(str(fact.canonical_model_id or "")) is None
         or fact.currency != "USD"
         or fact.unit != "token"
         or fact.source_url != expected_url
@@ -449,10 +546,22 @@ def _valid_cached_fact(fact: PricingFact, engine: str, model: str) -> bool:
         fact.thinking_per_unit,
         fact.request_per_unit,
         *(value for _, value in fact.cache_write_tiers),
+        *(value for _, value in fact.additional_per_unit),
+        *(
+            value
+            for tier in fact.conditional_price_tiers
+            for key, value in tier.items()
+            if key not in {"min_prompt_tokens", "additional_per_unit"}
+        ),
+        *(
+            value
+            for tier in fact.conditional_price_tiers
+            for value in dict(tier.get("additional_per_unit", {})).values()
+        ),
     )
     all_zero = all(value in {None, 0, 0.0} for value in modeled_rates)
     if fact.status == "known_zero":
-        return requested.endswith(":free") and all_zero
+        return str(fact.source_model_id).endswith(":free") and all_zero
     return fact.status == "known" and not all_zero
 
 
@@ -492,6 +601,7 @@ def get_cached_pricing_fact(
         now=selected_now,
         previous=fact,
         source_url=fact.source_url,
+        source_model_id=fact.source_model_id,
     )
     if fact.status == "unknown":
         stale = replace(
@@ -515,6 +625,94 @@ def _openrouter_url(model: str) -> str:
     )
 
 
+def _catalog_source_model_id(model: str, evidence: HttpEvidence) -> str:
+    """Resolve only a unique exact catalogue identity from bounded evidence."""
+
+    if evidence.url != OPENROUTER_MODELS_URL:
+        raise PricingSourceError("source_url_mismatch")
+    if len(evidence.body) > CATALOG_MAX_RESPONSE_BYTES:
+        raise PricingSourceError("response_too_large")
+    if evidence.status != 200:
+        raise PricingSourceError(f"http_{evidence.status}")
+    if evidence.content_type.split(";", 1)[0].strip().casefold() != "application/json":
+        raise PricingSourceError("unsupported_content_type")
+    try:
+        payload = json.loads(evidence.body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PricingSourceError("malformed_json", str(exc)) from exc
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise PricingSourceError("invalid_model_catalogue")
+    requested = str(model or "").strip().casefold()
+    candidates: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get("id") or "").strip()
+        canonical = str(row.get("canonical_slug") or "").strip()
+        aliases = row.get("aliases") or ()
+        exact_names = {
+            model_id.casefold(),
+            canonical.casefold(),
+            model_id.rsplit("/", 1)[-1].casefold(),
+            canonical.rsplit("/", 1)[-1].casefold(),
+        }
+        if isinstance(aliases, list):
+            exact_names.update(
+                str(item or "").strip().casefold()
+                for item in aliases
+                if str(item or "").strip()
+            )
+        if requested in exact_names and _MODEL_ID.fullmatch(model_id):
+            candidates.append(model_id)
+    candidates = list(dict.fromkeys(candidates))
+    if not candidates:
+        raise PricingSourceError("source_not_qualified")
+    if len(candidates) != 1:
+        raise PricingSourceError("source_alias_ambiguous")
+    return candidates[0]
+
+
+def resolve_source_model_id(
+    engine: str,
+    model: str,
+    *,
+    mappings: Mapping[tuple[str, str], str | Sequence[str]] | None = None,
+    catalogue_evidence: HttpEvidence | None = None,
+) -> str:
+    """Resolve one exact OpenRouter model ID without fuzzy family matching."""
+
+    normalized_engine = normalize_engine(engine).replace("_", "-")
+    requested = str(model or "").strip()
+    if _MODEL_ID.fullmatch(requested):
+        return requested
+
+    selected_mappings = mappings or EXACT_OPENROUTER_MODEL_MAPPINGS
+    raw = selected_mappings.get((normalized_engine, requested.casefold()))
+    if isinstance(raw, str):
+        candidates = (raw,)
+    elif isinstance(raw, Sequence):
+        candidates = tuple(
+            str(item or "").strip() for item in raw if str(item or "").strip()
+        )
+    else:
+        candidates = ()
+    candidates = tuple(dict.fromkeys(candidates))
+    if len(candidates) > 1:
+        raise PricingSourceError("source_alias_ambiguous")
+    if len(candidates) == 1:
+        if _MODEL_ID.fullmatch(candidates[0]) is None:
+            raise PricingSourceError("invalid_source_model_id")
+        return candidates[0]
+
+    namespace = ENGINE_VENDOR_NAMESPACES.get(normalized_engine)
+    if namespace and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:+-]*", requested):
+        return f"{namespace}/{requested}"
+    if catalogue_evidence is not None:
+        return _catalog_source_model_id(requested, catalogue_evidence)
+    raise PricingSourceError("catalogue_required")
+
+
 def bounded_https_get(url: str) -> HttpEvidence:
     """Fetch one allowlisted JSON resource with a hard streaming byte limit."""
 
@@ -530,6 +728,11 @@ def bounded_https_get(url: str) -> HttpEvidence:
     path = parsed.path or "/"
     if parsed.query:
         path += "?" + parsed.query
+    response_limit = (
+        CATALOG_MAX_RESPONSE_BYTES
+        if url == OPENROUTER_MODELS_URL
+        else MAX_RESPONSE_BYTES
+    )
     started = time.monotonic()
     connection = http.client.HTTPSConnection(
         OPENROUTER_HOST,
@@ -548,7 +751,7 @@ def bounded_https_get(url: str) -> HttpEvidence:
         response = connection.getresponse()
         content_type = str(response.getheader("Content-Type") or "")
         content_length = str(response.getheader("Content-Length") or "").strip()
-        if content_length.isdigit() and int(content_length) > MAX_RESPONSE_BYTES:
+        if content_length.isdigit() and int(content_length) > response_limit:
             raise PricingSourceError("response_too_large")
         body = bytearray()
         while True:
@@ -557,11 +760,11 @@ def bounded_https_get(url: str) -> HttpEvidence:
                 raise PricingSourceError("timeout")
             if connection.sock is not None:
                 connection.sock.settimeout(max(0.1, min(CONNECT_TIMEOUT_SECONDS, remaining)))
-            chunk = response.read(min(8192, MAX_RESPONSE_BYTES + 1 - len(body)))
+            chunk = response.read(min(8192, response_limit + 1 - len(body)))
             if not chunk:
                 break
             body.extend(chunk)
-            if len(body) > MAX_RESPONSE_BYTES:
+            if len(body) > response_limit:
                 raise PricingSourceError("response_too_large")
         return HttpEvidence(
             status=int(response.status),
@@ -642,9 +845,90 @@ def _rate(value: Any, *, required: bool, field: str) -> float | None:
     return parsed
 
 
+_OPENROUTER_RATE_FIELDS = {
+    "prompt": "input_per_unit",
+    "completion": "output_per_unit",
+    "input_cache_read": "cache_read_per_unit",
+    "input_cache_write": "cache_write_per_unit",
+    "internal_reasoning": "thinking_per_unit",
+    "request": "request_per_unit",
+}
+_OPENROUTER_CACHE_TIER_FIELDS = {
+    "input_cache_write_5m",
+    "input_cache_write_1h",
+}
+
+
+def _additional_rates(pricing: Mapping[str, Any]) -> tuple[tuple[str, float], ...]:
+    excluded = {
+        "overrides",
+        *_OPENROUTER_RATE_FIELDS,
+        *_OPENROUTER_CACHE_TIER_FIELDS,
+    }
+    values = []
+    for name in sorted(set(pricing) - excluded):
+        rate = _rate(pricing.get(name), required=False, field=name)
+        if rate is not None:
+            values.append((str(name), rate))
+    return tuple(values)
+
+
+def _conditional_tiers(
+    pricing: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    overrides = pricing.get("overrides")
+    if overrides is None or overrides == [] or overrides == ():
+        return ()
+    if not isinstance(overrides, list):
+        raise PricingSourceError("invalid_pricing_schema")
+    tiers: list[dict[str, Any]] = []
+    for raw in overrides:
+        if not isinstance(raw, dict):
+            raise PricingSourceError("invalid_pricing_schema")
+        condition_keys = set(raw) - set(_OPENROUTER_RATE_FIELDS)
+        condition_keys -= _OPENROUTER_CACHE_TIER_FIELDS
+        condition_keys -= {"min_prompt_tokens"}
+        # Unknown numeric keys are price dimensions, not conditions.
+        unknown_price_keys = {
+            key
+            for key in condition_keys
+            if _PLAIN_DECIMAL.fullmatch(str(raw.get(key))) is not None
+        }
+        condition_keys -= unknown_price_keys
+        if condition_keys:
+            raise PricingSourceError("unsupported_pricing_condition")
+        minimum = raw.get("min_prompt_tokens")
+        if (
+            isinstance(minimum, bool)
+            or not isinstance(minimum, int)
+            or minimum < 0
+        ):
+            raise PricingSourceError("invalid_pricing_schema")
+        tier: dict[str, Any] = {"min_prompt_tokens": minimum}
+        for source_name, stored_name in _OPENROUTER_RATE_FIELDS.items():
+            if source_name in raw:
+                tier[stored_name] = _rate(
+                    raw.get(source_name), required=True, field=source_name
+                )
+        additional = {
+            str(name): _rate(raw.get(name), required=True, field=str(name))
+            for name in sorted(unknown_price_keys)
+        }
+        if additional:
+            tier["additional_per_unit"] = additional
+        if len(tier) == 1:
+            raise PricingSourceError("invalid_pricing_schema")
+        tiers.append(tier)
+    tiers.sort(key=lambda item: int(item["min_prompt_tokens"]))
+    if len({int(item["min_prompt_tokens"]) for item in tiers}) != len(tiers):
+        raise PricingSourceError("invalid_pricing_schema")
+    return tuple(tiers)
+
+
 def _openrouter_fact(
     engine: str,
     model: str,
+    source_model_id: str,
     evidence: HttpEvidence,
     *,
     now: datetime,
@@ -670,20 +954,17 @@ def _openrouter_fact(
         if isinstance(data, dict)
         else ""
     )
-    if response_model_id != requested:
+    if response_model_id != source_model_id:
         raise PricingSourceError("model_id_mismatch")
-    if evidence.url != _openrouter_url(requested):
+    if evidence.url != _openrouter_url(source_model_id):
         raise PricingSourceError("source_url_mismatch")
     if (
         not isinstance(pricing, dict)
         or _MODEL_ID.fullmatch(canonical) is None
     ):
         raise PricingSourceError("invalid_pricing_schema")
-    overrides = pricing.get("overrides")
-    if overrides is not None and overrides != []:
-        if not isinstance(overrides, list):
-            raise PricingSourceError("invalid_pricing_schema")
-        raise PricingSourceError("unsupported_pricing_overrides")
+    conditional_tiers = _conditional_tiers(pricing)
+    additional_rates = _additional_rates(pricing)
 
     prompt = _rate(pricing.get("prompt"), required=True, field="prompt")
     completion = _rate(
@@ -720,15 +1001,27 @@ def _openrouter_fact(
             cache_write,
             thinking,
             *(rate for _, rate in tiers),
+            *(rate for _, rate in additional_rates),
+            *(
+                value
+                for tier in conditional_tiers
+                for name, value in tier.items()
+                if name not in {"min_prompt_tokens", "additional_per_unit"}
+            ),
+            *(
+                value
+                for tier in conditional_tiers
+                for value in dict(tier.get("additional_per_unit", {})).values()
+            ),
         )
     )
-    if all_modeled_rates_zero and not requested.endswith(":free"):
+    if all_modeled_rates_zero and not source_model_id.endswith(":free"):
         raise PricingSourceError("unproven_zero_price")
     status = "known_zero" if all_modeled_rates_zero else "known"
     return PricingFact(
         status=status,
-        scope=OPENROUTER_SCOPE,
-        engine=OPENROUTER_ENGINE,
+        scope=source_scope(engine),
+        engine=normalize_engine(engine),
         requested_model_id=requested,
         canonical_model_id=canonical,
         currency="USD",
@@ -749,6 +1042,10 @@ def _openrouter_fact(
         revision_kind="content_sha256",
         evidence_sha256=evidence_hash,
         unknown_reason=None,
+        source_engine=OPENROUTER_ENGINE,
+        source_model_id=source_model_id,
+        conditional_price_tiers=conditional_tiers,
+        additional_per_unit=additional_rates,
     )
 
 
@@ -766,56 +1063,79 @@ def refresh_pricing_fact(
     selected_now = _utc(now)
     path = _selected_cache_path(cache_path)
     key = _cache_key(engine, model)
-    with _exclusive_cache_lock(path):
-        payload = _read_cache(path)
-        previous = _cached_fact(payload, key, engine, model)
-        if previous is not None and _fact_is_fresh(previous, selected_now) and not force:
-            return previous
-
-        url: str | None = None
+    with _refresh_lock(path, key):
         try:
-            if normalize_engine(engine) != OPENROUTER_ENGINE:
-                raise PricingSourceError("source_not_qualified")
-            url = _openrouter_url(model)
-            evidence = (fetcher or shared_bounded_https_get)(url)
+            with _exclusive_cache_lock(path):
+                payload = _read_cache(path)
+                previous = _cached_fact(payload, key, engine, model)
+                if (
+                    previous is not None
+                    and _fact_is_fresh(previous, selected_now)
+                    and not force
+                ):
+                    return previous
+        except (PricingSourceError, OSError):
+            previous = _cached_fact(_read_cache(path), key, engine, model)
+
+        # Network I/O is outside the whole-cache lock. Independent models can
+        # discover concurrently, while the exact-key lock coalesces duplicates.
+        source_model_id: str | None = None
+        url: str | None = None
+        fact: PricingFact | None = None
+        failure_reason: str | None = None
+        selected_fetcher = fetcher or shared_bounded_https_get
+        try:
+            try:
+                source_model_id = resolve_source_model_id(engine, model)
+            except PricingSourceError as exc:
+                if exc.reason != "catalogue_required":
+                    raise
+                catalogue = selected_fetcher(OPENROUTER_MODELS_URL)
+                source_model_id = resolve_source_model_id(
+                    engine,
+                    model,
+                    catalogue_evidence=catalogue,
+                )
+            url = _openrouter_url(source_model_id)
+            evidence = selected_fetcher(url)
             fact = _openrouter_fact(
                 engine,
                 model,
+                source_model_id,
                 evidence,
                 now=selected_now,
             )
         except PricingSourceError as exc:
-            fact = _unknown_fact(
-                engine,
-                model,
-                reason=exc.reason,
-                now=selected_now,
-                previous=previous,
-                source_url=url,
-            )
+            failure_reason = exc.reason
         except TimeoutError:
-            fact = _unknown_fact(
-                engine,
-                model,
-                reason="timeout",
-                now=selected_now,
-                previous=previous,
-                source_url=url,
-            )
+            failure_reason = "timeout"
         except Exception:
-            # Price discovery must never block model use or expose arbitrary
+            # Discovery must never block model use or expose arbitrary
             # exception details in a shared cache.
-            fact = _unknown_fact(
-                engine,
-                model,
-                reason="fetch_failed",
-                now=selected_now,
-                previous=previous,
-                source_url=url,
-            )
-        payload["facts"][key] = fact.to_dict()
-        _write_cache(path, payload)
-        return fact
+            failure_reason = "fetch_failed"
+
+        with _exclusive_cache_lock(path):
+            payload = _read_cache(path)
+            latest = _cached_fact(payload, key, engine, model)
+            if (
+                latest is not None
+                and _fact_is_fresh(latest, selected_now)
+                and not force
+            ):
+                return latest
+            if fact is None:
+                fact = _unknown_fact(
+                    engine,
+                    model,
+                    reason=failure_reason or "fetch_failed",
+                    now=selected_now,
+                    previous=latest or previous,
+                    source_url=url,
+                    source_model_id=source_model_id,
+                )
+            payload["facts"][key] = fact.to_dict()
+            _write_cache(path, payload)
+            return fact
 
 
 def calculate_cost(
@@ -841,17 +1161,30 @@ def calculate_cost(
     input_count = max(0, int(input_tokens or 0))
     output_count = max(0, int(output_tokens or 0))
     cached_count = min(input_count, max(0, int(cached_tokens or 0)))
-    if cached_count and fact.cache_read_per_unit is None:
+    rates = {
+        "input_per_unit": fact.input_per_unit,
+        "output_per_unit": fact.output_per_unit,
+        "cache_read_per_unit": fact.cache_read_per_unit,
+        "thinking_per_unit": fact.thinking_per_unit,
+        "request_per_unit": fact.request_per_unit,
+    }
+    for tier in fact.conditional_price_tiers:
+        if input_count < int(tier["min_prompt_tokens"]):
+            break
+        for name in tuple(rates):
+            if name in tier:
+                rates[name] = float(tier[name])
+    if cached_count and rates["cache_read_per_unit"] is None:
         return None
     separate_thinking = 0 if thinking_in_output else max(0, int(thinking_tokens or 0))
-    if separate_thinking and fact.thinking_per_unit is None:
+    if separate_thinking and rates["thinking_per_unit"] is None:
         return None
     total = (
-        (input_count - cached_count) * fact.input_per_unit
-        + cached_count * (fact.cache_read_per_unit or 0.0)
-        + output_count * fact.output_per_unit
-        + separate_thinking * (fact.thinking_per_unit or 0.0)
-        + (fact.request_per_unit or 0.0)
+        (input_count - cached_count) * float(rates["input_per_unit"] or 0.0)
+        + cached_count * float(rates["cache_read_per_unit"] or 0.0)
+        + output_count * float(rates["output_per_unit"] or 0.0)
+        + separate_thinking * float(rates["thinking_per_unit"] or 0.0)
+        + float(rates["request_per_unit"] or 0.0)
     )
     return round(total, 6)
 

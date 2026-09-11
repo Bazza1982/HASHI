@@ -551,6 +551,7 @@
     "meter.tail.label.meditation": "冥想",
     "meter.tail.pricing_unknown": "未知",
     "meter.tail.cost.pricing": "{icon} {label}：≈ {cost}",
+    "meter.tail.cost.openrouter_reference": "{icon} {label}：≈ {cost}（OpenRouter 参考估价）",
     "meter.tail.cost.provider": "{icon} {label}：{cost}",
     "meter.tail.cost.provider_priced": "{icon} {label}：{cost}",
     "meter.tail.cost.local": "{icon} {label}：{cost}",
