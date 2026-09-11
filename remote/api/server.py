@@ -160,6 +160,9 @@ TUI_PROXY_OPERATIONS = {
     "background_jobs",
     "chat",
     "chat_attachment",
+    "voice_state",
+    "voice_profile",
+    "speech",
     "run_info",
     "transcript_recent",
     "transcript_poll",
@@ -347,6 +350,8 @@ class TuiProxyRequest(BaseModel):
     delivery_policy: Optional[dict[str, Any]] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
+    request_id: Optional[str] = None
+    voice_profile: Optional[str] = None
     attachment: Optional[dict[str, Any]] = None
     workzone_ref: Optional[str] = None
     offset: int = 0
@@ -365,6 +370,8 @@ class ProtocolTuiRequest(BaseModel):
     delivery_policy: Optional[dict[str, Any]] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
+    request_id: Optional[str] = None
+    voice_profile: Optional[str] = None
     attachment: Optional[dict[str, Any]] = None
     workzone_ref: Optional[str] = None
     offset: int = 0
@@ -583,6 +590,9 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
         "background_jobs",
         "chat",
         "chat_attachment",
+        "voice_state",
+        "voice_profile",
+        "speech",
         "transcript_recent",
         "transcript_poll",
     }:
@@ -640,6 +650,25 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
             declared_sha = str(attachment.get("sha256") or "")
             if declared_sha and declared_sha != hashlib.sha256(decoded).hexdigest():
                 return False, "attachment_digest_mismatch"
+    if operation == "speech":
+        text = str(payload.text or "")
+        request_id = str(payload.request_id or "").strip()
+        if not text or len(text) > 20_000:
+            return False, "invalid_speech_text"
+        if (
+            not request_id
+            or len(request_id) > 160
+            or any(ord(character) < 33 for character in request_id)
+        ):
+            return False, "invalid_request_id"
+    if operation == "voice_profile":
+        profile = str(payload.voice_profile or "").strip()
+        if (
+            not profile
+            or len(profile) > 64
+            or any(not (character.isalnum() or character in {"_", "-"}) for character in profile)
+        ):
+            return False, "invalid_voice_profile"
     if operation == "run_info":
         for value in (payload.session_id, payload.run_id):
             identifier = str(value or "").strip()
@@ -719,6 +748,23 @@ def _local_workbench_tui_request(
                 "_connector_evidence": connector_evidence
             }
         body_bytes = json.dumps(body).encode("utf-8")
+    elif operation in {"voice_state", "voice_profile"}:
+        path = "/api/tui/voice"
+        method = "POST"
+        body = {"agent": agent}
+        if operation == "voice_profile":
+            body["profile"] = str(payload.voice_profile or "")
+        body_bytes = json.dumps(body).encode("utf-8")
+    elif operation == "speech":
+        path = "/api/tui/speech"
+        method = "POST"
+        body_bytes = json.dumps(
+            {
+                "agent": agent,
+                "text": str(payload.text or ""),
+                "request_id": str(payload.request_id or ""),
+            }
+        ).encode("utf-8")
     elif operation == "run_info":
         path = (
             f"/api/v1/sessions/{quote(str(payload.session_id), safe='')}/runs/"
@@ -1593,6 +1639,8 @@ def create_app(
             delivery_policy=payload.delivery_policy,
             session_id=payload.session_id,
             run_id=payload.run_id,
+            request_id=payload.request_id,
+            voice_profile=payload.voice_profile,
             attachment=payload.attachment,
             workzone_ref=payload.workzone_ref,
             offset=payload.offset,
@@ -1613,7 +1661,13 @@ def create_app(
                     lambda u=url: _post_json_with_optional_hmac(
                         u,
                         protocol_payload.model_dump(),
-                        timeout=40 if payload.operation == "chat_attachment" else 20,
+                        timeout=(
+                            130
+                            if payload.operation == "speech"
+                            else 40
+                            if payload.operation == "chat_attachment"
+                            else 20
+                        ),
                     ),
                 )
                 status = int(result.pop("__http_status", 200)) if isinstance(result, dict) else 502

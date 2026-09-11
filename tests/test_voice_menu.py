@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,6 +86,33 @@ def test_voice_profiles_resolve_supported_native_voice_and_tts_fallback(tmp_path
     assert manager._tts_voice_for_profile("calm_male", "終わりました。") == (
         "ja-JP-NaokiNeural"
     )
+
+
+def test_voice_state_writer_normalizes_legacy_bytes_and_preserves_unknown_fields(tmp_path):
+    manager = _manager(tmp_path)
+    manager.workspace_dir.mkdir(parents=True)
+    manager.state_path.write_bytes(
+        b'\xef\xbb\xbf{\r\n  "enabled": false,\r\n  "future": {"keep": 1}\r\n}\r\n'
+    )
+
+    manager.set_voice_profile("clear_female")
+
+    raw = manager.state_path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert b"\r\n" not in raw
+    assert json.loads(raw)["future"] == {"keep": 1}
+
+
+def test_voice_state_writer_rejects_corruption_without_overwrite(tmp_path):
+    manager = _manager(tmp_path)
+    manager.workspace_dir.mkdir(parents=True)
+    manager.state_path.write_bytes(b'{"enabled":')
+    before = manager.state_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="unreadable"):
+        manager.set_voice_profile("warm_female")
+
+    assert manager.state_path.read_bytes() == before
 
 
 def test_voice_modes_coordinate_native_and_legacy_tts_state(tmp_path):

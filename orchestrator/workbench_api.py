@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import inspect
 import json
 import logging
 import mimetypes
@@ -615,6 +616,8 @@ class WorkbenchApiServer:
             "/api/project-chat/{name}/{project}", self.handle_project_chat_log
         )
         self.app.router.add_post("/api/chat", self.handle_chat)
+        self.app.router.add_post("/api/tui/speech", self.handle_tui_speech)
+        self.app.router.add_post("/api/tui/voice", self.handle_tui_voice)
         self.app.router.add_get(
             "/api/capabilities/message-source", self.handle_message_source_capabilities
         )
@@ -5242,6 +5245,98 @@ class WorkbenchApiServer:
                     mimetypes.guess_type(candidate.name)[0] or "application/octet-stream",
                 )
         raise ValueError("Workzone attachment was not found in an enabled Workzone")
+
+    async def handle_tui_voice(self, request):
+        """Read or change the selected Agent's shared semantic voice profile."""
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "code": "invalid_json", "error": "invalid JSON body"},
+                status=400,
+            )
+        runtime = self._runtime_map().get(str(payload.get("agent") or ""))
+        if runtime is None:
+            return web.json_response(
+                {"ok": False, "code": "agent_not_found", "error": "agent not found"},
+                status=404,
+            )
+        profile = str(payload.get("profile") or "").strip().casefold()
+        method_name = "set_tui_voice_profile" if profile else "tui_voice_state"
+        method = getattr(runtime, method_name, None)
+        if not callable(method):
+            return web.json_response(
+                {"ok": False, "code": "voice_unavailable", "error": "voice controls are unavailable"},
+                status=503,
+            )
+        try:
+            result = method(profile) if profile else method()
+            if inspect.isawaitable(result):
+                result = await result
+        except ValueError as exc:
+            return web.json_response(
+                {"ok": False, "code": "invalid_voice_profile", "error": str(exc)},
+                status=400,
+            )
+        except RuntimeError as exc:
+            return web.json_response(
+                {"ok": False, "code": "voice_update_failed", "error": str(exc)},
+                status=503,
+            )
+        state = dict(result or {})
+        return web.json_response({"ok": True, **state})
+
+    async def handle_tui_speech(self, request):
+        """Generate a TUI-only audio asset without a Connector delivery side effect."""
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "code": "invalid_json", "error": "invalid JSON body"},
+                status=400,
+            )
+        runtime = self._runtime_map().get(str(payload.get("agent") or ""))
+        if runtime is None:
+            return web.json_response(
+                {"ok": False, "code": "agent_not_found", "error": "agent not found"},
+                status=404,
+            )
+        text = str(payload.get("text") or "").strip()
+        request_id = str(payload.get("request_id") or "").strip()
+        if not text or len(text) > 20_000 or not request_id or len(request_id) > 160:
+            return web.json_response(
+                {"ok": False, "code": "invalid_speech_request", "error": "valid text and request_id are required"},
+                status=400,
+            )
+        method = getattr(runtime, "synthesize_tui_speech", None)
+        if not callable(method):
+            return web.json_response(
+                {"ok": False, "code": "tts_unavailable", "error": "TTS is unavailable for this Agent"},
+                status=503,
+            )
+        try:
+            result = method(text, request_id)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            logging.getLogger("BridgeU.Workbench").warning(
+                "TUI speech generation failed: agent=%s error=%s",
+                getattr(runtime, "name", "unknown"),
+                exc,
+            )
+            return web.json_response(
+                {"ok": False, "code": "tts_generation_failed", "error": str(exc)},
+                status=503,
+            )
+        response = dict(result or {})
+        if len(str(response.get("content_b64") or "")) > 4_200_000:
+            return web.json_response(
+                {"ok": False, "code": "speech_asset_too_large", "error": "generated speech is too large"},
+                status=502,
+            )
+        return web.json_response({"ok": True, **response})
 
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()

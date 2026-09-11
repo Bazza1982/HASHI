@@ -1,4 +1,6 @@
 from __future__ import annotations
+import base64
+import hashlib
 import html
 import re
 import sys
@@ -1975,6 +1977,59 @@ class FlexibleAgentRuntime:
             self.error_logger.error(f"Voice reply failed for {request_id}: {e}")
             self._mark_error(f"Voice reply failed: {e}")
             return False
+
+    def tui_voice_state(self) -> dict[str, Any]:
+        """Return the shared Agent voice identity without Telegram UI state."""
+
+        return {
+            "profile": self.voice_manager.get_voice_profile_id(),
+            "profiles": [
+                {"id": profile_id, "label": str(profile.get("label") or profile_id)}
+                for profile_id, profile in self.voice_manager.get_voice_profiles()
+            ],
+        }
+
+    def set_tui_voice_profile(self, profile_id: str) -> dict[str, Any]:
+        """Set the existing shared voice identity for a TUI client."""
+
+        available = {profile for profile, _value in self.voice_manager.get_voice_profiles()}
+        if str(profile_id or "").strip().casefold() not in available:
+            raise ValueError("unknown semantic voice profile")
+        self.voice_manager.set_voice_profile(profile_id)
+        return self.tui_voice_state()
+
+    async def synthesize_tui_speech(self, text: str, request_id: str) -> dict[str, Any]:
+        """Generate a bounded local-presentation asset without any Bot send."""
+
+        spoken = str(text or "").strip()
+        if not spoken:
+            raise ValueError("speech text is required")
+        if len(spoken) > 20_000:
+            raise ValueError("speech text is too long")
+        asset = await self.voice_manager.synthesize_reply(
+            self.name,
+            str(request_id or f"tui-say-{uuid4().hex}"),
+            spoken,
+            force=True,
+        )
+        if asset is None:
+            raise RuntimeError("TTS is unavailable for this Agent")
+        try:
+            content = await asyncio.to_thread(asset.ogg_path.read_bytes)
+        except OSError:
+            raise RuntimeError("the generated speech asset could not be read") from None
+        if not content.startswith(b"OggS"):
+            raise RuntimeError("the TTS provider returned malformed Ogg audio")
+        if len(content) > 3 * 1024 * 1024:
+            raise RuntimeError("the generated speech asset exceeds the TUI limit")
+        return {
+            "content_b64": base64.b64encode(content).decode("ascii"),
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "media_type": "audio/ogg",
+            "profile": self.voice_manager.get_voice_profile_id(),
+            "request_id": str(request_id or ""),
+        }
 
     def _format_status_mode_block(self, mode: str, state: Mapping[str, Any], detailed: bool) -> list[str]:
         return runtime_status.format_status_mode_block(mode, state, detailed)

@@ -73,6 +73,8 @@ The proxy accepts only these named operations:
 | `background_jobs` | `GET /api/background-jobs?agent={agent}` |
 | `chat` | `POST /api/chat` |
 | `chat_attachment` | one bounded `POST /api/chat` carrying frozen bytes or a target Workzone reference |
+| `voice_state` / `voice_profile` | `POST /api/tui/voice` against the selected Agent's existing voice owner |
+| `speech` | `POST /api/tui/speech`; returns bounded authenticated Ogg bytes, never a remote path |
 | `transcript_recent` | `GET /api/transcript/{agent}` |
 | `transcript_poll` | `GET /api/transcript/{agent}/poll` |
 | `log_tail` | bounded instance-owned `logs/bridge.log` tail; no path returned |
@@ -86,6 +88,15 @@ the same target Agent media Run as its caption. A Workzone `@file` reference is
 resolved only by the target instance beneath that Agent's active Workzone;
 the source machine's path is never forwarded. Switching instance or Agent
 invalidates a pending attachment and late generations are discarded.
+
+`/say` and TUI auto-read are local presentation operations, not Agent chat
+commands. Speech is generated on the selected instance using the Agent's
+shared semantic voice profile, integrity-checked at the TUI, then played only
+on the launch computer. It does not enter the Conversation or any Telegram
+delivery path. One generation-fenced player task owns playback; a newer
+request, target switch, auto-read Off, or exit cancels it before another asset
+may play. Auto-read is a launch-client preference namespaced by instance and
+Agent; the semantic voice profile remains Agent-owned shared state.
 
 The TUI is HASHI's permanent built-in reference terminal Connector. This
 switching contract currently proxies the basic Backend API chat/transcript

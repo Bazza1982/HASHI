@@ -1,15 +1,16 @@
 from __future__ import annotations
 import copy
 import html
-import json
 import importlib.util
 import os
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from orchestrator import ui_language
+from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.tts_providers import build_provider, list_provider_names
 from orchestrator.voice_synthesizer import VoiceAsset
 from orchestrator.command_ui import setting_card
@@ -584,15 +585,17 @@ class VoiceManager:
                 f"Unknown voice profile: {profile_id}. "
                 f"Available: {', '.join(self.VOICE_PROFILES)}"
             )
-        state = self._load()
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            native["voice"] = self._native_voice_for_profile(key, native)
+            state["native"] = native
+            state["voice_profile"] = key
+            state["provider"] = "edge"
+            state["voice_name"] = self._tts_voice_for_profile(key, "Hello.")
+            state["provider_options"] = {}
+
+        state = self._update(mutate)
         native = self._native_policy_from_state(state)
-        native["voice"] = self._native_voice_for_profile(key, native)
-        state["native"] = native
-        state["voice_profile"] = key
-        state["provider"] = "edge"
-        state["voice_name"] = self._tts_voice_for_profile(key, "Hello.")
-        state["provider_options"] = {}
-        self._save(state)
         return (
             f"Voice set to {profile['label']} "
             f"(native {native['voice']}; language-aware TTS fallback)."
@@ -614,14 +617,15 @@ class VoiceManager:
             normalized = "native"
         if normalized not in {"off", "tts", "native"}:
             raise RuntimeError("Voice mode must be off, tts, or native.")
-        state = self._load()
-        native = self._native_policy_from_state(state)
-        if normalized == "native":
-            self._prepare_native_mode(state, native)
-        native["mode"] = normalized
-        state["native"] = native
-        state["enabled"] = normalized == "tts"
-        self._save(state)
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            if normalized == "native":
+                self._prepare_native_mode(state, native)
+            native["mode"] = normalized
+            state["native"] = native
+            state["enabled"] = normalized == "tts"
+
+        self._update(mutate)
         return f"Voice mode set to {normalized.upper()}."
 
     def voice_menu_text(self) -> str:
@@ -731,34 +735,62 @@ class VoiceManager:
                 assets.append((str(renderer), path))
         return tuple(assets)
 
+    def _normalise_state(self, data: dict) -> dict:
+        merged = copy.deepcopy(self.DEFAULT_STATE)
+        merged.update(data)
+        if not isinstance(merged.get("provider_options"), dict):
+            merged["provider_options"] = {}
+        voice_profile = str(merged.get("voice_profile") or "").strip().casefold()
+        merged["voice_profile"] = (
+            voice_profile if voice_profile in self.VOICE_PROFILES else None
+        )
+        raw_native = data.get("native")
+        native = copy.deepcopy(self.DEFAULT_STATE["native"])
+        if isinstance(raw_native, dict):
+            native.update(raw_native)
+        merged["native"] = self._normalise_native_policy(native)
+        return merged
+
     def _load(self) -> dict:
-        if not self.state_path.exists():
-            return copy.deepcopy(self.DEFAULT_STATE)
         try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            merged = copy.deepcopy(self.DEFAULT_STATE)
-            merged.update(data if isinstance(data, dict) else {})
-            if not isinstance(merged.get("provider_options"), dict):
-                merged["provider_options"] = {}
-            voice_profile = str(merged.get("voice_profile") or "").strip().casefold()
-            merged["voice_profile"] = (
-                voice_profile if voice_profile in self.VOICE_PROFILES else None
-            )
-            raw_native = data.get("native") if isinstance(data, dict) else None
-            native = copy.deepcopy(self.DEFAULT_STATE["native"])
-            if isinstance(raw_native, dict):
-                native.update(raw_native)
-            merged["native"] = self._normalise_native_policy(native)
-            return merged
-        except Exception:
+            return self._normalise_state(dict(read_config_json(self.state_path)))
+        except FileNotFoundError:
+            return copy.deepcopy(self.DEFAULT_STATE)
+        except (OSError, ValueError, TypeError):
+            # Reads remain backwards compatible and fail to safe defaults.
             return copy.deepcopy(self.DEFAULT_STATE)
 
-    def _save(self, payload: dict):
+    def _update(self, mutate: Callable[[dict], None], *, retries: int = 4) -> dict:
+        """Fresh-read mutation that never overwrites corrupt or newer state."""
+
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
-            encoding="utf-8",
-        )
+        conflict: Exception | None = None
+        for _attempt in range(max(1, retries)):
+            try:
+                try:
+                    document = read_config_json(self.state_path)
+                    revision: str | None = document.revision
+                    state = self._normalise_state(dict(document))
+                except FileNotFoundError:
+                    revision = None
+                    state = copy.deepcopy(self.DEFAULT_STATE)
+                except (OSError, ValueError, TypeError) as exc:
+                    raise RuntimeError(
+                        f"Voice state is unreadable; no settings were changed: {exc}"
+                    ) from exc
+                mutate(state)
+                write_config_json(
+                    self.state_path,
+                    state,
+                    expected_revision=revision,
+                )
+                return state
+            except ConfigConflictError as exc:
+                conflict = exc
+                continue
+        raise RuntimeError(
+            "Voice state changed repeatedly; reopen the setting and try again"
+        ) from conflict
 
     def get_state(self) -> dict:
         return self._load()
@@ -851,34 +883,44 @@ class VoiceManager:
         return self.set_reply_mode(mode)
 
     def set_native_target(self, provider: str | None, model: str | None) -> str:
-        state = self._load()
-        native = self._native_policy_from_state(state)
-        native["provider"] = str(provider or "").strip() or None
-        native["model"] = str(model or "").strip() or None
-        if bool(native["provider"]) != bool(native["model"]):
+        selected_provider = str(provider or "").strip() or None
+        selected_model = str(model or "").strip() or None
+        if bool(selected_provider) != bool(selected_model):
             raise RuntimeError("Native provider and model must be configured together.")
-        profile_id = str(state.get("voice_profile") or "").strip().casefold()
-        if profile_id:
-            native["voice"] = self._native_voice_for_profile(profile_id, native)
-        state["native"] = native
-        self._save(state)
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            native["provider"] = selected_provider
+            native["model"] = selected_model
+            profile_id = str(state.get("voice_profile") or "").strip().casefold()
+            if profile_id:
+                native["voice"] = self._native_voice_for_profile(profile_id, native)
+            state["native"] = native
+
+        state = self._update(mutate)
+        native = self._native_policy_from_state(state)
         return f"Native target set to {self._native_target_label(native)}."
 
     def set_native_voice(self, voice: str | None) -> str:
-        state = self._load()
+        selected_voice = str(voice or "").strip() or None
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            native["voice"] = selected_voice
+            state["native"] = native
+            state["voice_profile"] = None
+
+        state = self._update(mutate)
         native = self._native_policy_from_state(state)
-        native["voice"] = str(voice or "").strip() or None
-        state["native"] = native
-        state["voice_profile"] = None
-        self._save(state)
         return f"Native voice set to {native['voice'] or 'configured default'}."
 
     def set_native_format(self, audio_format: str | None) -> str:
-        state = self._load()
+        selected_format = str(audio_format or "").strip().casefold() or None
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            native["format"] = selected_format
+            state["native"] = native
+
+        state = self._update(mutate)
         native = self._native_policy_from_state(state)
-        native["format"] = str(audio_format or "").strip().casefold() or None
-        state["native"] = native
-        self._save(state)
         return f"Native format set to {native['format'] or 'capability-selected default'}."
 
     def set_native_reply_content(self, content: str) -> str:
@@ -890,11 +932,12 @@ class VoiceManager:
         normalized = aliases.get(str(content or "").strip().casefold(), str(content or "").strip().casefold())
         if normalized not in {"audio_and_text", "audio_only", "text_only"}:
             raise RuntimeError("Reply content must be both, audio, or text.")
-        state = self._load()
-        native = self._native_policy_from_state(state)
-        native["reply_content"] = normalized
-        state["native"] = native
-        self._save(state)
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            native["reply_content"] = normalized
+            state["native"] = native
+
+        self._update(mutate)
         return f"Native reply content set to {normalized}."
 
     def set_native_fallback(self, fallback: str) -> str:
@@ -902,11 +945,12 @@ class VoiceManager:
         normalized = aliases.get(str(fallback or "").strip().casefold(), str(fallback or "").strip().casefold())
         if normalized not in {"local_chain", "native_only"}:
             raise RuntimeError("Fallback must be local_chain or native_only.")
-        state = self._load()
-        native = self._native_policy_from_state(state)
-        native["fallback"] = normalized
-        state["native"] = native
-        self._save(state)
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            native["fallback"] = normalized
+            state["native"] = native
+
+        self._update(mutate)
         return f"Native fallback set to {normalized}."
 
     def set_native_retention(self, value: str | int) -> str:
@@ -922,22 +966,24 @@ class VoiceManager:
             if minutes < 1:
                 raise RuntimeError("Retention must be at least one minute.")
             retention = minutes * 60
-        state = self._load()
-        native = self._native_policy_from_state(state)
-        native["retention_seconds"] = retention
-        state["native"] = native
-        self._save(state)
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            native["retention_seconds"] = retention
+            state["native"] = native
+
+        self._update(mutate)
         return f"Native audio retention set to {self._retention_label(retention)}."
 
     def set_output_transcript_echo(self, enabled: bool) -> str:
-        state = self._load()
-        native = self._native_policy_from_state(state)
-        native["output_transcript_echo"] = bool(enabled)
-        native["reply_content"] = (
-            "audio_and_text" if enabled else "audio_only"
-        )
-        state["native"] = native
-        self._save(state)
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            native["output_transcript_echo"] = bool(enabled)
+            native["reply_content"] = (
+                "audio_and_text" if enabled else "audio_only"
+            )
+            state["native"] = native
+
+        self._update(mutate)
         return f"Native output transcript echo is now {'ON' if enabled else 'OFF'}."
 
     def is_enabled(self) -> bool:
@@ -976,35 +1022,34 @@ class VoiceManager:
         )
 
     def set_enabled(self, enabled: bool) -> str:
-        state = self._load()
-        state["enabled"] = bool(enabled)
-        self._save(state)
+        self._update(lambda state: state.__setitem__("enabled", bool(enabled)))
         return f"Voice replies are now {'ON' if enabled else 'OFF'}."
 
     def set_provider(self, provider_name: str) -> str:
         name = (provider_name or "").strip().lower()
         if name not in self.list_providers():
             raise RuntimeError(f"Unknown voice provider: {provider_name}. Available: {', '.join(self.list_providers())}")
-        state = self._load()
-        state["provider"] = name
-        state["voice_profile"] = None
-        self._save(state)
+        def mutate(state: dict) -> None:
+            state["provider"] = name
+            state["voice_profile"] = None
+
+        self._update(mutate)
         return f"Voice provider set to {name}."
 
     def set_voice_name(self, voice_name: str) -> str:
         preset = self._preset_payload(voice_name)
         if preset:
             return self.apply_voice_preset(voice_name)
-        state = self._load()
-        state["voice_name"] = voice_name.strip() or None
-        state["voice_profile"] = None
-        self._save(state)
-        return f"Voice name set to {state['voice_name'] or 'default'}."
+        selected_name = voice_name.strip() or None
+        def mutate(state: dict) -> None:
+            state["voice_name"] = selected_name
+            state["voice_profile"] = None
+
+        self._update(mutate)
+        return f"Voice name set to {selected_name or 'default'}."
 
     def set_rate(self, rate: int) -> str:
-        state = self._load()
-        state["rate"] = int(rate)
-        self._save(state)
+        self._update(lambda state: state.__setitem__("rate", int(rate)))
         return f"Voice rate set to {int(rate)}."
 
     def provider_hints(self) -> str:
@@ -1023,12 +1068,13 @@ class VoiceManager:
             raise RuntimeError(f"Unknown voice preset: {alias}. Use /voice voices.")
         if preset["provider"] == "piper" and not Path(preset["voice_name"]).exists():
             raise RuntimeError(f"Voice preset {alias} is not ready on disk: {preset['voice_name']}")
-        state = self._load()
-        state["provider"] = preset["provider"]
-        state["voice_name"] = preset["voice_name"]
-        state["provider_options"] = dict(preset.get("provider_options") or {})
-        state["voice_profile"] = None
-        self._save(state)
+        def mutate(state: dict) -> None:
+            state["provider"] = preset["provider"]
+            state["voice_name"] = preset["voice_name"]
+            state["provider_options"] = dict(preset.get("provider_options") or {})
+            state["voice_profile"] = None
+
+        self._update(mutate)
         return f"Voice preset set to {alias}: {preset['label']}."
 
     async def synthesize_reply(

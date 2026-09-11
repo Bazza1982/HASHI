@@ -114,7 +114,15 @@ Current implementation boundary:
   ownership only after the clipboard accepts it;
 - short sent/received sounds are a local, persisted TUI preference. Windows uses
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
-- language, layout, sounds, the TUI typing indicator, and the default Telegram
+- `/say` and automatic reply speech are TUI-only presentation. The selected
+  instance generates bounded Ogg bytes using the Agent-owned semantic voice
+  profile, while the launch computer owns the sole non-overlapping player.
+  These controls never enqueue a chat command or create Telegram output;
+- TUI auto-read is persisted per launch client, instance and Agent. The four
+  available semantic profiles are discovered from the Agent voice owner and
+  profile changes use that existing revision-safe state rather than a second
+  TUI voice configuration;
+- language, layout, sounds, auto-read, the TUI typing indicator, and the default Telegram
   mirror choice are local persisted Connector preferences;
 - the side panel is closed by default. `/sidepanel` opens the TUI's persisted,
   read-only information panel;

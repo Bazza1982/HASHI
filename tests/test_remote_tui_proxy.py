@@ -406,6 +406,80 @@ def test_tui_attachment_proxy_rejects_corrupt_or_ambiguous_sources():
     )
 
 
+def test_tui_speech_proxy_maps_only_to_local_presentation_endpoint(monkeypatch):
+    captured = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"ok":true}'
+
+    def urlopen(request, timeout):
+        captured.update(
+            method=request.get_method(),
+            url=request.full_url,
+            body=json.loads(request.data.decode("utf-8")),
+            timeout=timeout,
+        )
+        return Response()
+
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
+
+    status, result = remote_server._local_workbench_tui_request(
+        ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation="speech",
+            agent="akane",
+            text="last visible reply",
+            request_id="tui-say-1",
+        ),
+        timeout=120,
+    )
+
+    assert status == 200
+    assert result == {"ok": True}
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/api/tui/speech")
+    assert captured["body"] == {
+        "agent": "akane",
+        "text": "last visible reply",
+        "request_id": "tui-say-1",
+    }
+    assert "delivery_policy" not in captured["body"]
+
+
+def test_tui_speech_proxy_rejects_missing_identity_and_invalid_profile():
+    missing_request = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="speech",
+        agent="akane",
+        text="hello",
+    )
+    invalid_profile = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="voice_profile",
+        agent="akane",
+        voice_profile="../../voice",
+    )
+
+    assert remote_server._validate_tui_proxy_payload(missing_request) == (
+        False,
+        "invalid_request_id",
+    )
+    assert remote_server._validate_tui_proxy_payload(invalid_profile) == (
+        False,
+        "invalid_voice_profile",
+    )
+
+
 def test_tui_proxy_accepts_only_agent_scoped_sidepanel_reads():
     for operation in ("agent_overview", "scheduler_jobs", "background_jobs"):
         missing_agent = ProtocolTuiRequest(

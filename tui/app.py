@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from orchestrator.runtime_effort_options import get_available_efforts
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
 from tui.attachments import PendingAttachment, TuiAttachmentError, snapshot_bytes, snapshot_path
+from tui.audio import TuiAudioError, decode_tui_audio, play_ogg_bytes
 from tui.clipboard import copy_to_windows_clipboard, read_windows_clipboard_png
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
 from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
@@ -71,7 +73,9 @@ TUI_COMMAND_HELP = {
     "agents": ("查看可用 Agent", "List available Agents"),
     "clear": ("清空当前 TUI 显示", "Clear the current TUI view"),
     "quit": ("退出 TUI", "Exit the TUI"),
+    "say": ("在本机朗读最后一条代理回复", "Read the last Agent reply on this computer"),
     "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
+    "voice": ("设置本机自动朗读与共享声音", "Set local auto-read and the shared voice"),
 }
 TUI_COMMAND_HELP["telegram"] = (
     "\u67e5\u770b\u6216\u8bbe\u7f6e TUI Telegram \u955c\u50cf",
@@ -113,6 +117,12 @@ TUI_COMMAND_GUIDES = {
         "/sidepanel [on|off|toggle|refresh|auto <on|off|toggle>]",
         ("on", "off", "toggle", "refresh", "auto"),
         example="/sidepanel on",
+    ),
+    "say": CommandGuide("/say", example="/say"),
+    "voice": CommandGuide(
+        "/voice [status|on|off|<profile>|advanced]",
+        ("status", "on", "off", "advanced"),
+        example="/voice on",
     ),
 }
 TUI_NESTED_CHOICES = {
@@ -721,6 +731,11 @@ class HASHITuiApp(App):
         self._submission_sequence = 0
         self._latest_submission_ref: tuple[int, str, int] | None = None
         self._pending_attachment: PendingAttachment | None = None
+        self._last_assistant_by_target: dict[str, dict] = {}
+        self._auto_spoken_refs: dict[str, None] = {}
+        self._auto_speech_pending: set[str] = set()
+        self._speech_task: asyncio.Task | None = None
+        self._speech_lock = asyncio.Lock()
         preferences = self._load_tui_preferences()
         remembered = preferences.get("last_agent_by_instance", {})
         self._last_agent_by_instance = {
@@ -729,6 +744,16 @@ class HASHITuiApp(App):
             if str(instance).strip() and str(agent).strip()
         }
         self._forgotten_agent_instances: set[str] = set()
+        remembered_voice = preferences.get("voice_auto_by_target", {})
+        self._voice_auto_by_target = {
+            str(target): bool(enabled)
+            for target, enabled in (
+                remembered_voice.items()
+                if isinstance(remembered_voice, dict)
+                else ()
+            )
+            if str(target).strip()
+        }
         register_themes(self)
         self._theme_name = preferences.get("theme", "retro")
         if self._theme_name not in PALETTES:
@@ -872,6 +897,12 @@ class HASHITuiApp(App):
                 for instance_id in self._forgotten_agent_instances:
                     merged.pop(instance_id, None)
                 payload["last_agent_by_instance"] = merged
+                stored_voice = payload.get("voice_auto_by_target")
+                merged_voice = (
+                    dict(stored_voice) if isinstance(stored_voice, dict) else {}
+                )
+                merged_voice.update(self._voice_auto_by_target)
+                payload["voice_auto_by_target"] = merged_voice
 
             saved = TuiPreferenceStore(self._preferences_path).update(mutate)
             stored = saved.get("last_agent_by_instance")
@@ -880,6 +911,13 @@ class HASHITuiApp(App):
                     str(instance).upper(): str(agent).casefold()
                     for instance, agent in stored.items()
                     if str(instance).strip() and str(agent).strip()
+                }
+            stored_voice = saved.get("voice_auto_by_target")
+            if isinstance(stored_voice, dict):
+                self._voice_auto_by_target = {
+                    str(target): bool(enabled)
+                    for target, enabled in stored_voice.items()
+                    if str(target).strip()
                 }
             self._forgotten_agent_instances.clear()
             return True
@@ -1432,6 +1470,7 @@ class HASHITuiApp(App):
         )
         if selected is None:
             missing = self.current_agent
+            self._cancel_tui_speech()
             self._clear_typing_indicator()
             self._latest_submission_ref = None
             self.current_agent = None
@@ -1477,6 +1516,7 @@ class HASHITuiApp(App):
         if not selected_name:
             return False
         if selected_name != self.current_agent:
+            self._cancel_tui_speech()
             if self._pending_attachment is not None:
                 self._pending_attachment = None
                 if self.is_mounted:
@@ -1563,6 +1603,13 @@ class HASHITuiApp(App):
             chat.write(chat_message_renderable("user", "You", text))
         elif role == "assistant":
             chat.write(chat_message_renderable("assistant", prefix, text))
+            target_agent = str(
+                msg.get("agent") or msg.get("agent_id") or self.current_agent or ""
+            ).strip().casefold()
+            if target_agent:
+                self._last_assistant_by_target[
+                    f"{self.current_instance_id}:{target_agent}"
+                ] = dict(msg)
             self._clear_typing_for_transcript_message(msg)
 
     @work()
@@ -1623,6 +1670,8 @@ class HASHITuiApp(App):
                         for msg in messages:
                             if msg.get("role") == "assistant":
                                 self._render_transcript_message(msg)
+                                if self._voice_auto_enabled(agent):
+                                    self._queue_tui_speech(msg, announce=False)
                                 received = True
                         if received:
                             self._play_message_sound("received")
@@ -1685,6 +1734,12 @@ class HASHITuiApp(App):
             return
         if normalized == "/attach" or normalized.startswith("/attach "):
             await self._handle_attach_cmd(normalized)
+            return
+        if normalized == "/say" or normalized.startswith("/say "):
+            self._handle_say_cmd(normalized)
+            return
+        if normalized == "/voice" or normalized.startswith("/voice "):
+            await self._handle_voice_cmd(normalized)
             return
         if normalized == "/agents":
             await self._handle_agents_cmd()
@@ -2576,8 +2631,12 @@ class HASHITuiApp(App):
 `/log [show|hide|pause]`　控制本地日志
 `/sidepanel [on|off|toggle|refresh]`　控制只读信息面板
 `/sidepanel auto on|off|toggle`　设置自动巡览
+`/attach <路径|clipboard|cancel>`　发送文件或剪贴板图片
+`@相对路径`　发送当前 Agent Workzone 中的文件
+`/say`　仅在本机朗读最后一条代理回复一次
+`/voice [on|off|档案|advanced]`　设置本机自动朗读与共享声音
 `/tui language zh|en`　切换界面语言
-`/tui sound on|off|test`　设置或试听提示音
+`/tui sound on|off|test`　设置短提示音（不是回复朗读）
 `/clear`　清空当前显示　　`/quit`　退出
 
 输入命令前缀可自动补全；未知命令不会发送给 Agent。输入 `/help en` 查看英文版。"""
@@ -2599,8 +2658,12 @@ class HASHITuiApp(App):
 `/log [show|hide|pause]`　Control the host log
 `/sidepanel [on|off|toggle|refresh]`　Control the read-only information panel
 `/sidepanel auto on|off|toggle`　Configure the automatic tour
+`/attach <path|clipboard|cancel>`　Send a file or clipboard image
+`@relative/path`　Send a file from the current Agent Workzone
+`/say`　Read the last Agent reply once on this computer only
+`/voice [on|off|profile|advanced]`　Set local auto-read and the shared voice
 `/tui language zh|en`　Change the interface language
-`/tui sound on|off|test`　Configure or preview message sounds
+`/tui sound on|off|test`　Configure short cues (not reply speech)
 `/clear`　Clear this view　　`/quit`　Exit
 
 Command prefixes autocomplete; unknown commands are never sent to an Agent. Use `/help zh` for Chinese."""
@@ -2947,6 +3010,283 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         return bool(
             value.startswith(("/", "./", "../", "~", "\\\\", '"'))
             or (len(value) >= 3 and value[0].isalpha() and value[1:3] in {":\\", ":/"})
+        )
+
+    def _voice_target_key(self, agent: str | None = None) -> str:
+        return (
+            f"{self.current_instance_id}:"
+            f"{str(agent or self.current_agent or '').strip().casefold()}"
+        )
+
+    def _voice_auto_enabled(self, agent: str | None = None) -> bool:
+        if self.current_agent_display == "ALL":
+            return False
+        return bool(self._voice_auto_by_target.get(self._voice_target_key(agent), False))
+
+    def _cancel_tui_speech(self) -> None:
+        task = self._speech_task
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _queue_tui_speech(self, message: dict, *, announce: bool) -> None:
+        if not self.current_agent or self.current_agent_display == "ALL":
+            return
+        text = str(message.get("text") or "").strip()
+        if not text:
+            return
+        self._cancel_tui_speech()
+        generation = self._connection_generation
+        client = self.api
+        instance_id = self.current_instance_id
+        agent = self.current_agent
+        source_ref = str(
+            message.get("message_id")
+            or message.get("run_id")
+            or message.get("request_id")
+            or hashlib.sha256(
+                (
+                    text
+                    + "\0"
+                    + str(message.get("timestamp") or message.get("created_at") or "")
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        dedupe_ref: str | None = None
+        if not announce:
+            dedupe_ref = f"{self._voice_target_key(agent)}:{source_ref}"
+            if (
+                dedupe_ref in self._auto_spoken_refs
+                or dedupe_ref in self._auto_speech_pending
+            ):
+                return
+            self._auto_speech_pending.add(dedupe_ref)
+        task = asyncio.create_task(
+            self._synthesize_and_play_tui_speech(
+                text=text,
+                source_ref=source_ref,
+                agent=agent,
+                instance_id=instance_id,
+                client=client,
+                generation=generation,
+                announce=announce,
+                dedupe_ref=dedupe_ref,
+            )
+        )
+        self._speech_task = task
+
+    async def _synthesize_and_play_tui_speech(
+        self,
+        *,
+        text: str,
+        source_ref: str,
+        agent: str,
+        instance_id: str,
+        client: TuiApiClient,
+        generation: int,
+        announce: bool,
+        dedupe_ref: str | None,
+    ) -> None:
+        current_task = asyncio.current_task()
+        try:
+            async with self._speech_lock:
+                if (
+                    generation != self._connection_generation
+                    or client is not self.api
+                    or instance_id != self.current_instance_id
+                    or agent != self.current_agent
+                ):
+                    return
+                result = await client.synthesize_speech(
+                    agent,
+                    text,
+                    request_id=(
+                        "tui-"
+                        + hashlib.sha256(source_ref.encode("utf-8")).hexdigest()[:24]
+                        + "-"
+                        + uuid4().hex[:12]
+                    ),
+                )
+                if (
+                    generation != self._connection_generation
+                    or client is not self.api
+                    or instance_id != self.current_instance_id
+                    or agent != self.current_agent
+                ):
+                    logger.info(
+                        "Discarded late TUI speech: instance=%s agent=%s generation=%s",
+                        instance_id,
+                        agent,
+                        generation,
+                    )
+                    return
+                if not result.get("ok"):
+                    raise TuiAudioError(
+                        str(result.get("error") or "speech generation failed")
+                    )
+                content = decode_tui_audio(result)
+                if announce and self.is_mounted:
+                    self.query_one("#chat-history", ChatHistory).write(
+                        Text(
+                            "语音已生成，正在此电脑播放……"
+                            if self._ui_language == "zh"
+                            else "Speech generated; playing on this computer…",
+                            style="hashi.muted",
+                        )
+                    )
+                await play_ogg_bytes(content)
+                if dedupe_ref is not None:
+                    self._auto_spoken_refs[dedupe_ref] = None
+                    while len(self._auto_spoken_refs) > 1000:
+                        self._auto_spoken_refs.pop(next(iter(self._auto_spoken_refs)))
+                if (
+                    announce
+                    and self.is_mounted
+                    and generation == self._connection_generation
+                    and client is self.api
+                    and agent == self.current_agent
+                ):
+                    self.query_one("#chat-history", ChatHistory).write(
+                        Text(
+                            "✓ 已在此电脑播放一次。"
+                            if self._ui_language == "zh"
+                            else "✓ Played once on this computer.",
+                            style="hashi.accent",
+                        )
+                    )
+        except asyncio.CancelledError:
+            logger.info(
+                "Cancelled TUI speech: instance=%s agent=%s generation=%s",
+                instance_id,
+                agent,
+                generation,
+            )
+            raise
+        except (TuiAudioError, OSError, RuntimeError) as exc:
+            if (
+                self.is_mounted
+                and generation == self._connection_generation
+                and client is self.api
+                and agent == self.current_agent
+            ):
+                self.query_one("#chat-history", ChatHistory).write(
+                    Text(
+                        (f"本机朗读不可用：{exc}" if self._ui_language == "zh" else f"Local speech unavailable: {exc}"),
+                        style="hashi.error",
+                    )
+                )
+        finally:
+            if dedupe_ref is not None:
+                self._auto_speech_pending.discard(dedupe_ref)
+            if self._speech_task is current_task:
+                self._speech_task = None
+
+    def _handle_say_cmd(self, text: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        if text.strip().casefold() != "/say":
+            chat.write(Text("请直接使用 /say，不带参数。" if self._ui_language == "zh" else "Use /say without arguments.", style="hashi.error"))
+            return
+        if not self.current_agent or self.current_agent_display == "ALL":
+            chat.write(Text("使用 /say 前请先选择一个 Agent。" if self._ui_language == "zh" else "Select one Agent before using /say.", style="hashi.error"))
+            return
+        message = self._last_assistant_by_target.get(self._voice_target_key())
+        if not message:
+            chat.write(Text("当前没有可朗读的已显示代理最终回复。" if self._ui_language == "zh" else "No visible final Agent reply is available to read.", style="hashi.error"))
+            return
+        self._queue_tui_speech(message, announce=True)
+
+    async def _handle_voice_cmd(self, text: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        if not self.current_agent or self.current_agent_display == "ALL":
+            chat.write(Text("更改语音设置前请先选择一个 Agent。" if self._ui_language == "zh" else "Select one Agent before changing voice settings.", style="hashi.error"))
+            return
+        parts = text.split(maxsplit=1)
+        action = parts[1].strip().casefold() if len(parts) > 1 else "status"
+        if action in {"on", "off"}:
+            key = self._voice_target_key()
+            previous = self._voice_auto_by_target.get(key)
+            self._voice_auto_by_target[key] = action == "on"
+            if not self._save_tui_preferences():
+                if previous is None:
+                    self._voice_auto_by_target.pop(key, None)
+                else:
+                    self._voice_auto_by_target[key] = previous
+                chat.write(Text("自动朗读偏好保存失败，设置未更改。" if self._ui_language == "zh" else "Auto-read was not changed because its preference could not be saved.", style="hashi.error"))
+                return
+            if action == "off":
+                self._cancel_tui_speech()
+            state = "ON" if action == "on" else "OFF"
+            chat.write(Text((f"✓ {self.current_agent}@{self.current_instance_id} 的本机自动朗读已{('开启' if action == 'on' else '关闭')}。" if self._ui_language == "zh" else f"✓ Local auto-read {state} for {self.current_agent}@{self.current_instance_id}."), style="hashi.accent"))
+            return
+
+        generation = self._connection_generation
+        client = self.api
+        agent = self.current_agent
+        voice_state = await client.voice_state(agent)
+        if generation != self._connection_generation or client is not self.api or agent != self.current_agent:
+            return
+        if not voice_state.get("ok"):
+            detail = voice_state.get("error") or ("请求失败" if self._ui_language == "zh" else "request failed")
+            chat.write(Text((f"语音状态不可用：{detail}" if self._ui_language == "zh" else f"Voice state unavailable: {detail}"), style="hashi.error"))
+            return
+        profiles = {
+            str(row.get("id") or "").casefold(): str(row.get("label") or row.get("id") or "")
+            for row in voice_state.get("profiles", [])
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        if action == "advanced":
+            advanced = (
+                "高级共享 Agent 语音控制：\n"
+                "/voice provider <名称> · /voice name <声音> · /voice rate <数值>\n"
+                "/voice mode <off|tts|native> · /voice target <Provider> <Model>\n"
+                "/voice native-voice <名称> · /voice native-format <格式>\n"
+                "/voice fallback <local_chain|native_only> · /voice retention <分钟|indefinite>\n"
+                "这些共享高级设置请使用 Agent Connector 的完整语音界面；TUI /voice on|off 始终只影响本机。"
+            ) if self._ui_language == "zh" else (
+                "Advanced shared Agent controls:\n"
+                "/voice provider <name> · /voice name <voice> · /voice rate <n>\n"
+                "/voice mode <off|tts|native> · /voice target <provider> <model>\n"
+                "/voice native-voice <name> · /voice native-format <format>\n"
+                "/voice fallback <local_chain|native_only> · /voice retention <minutes|indefinite>\n"
+                "Use the Agent connector's advanced voice surface for these shared controls. "
+                "TUI /voice on|off remains local only."
+            )
+            chat.write(Text(advanced, style="hashi.secondary"))
+            return
+        if action not in {"", "status"}:
+            if action not in profiles:
+                chat.write(Text("请使用 /voice on|off、列出的声音档案或 /voice advanced。" if self._ui_language == "zh" else "Use /voice on|off, one listed profile, or /voice advanced.", style="hashi.error"))
+                return
+            updated = await client.set_voice_profile(agent, action)
+            if generation != self._connection_generation or client is not self.api or agent != self.current_agent:
+                return
+            if not updated.get("ok"):
+                detail = updated.get("error") or ("请求失败" if self._ui_language == "zh" else "request failed")
+                chat.write(Text((f"声音档案未更改：{detail}" if self._ui_language == "zh" else f"Voice profile was not changed: {detail}"), style="hashi.error"))
+                return
+            voice_state = updated
+            chat.write(Text((f"✓ Agent 的共享声音已设为 {profiles[action]}（{action}）。" if self._ui_language == "zh" else f"✓ Shared Agent voice set to {profiles[action]} ({action})."), style="hashi.accent"))
+            return
+        current = str(voice_state.get("profile") or "custom")
+        auto = "ON" if self._voice_auto_enabled() else "OFF"
+        choices = "\n".join(
+            f"  /voice {profile_id} — {label}"
+            for profile_id, label in profiles.items()
+        ) or ("  没有可用的语义声音档案。" if self._ui_language == "zh" else "  No semantic voice profiles are available.")
+        summary = (
+            f"本机自动朗读：{auto}\nAgent 共享声音：{current}\n{choices}\n"
+            "/voice on|off · /say · /voice advanced\n"
+            "自动朗读属于此 TUI 电脑；声音档案是 Agent 的共享声音身份。"
+            if self._ui_language == "zh"
+            else
+            f"Local auto-read: {auto}\nShared Agent voice: {current}\n{choices}\n"
+            "/voice on|off · /say · /voice advanced\n"
+            "Auto-read belongs to this TUI computer; the voice profile is the Agent's shared identity."
+        )
+        chat.write(
+            Text(
+                summary,
+                style="hashi.secondary",
+            )
         )
 
     @staticmethod
@@ -3523,6 +3863,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             )
 
             previous_instance = self.current_instance_id
+            self._cancel_tui_speech()
             attachment_cleared = self._pending_attachment is not None
             self._pending_attachment = None
             self._clear_typing_indicator()
@@ -3606,6 +3947,9 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     async def _shutdown(self):
         self._clear_typing_indicator()
         self._pending_attachment = None
+        self._cancel_tui_speech()
+        if self._speech_task is not None:
+            await asyncio.gather(self._speech_task, return_exceptions=True)
         self._cancel_side_panel_refresh()
         if self._log_follow_task and not self._log_follow_task.done():
             self._log_follow_task.cancel()

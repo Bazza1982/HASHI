@@ -285,6 +285,18 @@ class _RemoteVoiceManagerView:
     def native_policy(self) -> dict[str, Any]:
         return dict(self.handle.metadata.get("native_voice_policy") or {})
 
+    def get_voice_profile_id(self) -> str | None:
+        value = dict(self.handle.metadata.get("tui_voice_state") or {}).get("profile")
+        return str(value) if value else None
+
+    def get_voice_profiles(self) -> list[tuple[str, dict[str, Any]]]:
+        rows = dict(self.handle.metadata.get("tui_voice_state") or {}).get("profiles")
+        return [
+            (str(row["id"]), {"label": str(row.get("label") or row["id"])})
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, Mapping) and str(row.get("id") or "").strip()
+        ]
+
 
 class FunctionWorkerClient:
     """One candidate or active worker process and its private IPC peer."""
@@ -946,6 +958,30 @@ class AgentRuntimeHandle:
                     "decision": decision,
                 },
             )
+        )
+
+    async def tui_voice_state(self) -> dict[str, Any]:
+        return dict(await self._route("runtime.tui_voice_state") or {})
+
+    async def set_tui_voice_profile(self, profile: str) -> dict[str, Any]:
+        return dict(
+            await self._route(
+                "runtime.tui_voice_profile",
+                {"profile": str(profile)},
+            )
+            or {}
+        )
+
+    async def synthesize_tui_speech(
+        self, text: str, request_id: str
+    ) -> dict[str, Any]:
+        return dict(
+            await self._route(
+                "runtime.tui_speech",
+                {"text": str(text), "request_id": str(request_id)},
+                timeout=120,
+            )
+            or {}
         )
 
     async def set_command_menu(self, *, chat_id: int, locale: str) -> bool:

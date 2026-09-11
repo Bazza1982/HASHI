@@ -68,6 +68,37 @@ async def test_direct_tui_attachment_sends_bytes_and_caption_in_one_request(monk
 
 
 @pytest.mark.asyncio
+async def test_remote_tui_speech_and_profile_use_local_presentation_operations(monkeypatch):
+    client = TuiApiClient(
+        remote_url="http://127.0.0.1:8766",
+        target_instance="HASHI3",
+    )
+    calls = []
+
+    async def proxy(operation, **kwargs):
+        calls.append((operation, kwargs))
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_proxy_request", proxy)
+
+    await client.voice_state("akane")
+    await client.set_voice_profile("akane", "clear_female")
+    await client.synthesize_speech("akane", "hello", request_id="say-1")
+
+    assert calls == [
+        ("voice_state", {"agent": "akane", "timeout": 10}),
+        (
+            "voice_profile",
+            {"agent": "akane", "voice_profile": "clear_female", "timeout": 15},
+        ),
+        (
+            "speech",
+            {"agent": "akane", "text": "hello", "request_id": "say-1", "timeout": 130},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_remote_tui_run_status_uses_typed_proxy_fields(monkeypatch):
     client = TuiApiClient(
         remote_url="http://127.0.0.1:8766",

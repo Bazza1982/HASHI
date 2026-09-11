@@ -133,6 +133,8 @@ class TuiApiClient:
         delivery_policy: dict | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        request_id: str | None = None,
+        voice_profile: str | None = None,
         attachment: dict | None = None,
         workzone_ref: str | None = None,
         offset: int = 0,
@@ -159,6 +161,10 @@ class TuiApiClient:
             payload["session_id"] = session_id
         if run_id is not None:
             payload["run_id"] = run_id
+        if request_id is not None:
+            payload["request_id"] = request_id
+        if voice_profile is not None:
+            payload["voice_profile"] = voice_profile
         if attachment is not None:
             payload["attachment"] = dict(attachment)
         if workzone_ref is not None:
@@ -379,6 +385,50 @@ class TuiApiClient:
             payload["workzone_ref"] = str(workzone_ref)
         return await self._direct_request(
             "POST", "/api/chat", json_body=payload, timeout=35
+        )
+
+    async def voice_state(self, agent: str) -> dict:
+        if self.proxied:
+            return await self._proxy_request(
+                "voice_state", agent=agent, timeout=10
+            )
+        return await self._direct_request(
+            "POST", "/api/tui/voice", json_body={"agent": agent}, timeout=10
+        )
+
+    async def set_voice_profile(self, agent: str, profile: str) -> dict:
+        if self.proxied:
+            return await self._proxy_request(
+                "voice_profile",
+                agent=agent,
+                voice_profile=profile,
+                timeout=15,
+            )
+        return await self._direct_request(
+            "POST",
+            "/api/tui/voice",
+            json_body={"agent": agent, "profile": profile},
+            timeout=15,
+        )
+
+    async def synthesize_speech(
+        self, agent: str, text: str, *, request_id: str
+    ) -> dict:
+        """Generate audio on the selected instance without Connector delivery."""
+
+        if self.proxied:
+            return await self._proxy_request(
+                "speech",
+                agent=agent,
+                text=text,
+                request_id=request_id,
+                timeout=130,
+            )
+        return await self._direct_request(
+            "POST",
+            "/api/tui/speech",
+            json_body={"agent": agent, "text": text, "request_id": request_id},
+            timeout=130,
         )
 
     async def run_info(self, session_id: str, run_id: str) -> dict:

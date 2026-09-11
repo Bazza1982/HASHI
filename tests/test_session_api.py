@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -144,6 +146,29 @@ class _Runtime:
         self.api_media_calls.append(dict(kwargs))
         return f"req-media-{len(self.api_media_calls)}"
 
+    def tui_voice_state(self):
+        return {
+            "profile": "warm_female",
+            "profiles": [{"id": "warm_female", "label": "Warm"}],
+        }
+
+    def set_tui_voice_profile(self, profile):
+        return {
+            "profile": profile,
+            "profiles": [{"id": profile, "label": "Selected"}],
+        }
+
+    async def synthesize_tui_speech(self, text, request_id):
+        content = b"OggS-test-audio"
+        return {
+            "content_b64": base64.b64encode(content).decode("ascii"),
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "media_type": "audio/ogg",
+            "request_id": request_id,
+            "spoken": text,
+        }
+
 def _server(
     tmp_path: Path,
     *,
@@ -173,6 +198,35 @@ def _server(
     )
     runtime.server = server
     return server, runtime
+
+
+@pytest.mark.asyncio
+async def test_tui_speech_generates_asset_without_enqueue_or_connector_send(tmp_path):
+    server, runtime = _server(tmp_path)
+    response = await server.handle_tui_speech(
+        _Request({"agent": "lily", "text": "read this", "request_id": "say-1"})
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert base64.b64decode(payload["content_b64"]).startswith(b"OggS")
+    assert payload["spoken"] == "read this"
+    assert runtime.api_delivery_flags == []
+    assert runtime.api_media_calls == []
+
+
+@pytest.mark.asyncio
+async def test_tui_voice_profile_uses_existing_agent_owner(tmp_path):
+    server, _runtime = _server(tmp_path)
+    response = await server.handle_tui_voice(
+        _Request({"agent": "lily", "profile": "calm_male"})
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["profile"] == "calm_male"
+    assert payload["profiles"] == [{"id": "calm_male", "label": "Selected"}]
 
 
 @pytest.mark.asyncio

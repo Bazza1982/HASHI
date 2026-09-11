@@ -1026,6 +1026,11 @@ class FunctionWorkerHost:
                 "native_voice_policy": dict(
                     getattr(manager, "native_policy", {}) or {}
                 ),
+                "tui_voice_state": (
+                    runtime.tui_voice_state()
+                    if callable(getattr(runtime, "tui_voice_state", None))
+                    else {"profile": None, "profiles": []}
+                ),
                 "supported_commands": commands,
                 "command_registry_notices": command_registry_notices,
                 "active_transfer": bool(runtime.has_active_transfer()),
@@ -1450,6 +1455,17 @@ class FunctionWorkerHost:
             return True
         if method == "runtime.native_transcript_decide":
             return self._decide_native_transcript(params)
+        if method == "runtime.tui_voice_state":
+            return runtime.tui_voice_state()
+        if method == "runtime.tui_voice_profile":
+            result = runtime.set_tui_voice_profile(str(params.get("profile") or ""))
+            await self.emit_metadata()
+            return result
+        if method == "runtime.tui_speech":
+            return await runtime.synthesize_tui_speech(
+                str(params.get("text") or ""),
+                str(params.get("request_id") or ""),
+            )
         raise FunctionWorkerStateError(f"unknown Worker request: {method}")
 
     async def _begin_native_voice_transcription(
