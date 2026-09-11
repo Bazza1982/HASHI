@@ -1,5 +1,34 @@
 # TUI Instance Switching
 
+## Current-instance scope
+
+The selected instance is the highest TUI routing scope. A switch validates
+the candidate identity and its complete Agent-directory response before one
+connection generation is committed. Failed or stale checks leave the prior
+client, Agent, transcript cursor, and send target unchanged. `/agents`,
+`/to <agent>`, and `/to all` consume only that generation's directory;
+directory errors are never represented as an empty directory and an empty
+broadcast target set is an error. A submission freezes its client,
+generation, instance-owned Agent set, mirror choice, and locale before I/O.
+
+The local preference file remembers only the last successful single-Agent
+selection for each instance. Startup still begins on the launch instance;
+manual instance switches restore that instance's remembered Agent when it is
+still present. `ALL` is never persisted.
+
+The host log follows the current instance by default. Authenticated peer logs
+use the restricted `log_tail` Remote operation, which exposes a bounded line
+tail and opaque byte cursor but no filesystem path. Switching generations
+cancels the old follower and clears its rendered buffer. `/log local` is the
+explicit exception for inspecting the launch computer; `/log current`
+returns to current-instance following. An unavailable remote log is shown as
+unavailable and never silently replaced by the launch-instance log.
+
+Persistent Session status is separately discovered from
+`/api/v1/capabilities` for each connection generation. Chat remains valid
+when that optional capability is disabled; the TUI does not issue Run-status
+requests or render a task failure in that case.
+
 Architecture: [HASHI Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md)
 
 ## Purpose and boundary
@@ -37,6 +66,7 @@ The proxy accepts only these named operations:
 | Operation | Local Backend API request |
 | --- | --- |
 | `health` | `GET /api/health` |
+| `capabilities` | `GET /api/v1/capabilities` |
 | `agents` | `GET /api/agents` |
 | `agent_overview` | `GET /api/agents/{agent}/overview` |
 | `scheduler_jobs` | `GET /api/agents/{agent}/scheduler/jobs` |
@@ -44,6 +74,7 @@ The proxy accepts only these named operations:
 | `chat` | `POST /api/chat` |
 | `transcript_recent` | `GET /api/transcript/{agent}` |
 | `transcript_poll` | `GET /api/transcript/{agent}/poll` |
+| `log_tail` | bounded instance-owned `logs/bridge.log` tail; no path returned |
 
 The three information-panel operations are read-only and Agent-scoped.
 Arbitrary paths are not represented in the protocol. Text, agent, offset,

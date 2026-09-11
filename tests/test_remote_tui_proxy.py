@@ -184,6 +184,33 @@ def test_tui_proxy_allowlist_rejects_arbitrary_workbench_operation(tmp_path):
     assert response.json()["error"] == "operation_not_allowed"
 
 
+def test_tui_log_tail_reads_only_bounded_instance_owned_log(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "bridge.log").write_text(
+        "old\n" + "\n".join(f"line-{index}" for index in range(250)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(remote_server, "_hashi_root", str(tmp_path))
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI3"})
+
+    status, payload = remote_server._local_workbench_tui_request(
+        ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation="log_tail",
+            limit=12,
+        )
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["instance_id"] == "HASHI3"
+    assert len(payload["lines"]) == 12
+    assert payload["lines"][-1] == "line-249"
+    assert "path" not in payload
+    assert isinstance(payload["offset"], int)
+
+
 def test_tui_proxy_forwards_typed_run_delivery_policy_without_text_inference(
     tmp_path,
     monkeypatch,

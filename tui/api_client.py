@@ -88,6 +88,7 @@ class TuiApiClient:
     ) -> dict:
         ordered_bases = [self.base, *(base for base in self._bases if base != self.base)]
         first_error: Exception | None = None
+        timed_out = False
         first_error_base = ordered_bases[0]
         for base in ordered_bases:
             try:
@@ -103,6 +104,7 @@ class TuiApiClient:
                     self.base = base
                 return data
             except (aiohttp.ClientError, TimeoutError) as exc:
+                timed_out = timed_out or isinstance(exc, TimeoutError)
                 if first_error is None:
                     first_error = exc
                     first_error_base = base
@@ -115,6 +117,7 @@ class TuiApiClient:
         )
         return {
             "ok": False,
+            "code": "request_timeout" if timed_out else "connection_unavailable",
             "error": f"Cannot connect to local HASHI at {first_error_base}: "
             f"{first_error or 'Workbench unavailable'}",
         }
@@ -186,7 +189,14 @@ class TuiApiClient:
                 operation,
                 exc,
             )
-            return {"ok": False, "error": str(exc)}
+            return {
+                "ok": False,
+                "code": (
+                    "request_timeout" if isinstance(exc, TimeoutError)
+                    else "connection_unavailable"
+                ),
+                "error": str(exc),
+            }
 
     async def health_info(self) -> dict:
         if self.proxied:
@@ -217,6 +227,25 @@ class TuiApiClient:
             await self._proxy_request("agents")
             if self.proxied
             else await self._direct_request("GET", "/api/agents")
+        )
+
+    async def capabilities_info(self) -> dict:
+        """Read optional Workbench capabilities without inferring from chat."""
+        return (
+            await self._proxy_request("capabilities", timeout=5)
+            if self.proxied
+            else await self._direct_request("GET", "/api/v1/capabilities", timeout=5)
+        )
+
+    async def log_tail(self, *, offset: int = 0, limit: int = 120) -> dict:
+        """Read a bounded peer-owned host log tail through authenticated Remote."""
+        if not self.proxied:
+            return {"ok": False, "code": "local_log_owned_by_client", "error": "local log is read by the TUI client"}
+        return await self._proxy_request(
+            "log_tail",
+            offset=max(0, int(offset)),
+            limit=max(1, min(int(limit), 200)),
+            timeout=5,
         )
 
     async def list_agents(self) -> list[dict]:

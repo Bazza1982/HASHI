@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from types import SimpleNamespace
 
@@ -200,7 +201,7 @@ async def test_saved_language_command_menu_is_restored_as_chat_scope(tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_language_selection_persists_and_refreshes_all_live_agent_menus(
+async def test_language_selection_persists_before_background_menu_refresh(
     tmp_path,
 ) -> None:
     calls = []
@@ -230,9 +231,47 @@ async def test_language_selection_persists_and_refreshes_all_live_agent_menus(
     assert notice == "界面语言已切换为简体中文。"
     assert failures == 0
     assert ui_language.preferred_locale(runtime, update) == "zh-CN"
+    assert calls == []
+
+    runtime._schedule_language_menu_sync(update, chat_id=42, locale=selected)
+    await asyncio.gather(*runtime._language_menu_sync_tasks)
+
     assert calls[-1][1]["scope"].chat_id == 42
     descriptions = {item.command: item.description for item in calls[-1][0]}
     assert descriptions["agents"] == "查看和管理代理"
+
+
+@pytest.mark.asyncio
+async def test_language_menu_sync_is_serialized_and_latest_selection_wins(
+    tmp_path, monkeypatch
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def sync(_runtime, *, chat_id, locale):
+        calls.append((chat_id, locale))
+        if locale == "zh-CN":
+            started.set()
+            await release.wait()
+        return runtime_command_binding.CommandMenuSyncResult(1, 1, ())
+
+    monkeypatch.setattr(runtime_command_binding, "sync_user_command_menus", sync)
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.global_config = GlobalConfig(
+        authorized_id=42, bridge_home=tmp_path, project_root=tmp_path
+    )
+    runtime._reply_text = lambda *_args, **_kwargs: None
+    update = _update()
+
+    runtime._schedule_language_menu_sync(update, chat_id=42, locale="zh-CN")
+    await started.wait()
+    runtime._schedule_language_menu_sync(update, chat_id=42, locale="en")
+    release.set()
+    await asyncio.gather(*tuple(runtime._language_menu_sync_tasks))
+
+    assert calls == [(42, "zh-CN"), (42, "en")]
 
 
 def test_telegram_activity_can_be_chinese_while_terminal_default_stays_english() -> None:

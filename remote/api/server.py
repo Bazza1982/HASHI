@@ -153,6 +153,7 @@ _WORKBENCH_GATEWAY_RESPONSE_HEADERS = frozenset(
 
 TUI_PROXY_OPERATIONS = {
     "health",
+    "capabilities",
     "agents",
     "agent_overview",
     "scheduler_jobs",
@@ -161,6 +162,7 @@ TUI_PROXY_OPERATIONS = {
     "run_info",
     "transcript_recent",
     "transcript_poll",
+    "log_tail",
 }
 TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
@@ -622,7 +624,9 @@ def _local_workbench_tui_request(
     method = "GET"
     body_bytes: bytes | None = None
     path = "/api/health"
-    if operation == "agents":
+    if operation == "capabilities":
+        path = "/api/v1/capabilities"
+    elif operation == "agents":
         path = "/api/agents"
     elif operation == "agent_overview":
         path = f"/api/agents/{quote(agent, safe='')}/overview"
@@ -679,6 +683,45 @@ def _local_workbench_tui_request(
             f"/api/transcript/{quote(agent, safe='')}/poll?offset="
             f"{int(payload.offset)}"
         )
+    elif operation == "log_tail":
+        root = Path(_hashi_root) if _hashi_root else None
+        candidates = (
+            (root / "logs" / "bridge.log", root / "bridge_launch.log")
+            if root is not None else ()
+        )
+        log_path = next((item for item in candidates if item.is_file()), None)
+        if log_path is None:
+            return 404, {
+                "ok": False,
+                "code": "log_unavailable",
+                "error": "No bounded host log is available on this instance",
+            }
+        try:
+            size = log_path.stat().st_size
+            requested_offset = min(max(0, int(payload.offset)), size)
+            # An initial request returns only a bounded recent tail. Later
+            # requests resume at the opaque byte cursor returned below.
+            start = requested_offset or max(0, size - 65_536)
+            with log_path.open("rb") as stream:
+                stream.seek(start)
+                raw = stream.read(65_536)
+                cursor = stream.tell()
+            if start > 0 and requested_offset == 0:
+                raw = raw.split(b"\n", 1)[-1]
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+            return 200, {
+                "ok": True,
+                "instance_id": str(_instance_info.get("instance_id") or "").upper(),
+                "lines": lines[-max(1, min(int(payload.limit), 200)):],
+                "offset": cursor,
+            }
+        except OSError as exc:
+            logger.warning("TUI bounded log read failed: %s", exc)
+            return 503, {
+                "ok": False,
+                "code": "log_read_failed",
+                "error": "Host log could not be read",
+            }
 
     last_error: Exception | None = None
     for host in local_http_hosts():

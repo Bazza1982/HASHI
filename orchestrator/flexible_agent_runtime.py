@@ -2440,23 +2440,20 @@ class FlexibleAgentRuntime:
         requested: str,
     ) -> tuple[str, str, int]:
         reset = requested == "default"
-        if reset:
-            ui_language.reset_preferred_locale(self, update)
-            selected = ui_language.preferred_locale(self, update)
-        else:
-            selected = ui_language.normalize_locale(requested, fallback="")
-            if selected not in ui_language.SUPPORTED_LOCALES:
-                raise ValueError(requested)
-            ui_language.set_preferred_locale(self, selected, update)
-
-        chat_id = ui_language.chat_id_from_update(update)
-        failures = 0
-        if chat_id is not None:
-            failures = await runtime_command_binding.sync_user_command_menus(
-                self,
-                chat_id=chat_id,
-                locale=selected,
-            )
+        selected = (
+            ui_language.configured_default_locale(self)
+            if reset else ui_language.normalize_locale(requested, fallback="")
+        )
+        if selected not in ui_language.SUPPORTED_LOCALES:
+            raise ValueError(requested)
+        try:
+            if reset:
+                ui_language.reset_preferred_locale(self, update)
+                selected = ui_language.preferred_locale(self, update)
+            else:
+                ui_language.set_preferred_locale(self, selected, update)
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise RuntimeError(f"language preference save failed: {exc}") from exc
         catalog = ui_language.load_catalog(selected)
         key = "language.reset" if reset else "language.changed"
         notice = ui_language.tr(
@@ -2464,7 +2461,75 @@ class FlexibleAgentRuntime:
             locale=selected,
             language=catalog.native_name,
         )
-        return selected, notice, failures
+        return selected, notice, 0
+
+    def _schedule_language_menu_sync(
+        self,
+        update: Update,
+        *,
+        chat_id: int | str | None,
+        locale: str,
+    ) -> None:
+        if chat_id is None:
+            return
+        key = str(chat_id)
+        generations = getattr(self, "_language_menu_sync_generations", None)
+        if not isinstance(generations, dict):
+            generations = {}
+            self._language_menu_sync_generations = generations
+        generation = int(generations.get(key, 0)) + 1
+        generations[key] = generation
+        locks = getattr(self, "_language_menu_sync_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._language_menu_sync_locks = locks
+        lock = locks.setdefault(key, asyncio.Lock())
+
+        async def run() -> None:
+            async with lock:
+                if generations.get(key) != generation:
+                    return
+                result = await runtime_command_binding.sync_user_command_menus(
+                    self, chat_id=chat_id, locale=locale
+                )
+                if generations.get(key) != generation or not result.failures:
+                    return
+                codes = {item["code"] for item in result.failures}
+                if locale == "zh-CN":
+                    if "request_timeout" in codes:
+                        cause = "菜单同步超时"
+                    elif "connection_unavailable" in codes:
+                        cause = "菜单同步无法连接"
+                    else:
+                        cause = "菜单同步失败"
+                    if result.succeeded:
+                        cause = "部分 Agent 菜单已更新；" + cause
+                    warning = (
+                        f"语言偏好已保存，但{cause}（{result.failure_count} 个 Agent）。"
+                        "稍后会在重连时重试。"
+                    )
+                else:
+                    if "request_timeout" in codes:
+                        cause = "menu synchronization timed out"
+                    elif "connection_unavailable" in codes:
+                        cause = "menu synchronization could not connect"
+                    else:
+                        cause = "menu synchronization failed"
+                    if result.succeeded:
+                        cause = "some Agent menus updated; " + cause
+                    warning = (
+                        f"Language preference was saved, but {cause} for "
+                        f"{result.failure_count} Agent(s). It will retry on reconnect."
+                    )
+                await self._reply_text(update, f"⚠️ {warning}")
+
+        tasks = getattr(self, "_language_menu_sync_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            self._language_menu_sync_tasks = tasks
+        task = asyncio.create_task(run(), name=f"language-menu-sync:{key}:{generation}")
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     async def cmd_language(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2472,13 +2537,12 @@ class FlexibleAgentRuntime:
         arg = " ".join(context.args).strip() if context.args else ""
         current = ui_language.preferred_locale(self, update)
         notice = None
-        failures = 0
         if arg and arg.casefold() not in {"status", "menu"}:
             requested = arg.casefold()
             if requested in {"default", "reset", "auto"}:
                 requested = "default"
             try:
-                current, notice, failures = await self._apply_ui_language(
+                current, notice, _failures = await self._apply_ui_language(
                     update,
                     requested=requested,
                 )
@@ -2488,19 +2552,25 @@ class FlexibleAgentRuntime:
                     ui_language.tr("language.invalid", locale=current),
                 )
                 return
-        if failures:
-            warning = ui_language.tr(
-                "language.menu_sync_warning",
-                locale=current,
-                count=failures,
-            )
-            notice = f"{notice}\n⚠️ {warning}" if notice else f"⚠️ {warning}"
+            except RuntimeError:
+                await self._reply_text(
+                    update,
+                    "语言偏好无法安全保存；原设置保持不变。" if current == "zh-CN" else
+                    "The language preference could not be saved safely; the previous setting was kept.",
+                )
+                return
         await self._reply_text(
             update,
             self._language_menu_text(locale=current, notice=notice),
             parse_mode="HTML",
             reply_markup=self._language_keyboard(locale=current),
         )
+        if notice:
+            self._schedule_language_menu_sync(
+                update,
+                chat_id=ui_language.chat_id_from_update(update),
+                locale=current,
+            )
 
     async def callback_language(self, update: Update, context: Any):
         del context
@@ -2520,7 +2590,7 @@ class FlexibleAgentRuntime:
             )
             return
         try:
-            selected, notice, failures = await self._apply_ui_language(
+            selected, notice, _failures = await self._apply_ui_language(
                 update,
                 requested=requested,
             )
@@ -2530,18 +2600,24 @@ class FlexibleAgentRuntime:
                 show_alert=True,
             )
             return
-        if failures:
-            notice += "\n⚠️ " + ui_language.tr(
-                "language.menu_sync_warning",
-                locale=selected,
-                count=failures,
+        except RuntimeError:
+            await query.answer(
+                "语言偏好无法安全保存。" if old_locale == "zh-CN" else
+                "The language preference could not be saved safely.",
+                show_alert=True,
             )
+            return
         await query.edit_message_text(
             self._language_menu_text(locale=selected, notice=notice),
             parse_mode="HTML",
             reply_markup=self._language_keyboard(locale=selected),
         )
         await query.answer(notice.splitlines()[0][:200])
+        self._schedule_language_menu_sync(
+            update,
+            chat_id=ui_language.chat_id_from_update(update),
+            locale=selected,
+        )
 
     def _startable_agent_keyboard(self) -> InlineKeyboardMarkup | None:
         orchestrator = getattr(self, "orchestrator", None)
