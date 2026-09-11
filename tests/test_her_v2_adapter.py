@@ -3387,6 +3387,7 @@ async def test_hashi_stage_provider_preserves_typed_replan_completion():
 )
 async def test_tool_capable_api_families_do_not_flatten_replan_control(
     adapter_type,
+    tmp_path,
 ):
     snapshot = CheckpointSnapshot(
         cycle_id="turn-1:execution-cycle:1",
@@ -3408,7 +3409,11 @@ async def test_tool_capable_api_families_do_not_flatten_replan_control(
     adapter.sys_prompt = ""
     adapter.api_key = "test-key"
     adapter.tool_registry = object()
-    adapter.config = SimpleNamespace(model="test-model", name="test-agent")
+    adapter.config = SimpleNamespace(
+        model="test-model",
+        name="test-agent",
+        workspace_dir=tmp_path / adapter_type.__name__,
+    )
     adapter.global_config = SimpleNamespace(openrouter_url="https://invalid.test")
     adapter.logger = SimpleNamespace(
         debug=lambda *_args, **_kwargs: None,

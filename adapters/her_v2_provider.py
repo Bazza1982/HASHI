@@ -310,6 +310,9 @@ def _backend_response_error(
         "provider_http_failure",
         "provider_protocol",
         "provider_protocol_forensic_path",
+        "provider_local_recovery_count",
+        "provider_local_recovery_limit",
+        "provider_local_recovery_exhausted",
         "transport_audit_path",
         "gateway_continuation",
     ):

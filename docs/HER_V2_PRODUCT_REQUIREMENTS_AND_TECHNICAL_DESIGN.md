@@ -1313,20 +1313,30 @@ final lane is not proof of delivery.
 
 Logs must apply existing HASHI secret-redaction, access-control, retention, and workspace-isolation policies.
 
-Malformed Provider tool-call protocol has one deliberately narrower forensic
-exception. HASHI writes the complete, unredacted and untruncated request body,
+Every physical OpenAI-compatible Provider call records a request-prepared event
+before network activity and a response, failure or cancellation event when the
+observable boundary settles. The complete non-authentication request body,
 raw response or ordered SSE events, fragment-by-fragment tool assembly, exact
-JSON parser input and exception position to an Agent-local private file. The
-directory/file permissions are restricted; ordinary audit, Telegram, HChat,
-Backend API errors and user cards receive only a safe summary and the local
-path. Failure to persist this mandatory evidence stops execution without a
-tool side effect.
+JSON parser input and exception position are retained in the existing
+canonical audit store. Large values use its content-addressed artifact
+boundary. Direct adapter diagnostics without a running PAO store use a private,
+append-only Agent-local fallback. Ordinary audit, Telegram, HChat, Backend API
+errors and user cards receive only safe summaries and evidence references.
+Failure to persist mandatory request evidence stops before network or tool side
+effects.
 
-The JSONL audit projection rotates at 16 MiB with five retained files; replay
-checks retained event IDs so rotation cannot duplicate a pending fallback event.
-The fallback spool is not rotated before replay. Invalid-tool-call forensic
-files expire after seven days when the next incident is written, except for
-the currently active incident. Only files owned by that writer are eligible.
+Streaming HTTP errors are read while the response is open and before
+`raise_for_status`. Evidence distinguishes `empty`, `not_read`, `partial` and
+`read_failed`, retaining declared and observed byte counts and a digest when
+bytes were received. A Provider's stream-level error event remains its typed
+error; it is not replaced by a synthetic missing-finish reason. Authorization,
+cookies and reusable credentials are excluded from evidence at the boundary.
+
+The operational JSONL audit projection rotates at 16 MiB with five retained
+files; replay checks retained event IDs so rotation cannot duplicate a pending
+fallback event. The fallback spool is not rotated before replay. Canonical
+evidence and the direct-adapter Provider fallback have no time-based deletion;
+rotation of a safe projection never deletes the only complete original.
 POSIX uses 0700 directories and 0600 files. Windows installs a protected DACL
 for the current user, SYSTEM and Administrators before writing; existing
 explicit broad grants are replaced as well as inherited grants.
@@ -1341,21 +1351,31 @@ without depending on garbage collection or deleting durable production state.
 
 ### 18.1 Stage-local provider recovery
 
-HER permits exactly one fresh-connection provider recovery within the active
-process and current logical stage. Recovery eligibility is selected by typed
-failure and replay safety, never by an elapsed-time tier. Initial and recovery
-attempts have no HER deadline. Runtime must not wrap a complete
+The OpenAI-compatible Adapter owns one recovery incident for each unfinished
+model interaction. Beyond the initial call it may issue at most three local
+recovery requests. Temporary transport failures, incomplete responses,
+malformed tool arguments and deterministic carrier correction consume the
+same `1/3`, `2/3`, `3/3` budget; changing error class or crossing an internal
+helper does not reset it. A valid response closes that incident. A later normal
+tool continuation is a new interaction, not a retry and not a limit on a long
+task's legitimate tool count.
+
+Recovery eligibility is selected by typed failure and replay safety, never by
+an elapsed-time tier. Initial and recovery attempts have no HER deadline.
+Runtime must not wrap a complete
 `provider.invoke()` operation in a timeout and must not synthesize an attempt
 timeout for an adapter, because a tool-capable provider invocation can include
 model generation, any number of foreground tool calls, and later model
 continuations.
 
-Typed failures eligible for the one recovery are HTTP 408, HTTP 429, HTTP 5xx,
+Typed failures eligible for bounded local recovery are HTTP 408, HTTP 429, HTTP 5xx,
 connection/DNS/reset failures, a scoped transport read-inactivity timeout, an
 incomplete provider stream, an empty response, and a stream that never produces
-a usable tool or final result. Configuration failures, HTTP 400, HTTP 401, HTTP
-403, invalid URL or TLS configuration, audit persistence failure, and an
-authorised user stop are not retried. Every terminal technical failure enters
+a usable tool or final result. Configuration failures, unknown HTTP 400, HTTP
+401, HTTP 403, invalid URL or TLS configuration, audit persistence failure, and
+an authorised user stop are not blindly retried. A 400 may continue only after
+its specific local carrier defect is known and deterministically corrected.
+Every terminal technical failure enters
 `ERROR` with a stable error code, a redacted human-readable description,
 attempt count, side-effect status, and a correlation reference.
 
@@ -1370,20 +1390,22 @@ hash on both attempts. Backoff and a provider-supplied `Retry-After` value are
 scheduling inputs, not attempt deadlines or permission to create a recovery
 window.
 
-Deterministic carrier recovery occurs before model repair. When a JSON/schema
+Deterministic carrier recovery occurs before model repair and consumes the same
+incident budget. When a JSON/schema
 defect remains, Runtime freezes the source response and receipts and invokes
 the isolated JSON Repair specialist. Invalid specialist output may be repaired
 again under the user idle-progress boundary; it never replays the source stage
-and does not replenish the one provider-recovery allowance.
+and does not replenish the Provider-recovery allowance.
 
-Main Execution may use the provider recovery only when no tool has started or
-when every started tool is provably read-only and has completed. Unknown,
-incomplete, or side-effecting tool activity blocks automatic replay. A
-side-effect-authorised Execution result is never replayed merely to repair its
-natural-language presentation. Read-only sub-agents receive
-the same single provider recovery. Finalisation receives at most one recovery
-and reuses immutable Execution evidence; the Execution invocation count remains
-one.
+Recovery continues only the current physical model interaction and reuses its
+existing conversation and completed tool results. It does not reinvoke the HER
+stage or replay any tool. Unknown or incomplete tool activity blocks any path
+that cannot prove this property. Once the Adapter marks its three-request
+budget exhausted, HER must not allocate a fresh outer-stage retry. Legacy
+Adapters without this local owner retain the conservative single
+fresh-connection recovery and the existing side-effect checks. Finalisation
+always reuses immutable Execution evidence; the Execution invocation count
+remains one.
 
 ### 18.2 No process-restart resumption
 
@@ -1409,12 +1431,19 @@ Provider, and asks it to reissue the intended complete batch. Earlier messages,
 completed tool results, goal, plan and authority remain in place. A completed
 tool is never replayed and a malformed tool executes zero times.
 
-The initial malformed response permits at most three repair requests, recorded
-as `1/3`, `2/3` and `3/3` with their Provider request IDs. The first valid
-response resumes ordinary execution. If the response to `3/3` is still invalid,
+Before appending the rejected assistant turn, HASHI invokes the same
+Provider-specific augmentation used by a valid tool turn. DeepSeek thinking
+therefore retains the exact Provider-supplied `reasoning_content`; HASHI neither
+drops nor invents it.
+
+The initial malformed response may consume the shared recovery budget, recorded
+as `1/3`, `2/3` and `3/3` with physical-call and evidence references. A
+transport retry between format repairs consumes its own position rather than
+creating a second counter. The first valid response resumes ordinary execution.
+If the response after the final available request is still invalid,
 HER stops with `PROVIDER_INVALID_TOOL_CALLS`, the tool name, concise parser
 reason, final Provider request ID and private diagnostic path. This repair is
-not HER's fresh-connection retry, not JSON/schema output repair, and never
+not a fresh outer HER stage, not JSON/schema output repair, and never
 creates or reruns a PAO Run, Cron job or Scheduler action.
 
 An Adapter's explicit stable uppercase failure code, retryability, cause and

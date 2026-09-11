@@ -10,24 +10,13 @@ Differences from OpenRouter:
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import time
-from itertools import count
 from pathlib import Path
 
-from adapters.base import BackendCapabilities, BackendResponse
+from adapters.base import BackendCapabilities
 from adapters.openrouter_api import (
     OpenRouterAdapter,
     _APIResult,
-    _assistant_content_text,
-    _message_structured_data,
-)
-from adapters.stream_events import (
-    KIND_TEXT_DELTA,
-    KIND_THINKING,
-    StreamEvent,
 )
 from orchestrator.pcm import load_pcm_document
 
@@ -51,6 +40,9 @@ class OllamaAdapter(OpenRouterAdapter):
         # Allow override via agent extra config
         extra = getattr(self.config, "extra", {}) or {}
         self.ollama_url = extra.get("ollama_url", _DEFAULT_OLLAMA_URL)
+
+    def _provider_evidence_url(self) -> str:
+        return str(getattr(self, "ollama_url", _DEFAULT_OLLAMA_URL))
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -97,8 +89,24 @@ class OllamaAdapter(OpenRouterAdapter):
     # all schemas every turn. Extra tiers are loaded on demand.
     DEFAULT_TOOL_TIERS = ["core"]
 
-    def _build_payload(self, messages: list[dict], use_streaming: bool = False,
-                       tool_tiers: list[str] | None = None) -> dict:
+    def _request_headers(self) -> dict[str, str]:
+        return self._ollama_headers()
+
+    def _chat_completions_url(self) -> str:
+        return str(getattr(self, "ollama_url", _DEFAULT_OLLAMA_URL))
+
+    def _build_payload(
+        self,
+        messages: list[dict],
+        use_streaming: bool = False,
+        tool_tiers: list[str] | None = None,
+        *,
+        excluded_tool_names: frozenset[str] = frozenset(),
+        audio_output=None,
+        allow_tools: bool = True,
+    ) -> dict:
+        if audio_output is not None:
+            raise ValueError("Ollama does not support native audio output")
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
@@ -106,9 +114,16 @@ class OllamaAdapter(OpenRouterAdapter):
         }
         if use_streaming:
             payload["stream"] = True
-        if self.tool_registry:
+        if allow_tools and self.tool_registry:
             tiers = tool_tiers or self.DEFAULT_TOOL_TIERS
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
+            if excluded_tool_names:
+                tool_defs = [
+                    item
+                    for item in tool_defs
+                    if str((item.get("function") or {}).get("name") or "")
+                    not in excluded_tool_names
+                ]
             if tool_defs:
                 payload["tools"] = tool_defs
         return payload
@@ -117,153 +132,25 @@ class OllamaAdapter(OpenRouterAdapter):
         return {"Content-Type": "application/json"}
 
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
-        response = await self.client.post(self.ollama_url, json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return _APIResult(text="", tool_calls=None, finish_reason="error")
-
-        choice = choices[0]
-        message = choice.get("message") or {}
-        finish_reason = choice.get("finish_reason") or "stop"
-        ai_text = _assistant_content_text(message.get("content"))
-
-        # Emit reasoning/thinking if present
-        if on_stream_event is not None:
-            reasoning_text = str(message.get("reasoning") or "").strip()
-            if reasoning_text:
-                await on_stream_event(
-                    StreamEvent(
-                        kind=KIND_THINKING,
-                        summary=reasoning_text[:400],
-                        raw_delta=reasoning_text,
-                    )
-                )
-
-        tool_calls = message.get("tool_calls") or None
-        return _APIResult(
-            text=ai_text,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            structured_data=_message_structured_data(message),
-        )
+        return await super()._call_api_once(payload, headers, on_stream_event)
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
-        text_chunks: list[str] = []
-        tool_calls_acc: dict[int, dict] = {}
-        finish_reason = "stop"
+        return await super()._stream_api_once(payload, headers, on_stream_event)
 
-        async with self.client.stream("POST", self.ollama_url, json=payload, headers=headers) as response:
-            response.raise_for_status()
-
-            async for line in response.aiter_lines():
-                self._touch_activity()
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if data_str == "[DONE]":
-                    break
-
-                try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-
-                choices = data.get("choices", [])
-                if not choices:
-                    continue
-
-                choice = choices[0]
-                delta = choice.get("delta", {})
-                finish_reason = choice.get("finish_reason") or finish_reason
-
-                # Emit reasoning/thinking chunks
-                reasoning_delta = str(delta.get("reasoning") or "")
-                if reasoning_delta and on_stream_event:
-                    await on_stream_event(
-                        StreamEvent(
-                            kind=KIND_THINKING,
-                            summary=reasoning_delta[:400],
-                            raw_delta=reasoning_delta,
-                        )
-                    )
-
-                content = delta.get("content", "")
-                if content:
-                    text_chunks.append(content)
-                    if on_stream_event:
-                        await on_stream_event(
-                            StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
-                        )
-
-                for tc_delta in (delta.get("tool_calls") or []):
-                    idx = tc_delta.get("index", 0)
-                    if idx not in tool_calls_acc:
-                        tool_calls_acc[idx] = {
-                            "id": tc_delta.get("id", ""),
-                            "type": tc_delta.get("type", "function"),
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    acc = tool_calls_acc[idx]
-                    if tc_delta.get("id"):
-                        acc["id"] = tc_delta["id"]
-                    fn_delta = tc_delta.get("function", {})
-                    if fn_delta.get("name"):
-                        acc["function"]["name"] += fn_delta["name"]
-                    if fn_delta.get("arguments"):
-                        acc["function"]["arguments"] += fn_delta["arguments"]
-
-        full_text = "".join(text_chunks)
-        tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
-        return _APIResult(text=full_text, tool_calls=tool_calls, finish_reason=finish_reason)
-
-    async def generate_response(self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None):
-        started = time.perf_counter()
-        self._ensure_client()
-
-        use_streaming = on_stream_event is not None
-        messages = [
-            {"role": "system", "content": self.sys_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        headers = self._ollama_headers()
-        last_text = ""
-        last_structured_data = None
-        result = None
-
-        try:
-            self._touch_activity()
-            for loop_idx in count():
-                payload = self._build_payload(messages, use_streaming=use_streaming)
-                if use_streaming:
-                    result = await self._stream_api_once(payload, headers, on_stream_event)
-                else:
-                    result = await self._call_api_once(payload, headers, on_stream_event)
-
-                last_text = result.text
-                last_structured_data = result.structured_data
-                if not result.tool_calls or not self.tool_registry:
-                    break
-
-                assistant_msg: dict = {"role": "assistant"}
-                if result.text:
-                    assistant_msg["content"] = result.text
-                assistant_msg["tool_calls"] = result.tool_calls
-                messages.append(assistant_msg)
-                await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
-
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            return BackendResponse(
-                text=last_text,
-                duration_ms=duration_ms,
-                structured_data=last_structured_data,
-                is_success=True,
-                stop_reason=result.finish_reason if result else "stop",
-            )
-
-        except Exception as e:
-            if isinstance(e, asyncio.CancelledError):
-                raise
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            return BackendResponse(text="", duration_ms=duration_ms, error=str(e), is_success=False)
+    async def generate_response(
+        self,
+        prompt,
+        request_id,
+        is_retry=False,
+        silent=False,
+        on_stream_event=None,
+        request_content=None,
+    ):
+        return await super().generate_response(
+            prompt,
+            request_id,
+            is_retry=is_retry,
+            silent=silent,
+            on_stream_event=on_stream_event,
+            request_content=request_content,
+        )
