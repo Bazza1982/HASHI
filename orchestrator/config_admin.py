@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from orchestrator.config_json import read_config_json, write_config_json
 
 from orchestrator.pathing import BridgePaths
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
@@ -14,14 +14,12 @@ class ConfigAdmin:
         self.paths = paths
 
     def load_raw_config(self) -> dict:
-        return json.loads(self.paths.config_path.read_text(encoding="utf-8-sig"))
+        return read_config_json(self.paths.config_path)
 
     def write_raw_config(self, raw_cfg: dict) -> None:
-        self.paths.config_path.write_text(
-            json.dumps(raw_cfg, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8-sig",
-            newline="\r\n",
-        )
+        # Loaded documents carry their revision outside the JSON. A concurrent
+        # change raises ConfigConflictError rather than losing another update.
+        write_config_json(self.paths.config_path, raw_cfg)
 
     def get_all_agents_raw(self) -> list[dict]:
         raw = self.load_raw_config()
