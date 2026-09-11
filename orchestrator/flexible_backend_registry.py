@@ -192,6 +192,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "label": "openrouter",
         "privacy_levels": [0, 1, 2],
         "models": [
+            "google/gemini-3.8-flash",
             "deepseek/deepseek-v4-pro",
             "deepseek/deepseek-v4-flash",
             "moonshotai/kimi-k2.5",
