@@ -1,10 +1,15 @@
 from __future__ import annotations
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from orchestrator.bridge_protocol import required_scope_for_intent
+from orchestrator.config_json import ConfigDurabilityError, read_config_json, write_config_json
 from orchestrator.pathing import resolve_bridge_home, resolve_path_value
+from orchestrator.process_resources import path_lock
 
 
 class AgentDirectory:
@@ -114,8 +119,8 @@ class AgentDirectory:
     # ── Group management ──────────────────────────────────────────────────────
 
     def list_groups(self) -> dict[str, dict]:
-        """Return all group definitions."""
-        return dict(self._groups)
+        """Return a detached view, never a mutable persistence source."""
+        return deepcopy(self._groups)
 
     def resolve_group(self, name: str, exclude_self: str | None = None) -> list[str]:
         """Resolve a group name to a list of agent names.
@@ -142,54 +147,76 @@ class AgentDirectory:
     def group_exists(self, name: str) -> bool:
         return name in self._groups
 
-    def _save_groups(self) -> None:
-        """Persist groups back to agents.json."""
-        raw_cfg = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
-        raw_cfg["groups"] = self._groups
-        self.config_path.write_text(
-            json.dumps(raw_cfg, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    @contextmanager
+    def _edit_groups(self) -> Iterator[dict[str, dict]]:
+        """Edit a fresh revision; publish before changing the cached view.
+
+        The local lock orders this process's edits and cache publication. The
+        shared primitive supplies the OS lock and revision check across Workers.
+        Neither conflict nor committed durability errors are automatically retried.
+        """
+        with path_lock(self.config_path):
+            document = read_config_json(self.config_path)
+            groups = document.setdefault("groups", {})
+            if not isinstance(groups, dict) or any(
+                not isinstance(group, dict) for group in groups.values()
+            ):
+                raise ValueError("groups must be an object containing group objects")
+            original = deepcopy(groups)
+            yield groups
+            if groups != original:
+                try:
+                    write_config_json(self.config_path, document)
+                except ConfigDurabilityError:
+                    # Replacement already happened. Keep the committed view but
+                    # propagate the error; never restore a stale snapshot.
+                    self._groups = deepcopy(groups)
+                    raise
+            self._groups = deepcopy(groups)
 
     def create_group(self, name: str, description: str = "") -> tuple[bool, str]:
-        if name in self._groups:
-            return False, f"Group '{name}' already exists."
-        self._groups[name] = {"description": description, "members": [], "exclude_from_broadcast": []}
-        self._save_groups()
-        return True, f"Group '{name}' created."
+        with self._edit_groups() as groups:
+            if name in groups:
+                return False, f"Group '{name}' already exists."
+            groups[name] = {"description": description, "members": [], "exclude_from_broadcast": []}
+            return True, f"Group '{name}' created."
 
     def delete_group(self, name: str) -> tuple[bool, str]:
-        if name not in self._groups:
-            return False, f"Group '{name}' not found."
-        del self._groups[name]
-        self._save_groups()
-        return True, f"Group '{name}' deleted."
+        with self._edit_groups() as groups:
+            if name not in groups:
+                return False, f"Group '{name}' not found."
+            del groups[name]
+            return True, f"Group '{name}' deleted."
 
     def group_add_member(self, group_name: str, agent_name: str) -> tuple[bool, str]:
-        if group_name not in self._groups:
-            return False, f"Group '{group_name}' not found."
-        grp = self._groups[group_name]
-        if grp.get("members") == "@active":
-            return False, "Cannot manually edit a dynamic group (@active)."
-        members: list = grp.setdefault("members", [])
-        if agent_name in members:
-            return False, f"'{agent_name}' is already in group '{group_name}'."
-        members.append(agent_name)
-        self._save_groups()
-        return True, f"Added '{agent_name}' to group '{group_name}'."
+        with self._edit_groups() as groups:
+            if group_name not in groups:
+                return False, f"Group '{group_name}' not found."
+            grp = groups[group_name]
+            if grp.get("members") == "@active":
+                return False, "Cannot manually edit a dynamic group (@active)."
+            members: list = grp.setdefault("members", [])
+            if not isinstance(members, list):
+                raise ValueError("group members must be a list or @active")
+            if agent_name in members:
+                return False, f"'{agent_name}' is already in group '{group_name}'."
+            members.append(agent_name)
+            return True, f"Added '{agent_name}' to group '{group_name}'."
 
     def group_remove_member(self, group_name: str, agent_name: str) -> tuple[bool, str]:
-        if group_name not in self._groups:
-            return False, f"Group '{group_name}' not found."
-        grp = self._groups[group_name]
-        if grp.get("members") == "@active":
-            return False, "Cannot manually edit a dynamic group (@active)."
-        members: list = grp.get("members", [])
-        if agent_name not in members:
-            return False, f"'{agent_name}' is not in group '{group_name}'."
-        members.remove(agent_name)
-        self._save_groups()
-        return True, f"Removed '{agent_name}' from group '{group_name}'."
+        with self._edit_groups() as groups:
+            if group_name not in groups:
+                return False, f"Group '{group_name}' not found."
+            grp = groups[group_name]
+            if grp.get("members") == "@active":
+                return False, "Cannot manually edit a dynamic group (@active)."
+            members: list = grp.get("members", [])
+            if not isinstance(members, list):
+                raise ValueError("group members must be a list or @active")
+            if agent_name not in members:
+                return False, f"'{agent_name}' is not in group '{group_name}'."
+            members.remove(agent_name)
+            return True, f"Removed '{agent_name}' from group '{group_name}'."
 
     @staticmethod
     def remove_local_memberships(config: dict[str, Any], agent_name: str) -> None:
@@ -207,13 +234,13 @@ class AgentDirectory:
                     group[field] = [value for value in values if value != agent_name]
 
     def group_rename(self, old_name: str, new_name: str) -> tuple[bool, str]:
-        if old_name not in self._groups:
-            return False, f"Group '{old_name}' not found."
-        if new_name in self._groups:
-            return False, f"Group '{new_name}' already exists."
-        self._groups[new_name] = self._groups.pop(old_name)
-        self._save_groups()
-        return True, f"Group renamed '{old_name}' → '{new_name}'."
+        with self._edit_groups() as groups:
+            if old_name not in groups:
+                return False, f"Group '{old_name}' not found."
+            if new_name in groups:
+                return False, f"Group '{new_name}' already exists."
+            groups[new_name] = groups.pop(old_name)
+            return True, f"Group renamed '{old_name}' → '{new_name}'."
 
     def check_permission(self, message: dict[str, Any]) -> tuple[bool, str]:
         from_agent = message["from_agent"]
