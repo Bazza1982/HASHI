@@ -196,6 +196,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "deepseek/deepseek-v4-flash",
             "moonshotai/kimi-k2.5",
             "google/gemini-3.1-flash-lite-preview",
+            "google/gemini-3.8-flash",
             "anthropic/claude-sonnet-4.6",
             "anthropic/claude-opus-4.6",
             "anthropic/claude-opus-4.5",
