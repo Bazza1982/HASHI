@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator import voice_manager as voice_manager_module
+from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_synthesizer import VoiceAsset
@@ -113,6 +115,30 @@ def test_voice_state_writer_rejects_corruption_without_overwrite(tmp_path):
         manager.set_voice_profile("warm_female")
 
     assert manager.state_path.read_bytes() == before
+
+
+def test_voice_state_conflict_does_not_replay_setting_change(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    manager.workspace_dir.mkdir(parents=True)
+    manager.state_path.write_text('{"voice_profile": "warm_female"}', encoding="utf-8")
+    actual_write = write_config_json
+    injected = False
+
+    def interleaved(path, payload, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            winner = read_config_json(path)
+            winner["voice_profile"] = "calm_male"
+            actual_write(path, winner)
+        return actual_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(voice_manager_module, "write_config_json", interleaved)
+
+    with pytest.raises(RuntimeError, match="changed since"):
+        manager.set_voice_profile("clear_female")
+
+    assert read_config_json(manager.state_path)["voice_profile"] == "calm_male"
 
 
 def test_voice_modes_coordinate_native_and_legacy_tts_state(tmp_path):

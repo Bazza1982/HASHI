@@ -12,6 +12,7 @@ from orchestrator.stable_port_allocator import (
     candidate_ports,
     os_reserved_ports,
 )
+from orchestrator.config_json import read_config_json
 
 
 def test_allocator_persists_configured_port_when_free(tmp_path: Path) -> None:
@@ -29,6 +30,42 @@ def test_allocator_persists_configured_port_when_free(tmp_path: Path) -> None:
     assert assignment.persisted is True
     payload = json.loads((tmp_path / "runtime_port_assignments.json").read_text(encoding="utf-8"))
     assert payload["assignments"][SERVICE_HASHI_REMOTE]["port"] == 8767
+
+
+def test_allocator_accepts_legacy_bytes_and_normalizes_on_change(tmp_path: Path) -> None:
+    path = tmp_path / "runtime_port_assignments.json"
+    path.write_bytes(
+        b'\xef\xbb\xbf{\r\n  "version": 1,\r\n  "assignments": {},\r\n  "future": 7\r\n}\r\n'
+    )
+    allocator = StablePortAllocator(
+        bridge_home=tmp_path,
+        service=SERVICE_HASHI_REMOTE,
+        host="127.0.0.1",
+        availability_probe=lambda host, port: True,
+    )
+
+    allocator.reserve_configured_port(8767)
+
+    raw = path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw
+    assert read_config_json(path)["future"] == 7
+
+
+def test_allocator_never_replaces_corrupt_saved_state(tmp_path: Path) -> None:
+    path = tmp_path / "runtime_port_assignments.json"
+    original = b'{"assignments":'
+    path.write_bytes(original)
+    allocator = StablePortAllocator(
+        bridge_home=tmp_path,
+        service=SERVICE_HASHI_REMOTE,
+        host="127.0.0.1",
+        availability_probe=lambda host, port: True,
+    )
+
+    with pytest.raises(PortAllocationError, match="unreadable"):
+        allocator.reserve_configured_port(8767)
+
+    assert path.read_bytes() == original
 
 
 def test_allocator_allocates_stable_fallback_when_configured_port_busy(tmp_path: Path) -> None:

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import time
 from collections.abc import Mapping
 from datetime import datetime, timedelta
@@ -10,6 +9,12 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator import runtime_pending, scheduler_recovery, ui_language
+from orchestrator.config_json import (
+    ConfigDocument,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.her_v2.request_policy import build_scheduler_request_context
 from orchestrator.job_ownership import ownership_mismatch_label
 from orchestrator.runtime_common import _safe_excerpt
@@ -226,11 +231,21 @@ class TaskScheduler:
     def _load_state(self):
         if self.state_path.exists():
             try:
-                with open(self.state_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                return read_config_json(self.state_path)
             except Exception as e:
                 scheduler_logger.error(f"Failed to load state: {e}")
-        return {
+                # Runtime display may continue from an empty view, but writes
+                # must not replace an unreadable saved state with this fallback.
+                return {
+                    "heartbeats": {},
+                    "crons": {},
+                    "nudges": {},
+                    "missed_crons": {},
+                    "missed_heartbeats": {},
+                    "recovery_batches": {},
+                    "delayed_messages": {},
+                }
+        return new_config_json(self.state_path, {
             "heartbeats": {},
             "crons": {},
             "nudges": {},
@@ -238,26 +253,19 @@ class TaskScheduler:
             "missed_heartbeats": {},
             "recovery_batches": {},
             "delayed_messages": {},
-        }
+        })
 
     def _save_state(self):
-        temporary = self.state_path.with_name(
-            f".{self.state_path.name}.{os.getpid()}.{uuid4().hex}.tmp"
-        )
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary.write_text(
-                json.dumps(self.state, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, self.state_path)
+            if not isinstance(self.state, ConfigDocument):
+                raise ValueError(
+                    "scheduler state is an unreadable fallback; refusing replacement"
+                )
+            write_config_json(self.state_path, self.state)
             return True
         except Exception as e:
             scheduler_logger.error(f"Failed to save state: {e}")
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
             return False
 
     def _delayed_message_records(self) -> dict[str, dict[str, Any]]:
@@ -684,11 +692,13 @@ class TaskScheduler:
             )
 
         if not self.tasks_path.exists():
-            tasks = {"heartbeats": [], "crons": [], "nudges": []}
+            tasks = new_config_json(
+                self.tasks_path,
+                {"heartbeats": [], "crons": [], "nudges": []},
+            )
         else:
             try:
-                with open(self.tasks_path, "r", encoding="utf-8") as f:
-                    tasks = json.load(f)
+                tasks = read_config_json(self.tasks_path)
             except Exception as e:
                 scheduler_logger.error(f"Failed to load tasks: {e}")
                 tasks = {"heartbeats": [], "crons": [], "nudges": []}
@@ -720,8 +730,9 @@ class TaskScheduler:
         ]
         if self.active_heartbeats_path.exists():
             try:
-                with open(self.active_heartbeats_path, "r", encoding="utf-8") as f:
-                    payload = json.load(f)
+                payload = json.loads(
+                    self.active_heartbeats_path.read_bytes().decode("utf-8-sig")
+                )
                 managed = payload if isinstance(payload, list) else payload.get("heartbeats", [])
                 heartbeats.extend(
                     hb for hb in managed
@@ -735,10 +746,15 @@ class TaskScheduler:
 
     def _save_tasks(self, tasks: dict):
         try:
-            with open(self.tasks_path, "w", encoding="utf-8") as f:
-                json.dump(tasks, f, indent=2, ensure_ascii=False)
+            if not isinstance(tasks, ConfigDocument):
+                raise ValueError(
+                    "tasks are an unreadable fallback; refusing replacement"
+                )
+            write_config_json(self.tasks_path, tasks)
+            return True
         except Exception as e:
             scheduler_logger.error(f"Failed to save tasks: {e}")
+            return False
 
     def _get_cron_last_run(self, task_id: str) -> float:
         """Get last run timestamp for a cron task, handling both old date-string and new timestamp formats."""

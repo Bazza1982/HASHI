@@ -968,3 +968,39 @@ async def test_thinking_deltas_preserve_exact_provider_spacing():
     assert runtime._openrouter_think_chunk == (
         "A EST and was flagged as missed by ~ 2.5 hours, so sunny."
     )
+
+
+def test_stream_preferences_read_bom_crlf_then_publish_utf8_lf(tmp_path):
+    runtime = _runtime(tmp_path)
+    path = telegram_stream_policy.preferences_path(runtime)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = json.dumps(
+        {
+            "version": 3,
+            "telegram_stream": {"enabled": True},
+            "extension": {"keep": True},
+        },
+        indent=2,
+    ).replace("\n", "\r\n")
+    path.write_bytes(b"\xef\xbb\xbf" + (rendered + "\r\n").encode())
+
+    telegram_stream_policy.set_policy_value(runtime, "typing", False)
+
+    raw = path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw
+    saved = json.loads(raw.decode())
+    assert saved["extension"] == {"keep": True}
+    assert saved["telegram_stream"]["typing"] is False
+
+
+def test_stream_preference_mutation_never_replaces_corrupt_state(tmp_path):
+    runtime = _runtime(tmp_path)
+    path = telegram_stream_policy.preferences_path(runtime)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = b'{"broken":'
+    path.write_bytes(original)
+
+    with pytest.raises(json.JSONDecodeError):
+        telegram_stream_policy.set_display_preference(runtime, "think", False)
+
+    assert path.read_bytes() == original

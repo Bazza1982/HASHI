@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from orchestrator.config_json import read_managed_json, write_config_json
 
 
 class TransferMoveError(ValueError):
@@ -61,14 +62,14 @@ def finalize_hashi_to_hermes_move_source(
             break
     if not changed:
         raise TransferMoveError(f"HASHI agent not found: {name}")
-    agents_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_config_json(agents_file, data)
 
     changed_paths = [agents_file]
     tasks_file = root / "tasks.json"
     if tasks_file.exists():
         tasks = _read_json_file(tasks_file)
         if _disable_hashi_tasks(tasks, name, opts):
-            tasks_file.write_text(json.dumps(tasks, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            write_config_json(tasks_file, tasks)
             changed_paths.append(tasks_file)
     return MoveFinalizeResult("hashi", name, changed_paths, [])
 
@@ -188,7 +189,7 @@ def _disable_hermes_bridge_entry(data: dict[str, Any], profile_name: str, opts: 
 
 
 def _read_json_file(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    return read_managed_json(path)
 
 
 def _read_yaml_file(path: Path) -> dict[str, Any]:

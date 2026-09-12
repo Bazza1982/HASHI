@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator import config as config_module
 from orchestrator.config import (
     LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
     SESSION_MODE_BACKENDS,
     ConfigManager,
     resolve_access_root,
 )
+from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.flexible_backend_registry import normalize_allowed_backends
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.runtime_configuration import build_her_v2_provider_options
@@ -154,6 +156,75 @@ def test_explicit_fixed_session_agent_keeps_fixed_working_mode(tmp_path, caplog)
     assert "engine" not in persisted["agents"][0]
     assert "resume_policy" not in persisted["agents"][0]
     assert "default_mode=fixed" in caplog.text
+
+
+def test_config_migration_reads_bom_crlf_and_publishes_utf8_lf(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "legacy",
+            "type": "fixed",
+            "engine": "codex-cli",
+            "workspace_dir": "workspaces/legacy",
+            "system_md": "workspaces/legacy/agent.md",
+            "model": "gpt-5.4",
+        },
+    )
+    config_value = json.loads(config_path.read_text(encoding="utf-8"))
+    secret_value = json.loads(secrets_path.read_text(encoding="utf-8"))
+    config_path.write_bytes(
+        b"\xef\xbb\xbf"
+        + (json.dumps(config_value, ensure_ascii=False, indent=2) + "\n")
+        .replace("\n", "\r\n")
+        .encode("utf-8")
+    )
+    secrets_path.write_bytes(
+        b"\xef\xbb\xbf"
+        + (json.dumps(secret_value, indent=2) + "\n")
+        .replace("\n", "\r\n")
+        .encode("utf-8")
+    )
+
+    ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+    raw = config_path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert b"\r" not in raw
+    assert raw.endswith(b"\n")
+    assert read_config_json(config_path)["agents"][0]["type"] == "flex"
+
+
+def test_config_migration_conflict_keeps_external_winner_and_restores_pcm(
+    tmp_path, monkeypatch
+):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "legacy",
+            "type": "fixed",
+            "engine": "codex-cli",
+            "workspace_dir": "workspaces/legacy",
+            "system_md": "workspaces/legacy/agent.md",
+            "model": "gpt-5.4",
+        },
+    )
+    pcm_path = tmp_path / "workspaces" / "legacy" / "agent.md"
+    pcm_before = pcm_path.read_bytes()
+    actual_write = write_config_json
+
+    def interleaved(path, stale, **kwargs):
+        winner = read_config_json(path)
+        winner["external"] = "preserved"
+        actual_write(path, winner)
+        return actual_write(path, stale, **kwargs)
+
+    monkeypatch.setattr(config_module, "write_config_json", interleaved)
+
+    with pytest.raises(ConfigConflictError):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+    assert read_config_json(config_path)["external"] == "preserved"
+    assert pcm_path.read_bytes() == pcm_before
 
 
 def test_her_v2_defaults_to_fixed_as_a_session_backend(tmp_path):

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+
+from orchestrator.config_json import (
+    ConfigDocument,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 
 
 DEFAULT_STREAM_ENABLED = True
@@ -90,16 +95,26 @@ def preferences_path(runtime: Any) -> Path:
     return Path(workspace) / "state" / "runtime_preferences.json"
 
 
-def load_preferences(runtime: Any) -> dict[str, Any]:
+def load_preferences(runtime: Any, *, strict: bool = False) -> dict[str, Any]:
     path = preferences_path(runtime)
     if not path.exists():
         return _write_preferences(
             runtime,
-            {"telegram_stream": {"enabled": DEFAULT_STREAM_ENABLED, **DEFAULT_COMPONENTS}},
+            new_config_json(
+                path,
+                {
+                    "telegram_stream": {
+                        "enabled": DEFAULT_STREAM_ENABLED,
+                        **DEFAULT_COMPONENTS,
+                    }
+                },
+            ),
         )
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_config_json(path)
     except Exception:
+        if strict:
+            raise
         return {}
     if not isinstance(payload, dict):
         return {}
@@ -240,22 +255,18 @@ def _write_preferences(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         current_version = 0
     payload["version"] = max(STREAM_PREFERENCES_VERSION, current_version)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    if not isinstance(payload, ConfigDocument):
+        if path.exists():
+            raise ValueError("runtime preference update requires a revision-bearing read")
+        payload = new_config_json(path, payload)
+    write_config_json(path, payload)
     return payload
 
 
 def set_policy_value(runtime: Any, name: str, enabled: bool) -> Path:
     if name != "enabled" and name not in COMPONENT_NAMES:
         raise ValueError(f"Unknown Telegram stream switch: {name}")
-    payload = load_preferences(runtime)
+    payload = load_preferences(runtime, strict=True)
     stream = payload.get("telegram_stream")
     if not isinstance(stream, dict):
         stream = {}
@@ -341,7 +352,7 @@ def get_display_preference(runtime: Any, name: str, *, default: bool = True) -> 
 def set_display_preference(runtime: Any, name: str, enabled: bool) -> Path:
     if name not in DISPLAY_PREFERENCE_NAMES:
         raise ValueError(f"Unknown Telegram display preference: {name}")
-    payload = load_preferences(runtime)
+    payload = load_preferences(runtime, strict=True)
     display = payload.get("telegram_display")
     if not isinstance(display, dict):
         display = {}
@@ -352,7 +363,7 @@ def set_display_preference(runtime: Any, name: str, enabled: bool) -> Path:
 
 
 def reset_policy(runtime: Any) -> Path:
-    payload = load_preferences(runtime)
+    payload = load_preferences(runtime, strict=True)
     payload["telegram_stream"] = {
         "enabled": DEFAULT_STREAM_ENABLED,
         **DEFAULT_COMPONENTS,

@@ -26,6 +26,14 @@ from orchestrator.config import (
     VALID_ACCESS_SCOPES,
     default_agent_mode_for_backend,
 )
+from orchestrator.config_json import (
+    ConfigDocument,
+    ConfigList,
+    delete_config_json,
+    new_config_json,
+    read_managed_json,
+    write_config_json,
+)
 from orchestrator.flexible_backend_registry import (
     get_secret_lookup_order,
     migrate_provider_only_active_backend,
@@ -528,12 +536,26 @@ def commit_agent_move(
             )
             os.replace(staging_workspace, final_workspace)
             _atomic_json(agents_path, agents_data)
+            _record_recovery_publication(
+                record_dir, "agents.json", agents_data.revision
+            )
             _atomic_json(tasks_path, tasks_data)
+            _record_recovery_publication(
+                record_dir, "tasks.json", tasks_data.revision
+            )
             if secret_values:
                 secrets_data.update(secret_values)
                 _atomic_json(secrets_path, secrets_data, mode=0o600)
+                _record_recovery_publication(
+                    record_dir, "secrets.json", secrets_data.revision
+                )
             if package.agent_capability is not None:
                 _atomic_json(capabilities_path, capabilities_data)
+                _record_recovery_publication(
+                    record_dir,
+                    "agent_capabilities.json",
+                    capabilities_data.revision,
+                )
 
             credential_status = _credential_status(
                 root,
@@ -616,6 +638,7 @@ def activate_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
         path = root / "agents.json"
         original = path.read_bytes()
         data = _load_json(path)
+        original_revision = data.revision
         row = _find_owned_agent(data, target_agent_id, package.package_id)
         row["is_active"] = True
         row["transfer_import_state"] = "activated_pending_reboot"
@@ -631,7 +654,12 @@ def activate_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
             )
             _atomic_json(record_dir / "state.json", record, mode=0o600)
         except Exception:
-            _atomic_bytes(path, original)
+            if data.revision != original_revision:
+                _restore_json_snapshot(
+                    path,
+                    original,
+                    published_revision=data.revision,
+                )
             raise
         return _public_state(record)
 
@@ -891,7 +919,7 @@ def deactivate_source_agent(
                         schedule_states[_schedule_state_key(section, item, index)] = (
                             bool(item.get("enabled", True))
                         )
-            state = {
+            state = new_config_json(state_path, {
                 "schema_version": MOVE_STATE_SCHEMA_VERSION,
                 "package_id": package_id,
                 "agent_id": agent_id,
@@ -904,7 +932,7 @@ def deactivate_source_agent(
                 "workspace_retained": True,
                 "workspace_path": str(_source_workspace_path(root, row, agent_id)),
                 "reboot_required": False,
-            }
+            })
             _atomic_json(state_path, state, mode=0o600)
 
         for key in _SOURCE_TRANSFER_FIELDS:
@@ -920,18 +948,29 @@ def deactivate_source_agent(
                     item["transfer_disabled_by"] = package_id
 
         try:
+            agents_published = False
+            tasks_published = False
             _atomic_json(agents_path, agents)
+            agents_published = True
             _atomic_json(tasks_path, tasks)
+            tasks_published = True
             state["status"] = "source_disabled_pending_reboot"
             state["disabled_at"] = utc_now_iso()
             state["reboot_required"] = True
             _atomic_json(state_path, state, mode=0o600)
         except Exception:
-            _atomic_bytes(agents_path, agents_original)
-            if tasks_original is None:
-                tasks_path.unlink(missing_ok=True)
-            else:
-                _atomic_bytes(tasks_path, tasks_original)
+            if tasks_published:
+                _restore_json_snapshot(
+                    tasks_path,
+                    tasks_original,
+                    published_revision=tasks.revision,
+                )
+            if agents_published:
+                _restore_json_snapshot(
+                    agents_path,
+                    agents_original,
+                    published_revision=agents.revision,
+                )
             raise
         return state
 
@@ -1563,7 +1602,7 @@ def _remove_dormant_schedules(
 ) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise AgentMoveError("target tasks.json must contain a JSON object")
-    result = dict(data)
+    result = data.copy()
     for section in ("heartbeats", "crons", "nudges"):
         result[section] = [
             item
@@ -1588,7 +1627,7 @@ def _merge_schedules(
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
     if not isinstance(target, dict):
         raise AgentMoveError("target tasks.json must contain a JSON object")
-    result = dict(target)
+    result = target.copy()
     imported_ids: dict[str, list[str]] = {}
     for section in ("heartbeats", "crons", "nudges"):
         existing = list(result.get(section) or [])
@@ -2274,6 +2313,30 @@ def _write_recovery_snapshots(root: Path, record_dir: Path) -> None:
     _atomic_json(recovery / "manifest.json", metadata, mode=0o600)
 
 
+def _record_recovery_publication(
+    record_dir: Path,
+    name: str,
+    published_revision: str | None,
+) -> None:
+    """Journal one completed config publication for guarded recovery.
+
+    A crash between publishing a config and this journal update deliberately
+    leaves recovery unable to prove ownership.  In that case recovery fails
+    closed instead of replacing a possible external writer's value.
+    """
+
+    if not published_revision:
+        raise AgentMoveError(f"missing published revision for {name}")
+    manifest_path = record_dir / "recovery" / "manifest.json"
+    manifest = _load_json(manifest_path)
+    files = manifest.get("files")
+    item = files.get(name) if isinstance(files, Mapping) else None
+    if not isinstance(item, dict):
+        raise AgentMoveError(f"recovery manifest has no snapshot for {name}")
+    item["published_revision"] = published_revision
+    _atomic_json(manifest_path, manifest, mode=0o600)
+
+
 def _restore_recovery_snapshots(root: Path, record_dir: Path) -> None:
     recovery = record_dir / "recovery"
     manifest_path = recovery / "manifest.json"
@@ -2288,15 +2351,40 @@ def _restore_recovery_snapshots(root: Path, record_dir: Path) -> None:
             "agent_capabilities.json",
         }:
             continue
+        if not isinstance(item, Mapping):
+            raise AgentMoveError(f"invalid recovery manifest entry for {name}")
         target = root / name
+        try:
+            current = target.read_bytes()
+        except FileNotFoundError:
+            if not item.get("existed"):
+                continue
+            raise AgentMoveError(
+                f"cannot recover {name}: live file was removed by another writer"
+            )
+        current_revision = hashlib.sha256(current).hexdigest()
+        original_revision = str(item.get("sha256") or "")
+        if item.get("existed") and current_revision == original_revision:
+            continue
+        published_revision = str(item.get("published_revision") or "")
+        if current_revision != published_revision:
+            raise AgentMoveError(
+                f"cannot recover {name}: live file is not the transaction publication"
+            )
         if item.get("existed"):
-            _atomic_bytes(
+            original = (recovery / name).read_bytes()
+            if hashlib.sha256(original).hexdigest() != original_revision:
+                raise AgentMoveError(f"recovery snapshot checksum failed for {name}")
+            _restore_json_snapshot(
                 target,
-                (recovery / name).read_bytes(),
-                mode=0o600 if name == "secrets.json" else None,
+                original,
+                published_revision=published_revision,
             )
         else:
-            target.unlink(missing_ok=True)
+            delete_config_json(
+                target,
+                expected_revision=published_revision,
+            )
 
 
 def _target_max_access_scope(root: Path) -> str:
@@ -2414,20 +2502,60 @@ def _agent_rows(data: Any) -> list[dict[str, Any]]:
 
 def _load_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        return read_managed_json(path)
     except Exception as exc:
         raise AgentMoveError(f"invalid JSON file: {path.name}") from exc
 
 
 def _load_json_or_default(path: Path, default: Any) -> Any:
     if not path.exists():
-        return json.loads(json.dumps(default))
+        if not isinstance(default, dict):
+            raise AgentMoveError("managed JSON defaults must be objects")
+        return new_config_json(path, json.loads(json.dumps(default)))
     return _load_json(path)
 
 
 def _atomic_json(path: Path, value: Any, *, mode: int | None = None) -> None:
-    data = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    _atomic_bytes(path, data, mode=mode)
+    del mode  # the shared primitive applies the platform-private policy
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not isinstance(value, (ConfigDocument, ConfigList)):
+        if path.exists():
+            raise AgentMoveError(
+                f"revision-bearing read required before updating {path.name}"
+            )
+        if not isinstance(value, dict):
+            raise AgentMoveError("new managed JSON documents must be objects")
+        value = new_config_json(path, value)
+    write_config_json(path, value)
+
+
+def _restore_json_snapshot(
+    path: Path,
+    original: bytes | None,
+    *,
+    published_revision: str,
+) -> None:
+    """Rollback only our own still-current publication, never another writer."""
+
+    if original is None:
+        delete_config_json(path, expected_revision=published_revision)
+        return
+    try:
+        value = json.loads(original.decode("utf-8-sig"))
+    except Exception as exc:
+        raise AgentMoveError(f"invalid recovery JSON file: {path.name}") from exc
+    if isinstance(value, dict):
+        write_config_json(path, value, expected_revision=published_revision)
+        return
+    if isinstance(value, list):
+        snapshot = ConfigList(
+            value,
+            source=path.resolve(),
+            revision=published_revision,
+        )
+        write_config_json(path, snapshot)
+        return
+    raise AgentMoveError(f"recovery JSON must be an object or list: {path.name}")
 
 
 def _atomic_bytes(path: Path, data: bytes, *, mode: int | None = None) -> None:

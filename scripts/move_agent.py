@@ -61,6 +61,7 @@ from orchestrator.agent_move.manager import (
     record_agent_move_admin_outcome,
 )
 from orchestrator.agent_move.package import AgentMoveError
+from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 
 
 # ---------------------------------------------------------------------------
@@ -591,11 +592,10 @@ def _upsert_agent_config(agent_config: dict, root: Path, agent_id: str):
         print(f"  WARNING: {agents_file} not found — skipping config update")
         return
 
-    with open(agents_file) as f:
-        data = json.load(f)
-
-    is_list = isinstance(data, list)
-    agents = data if is_list else data.get("agents", [])
+    data = read_config_json(agents_file)
+    agents = data.get("agents", [])
+    if not isinstance(agents, list):
+        raise ValueError("agents.json agents must be a list")
 
     # Update workspace_dir to match target layout
     new_config = dict(agent_config)
@@ -613,25 +613,20 @@ def _upsert_agent_config(agent_config: dict, root: Path, agent_id: str):
     if not updated:
         agents.append(new_config)
 
-    if is_list:
-        data = agents
-    else:
-        data["agents"] = agents
-
-    with open(agents_file, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    data["agents"] = agents
+    write_config_json(agents_file, data)
     print("  agents.json updated on target")
 
 
 def _upsert_secrets(secrets: dict, root: Path):
     secrets_file = root / "secrets.json"
-    existing = {}
-    if secrets_file.exists():
-        with open(secrets_file) as f:
-            existing = json.load(f)
+    existing = (
+        read_config_json(secrets_file)
+        if secrets_file.exists()
+        else new_config_json(secrets_file)
+    )
     existing.update(secrets)
-    with open(secrets_file, "w") as f:
-        json.dump(existing, f, indent=2, ensure_ascii=False)
+    write_config_json(secrets_file, existing)
     print(f"  secrets.json updated on target ({len(secrets)} keys)")
 
 
@@ -639,20 +634,16 @@ def _deactivate_agent(agent_id: str, root: Path):
     agents_file = root / "agents.json"
     if not agents_file.exists():
         return
-    with open(agents_file) as f:
-        data = json.load(f)
-    is_list = isinstance(data, list)
-    agents = data if is_list else data.get("agents", [])
+    data = read_config_json(agents_file)
+    agents = data.get("agents", [])
+    if not isinstance(agents, list):
+        raise ValueError("agents.json agents must be a list")
     for ag in agents:
         if ag.get("name") == agent_id or ag.get("id") == agent_id:
             ag["is_active"] = False
             break
-    if is_list:
-        data = agents
-    else:
-        data["agents"] = agents
-    with open(agents_file, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    data["agents"] = agents
+    write_config_json(agents_file, data)
 
 
 def _try_vector_backfill(root: Path, agent_id: str):

@@ -22,6 +22,12 @@ from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import DEFAULT_AGENT_MODE, FlexibleAgentConfig, GlobalConfig
+from orchestrator.config_json import (
+    ConfigDocument,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.agent_move.package import AgentMoveError
 from orchestrator.bootstrap_logging import refresh_console_output_filters
 from orchestrator.command_ui import (
@@ -1583,17 +1589,13 @@ class FlexibleAgentRuntime:
 
     def _load_runtime_session_state(self) -> dict:
         if not self.runtime_session_path.exists():
-            return {}
-        try:
-            return json.loads(self.runtime_session_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+            return new_config_json(self.runtime_session_path)
+        return read_config_json(self.runtime_session_path)
 
     def _save_runtime_session_state(self, payload: dict):
-        self.runtime_session_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
-            encoding="utf-8",
-        )
+        if not isinstance(payload, ConfigDocument):
+            raise ValueError("runtime session updates require a revision-bearing read")
+        write_config_json(self.runtime_session_path, payload)
 
     def _detect_instance_name(self) -> str:
         return str(getattr(self.global_config, "instance_id", None) or "HASHI").upper()
@@ -8718,18 +8720,22 @@ class FlexibleAgentRuntime:
     async def cmd_promote(self, update: Update, context: Any):
         await runtime_session.cmd_promote(self, update, context)
 
-    def _get_skill_state(self) -> dict:
+    def _get_skill_state(self, *, strict: bool = False) -> dict:
         path = self.workspace_dir / "skill_state.json"
+        if not path.exists():
+            return new_config_json(path)
         try:
-            return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            return read_config_json(path)
         except Exception:
+            if strict:
+                raise
             return {}
 
     def _set_skill_state(self, key: str, value):
         path = self.workspace_dir / "skill_state.json"
-        state = self._get_skill_state()
+        state = self._get_skill_state(strict=True)
         state[key] = value
-        path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_config_json(path, state)
 
     async def cmd_memory(self, update: Update, context: Any):
         await runtime_workspace.cmd_memory(self, update, context)

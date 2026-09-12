@@ -25,6 +25,7 @@ from orchestrator.admin_local_testing import (
 )
 from orchestrator.agent_overview import build_agent_overview
 from orchestrator.capability_broker import CapabilityBrokerError
+from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
@@ -737,7 +738,7 @@ class WorkbenchApiServer:
         return list(self.runtimes)
 
     def _load_agent_rows(self, *, include_inactive: bool = False) -> list[dict]:
-        raw = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
+        raw = read_config_json(self.config_path)
         return [
             agent
             for agent in raw.get("agents", [])
@@ -745,33 +746,10 @@ class WorkbenchApiServer:
         ]
 
     def _load_raw_agent_config(self) -> dict:
-        return json.loads(self.config_path.read_text(encoding="utf-8-sig"))
+        return read_config_json(self.config_path)
 
     def _write_raw_agent_config(self, raw: dict) -> None:
-        original = self.config_path.read_bytes()
-        uses_bom = original.startswith(b"\xef\xbb\xbf")
-        newline = "\r\n" if b"\r\n" in original else "\n"
-        rendered = json.dumps(raw, indent=2, ensure_ascii=False) + "\n"
-        if newline == "\r\n":
-            rendered = rendered.replace("\n", "\r\n")
-        encoded = rendered.encode("utf-8")
-        if uses_bom:
-            encoded = b"\xef\xbb\xbf" + encoded
-        temporary = self.config_path.with_name(
-            f".{self.config_path.name}.tmp-{os.getpid()}-{time.time_ns()}"
-        )
-        try:
-            temporary.write_bytes(encoded)
-            try:
-                temporary.chmod(self.config_path.stat().st_mode)
-            except OSError:
-                pass
-            temporary.replace(self.config_path)
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+        write_config_json(self.config_path, raw)
 
     def _load_agent_capability_rows(self):
         capabilities_path = self.config_path.parent / "agent_capabilities.json"

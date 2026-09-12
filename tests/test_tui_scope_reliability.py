@@ -11,7 +11,9 @@ pytest.importorskip("textual")
 
 from tui.app import ChatHistory, ChatInput, HASHITuiApp, LogPanel
 from tui.audio import TuiAudioError, decode_tui_audio
-from tui.preferences import TuiPreferenceStore
+from tui import preferences as preferences_module
+from tui.preferences import TuiPreferenceError, TuiPreferenceStore
+from orchestrator.config_json import read_config_json, write_config_json
 
 
 class _QuietTui(HASHITuiApp):
@@ -199,6 +201,33 @@ def test_preference_store_reads_bom_crlf_and_preserves_concurrent_fields(tmp_pat
     assert not raw.startswith(b"\xef\xbb\xbf")
     assert b"\r\n" not in raw
     assert json.loads(raw) == {"future": 7, "theme": "atm"}
+
+
+def test_preference_store_reports_conflict_without_replaying_user_action(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "preferences.json"
+    path.write_text('{"theme": "retro"}', encoding="utf-8")
+    actual_write = write_config_json
+    injected = False
+
+    def interleaved(target, payload, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            winner = read_config_json(target)
+            winner["theme"] = "apple2"
+            actual_write(target, winner)
+        return actual_write(target, payload, **kwargs)
+
+    monkeypatch.setattr(preferences_module, "write_config_json", interleaved)
+
+    with pytest.raises(TuiPreferenceError, match="changed since"):
+        TuiPreferenceStore(path, retries=99).update(
+            lambda value: value.update({"theme": "atm"})
+        )
+
+    assert read_config_json(path)["theme"] == "apple2"
 
 
 def test_tui_audio_requires_ogg_size_and_digest_integrity():

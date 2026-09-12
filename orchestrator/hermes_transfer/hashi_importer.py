@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.config_json import new_config_json, read_managed_json, write_config_json
 from orchestrator.pcm import atomic_write_pcm, convert_legacy_pcm_text
 
 from .package import TransferPackage, read_transfer_package
@@ -211,15 +212,16 @@ def _write_hermes_import_files(archive: zipfile.ZipFile, target: Path) -> None:
 
 def _upsert_agent(agents_file: Path, agent_config: dict[str, Any]) -> None:
     data = _read_json_file(agents_file)
-    is_list = isinstance(data, list)
-    agents = data if is_list else data.setdefault("agents", [])
+    agents = data if isinstance(data, list) else data.setdefault("agents", [])
+    if not isinstance(agents, list):
+        raise HashiImportError("agents.json agents must be a list")
     for idx, existing in enumerate(agents):
         if isinstance(existing, dict) and (existing.get("name") == agent_config["name"] or existing.get("id") == agent_config["name"]):
             agents[idx] = agent_config
             break
     else:
         agents.append(agent_config)
-    agents_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_config_json(agents_file, data)
 
 
 def _import_schedules(plan: HashiImportPlan) -> None:
@@ -231,7 +233,10 @@ def _import_schedules(plan: HashiImportPlan) -> None:
     if tasks_file.exists():
         tasks = _read_json_file(tasks_file)
     else:
-        tasks = {"version": 1, "heartbeats": [], "crons": [], "nudges": []}
+        tasks = new_config_json(
+            tasks_file,
+            {"version": 1, "heartbeats": [], "crons": [], "nudges": []},
+        )
     for section in ("heartbeats", "crons", "nudges"):
         tasks.setdefault(section, [])
         existing_ids = {item.get("id") for item in tasks[section] if isinstance(item, dict)}
@@ -245,7 +250,7 @@ def _import_schedules(plan: HashiImportPlan) -> None:
             if imported.get("id") in existing_ids:
                 imported["id"] = f"{plan.target_agent_id}-{imported['id']}"
             tasks[section].append(imported)
-    tasks_file.write_text(json.dumps(tasks, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_config_json(tasks_file, tasks)
 
 
 def _find_agent_config(agents_data: Any, agent_id: str) -> dict[str, Any] | None:
@@ -271,4 +276,4 @@ def _rollback_dir(root: Path, manifest: dict[str, Any]) -> Path:
 
 
 def _read_json_file(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    return read_managed_json(path)

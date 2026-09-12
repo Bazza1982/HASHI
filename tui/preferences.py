@@ -20,6 +20,9 @@ class TuiPreferenceStore:
 
     def __init__(self, path: str | Path, *, retries: int = 4):
         self.path = Path(path)
+        # Retain the keyword for source compatibility.  A stale user action is
+        # never replayed against a newer document, regardless of this legacy
+        # value.
         self.retries = max(1, int(retries))
 
     def read(self) -> dict:
@@ -32,31 +35,27 @@ class TuiPreferenceStore:
 
     def update(self, mutate: Callable[[dict], None]) -> dict:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conflict: Exception | None = None
-        for _attempt in range(self.retries):
+        try:
             try:
-                try:
-                    document = read_config_json(self.path)
-                    expected_revision: str | None = document.revision
-                    payload = dict(document)
-                except FileNotFoundError:
-                    expected_revision = None
-                    payload = {}
-                mutate(payload)
-                write_config_json(
-                    self.path,
-                    payload,
-                    expected_revision=expected_revision,
-                )
-                return payload
-            except ConfigConflictError as exc:
-                conflict = exc
-                continue
-            except (OSError, ValueError, TypeError) as exc:
-                raise TuiPreferenceError(f"TUI preferences were not saved: {exc}") from exc
-        raise TuiPreferenceError(
-            "TUI preferences changed repeatedly; reopen the setting and try again"
-        ) from conflict
+                document = read_config_json(self.path)
+                expected_revision: str | None = document.revision
+                payload = dict(document)
+            except FileNotFoundError:
+                expected_revision = None
+                payload = {}
+            mutate(payload)
+            write_config_json(
+                self.path,
+                payload,
+                expected_revision=expected_revision,
+            )
+            return payload
+        except ConfigConflictError as exc:
+            raise TuiPreferenceError(
+                "TUI preferences changed since they were opened; reopen the setting and try again"
+            ) from exc
+        except (OSError, ValueError, TypeError) as exc:
+            raise TuiPreferenceError(f"TUI preferences were not saved: {exc}") from exc
 
 
 __all__ = ["TuiPreferenceError", "TuiPreferenceStore"]

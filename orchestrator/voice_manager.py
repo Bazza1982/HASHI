@@ -763,34 +763,31 @@ class VoiceManager:
     def _update(self, mutate: Callable[[dict], None], *, retries: int = 4) -> dict:
         """Fresh-read mutation that never overwrites corrupt or newer state."""
 
+        del retries  # retained for private-call compatibility; stale actions are not replayed
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
-        conflict: Exception | None = None
-        for _attempt in range(max(1, retries)):
-            try:
-                try:
-                    document = read_config_json(self.state_path)
-                    revision: str | None = document.revision
-                    state = self._normalise_state(dict(document))
-                except FileNotFoundError:
-                    revision = None
-                    state = copy.deepcopy(self.DEFAULT_STATE)
-                except (OSError, ValueError, TypeError) as exc:
-                    raise RuntimeError(
-                        f"Voice state is unreadable; no settings were changed: {exc}"
-                    ) from exc
-                mutate(state)
-                write_config_json(
-                    self.state_path,
-                    state,
-                    expected_revision=revision,
-                )
-                return state
-            except ConfigConflictError as exc:
-                conflict = exc
-                continue
-        raise RuntimeError(
-            "Voice state changed repeatedly; reopen the setting and try again"
-        ) from conflict
+        try:
+            document = read_config_json(self.state_path)
+            revision: str | None = document.revision
+            state = self._normalise_state(dict(document))
+        except FileNotFoundError:
+            revision = None
+            state = copy.deepcopy(self.DEFAULT_STATE)
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"Voice state is unreadable; no settings were changed: {exc}"
+            ) from exc
+        mutate(state)
+        try:
+            write_config_json(
+                self.state_path,
+                state,
+                expected_revision=revision,
+            )
+        except ConfigConflictError as exc:
+            raise RuntimeError(
+                "Voice state changed since it was opened; reopen the setting and try again"
+            ) from exc
+        return state
 
     def get_state(self) -> dict:
         return self._load()

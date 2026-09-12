@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import importlib
-import json
 import logging
 import os
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,6 +10,11 @@ from typing import Any
 from orchestrator.enterprise.profile import (
     parse_profile_context,
     validate_profile_context,
+)
+from orchestrator.config_json import (
+    ConfigDurabilityError,
+    read_config_json,
+    write_config_json,
 )
 from orchestrator.pathing import resolve_command_value, resolve_path_value
 from orchestrator.pcm import (
@@ -274,14 +277,7 @@ class ConfigManager:
         )
         if not backup_path.exists():
             backup_path.write_bytes(self.config_path.read_bytes())
-        temp_path = self.config_path.with_name(
-            f".{self.config_path.name}.fixed-migration-{os.getpid()}.tmp"
-        )
-        temp_path.write_text(
-            json.dumps(raw_cfg, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temp_path.replace(self.config_path)
+        write_config_json(self.config_path, raw_cfg)
 
     def _validate_pcm_migration_preconditions(self, raw_cfg: dict) -> None:
         """Reject invalid configuration before any one-time PCM write."""
@@ -375,27 +371,11 @@ class ConfigManager:
                 )
 
     def _write_config_atomic(self, raw_cfg: dict, *, label: str) -> None:
+        # Keep the compatibility method name for migration tests and callers;
+        # encoding, locking, revision checks and publication have one owner.
+        del label
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{self.config_path.name}.{label}-",
-            suffix=".tmp",
-            dir=self.config_path.parent,
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(raw_cfg, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.config_path)
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            temporary.unlink(missing_ok=True)
-            raise
+        write_config_json(self.config_path, raw_cfg)
 
     def _migrate_pcm_agents(self, raw_cfg: dict) -> list[str]:
         """Validate and atomically migrate every configured Agent to ``agent.md``.
@@ -505,6 +485,10 @@ class ConfigManager:
                 )
                 atomic_write_pcm(target, converted)
             self._write_config_atomic(raw_cfg, label="pcm-migration")
+        except ConfigDurabilityError:
+            # The configuration replacement is already committed.  Retaining
+            # the matching PCM files is the only non-destructive outcome.
+            raise
         except Exception:
             for target, (existed, content, mode) in reversed(list(originals.items())):
                 if existed:
@@ -512,7 +496,6 @@ class ConfigManager:
                     os.chmod(target, mode)
                 else:
                     target.unlink(missing_ok=True)
-            self.config_path.write_bytes(original_config)
             raise
 
         for name, _target, _converted in staged:
@@ -521,8 +504,7 @@ class ConfigManager:
         return migrated_names
 
     def load(self) -> tuple[GlobalConfig, list[FlexibleAgentConfig], dict]:
-        with open(self.config_path, "r", encoding="utf-8-sig") as f:
-            raw_cfg = json.load(f)
+        raw_cfg = read_config_json(self.config_path)
 
         migrated_fixed_agents = self._migrate_legacy_fixed_agents(raw_cfg)
         self._validate_pcm_migration_preconditions(raw_cfg)
@@ -533,17 +515,9 @@ class ConfigManager:
                 ", ".join(migrated_pcm_agents),
             )
         elif migrated_fixed_agents:
-            try:
-                self._persist_legacy_fixed_migration(raw_cfg)
-            except OSError as exc:
-                config_logger.warning(
-                    "Legacy fixed agents were migrated in memory but the normalized "
-                    "configuration could not be persisted: %s",
-                    exc,
-                )
+            self._persist_legacy_fixed_migration(raw_cfg)
 
-        with open(self.secrets_path, "r", encoding="utf-8-sig") as f:
-            secrets = json.load(f)
+        secrets = read_config_json(self.secrets_path)
 
         g_raw = raw_cfg["global"]
         profile_ctx = parse_profile_context(g_raw)

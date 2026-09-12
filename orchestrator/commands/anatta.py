@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import json
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from orchestrator import ui_language
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.command_ui import card_title, refresh_label, selected_label
+from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 from tools.anatta_diagnostics import build_report
 
 
@@ -63,7 +63,11 @@ async def anatta_command(runtime: Any, update: Any, context: Any) -> None:
 
 
 def _current_mode(workspace: Path) -> str:
-    return str(_load_json_object(workspace / "anatta_config.json").get("mode") or "off")
+    try:
+        config = _load_json_object(workspace / "anatta_config.json")
+    except (OSError, ValueError, UnicodeError):
+        return "off"
+    return str(config.get("mode") or "off")
 
 
 def _status_text(
@@ -192,16 +196,12 @@ def _ensure_anatta_observer(path: Path) -> bool:
 
 def _load_json_object(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {}
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+        return new_config_json(path)
+    return read_config_json(path)
 
 
 def _write_json_object(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_config_json(path, payload)
 
 
 def _reload_observers(runtime: Any) -> bool:
