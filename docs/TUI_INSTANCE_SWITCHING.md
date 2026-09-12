@@ -119,9 +119,12 @@ initial transcript loads, onboarding wakeups, and sends carry the connection
 generation or client reference so stale results cannot appear in the new
 instance view.
 
-Transcript byte offsets live inside each API client and are never copied during
-a switch. The chat panel is cleared at commit. The log panel is not remote: it
-continues to follow the launch repository and is labeled `Local log — <id>`.
+Transcript and log byte offsets live inside each API client and are never copied
+during a switch. The chat and rendered log panels are cleared at commit. In
+`current` mode the log follower changes to the newly committed instance through
+the authenticated, bounded `log_tail` operation; a response from the previous
+connection generation is discarded. `/log local` is the explicit opt-in for
+following the launch repository instead.
 
 ## Commands
 

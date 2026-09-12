@@ -41,8 +41,8 @@ shared recovery positions and control-flow propagation across tool-capable
 adapter families.
 
 Native Windows/WSL permissions and the authorised, low-volume real Provider
-canaries remain runtime acceptance work. Their results belong in the nightly
-checklist; unit evidence alone does not close those rows.
+canaries are recorded in `NIGHTLY_20260912_RUNTIME_ACCEPTANCE.md`; unit evidence
+alone does not close those rows.
 
 ## Protected boundary
 

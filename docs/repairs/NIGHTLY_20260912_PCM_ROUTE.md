@@ -52,7 +52,8 @@ duplicate send.
 - `python scripts/check_protected_core_changes.py --base
   19e330f985aaf6d5523fd82a3bcc8a4256b536c0` passed.
 
-No Core file, instance configuration, credential, or user data was changed.
-Native Windows qualification and modest marked Telegram/HChat runtime
-acceptance remain deployment steps; WhatsApp stays simulation-only while its
-account is logged out.
+No Core file, instance configuration, credential, or user data was changed by
+the source batch. Native Windows qualification and the modest marked
+Telegram/HChat runtime checks are recorded in
+`NIGHTLY_20260912_RUNTIME_ACCEPTANCE.md`. WhatsApp stays simulation-only while
+its account is logged out.

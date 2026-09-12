@@ -37,4 +37,5 @@ The focused attachment, session API, Workbench upload, Remote proxy, and TUI
 scope suites cover frozen-byte behavior, one-request media admission, target
 Workzone containment, Remote field forwarding, and corrupt/ambiguous payload
 rejection. Native Windows clipboard and drag/drop adoption are validated
-separately during the platform pass.
+separately during the platform pass. The authenticated H1-to-H3 byte-transfer
+acceptance is recorded in `NIGHTLY_20260912_RUNTIME_ACCEPTANCE.md`.

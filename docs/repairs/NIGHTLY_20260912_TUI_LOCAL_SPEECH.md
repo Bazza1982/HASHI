@@ -39,4 +39,5 @@ TUI-only `/say`, local preference reopening, duplicate suppression, shared
 profile selection, old Telegram command regression, worker proxy consumption,
 legacy encoding, and corrupt-state rejection. Physical playback is deliberately
 left to the user-authorized listening check; automated validation replaces the
-player function and produces no sound.
+player function and produces no sound. Live direct/proxied voice-state evidence
+is recorded in `NIGHTLY_20260912_RUNTIME_ACCEPTANCE.md`.

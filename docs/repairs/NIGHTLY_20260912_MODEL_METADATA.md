@@ -41,7 +41,8 @@ and localized reference-estimate rendering.
 
 A bounded real public query for `openai/gpt-5.4` returned known price and
 capability facts with the same exact source identity. Runtime adoption and
-model-call acceptance are recorded separately in the nightly checklist.
+model-call acceptance are recorded in
+`NIGHTLY_20260912_RUNTIME_ACCEPTANCE.md` and the nightly checklist.
 
 ## Protected boundary
 

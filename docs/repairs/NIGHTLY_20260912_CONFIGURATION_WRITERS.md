@@ -60,6 +60,8 @@ stated baseline reported `protected core check: ok`. No global test suite,
 Provider call, connector message, scan, database cleanup or instance operation
 was used for this source-level batch.
 
-Native Windows qualification, H1/H3 Functions adoption, HASHI2 adoption and a
-post-adoption Memory/Wiki preflight are separate evidence gates. Source commit,
-running generation and observed behavior must not be collapsed into one status.
+Native Windows qualification, H1/H3 Functions adoption, and the read-only
+post-adoption Memory/Wiki preflight are recorded in
+`NIGHTLY_20260912_RUNTIME_ACCEPTANCE.md`. HASHI2 adoption remains a separate
+gate. Source commit, running generation and observed behavior must not be
+collapsed into one status.
