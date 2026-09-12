@@ -695,10 +695,10 @@ def test_persistence_failure_keeps_previous_live_configuration(tmp_path, monkeyp
     before = manager.get_her_v2_configuration()
     candidate = manager.prepare_her_v2_provider("openrouter")
 
-    def fail_replace(_state):
+    def fail_publish(_state, _revision):
         raise OSError("disk unavailable")
 
-    monkeypatch.setattr(manager.state_store, "replace", fail_replace)
+    monkeypatch.setattr(manager.state_store, "_publish", fail_publish)
     with pytest.raises(OSError, match="disk unavailable"):
         manager.apply_her_v2_configuration(candidate)
 
@@ -713,16 +713,20 @@ def test_state_read_failure_cannot_overwrite_or_activate_candidate(
     manager = _manager(tmp_path)
     before = manager.get_her_v2_configuration()
     candidate = manager.prepare_her_v2_provider("openrouter")
-    replace_calls = []
+    publish_calls = []
 
-    def fail_read():
+    def fail_read_for_update():
         raise OSError("state unreadable")
 
-    monkeypatch.setattr(manager.state_store, "read", fail_read)
-    monkeypatch.setattr(manager.state_store, "replace", replace_calls.append)
+    def record_publish(state, revision):
+        publish_calls.append((state, revision))
+        return state
+
+    monkeypatch.setattr(manager.state_store, "_read_for_update", fail_read_for_update)
+    monkeypatch.setattr(manager.state_store, "_publish", record_publish)
 
     with pytest.raises(OSError, match="state unreadable"):
         manager.apply_her_v2_configuration(candidate)
 
-    assert replace_calls == []
+    assert publish_calls == []
     assert manager.get_her_v2_configuration() == before
