@@ -220,3 +220,13 @@ Telegram read state. Implementation/offline tests on
 `feature/chat-connector-ux-20260912` do not prove shared/Worker adoption or real
 microphone delivery. This task authorizes no production restart or push. See the
 [Frontend Connector decision](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
+
+Targeted chat-projection follow-up (2026-09-12): a bounded reserved version-1
+request now crosses the existing authenticated admin-command / `runtime.slash`
+path to the selected Worker. The Worker derives the configured actor and current
+Session and uses the same transcript projection builder as HTTP. Requests cannot
+select another owner, Session or path, enter model admission, or log chat bodies
+as commands. The user permits only the explicitly named Agent's `reboot min` for
+this adoption; Core and shared/instance restart remain forbidden. This candidate
+implementation and focused tests do not prove qualification, running adoption or
+user-terminal delivery; the integration task records those separately.

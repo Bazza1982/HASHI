@@ -5,6 +5,24 @@ from collections import deque
 import hashlib
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from orchestrator.session_store import SessionStore
+
+
+def build_chat_projection(store: SessionStore, *, session: dict, owner_id: str,
+                          offset: int | None = None, limit: int = 200) -> dict:
+    """Project one already-resolved Session snapshot for HTTP and Worker reads."""
+    requests = store.recent_session_runs(
+        session["session_id"], owner_id=owner_id,
+        context_generation=session["context_generation"],
+    )
+    path = store.session_workspace(session["session_id"], session["context_generation"]) / "transcript.jsonl"
+    payload = read_chat_transcript(path, session=session, offset=offset, limit=limit)
+    payload["requests"] = requests
+    payload["request_discovery_complete"] = len(requests) < 64
+    return payload
 
 
 def _cursor_at_record_boundary(stream, offset: int, size: int) -> bool:

@@ -436,3 +436,48 @@ Implementation and offline validation are scoped to the local candidate branch
 feature/chat-connector-ux-20260912. Shared API source adoption, Worker source
 adoption, qualified artifacts, current STT dependencies and terminal delivery are
 separate facts. This task did not adopt a running generation or restart production.
+
+### Targeted Worker chat-projection adoption (2026-09-12)
+
+The Backend API's existing authenticated admin-command transport may carry the
+reserved `__hashi_chat_projection_v1__:` envelope through the unchanged
+`runtime.slash` RPC. Frontend Connector Functions interpret it only at the
+selected Agent Worker; this follows the existing command-menu transport and
+does not add a Core, Supervisor, Worker-host or shared-ingress protocol.
+
+The base64url JSON object contains integer `version: 1`, `op: recent` with an
+optional integer `limit` from 1 through 200, or `op: poll` with a required integer
+`offset` from 0 through 9007199254740991. Other fields are rejected. Only the
+`workbench_api` source in a personal deployment is supported. The Worker derives
+the positive configured authorized actor and the current `workbench/default`
+Session through the existing runtime Session owner; a caller cannot choose an
+actor, owner, Session, context generation, or filesystem path.
+
+Every supported result carries `chat_projection_version: 1`. Success returns
+`ok: true` and `projection` with the same fields as the transcript HTTP routes.
+Failure returns `ok: false`, a stable `chat_projection_*` error code and
+`http_status`. Invalid requests and read failures are terminal before ordinary
+command handling, command audit capture or model admission. The envelope and
+transcript body are not written to command or failure logs.
+
+HTTP and Worker callers share `build_chat_projection`, so message identity,
+context fences, byte cursors, half-record handling and recent-Run discovery
+retain one implementation. Reading creates no Messages, Runs or frontend reading
+state; existing SessionStore resolution may initialize default Session/binding
+metadata and its workspace when absent. A populated Session's persisted data is
+unchanged by projection reads. Polling retains the existing transcript reader's
+cursor and replay limits; this transport is not a new durable activity archive.
+
+The current task explicitly permits a targeted `reboot min` for the named Agent,
+while prohibiting instance/shared restart and Core edits. Implementation and
+focused offline evidence are on `feature/chat-connector-ux-20260912`; a parent
+integration task owns qualification and live adoption. No lifecycle action was
+performed while implementing this transport. Initial real command-entry tests
+failed before implementation (30 failed, one ordinary-text case passed); the
+follow-up positive-actor invariant failed for zero and negative actor IDs before
+the guard was tightened. Focused validation passed: 76 cases across
+`test_chat_projection_transport.py`, `test_chat_connector_projection.py`,
+`test_command_interaction_transport.py` and `test_session_api.py`; 23 direct
+command-audit/admin consumers passed separately. The protected-Core guard and
+whitespace check passed. Live Worker generation and user-terminal delivery remain
+separate acceptance evidence.

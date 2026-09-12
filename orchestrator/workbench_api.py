@@ -24,7 +24,7 @@ from orchestrator.admin_local_testing import (
     try_execute_slash_command_text,
 )
 from orchestrator.agent_overview import build_agent_overview
-from orchestrator.chat_transcript_projection import read_chat_transcript
+from orchestrator.chat_transcript_projection import build_chat_projection
 from orchestrator.capability_broker import CapabilityBrokerError
 from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.conversation_router import ConversationRouter
@@ -3881,10 +3881,9 @@ class WorkbenchApiServer:
             )
         session = self.session_store.resolve_session(owner_id=owner_id, agent_id=name,
                                                      surface="workbench", channel_key="default")
-        path = self.session_store.session_workspace(session["session_id"], session["context_generation"]) / "transcript.jsonl"
-        payload = read_chat_transcript(path, session=session, offset=offset, limit=limit)
-        payload["requests"] = self.session_store.recent_session_runs(session["session_id"], owner_id=owner_id, context_generation=session["context_generation"])
-        payload["request_discovery_complete"] = len(payload["requests"]) < 64
+        payload = build_chat_projection(
+            self.session_store, session=session, owner_id=owner_id, offset=offset, limit=limit,
+        )
         return web.json_response(payload)
 
     async def handle_request_activity(self, request):

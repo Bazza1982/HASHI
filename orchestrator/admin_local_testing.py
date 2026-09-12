@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
+from orchestrator.chat_projection_transport import try_dispatch_chat_projection_transport
 from orchestrator.command_interaction_transport import (
     try_dispatch_command_interaction_transport,
 )
@@ -198,6 +199,11 @@ async def try_execute_slash_command_text(
     chat_id: int | str | None = None,
     session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    projection = await try_dispatch_chat_projection_transport(
+        runtime, text, source_channel=source_channel,
+    )
+    if projection is not None:
+        return projection
     interaction = await try_dispatch_command_interaction_transport(
         runtime,
         text,
@@ -276,6 +282,11 @@ async def execute_local_command(
             "error": f"unknown command: {command_name or '(empty)'}",
             "supported_commands": supported_commands(runtime),
         }
+    projection = await try_dispatch_chat_projection_transport(
+        runtime, command_line, source_channel=source_channel,
+    )
+    if projection is not None:
+        return projection
     command_name, args = _split_command(command_line)
     local_chat_id = (
         chat_id if chat_id is not None else runtime.global_config.authorized_id
