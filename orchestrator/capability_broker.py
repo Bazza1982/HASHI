@@ -71,6 +71,28 @@ class CapabilityBrokerError(RuntimeError):
     """A capability registration, route, authorization, or action failed."""
 
 
+class CapabilityUnavailableError(CapabilityBrokerError):
+    """No live registration can execute the requested capability action."""
+
+    code = "capability_unavailable"
+
+    def __init__(
+        self,
+        capability_kind: str,
+        *,
+        action: str | None = None,
+        reason: str = "not_registered_or_expired",
+    ) -> None:
+        self.capability_kind = str(capability_kind or "").strip().casefold()
+        self.action = str(action or "").strip().casefold() or None
+        self.reason = str(reason or "not_registered_or_expired")
+        suffix = f" for action {self.action!r}" if self.action else ""
+        super().__init__(
+            f"capability is unavailable: {self.capability_kind}{suffix}; "
+            f"reason={self.reason}"
+        )
+
+
 class CapabilityLeaseConflict(CapabilityBrokerError):
     """A different task currently owns the device/session write lease."""
 
@@ -804,7 +826,10 @@ class CapabilityBroker:
             self._prune()
             record = self._records.get(str(capability_id))
             if record is None:
-                raise CapabilityBrokerError(f"capability is unavailable: {capability_id}")
+                raise CapabilityUnavailableError(
+                    str(capability_id),
+                    reason="registration_missing_or_expired",
+                )
             return record
 
     def _select(
@@ -827,9 +852,9 @@ class CapabilityBroker:
                 )
             ]
             if not candidates:
-                suffix = f" for action {normalized_action!r}" if normalized_action else ""
-                raise CapabilityBrokerError(
-                    f"capability is unavailable: {kind}{suffix}"
+                raise CapabilityUnavailableError(
+                    kind,
+                    action=normalized_action or None,
                 )
             return sorted(
                 candidates,

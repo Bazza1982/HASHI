@@ -240,11 +240,11 @@ class ServiceManager:
         if self.kernel.global_cfg is None:
             return False, "API Gateway cannot start before global config is loaded."
         if self.kernel.api_gateway is not None:
-            self.kernel.enable_api_gateway = True
             self._save_api_gateway_state(enabled=True)
+            self.kernel.enable_api_gateway = True
             return True, "API Gateway is already running."
-        self.kernel.enable_api_gateway = True
         self._save_api_gateway_state(enabled=True)
+        self.kernel.enable_api_gateway = True
         await self.start_api_gateway(self.kernel.global_cfg, self.kernel.secrets)
         if self.kernel.api_gateway is None:
             return False, "API Gateway failed to start."
@@ -257,8 +257,8 @@ class ServiceManager:
         return await self.stop_api_gateway_runtime()
 
     async def stop_api_gateway_runtime(self, timeout: float = 5.0) -> tuple[bool, str]:
-        self.kernel.enable_api_gateway = False
         self._save_api_gateway_state(enabled=False)
+        self.kernel.enable_api_gateway = False
         if self.kernel.api_gateway is None:
             return True, "API Gateway is already stopped."
         if not await self.stop_api_gateway(timeout=timeout):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import shlex
 from dataclasses import dataclass
@@ -25,6 +26,30 @@ class CommandBinding:
 class CallbackBinding:
     pattern: str
     method_name: str
+
+
+@dataclass(frozen=True)
+class CommandMenuSyncResult:
+    attempted: int
+    succeeded: int
+    failures: tuple[dict[str, str], ...]
+
+    @property
+    def failure_count(self) -> int:
+        return len(self.failures)
+
+
+def _menu_sync_failure(exc: Exception, *, agent: str) -> dict[str, str]:
+    name = type(exc).__name__.casefold()
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "timedout" in name:
+        code = "request_timeout"
+    elif isinstance(exc, ConnectionError) or any(
+        marker in name for marker in ("network", "connect", "transport")
+    ):
+        code = "connection_unavailable"
+    else:
+        code = "menu_sync_failed"
+    return {"agent": agent, "code": code, "error": str(exc)}
 
 
 @dataclass(frozen=True)
@@ -210,28 +235,33 @@ async def sync_user_command_menus(
     *,
     chat_id: int | str,
     locale: str,
-) -> int:
+) -> CommandMenuSyncResult:
     """Refresh one user's private-chat command menu on every live agent."""
 
     try:
         numeric_chat_id = int(chat_id)
     except (TypeError, ValueError):
-        return 0
+        return CommandMenuSyncResult(0, 0, ())
     if numeric_chat_id <= 0:
-        return 0
+        return CommandMenuSyncResult(0, 0, ())
 
     orchestrator = getattr(runtime, "orchestrator", None)
     candidates = list(getattr(orchestrator, "runtimes", ()) or ())
     if not candidates:
         candidates = [runtime]
-    failures = 0
+    attempted = 0
+    succeeded = 0
+    failures: list[dict[str, str]] = []
     for candidate in candidates:
+        agent_name = str(getattr(candidate, "name", "unknown"))
         remote_setter = getattr(candidate, "set_command_menu", None)
         if callable(remote_setter) and not hasattr(candidate, "app"):
+            attempted += 1
             try:
                 await remote_setter(chat_id=numeric_chat_id, locale=locale)
+                succeeded += 1
             except Exception as exc:
-                failures += 1
+                failures.append(_menu_sync_failure(exc, agent=agent_name))
                 logger.warning(
                     "Could not refresh %s command menu for chat %s on %s: %s",
                     locale,
@@ -243,13 +273,15 @@ async def sync_user_command_menus(
         bot = getattr(getattr(candidate, "app", None), "bot", None)
         if bot is None or not getattr(candidate, "telegram_connected", True):
             continue
+        attempted += 1
         try:
             await bot.set_my_commands(
                 get_flexible_bot_commands(candidate, locale=locale),
                 scope=BotCommandScopeChat(chat_id=numeric_chat_id),
             )
+            succeeded += 1
         except Exception as exc:
-            failures += 1
+            failures.append(_menu_sync_failure(exc, agent=agent_name))
             logger.warning(
                 "Could not refresh %s command menu for chat %s on %s: %s",
                 locale,
@@ -257,4 +289,4 @@ async def sync_user_command_menus(
                 getattr(candidate, "name", "unknown"),
                 exc,
             )
-    return failures
+    return CommandMenuSyncResult(attempted, succeeded, tuple(failures))

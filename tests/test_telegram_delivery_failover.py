@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from orchestrator import telegram_delivery_failover as failover
 from orchestrator import runtime_status, telegram_stream_policy
@@ -25,6 +26,16 @@ class _Bot:
         return SimpleNamespace(message_id=len(self.messages))
 
 
+def _owner(agent: str) -> dict[str, str]:
+    return {
+        "instance_id": "HASHI2",
+        "agent_lifecycle_id": hashlib.sha256(agent.encode()).hexdigest()[:32],
+        "telegram_bot_fingerprint": failover.telegram_bot_fingerprint(
+            f"token-{agent}"
+        ),
+    }
+
+
 def _runtime(tmp_path: Path, name: str, *, preview_default: bool = True):
     workspace = tmp_path / "workspaces" / name
     workspace.mkdir(parents=True, exist_ok=True)
@@ -35,6 +46,7 @@ def _runtime(tmp_path: Path, name: str, *, preview_default: bool = True):
             extra={
                 "telegram_stream_enabled": True,
                 "answer_stream_preview": preview_default,
+                "agent_lifecycle_id": hashlib.sha256(name.encode()).hexdigest()[:32],
             },
             telegram_token_key=name,
         ),
@@ -53,10 +65,11 @@ def _write_delivery_state(tmp_path: Path, agent: str, record: dict) -> Path:
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "agents": {
                     agent: {
                         "token_key": f"telegram:{agent}",
+                        "owner": _owner(agent),
                         "per_chat": {},
                         **record,
                     }
@@ -93,7 +106,7 @@ def test_only_unexpired_retry_after_window_blocks_delivery(tmp_path):
     path.write_text(json.dumps(state), encoding="utf-8")
 
     assert failover.is_delivery_blocked(source) is False
-    assert failover.delivery_status_summary(source) is None
+    assert failover.delivery_status_summary(source)["status"] == "recovery_due"
 
 
 def test_retry_after_duration_rounds_up_to_full_wait():
@@ -181,7 +194,7 @@ async def test_failover_warning_generic_error_is_recorded_not_raised(tmp_path):
     record = saved["agents"]["kasumi"]
     assert record["status"] == "blocked"
     assert record["failover_failed"] is True
-    assert "RuntimeError: telegram network down" in record["last_failover_error"]
+    assert record["last_failover_error"] == "transient_unknown"
 
 
 @pytest.mark.asyncio
@@ -194,10 +207,11 @@ async def test_tick_recovery_clears_block_and_sends_notice(tmp_path):
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "agents": {
                     "kasumi": {
                         "token_key": "telegram:kasumi",
+                        "owner": _owner("kasumi"),
                         "status": "blocked",
                         "blocked_until": "2000-01-01T00:00:00+00:00",
                         "retry_after_s": 60,
@@ -229,10 +243,11 @@ async def test_tick_recovery_retry_after_reextends_block(tmp_path):
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "agents": {
                     "kasumi": {
                         "token_key": "telegram:kasumi",
+                        "owner": _owner("kasumi"),
                         "status": "blocked",
                         "blocked_until": "2000-01-01T00:00:00+00:00",
                         "retry_after_s": 60,
@@ -283,9 +298,13 @@ async def test_tick_recovery_retries_recovery_due_after_transient_error(tmp_path
 
     failed = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
     assert failed["status"] == "recovery_due"
-    assert "temporary gateway failure" in failed["last_recovery_error"]
+    assert failed["last_recovery_error"] == "transient_unknown"
 
     source.app.bot.send_error = None
+    failed["per_chat"]["321"]["next_recovery_at"] = "2000-01-01T00:00:00+00:00"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["agents"]["zelda"] = failed
+    path.write_text(json.dumps(state), encoding="utf-8")
     await failover._tick_recovery(orchestrator)
 
     recovered = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
@@ -437,6 +456,229 @@ async def test_tick_recovery_normalizes_completed_legacy_notice(tmp_path):
     assert source.app.bot.messages == []
 
 
+@pytest.mark.asyncio
+async def test_unowned_legacy_record_is_quarantined_without_sending(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = tmp_path / "state" / "telegram_delivery_health.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "zelda": {
+                        "token_key": "telegram:zelda",
+                        "status": "recovery_due",
+                        "incident_id": "legacy-123",
+                        "per_chat": {"123": {"undelivered_request_ids": ["req-1"]}},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await failover._tick_recovery(orchestrator)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert "zelda" not in saved["agents"]
+    assert saved["quarantine"][-1]["reason"] == "legacy_record_has_no_owner"
+    assert source.app.bot.messages == []
+
+
+@pytest.mark.asyncio
+async def test_same_name_different_bot_record_is_quarantined_without_sending(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "owner": {
+                **_owner("zelda"),
+                "telegram_bot_fingerprint": failover.telegram_bot_fingerprint(
+                    "old-bot-token"
+                ),
+            },
+            "status": "recovery_due",
+            "incident_id": "old-bot-incident",
+            "per_chat": {"123": {}},
+        },
+    )
+
+    await failover._tick_recovery(orchestrator)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert "zelda" not in saved["agents"]
+    assert saved["quarantine"][-1]["reason"] == "runtime_owner_mismatch"
+    assert source.app.bot.messages == []
+
+
+@pytest.mark.asyncio
+async def test_permanent_chat_not_found_stops_only_that_destination(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+
+    class PartialBot(_Bot):
+        def __init__(self):
+            super().__init__()
+            self.attempts = []
+
+        async def send_message(self, **kwargs):
+            self.attempts.append(kwargs["chat_id"])
+            if kwargs["chat_id"] == 123:
+                raise BadRequest("Chat not found")
+            return await super().send_message(**kwargs)
+
+    source.app.bot = PartialBot()
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_due",
+            "incident_id": "partial-incident",
+            "per_chat": {"123": {}, "456": {}},
+        },
+    )
+
+    await failover._tick_recovery(orchestrator)
+    await failover._tick_recovery(orchestrator)
+
+    record = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert source.app.bot.attempts == [123, 456]
+    assert record["per_chat"]["123"]["recovery_stop_reason"] == (
+        "destination_not_found"
+    )
+    assert record["per_chat"]["456"]["recovery_notice_sent_at"]
+    assert record["status"] == "recovery_stopped"
+
+
+@pytest.mark.asyncio
+async def test_transient_recovery_is_bounded_and_never_marks_delivered(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+
+    class CountingFailureBot(_Bot):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        async def send_message(self, **kwargs):
+            self.attempts += 1
+            raise OSError("temporary outage")
+
+    source.app.bot = CountingFailureBot()
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_due",
+            "incident_id": "bounded-incident",
+            "per_chat": {"321": {}},
+        },
+    )
+
+    for _ in range(failover.MAX_RECOVERY_ATTEMPTS):
+        await failover._tick_recovery(orchestrator)
+        state = json.loads(path.read_text(encoding="utf-8"))
+        chat = state["agents"]["zelda"]["per_chat"]["321"]
+        if "next_recovery_at" in chat:
+            chat["next_recovery_at"] = "2000-01-01T00:00:00+00:00"
+            path.write_text(json.dumps(state), encoding="utf-8")
+    await failover._tick_recovery(orchestrator)
+
+    chat = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"][
+        "per_chat"
+    ]["321"]
+    assert source.app.bot.attempts == failover.MAX_RECOVERY_ATTEMPTS
+    assert chat["recovery_stop_reason"] == "transient_retry_exhausted"
+    assert "recovery_notice_sent_at" not in chat
+
+
+@pytest.mark.asyncio
+async def test_invalid_chat_key_stops_that_destination_without_breaking_watcher(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_due",
+            "incident_id": "invalid-chat-incident",
+            "per_chat": {"not-a-chat": {}, "456": {}},
+        },
+    )
+
+    await failover._tick_recovery(orchestrator)
+
+    record = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert record["per_chat"]["not-a-chat"]["recovery_stop_reason"] == (
+        "invalid_chat_id"
+    )
+    assert record["per_chat"]["456"]["recovery_notice_sent_at"]
+    assert [message["chat_id"] for message in source.app.bot.messages] == [456]
+
+
+@pytest.mark.asyncio
+async def test_expired_attempt_claim_stops_without_risking_duplicate_notice(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_due",
+            "incident_id": "unknown-outcome-incident",
+            "per_chat": {
+                "456": {
+                    "recovery_attempt_id": "lost-process-claim",
+                    "recovery_attempt_started_at": "2000-01-01T00:00:00+00:00",
+                }
+            },
+        },
+    )
+
+    await failover._tick_recovery(orchestrator)
+    await failover._tick_recovery(orchestrator)
+
+    record = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    chat = record["per_chat"]["456"]
+    assert chat["recovery_stop_reason"] == "prior_attempt_outcome_unknown"
+    assert "recovery_notice_sent_at" not in chat
+    assert source.app.bot.messages == []
+
+
 def test_recovery_due_status_does_not_show_expired_block_deadline():
     text = runtime_status._delivery_line(
         {
@@ -449,6 +691,64 @@ def test_recovery_due_status_does_not_show_expired_block_deadline():
     assert "RECOVERY_DUE" in text
     assert "2000-01-01T00:00:05+00:00" not in text
     assert "lily" in text
+
+
+def test_delivery_status_exposes_stopped_recovery_without_blocking(tmp_path):
+    runtime = _runtime(tmp_path, "zelda")
+    _write_delivery_state(
+        tmp_path,
+        "zelda",
+        {
+            "status": "recovery_stopped",
+            "incident_id": "stopped-incident",
+            "last_recovery_error": "destination_not_found",
+            "per_chat": {
+                "123": {
+                    "recovery_stopped_at": "2030-01-01T00:00:00+00:00",
+                    "recovery_stop_reason": "destination_not_found",
+                }
+            },
+        },
+    )
+
+    assert failover.is_delivery_blocked(runtime) is False
+    summary = failover.delivery_status_summary(runtime)
+    assert summary == {
+        "blocked_until": None,
+        "status": "recovery_stopped",
+        "active_failover_agent": None,
+        "incident_id": "stopped-incident",
+        "reason": "destination_not_found",
+    }
+    rendered = runtime_status._delivery_line(summary)
+    assert "RECOVERY_STOPPED" in rendered
+    assert "destination_not_found" in rendered
+    assert "via" not in rendered.casefold()
+
+
+def test_delivery_status_exposes_quarantined_stale_record(tmp_path):
+    runtime = _runtime(tmp_path, "zelda")
+    state = {
+        "version": 2,
+        "agents": {},
+        "quarantine": [
+            {
+                "agent_name": "zelda",
+                "reason": "runtime_owner_mismatch",
+                "incident_id": "old-incident",
+                "expected_owner": failover.owner_for_runtime(runtime),
+            }
+        ],
+    }
+    path = tmp_path / "state" / "telegram_delivery_health.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert failover.is_delivery_blocked(runtime) is False
+    summary = failover.delivery_status_summary(runtime)
+    assert summary["status"] == "quarantined"
+    assert summary["reason"] == "runtime_owner_mismatch"
+    assert "QUARANTINED" in runtime_status._delivery_line(summary)
 
 
 def test_persisted_typing_only_defaults_override_legacy_preview_config(tmp_path):
@@ -543,10 +843,11 @@ def test_status_summary_reports_delivery_block_and_typing(tmp_path):
     state_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "agents": {
                     "kasumi": {
                         "token_key": "telegram:kasumi",
+                        "owner": _owner("kasumi"),
                         "status": "blocked",
                         "blocked_until": "2030-01-01T00:00:00+10:00",
                         "retry_after_s": 60,
@@ -599,14 +900,27 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
 
     monkeypatch.setattr("telegram.Bot", DirectBot)
     config = {
+        "global": {"instance_id": "HASHI2"},
         "agents": [
-            {"name": "source", "telegram_token_key": "s"},
-            {"name": "source_alias", "telegram_token_key": "s"},
-            {"name": "backup", "telegram_token_key": "b"},
-        ]
+            {
+                "name": "source",
+                "telegram_token_key": "s",
+                "agent_lifecycle_id": "1" * 32,
+            },
+            {
+                "name": "source_alias",
+                "telegram_token_key": "s",
+                "agent_lifecycle_id": "2" * 32,
+            },
+            {
+                "name": "backup",
+                "telegram_token_key": "b",
+                "agent_lifecycle_id": "3" * 32,
+            },
+        ],
     }
     kernel = SimpleNamespace(
-        global_cfg=SimpleNamespace(project_root=tmp_path),
+        global_cfg=SimpleNamespace(project_root=tmp_path, instance_id="HASHI2"),
         _runtime_map=lambda: {},  # no Worker exists, including the initiator
         _load_raw_config=lambda: config,
         secrets={"s": "source-test-token", "b": "backup-test-token"},
@@ -616,6 +930,13 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
             tmp_path,
             "source",
             {
+                "owner": {
+                    "instance_id": "HASHI2",
+                    "agent_lifecycle_id": "1" * 32,
+                    "telegram_bot_fingerprint": failover.telegram_bot_fingerprint(
+                        "source-test-token"
+                    ),
+                },
                 "status": "blocked",
                 "blocked_until": "2999-01-01T00:00:00+00:00",
                 "token_key": "telegram:s",

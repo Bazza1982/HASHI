@@ -118,7 +118,7 @@ async def test_registration_requires_bootstrap_and_broadcasts_topology(tmp_path)
 
 @pytest.mark.asyncio
 async def test_heartbeat_requires_worker_bearer_token(tmp_path):
-    server, broker, _broadcasts = _server(tmp_path)
+    server, broker, broadcasts = _server(tmp_path)
     payload = {
         "capability_id": "cap-1",
         "identity": {"instance_id": "HASHI3"},
@@ -135,6 +135,9 @@ async def test_heartbeat_requires_worker_bearer_token(tmp_path):
     assert denied.status == 403
     assert accepted.status == 200
     assert broker.heartbeat_calls[-1][1]["ttl_seconds"] == 45.0
+    # Both a rejected heartbeat that may have evicted an unhealthy Worker and
+    # a successful lease extension refresh the Function-side catalogue.
+    assert broadcasts == ["broadcast", "broadcast"]
 
 
 @pytest.mark.asyncio

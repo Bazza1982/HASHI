@@ -561,13 +561,36 @@ class CodexCLIAdapter(BaseBackend):
         if etype == "turn.completed":
             usage = event.get("usage")
             if isinstance(usage, dict):
+                input_tokens = int(usage.get("input_tokens", 0) or 0)
+                cache_key = next(
+                    (
+                        key
+                        for key in (
+                            "cached_input_tokens",
+                            "prompt_cache_hit_tokens",
+                        )
+                        if key in usage
+                    ),
+                    None,
+                )
+                cache_hit = (
+                    max(0, int(usage.get(cache_key) or 0))
+                    if cache_key is not None
+                    else None
+                )
                 self._last_usage = TokenUsage(
-                    input_tokens=usage.get("input_tokens", 0) or 0,
+                    input_tokens=input_tokens,
                     output_tokens=usage.get("output_tokens", 0) or 0,
                     thinking_tokens=(
                         usage.get("reasoning_output_tokens")
                         or usage.get("reasoning_tokens")
                         or 0
+                    ),
+                    prompt_cache_hit_tokens=cache_hit,
+                    prompt_cache_miss_tokens=(
+                        max(0, input_tokens - cache_hit)
+                        if cache_hit is not None and "input_tokens" in usage
+                        else None
                     ),
                 )
             return None

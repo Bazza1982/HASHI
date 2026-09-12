@@ -46,6 +46,11 @@ Delivery presentation contract:
 - The legacy model-command path uses the same status vocabulary and requires the
   final response to include the exact `--text` payload while Phase C remains
   opt-in.
+- For an inbound HChat Run, PAO freezes `surface=hchat` before PCM assembly and
+  may list Telegram only as a mirror. The ordinary Agent response is routed by
+  the runtime; it must not invoke `hchat_send.py` or `telegram_send` to duplicate
+  that response. HChat and Telegram produce independent route-scoped receipts,
+  so one failed mirror cannot overwrite the other Connector's observed result.
 
 ## 1. Problem
 

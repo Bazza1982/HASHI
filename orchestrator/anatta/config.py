@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+from orchestrator.config_json import read_config_json
 
 
 DEFAULT_DRIVE_REGISTRY: dict[str, dict[str, Any]] = {
@@ -167,7 +168,7 @@ class AnattaConfig:
     def _load(self) -> dict[str, Any]:
         if self.path.exists():
             try:
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                loaded = read_config_json(self.path)
                 if isinstance(loaded, dict):
                     return loaded
             except Exception:

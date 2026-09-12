@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -184,6 +186,33 @@ def test_tui_proxy_allowlist_rejects_arbitrary_workbench_operation(tmp_path):
     assert response.json()["error"] == "operation_not_allowed"
 
 
+def test_tui_log_tail_reads_only_bounded_instance_owned_log(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "bridge.log").write_text(
+        "old\n" + "\n".join(f"line-{index}" for index in range(250)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(remote_server, "_hashi_root", str(tmp_path))
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI3"})
+
+    status, payload = remote_server._local_workbench_tui_request(
+        ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation="log_tail",
+            limit=12,
+        )
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["instance_id"] == "HASHI3"
+    assert len(payload["lines"]) == 12
+    assert payload["lines"][-1] == "line-249"
+    assert "path" not in payload
+    assert isinstance(payload["offset"], int)
+
+
 def test_tui_proxy_forwards_typed_run_delivery_policy_without_text_inference(
     tmp_path,
     monkeypatch,
@@ -296,6 +325,159 @@ def test_authenticated_cross_instance_tui_seals_origin_evidence(
         "id": "HASHI1",
         "assurance": "shared_network_hmac",
     }
+
+
+def test_tui_attachment_proxy_forwards_frozen_bytes_with_integrity(
+    tmp_path, monkeypatch
+):
+    _client(tmp_path)
+    captured = {}
+    content = b"attachment bytes"
+    encoded = base64.b64encode(content).decode("ascii")
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit=-1):
+            return json.dumps({"ok": True, "request_id": "req-attachment"}).encode()
+
+    def _urlopen(request, timeout=15):
+        del timeout
+        captured.update(json.loads(request.data.decode("utf-8")))
+        return _Response()
+
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", _urlopen)
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    status, _result = remote_server._local_workbench_tui_request(
+        ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation="chat_attachment",
+            agent="akane",
+            text="inspect this",
+            attachment={
+                "filename": "report.txt",
+                "media_type": "text/plain",
+                "content_b64": encoded,
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
+        )
+    )
+
+    assert status == 200
+    assert captured["text"] == "inspect this"
+    assert captured["attachment"]["content_b64"] == encoded
+    assert captured["attachment"]["sha256"] == hashlib.sha256(content).hexdigest()
+
+
+def test_tui_attachment_proxy_rejects_corrupt_or_ambiguous_sources():
+    content = b"attachment bytes"
+    attachment = {
+        "filename": "report.txt",
+        "content_b64": base64.b64encode(content).decode("ascii"),
+        "size_bytes": len(content),
+        "sha256": "0" * 64,
+    }
+    corrupt = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="chat_attachment",
+        agent="akane",
+        attachment=attachment,
+    )
+    ambiguous = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="chat_attachment",
+        agent="akane",
+        attachment={**attachment, "sha256": hashlib.sha256(content).hexdigest()},
+        workzone_ref="report.txt",
+    )
+
+    assert remote_server._validate_tui_proxy_payload(corrupt) == (
+        False,
+        "attachment_digest_mismatch",
+    )
+    assert remote_server._validate_tui_proxy_payload(ambiguous) == (
+        False,
+        "invalid_attachment_source",
+    )
+
+
+def test_tui_speech_proxy_maps_only_to_local_presentation_endpoint(monkeypatch):
+    captured = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"ok":true}'
+
+    def urlopen(request, timeout):
+        captured.update(
+            method=request.get_method(),
+            url=request.full_url,
+            body=json.loads(request.data.decode("utf-8")),
+            timeout=timeout,
+        )
+        return Response()
+
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
+
+    status, result = remote_server._local_workbench_tui_request(
+        ProtocolTuiRequest(
+            from_instance="HASHI1",
+            operation="speech",
+            agent="akane",
+            text="last visible reply",
+            request_id="tui-say-1",
+        ),
+        timeout=120,
+    )
+
+    assert status == 200
+    assert result == {"ok": True}
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/api/tui/speech")
+    assert captured["body"] == {
+        "agent": "akane",
+        "text": "last visible reply",
+        "request_id": "tui-say-1",
+    }
+    assert "delivery_policy" not in captured["body"]
+
+
+def test_tui_speech_proxy_rejects_missing_identity_and_invalid_profile():
+    missing_request = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="speech",
+        agent="akane",
+        text="hello",
+    )
+    invalid_profile = ProtocolTuiRequest(
+        from_instance="HASHI1",
+        operation="voice_profile",
+        agent="akane",
+        voice_profile="../../voice",
+    )
+
+    assert remote_server._validate_tui_proxy_payload(missing_request) == (
+        False,
+        "invalid_request_id",
+    )
+    assert remote_server._validate_tui_proxy_payload(invalid_profile) == (
+        False,
+        "invalid_voice_profile",
+    )
 
 
 def test_tui_proxy_accepts_only_agent_scoped_sidepanel_reads():

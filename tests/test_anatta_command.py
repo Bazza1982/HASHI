@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator.commands import anatta as anatta_module
 from orchestrator.command_registry import load_runtime_commands
 from orchestrator.commands.anatta import anatta_command
 from tools.anatta_diagnostics import build_report
@@ -131,3 +132,37 @@ def test_anatta_runtime_command_is_registered():
     commands = {command.name: command for command in load_runtime_commands()}
 
     assert commands["anatta"].description == "Read-only Anatta diagnostics"
+
+
+def test_anatta_mutation_reads_bom_crlf_and_normalizes_managed_configs(tmp_path):
+    config = json.dumps(
+        {"mode": "off", "extension": {"keep": True}}, indent=2
+    ).replace("\n", "\r\n")
+    observers = json.dumps({"observers": []}, indent=2).replace("\n", "\r\n")
+    (tmp_path / "anatta_config.json").write_bytes(
+        b"\xef\xbb\xbf" + (config + "\r\n").encode()
+    )
+    (tmp_path / "post_turn_observers.json").write_bytes(
+        b"\xef\xbb\xbf" + (observers + "\r\n").encode()
+    )
+
+    result = anatta_module._set_anatta_mode(tmp_path, "shadow")
+
+    assert result["observer_ensured"] is True
+    for name in ("anatta_config.json", "post_turn_observers.json"):
+        raw = (tmp_path / name).read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw
+    saved = json.loads((tmp_path / "anatta_config.json").read_text())
+    assert saved["extension"] == {"keep": True}
+
+
+def test_anatta_mutation_never_replaces_corrupt_config(tmp_path):
+    path = tmp_path / "anatta_config.json"
+    original = b'{"broken":'
+    path.write_bytes(original)
+
+    with pytest.raises(json.JSONDecodeError):
+        anatta_module._set_anatta_mode(tmp_path, "on")
+
+    assert path.read_bytes() == original
+    assert not (tmp_path / "post_turn_observers.json").exists()

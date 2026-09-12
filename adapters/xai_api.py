@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import time
-from itertools import count
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from adapters.base import BackendResponse, TokenUsage
 from adapters.openrouter_api import (
     OpenRouterAdapter,
     _APIResult,
+    _annotate_stream_exception,
     _assistant_content_text,
+    _diagnostic_headers,
     _message_structured_data,
+    _provider_http_failure_diagnostics,
+    _read_http_error_body,
     _request_wire_evidence,
     _response_wire_evidence,
+    _stream_error_exception,
 )
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
 from adapters.xai_imagine import generate_xai_image, is_imagine_image_model
@@ -60,6 +66,11 @@ class XaiApiAdapter(OpenRouterAdapter):
         self._base_url = DEFAULT_XAI_BASE_URL
         self._credential_source = "init"
         self._apply_api_key_input(api_key)
+
+    def _provider_evidence_url(self) -> str:
+        if hasattr(self, "_base_url"):
+            return self._api_url()
+        return f"{self._configured_base_url()}/v1/chat/completions"
 
     def _apply_api_key_input(self, api_key: Any) -> None:
         if isinstance(api_key, dict):
@@ -308,10 +319,54 @@ class XaiApiAdapter(OpenRouterAdapter):
         request_url = api_url or self._api_url()
         response = await self.client.post(request_url, json=payload, headers=headers)
         if response.status_code in _AUTH_RETRY_STATUSES:
+            await _read_http_error_body(response)
+            context = dict(
+                getattr(self, "_active_provider_wire_context", {}) or {}
+            )
+            if isinstance(response, httpx.Response):
+                try:
+                    rejected_request = response.request
+                except RuntimeError:
+                    rejected_request = httpx.Request("POST", request_url)
+                rejected_error = httpx.HTTPStatusError(
+                    f"HTTP {response.status_code}",
+                    request=rejected_request,
+                    response=response,
+                )
+                rejected_http = _provider_http_failure_diagnostics(
+                    rejected_error
+                )
+            else:
+                rejected_http = {"response": {"status": response.status_code}}
+            self._record_provider_wire_evidence(
+                "authentication_response_rejected",
+                request_id=str(context.get("request_id") or ""),
+                call_serial=int(context.get("call_serial") or 1),
+                payload={"http": rejected_http, "will_refresh": True},
+            )
             await self._resolve_bearer(force_refresh=True)
             headers = self._xai_headers()
             retry_url = self._chat_url() if api_url is not None else self._api_url()
+            self._record_provider_wire_evidence(
+                "authentication_retry_prepared",
+                request_id=str(context.get("request_id") or ""),
+                call_serial=int(context.get("call_serial") or 1),
+                payload={
+                    "method": "POST",
+                    "url": retry_url,
+                    "headers": {
+                        name: (
+                            "[REDACTED]"
+                            if str(name).casefold() == "authorization"
+                            else str(value)
+                        )
+                        for name, value in headers.items()
+                    },
+                    "body": payload,
+                },
+            )
             response = await self.client.post(retry_url, json=payload, headers=headers)
+        await _read_http_error_body(response)
         response.raise_for_status()
         data = response.json()
         result = self._parse_api_body(data)
@@ -363,6 +418,13 @@ class XaiApiAdapter(OpenRouterAdapter):
             "tool_call_fragments": [],
             "assembly_snapshots": [],
         }
+        protocol_state: dict[str, Any] = {
+            "raw_finish_reason_present": False,
+            "raw_finish_reason": None,
+            "finish_reason_source": "missing",
+            "normalized_finish_reason": "incomplete",
+            "wire_evidence": wire_evidence,
+        }
 
         async def _read_stream(response) -> None:
             nonlocal finish_reason, stream_usage
@@ -386,8 +448,25 @@ class XaiApiAdapter(OpenRouterAdapter):
                     break
                 try:
                     data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
+                except json.JSONDecodeError as exc:
+                    error = httpx.RemoteProtocolError(
+                        "provider stream contained invalid JSON data"
+                    )
+                    raise _annotate_stream_exception(
+                        error, protocol_state
+                    ) from exc
+
+                stream_error = _stream_error_exception(
+                    data,
+                    request=stream_request,
+                    provider_activity_observed=bool(
+                        text_chunks or reasoning_chunks or tool_calls_acc
+                    ),
+                )
+                if stream_error is not None:
+                    raise _annotate_stream_exception(
+                        stream_error, protocol_state
+                    )
 
                 if data.get("usage"):
                     stream_usage = data["usage"]
@@ -464,17 +543,55 @@ class XaiApiAdapter(OpenRouterAdapter):
             "POST", request_url, json=payload, headers=headers
         ) as response:
             if response.status_code in _AUTH_RETRY_STATUSES:
+                await _read_http_error_body(response)
+                context = dict(
+                    getattr(self, "_active_provider_wire_context", {}) or {}
+                )
+                try:
+                    rejected_request = response.request
+                except (AttributeError, RuntimeError):
+                    rejected_request = httpx.Request("POST", request_url)
+                rejected_error = httpx.HTTPStatusError(
+                    f"HTTP {response.status_code}",
+                    request=rejected_request,
+                    response=response,
+                )
+                self._record_provider_wire_evidence(
+                    "authentication_response_rejected",
+                    request_id=str(context.get("request_id") or ""),
+                    call_serial=int(context.get("call_serial") or 1),
+                    payload={
+                        "http": _provider_http_failure_diagnostics(
+                            rejected_error
+                        ),
+                        "will_refresh": True,
+                    },
+                )
                 await self._resolve_bearer(force_refresh=True)
                 retry_url = self._chat_url() if api_url is not None else self._api_url()
+                retry_headers = self._xai_headers()
+                self._record_provider_wire_evidence(
+                    "authentication_retry_prepared",
+                    request_id=str(context.get("request_id") or ""),
+                    call_serial=int(context.get("call_serial") or 1),
+                    payload={
+                        "method": "POST",
+                        "url": retry_url,
+                        "headers": _diagnostic_headers(retry_headers),
+                        "body": payload,
+                    },
+                )
                 async with self.client.stream(
                     "POST",
                     retry_url,
                     json=payload,
-                    headers=self._xai_headers(),
+                    headers=retry_headers,
                 ) as retry_response:
+                    await _read_http_error_body(retry_response)
                     retry_response.raise_for_status()
                     await _read_stream(retry_response)
             else:
+                await _read_http_error_body(response)
                 response.raise_for_status()
                 await _read_stream(response)
 
@@ -523,20 +640,83 @@ class XaiApiAdapter(OpenRouterAdapter):
                 model=model,
             )
             self._touch_activity()
+            call_serial = 1
+            self._active_provider_wire_context = {
+                "request_id": str(request_id or ""),
+                "call_serial": call_serial,
+            }
+            evidence_refs = [
+                self._record_provider_wire_evidence(
+                    "request_prepared",
+                    request_id=request_id,
+                    call_serial=call_serial,
+                    payload={
+                        "method": "POST",
+                        "url": self._chat_url(),
+                        "headers": _diagnostic_headers(self._xai_headers()),
+                        "streaming": bool(use_streaming),
+                        "body": payload,
+                    },
+                )
+            ]
             if use_streaming:
-                result = await self._stream_api_once(
-                    payload,
-                    self._xai_headers(),
-                    on_stream_event,
-                    api_url=self._chat_url(),
-                )
+                try:
+                    result = await self._stream_api_once(
+                        payload,
+                        self._xai_headers(),
+                        on_stream_event,
+                        api_url=self._chat_url(),
+                    )
+                except BaseException as exc:
+                    evidence_refs.append(
+                        self._record_provider_wire_evidence(
+                            "request_failed",
+                            request_id=request_id,
+                            call_serial=call_serial,
+                            payload={
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                "http": _provider_http_failure_diagnostics(exc),
+                                "partial_protocol": dict(
+                                    getattr(exc, "hashi_provider_protocol", {}) or {}
+                                ),
+                            },
+                        )
+                    )
+                    raise
             else:
-                result = await self._call_api_once(
-                    payload,
-                    self._xai_headers(),
-                    on_stream_event,
-                    api_url=self._chat_url(),
+                try:
+                    result = await self._call_api_once(
+                        payload,
+                        self._xai_headers(),
+                        on_stream_event,
+                        api_url=self._chat_url(),
+                    )
+                except BaseException as exc:
+                    evidence_refs.append(
+                        self._record_provider_wire_evidence(
+                            "request_failed",
+                            request_id=request_id,
+                            call_serial=call_serial,
+                            payload={
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                "http": _provider_http_failure_diagnostics(exc),
+                            },
+                        )
+                    )
+                    raise
+            evidence_refs.append(
+                self._record_provider_wire_evidence(
+                    "response_received",
+                    request_id=request_id,
+                    call_serial=call_serial,
+                    payload={
+                        "wire": dict(getattr(result, "wire_evidence", {}) or {}),
+                        "finish_reason": result.raw_finish_reason,
+                    },
                 )
+            )
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             usage = TokenUsage(
@@ -556,6 +736,9 @@ class XaiApiAdapter(OpenRouterAdapter):
                 usage=usage,
                 tool_call_count=len(result.tool_calls or []),
                 tool_loop_count=0,
+                stream_metadata={
+                    "provider_wire_evidence_refs": list(evidence_refs)
+                },
             )
         except asyncio.CancelledError:
             raise
@@ -603,7 +786,15 @@ class XaiApiAdapter(OpenRouterAdapter):
                 is_success=False,
             )
 
-    async def generate_response(self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None):
+    async def generate_response(
+        self,
+        prompt,
+        request_id,
+        is_retry=False,
+        silent=False,
+        on_stream_event=None,
+        request_content=None,
+    ):
         started = time.perf_counter()
         self._ensure_client()
         await self._resolve_bearer()
@@ -611,88 +802,15 @@ class XaiApiAdapter(OpenRouterAdapter):
         if is_imagine_image_model(self.config.model):
             return await self._generate_imagine_response(prompt, started, on_stream_event)
 
-        # Chat-Completions xAI models share the complete OpenAI-compatible
-        # Provider protocol owner, including invalid-tool forensics and the
-        # bounded in-loop repair contract. Responses-API models expose no
-        # HASHI tool calls here and retain their dedicated parser below.
-        if not self._use_responses_api():
-            return await super().generate_response(
-                prompt,
-                request_id,
-                is_retry=is_retry,
-                silent=silent,
-                on_stream_event=on_stream_event,
-            )
-
-        use_streaming = on_stream_event is not None and not self._use_responses_api()
-        messages = [
-            {"role": "system", "content": self.sys_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        headers = self._xai_headers()
-        last_text = ""
-        last_structured_data = None
-        result = None
-        total_prompt = 0
-        total_completion = 0
-        total_thinking = 0
-        total_tool_calls = 0
-        tool_loop_count = 0
-
-        try:
-            self._touch_activity()
-            for loop_idx in count():
-                payload = self._build_payload(messages, use_streaming=use_streaming)
-                if use_streaming:
-                    result = await self._stream_api_once(payload, headers, on_stream_event)
-                else:
-                    result = await self._call_api_once(payload, headers, on_stream_event)
-
-                headers = self._xai_headers()
-                total_prompt += result.prompt_tokens
-                total_completion += result.completion_tokens
-                total_thinking += result.thinking_tokens
-
-                last_text = result.text
-                last_structured_data = result.structured_data
-                if not result.tool_calls or not self.tool_registry:
-                    break
-
-                tool_loop_count += 1
-                total_tool_calls += len(result.tool_calls)
-                assistant_msg: dict = {"role": "assistant"}
-                if result.text:
-                    assistant_msg["content"] = result.text
-                reasoning_content = getattr(result, "reasoning_content", "")
-                if reasoning_content:
-                    assistant_msg["reasoning_content"] = reasoning_content
-                assistant_msg["tool_calls"] = result.tool_calls
-                messages.append(assistant_msg)
-                await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
-
-            from adapters.base import BackendResponse, TokenUsage
-
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            usage = TokenUsage(
-                input_tokens=total_prompt,
-                output_tokens=total_completion,
-                thinking_tokens=total_thinking,
-            ) if (total_prompt or total_completion) else None
-            return BackendResponse(
-                text=last_text,
-                duration_ms=duration_ms,
-                structured_data=last_structured_data,
-                is_success=True,
-                stop_reason=result.finish_reason if result else "stop",
-                usage=usage,
-                tool_call_count=total_tool_calls,
-                tool_loop_count=tool_loop_count,
-            )
-
-        except Exception as e:
-            from adapters.base import BackendResponse
-
-            if isinstance(e, asyncio.CancelledError):
-                raise
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            return BackendResponse(text="", duration_ms=duration_ms, error=str(e), is_success=False)
+        # Both Chat Completions and Responses models use the shared physical
+        # request observer, typed protocol decision and bounded local recovery.
+        # Responses models simply build/parse their native body and expose no
+        # HASHI tool calls on this path.
+        return await super().generate_response(
+            prompt,
+            request_id,
+            is_retry=is_retry,
+            silent=silent,
+            on_stream_event=on_stream_event,
+            request_content=request_content,
+        )

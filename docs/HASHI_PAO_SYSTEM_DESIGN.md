@@ -123,6 +123,11 @@ Exact model media metadata follows the independent
 PAO owns the derived fact, each Engine Adapter owns its implemented transport,
 and instance policy owns permission; native support is their intersection.
 Message admission is cache-only and never waits for catalogue network I/O.
+The same exact OpenRouter identity and bounded evidence feed PAO's derived
+price fact. Execution Engine and metadata source remain separate: Provider
+reported cost is actual, while a catalogue valuation for another channel is
+an explicitly labelled OpenRouter reference estimate. Every usage row freezes
+the price revision and observed cache dimensions used at completion.
 
 ## 5. State model
 
@@ -204,7 +209,22 @@ facts but must not infer them from files or become another catalogue owner.
 
 PAO owns the `hashi.current-message-context` version 1 snapshot. Its provenance
 fields are frozen at admission and the same current snapshot is persisted on
-Message and Run. Immediately before an execution attempt, PAO revalidates the
+Message and Run. PAO first resolves the exact Session binding and freezes one
+private `hashi.run-delivery-route` version 1 snapshot; only then may it build
+the current-message snapshot. The route's primary destination, optional
+mirrors, and automatic-delivery intent therefore cannot diverge from the
+QueuedRequest when a client changes instance, Agent, Session, or mirror
+preference after admission. Connector channel keys remain private and are not
+projected into PCM.
+
+`message_source` records the actual ingress, while `sender.kind` independently
+distinguishes a human/client, HChat Agent, or HASHI system source. Scheduler,
+heartbeat, proactive, and background-job events are `hashi.internal` system
+messages even when their delivery route contains a Telegram chat. A Telegram
+identifier is a route coordinate, not evidence that a human authored the
+message.
+
+Immediately before an execution attempt, PAO revalidates the
 authorization portion and atomically refreshes both records before recording
 the attempt projection. Retried or recovered work retains the original message
 identity and source evidence but revalidates proof expiry, revocation, target,
@@ -237,6 +257,14 @@ Private authorization adds disclosure scope but never admits network traffic.
 Ordinary HChat continues through its existing network/channel policy when no
 private proof is supplied or when a proof is invalid, expired, or revoked.
 Network authentication failure retains its existing fail-closed behavior.
+
+The projected `output_destination` is a plan, not a receipt. It contains the
+primary `surface`, a surface-only `mirrors` list, and `automatic`; the legacy
+`telegram_mirror` boolean remains for compatible TUI readers. Telegram, HChat,
+and WhatsApp record separate `assistant.delivery.outcome` events only after
+their Connector observes success or failure. A failed optional mirror does not
+reroute or erase a successful primary delivery, and a queued HChat hop is not
+mislabelled as a confirmed peer presentation.
 
 ## 7. Command ownership
 

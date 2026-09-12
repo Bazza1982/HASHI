@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from orchestrator.activity_digest import ActivityDigest
+from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 from orchestrator.pathing import instance_runtime_dir
 
 LEVEL_QUIET = "quiet"
@@ -95,7 +96,7 @@ def _state_path(bridge_home: Path) -> Path:
 
 def _read_level(path: Path) -> str:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_config_json(path)
     except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
         return DEFAULT_LEVEL
     if not isinstance(payload, dict):
@@ -162,25 +163,13 @@ def set_level(level: object, *, bridge_home: str | Path | None = None) -> str:
             raise RuntimeError("Terminal console policy has not been configured")
         path = _state_path(_configured_home)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(
-            f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        payload = {
-            "version": _STATE_VERSION,
-            "level": candidate,
-        }
         try:
-            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+            payload = read_config_json(path)
+        except FileNotFoundError:
+            payload = new_config_json(path)
+        payload["version"] = _STATE_VERSION
+        payload["level"] = candidate
+        write_config_json(path, payload)
         _level = candidate
         return _level
 

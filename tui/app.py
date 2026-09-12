@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import shlex
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -31,7 +33,9 @@ from orchestrator.flexible_backend_registry import (
 from orchestrator.runtime_effort_options import get_available_efforts
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
-from tui.clipboard import copy_to_windows_clipboard
+from tui.attachments import PendingAttachment, TuiAttachmentError, snapshot_bytes, snapshot_path
+from tui.audio import TuiAudioError, decode_tui_audio, play_ogg_bytes
+from tui.clipboard import copy_to_windows_clipboard, read_windows_clipboard_png
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
 from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
 from tui.onboarding import (
@@ -42,6 +46,7 @@ from tui.onboarding import (
     write_config,
 )
 from tui.sounds import play_message_sound
+from tui.preferences import TuiPreferenceError, TuiPreferenceStore
 from tui.side_panel import SidePanel
 from tui.telegram_rendering import command_message_renderable
 
@@ -57,6 +62,7 @@ STARTUP_LOGO = (
 )
 
 TUI_COMMAND_HELP = {
+    "attach": ("附加文件或剪贴板图片", "Attach a file or clipboard image"),
     "connect": ("打开本地后端接通／修复页", "Open local backend connection/repair"),
     "theme": ("查看或切换终端主题", "Inspect or change the terminal theme"),
     "help": ("查看 TUI 与 Agent 命令", "Show TUI and Agent commands"),
@@ -67,7 +73,9 @@ TUI_COMMAND_HELP = {
     "agents": ("查看可用 Agent", "List available Agents"),
     "clear": ("清空当前 TUI 显示", "Clear the current TUI view"),
     "quit": ("退出 TUI", "Exit the TUI"),
+    "say": ("在本机朗读最后一条代理回复", "Read the last Agent reply on this computer"),
     "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
+    "voice": ("设置本机自动朗读与共享声音", "Set local auto-read and the shared voice"),
 }
 TUI_COMMAND_HELP["telegram"] = (
     "\u67e5\u770b\u6216\u8bbe\u7f6e TUI Telegram \u955c\u50cf",
@@ -78,6 +86,9 @@ TUI_COMMAND_HELP["sidepanel"] = (
     "Control the read-only information panel and automatic tour",
 )
 TUI_COMMAND_GUIDES = {
+    "attach": CommandGuide(
+        "/attach <path|clipboard|cancel>", ("clipboard", "cancel"), example='/attach "report.pdf"'
+    ),
     "theme": CommandGuide("/theme [" + "|".join((*PALETTES, "reset")) + "]", (*PALETTES, "reset"), example="/theme apple2"),
     "help": CommandGuide("/help [zh|en]", ("zh", "en"), example="/help zh"),
     "to": CommandGuide("/to <agent|all>", choice_source="agents"),
@@ -90,8 +101,8 @@ TUI_COMMAND_GUIDES = {
         example="/layout balanced",
     ),
     "log": CommandGuide(
-        "/log [show|hide|pause]",
-        ("show", "hide", "pause"),
+        "/log [show|hide|pause|current|local]",
+        ("show", "hide", "pause", "current", "local"),
         example="/log hide",
     ),
     "tui": CommandGuide(
@@ -106,6 +117,12 @@ TUI_COMMAND_GUIDES = {
         "/sidepanel [on|off|toggle|refresh|auto <on|off|toggle>]",
         ("on", "off", "toggle", "refresh", "auto"),
         example="/sidepanel on",
+    ),
+    "say": CommandGuide("/say", example="/say"),
+    "voice": CommandGuide(
+        "/voice [status|on|off|<profile>|advanced]",
+        ("status", "on", "off", "advanced"),
+        example="/voice on",
     ),
 }
 TUI_NESTED_CHOICES = {
@@ -713,7 +730,30 @@ class HASHITuiApp(App):
         self._active_run_phase = "idle"
         self._submission_sequence = 0
         self._latest_submission_ref: tuple[int, str, int] | None = None
+        self._pending_attachment: PendingAttachment | None = None
+        self._last_assistant_by_target: dict[str, dict] = {}
+        self._auto_spoken_refs: dict[str, None] = {}
+        self._auto_speech_pending: set[str] = set()
+        self._speech_task: asyncio.Task | None = None
+        self._speech_lock = asyncio.Lock()
         preferences = self._load_tui_preferences()
+        remembered = preferences.get("last_agent_by_instance", {})
+        self._last_agent_by_instance = {
+            str(instance).strip().upper(): str(agent).strip().lower()
+            for instance, agent in (remembered.items() if isinstance(remembered, dict) else ())
+            if str(instance).strip() and str(agent).strip()
+        }
+        self._forgotten_agent_instances: set[str] = set()
+        remembered_voice = preferences.get("voice_auto_by_target", {})
+        self._voice_auto_by_target = {
+            str(target): bool(enabled)
+            for target, enabled in (
+                remembered_voice.items()
+                if isinstance(remembered_voice, dict)
+                else ()
+            )
+            if str(target).strip()
+        }
         register_themes(self)
         self._theme_name = preferences.get("theme", "retro")
         if self._theme_name not in PALETTES:
@@ -794,7 +834,12 @@ class HASHITuiApp(App):
         self._log_follow_task: asyncio.Task | None = None
         self._agents_cache: list[dict] = []
         self._attached_log_path: Path | None = None
+        self._log_source_instance = self.launch_instance_id
+        self._log_source_mode = "current"
+        self._remote_log_offset = 0
         self._agent_refresh_tick = 0
+        self._persistent_session_available: bool | None = None
+        self._session_capability_notice_generation: int | None = None
         self._startup_task: asyncio.Task | None = None
         self._side_panel_refresh_task: asyncio.Task | None = None
         self._side_panel_overview: dict | None = None
@@ -827,34 +872,58 @@ class HASHITuiApp(App):
 
     def _load_tui_preferences(self) -> dict:
         try:
-            data = json.loads(self._preferences_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (FileNotFoundError, OSError, ValueError):
+            return TuiPreferenceStore(self._preferences_path).read()
+        except TuiPreferenceError as exc:
+            logger.warning("TUI preferences could not be loaded: error=%s", exc)
             return {}
 
     def _save_tui_preferences(self):
         try:
-            self._preferences_path.parent.mkdir(parents=True, exist_ok=True)
-            self._preferences_path.write_text(
-                json.dumps(
-                    {
-                        **self._load_tui_preferences(),
-                        "theme": self._theme_name,
-                        "language": self._ui_language,
-                        "layout": self._layout_mode,
-                        "sounds": self._sound_enabled,
-                        "typing": self._tui_typing_enabled,
-                        "telegram_mirror": self._telegram_mirror_enabled,
-                        "sidepanel": self._side_panel_enabled,
-                        "sidepanel_auto": self._side_panel_auto_scroll,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as exc:
+            values = {
+                "theme": self._theme_name,
+                "language": self._ui_language,
+                "layout": self._layout_mode,
+                "sounds": self._sound_enabled,
+                "typing": self._tui_typing_enabled,
+                "telegram_mirror": self._telegram_mirror_enabled,
+                "sidepanel": self._side_panel_enabled,
+                "sidepanel_auto": self._side_panel_auto_scroll,
+            }
+            def mutate(payload: dict) -> None:
+                payload.update(values)
+                stored = payload.get("last_agent_by_instance")
+                merged = dict(stored) if isinstance(stored, dict) else {}
+                merged.update(self._last_agent_by_instance)
+                for instance_id in self._forgotten_agent_instances:
+                    merged.pop(instance_id, None)
+                payload["last_agent_by_instance"] = merged
+                stored_voice = payload.get("voice_auto_by_target")
+                merged_voice = (
+                    dict(stored_voice) if isinstance(stored_voice, dict) else {}
+                )
+                merged_voice.update(self._voice_auto_by_target)
+                payload["voice_auto_by_target"] = merged_voice
+
+            saved = TuiPreferenceStore(self._preferences_path).update(mutate)
+            stored = saved.get("last_agent_by_instance")
+            if isinstance(stored, dict):
+                self._last_agent_by_instance = {
+                    str(instance).upper(): str(agent).casefold()
+                    for instance, agent in stored.items()
+                    if str(instance).strip() and str(agent).strip()
+                }
+            stored_voice = saved.get("voice_auto_by_target")
+            if isinstance(stored_voice, dict):
+                self._voice_auto_by_target = {
+                    str(target): bool(enabled)
+                    for target, enabled in stored_voice.items()
+                    if str(target).strip()
+                }
+            self._forgotten_agent_instances.clear()
+            return True
+        except TuiPreferenceError as exc:
             logger.warning("TUI preferences could not be saved: error=%s", exc)
+            return False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-container"):
@@ -1057,6 +1126,9 @@ class HASHITuiApp(App):
             )
             self._start_attached_log_follow()
             self.gateway_ok = True
+            await self._refresh_instance_capabilities(
+                client=self.api, generation=self._connection_generation
+            )
             await self._load_agents(client=self.api, generation=self._connection_generation)
             self._start_polling()
             self._update_status_bar()
@@ -1104,7 +1176,11 @@ class HASHITuiApp(App):
                 if not line:
                     break
                 decoded = line.decode("utf-8", errors="replace").rstrip()
-                if decoded and not self._log_paused:
+                if (
+                    decoded
+                    and not self._log_paused
+                    and self._log_source_instance == self.launch_instance_id
+                ):
                     self._write_log_line(decoded)
             except Exception as exc:
                 logger.warning("TUI bridge log stream failed: error=%s", exc)
@@ -1126,6 +1202,96 @@ class HASHITuiApp(App):
         if self._log_follow_task and not self._log_follow_task.done():
             return
         self._log_follow_task = asyncio.create_task(self._follow_attached_log())
+
+    def _set_log_title(self) -> None:
+        if not self.is_mounted:
+            return
+        log = self.query_one("#log-panel", LogPanel)
+        local = self._log_source_instance == self.launch_instance_id
+        suffix = "本机" if self._ui_language == "zh" and local else "远程" if self._ui_language == "zh" else "local" if local else "remote"
+        base = (
+            f"主机日志 · {self._log_source_instance}（{suffix}）"
+            if self._ui_language == "zh" else
+            f"Host log · {self._log_source_instance} ({suffix})"
+        )
+        paused = " [已暂停]" if self._ui_language == "zh" else " [PAUSED]"
+        log.border_title = base + (paused if self._log_paused else "")
+
+    def _activate_log_source(
+        self,
+        *,
+        instance_id: str,
+        client: TuiApiClient | None = None,
+        generation: int | None = None,
+        mode: str = "current",
+    ) -> None:
+        if self._log_follow_task and not self._log_follow_task.done():
+            self._log_follow_task.cancel()
+        self._log_follow_task = None
+        self._log_source_instance = str(instance_id).strip().upper()
+        self._log_source_mode = mode
+        self._remote_log_offset = 0
+        if self.is_mounted:
+            self.query_one("#log-panel", LogPanel).clear()
+        self._set_log_title()
+        if self._log_source_instance == self.launch_instance_id:
+            if self.bridge_proc is None:
+                self._start_attached_log_follow()
+            return
+        selected_client = client or self.api
+        selected_generation = self._connection_generation if generation is None else generation
+        self._log_follow_task = asyncio.create_task(
+            self._follow_remote_log(
+                client=selected_client,
+                generation=selected_generation,
+                instance_id=self._log_source_instance,
+            )
+        )
+
+    async def _follow_remote_log(
+        self,
+        *,
+        client: TuiApiClient,
+        generation: int,
+        instance_id: str,
+    ) -> None:
+        error_shown = False
+        while True:
+            try:
+                result = await client.log_tail(offset=self._remote_log_offset, limit=120)
+                if (
+                    generation != self._connection_generation
+                    or client is not self.api
+                    or instance_id != self._log_source_instance
+                ):
+                    return
+                if not result.get("ok"):
+                    if not error_shown:
+                        self._write_log_line(
+                            f"[TUI] {instance_id} log unavailable: "
+                            f"{result.get('error') or result.get('code') or 'unknown error'}"
+                        )
+                        error_shown = True
+                else:
+                    actual = str(result.get("instance_id") or "").strip().upper()
+                    if actual and actual != instance_id:
+                        self._write_log_line("[TUI] Remote log identity mismatch; follow stopped.")
+                        return
+                    error_shown = False
+                    new_offset = result.get("offset")
+                    if isinstance(new_offset, int) and new_offset >= 0:
+                        self._remote_log_offset = new_offset
+                    if not self._log_paused:
+                        for line in result.get("lines") or ():
+                            if isinstance(line, str) and line:
+                                self._write_log_line(line)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not error_shown:
+                    self._write_log_line(f"[TUI] {instance_id} log follow failed: {exc}")
+                    error_shown = True
+            await asyncio.sleep(1.0)
 
     async def _follow_attached_log(self):
         path = self._attached_log_path
@@ -1151,7 +1317,11 @@ class HASHITuiApp(App):
                 if current_size > position:
                     chunk, position = await asyncio.to_thread(self._read_log_chunk, path, position)
                     for line in chunk:
-                        if line and not self._log_paused:
+                        if (
+                            line
+                            and not self._log_paused
+                            and self._log_source_instance == self.launch_instance_id
+                        ):
                             self._write_log_line(line)
             except asyncio.CancelledError:
                 raise
@@ -1174,6 +1344,9 @@ class HASHITuiApp(App):
             if await self.api.health():
                 self.gateway_ok = True
                 self._write_log_line("[TUI] Local HASHI API connected.")
+                await self._refresh_instance_capabilities(
+                    client=self.api, generation=self._connection_generation
+                )
                 await self._load_agents(client=self.api, generation=self._connection_generation)
                 self._start_polling()
                 self._update_status_bar()
@@ -1191,17 +1364,48 @@ class HASHITuiApp(App):
     ):
         client = client or self.api
         generation = self._connection_generation if generation is None else generation
-        agents = await client.list_agents() if agents is None else agents
+        if agents is None:
+            result = await self._read_agent_directory(client)
+            if generation != self._connection_generation or client is not self.api:
+                logger.debug("Discarded stale TUI agent load: generation=%s", generation)
+                return False
+            if not result.get("ok") or not isinstance(result.get("agents"), list):
+                logger.warning(
+                    "TUI Agent directory unavailable: instance=%s error=%s",
+                    self.current_instance_id,
+                    result.get("error") or "invalid response",
+                )
+                return False
+            agents = result["agents"]
         if generation != self._connection_generation or client is not self.api:
             logger.debug("Discarded stale TUI agent load: generation=%s", generation)
-            return
+            return False
         self._adopt_agent_directory(agents)
         self._update_status_bar()
         if agents and (self._inject_wakeup or os.environ.get("HASHI_TUI_INITIAL_AGENT") == "hashiko"):
             hashiko = next((a for a in agents if a.get("name") == "hashiko"), None)
             if hashiko is not None:
                 self._select_agent(hashiko, client=client, generation=generation)
-                return
+                return True
+        remembered_name = self._last_agent_by_instance.get(self.current_instance_id)
+        if agents and not self.current_agent and remembered_name:
+            remembered_agent = next(
+                (item for item in agents if str(item.get("name") or "").casefold() == remembered_name.casefold()),
+                None,
+            )
+            if remembered_agent is not None:
+                self._select_agent(remembered_agent, client=client, generation=generation)
+                return True
+            self._last_agent_by_instance.pop(self.current_instance_id, None)
+            self._forgotten_agent_instances.add(self.current_instance_id)
+            self._save_tui_preferences()
+            if self.is_mounted:
+                message = (
+                    f"先前记住的 Agent ‘{remembered_name}’ 已不在 {self.current_instance_id}，已选择可用 Agent。"
+                    if self._ui_language == "zh" else
+                    f"Remembered Agent ‘{remembered_name}’ no longer exists on {self.current_instance_id}; selecting an available Agent."
+                )
+                self.query_one("#chat-history", ChatHistory).write(Text(message, style="hashi.muted"))
         if agents and not self.current_agent:
             # Auto-select first active agent
             for a in agents:
@@ -1210,6 +1414,50 @@ class HASHITuiApp(App):
                     break
             if not self.current_agent and agents:
                 self._select_agent(agents[0], client=client, generation=generation)
+        return True
+
+    @staticmethod
+    async def _read_agent_directory(client: TuiApiClient) -> dict:
+        reader = getattr(client, "agents_info", None)
+        if callable(reader):
+            try:
+                return await reader()
+            except Exception as exc:
+                return {"ok": False, "code": "directory_request_failed", "error": str(exc)}
+        legacy_reader = getattr(client, "list_agents", None)
+        if callable(legacy_reader):
+            try:
+                agents = await legacy_reader()
+                return {"ok": True, "agents": agents} if isinstance(agents, list) else {
+                    "ok": False,
+                    "code": "invalid_directory_response",
+                    "error": "Agent directory was not a list",
+                }
+            except Exception as exc:
+                return {"ok": False, "code": "directory_request_failed", "error": str(exc)}
+        return {"ok": False, "code": "directory_unsupported", "error": "Agent directory is unsupported"}
+
+    async def _refresh_instance_capabilities(
+        self,
+        *,
+        client: TuiApiClient,
+        generation: int,
+        payload: dict | None = None,
+    ) -> bool | None:
+        result = await client.capabilities_info() if payload is None else payload
+        if generation != self._connection_generation or client is not self.api:
+            return None
+        if not isinstance(result, dict) or not result.get("ok"):
+            self._persistent_session_available = None
+            logger.warning(
+                "TUI capability discovery unavailable: instance=%s error=%s",
+                self.current_instance_id,
+                (result or {}).get("error") if isinstance(result, dict) else "invalid response",
+            )
+            return None
+        self._persistent_session_available = bool(result.get("session_api_version"))
+        self._session_capability_notice_generation = None
+        return self._persistent_session_available
 
     def _adopt_agent_directory(self, agents: list[dict]) -> None:
         self._agents_cache = list(agents)
@@ -1221,6 +1469,25 @@ class HASHITuiApp(App):
             None,
         )
         if selected is None:
+            missing = self.current_agent
+            self._cancel_tui_speech()
+            self._clear_typing_indicator()
+            self._latest_submission_ref = None
+            self.current_agent = None
+            self._chat_targets = []
+            self.current_agent_display = ""
+            self.current_backend = ""
+            self._current_agent_metadata = {}
+            self._last_agent_by_instance.pop(self.current_instance_id, None)
+            self._forgotten_agent_instances.add(self.current_instance_id)
+            self._save_tui_preferences()
+            if self.is_mounted:
+                message = (
+                    f"Agent ‘{missing}’ 已不在 {self.current_instance_id}；发送已暂停，请重新选择。"
+                    if self._ui_language == "zh" else
+                    f"Agent ‘{missing}’ no longer exists on {self.current_instance_id}; sending is paused until you select another Agent."
+                )
+                self.query_one("#chat-history", ChatHistory).write(Text(message, style="hashi.error"))
             self._render_side_panel()
             return
         self._current_agent_metadata = dict(selected)
@@ -1242,8 +1509,23 @@ class HASHITuiApp(App):
     ):
         client = client or self.api
         generation = self._connection_generation if generation is None else generation
+        if generation != self._connection_generation or client is not self.api:
+            logger.debug("Discarded stale TUI Agent selection: generation=%s", generation)
+            return False
         selected_name = agent_data.get("name", "")
+        if not selected_name:
+            return False
         if selected_name != self.current_agent:
+            self._cancel_tui_speech()
+            if self._pending_attachment is not None:
+                self._pending_attachment = None
+                if self.is_mounted:
+                    self.query_one("#chat-history", ChatHistory).write(
+                        Text(
+                            "Pending attachment cleared because the Agent changed.",
+                            style="hashi.muted",
+                        )
+                    )
             self._clear_typing_indicator()
             self._latest_submission_ref = None
             self._cancel_side_panel_refresh()
@@ -1265,6 +1547,15 @@ class HASHITuiApp(App):
         self._update_status_bar()
         self._render_side_panel()
         self._schedule_side_panel_refresh()
+        self._last_agent_by_instance[self.current_instance_id] = str(selected_name).casefold()
+        self._forgotten_agent_instances.discard(self.current_instance_id)
+        if not self._save_tui_preferences() and self.is_mounted:
+            message = (
+                "Agent 已选择，但无法保存下次启动偏好。"
+                if self._ui_language == "zh" else
+                "Agent selected, but the next-launch preference could not be saved."
+            )
+            chat.write(Text(message, style="hashi.error"))
         # Load recent transcript
         self._load_initial_transcript(client, self.current_agent, generation)
 
@@ -1273,6 +1564,7 @@ class HASHITuiApp(App):
             wakeup = self._inject_wakeup
             self._inject_wakeup = None
             self._send_wakeup(wakeup, self.current_agent, client, generation)
+        return True
 
     @work()
     async def _send_wakeup(
@@ -1311,6 +1603,13 @@ class HASHITuiApp(App):
             chat.write(chat_message_renderable("user", "You", text))
         elif role == "assistant":
             chat.write(chat_message_renderable("assistant", prefix, text))
+            target_agent = str(
+                msg.get("agent") or msg.get("agent_id") or self.current_agent or ""
+            ).strip().casefold()
+            if target_agent:
+                self._last_assistant_by_target[
+                    f"{self.current_instance_id}:{target_agent}"
+                ] = dict(msg)
             self._clear_typing_for_transcript_message(msg)
 
     @work()
@@ -1350,9 +1649,14 @@ class HASHITuiApp(App):
                 try:
                     self._agent_refresh_tick = (self._agent_refresh_tick + 1) % 5
                     if self._agent_refresh_tick == 0:
-                        agents = await client.list_agents()
-                        if generation == self._connection_generation and client is self.api:
-                            self._adopt_agent_directory(agents)
+                        directory = await self._read_agent_directory(client)
+                        if (
+                            generation == self._connection_generation
+                            and client is self.api
+                            and directory.get("ok")
+                            and isinstance(directory.get("agents"), list)
+                        ):
+                            self._adopt_agent_directory(directory["agents"])
                             self._update_status_bar()
                     poll_targets = self._chat_targets[:]
                     if self.current_agent and self.current_agent not in poll_targets:
@@ -1366,6 +1670,8 @@ class HASHITuiApp(App):
                         for msg in messages:
                             if msg.get("role") == "assistant":
                                 self._render_transcript_message(msg)
+                                if self._voice_auto_enabled(agent):
+                                    self._queue_tui_speech(msg, announce=False)
                                 received = True
                         if received:
                             self._play_message_sound("received")
@@ -1426,6 +1732,15 @@ class HASHITuiApp(App):
         if normalized == "/to" or normalized.startswith("/to "):
             await self._handle_to(normalized)
             return
+        if normalized == "/attach" or normalized.startswith("/attach "):
+            await self._handle_attach_cmd(normalized)
+            return
+        if normalized == "/say" or normalized.startswith("/say "):
+            self._handle_say_cmd(normalized)
+            return
+        if normalized == "/voice" or normalized.startswith("/voice "):
+            await self._handle_voice_cmd(normalized)
+            return
         if normalized == "/agents":
             await self._handle_agents_cmd()
             return
@@ -1473,13 +1788,39 @@ class HASHITuiApp(App):
             return
 
         chat = self.query_one("#chat-history", ChatHistory)
+        workzone_ref, workzone_caption = self._parse_workzone_reference(normalized)
+        if workzone_ref is not None:
+            if not self.current_agent or self.current_agent_display == "ALL":
+                chat.write(markup("[hashi.error]Select one Agent before attaching a Workzone file.[/]"))
+                return
+            chat.write(chat_message_renderable("user", "You", workzone_caption or f"Attached: {Path(workzone_ref).name}"))
+            self._send_attachment_message(
+                workzone_caption,
+                self.current_agent,
+                self.api,
+                self._connection_generation,
+                self.current_instance_id,
+                self._telegram_mirror_enabled,
+                self._ui_language,
+                attachment=None,
+                workzone_ref=workzone_ref,
+            )
+            return
+        if self._looks_like_dropped_path(normalized):
+            await self._stage_path_attachment(normalized)
+            return
         chat.write(chat_message_renderable("user", "You", normalized))
 
         if self.current_agent_display == "ALL":
             # Broadcast to all active agents
+            targets = tuple(self._chat_targets)
+            if not targets:
+                chat.write(markup("[hashi.error]No active Agents are available on the current instance; nothing was sent.[/]"))
+                return
             self._play_message_sound("sent")
             self._send_broadcast(
                 normalized,
+                targets,
                 self.api,
                 self._connection_generation,
                 self._telegram_mirror_enabled,
@@ -1492,6 +1833,29 @@ class HASHITuiApp(App):
             return
         else:
             self._play_message_sound("sent")
+            pending = self._pending_attachment
+            if pending is not None:
+                if (
+                    pending.generation != self._connection_generation
+                    or pending.instance_id != self.current_instance_id
+                    or pending.agent != self.current_agent.casefold()
+                ):
+                    self._pending_attachment = None
+                    chat.write(markup("[hashi.error]The pending attachment belonged to an earlier target and was cleared; nothing was sent.[/]"))
+                    return
+                self._pending_attachment = None
+                self._send_attachment_message(
+                    normalized,
+                    self.current_agent,
+                    self.api,
+                    self._connection_generation,
+                    self.current_instance_id,
+                    self._telegram_mirror_enabled,
+                    self._ui_language,
+                    attachment=pending,
+                    workzone_ref=None,
+                )
+                return
             self._submission_sequence += 1
             submission_ref = (
                 self._connection_generation,
@@ -2267,8 +2631,12 @@ class HASHITuiApp(App):
 `/log [show|hide|pause]`　控制本地日志
 `/sidepanel [on|off|toggle|refresh]`　控制只读信息面板
 `/sidepanel auto on|off|toggle`　设置自动巡览
+`/attach <路径|clipboard|cancel>`　发送文件或剪贴板图片
+`@相对路径`　发送当前 Agent Workzone 中的文件
+`/say`　仅在本机朗读最后一条代理回复一次
+`/voice [on|off|档案|advanced]`　设置本机自动朗读与共享声音
 `/tui language zh|en`　切换界面语言
-`/tui sound on|off|test`　设置或试听提示音
+`/tui sound on|off|test`　设置短提示音（不是回复朗读）
 `/clear`　清空当前显示　　`/quit`　退出
 
 输入命令前缀可自动补全；未知命令不会发送给 Agent。输入 `/help en` 查看英文版。"""
@@ -2290,8 +2658,12 @@ class HASHITuiApp(App):
 `/log [show|hide|pause]`　Control the host log
 `/sidepanel [on|off|toggle|refresh]`　Control the read-only information panel
 `/sidepanel auto on|off|toggle`　Configure the automatic tour
+`/attach <path|clipboard|cancel>`　Send a file or clipboard image
+`@relative/path`　Send a file from the current Agent Workzone
+`/say`　Read the last Agent reply once on this computer only
+`/voice [on|off|profile|advanced]`　Set local auto-read and the shared voice
 `/tui language zh|en`　Change the interface language
-`/tui sound on|off|test`　Configure or preview message sounds
+`/tui sound on|off|test`　Configure short cues (not reply speech)
 `/clear`　Clear this view　　`/quit`　Exit
 
 Command prefixes autocomplete; unknown commands are never sent to an Agent. Use `/help zh` for Chinese."""
@@ -2315,11 +2687,10 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self._ui_language
         )
         if self._ui_language == "zh":
-            log.border_title = f"主机日志 · {self.launch_instance_id}（本机）"
             input_box.placeholder = "输入消息 · /help · /to <Agent> · /instance"
         else:
-            log.border_title = f"Host log · {self.launch_instance_id} (local)"
             input_box.placeholder = "Message · /help · /to <agent> · /instance"
+        self._set_log_title()
         if self.current_agent_display:
             location = self._location_label()
             chat_label = "聊天" if self._ui_language == "zh" else "Chat"
@@ -2614,8 +2985,432 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self.action_toggle_log_pause()
             state = "paused" if self._log_paused else "following"
             chat.write(markup(f"[hashi.accent]✓ Host log · {state}.[/]"))
+        elif action == "local":
+            self._activate_log_source(
+                instance_id=self.launch_instance_id,
+                client=self.api,
+                generation=self._connection_generation,
+                mode="local",
+            )
+            chat.write(markup(f"[hashi.accent]✓ Host log · {self.launch_instance_id} (local).[/]"))
+        elif action == "current":
+            self._activate_log_source(
+                instance_id=self.current_instance_id,
+                client=self.api,
+                generation=self._connection_generation,
+                mode="current",
+            )
+            chat.write(markup(f"[hashi.accent]✓ Host log · {self.current_instance_id}.[/]"))
         else:
-            chat.write(markup("[hashi.error]Use /log show|hide|pause.[/]"))
+            chat.write(markup("[hashi.error]Use /log show|hide|pause|current|local.[/]"))
+
+    @staticmethod
+    def _looks_like_dropped_path(text: str) -> bool:
+        value = str(text or "").strip()
+        return bool(
+            value.startswith(("/", "./", "../", "~", "\\\\", '"'))
+            or (len(value) >= 3 and value[0].isalpha() and value[1:3] in {":\\", ":/"})
+        )
+
+    def _voice_target_key(self, agent: str | None = None) -> str:
+        return (
+            f"{self.current_instance_id}:"
+            f"{str(agent or self.current_agent or '').strip().casefold()}"
+        )
+
+    def _voice_auto_enabled(self, agent: str | None = None) -> bool:
+        if self.current_agent_display == "ALL":
+            return False
+        return bool(self._voice_auto_by_target.get(self._voice_target_key(agent), False))
+
+    def _cancel_tui_speech(self) -> None:
+        task = self._speech_task
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _queue_tui_speech(self, message: dict, *, announce: bool) -> None:
+        if not self.current_agent or self.current_agent_display == "ALL":
+            return
+        text = str(message.get("text") or "").strip()
+        if not text:
+            return
+        self._cancel_tui_speech()
+        generation = self._connection_generation
+        client = self.api
+        instance_id = self.current_instance_id
+        agent = self.current_agent
+        source_ref = str(
+            message.get("message_id")
+            or message.get("run_id")
+            or message.get("request_id")
+            or hashlib.sha256(
+                (
+                    text
+                    + "\0"
+                    + str(message.get("timestamp") or message.get("created_at") or "")
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        dedupe_ref: str | None = None
+        if not announce:
+            dedupe_ref = f"{self._voice_target_key(agent)}:{source_ref}"
+            if (
+                dedupe_ref in self._auto_spoken_refs
+                or dedupe_ref in self._auto_speech_pending
+            ):
+                return
+            self._auto_speech_pending.add(dedupe_ref)
+        task = asyncio.create_task(
+            self._synthesize_and_play_tui_speech(
+                text=text,
+                source_ref=source_ref,
+                agent=agent,
+                instance_id=instance_id,
+                client=client,
+                generation=generation,
+                announce=announce,
+                dedupe_ref=dedupe_ref,
+            )
+        )
+        self._speech_task = task
+
+    async def _synthesize_and_play_tui_speech(
+        self,
+        *,
+        text: str,
+        source_ref: str,
+        agent: str,
+        instance_id: str,
+        client: TuiApiClient,
+        generation: int,
+        announce: bool,
+        dedupe_ref: str | None,
+    ) -> None:
+        current_task = asyncio.current_task()
+        try:
+            async with self._speech_lock:
+                if (
+                    generation != self._connection_generation
+                    or client is not self.api
+                    or instance_id != self.current_instance_id
+                    or agent != self.current_agent
+                ):
+                    return
+                result = await client.synthesize_speech(
+                    agent,
+                    text,
+                    request_id=(
+                        "tui-"
+                        + hashlib.sha256(source_ref.encode("utf-8")).hexdigest()[:24]
+                        + "-"
+                        + uuid4().hex[:12]
+                    ),
+                )
+                if (
+                    generation != self._connection_generation
+                    or client is not self.api
+                    or instance_id != self.current_instance_id
+                    or agent != self.current_agent
+                ):
+                    logger.info(
+                        "Discarded late TUI speech: instance=%s agent=%s generation=%s",
+                        instance_id,
+                        agent,
+                        generation,
+                    )
+                    return
+                if not result.get("ok"):
+                    raise TuiAudioError(
+                        str(result.get("error") or "speech generation failed")
+                    )
+                content = decode_tui_audio(result)
+                if announce and self.is_mounted:
+                    self.query_one("#chat-history", ChatHistory).write(
+                        Text(
+                            "语音已生成，正在此电脑播放……"
+                            if self._ui_language == "zh"
+                            else "Speech generated; playing on this computer…",
+                            style="hashi.muted",
+                        )
+                    )
+                await play_ogg_bytes(content)
+                if dedupe_ref is not None:
+                    self._auto_spoken_refs[dedupe_ref] = None
+                    while len(self._auto_spoken_refs) > 1000:
+                        self._auto_spoken_refs.pop(next(iter(self._auto_spoken_refs)))
+                if (
+                    announce
+                    and self.is_mounted
+                    and generation == self._connection_generation
+                    and client is self.api
+                    and agent == self.current_agent
+                ):
+                    self.query_one("#chat-history", ChatHistory).write(
+                        Text(
+                            "✓ 已在此电脑播放一次。"
+                            if self._ui_language == "zh"
+                            else "✓ Played once on this computer.",
+                            style="hashi.accent",
+                        )
+                    )
+        except asyncio.CancelledError:
+            logger.info(
+                "Cancelled TUI speech: instance=%s agent=%s generation=%s",
+                instance_id,
+                agent,
+                generation,
+            )
+            raise
+        except (TuiAudioError, OSError, RuntimeError) as exc:
+            if (
+                self.is_mounted
+                and generation == self._connection_generation
+                and client is self.api
+                and agent == self.current_agent
+            ):
+                self.query_one("#chat-history", ChatHistory).write(
+                    Text(
+                        (f"本机朗读不可用：{exc}" if self._ui_language == "zh" else f"Local speech unavailable: {exc}"),
+                        style="hashi.error",
+                    )
+                )
+        finally:
+            if dedupe_ref is not None:
+                self._auto_speech_pending.discard(dedupe_ref)
+            if self._speech_task is current_task:
+                self._speech_task = None
+
+    def _handle_say_cmd(self, text: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        if text.strip().casefold() != "/say":
+            chat.write(Text("请直接使用 /say，不带参数。" if self._ui_language == "zh" else "Use /say without arguments.", style="hashi.error"))
+            return
+        if not self.current_agent or self.current_agent_display == "ALL":
+            chat.write(Text("使用 /say 前请先选择一个 Agent。" if self._ui_language == "zh" else "Select one Agent before using /say.", style="hashi.error"))
+            return
+        message = self._last_assistant_by_target.get(self._voice_target_key())
+        if not message:
+            chat.write(Text("当前没有可朗读的已显示代理最终回复。" if self._ui_language == "zh" else "No visible final Agent reply is available to read.", style="hashi.error"))
+            return
+        self._queue_tui_speech(message, announce=True)
+
+    async def _handle_voice_cmd(self, text: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        if not self.current_agent or self.current_agent_display == "ALL":
+            chat.write(Text("更改语音设置前请先选择一个 Agent。" if self._ui_language == "zh" else "Select one Agent before changing voice settings.", style="hashi.error"))
+            return
+        parts = text.split(maxsplit=1)
+        action = parts[1].strip().casefold() if len(parts) > 1 else "status"
+        if action in {"on", "off"}:
+            key = self._voice_target_key()
+            previous = self._voice_auto_by_target.get(key)
+            self._voice_auto_by_target[key] = action == "on"
+            if not self._save_tui_preferences():
+                if previous is None:
+                    self._voice_auto_by_target.pop(key, None)
+                else:
+                    self._voice_auto_by_target[key] = previous
+                chat.write(Text("自动朗读偏好保存失败，设置未更改。" if self._ui_language == "zh" else "Auto-read was not changed because its preference could not be saved.", style="hashi.error"))
+                return
+            if action == "off":
+                self._cancel_tui_speech()
+            state = "ON" if action == "on" else "OFF"
+            chat.write(Text((f"✓ {self.current_agent}@{self.current_instance_id} 的本机自动朗读已{('开启' if action == 'on' else '关闭')}。" if self._ui_language == "zh" else f"✓ Local auto-read {state} for {self.current_agent}@{self.current_instance_id}."), style="hashi.accent"))
+            return
+
+        generation = self._connection_generation
+        client = self.api
+        agent = self.current_agent
+        voice_state = await client.voice_state(agent)
+        if generation != self._connection_generation or client is not self.api or agent != self.current_agent:
+            return
+        if not voice_state.get("ok"):
+            detail = voice_state.get("error") or ("请求失败" if self._ui_language == "zh" else "request failed")
+            chat.write(Text((f"语音状态不可用：{detail}" if self._ui_language == "zh" else f"Voice state unavailable: {detail}"), style="hashi.error"))
+            return
+        profiles = {
+            str(row.get("id") or "").casefold(): str(row.get("label") or row.get("id") or "")
+            for row in voice_state.get("profiles", [])
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        if action == "advanced":
+            advanced = (
+                "高级共享 Agent 语音控制：\n"
+                "/voice provider <名称> · /voice name <声音> · /voice rate <数值>\n"
+                "/voice mode <off|tts|native> · /voice target <Provider> <Model>\n"
+                "/voice native-voice <名称> · /voice native-format <格式>\n"
+                "/voice fallback <local_chain|native_only> · /voice retention <分钟|indefinite>\n"
+                "这些共享高级设置请使用 Agent Connector 的完整语音界面；TUI /voice on|off 始终只影响本机。"
+            ) if self._ui_language == "zh" else (
+                "Advanced shared Agent controls:\n"
+                "/voice provider <name> · /voice name <voice> · /voice rate <n>\n"
+                "/voice mode <off|tts|native> · /voice target <provider> <model>\n"
+                "/voice native-voice <name> · /voice native-format <format>\n"
+                "/voice fallback <local_chain|native_only> · /voice retention <minutes|indefinite>\n"
+                "Use the Agent connector's advanced voice surface for these shared controls. "
+                "TUI /voice on|off remains local only."
+            )
+            chat.write(Text(advanced, style="hashi.secondary"))
+            return
+        if action not in {"", "status"}:
+            if action not in profiles:
+                chat.write(Text("请使用 /voice on|off、列出的声音档案或 /voice advanced。" if self._ui_language == "zh" else "Use /voice on|off, one listed profile, or /voice advanced.", style="hashi.error"))
+                return
+            updated = await client.set_voice_profile(agent, action)
+            if generation != self._connection_generation or client is not self.api or agent != self.current_agent:
+                return
+            if not updated.get("ok"):
+                detail = updated.get("error") or ("请求失败" if self._ui_language == "zh" else "request failed")
+                chat.write(Text((f"声音档案未更改：{detail}" if self._ui_language == "zh" else f"Voice profile was not changed: {detail}"), style="hashi.error"))
+                return
+            voice_state = updated
+            chat.write(Text((f"✓ Agent 的共享声音已设为 {profiles[action]}（{action}）。" if self._ui_language == "zh" else f"✓ Shared Agent voice set to {profiles[action]} ({action})."), style="hashi.accent"))
+            return
+        current = str(voice_state.get("profile") or "custom")
+        auto = "ON" if self._voice_auto_enabled() else "OFF"
+        choices = "\n".join(
+            f"  /voice {profile_id} — {label}"
+            for profile_id, label in profiles.items()
+        ) or ("  没有可用的语义声音档案。" if self._ui_language == "zh" else "  No semantic voice profiles are available.")
+        summary = (
+            f"本机自动朗读：{auto}\nAgent 共享声音：{current}\n{choices}\n"
+            "/voice on|off · /say · /voice advanced\n"
+            "自动朗读属于此 TUI 电脑；声音档案是 Agent 的共享声音身份。"
+            if self._ui_language == "zh"
+            else
+            f"Local auto-read: {auto}\nShared Agent voice: {current}\n{choices}\n"
+            "/voice on|off · /say · /voice advanced\n"
+            "Auto-read belongs to this TUI computer; the voice profile is the Agent's shared identity."
+        )
+        chat.write(
+            Text(
+                summary,
+                style="hashi.secondary",
+            )
+        )
+
+    @staticmethod
+    def _parse_workzone_reference(text: str) -> tuple[str | None, str]:
+        try:
+            # Workzone references are target-relative protocol paths, never
+            # native Windows paths. Keep caption quote removal platform-neutral.
+            parts = shlex.split(str(text or ""), posix=True)
+        except ValueError:
+            return None, text
+        if not parts or not parts[0].startswith("@") or len(parts[0]) == 1:
+            return None, text
+        reference = parts[0][1:]
+        if reference.startswith("@"):
+            return None, text
+        return reference, " ".join(parts[1:]).strip()
+
+    async def _stage_path_attachment(self, value: str) -> bool:
+        chat = self.query_one("#chat-history", ChatHistory)
+        if not self.current_agent or self.current_agent_display == "ALL":
+            chat.write(markup("[hashi.error]Select one Agent before attaching a file.[/]"))
+            return False
+        try:
+            pending = await asyncio.to_thread(
+                snapshot_path,
+                value,
+                generation=self._connection_generation,
+                instance_id=self.current_instance_id,
+                agent=self.current_agent,
+            )
+        except TuiAttachmentError as exc:
+            chat.write(Text(f"Attachment not staged: {exc}", style="hashi.error"))
+            return False
+        self._pending_attachment = pending
+        chat.write(
+            Text(
+                f"✓ Attached {pending.filename} ({len(pending.content)} bytes). "
+                "Type the accompanying message to submit both together, or /attach cancel.",
+                style="hashi.accent",
+            )
+        )
+        return True
+
+    async def _handle_attach_cmd(self, text: str) -> None:
+        chat = self.query_one("#chat-history", ChatHistory)
+        try:
+            parts = shlex.split(text, posix=os.name != "nt")
+        except ValueError:
+            chat.write(markup("[hashi.error]Invalid quoting. Use /attach \"path with spaces\".[/]"))
+            return
+        if len(parts) == 1:
+            pending = self._pending_attachment.filename if self._pending_attachment else "none"
+            chat.write(Text(f"Pending attachment: {pending}. Use /attach <path|clipboard|cancel>.", style="hashi.secondary"))
+            return
+        argument = " ".join(parts[1:]).strip()
+        if argument.casefold() == "cancel":
+            self._pending_attachment = None
+            chat.write(markup("[hashi.accent]✓ Pending attachment cleared.[/]"))
+            return
+        if argument.casefold() == "clipboard":
+            if not self.current_agent or self.current_agent_display == "ALL":
+                chat.write(markup("[hashi.error]Select one Agent before attaching a clipboard image.[/]"))
+                return
+            payload = await asyncio.to_thread(read_windows_clipboard_png)
+            if payload is None:
+                chat.write(markup("[hashi.error]No supported image is available on the Windows clipboard.[/]"))
+                return
+            try:
+                self._pending_attachment = snapshot_bytes(
+                    payload,
+                    filename="clipboard.png",
+                    media_type="image/png",
+                    generation=self._connection_generation,
+                    instance_id=self.current_instance_id,
+                    agent=self.current_agent,
+                )
+            except TuiAttachmentError as exc:
+                chat.write(Text(f"Clipboard image not staged: {exc}", style="hashi.error"))
+                return
+            chat.write(markup("[hashi.accent]✓ Clipboard image attached. Type the accompanying message to submit it.[/]"))
+            return
+        await self._stage_path_attachment(argument)
+
+    @work()
+    async def _send_attachment_message(
+        self,
+        text: str,
+        agent: str,
+        client: TuiApiClient,
+        generation: int,
+        instance_id: str,
+        telegram_mirror: bool,
+        ui_locale: str,
+        *,
+        attachment: PendingAttachment | None,
+        workzone_ref: str | None,
+    ) -> None:
+        result = await client.send_chat_attachment(
+            agent,
+            text,
+            attachment=attachment.wire_payload() if attachment is not None else None,
+            workzone_ref=workzone_ref,
+            client_id=self._tui_client_id,
+            telegram_mirror=telegram_mirror,
+            ui_locale=ui_locale,
+        )
+        if (
+            generation != self._connection_generation
+            or client is not self.api
+            or instance_id != self.current_instance_id
+        ):
+            logger.info("Discarded stale TUI attachment result: generation=%s", generation)
+            return
+        chat = self.query_one("#chat-history", ChatHistory)
+        if not result.get("ok"):
+            chat.write(
+                Text(
+                    f"Attachment was not sent ({agent}): {result.get('error') or 'request rejected'}",
+                    style="hashi.error",
+                )
+            )
+            return
+        label = attachment.filename if attachment is not None else Path(str(workzone_ref)).name
+        chat.write(Text(f"✓ Attachment submitted: {label}", style="hashi.accent"))
 
     @work()
     async def _send_message(
@@ -2654,6 +3449,18 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             )
             return
 
+        if self._persistent_session_available is False:
+            self._clear_typing_indicator()
+            if self._session_capability_notice_generation != generation:
+                self._session_capability_notice_generation = generation
+                message = (
+                    "此实例未启用 Persistent Session 状态；消息已提交，将继续从聊天记录接收回复。"
+                    if self._ui_language == "zh" else
+                    "Persistent Session status is disabled on this instance; the message was submitted and replies will continue through the transcript."
+                )
+                self.query_one("#chat-history", ChatHistory).write(Text(message, style="hashi.muted"))
+            return
+
         session_id = str(result.get("session_id") or "").strip()
         run_id = str(result.get("run_id") or "").strip()
         request_id = str(result.get("request_id") or "").strip()
@@ -2687,6 +3494,15 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                     # Fresh instances may expose legacy chat/transcript without
                     # the separately qualified persistent Session status API.
                     self._clear_typing_indicator(run_ref)
+                    self._persistent_session_available = False
+                    if self._session_capability_notice_generation != generation:
+                        self._session_capability_notice_generation = generation
+                        self.query_one("#chat-history", ChatHistory).write(
+                            Text(
+                                "Persistent Session status is disabled; chat delivery remains active.",
+                                style="hashi.muted",
+                            )
+                        )
                     return
                 status_failures += 1
                 logger.warning(
@@ -2770,10 +3586,13 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         client: TuiApiClient,
         generation: int,
     ) -> None:
-        agents = await client.list_agents()
+        result = await self._read_agent_directory(client)
         if generation != self._connection_generation or client is not self.api:
             return
-        self._adopt_agent_directory(agents)
+        if not result.get("ok") or not isinstance(result.get("agents"), list):
+            logger.warning("TUI Agent refresh failed: %s", result.get("error"))
+            return
+        self._adopt_agent_directory(result["agents"])
         self._update_status_bar()
         self._schedule_side_panel_refresh()
 
@@ -2832,21 +3651,23 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     async def _send_broadcast(
         self,
         text: str,
+        targets: tuple[str, ...],
         client: TuiApiClient,
         generation: int,
         telegram_mirror: bool,
         ui_locale: str,
     ):
-        agents = await client.list_agents()
-        for a in agents:
-            if a.get("is_active") or a.get("online"):
-                await client.send_chat(
-                    a["name"],
+        for agent in targets:
+            if generation != self._connection_generation or client is not self.api:
+                logger.info("Canceled remaining stale TUI broadcast: generation=%s", generation)
+                return
+            await client.send_chat(
+                    agent,
                     text,
                     client_id=self._tui_client_id,
                     telegram_mirror=telegram_mirror,
                     ui_locale=ui_locale,
-                )
+            )
         if generation != self._connection_generation:
             logger.info("TUI broadcast completed on previous instance generation=%s", generation)
 
@@ -2859,23 +3680,43 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             chat.write(markup("[hashi.success]Usage: /to <agent> or /to all[/]"))
             return
 
-        # Refresh agent list
-        agents = await self.api.list_agents()
+        generation = self._connection_generation
+        client = self.api
+        directory = await self._read_agent_directory(client)
+        if generation != self._connection_generation or client is not self.api:
+            chat.write(markup("[hashi.error]Agent directory changed during the request; try again.[/]"))
+            return
+        if not directory.get("ok") or not isinstance(directory.get("agents"), list):
+            chat.write(markup(
+                f"[hashi.error]Agent directory unavailable on {self.current_instance_id}: "
+                f"{directory.get('error') or 'invalid response'}. Current selection was kept.[/]"
+            ))
+            return
+        agents = directory["agents"]
         self._adopt_agent_directory(agents)
-        agent_map = {a["name"]: a for a in agents}
+        agent_map: dict[str, dict] = {}
+        for agent in agents:
+            for alias in (agent.get("name"), agent.get("display_name"), *(agent.get("aliases") or ())):
+                if isinstance(alias, str) and alias.strip():
+                    agent_map.setdefault(alias.strip().casefold(), agent)
 
         target = parts[0].lower()
         if target == "all":
+            active_targets = tuple(
+                str(a.get("name") or "")
+                for a in agents
+                if (a.get("is_active") or a.get("online")) and str(a.get("name") or "")
+            )
+            if not active_targets:
+                chat.write(markup(
+                    f"[hashi.error]No active Agents are available on {self.current_instance_id}; selection was kept.[/]"
+                ))
+                return
             self._clear_typing_indicator()
             self._latest_submission_ref = None
             # Multi-cast mode — just switch display; actual sending done in send
-            active_targets = [
-                a["name"]
-                for a in agents
-                if a.get("is_active") or a.get("online")
-            ]
             self.current_agent = None
-            self._chat_targets = active_targets
+            self._chat_targets = list(active_targets)
             self.current_agent_display = "ALL"
             self.current_backend = ""
             self._current_agent_metadata = {}
@@ -2889,14 +3730,26 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
         # Single or multi agent
         if target in agent_map:
-            self._select_agent(agent_map[target])
+            self._select_agent(agent_map[target], client=client, generation=generation)
             chat.write(markup(f"[hashi.accent]\u2705 Switched to {self.current_agent_display}[/]"))
         else:
             chat.write(markup(f"[hashi.error]Agent '{target}' not found. Use /agents to list.[/]"))
 
     async def _handle_agents_cmd(self):
         chat = self.query_one("#chat-history", ChatHistory)
-        agents = await self.api.list_agents()
+        generation = self._connection_generation
+        client = self.api
+        result = await self._read_agent_directory(client)
+        if generation != self._connection_generation or client is not self.api:
+            chat.write(markup("[hashi.error]Agent directory response became stale; try again.[/]"))
+            return
+        if not result.get("ok") or not isinstance(result.get("agents"), list):
+            chat.write(markup(
+                f"[hashi.error]Agent directory unavailable on {self.current_instance_id}: "
+                f"{result.get('error') or 'invalid response'}. Cached selection was kept.[/]"
+            ))
+            return
+        agents = result["agents"]
         self._adopt_agent_directory(agents)
         if not agents:
             chat.write(markup("[hashi.success]No agents found.[/]"))
@@ -3005,8 +3858,16 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 chat.write(markup(f"[hashi.error]Switch failed: {reason}. Current connection was kept.[/]"))
                 return
             agents = agent_result["agents"]
+            capability_result = (
+                await candidate.capabilities_info()
+                if hasattr(candidate, "capabilities_info")
+                else {"ok": False, "error": "capability endpoint unavailable"}
+            )
 
             previous_instance = self.current_instance_id
+            self._cancel_tui_speech()
+            attachment_cleared = self._pending_attachment is not None
+            self._pending_attachment = None
             self._clear_typing_indicator()
             self._latest_submission_ref = None
             self._cancel_side_panel_refresh()
@@ -3023,6 +3884,11 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self._current_agent_metadata = {}
             self._agents_cache = []
             self._agent_refresh_tick = 0
+            self._persistent_session_available = (
+                bool(capability_result.get("session_api_version"))
+                if capability_result.get("ok") else None
+            )
+            self._session_capability_notice_generation = None
             chat.clear()
             location = self._location_label()
             chat_label = "聊天" if self._ui_language == "zh" else "Chat"
@@ -3032,6 +3898,13 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 generation=generation,
                 agents=agents,
             )
+            if self._log_source_mode == "current":
+                self._activate_log_source(
+                    instance_id=self.current_instance_id,
+                    client=candidate,
+                    generation=generation,
+                    mode="current",
+                )
             self._update_status_bar()
             logger.info(
                 "TUI instance switch committed: from=%s target=%s transport=%s",
@@ -3044,6 +3917,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 f"{'local Workbench' if target.transport == 'direct' else 'authenticated Hashi Remote'}."
             )
             chat.write(markup(f"[hashi.accent]✅ Connected to {self.current_instance_id}.[/]"))
+            if attachment_cleared:
+                chat.write(markup("[hashi.muted]Pending attachment was cleared for the instance switch; attach it again to confirm the new target.[/]"))
 
     # ── Status bar ──────────────────────────────────────────────────────
 
@@ -3066,22 +3941,17 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
     def action_toggle_log_pause(self):
         self._log_paused = not self._log_paused
-        log = self.query_one("#log-panel", LogPanel)
-        base_title = (
-            f"主机日志 · {self.launch_instance_id}（本机）"
-            if self._ui_language == "zh"
-            else f"Host log · {self.launch_instance_id} (local)"
-        )
-        paused = " [已暂停]" if self._ui_language == "zh" else " [PAUSED]"
-        log.border_title = (
-            base_title + (paused if self._log_paused else "")
-        )
+        self._set_log_title()
 
     async def action_quit_app(self):
         await self._shutdown()
 
     async def _shutdown(self):
         self._clear_typing_indicator()
+        self._pending_attachment = None
+        self._cancel_tui_speech()
+        if self._speech_task is not None:
+            await asyncio.gather(self._speech_task, return_exceptions=True)
         self._cancel_side_panel_refresh()
         if self._log_follow_task and not self._log_follow_task.done():
             self._log_follow_task.cancel()

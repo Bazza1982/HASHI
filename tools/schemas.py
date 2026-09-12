@@ -431,7 +431,10 @@ TOOL_SCHEMAS = [
             "name": "telegram_send",
             "description": (
                 "Send a Telegram message to a chat ID or to another HASHI agent by agent_id. "
-                "Use this for agent-to-agent communication or notifications."
+                "Use this only for an explicitly requested additional notification or "
+                "agent-to-agent message. When CURRENT MESSAGE CONTEXT already lists "
+                "Telegram as an automatic primary destination or mirror, reply normally "
+                "instead of duplicating the current response with this tool."
             ),
             "parameters": {
                 "type": "object",

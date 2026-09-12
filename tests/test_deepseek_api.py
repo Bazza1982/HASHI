@@ -13,6 +13,7 @@ from adapters.deepseek_api import DeepSeekAdapter
 from adapters.openrouter_api import (
     _APIResult,
     _backend_failure_response,
+    _provider_http_failure_diagnostics,
     _tool_call_forensic_details,
 )
 from adapters.stream_events import (
@@ -357,6 +358,106 @@ def test_openai_compatible_connection_and_stream_failures_are_typed():
     assert invalid_url.error_retryable is False
     assert tls.error_code == "PROVIDER_TLS_ERROR"
     assert tls.error_retryable is False
+
+
+@pytest.mark.asyncio
+async def test_streaming_http_error_reads_unloaded_body_before_status_failure(
+    tmp_path,
+):
+    body = "参数错误：reasoning_content 缺失".encode("utf-8")
+
+    class _ErrorStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield body[:17]
+            yield body[17:]
+
+    async def handler(request):
+        return httpx.Response(
+            400,
+            headers={
+                "content-length": str(len(body)),
+                "x-ds-trace-id": "trace-body-175",
+            },
+            stream=_ErrorStream(),
+            request=request,
+        )
+
+    adapter = _adapter(tmp_path)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter.client = client
+
+    async def capture(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "inspect", "req-unloaded-400", on_stream_event=capture
+    )
+    await client.aclose()
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_BAD_REQUEST"
+    evidence = response.stream_metadata["provider_http_failure"]["response"]
+    assert evidence["body"] == body.decode("utf-8")
+    assert evidence["body_bytes"] == len(body)
+    assert evidence["declared_body_bytes"] == len(body)
+    assert evidence["body_state"] == "complete"
+    assert evidence["headers"]["x-ds-trace-id"] == "trace-body-175"
+    wire_path = (
+        tmp_path / "logs" / "provider_protocol_forensics" / "provider-wire.jsonl"
+    )
+    wire_bytes = wire_path.read_bytes()
+    assert b"test-key" not in wire_bytes
+    wire_records = [
+        json.loads(line)
+        for line in wire_bytes.decode("utf-8").splitlines()
+    ]
+    assert [item["event"] for item in wire_records] == [
+        "request_prepared",
+        "request_failed",
+    ]
+    assert (
+        wire_records[0]["payload"]["headers"]["Authorization"]
+        == "[REDACTED]"
+    )
+    assert (
+        wire_records[1]["payload"]["http"]["response"]["body"]
+        == body.decode("utf-8")
+    )
+
+
+def test_unread_response_is_not_reported_as_empty_body():
+    request = httpx.Request("POST", "https://provider.invalid/v1/chat")
+    response = httpx.Response(
+        400,
+        headers={"content-length": "175"},
+        stream=httpx.ByteStream(b"provider diagnostic"),
+        request=request,
+    )
+    error = httpx.HTTPStatusError(
+        "HTTP 400", request=request, response=response
+    )
+
+    evidence = _provider_http_failure_diagnostics(error)["response"]
+
+    assert evidence["body_state"] == "not_read"
+    assert "body" not in evidence
+    assert evidence["headers"]["content-length"] == "175"
+
+
+@pytest.mark.asyncio
+async def test_provider_stops_before_http_when_wire_evidence_cannot_persist(
+    tmp_path,
+):
+    blocked_workspace = tmp_path / "blocked-workspace"
+    blocked_workspace.write_text("not a directory", encoding="utf-8")
+    adapter = _adapter(blocked_workspace)
+    adapter._call_api_once = AsyncMock(return_value=_APIResult("done", None, "stop"))
+
+    response = await adapter.generate_response("inspect", "req-audit-blocked")
+
+    assert response.is_success is False
+    assert response.error_code == "AUDIT_PERSISTENCE_FAILURE"
+    assert adapter._call_api_once.await_count == 0
 
 
 def test_stable_provider_capacity_code_is_typed_but_generic_400_is_not():
@@ -834,6 +935,110 @@ async def test_incomplete_tool_arguments_repair_in_place_before_any_side_effect(
 
 
 @pytest.mark.asyncio
+async def test_invalid_tool_repair_preserves_deepseek_reasoning_content(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    bad = [
+        {
+            "id": "call-bad",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":'},
+        }
+    ]
+    payloads = []
+
+    async def fake_call(payload, headers, on_stream_event):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _APIResult(
+                "",
+                bad,
+                "tool_calls",
+                reasoning_content="Provider-visible repair reasoning.",
+            )
+        assistant = [
+            message
+            for message in payload["messages"]
+            if message.get("role") == "assistant"
+        ][-1]
+        assert (
+            assistant["reasoning_content"]
+            == "Provider-visible repair reasoning."
+        )
+        return _APIResult("done", None, "stop")
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-reasoning-repair")
+
+    assert response.is_success is True
+    assert len(payloads) == 2
+    assert adapter.tool_registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_categories_share_one_three_request_budget(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRIES = 3
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    bad = [
+        {
+            "id": "call-bad",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":'},
+        }
+    ]
+    request = httpx.Request(
+        "POST", "https://api.deepseek.com/v1/chat/completions"
+    )
+    responses = iter(
+        [
+            _APIResult("", bad, "tool_calls"),
+            httpx.HTTPStatusError(
+                "HTTP 429",
+                request=request,
+                response=httpx.Response(429, request=request),
+            ),
+            _APIResult("", bad, "tool_calls"),
+            _APIResult("done", None, "stop"),
+        ]
+    )
+    payloads = []
+
+    async def fake_call(payload, headers, on_stream_event):
+        payloads.append(payload)
+        value = next(responses)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-shared-budget")
+
+    assert response.is_success is True
+    assert len(payloads) == 4
+    assert response.stream_metadata["provider_transport_retry_count"] == 1
+    assert response.stream_metadata["provider_tool_repair_count"] == 2
+    repair_prompts = [
+        message["content"]
+        for payload in payloads
+        for message in payload["messages"]
+        if message.get("role") == "system"
+        and "tool-call repair request" in message.get("content", "")
+    ]
+    assert any("repair request 1/3" in prompt for prompt in repair_prompts)
+    assert any("repair request 3/3" in prompt for prompt in repair_prompts)
+    assert not any("repair request 2/3" in prompt for prompt in repair_prompts)
+    assert adapter.tool_registry.calls == []
+
+
+@pytest.mark.asyncio
 async def test_invalid_tool_arguments_succeed_on_third_repair_without_replay(
     monkeypatch,
     tmp_path,
@@ -961,7 +1166,7 @@ async def test_invalid_tool_arguments_exhaust_three_repairs_with_precise_error(
         assert '(I)' not in acl.stdout, 'private protocol evidence must not inherit readers'
     else:
         assert forensic_path.stat().st_mode & 0o777 == 0o600
-    assert not expired.exists(), 'expired private raw evidence must be removed'
+    assert expired.read_text() == 'old private evidence\n'
     assert unrelated.read_text() == 'keep\n'
     records = [
         json.loads(line)

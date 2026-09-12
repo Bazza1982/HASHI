@@ -1,10 +1,18 @@
 """Light onboarding phase — runs at TUI startup before normal chat begins."""
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import re
 from pathlib import Path
+
+from orchestrator.config_json import (
+    ConfigDocument,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 
 
 def strip_ansi(text: str) -> str:
@@ -23,7 +31,7 @@ def load_languages(bridge_home: Path) -> list[dict]:
     langs = []
     for f in files:
         try:
-            data = json.loads(f.read_text(encoding="utf-8"))
+            data = json.loads(f.read_bytes().decode("utf-8-sig"))
             data["_file"] = f.name
             langs.append(data)
         except Exception:
@@ -79,17 +87,16 @@ def detect_key_type(key: str) -> str:
 
 def _read_secrets(bridge_home: Path) -> dict:
     p = bridge_home / "secrets.json"
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
+    return read_config_json(p) if p.exists() else new_config_json(p)
 
 
 def _write_secrets(bridge_home: Path, secrets: dict):
     p = bridge_home / "secrets.json"
-    p.write_text(json.dumps(secrets, indent=2), encoding="utf-8")
+    if not isinstance(secrets, ConfigDocument):
+        if p.exists():
+            raise ValueError("existing secrets update requires a revision-bearing read")
+        secrets = new_config_json(p, secrets)
+    write_config_json(p, secrets)
 
 
 def check_existing_api_key(bridge_home: Path) -> tuple[bool, str]:
@@ -125,39 +132,46 @@ def ensure_agents_json(bridge_home: Path, engine: str):
     """Generate agents.json from agents.json.sample if missing or empty — hashiko only."""
     agents_path = bridge_home / "agents.json"
     if agents_path.exists():
-        try:
-            cfg = json.loads(agents_path.read_text(encoding="utf-8"))
-            if cfg.get("agents"):
-                return
-        except Exception:
-            pass
+        cfg = read_config_json(agents_path)
+        if cfg.get("agents"):
+            return
+    else:
+        cfg = new_config_json(agents_path)
 
     sample_path = bridge_home / "agents.json.sample"
     if not sample_path.exists():
         return
 
-    sample = json.loads(sample_path.read_text(encoding="utf-8"))
-    agents = [a for a in sample.get("agents", []) if a.get("name") == "hashiko"]
+    sample = read_config_json(sample_path)
+    agents = [
+        copy.deepcopy(a)
+        for a in sample.get("agents", [])
+        if a.get("name") == "hashiko"
+    ]
     if not agents:
-        agents = sample.get("agents", [])[:1]
+        agents = copy.deepcopy(sample.get("agents", [])[:1])
 
     for a in agents:
         a["engine"] = engine
         a["active_backend"] = engine
         a["is_active"] = True
 
-    cfg = {
-        "global": sample.get("global", {"authorized_id": 0}),
-        "agents": agents,
-    }
-    agents_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    cfg.setdefault("global", copy.deepcopy(sample.get("global", {"authorized_id": 0})))
+    cfg["agents"] = agents
+    write_config_json(agents_path, cfg)
 
 
 def write_completion_marker(bridge_home: Path, lang_code: str):
     workspace = bridge_home / "workspaces" / "hashiko"
     workspace.mkdir(parents=True, exist_ok=True)
     marker = workspace / "tui_onboarding_complete"
-    marker.write_text(json.dumps({"lang": lang_code, "completed": True}), encoding="utf-8")
+    state = (
+        read_config_json(marker)
+        if marker.exists()
+        else new_config_json(marker)
+    )
+    state.update({"lang": lang_code, "completed": True})
+    write_config_json(marker, state)
 
 
 def is_onboarding_complete(bridge_home: Path) -> bool:

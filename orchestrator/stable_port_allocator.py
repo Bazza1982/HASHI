@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from orchestrator.config_json import (
+    ConfigDocument,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT
 
 STATE_FILENAME = "runtime_port_assignments.json"
@@ -206,27 +212,33 @@ def candidate_ports(
     return candidates
 
 
-def _read_state(state_path: Path) -> dict:
+def _read_state(state_path: Path, *, strict: bool = False) -> ConfigDocument:
     if not state_path.exists():
-        return {"version": 1, "assignments": {}}
+        return new_config_json(state_path, {"version": 1, "assignments": {}})
     try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"version": 1, "assignments": {}}
+        payload = read_config_json(state_path)
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        if strict:
+            raise PortAllocationError(
+                f"Port assignment state is unreadable; no assignment was changed: {exc}"
+            ) from exc
+        return new_config_json(state_path, {"version": 1, "assignments": {}})
     if not isinstance(payload, dict):
-        return {"version": 1, "assignments": {}}
+        if strict:
+            raise PortAllocationError("Port assignment state must be a JSON object")
+        return new_config_json(state_path, {"version": 1, "assignments": {}})
     assignments = payload.get("assignments")
     if not isinstance(assignments, dict):
-        payload["assignments"] = {}
+        if strict:
+            raise PortAllocationError("Port assignment state has invalid assignments")
+        payload = new_config_json(state_path, {"version": 1, "assignments": {}})
     payload.setdefault("version", 1)
     return payload
 
 
-def _write_state(state_path: Path, payload: dict) -> None:
+def _write_state(state_path: Path, payload: ConfigDocument) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(state_path)
+    write_config_json(state_path, payload)
 
 
 class AllocationLock:
@@ -313,7 +325,7 @@ class StablePortAllocator:
 
     def reset(self) -> bool:
         with AllocationLock(self.lock_path):
-            payload = _read_state(self.state_path)
+            payload = _read_state(self.state_path, strict=True)
             assignments = payload.setdefault("assignments", {})
             removed = assignments.pop(self.service, None) is not None
             if removed:
@@ -361,7 +373,7 @@ class StablePortAllocator:
 
     def _assign(self, *, configured_port: int, allow_fallback: bool) -> PortAssignment:
         with AllocationLock(self.lock_path):
-            payload = _read_state(self.state_path)
+            payload = _read_state(self.state_path, strict=True)
             assignments = payload.setdefault("assignments", {})
             entry = assignments.get(self.service)
             if isinstance(entry, dict) and int(entry.get("port") or 0) > 0:

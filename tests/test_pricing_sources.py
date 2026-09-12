@@ -143,20 +143,32 @@ def test_all_zero_price_requires_explicit_free_route(tmp_path):
     assert fact.unknown_reason == "unproven_zero_price"
 
 
-def test_conditional_price_overrides_fail_closed_until_tiers_are_supported(tmp_path):
+def test_conditional_price_overrides_are_saved_and_applied_per_call(tmp_path):
     fact = pricing_sources.refresh_pricing_fact(
         "openrouter-api",
         "vendor/tiered",
         cache_path=tmp_path / "pricing.json",
         fetcher=lambda _url: _openrouter_response(
             "vendor/tiered",
-            overrides=[{"min_prompt_tokens": 200_000, "prompt": "0.000004"}],
+            overrides=[
+                {
+                    "min_prompt_tokens": 200_000,
+                    "prompt": "0.000004",
+                }
+            ],
         ),
         now=NOW,
     )
 
-    assert fact.status == "unknown"
-    assert fact.unknown_reason == "unsupported_pricing_overrides"
+    assert fact.status == "known"
+    assert fact.conditional_price_tiers == (
+        {"min_prompt_tokens": 200_000, "input_per_unit": 0.000004},
+    )
+    assert pricing_sources.calculate_cost(
+        fact,
+        input_tokens=250_000,
+        output_tokens=1_000,
+    ) == 1.006
 
 
 def test_cache_only_usage_never_fetches_and_expired_fact_is_diagnostic_only(tmp_path):
@@ -203,6 +215,139 @@ def test_openrouter_route_never_populates_a_direct_provider_key(tmp_path):
 
     assert direct.status == "unknown"
     assert direct.unknown_reason == "cache_miss"
+
+
+def test_direct_engine_gets_explicit_openrouter_reference_price(tmp_path):
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        return _openrouter_response("openai/gpt-brand-new")
+
+    fact = pricing_sources.refresh_pricing_fact(
+        "codex-cli",
+        "gpt-brand-new",
+        cache_path=tmp_path / "pricing.json",
+        fetcher=fetch,
+        now=NOW,
+    )
+
+    assert fact.status == "known"
+    assert fact.scope == "openrouter_reference"
+    assert fact.engine == "codex-cli"
+    assert fact.requested_model_id == "gpt-brand-new"
+    assert fact.source_engine == "openrouter-api"
+    assert fact.source_model_id == "openai/gpt-brand-new"
+    assert seen == [
+        "https://openrouter.ai/api/v1/model/openai/gpt-brand-new"
+    ]
+
+
+def test_broker_engine_uses_only_unique_exact_catalogue_basename(tmp_path):
+    catalog = pricing_sources.HttpEvidence(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "data": [
+                    {
+                        "id": "vendor/new-exact-model",
+                        "canonical_slug": "vendor/new-exact-model",
+                    },
+                    {
+                        "id": "other/different",
+                        "canonical_slug": "other/different",
+                    },
+                ]
+            }
+        ).encode(),
+        fetched_at=NOW,
+        url=pricing_sources.OPENROUTER_MODELS_URL,
+    )
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        if url == pricing_sources.OPENROUTER_MODELS_URL:
+            return catalog
+        return _openrouter_response("vendor/new-exact-model")
+
+    fact = pricing_sources.refresh_pricing_fact(
+        "hashi-api",
+        "new-exact-model",
+        cache_path=tmp_path / "pricing.json",
+        fetcher=fetch,
+        now=NOW,
+    )
+
+    assert fact.status == "known"
+    assert fact.source_model_id == "vendor/new-exact-model"
+    assert seen == [
+        pricing_sources.OPENROUTER_MODELS_URL,
+        "https://openrouter.ai/api/v1/model/vendor/new-exact-model",
+    ]
+
+
+def test_broker_engine_rejects_ambiguous_exact_catalogue_basename(tmp_path):
+    catalog = pricing_sources.HttpEvidence(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "data": [
+                    {"id": "one/shared", "canonical_slug": "one/shared"},
+                    {"id": "two/shared", "canonical_slug": "two/shared"},
+                ]
+            }
+        ).encode(),
+        fetched_at=NOW,
+        url=pricing_sources.OPENROUTER_MODELS_URL,
+    )
+    calls = 0
+
+    def fetch(_url):
+        nonlocal calls
+        calls += 1
+        return catalog
+
+    fact = pricing_sources.refresh_pricing_fact(
+        "hashi-api",
+        "shared",
+        cache_path=tmp_path / "pricing.json",
+        fetcher=fetch,
+        now=NOW,
+    )
+
+    assert calls == 1
+    assert fact.status == "unknown"
+    assert fact.unknown_reason == "source_alias_ambiguous"
+
+
+def test_pricing_cache_reads_legacy_bom_crlf_and_republishes_utf8_lf(tmp_path):
+    cache = tmp_path / "pricing.json"
+    pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _openrouter_response(),
+        now=NOW,
+    )
+    legacy = cache.read_text(encoding="utf-8").replace("\n", "\r\n")
+    cache.write_bytes(b"\xef\xbb\xbf" + legacy.encode("utf-8"))
+
+    fact = pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _openrouter_response(prompt="0.000003"),
+        now=NOW + timedelta(hours=25),
+        force=True,
+    )
+
+    raw = cache.read_bytes()
+    assert fact.status == "known"
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert b"\r\n" not in raw
 
 
 @pytest.mark.parametrize("failure", ["timeout", "network_error", "429", "503"])

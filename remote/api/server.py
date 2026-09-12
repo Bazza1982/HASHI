@@ -153,17 +153,24 @@ _WORKBENCH_GATEWAY_RESPONSE_HEADERS = frozenset(
 
 TUI_PROXY_OPERATIONS = {
     "health",
+    "capabilities",
     "agents",
     "agent_overview",
     "scheduler_jobs",
     "background_jobs",
     "chat",
+    "chat_attachment",
+    "voice_state",
+    "voice_profile",
+    "speech",
     "run_info",
     "transcript_recent",
     "transcript_poll",
+    "log_tail",
 }
 TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
+TUI_PROXY_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -343,6 +350,10 @@ class TuiProxyRequest(BaseModel):
     delivery_policy: Optional[dict[str, Any]] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
+    request_id: Optional[str] = None
+    voice_profile: Optional[str] = None
+    attachment: Optional[dict[str, Any]] = None
+    workzone_ref: Optional[str] = None
     offset: int = 0
     limit: int = 20
 
@@ -359,6 +370,10 @@ class ProtocolTuiRequest(BaseModel):
     delivery_policy: Optional[dict[str, Any]] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
+    request_id: Optional[str] = None
+    voice_profile: Optional[str] = None
+    attachment: Optional[dict[str, Any]] = None
+    workzone_ref: Optional[str] = None
     offset: int = 0
     limit: int = 20
 
@@ -574,15 +589,21 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
         "scheduler_jobs",
         "background_jobs",
         "chat",
+        "chat_attachment",
+        "voice_state",
+        "voice_profile",
+        "speech",
         "transcript_recent",
         "transcript_poll",
     }:
         agent = str(payload.agent or "").strip()
         if not agent or len(agent) > 128 or any(ord(ch) < 32 for ch in agent):
             return False, "invalid_agent"
-    if operation == "chat":
+    if operation in {"chat", "chat_attachment"}:
         text = str(payload.text or "")
-        if not text or len(text.encode("utf-8")) > TUI_PROXY_MAX_TEXT_BYTES:
+        if operation == "chat" and not text:
+            return False, "invalid_text"
+        if len(text.encode("utf-8")) > TUI_PROXY_MAX_TEXT_BYTES:
             return False, "invalid_text"
         ui_locale = str(payload.ui_locale or "")
         if len(ui_locale) > 32 or any(ord(character) < 32 for character in ui_locale):
@@ -595,6 +616,59 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
                 )
             except ValueError:
                 return False, "invalid_delivery_policy"
+    if operation == "chat_attachment":
+        if bool(payload.attachment) == bool(payload.workzone_ref):
+            return False, "invalid_attachment_source"
+        if payload.workzone_ref is not None:
+            reference = str(payload.workzone_ref or "")
+            if (
+                not reference
+                or len(reference.encode("utf-8")) > 4096
+                or "\x00" in reference
+            ):
+                return False, "invalid_workzone_ref"
+        else:
+            attachment = payload.attachment or {}
+            filename = str(attachment.get("filename") or "")
+            encoded = str(attachment.get("content_b64") or "")
+            if (
+                not filename
+                or Path(filename).name != filename
+                or len(filename) > 255
+                or len(encoded) > ((TUI_PROXY_MAX_ATTACHMENT_BYTES + 2) // 3) * 4 + 16
+            ):
+                return False, "invalid_attachment"
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                return False, "invalid_attachment"
+            if not decoded or len(decoded) > TUI_PROXY_MAX_ATTACHMENT_BYTES:
+                return False, "invalid_attachment"
+            declared_size = attachment.get("size_bytes")
+            if declared_size is not None and int(declared_size) != len(decoded):
+                return False, "attachment_size_mismatch"
+            declared_sha = str(attachment.get("sha256") or "")
+            if declared_sha and declared_sha != hashlib.sha256(decoded).hexdigest():
+                return False, "attachment_digest_mismatch"
+    if operation == "speech":
+        text = str(payload.text or "")
+        request_id = str(payload.request_id or "").strip()
+        if not text or len(text) > 20_000:
+            return False, "invalid_speech_text"
+        if (
+            not request_id
+            or len(request_id) > 160
+            or any(ord(character) < 33 for character in request_id)
+        ):
+            return False, "invalid_request_id"
+    if operation == "voice_profile":
+        profile = str(payload.voice_profile or "").strip()
+        if (
+            not profile
+            or len(profile) > 64
+            or any(not (character.isalnum() or character in {"_", "-"}) for character in profile)
+        ):
+            return False, "invalid_voice_profile"
     if operation == "run_info":
         for value in (payload.session_id, payload.run_id):
             identifier = str(value or "").strip()
@@ -622,7 +696,9 @@ def _local_workbench_tui_request(
     method = "GET"
     body_bytes: bytes | None = None
     path = "/api/health"
-    if operation == "agents":
+    if operation == "capabilities":
+        path = "/api/v1/capabilities"
+    elif operation == "agents":
         path = "/api/agents"
     elif operation == "agent_overview":
         path = f"/api/agents/{quote(agent, safe='')}/overview"
@@ -633,13 +709,18 @@ def _local_workbench_tui_request(
             f"/api/background-jobs?agent={quote(agent, safe='')}&limit="
             f"{int(payload.limit)}"
         )
-    elif operation == "chat":
+    elif operation in {"chat", "chat_attachment"}:
         path = "/api/chat"
         method = "POST"
         body = {
             "agent": agent,
             "text": str(payload.text or ""),
         }
+        if operation == "chat_attachment":
+            if payload.attachment is not None:
+                body["attachment"] = dict(payload.attachment)
+            else:
+                body["workzone_ref"] = str(payload.workzone_ref or "")
         if payload.delivery_policy is not None:
             body.update(
                 {
@@ -667,6 +748,23 @@ def _local_workbench_tui_request(
                 "_connector_evidence": connector_evidence
             }
         body_bytes = json.dumps(body).encode("utf-8")
+    elif operation in {"voice_state", "voice_profile"}:
+        path = "/api/tui/voice"
+        method = "POST"
+        body = {"agent": agent}
+        if operation == "voice_profile":
+            body["profile"] = str(payload.voice_profile or "")
+        body_bytes = json.dumps(body).encode("utf-8")
+    elif operation == "speech":
+        path = "/api/tui/speech"
+        method = "POST"
+        body_bytes = json.dumps(
+            {
+                "agent": agent,
+                "text": str(payload.text or ""),
+                "request_id": str(payload.request_id or ""),
+            }
+        ).encode("utf-8")
     elif operation == "run_info":
         path = (
             f"/api/v1/sessions/{quote(str(payload.session_id), safe='')}/runs/"
@@ -679,6 +777,45 @@ def _local_workbench_tui_request(
             f"/api/transcript/{quote(agent, safe='')}/poll?offset="
             f"{int(payload.offset)}"
         )
+    elif operation == "log_tail":
+        root = Path(_hashi_root) if _hashi_root else None
+        candidates = (
+            (root / "logs" / "bridge.log", root / "bridge_launch.log")
+            if root is not None else ()
+        )
+        log_path = next((item for item in candidates if item.is_file()), None)
+        if log_path is None:
+            return 404, {
+                "ok": False,
+                "code": "log_unavailable",
+                "error": "No bounded host log is available on this instance",
+            }
+        try:
+            size = log_path.stat().st_size
+            requested_offset = min(max(0, int(payload.offset)), size)
+            # An initial request returns only a bounded recent tail. Later
+            # requests resume at the opaque byte cursor returned below.
+            start = requested_offset or max(0, size - 65_536)
+            with log_path.open("rb") as stream:
+                stream.seek(start)
+                raw = stream.read(65_536)
+                cursor = stream.tell()
+            if start > 0 and requested_offset == 0:
+                raw = raw.split(b"\n", 1)[-1]
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+            return 200, {
+                "ok": True,
+                "instance_id": str(_instance_info.get("instance_id") or "").upper(),
+                "lines": lines[-max(1, min(int(payload.limit), 200)):],
+                "offset": cursor,
+            }
+        except OSError as exc:
+            logger.warning("TUI bounded log read failed: %s", exc)
+            return 503, {
+                "ok": False,
+                "code": "log_read_failed",
+                "error": "Host log could not be read",
+            }
 
     last_error: Exception | None = None
     for host in local_http_hosts():
@@ -1502,6 +1639,10 @@ def create_app(
             delivery_policy=payload.delivery_policy,
             session_id=payload.session_id,
             run_id=payload.run_id,
+            request_id=payload.request_id,
+            voice_profile=payload.voice_profile,
+            attachment=payload.attachment,
+            workzone_ref=payload.workzone_ref,
             offset=payload.offset,
             limit=payload.limit,
         )
@@ -1520,7 +1661,13 @@ def create_app(
                     lambda u=url: _post_json_with_optional_hmac(
                         u,
                         protocol_payload.model_dump(),
-                        timeout=20,
+                        timeout=(
+                            130
+                            if payload.operation == "speech"
+                            else 40
+                            if payload.operation == "chat_attachment"
+                            else 20
+                        ),
                     ),
                 )
                 status = int(result.pop("__http_status", 200)) if isinstance(result, dict) else 502

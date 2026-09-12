@@ -446,7 +446,7 @@ def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path
     lines = [
         json.dumps({"type": "thread.started", "thread_id": "thread_123"}),
         json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "final answer"}}),
-        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5, "reasoning_output_tokens": 3}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 4, "output_tokens": 5, "reasoning_output_tokens": 3}}),
     ]
     proc = _HangingProc(lines)
     killed_reasons: list[str] = []
@@ -469,6 +469,8 @@ def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path
     assert response.usage is not None
     assert response.usage.input_tokens == 10
     assert response.usage.thinking_tokens == 3
+    assert response.usage.prompt_cache_hit_tokens == 4
+    assert response.usage.prompt_cache_miss_tokens == 6
     assert adapter._session_id == "thread_123"
     assert killed_reasons == ["turn-completed-grace-expired:req-0001"]
 

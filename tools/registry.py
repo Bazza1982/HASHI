@@ -7,6 +7,7 @@ when the backend config contains a `tools` key.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -14,6 +15,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+from urllib import request as urllib_request
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -92,6 +94,23 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "workspace_inspect",
     }
 )
+
+_BROWSER_ACTION_OVERRIDES = {
+    "browser_get_media_state": "media_state",
+    "browser_play": "media_play",
+}
+
+
+def _device_tool_requirement(tool_name: str) -> tuple[str, str] | None:
+    name = str(tool_name or "").strip()
+    if name.startswith("browser_"):
+        return (
+            "browser_control",
+            _BROWSER_ACTION_OVERRIDES.get(name, name.removeprefix("browser_")),
+        )
+    if name.startswith("windows_"):
+        return "computer_control", name.removeprefix("windows_")
+    return None
 
 def resolve_tiers(tier_names: list[str]) -> list[str]:
     """Expand tier names into a flat list of tool names."""
@@ -223,6 +242,7 @@ class ToolRegistry:
 
         self.logger.info(f"ToolRegistry initialized. Allowed: {sorted(self._allowed)}")
         self._obsidian = None  # lazy-initialized on first obsidian_* tool call
+        self._http_capability_cache: tuple[float, dict[str, Any] | None] | None = None
 
     def is_allowed(self, tool_name: str) -> bool:
         return tool_name in self._allowed
@@ -332,12 +352,180 @@ class ToolRegistry:
             available.intersection_update(normalized_allowlist)
         if "shell" in available:
             available.discard("bash")
+        unavailable_browser = False
+        for name in tuple(available):
+            availability = self.tool_availability(name)
+            if availability["available"]:
+                continue
+            available.discard(name)
+            unavailable_browser = unavailable_browser or name.startswith("browser_")
         if tiers is not None:
             tier_tools = set(resolve_tiers(tiers))
-            subset = available & tier_tools
-            return [TOOL_SCHEMA_MAP[name] for name in ALL_TOOL_NAMES
-                    if name in subset]
-        return [TOOL_SCHEMA_MAP[name] for name in ALL_TOOL_NAMES if name in available]
+            available.intersection_update(tier_tools)
+        definitions = [
+            copy.deepcopy(TOOL_SCHEMA_MAP[name])
+            for name in ALL_TOOL_NAMES
+            if name in available
+        ]
+        if unavailable_browser:
+            for definition in definitions:
+                function = definition.get("function") or {}
+                if function.get("name") != "web_fetch":
+                    continue
+                description = str(function.get("description") or "").rstrip()
+                function["description"] = (
+                    description
+                    + " Browser control is currently unavailable on this HASHI "
+                    "instance. Use web_fetch for ordinary public documents; "
+                    "JavaScript, login-state, or interaction requires a live Browser Worker."
+                ).strip()
+                break
+        return definitions
+
+    def _capability_status_snapshot(self) -> dict[str, Any] | None:
+        """Return the current instance's executable capability facts.
+
+        Function Workers consume the topology snapshot published by PAO. The
+        isolated MCP gateway reads the same Broker endpoint. A standalone
+        diagnostic registry has no authoritative source and keeps its explicit
+        legacy executor instead of inventing an unavailable state.
+        """
+
+        facade = self._function_worker_capability_facade()
+        if facade is not None:
+            status = getattr(facade, "capability_status", None)
+            if callable(status):
+                value = status()
+                return dict(value) if isinstance(value, dict) else {}
+        base_url = str(
+            self._effective_audit_context().get("workbench_api_base_url") or ""
+        ).strip().rstrip("/")
+        if not base_url:
+            return None
+        now = time.monotonic()
+        cached = self._http_capability_cache
+        if cached is not None and now - cached[0] < 1.0:
+            return copy.deepcopy(cached[1])
+        try:
+            with urllib_request.urlopen(
+                base_url + "/api/device-capabilities/status",
+                timeout=1.0,
+            ) as response:
+                raw = response.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError("capability status response exceeds limit")
+            value = json.loads(raw.decode("utf-8"))
+            status = dict(value) if isinstance(value, dict) else {}
+        except Exception as exc:
+            self.logger.warning(
+                "Capability catalogue status unavailable (%s)",
+                type(exc).__name__,
+            )
+            status = {}
+        self._http_capability_cache = (now, status)
+        return copy.deepcopy(status)
+
+    def tool_availability(self, tool_name: str) -> dict[str, Any]:
+        requirement = _device_tool_requirement(tool_name)
+        if requirement is None:
+            return {"available": True, "source": "local_executor"}
+        kind, action = requirement
+        status = self._capability_status_snapshot()
+        if status is None:
+            return {"available": True, "source": "standalone_legacy_executor"}
+        expected_instance = str(
+            getattr(
+                self._effective_audit_context().get("global_config"),
+                "instance_id",
+                "",
+            )
+            or ""
+        ).strip().upper()
+        observed_instance = str(status.get("instance_id") or "").strip().upper()
+        if not observed_instance:
+            reason = "capability_status_unavailable"
+        elif expected_instance and observed_instance != expected_instance:
+            reason = "cross_instance_capability_snapshot"
+        else:
+            now = time.time()
+            matching_kind = []
+            live = []
+            for row in status.get("capabilities") or ():
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("capability_kind") or "").casefold() != kind:
+                    continue
+                matching_kind.append(row)
+                try:
+                    unexpired = float(row.get("expires_at") or 0) > now
+                except (TypeError, ValueError):
+                    unexpired = False
+                actions = {
+                    str(item).strip().casefold()
+                    for item in row.get("supported_actions") or ()
+                }
+                if unexpired and action.casefold() in actions:
+                    live.append(row)
+            if live:
+                return {
+                    "available": True,
+                    "source": "capability_broker",
+                    "capability_kind": kind,
+                    "action": action,
+                    "registration_count": len(live),
+                }
+            if matching_kind and any(
+                float(row.get("expires_at") or 0) > now
+                for row in matching_kind
+                if isinstance(row.get("expires_at"), (int, float))
+            ):
+                reason = "action_not_supported"
+            elif matching_kind:
+                reason = "registration_expired"
+            else:
+                reason = "worker_not_registered"
+        next_step = (
+            "Use web_fetch for ordinary public documents, or start/recover the "
+            "Browser Worker for JavaScript, login-state, or interaction."
+            if kind == "browser_control"
+            else "Start or recover the Computer Control Worker for this instance."
+        )
+        return {
+            "available": False,
+            "code": "capability_unavailable",
+            "reason": reason,
+            "next_step": next_step,
+            "capability_kind": kind,
+            "action": action,
+        }
+
+    def _capability_unavailable_result(
+        self,
+        tool_name: str,
+        *,
+        tool_call_id: str,
+        reason: str | None = None,
+    ) -> ToolResult | None:
+        availability = self.tool_availability(tool_name)
+        if availability["available"]:
+            return None
+        if reason:
+            availability["reason"] = reason
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=(
+                "Error: capability_unavailable: "
+                f"{availability['capability_kind']}/{availability['action']} is "
+                f"not currently executable ({availability['reason']}). "
+                f"Next step: {availability['next_step']}"
+            ),
+            is_error=True,
+            details={
+                **availability,
+                "control_disposition": "unavailable",
+                "retryable": False,
+            },
+        )
 
     def evaluate_admission(
         self, tool_name: str, arguments: dict, tool_call_id: str = ""
@@ -373,6 +561,12 @@ class ToolRegistry:
                 is_error=True,
                 details={"control_disposition": "denied"},
             )
+        unavailable = self._capability_unavailable_result(
+            tool_name,
+            tool_call_id=tool_call_id,
+        )
+        if unavailable is not None:
+            return unavailable
         denial = self._check_system_exchange_loop_gate(
             tool_name,
             arguments,
@@ -507,6 +701,48 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, result, started)
             raise
         except Exception as e:
+            remote = getattr(e, "error", None)
+            unavailable_type = (
+                type(e).__name__ == "CapabilityUnavailableError"
+                or (
+                    isinstance(remote, dict)
+                    and remote.get("type") == "CapabilityUnavailableError"
+                )
+            )
+            if unavailable_type and _device_tool_requirement(tool_name) is not None:
+                result = self._capability_unavailable_result(
+                    tool_name,
+                    tool_call_id=effective_call_id,
+                    reason="disappeared_before_execution",
+                )
+                if result is None:
+                    # The catalogue may already contain a newly recovered
+                    # registration; the failed invocation remains unavailable.
+                    kind, action = _device_tool_requirement(tool_name) or ("device", "action")
+                    result = ToolResult(
+                        tool_call_id=effective_call_id,
+                        output=(
+                            "Error: capability_unavailable: "
+                            f"{kind}/{action} disappeared before execution. "
+                            "Refresh the capability catalogue and choose another tool."
+                        ),
+                        is_error=True,
+                        details={
+                            "available": False,
+                            "code": "capability_unavailable",
+                            "reason": "disappeared_before_execution",
+                            "next_step": "Refresh the capability catalogue and choose another tool.",
+                            "capability_kind": kind,
+                            "action": action,
+                            "control_disposition": "unavailable",
+                            "retryable": False,
+                        },
+                    )
+                result = self._finalize_tool_result(
+                    tool_name, arguments, result, started
+                )
+                self._record_tool_audit(tool_name, arguments, result, started)
+                return result
             self.logger.error(f"Tool '{tool_name}' raised unexpected error: {e}", exc_info=True)
             output = f"Error: unexpected failure in '{tool_name}': {e}"
             result = ToolResult(

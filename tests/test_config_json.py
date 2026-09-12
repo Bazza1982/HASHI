@@ -14,6 +14,8 @@ from orchestrator import config_json
 from orchestrator.config_json import (
     ConfigConflictError,
     ConfigDurabilityError,
+    delete_config_json,
+    new_config_json,
     read_config_json,
     write_config_json,
 )
@@ -166,6 +168,21 @@ def test_plain_dictionary_can_supply_explicit_revision_or_require_absence(tmp_pa
     assert read_config_json(path)["value"] == 2
 
 
+def test_absent_document_is_create_only_and_keeps_revision_after_publish(tmp_path):
+    path = tmp_path / "new.json"
+    document = new_config_json(path, {"value": 1})
+
+    assert document.revision is None
+    write_config_json(path, document)
+    assert document.revision == read_config_json(path).revision
+
+    competing = new_config_json(path, {"value": 2})
+    before = path.read_bytes()
+    with pytest.raises(ConfigConflictError):
+        write_config_json(path, competing)
+    assert path.read_bytes() == before
+
+
 def test_legacy_plain_dict_replacement_still_uses_the_byte_contract(tmp_path):
     path = tmp_path / "agents.json"
     path.write_text('{"value": 0}', encoding="utf-8")
@@ -180,6 +197,22 @@ def test_deleted_source_is_not_silently_recreated_by_stale_document(tmp_path):
     path.unlink()
     with pytest.raises(ConfigConflictError):
         write_config_json(path, snapshot)
+    assert not path.exists()
+
+
+def test_delete_requires_the_exact_observed_revision(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"value": 1}', encoding="utf-8")
+    stale = read_config_json(path).revision
+    winner = read_config_json(path)
+    winner["other"] = True
+    write_config_json(path, winner)
+
+    with pytest.raises(ConfigConflictError):
+        delete_config_json(path, expected_revision=stale)
+    assert read_config_json(path)["other"] is True
+
+    delete_config_json(path, expected_revision=winner.revision)
     assert not path.exists()
 
 

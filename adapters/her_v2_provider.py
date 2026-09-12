@@ -310,6 +310,9 @@ def _backend_response_error(
         "provider_http_failure",
         "provider_protocol",
         "provider_protocol_forensic_path",
+        "provider_local_recovery_count",
+        "provider_local_recovery_limit",
+        "provider_local_recovery_exhausted",
         "transport_audit_path",
         "gateway_continuation",
     ):
@@ -2674,6 +2677,12 @@ class HashiStageProvider(StageProvider):
                     "input": int(getattr(response.usage, "input_tokens", 0) or 0),
                     "output": int(getattr(response.usage, "output_tokens", 0) or 0),
                     "thinking": int(getattr(response.usage, "thinking_tokens", 0) or 0),
+                    "prompt_cache_hit_tokens": getattr(
+                        response.usage, "prompt_cache_hit_tokens", None
+                    ),
+                    "prompt_cache_miss_tokens": getattr(
+                        response.usage, "prompt_cache_miss_tokens", None
+                    ),
                     "token_source": (
                         "provider" if response.usage is not None else "estimated"
                     ),
@@ -2814,6 +2823,26 @@ class HashiStageProvider(StageProvider):
             observed_provider_request_ids.add(provider_request_id)
             self.usage_line_items.append(line_item)
             self._notify_usage_observer(line_item)
+
+    def _accumulate_usage(self, usage: TokenUsage | None) -> None:
+        if usage is None:
+            return
+        self.usage.input_tokens += int(usage.input_tokens or 0)
+        self.usage.output_tokens += int(usage.output_tokens or 0)
+        self.usage.thinking_tokens += int(usage.thinking_tokens or 0)
+        for field_name in (
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
+        ):
+            observed = getattr(usage, field_name, None)
+            if observed is None:
+                continue
+            current = getattr(self.usage, field_name, None)
+            setattr(
+                self.usage,
+                field_name,
+                int(current or 0) + max(0, int(observed)),
+            )
 
     def _bind_provider_call_observer(
         self,
@@ -4449,10 +4478,7 @@ class HashiStageProvider(StageProvider):
                 )
             if cognitive_registry is not None:
                 cognitive_registry.note_provider_completion()
-            if response.usage:
-                self.usage.input_tokens += int(response.usage.input_tokens or 0)
-                self.usage.output_tokens += int(response.usage.output_tokens or 0)
-                self.usage.thinking_tokens += int(response.usage.thinking_tokens or 0)
+            self._accumulate_usage(response.usage)
             self.cost_usd += float(response.cost_usd or 0.0)
             self.tool_call_count += int(response.tool_call_count or 0)
             self.tool_loop_count += int(response.tool_loop_count or 0)
@@ -4474,6 +4500,12 @@ class HashiStageProvider(StageProvider):
                     ),
                     "thinking_tokens": int(
                         getattr(response.usage, "thinking_tokens", 0) or 0
+                    ),
+                    "prompt_cache_hit_tokens": getattr(
+                        response.usage, "prompt_cache_hit_tokens", None
+                    ),
+                    "prompt_cache_miss_tokens": getattr(
+                        response.usage, "prompt_cache_miss_tokens", None
                     ),
                 },
                 evidence_refs=tuple(item.evidence_ref for item in tool_receipts),
@@ -4852,10 +4884,7 @@ class HashiStageProvider(StageProvider):
                         f"{profile.engine}/{profile.model} {message_label} render failed"
                     ),
                 )
-            if response.usage:
-                self.usage.input_tokens += int(response.usage.input_tokens or 0)
-                self.usage.output_tokens += int(response.usage.output_tokens or 0)
-                self.usage.thinking_tokens += int(response.usage.thinking_tokens or 0)
+            self._accumulate_usage(response.usage)
             self.cost_usd += float(response.cost_usd or 0.0)
             self._record_usage_line_item(
                 request_id=request_id,

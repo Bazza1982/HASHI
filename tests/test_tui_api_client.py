@@ -35,6 +35,70 @@ async def test_direct_tui_chat_sends_typed_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_direct_tui_attachment_sends_bytes_and_caption_in_one_request(monkeypatch):
+    client = TuiApiClient("http://127.0.0.1:18800")
+    captured = {}
+
+    async def request(method, path, *, json_body=None, timeout=10):
+        captured.update(method=method, path=path, body=json_body, timeout=timeout)
+        return {"ok": True, "request_id": "request-1"}
+
+    monkeypatch.setattr(client, "_direct_request", request)
+    attachment = {
+        "filename": "photo.png",
+        "media_type": "image/png",
+        "size_bytes": 8,
+        "sha256": "digest",
+        "content_b64": "iVBORw0KGgo=",
+    }
+
+    result = await client.send_chat_attachment(
+        "akane",
+        "describe it",
+        attachment=attachment,
+        client_id="tui-1",
+        telegram_mirror=False,
+    )
+
+    assert result["request_id"] == "request-1"
+    assert captured["path"] == "/api/chat"
+    assert captured["body"]["text"] == "describe it"
+    assert captured["body"]["attachment"] == attachment
+    assert captured["body"]["delivery_policy"]["telegram"]["mirror"] is False
+
+
+@pytest.mark.asyncio
+async def test_remote_tui_speech_and_profile_use_local_presentation_operations(monkeypatch):
+    client = TuiApiClient(
+        remote_url="http://127.0.0.1:8766",
+        target_instance="HASHI3",
+    )
+    calls = []
+
+    async def proxy(operation, **kwargs):
+        calls.append((operation, kwargs))
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_proxy_request", proxy)
+
+    await client.voice_state("akane")
+    await client.set_voice_profile("akane", "clear_female")
+    await client.synthesize_speech("akane", "hello", request_id="say-1")
+
+    assert calls == [
+        ("voice_state", {"agent": "akane", "timeout": 10}),
+        (
+            "voice_profile",
+            {"agent": "akane", "voice_profile": "clear_female", "timeout": 15},
+        ),
+        (
+            "speech",
+            {"agent": "akane", "text": "hello", "request_id": "say-1", "timeout": 130},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_remote_tui_run_status_uses_typed_proxy_fields(monkeypatch):
     client = TuiApiClient(
         remote_url="http://127.0.0.1:8766",

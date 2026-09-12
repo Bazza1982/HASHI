@@ -37,6 +37,7 @@ from orchestrator.function_worker_protocol import (
     JsonConnectionPeer,
 )
 from orchestrator.telegram_ingress import CoreTelegramIngress
+from orchestrator.telegram_delivery_errors import TelegramDeliveryError
 
 logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -284,6 +285,18 @@ class _RemoteVoiceManagerView:
     @property
     def native_policy(self) -> dict[str, Any]:
         return dict(self.handle.metadata.get("native_voice_policy") or {})
+
+    def get_voice_profile_id(self) -> str | None:
+        value = dict(self.handle.metadata.get("tui_voice_state") or {}).get("profile")
+        return str(value) if value else None
+
+    def get_voice_profiles(self) -> list[tuple[str, dict[str, Any]]]:
+        rows = dict(self.handle.metadata.get("tui_voice_state") or {}).get("profiles")
+        return [
+            (str(row["id"]), {"label": str(row.get("label") or row["id"])})
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, Mapping) and str(row.get("id") or "").strip()
+        ]
 
 
 class FunctionWorkerClient:
@@ -592,6 +605,12 @@ class AgentRuntimeHandle:
         return SimpleNamespace(
             active_backend=str(self.metadata.get("active_backend") or "unknown"),
             type=str(self.metadata.get("type") or "assistant"),
+            telegram_token_key=str(
+                self.metadata.get("telegram_token_key") or self.name
+            ),
+            extra={
+                "agent_lifecycle_id": self.metadata.get("agent_lifecycle_id")
+            },
         )
 
     @property
@@ -788,12 +807,24 @@ class AgentRuntimeHandle:
         return None if result is None else str(result)
 
     async def _send_text(self, chat_id: int, text: str, **kwargs: Any) -> bool:
-        return bool(
-            await self._route(
-                "runtime.send_text",
-                {"chat_id": int(chat_id), "text": str(text), "kwargs": kwargs},
-            )
+        result = await self._route(
+            "runtime.send_text",
+            {"chat_id": int(chat_id), "text": str(text), "kwargs": kwargs},
         )
+        if isinstance(result, Mapping):
+            if result.get("sent") is True:
+                return True
+            error = result.get("error")
+            if isinstance(error, Mapping):
+                raise TelegramDeliveryError.from_mapping(error)
+            raise TelegramDeliveryError(
+                "delivery_not_confirmed",
+                retryable=True,
+                permanent=False,
+                reason="worker_returned_no_delivery_receipt",
+            )
+        # Compatibility with an older Function generation during cutover.
+        return bool(result)
 
     async def send_long_message(
         self,
@@ -946,6 +977,30 @@ class AgentRuntimeHandle:
                     "decision": decision,
                 },
             )
+        )
+
+    async def tui_voice_state(self) -> dict[str, Any]:
+        return dict(await self._route("runtime.tui_voice_state") or {})
+
+    async def set_tui_voice_profile(self, profile: str) -> dict[str, Any]:
+        return dict(
+            await self._route(
+                "runtime.tui_voice_profile",
+                {"profile": str(profile)},
+            )
+            or {}
+        )
+
+    async def synthesize_tui_speech(
+        self, text: str, request_id: str
+    ) -> dict[str, Any]:
+        return dict(
+            await self._route(
+                "runtime.tui_speech",
+                {"text": str(text), "request_id": str(request_id)},
+                timeout=120,
+            )
+            or {}
         )
 
     async def set_command_menu(self, *, chat_id: int, locale: str) -> bool:

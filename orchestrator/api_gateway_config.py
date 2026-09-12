@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.config_json import (
+    ConfigConflictError,
+    ConfigDocument,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.model_catalog import available_gateway_models, default_gateway_model
 
 
@@ -140,10 +145,33 @@ def legacy_state_path_for(global_config: Any) -> Path:
 
 
 def _write_config_atomic(path: Path, data: dict[str, Any]) -> None:
+    """Publish a read revision, or require absence when seeding a new config."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    if isinstance(data, ConfigDocument):
+        write_config_json(path, data)
+    else:
+        write_config_json(path, data, expected_revision=None)
+
+
+def _validate_gateway_config_for_update(data: dict[str, Any]) -> None:
+    if "enabled" in data and not isinstance(data["enabled"], bool):
+        raise ValueError("API Gateway enabled must be a boolean")
+    if "default_model" in data and not isinstance(data["default_model"], str):
+        raise ValueError("API Gateway default_model must be a string")
+
+
+def _gateway_config_view(data: dict[str, Any], global_config: Any) -> dict[str, Any]:
+    """Effective public values; never use this projection as a writable snapshot."""
+    enabled = data.get("enabled")
+    if not isinstance(enabled, bool):
+        enabled = False
+    model = normalize_api_model(data.get("default_model"), global_config) or default_api_model()
+    return {
+        "enabled": enabled,
+        "default_model": model,
+        "updated_at": str(data.get("updated_at") or ""),
+        "updated_by": str(data.get("updated_by") or ""),
+    }
 
 
 def migrate_legacy_api_gateway_state(global_config: Any) -> bool:
@@ -158,21 +186,23 @@ def migrate_legacy_api_gateway_state(global_config: Any) -> bool:
         return False
 
     try:
-        loaded = json.loads(legacy_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+        loaded = read_config_json(legacy_path)
+        _validate_gateway_config_for_update(loaded)
+    except (OSError, ValueError) as exc:
         logger.warning("Failed to migrate legacy API Gateway state %s: %s", legacy_path, exc)
         return False
-    if not isinstance(loaded, dict):
-        logger.warning("Failed to migrate legacy API Gateway state %s: expected an object", legacy_path)
-        return False
 
-    migrated = {
-        "enabled": bool(loaded.get("enabled", False)),
-        "default_model": normalize_api_model(loaded.get("default_model"), global_config) or default_api_model(),
-        "updated_at": str(loaded.get("updated_at") or datetime.now(timezone.utc).isoformat()),
-        "updated_by": str(loaded.get("updated_by") or "legacy-state-migration"),
-    }
-    _write_config_atomic(path, migrated)
+    # This is a new destination, not a read/modify/write of the legacy file.
+    migrated = dict(loaded)
+    migrated.update(_gateway_config_view(loaded, global_config))
+    migrated["updated_at"] = migrated["updated_at"] or datetime.now(timezone.utc).isoformat()
+    migrated["updated_by"] = migrated["updated_by"] or "legacy-state-migration"
+    try:
+        _write_config_atomic(path, migrated)
+    except ConfigConflictError:
+        # Another initializer/save created the canonical source. Do not replay
+        # migration; the caller will read that source instead of the legacy one.
+        return False
     logger.info(
         "Migrated legacy API Gateway state from %s to %s; legacy file retained for rollback",
         legacy_path,
@@ -184,26 +214,14 @@ def migrate_legacy_api_gateway_state(global_config: Any) -> bool:
 def load_api_gateway_config(global_config: Any) -> dict[str, Any]:
     migrate_legacy_api_gateway_state(global_config)
     path = config_path_for(global_config)
-    data: dict[str, Any] = {}
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception as exc:
-            logger.warning("Failed to read %s, using defaults: %s", path, exc)
-            data = {}
-
-    enabled = data.get("enabled")
-    if not isinstance(enabled, bool):
-        enabled = False
-    model = normalize_api_model(data.get("default_model"), global_config) or default_api_model()
-    return {
-        "enabled": enabled,
-        "default_model": model,
-        "updated_at": str(data.get("updated_at") or ""),
-        "updated_by": str(data.get("updated_by") or ""),
-    }
+    try:
+        data = read_config_json(path)
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as exc:
+        logger.warning("Failed to read %s, using defaults: %s", path, exc)
+        data = {}
+    return _gateway_config_view(data, global_config)
 
 
 def save_api_gateway_config(
@@ -213,17 +231,36 @@ def save_api_gateway_config(
     default_model: str | None = None,
     updated_by: str = "",
 ) -> dict[str, Any]:
-    current = load_api_gateway_config(global_config)
-    if enabled is not None:
-        current["enabled"] = bool(enabled)
+    # Validate the requested model before any migration/publication. In
+    # particular, a rejected update must not first create canonical defaults.
+    normalized = None
     if default_model is not None:
         normalized = normalize_api_model(default_model, global_config)
         if normalized is None:
             raise ValueError(f"Unknown API model: {default_model}")
+
+    path = config_path_for(global_config)
+    try:
+        current = read_config_json(path)
+    except FileNotFoundError:
+        # Seed from legacy only when canonical is absent. Retain the legacy
+        # bytes; the requested update and first creation publish together.
+        try:
+            current = dict(read_config_json(legacy_state_path_for(global_config)))
+        except FileNotFoundError:
+            current = {}
+    _validate_gateway_config_for_update(current)
+    current.setdefault("enabled", False)
+    current.setdefault("default_model", default_api_model())
+    if enabled is not None:
+        current["enabled"] = bool(enabled)
+    if normalized is not None:
         current["default_model"] = normalized
     current["updated_at"] = datetime.now(timezone.utc).isoformat()
     current["updated_by"] = updated_by
 
-    path = config_path_for(global_config)
+    # Resolve the public return view before publication as this may itself
+    # reject invalid instance model configuration. Preserve unowned raw fields.
+    result = _gateway_config_view(current, global_config)
     _write_config_atomic(path, current)
-    return current
+    return result

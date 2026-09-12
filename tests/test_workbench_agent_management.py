@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator import workbench_api as workbench_module
+from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
@@ -74,7 +76,7 @@ async def test_agents_can_include_inactive_for_authenticated_workbench_gateway(t
 
 
 @pytest.mark.asyncio
-async def test_agent_metadata_update_preserves_config_encoding_and_updates_values(tmp_path):
+async def test_agent_metadata_update_normalizes_config_encoding_and_updates_values(tmp_path):
     server = _server(tmp_path, active=False)
 
     response = await server.handle_agent_metadata(
@@ -89,10 +91,38 @@ async def test_agent_metadata_update_preserves_config_encoding_and_updates_value
     assert payload["agent"]["display_name"] == "Lily Moon"
     assert payload["agent"]["emoji"] == "🌙"
     raw = server.config_path.read_bytes()
-    assert raw.startswith(b"\xef\xbb\xbf")
-    assert b"\r\n" in raw
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert b"\r" not in raw
+    assert raw.endswith(b"\n")
     stored = json.loads(raw.decode("utf-8-sig"))
     assert stored["agents"][0]["display_name"] == "Lily Moon"
+
+
+@pytest.mark.asyncio
+async def test_agent_metadata_rejects_intervening_config_publication(tmp_path, monkeypatch):
+    server = _server(tmp_path, active=False)
+    actual_write = write_config_json
+
+    def interleaved(path, stale):
+        winner = read_config_json(path)
+        winner["unrelated"] = {"kept": True}
+        actual_write(path, winner)
+        actual_write(path, stale)
+
+    monkeypatch.setattr(workbench_module, "write_config_json", interleaved)
+
+    before_agent = read_config_json(server.config_path)["agents"][0]["display_name"]
+    with pytest.raises(ConfigConflictError):
+        await server.handle_agent_metadata(
+            _Request(
+                match_info={"name": "lily"},
+                payload={"display_name": "stale value"},
+            )
+        )
+
+    persisted = read_config_json(server.config_path)
+    assert persisted["unrelated"] == {"kept": True}
+    assert persisted["agents"][0]["display_name"] == before_agent
 
 
 @pytest.mark.asyncio
@@ -100,6 +130,18 @@ async def test_agent_activation_persists_before_start_and_can_be_disabled(tmp_pa
     seen_active_values: list[bool] = []
     orchestrator = SimpleNamespace(runtimes=[])
     server = _server(tmp_path, active=False, orchestrator=orchestrator)
+    snapshot = read_config_json(server.config_path)
+    snapshot["agents"].append(
+        {
+            "name": "guardian",
+            "type": "flex",
+            "workspace_dir": "workspaces/guardian",
+            "active_backend": "codex-cli",
+            "allowed_backends": [{"engine": "codex-cli"}],
+            "is_active": True,
+        }
+    )
+    write_config_json(server.config_path, snapshot)
 
     async def start_agent(name: str):
         raw = json.loads(server.config_path.read_text(encoding="utf-8-sig"))

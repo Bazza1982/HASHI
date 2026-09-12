@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.automation_runner import run_automation
+from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.skill_manager import SkillManager
 
 
@@ -19,6 +20,11 @@ def _write_skill(
         f"---\n{frontmatter}\n---\n\n{body}\n",
         encoding="utf-8",
     )
+
+
+def _legacy_json(value: dict) -> bytes:
+    rendered = json.dumps(value, ensure_ascii=False, indent=2).replace("\n", "\r\n")
+    return b"\xef\xbb\xbf" + (rendered + "\r\n").encode("utf-8")
 
 
 def test_repository_catalog_contains_only_publishable_standard_templates():
@@ -119,6 +125,57 @@ def test_standard_skill_enable_state_is_per_workspace(tmp_path: Path):
 
     manager.set_skill_enabled(first_workspace, "portable-skill", enabled=True)
     assert manager.is_skill_enabled(first_workspace, "portable-skill") is True
+
+
+def test_skill_state_accepts_legacy_bytes_and_normalizes_on_update(tmp_path: Path):
+    _write_skill(
+        tmp_path,
+        "portable-skill",
+        "name: portable-skill\ndescription: Use when testing package state.",
+    )
+    workspace = tmp_path / "workspaces" / "first"
+    workspace.mkdir(parents=True)
+    state_path = workspace / "skill_state.json"
+    state_path.write_bytes(_legacy_json({"extension": "kept"}))
+    manager = SkillManager(tmp_path, tmp_path / "tasks.json")
+
+    ok, _message = manager.set_skill_enabled(
+        workspace,
+        "portable-skill",
+        enabled=False,
+    )
+
+    assert ok is True
+    raw = state_path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw
+    assert read_config_json(state_path)["extension"] == "kept"
+
+
+def test_skill_state_never_replaces_corrupt_or_stale_documents(tmp_path: Path):
+    _write_skill(
+        tmp_path,
+        "portable-skill",
+        "name: portable-skill\ndescription: Use when testing package state.",
+    )
+    workspace = tmp_path / "workspaces" / "first"
+    workspace.mkdir(parents=True)
+    state_path = workspace / "skill_state.json"
+    state_path.write_bytes(b'{"broken":')
+    manager = SkillManager(tmp_path, tmp_path / "tasks.json")
+
+    with pytest.raises(json.JSONDecodeError):
+        manager.set_skill_enabled(workspace, "portable-skill", enabled=False)
+    assert state_path.read_bytes() == b'{"broken":'
+
+    state_path.write_text('{"disabled_skills": {}}', encoding="utf-8")
+    stale = manager._load_json(state_path, {}, strict=True)
+    winner = read_config_json(state_path)
+    winner["external"] = "kept"
+    write_config_json(state_path, winner)
+    stale["disabled_skills"]["portable-skill"] = True
+    with pytest.raises(ConfigConflictError, match="changed since it was read"):
+        manager._save_json(state_path, stale)
+    assert read_config_json(state_path)["external"] == "kept"
 
 
 def test_installed_skill_is_registered_and_uninstalled_to_recovery_area(tmp_path: Path):

@@ -3,6 +3,23 @@
 Full reference for all tools available to HASHI agents via function calling.
 To use a tool, call it directly as a function — do not simulate or describe what you would do.
 
+## Availability contract
+
+The catalogue is a request-time view, not a promise that every installed tool
+is executable forever. PAO intersects an Agent's permission with the current
+instance's live Capability Broker registrations, supported actions and lease
+expiry. Browser and computer-control tools are omitted when the matching Worker
+is absent, expired, on another instance, or does not support the action. A
+Worker heartbeat, expiry, disconnect or recovery updates that shared fact for
+PCM, HER v2 and direct Engine consumers; they must not keep a separate list.
+
+Execution checks the same fact again. If a Worker disappears after a model has
+selected a tool, the call returns the typed `capability_unavailable` result with
+a reason and next step; it is not an unexpected tool failure and should not be
+blindly retried. Use `web_fetch` for ordinary public documents. Browser tools
+remain necessary for JavaScript rendering, authenticated state, or interaction,
+and appear only while a suitable Browser Worker is live.
+
 ## Core Tools
 
 ### bash
@@ -87,7 +104,10 @@ Make an HTTP request with full control.
 ## Communication Tools
 
 ### telegram_send
-Send a Telegram message.
+Send an explicitly requested additional Telegram notification or agent-to-agent
+message. If `CURRENT MESSAGE CONTEXT.output_destination` already lists Telegram
+and `automatic=true`, reply normally; do not duplicate the current response with
+this tool.
 | Param | Required | Description |
 |-------|----------|-------------|
 | `text` | Yes | Message text |
@@ -102,7 +122,10 @@ python tools/hchat_send.py --to <agent_name> --from <your_name> --text "message"
 
 ## Browser Tools
 
-All browser tools can attach to the user's Chrome via `cdp_url="http://localhost:9222"` to reuse login sessions, or launch a standalone headless browser.
+When a Browser Worker is live, browser tools can attach to the user's Chrome
+through its authorized bridge or use its configured isolated browser. Endpoint
+selection comes from the capability registration; catalogue examples do not
+grant access to a browser or another HASHI instance.
 
 ### browser_session
 Execute a multi-step browser workflow on a single page. Most powerful browser tool.

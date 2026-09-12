@@ -88,6 +88,7 @@ class TuiApiClient:
     ) -> dict:
         ordered_bases = [self.base, *(base for base in self._bases if base != self.base)]
         first_error: Exception | None = None
+        timed_out = False
         first_error_base = ordered_bases[0]
         for base in ordered_bases:
             try:
@@ -103,6 +104,7 @@ class TuiApiClient:
                     self.base = base
                 return data
             except (aiohttp.ClientError, TimeoutError) as exc:
+                timed_out = timed_out or isinstance(exc, TimeoutError)
                 if first_error is None:
                     first_error = exc
                     first_error_base = base
@@ -115,6 +117,7 @@ class TuiApiClient:
         )
         return {
             "ok": False,
+            "code": "request_timeout" if timed_out else "connection_unavailable",
             "error": f"Cannot connect to local HASHI at {first_error_base}: "
             f"{first_error or 'Workbench unavailable'}",
         }
@@ -130,6 +133,10 @@ class TuiApiClient:
         delivery_policy: dict | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        request_id: str | None = None,
+        voice_profile: str | None = None,
+        attachment: dict | None = None,
+        workzone_ref: str | None = None,
         offset: int = 0,
         limit: int = 20,
         timeout: float = 25,
@@ -154,6 +161,14 @@ class TuiApiClient:
             payload["session_id"] = session_id
         if run_id is not None:
             payload["run_id"] = run_id
+        if request_id is not None:
+            payload["request_id"] = request_id
+        if voice_profile is not None:
+            payload["voice_profile"] = voice_profile
+        if attachment is not None:
+            payload["attachment"] = dict(attachment)
+        if workzone_ref is not None:
+            payload["workzone_ref"] = str(workzone_ref)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
                 async with session.post(f"{self.remote_url}/tui/proxy", json=payload) as response:
@@ -186,7 +201,14 @@ class TuiApiClient:
                 operation,
                 exc,
             )
-            return {"ok": False, "error": str(exc)}
+            return {
+                "ok": False,
+                "code": (
+                    "request_timeout" if isinstance(exc, TimeoutError)
+                    else "connection_unavailable"
+                ),
+                "error": str(exc),
+            }
 
     async def health_info(self) -> dict:
         if self.proxied:
@@ -217,6 +239,25 @@ class TuiApiClient:
             await self._proxy_request("agents")
             if self.proxied
             else await self._direct_request("GET", "/api/agents")
+        )
+
+    async def capabilities_info(self) -> dict:
+        """Read optional Workbench capabilities without inferring from chat."""
+        return (
+            await self._proxy_request("capabilities", timeout=5)
+            if self.proxied
+            else await self._direct_request("GET", "/api/v1/capabilities", timeout=5)
+        )
+
+    async def log_tail(self, *, offset: int = 0, limit: int = 120) -> dict:
+        """Read a bounded peer-owned host log tail through authenticated Remote."""
+        if not self.proxied:
+            return {"ok": False, "code": "local_log_owned_by_client", "error": "local log is read by the TUI client"}
+        return await self._proxy_request(
+            "log_tail",
+            offset=max(0, int(offset)),
+            limit=max(1, min(int(limit), 200)),
+            timeout=5,
         )
 
     async def list_agents(self) -> list[dict]:
@@ -298,6 +339,96 @@ class TuiApiClient:
             "/api/chat",
             json_body=payload,
             timeout=25,
+        )
+
+    async def send_chat_attachment(
+        self,
+        agent: str,
+        text: str,
+        *,
+        attachment: dict | None = None,
+        workzone_ref: str | None = None,
+        client_id: str | None = None,
+        telegram_mirror: bool = True,
+        ui_locale: str = "en",
+    ) -> dict:
+        """Submit one caption and one immutable attachment as one request."""
+        if bool(attachment) == bool(workzone_ref):
+            return {"ok": False, "code": "invalid_attachment", "error": "exactly one attachment source is required"}
+        policy = tui_run_delivery_policy(
+            telegram_mirror=telegram_mirror,
+            client_id=str(client_id or "tui-client"),
+        )
+        if self.proxied:
+            return await self._proxy_request(
+                "chat_attachment",
+                agent=agent,
+                text=text,
+                client_id=client_id,
+                ui_locale=ui_locale,
+                delivery_policy=policy,
+                attachment=attachment,
+                workzone_ref=workzone_ref,
+                timeout=35,
+            )
+        payload = {
+            "agent": agent,
+            "text": text,
+            "source": "tui",
+            "client_id": client_id,
+            "ui_locale": ui_locale,
+            "delivery_policy": policy,
+        }
+        if attachment is not None:
+            payload["attachment"] = dict(attachment)
+        else:
+            payload["workzone_ref"] = str(workzone_ref)
+        return await self._direct_request(
+            "POST", "/api/chat", json_body=payload, timeout=35
+        )
+
+    async def voice_state(self, agent: str) -> dict:
+        if self.proxied:
+            return await self._proxy_request(
+                "voice_state", agent=agent, timeout=10
+            )
+        return await self._direct_request(
+            "POST", "/api/tui/voice", json_body={"agent": agent}, timeout=10
+        )
+
+    async def set_voice_profile(self, agent: str, profile: str) -> dict:
+        if self.proxied:
+            return await self._proxy_request(
+                "voice_profile",
+                agent=agent,
+                voice_profile=profile,
+                timeout=15,
+            )
+        return await self._direct_request(
+            "POST",
+            "/api/tui/voice",
+            json_body={"agent": agent, "profile": profile},
+            timeout=15,
+        )
+
+    async def synthesize_speech(
+        self, agent: str, text: str, *, request_id: str
+    ) -> dict:
+        """Generate audio on the selected instance without Connector delivery."""
+
+        if self.proxied:
+            return await self._proxy_request(
+                "speech",
+                agent=agent,
+                text=text,
+                request_id=request_id,
+                timeout=130,
+            )
+        return await self._direct_request(
+            "POST",
+            "/api/tui/speech",
+            json_body={"agent": agent, "text": text, "request_id": request_id},
+            timeout=130,
         )
 
     async def run_info(self, session_id: str, run_id: str) -> dict:

@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from orchestrator.process_execution import process_is_alive
 from remote.security.shared_token import load_shared_token
+from orchestrator.agent_incarnation import ensure_agent_lifecycle_id
 
 from .package import (
     AgentMoveError,
@@ -400,6 +401,9 @@ def _prepare_outbound_transfer(
         }
         _atomic_json(state_path, state)
     try:
+        # Preview remains read-only; only an authorized transfer preparation
+        # upgrades an older Agent with its stable incarnation identity.
+        ensure_agent_lifecycle_id(root / "agents.json", name)
         package = create_agent_move_package(
             root,
             name,

@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 from orchestrator.post_turn_observer import PreTurnContextProvider, TurnContextRequest
 from orchestrator.process_resources import path_lock as process_path_lock
 from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
@@ -210,7 +211,7 @@ def build_memory_plus_observer(
 
 def ensure_memory_plus_observer(workspace_dir: Path) -> bool:
     path = workspace_dir / "post_turn_observers.json"
-    config = _read_json_object(path)
+    config = read_config_json(path) if path.exists() else new_config_json(path)
     raw_observers = config.get("observers", [])
     observers = raw_observers if isinstance(raw_observers, list) else []
     changed = raw_observers is not observers
@@ -235,7 +236,7 @@ def ensure_memory_plus_observer(workspace_dir: Path) -> bool:
         changed = True
     config["observers"] = normalized
     if changed or not path.exists():
-        _write_json(path, config)
+        write_config_json(path, config)
     return changed
 
 

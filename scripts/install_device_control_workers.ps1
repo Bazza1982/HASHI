@@ -1,17 +1,36 @@
 param(
     [string]$BridgeHome = (Split-Path -Parent $PSScriptRoot),
+    [string]$CodeRoot = "",
     [string]$PythonwExe = "",
     [string]$BindHost = "auto",
     [string]$AdvertiseHost = "",
     [string]$BrowserEndpoint = "",
     [string]$BrowserAuthFile = "",
+    [string]$LogDir = "",
     [switch]$ComputerOnly,
     [switch]$BrowserOnly,
     [switch]$NoStart
 )
 
 $ErrorActionPreference = "Stop"
-$BridgeHome = (Resolve-Path -LiteralPath $BridgeHome).Path
+
+function Resolve-FileSystemPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $Resolved = Resolve-Path -LiteralPath $Path
+    if ($Resolved.Provider.Name -ne "FileSystem") {
+        throw "Path is not on the FileSystem provider: $Path"
+    }
+    return $Resolved.ProviderPath
+}
+
+$BridgeHome = Resolve-FileSystemPath $BridgeHome
+$CodeRoot = if ([string]::IsNullOrWhiteSpace($CodeRoot)) {
+    $BridgeHome
+}
+else {
+    Resolve-FileSystemPath $CodeRoot
+}
 $ConfigPath = Join-Path $BridgeHome "agents.json"
 if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
     throw "HASHI configuration not found: $ConfigPath"
@@ -23,6 +42,10 @@ if ([string]::IsNullOrWhiteSpace($InstanceId)) {
     throw "global.instance_id is required in $ConfigPath"
 }
 $InstanceId = $InstanceId.ToUpperInvariant()
+
+if ([string]::IsNullOrWhiteSpace($LogDir)) {
+    $LogDir = Join-Path $env:LOCALAPPDATA "HASHI\device_control\$InstanceId\logs"
+}
 
 if (-not $PythonwExe) {
     $PythonwExe = Join-Path $BridgeHome ".venv\Scripts\pythonw.exe"
@@ -66,7 +89,8 @@ function Install-CapabilityTask {
         "--bridge-home", $BridgeHome,
         "--instance-id", $InstanceId,
         "--host", $BindHost,
-        "--advertise-host", $AdvertiseHost
+        "--advertise-host", $AdvertiseHost,
+        "--log-dir", $LogDir
     )
     if ($Kind -eq "browser_control") {
         if ($BrowserEndpoint) {
@@ -80,7 +104,7 @@ function Install-CapabilityTask {
     $Action = New-ScheduledTaskAction `
         -Execute $PythonwExe `
         -Argument $ArgumentLine `
-        -WorkingDirectory $BridgeHome
+        -WorkingDirectory $CodeRoot
     $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser
     $Principal = New-ScheduledTaskPrincipal `
         -UserId $CurrentUser `

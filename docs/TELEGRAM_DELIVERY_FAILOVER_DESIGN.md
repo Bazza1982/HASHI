@@ -1,5 +1,47 @@
 # Telegram Delivery Failover And Preview Control Plan
 
+> Ownership and recovery amendment (2026-09-12): schema 2 is authoritative.
+> A reusable Agent name or token-key label is never a delivery-state owner.
+> The rules below supersede the historical schema-1 example and broad retry
+> language retained later in this document.
+
+## Schema 2 ownership and recovery contract
+
+Every active Agent delivery record is bound to all three of:
+
+- the configured HASHI instance ID;
+- a stable `agent_lifecycle_id` for that exact Agent incarnation; and
+- a salted SHA-256 fingerprint of the actual Telegram Bot token.
+
+The raw token is never persisted. Existing Agents receive a lifecycle ID by a
+revision-safe configuration upgrade when their Function Worker is prepared;
+ordinary delete/recreate and Clone receive a new ID, while Move preserves it.
+An old record with no complete owner, or one whose instance/incarnation/Bot no
+longer matches the running Agent, moves to the bounded `quarantine` audit array
+and cannot send. Quarantine records retain incident and disposition evidence;
+they are not marked delivered.
+
+Schema 2 publication uses the shared private, atomic, revision-checked JSON
+primitive. Every conflict reloads current state and re-evaluates the narrow
+mutation. A corrupt file is not replaced. Before a recovery notice is sent, its
+chat receives a persisted unique attempt claim. The result is accepted only if
+owner, incident, chat, and claim all still match. A claim whose process outcome
+is unknown stops instead of risking a duplicate notice.
+
+Telegram Worker RPC returns a typed safe result. `RetryAfter` restores the exact
+server window. `BadRequest`/`Forbidden` destination failures stop that chat;
+transient transport failures use bounded backoff and stop after three failures.
+Other chats remain independent. `recovery_stopped` means the operational notice
+was not delivered; it never blocks ordinary traffic after the RetryAfter window.
+
+Move packages may carry an owned schema-2 record only when lifecycle and Bot
+fingerprint match. The target rebinds the instance after credential validation.
+If pending business responses exist, Move requires full-workspace mode and
+transfers their `undelivered/` files. Clone never carries the source record or
+those pending files. Target rollback, source verified cleanup, and ordinary
+Agent deletion retire only the matching incarnation through the same narrow
+state API.
+
 > Runtime update (2026-08-11): the public `/stream` and `/preview` controls are
 > retired. `/typing` owns both Telegram typing indicators, `/verbose` owns the
 > temporary progress/tool-summary card, and `/think` owns genuine provider

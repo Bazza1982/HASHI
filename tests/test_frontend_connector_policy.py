@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.frontend_delivery import (
+    freeze_run_delivery_route,
     normalize_tui_run_delivery_policy,
+    project_run_delivery_route,
+    route_destination,
     telegram_delivery_for_admission,
     tui_request_metadata,
     tui_run_delivery_policy,
@@ -75,6 +78,80 @@ def test_invalid_tui_delivery_policy_is_rejected(mutation):
     mutation(policy)
     with pytest.raises(ValueError):
         normalize_tui_run_delivery_policy(policy, client_id="tui-window-a")
+
+
+@pytest.mark.parametrize(
+    ("source_id", "session_surface", "telegram", "primary", "mirrors"),
+    [
+        ("telegram", "telegram", True, "telegram", []),
+        ("tui", "workbench", False, "tui", []),
+        ("tui", "workbench", True, "tui", ["telegram"]),
+        ("api", "workbench", True, "workbench", ["telegram"]),
+        ("hchat", "workbench", True, "hchat", ["telegram"]),
+        ("whatsapp", "whatsapp", True, "whatsapp", []),
+        ("hashi.internal", "scheduled", True, "telegram", []),
+    ],
+)
+def test_pao_freezes_one_cross_connector_run_route(
+    source_id, session_surface, telegram, primary, mirrors
+):
+    route = freeze_run_delivery_route(
+        message_source_id=source_id,
+        session_surface=session_surface,
+        session_channel_key="channel-a",
+        chat_id=123,
+        telegram_requested=telegram,
+        primary_channel_key=("peer@HASHI2" if source_id == "hchat" else None),
+    )
+
+    assert project_run_delivery_route(route) == {
+        "surface": primary,
+        "mirrors": mirrors,
+        "automatic": True,
+        "telegram_mirror": "telegram" in mirrors,
+    }
+    assert (route_destination(route, "telegram") is not None) is (
+        primary == "telegram" or "telegram" in mirrors
+    )
+    if source_id == "hchat":
+        assert route["primary"]["channel_key"] == "peer@HASHI2"
+
+
+def test_terminal_hchat_reply_routes_to_user_without_acknowledgement_loop():
+    route = freeze_run_delivery_route(
+        message_source_id="hchat",
+        session_surface="workbench",
+        session_channel_key="default",
+        primary_channel_key="peer@HASHI2",
+        chat_id=123,
+        telegram_requested=True,
+        terminal_exchange=True,
+    )
+
+    assert project_run_delivery_route(route) == {
+        "surface": "telegram",
+        "mirrors": [],
+        "automatic": True,
+        "telegram_mirror": False,
+    }
+    assert route_destination(route, "hchat") is None
+
+
+def test_internal_run_without_a_connector_target_is_explicitly_nonautomatic():
+    route = freeze_run_delivery_route(
+        message_source_id="hashi.internal",
+        session_surface="scheduled",
+        session_channel_key="default",
+        chat_id=None,
+        telegram_requested=False,
+    )
+
+    assert project_run_delivery_route(route) == {
+        "surface": "none",
+        "mirrors": [],
+        "automatic": False,
+        "telegram_mirror": False,
+    }
 
 
 def test_runtime_presentation_status_reports_structured_her_quick_and_pro():

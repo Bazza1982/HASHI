@@ -24,12 +24,23 @@ from orchestrator.agent_move.service import (
     rollback_agent_move,
     stage_agent_move,
 )
+from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.pcm import render_pcm_document
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
 def _write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _rewrite_legacy_json(path: Path) -> None:
+    rendered = json.dumps(
+        json.loads(path.read_text(encoding="utf-8")),
+        ensure_ascii=False,
+        indent=2,
+    ).replace("\n", "\r\n")
+    path.write_bytes(b"\xef\xbb\xbf" + (rendered + "\r\n").encode("utf-8"))
 
 
 def _agents(
@@ -174,6 +185,83 @@ def test_stage_commit_activate_and_recoverable_rollback(tmp_path):
     assert (source / "workspaces" / "zelda").is_dir()
 
 
+def test_move_commit_adopts_owned_delivery_state_and_rollback_retires_it(tmp_path):
+    source, target, _ = _roots(tmp_path)
+    lifecycle_id = "4" * 32
+    source_config = json.loads((source / "agents.json").read_text())
+    source_config["agents"][0]["agent_lifecycle_id"] = lifecycle_id
+    _write_json(source / "agents.json", source_config)
+    undelivered = source / "workspaces" / "zelda" / "undelivered"
+    undelivered.mkdir()
+    (undelivered / "req-owned.md").write_text("owned response", encoding="utf-8")
+    _write_json(
+        source / "state" / "telegram_delivery_health.json",
+        {
+            "version": 2,
+            "agents": {
+                "zelda": {
+                    "owner": {
+                        "instance_id": "HASHI1",
+                        "agent_lifecycle_id": lifecycle_id,
+                        "telegram_bot_fingerprint": telegram_bot_fingerprint(
+                            "agent-token"
+                        ),
+                    },
+                    "status": "blocked",
+                    "incident_id": "move-owned-incident",
+                    "per_chat": {
+                        "123": {"undelivered_request_ids": ["req-owned"]}
+                    },
+                }
+            },
+            "quarantine": [],
+        },
+    )
+    package_path = tmp_path / "owned-state.hashi-agent"
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        include_agent_secrets=True,
+        secret_passphrase="shared-secret",
+        transfer_mode="workspace",
+    )
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        secret_passphrase="shared-secret",
+    )
+
+    committed = commit_agent_move(
+        target, staged["package_id"], secret_passphrase="shared-secret"
+    )
+
+    delivery = json.loads(
+        (target / "state" / "telegram_delivery_health.json").read_text()
+    )
+    record = delivery["agents"]["zelda"]
+    assert committed["telegram_delivery_state"]["imported"] is True
+    assert record["incident_id"] == "move-owned-incident"
+    assert record["owner"] == {
+        "instance_id": "HASHI2",
+        "agent_lifecycle_id": lifecycle_id,
+        "telegram_bot_fingerprint": telegram_bot_fingerprint("agent-token"),
+    }
+    assert (
+        target / "workspaces" / "zelda" / "undelivered" / "req-owned.md"
+    ).read_text() == "owned response"
+
+    rollback_agent_move(target, staged["package_id"])
+    delivery = json.loads(
+        (target / "state" / "telegram_delivery_health.json").read_text()
+    )
+    assert "zelda" not in delivery["agents"]
+    assert delivery["quarantine"][-1]["reason"] == "agent_transfer_rolled_back"
+
+
 @pytest.mark.skipif(
     os.name == "nt",
     reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",
@@ -297,6 +385,81 @@ def test_activation_blocks_when_agent_credential_was_not_packaged(tmp_path):
 
     with pytest.raises(AgentMoveError, match="credentials are incomplete"):
         activate_agent_move(target, package.package_id)
+
+
+def test_activation_rollback_does_not_overwrite_an_intervening_writer(
+    tmp_path, monkeypatch
+):
+    _, target, package_path = _roots(tmp_path)
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        secret_passphrase="shared-secret",
+    )
+    commit_agent_move(
+        target,
+        staged["package_id"],
+        secret_passphrase="shared-secret",
+    )
+    actual_atomic = service._atomic_json
+    agents_path = (target / "agents.json").resolve()
+
+    def fail_record_after_external_write(path, value, **kwargs):
+        if path.name == "state.json":
+            winner = read_config_json(agents_path)
+            winner["global"]["concurrent_extension"] = "kept"
+            write_config_json(agents_path, winner)
+            raise OSError("simulated journal failure")
+        return actual_atomic(path, value, **kwargs)
+
+    monkeypatch.setattr(service, "_atomic_json", fail_record_after_external_write)
+
+    with pytest.raises(ConfigConflictError):
+        activate_agent_move(target, staged["package_id"])
+
+    current = read_config_json(agents_path)
+    assert current["global"]["concurrent_extension"] == "kept"
+
+
+def test_commit_recovery_does_not_overwrite_an_intervening_writer(
+    tmp_path, monkeypatch
+):
+    _, target, package_path = _roots(tmp_path)
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        secret_passphrase="shared-secret",
+    )
+    actual_atomic = service._atomic_json
+    agents_path = (target / "agents.json").resolve()
+    injected = False
+
+    def fail_after_task_publication(path, value, **kwargs):
+        nonlocal injected
+        result = actual_atomic(path, value, **kwargs)
+        if path.name == "tasks.json" and not injected:
+            injected = True
+            winner = read_config_json(agents_path)
+            winner["global"]["concurrent_extension"] = "kept"
+            write_config_json(agents_path, winner)
+            raise OSError("simulated commit interruption")
+        return result
+
+    monkeypatch.setattr(service, "_atomic_json", fail_after_task_publication)
+
+    with pytest.raises(AgentMoveError, match="not the transaction publication"):
+        commit_agent_move(
+            target,
+            staged["package_id"],
+            secret_passphrase="shared-secret",
+        )
+
+    current = read_config_json(agents_path)
+    assert current["global"]["concurrent_extension"] == "kept"
 
 
 def test_target_collision_is_rejected_before_mutation(tmp_path):
@@ -604,6 +767,58 @@ def test_source_deactivation_disables_schedules_and_restore_is_lossless(tmp_path
     )
 
 
+def test_source_deactivation_reads_legacy_config_and_normalizes_authoritative_writes(tmp_path):
+    source, _, _ = _roots(tmp_path)
+    for name in ("agents.json", "tasks.json"):
+        _rewrite_legacy_json(source / name)
+
+    deactivate_source_agent(
+        source,
+        "zelda",
+        "legacy-bytes-package",
+        target_instance="HASHI2",
+    )
+
+    for name in ("agents.json", "tasks.json"):
+        raw = (source / name).read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf")
+        assert b"\r" not in raw
+        assert raw.endswith(b"\n")
+
+
+def test_source_deactivation_does_not_overwrite_an_intervening_config_writer(
+    tmp_path, monkeypatch
+):
+    source, _, _ = _roots(tmp_path)
+    agents_path = (source / "agents.json").resolve()
+    actual_write = write_config_json
+    injected = False
+
+    def interleaved(path, payload, **kwargs):
+        nonlocal injected
+        if Path(path).resolve() == agents_path and not injected:
+            injected = True
+            winner = read_config_json(path)
+            winner["global"]["concurrent_extension"] = "kept"
+            actual_write(path, winner)
+        return actual_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(service, "write_config_json", interleaved)
+
+    with pytest.raises(ConfigConflictError):
+        deactivate_source_agent(
+            source,
+            "zelda",
+            "stale-source-package",
+            target_instance="HASHI2",
+        )
+
+    current = read_config_json(agents_path)
+    assert current["global"]["concurrent_extension"] == "kept"
+    zelda = next(row for row in current["agents"] if row["name"] == "zelda")
+    assert zelda["is_active"] is True
+
+
 def test_imported_source_can_move_again_and_restore_import_ownership(tmp_path):
     source, _, _ = _roots(tmp_path)
     old_package_id = "imported-package-id"
@@ -770,6 +985,11 @@ def test_source_deactivation_journal_recovers_interrupted_write(tmp_path, monkey
         target_instance="HASHI2",
     )
     assert disabled["status"] == "source_disabled_pending_reboot"
+    lifecycle_id = disabled["source_agent_lifecycle_id"]
+    assert len(lifecycle_id) == 32
+    assert json.loads((source / "agents.json").read_text())["agents"][0][
+        "agent_lifecycle_id"
+    ] == lifecycle_id
     restored = restore_source_agent(source, package_id)
     assert restored["status"] == "source_restored_pending_reboot"
     assert (

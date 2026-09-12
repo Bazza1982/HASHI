@@ -282,8 +282,14 @@ def resolve_usage_cost(
         except Exception:
             dynamic_cost = None
         if dynamic_cost is not None:
-            return dynamic_cost, "pricing_table", str(
-                fact.source_revision or "unknown"
+            return (
+                dynamic_cost,
+                (
+                    "pricing_table"
+                    if fact.scope == "openrouter_route"
+                    else "openrouter_reference"
+                ),
+                str(fact.source_revision or "unknown"),
             )
         # A present exact fact with incomplete dimensions must remain unknown;
         # it must not silently fall through to a differently scoped old row.
@@ -293,7 +299,7 @@ def resolve_usage_cost(
         schedule_missing
         and fact is not None
         and fact.status == "unknown"
-        and fact.scope == "openrouter_route"
+        and fact.scope in {"openrouter_route", "openrouter_reference"}
         and fact.unknown_reason in {"cache_miss", "stale_cache"}
     ):
         try:
@@ -346,6 +352,8 @@ def record_usage(
     phase: str = "",
     engine: str = "",
     line_items: list | None = None,
+    prompt_cache_hit_tokens: int | None = None,
+    prompt_cache_miss_tokens: int | None = None,
 ):
     """Append a usage record and return a structured :class:`UsageReceipt`.
 
@@ -373,6 +381,7 @@ def record_usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             thinking_tokens=thinking_tokens,
+            cached_tokens=int(prompt_cache_hit_tokens or 0),
             thinking_in_output=thinking_in_output,
             schedule_missing=True,
         )
@@ -391,6 +400,16 @@ def record_usage(
                 cost_usd=resolved_cost,
                 cost_source=cost_source,
                 pricing_revision=pricing_revision,
+                prompt_cache_hit_tokens=(
+                    max(0, int(prompt_cache_hit_tokens))
+                    if prompt_cache_hit_tokens is not None
+                    else None
+                ),
+                prompt_cache_miss_tokens=(
+                    max(0, int(prompt_cache_miss_tokens))
+                    if prompt_cache_miss_tokens is not None
+                    else None
+                ),
             )
         ]
     receipt = UsageReceipt(

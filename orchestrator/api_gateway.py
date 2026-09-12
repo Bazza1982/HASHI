@@ -1074,6 +1074,11 @@ class APIGatewayServer:
             if capability_root
             else None
         )
+        self._pricing_cache_path = (
+            Path(capability_root) / "tmp" / "pricing-facts-v1.json"
+            if capability_root
+            else None
+        )
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
         logs_root = Path(
@@ -1559,6 +1564,9 @@ class APIGatewayServer:
     def _schedule_capability_refresh(self, *models: str) -> None:
         try:
             from tools.model_capability_sources import schedule_prewarm
+            from tools.pricing_sources import (
+                schedule_prewarm as schedule_pricing_prewarm,
+            )
 
             for model in dict.fromkeys(
                 str(value or "").strip() for value in models if str(value or "").strip()
@@ -1569,6 +1577,11 @@ class APIGatewayServer:
                         engine,
                         model,
                         cache_path=self._model_capability_cache_path,
+                    )
+                    schedule_pricing_prewarm(
+                        engine,
+                        model,
+                        cache_path=self._pricing_cache_path,
                     )
         except Exception:
             # Model configuration succeeds independently from public metadata.

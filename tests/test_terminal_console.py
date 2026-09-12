@@ -15,6 +15,7 @@ from adapters.stream_events import (
     StreamEvent,
 )
 from orchestrator import terminal_console
+from orchestrator.config_json import read_config_json
 from orchestrator.api_gateway import _print_api_in, _print_api_out
 from orchestrator.bootstrap_logging import (
     ConsoleOutputFilter,
@@ -48,6 +49,35 @@ def test_terminal_defaults_to_quiet_and_persists_per_instance(tmp_path) -> None:
     terminal_console.reset_for_tests()
 
     assert terminal_console.configure(tmp_path) == "debug"
+
+
+def test_terminal_setting_accepts_legacy_bytes_and_preserves_extensions(tmp_path) -> None:
+    path = tmp_path / "state" / "instance" / "terminal.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        b'\xef\xbb\xbf{\r\n  "version": 1,\r\n  "level": "debug",\r\n  "future": 7\r\n}\r\n'
+    )
+
+    assert terminal_console.configure(tmp_path) == "debug"
+    assert terminal_console.set_level("activity") == "activity"
+
+    raw = path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw
+    assert read_config_json(path)["future"] == 7
+
+
+def test_terminal_setting_never_replaces_corrupt_saved_state(tmp_path) -> None:
+    path = tmp_path / "state" / "instance" / "terminal.json"
+    path.parent.mkdir(parents=True)
+    original = b'{"level":'
+    path.write_bytes(original)
+
+    assert terminal_console.configure(tmp_path) == "quiet"
+    with pytest.raises(json.JSONDecodeError):
+        terminal_console.set_level("debug")
+
+    assert terminal_console.get_level() == "quiet"
+    assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("level", ["quiet", "activity", "debug"])

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import base64
 import platform
 import shutil
 import subprocess
@@ -87,4 +88,40 @@ def copy_to_windows_clipboard(text: str) -> bool:
     return False
 
 
-__all__ = ["copy_to_windows_clipboard"]
+def read_windows_clipboard_png(*, max_bytes: int = 25 * 1024 * 1024) -> bytes | None:
+    """Return a PNG snapshot without changing the Windows clipboard."""
+    executable = shutil.which("powershell.exe") or (
+        shutil.which("powershell") if sys.platform == "win32" else None
+    )
+    if not executable:
+        return None
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$i=[Windows.Forms.Clipboard]::GetImage();"
+        "if($null -eq $i){exit 3};"
+        "$m=New-Object IO.MemoryStream;"
+        "$i.Save($m,[Drawing.Imaging.ImageFormat]::Png);"
+        "[Convert]::ToBase64String($m.ToArray())"
+    )
+    try:
+        completed = subprocess.run(
+            [executable, "-NoProfile", "-NonInteractive", "-STA", "-Command", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None
+        encoded = completed.stdout.strip()
+        if len(encoded) > ((max_bytes + 2) // 3) * 4 + 16:
+            return None
+        payload = base64.b64decode(encoded, validate=True)
+        if len(payload) > max_bytes or not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            return None
+        return payload
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+__all__ = ["copy_to_windows_clipboard", "read_windows_clipboard_png"]

@@ -729,18 +729,18 @@ def _provider_response_decision(
             "decision_reason": "tool_calls_incomplete_or_invalid",
             "error_code": "PROVIDER_INVALID_TOOL_CALLS",
         }
-    if normalized == "stop":
+    if normalized in {"stop", "completed"}:
         if has_tools:
             return {
                 **base,
                 "decision": "protocol_conflict",
-                "decision_reason": "stop_with_tool_calls",
+                "decision_reason": f"{normalized}_with_tool_calls",
                 "error_code": "PROVIDER_FINISH_REASON_CONFLICT",
             }
         return {
             **base,
             "decision": "complete",
-            "decision_reason": "provider_stop",
+            "decision_reason": f"provider_{normalized}",
             "success": True,
         }
     if normalized in {"tool_calls", "function_call"}:
@@ -1004,6 +1004,61 @@ def _diagnostic_body(payload: bytes) -> dict[str, Any]:
     }
 
 
+async def _read_http_error_body(response: Any) -> None:
+    """Read an HTTP error while its stream is open and retain read state.
+
+    ``httpx`` deliberately raises ``ResponseNotRead`` when a streaming
+    response is inspected before ``aread``.  Treating that exception as an
+    empty body destroys the Provider's actual diagnostic.  Adapters call this
+    helper before ``raise_for_status``; diagnostic projection can then
+    distinguish a genuinely empty response from an unread or failed read.
+    """
+
+    try:
+        status = int(getattr(response, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status < 400:
+        return
+
+    declared_length: int | None = None
+    headers = getattr(response, "headers", {}) or {}
+    try:
+        raw_length = str(headers.get("content-length") or "").strip()
+        if raw_length:
+            declared_length = max(0, int(raw_length))
+    except (AttributeError, TypeError, ValueError):
+        declared_length = None
+    setattr(response, "hashi_declared_body_bytes", declared_length)
+
+    aread = getattr(response, "aread", None)
+    if not callable(aread):
+        # Small protocol test doubles may expose only status/json. Real httpx
+        # streaming responses always provide aread; preserve uncertainty here
+        # instead of fabricating an empty body.
+        setattr(response, "hashi_body_read_state", "not_read")
+        return
+    try:
+        body = bytes(await aread())
+    except BaseException as exc:
+        setattr(response, "hashi_body_read_state", "read_failed")
+        setattr(response, "hashi_body_read_error", type(exc).__name__)
+        if not hasattr(exc, "response"):
+            try:
+                setattr(exc, "response", response)
+            except (AttributeError, TypeError):
+                pass
+        raise
+    setattr(response, "hashi_observed_body", body)
+    if not body:
+        state = "empty"
+    elif declared_length is not None and len(body) < declared_length:
+        state = "partial"
+    else:
+        state = "complete"
+    setattr(response, "hashi_body_read_state", state)
+
+
 def _provider_http_failure_diagnostics(error: Exception) -> dict[str, Any]:
     """Preserve the complete HTTP request/response evidence for local audit."""
 
@@ -1026,24 +1081,51 @@ def _provider_http_failure_diagnostics(error: Exception) -> dict[str, Any]:
         try:
             request_body = bytes(request.content)
         except (httpx.RequestNotRead, TypeError, ValueError):
-            request_body = b""
-        diagnostics["request"] = {
+            request_body = None
+        request_record = {
             "method": str(request.method),
             "url": str(request.url),
             "headers": _diagnostic_headers(request.headers),
-            **_diagnostic_body(request_body),
         }
+        if request_body is None:
+            request_record["body_state"] = "not_read"
+        else:
+            request_record.update(_diagnostic_body(request_body))
+            request_record["body_state"] = (
+                "empty" if not request_body else "complete"
+            )
+        diagnostics["request"] = request_record
 
     if isinstance(response, httpx.Response):
-        try:
-            response_body = bytes(response.content)
-        except (httpx.ResponseNotRead, TypeError, ValueError):
-            response_body = b""
-        diagnostics["response"] = {
+        response_body = getattr(response, "hashi_observed_body", None)
+        if response_body is None:
+            try:
+                response_body = bytes(response.content)
+            except (httpx.ResponseNotRead, TypeError, ValueError):
+                response_body = None
+        response_record = {
             "status": int(response.status_code),
             "headers": _diagnostic_headers(response.headers),
-            **_diagnostic_body(response_body),
         }
+        body_state = str(
+            getattr(response, "hashi_body_read_state", "") or ""
+        )
+        if response_body is None:
+            response_record["body_state"] = body_state or "not_read"
+        else:
+            response_record.update(_diagnostic_body(response_body))
+            response_record["body_state"] = body_state or (
+                "empty" if not response_body else "complete"
+            )
+        declared_length = getattr(response, "hashi_declared_body_bytes", None)
+        if declared_length is not None:
+            response_record["declared_body_bytes"] = int(declared_length)
+        read_error = str(
+            getattr(response, "hashi_body_read_error", "") or ""
+        )
+        if read_error:
+            response_record["body_read_error"] = read_error
+        diagnostics["response"] = response_record
 
     audit_refs = getattr(error, "hashi_transport_audit_refs", ())
     if isinstance(audit_refs, (list, tuple)):
@@ -1320,7 +1402,7 @@ class OpenRouterAdapter(BaseBackend):
     # OpenRouter aggregates providers with different replay guarantees.  A
     # concrete compatible adapter may opt into narrowly scoped HTTP-call
     # recovery without replaying completed tool loops.
-    TRANSIENT_PROVIDER_CALL_RETRIES = 0
+    TRANSIENT_PROVIDER_CALL_RETRIES = INVALID_TOOL_CALL_REPAIR_LIMIT
     TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.0
     TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 5.0
 
@@ -1352,6 +1434,110 @@ class OpenRouterAdapter(BaseBackend):
         self._audio_asset_store: AudioAssetStore | None = None
         self._provider_call_observer: ProviderCallObserver | None = None
         self._provider_invocation_context: dict[str, Any] = {}
+        self._active_provider_wire_context: dict[str, Any] = {}
+
+    def _provider_evidence_url(self) -> str:
+        """Return the effective non-secret HTTP endpoint for wire evidence."""
+
+        return self._chat_completions_url()
+
+    def _record_provider_wire_evidence(
+        self,
+        event: str,
+        *,
+        request_id: str,
+        call_serial: int,
+        payload: Mapping[str, Any],
+    ) -> str:
+        """Persist complete Provider wire evidence through the PAO store.
+
+        A running HASHI Worker always owns a canonical audit store outside the
+        mutable Agent workspace. Direct adapter use (diagnostics and focused
+        tests) falls back to one private, append-only local evidence file. The
+        fallback is deliberately not rotated: it must not become a seven-day
+        replacement for the canonical original.
+        """
+
+        record = {
+            "format": "hashi-provider-wire-v1",
+            "event": str(event),
+            "recorded_at": _utc_timestamp(),
+            "instance_id": str(
+                getattr(self.global_config, "instance_id", "")
+                or getattr(self.global_config, "name", "")
+                or ""
+            ),
+            "agent_id": str(getattr(self.config, "name", "") or ""),
+            "adapter": type(self).__name__,
+            "provider": str(
+                getattr(self.config, "engine", "") or "openrouter-api"
+            ),
+            "model": str(getattr(self.config, "model", "") or ""),
+            "hashi_request_id": str(request_id or ""),
+            "call_serial": max(1, int(call_serial)),
+            "runtime_generation_id": str(
+                getattr(self.config, "runtime_generation_id", "")
+                or getattr(self.config, "generation_id", "")
+                or ""
+            ),
+            **dict(getattr(self, "_provider_invocation_context", {}) or {}),
+            "payload": dict(payload),
+        }
+        runtime = getattr(self.config, "_hashi_runtime", None)
+        canonical = getattr(runtime, "canonical_audit", None)
+        if canonical is not None and callable(getattr(canonical, "record", None)):
+            try:
+                event_id = canonical.record(
+                    "provider_wire_evidence",
+                    record,
+                    request_id=str(request_id or ""),
+                    provenance={
+                        "adapter": type(self).__name__,
+                        "provider": record["provider"],
+                        "model": record["model"],
+                    },
+                )
+            except Exception as exc:
+                raise ProviderProtocolForensicError(
+                    "canonical Provider wire evidence could not be persisted"
+                ) from exc
+            return f"canonical-audit:{event_id}"
+
+        workspace = Path(self.config.workspace_dir).expanduser().resolve()
+        forensic_root = workspace / "logs" / "provider_protocol_forensics"
+        path = forensic_root / "provider-wire.jsonl"
+        record_id = "provider-wire-" + uuid4().hex
+        encoded = json.dumps(
+            {"event_id": record_id, **record},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ) + "\n"
+        try:
+            from tools.private_files import protect_private_file
+
+            forensic_root.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                protect_private_file(forensic_root)
+            else:
+                forensic_root.chmod(0o700)
+            descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                protect_private_file(path)
+                with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                    descriptor = -1
+                    with _PROVIDER_FORENSIC_WRITE_LOCK:
+                        handle.write(encoded)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        except OSError as exc:
+            raise ProviderProtocolForensicError(
+                f"private Provider wire evidence persistence failed: {exc}"
+            ) from exc
+        return f"provider-wire:{path}:{record_id}"
 
     def set_provider_call_observer(
         self,
@@ -1427,7 +1613,7 @@ class OpenRouterAdapter(BaseBackend):
         )
         record = {
             "format": "hashi-provider-tool-forensic-v1",
-            "retention_seconds": 7 * 24 * 60 * 60,
+            "retention": "canonical_or_indefinite_local",
             "recorded_at": _utc_timestamp(),
             "hashi": {
                 "request_id": str(request_id or ""),
@@ -1497,17 +1683,6 @@ class OpenRouterAdapter(BaseBackend):
                 protect_private_file(forensic_root)
             else:
                 forensic_root.chmod(0o700)
-            # Incidents have separate files; keep the current incident complete.
-            # Only expired files owned by this writer are eligible for deletion.
-            cutoff = time.time() - record['retention_seconds']
-            with _PROVIDER_FORENSIC_WRITE_LOCK:
-                for previous in forensic_root.glob('invalid-tool-calls-*.jsonl'):
-                    if previous != path and not previous.is_symlink():
-                        try:
-                            if previous.is_file() and previous.stat().st_mtime < cutoff:
-                                previous.unlink()
-                        except FileNotFoundError:
-                            pass
             flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
             descriptor = os.open(path, flags, 0o600)
             try:
@@ -2569,6 +2744,7 @@ class OpenRouterAdapter(BaseBackend):
             "reasoning_length": 0,
             "tool_calls": [],
         }
+        protocol_state["wire_evidence"] = wire_evidence
 
         async with self.client.stream(
             "POST",
@@ -2576,6 +2752,7 @@ class OpenRouterAdapter(BaseBackend):
             json=payload,
             headers=headers,
         ) as response:
+            await _read_http_error_body(response)
             response.raise_for_status()
             transport_request_id = _provider_request_id(response)
             protocol_state["transport_request_id"] = transport_request_id
@@ -2819,9 +2996,10 @@ class OpenRouterAdapter(BaseBackend):
                     )[0]
 
         if not saw_done and not finish_reason:
-            raise httpx.RemoteProtocolError(
+            error = httpx.RemoteProtocolError(
                 "provider stream ended without a completion marker"
             )
+            raise _annotate_stream_exception(error, protocol_state)
         full_text = audio_transcript or "".join(text_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
         audio_bytes = b""
@@ -2921,9 +3099,11 @@ class OpenRouterAdapter(BaseBackend):
         completed_tool_calls: list[dict[str, str]] = []
         repair_attempt_for_incident = 0
         repair_incident = 0
+        recovery_attempts_used = 0
         active_forensic_path: Path | None = None
         last_forensic_path: Path | None = None
         total_tool_repair_requests = 0
+        total_local_recovery_requests = 0
 
         try:
             self._touch_activity()
@@ -2994,6 +3174,33 @@ class OpenRouterAdapter(BaseBackend):
                     provider_call_started_at = _utc_timestamp()
                     provider_attempt = provider_call_retry_count + 1
                     provider_recovery_kind = next_provider_recovery_kind
+                    self._active_provider_wire_context = {
+                        "request_id": str(request_id or ""),
+                        "call_serial": provider_attempt_serial,
+                    }
+                    provider_wire_refs = [
+                        self._record_provider_wire_evidence(
+                            "request_prepared",
+                            request_id=request_id,
+                            call_serial=provider_attempt_serial,
+                            payload={
+                                "method": "POST",
+                                "url": self._provider_evidence_url(),
+                                "headers": _diagnostic_headers(headers),
+                                "streaming": bool(use_streaming),
+                                "body": payload,
+                                "body_sha256": hashlib.sha256(
+                                    json.dumps(
+                                        payload,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                        default=str,
+                                    ).encode("utf-8")
+                                ).hexdigest(),
+                            },
+                        )
+                    ]
                     try:
                         if use_streaming:
                             result = await self._stream_api_once(
@@ -3008,9 +3215,25 @@ class OpenRouterAdapter(BaseBackend):
                                 call_stream_callback,
                             )
                     except asyncio.CancelledError as exc:
+                        provider_wire_refs.append(
+                            self._record_provider_wire_evidence(
+                                "request_cancelled",
+                                request_id=request_id,
+                                call_serial=provider_attempt_serial,
+                                payload={
+                                    "partial_protocol": dict(
+                                        getattr(
+                                            exc, "hashi_provider_protocol", {}
+                                        )
+                                        or {}
+                                    )
+                                },
+                            )
+                        )
                         partial_protocol = dict(
                             getattr(exc, "hashi_provider_protocol", {}) or {}
                         )
+                        partial_protocol.pop("wire_evidence", None)
                         provider_calls.append(
                             self._provider_call_record(
                                 request_id=request_id,
@@ -3049,12 +3272,38 @@ class OpenRouterAdapter(BaseBackend):
                                     "decision": "cancel",
                                     "decision_reason": "request_cancelled",
                                     "decision_success": False,
+                                    "provider_wire_evidence_refs": list(
+                                        provider_wire_refs
+                                    ),
                                     **partial_protocol,
                                 },
                             )
                         )
                         raise
                     except Exception as exc:
+                        if not isinstance(exc, ProviderProtocolForensicError):
+                            provider_wire_refs.append(
+                                self._record_provider_wire_evidence(
+                                    "request_failed",
+                                    request_id=request_id,
+                                    call_serial=provider_attempt_serial,
+                                    payload={
+                                        "error_type": type(exc).__name__,
+                                        "error": str(exc),
+                                        "http": _provider_http_failure_diagnostics(
+                                            exc
+                                        ),
+                                        "partial_protocol": dict(
+                                            getattr(
+                                                exc,
+                                                "hashi_provider_protocol",
+                                                {},
+                                            )
+                                            or {}
+                                        ),
+                                    },
+                                )
+                            )
                         can_media_fallback = self._can_replay_typed_media_fallback(
                             exc,
                             media_routing=media_routing,
@@ -3062,19 +3311,20 @@ class OpenRouterAdapter(BaseBackend):
                             provider_call_count=provider_call_count,
                             tool_call_count=total_tool_calls,
                         )
-                        retry_limit = max(
-                            0,
-                            int(self.TRANSIENT_PROVIDER_CALL_RETRIES),
+                        retry_limit = min(
+                            INVALID_TOOL_CALL_REPAIR_LIMIT,
+                            max(0, int(self.TRANSIENT_PROVIDER_CALL_RETRIES)),
                         )
                         can_transport_retry = bool(
                             not can_media_fallback
-                            and provider_call_retry_count < retry_limit
+                            and recovery_attempts_used < retry_limit
                             and not provider_call_emitted_text
                             and _transient_provider_call_error(exc)
                         )
                         partial_protocol = dict(
                             getattr(exc, "hashi_provider_protocol", {}) or {}
                         )
+                        partial_protocol.pop("wire_evidence", None)
                         failure_decision = (
                             "retry_with_typed_media_fallback"
                             if can_media_fallback
@@ -3134,6 +3384,9 @@ class OpenRouterAdapter(BaseBackend):
                                     "decision": failure_decision,
                                     "decision_reason": type(exc).__name__,
                                     "decision_success": False,
+                                    "provider_wire_evidence_refs": list(
+                                        provider_wire_refs
+                                    ),
                                     **partial_protocol,
                                 },
                             )
@@ -3158,6 +3411,8 @@ class OpenRouterAdapter(BaseBackend):
                             continue
                         if can_transport_retry:
                             provider_call_retry_count += 1
+                            recovery_attempts_used += 1
+                            total_local_recovery_requests += 1
                             provider_transport_retry_count += 1
                             next_provider_recovery_kind = (
                                 "provider_transport_retry"
@@ -3179,6 +3434,25 @@ class OpenRouterAdapter(BaseBackend):
                         (time.perf_counter() - provider_call_started) * 1000,
                         3,
                     )
+                    provider_wire_refs.append(
+                        self._record_provider_wire_evidence(
+                            "response_received",
+                            request_id=request_id,
+                            call_serial=provider_attempt_serial,
+                            payload={
+                                "wire": dict(result.wire_evidence or {}),
+                                "provider_response_id": str(
+                                    result.provider_response_id or ""
+                                ),
+                                "transport_request_id": str(
+                                    result.transport_request_id or ""
+                                ),
+                                "transport_state": str(
+                                    result.transport_state or ""
+                                ),
+                            },
+                        )
+                    )
                     break
 
                 # Accumulate usage from each API call
@@ -3197,9 +3471,9 @@ class OpenRouterAdapter(BaseBackend):
                 if invalid_tool_response and active_forensic_path is None:
                     repair_incident += 1
                 next_repair_number = (
-                    repair_attempt_for_incident + 1
+                    recovery_attempts_used + 1
                     if invalid_tool_response
-                    and repair_attempt_for_incident < INVALID_TOOL_CALL_REPAIR_LIMIT
+                    and recovery_attempts_used < INVALID_TOOL_CALL_REPAIR_LIMIT
                     else None
                 )
                 repair_record: dict[str, Any] = {}
@@ -3255,6 +3529,9 @@ class OpenRouterAdapter(BaseBackend):
                         "retry_count": provider_call_retry_count,
                         "recovery_kind": provider_recovery_kind,
                         "status": "completed",
+                        "provider_wire_evidence_refs": list(
+                            provider_wire_refs
+                        ),
                         "request_started_at": provider_call_started_at,
                         "response_observed_at": _utc_timestamp(),
                         "effective_parameters": effective_parameters,
@@ -3293,20 +3570,26 @@ class OpenRouterAdapter(BaseBackend):
                     )
                     last_forensic_path = active_forensic_path
                     if next_repair_number is not None:
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": json.dumps(
-                                    {
-                                        "hashi_rejected_tool_call_batch": result.tool_calls,
-                                        "reason": "invalid tool arguments JSON",
-                                        "executed": False,
-                                    },
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                ),
-                            }
+                        rejected_assistant = {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "hashi_rejected_tool_call_batch": result.tool_calls,
+                                    "reason": "invalid tool arguments JSON",
+                                    "executed": False,
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        }
+                        # A synthetic repair turn is still the assistant turn
+                        # returned by the Provider. Provider-specific required
+                        # fields (notably DeepSeek reasoning_content) must use
+                        # the same augmentation path as a valid tool turn.
+                        self._augment_assistant_tool_message(
+                            rejected_assistant, result
                         )
+                        messages.append(rejected_assistant)
                         messages.append(
                             {
                                 "role": "system",
@@ -3318,7 +3601,9 @@ class OpenRouterAdapter(BaseBackend):
                             }
                         )
                         repair_attempt_for_incident = next_repair_number
+                        recovery_attempts_used = next_repair_number
                         total_tool_repair_requests += 1
+                        total_local_recovery_requests += 1
                         continue
 
                     provider_request_id = str(
@@ -3347,6 +3632,7 @@ class OpenRouterAdapter(BaseBackend):
                 if repair_attempt_for_incident:
                     repair_attempt_for_incident = 0
                     active_forensic_path = None
+                recovery_attempts_used = 0
 
                 # The protocol decision is persisted synchronously above. No
                 # tool side effect may occur before that durable boundary.
@@ -3546,6 +3832,12 @@ class OpenRouterAdapter(BaseBackend):
                         provider_transport_retry_count
                     ),
                     "provider_tool_repair_count": total_tool_repair_requests,
+                    "provider_local_recovery_count": (
+                        total_local_recovery_requests
+                    ),
+                    "provider_local_recovery_limit": (
+                        INVALID_TOOL_CALL_REPAIR_LIMIT
+                    ),
                     "provider_protocol_forensic_path": (
                         str(last_forensic_path) if last_forensic_path else None
                     ),
@@ -3595,6 +3887,19 @@ class OpenRouterAdapter(BaseBackend):
             metadata["provider_transport_retry_count"] = (
                 provider_transport_retry_count
             )
+            metadata["provider_local_recovery_count"] = (
+                total_local_recovery_requests
+            )
+            metadata["provider_local_recovery_limit"] = (
+                INVALID_TOOL_CALL_REPAIR_LIMIT
+            )
+            if recovery_attempts_used >= INVALID_TOOL_CALL_REPAIR_LIMIT:
+                # The Adapter already consumed the one recovery budget for
+                # this unfinished interaction. Do not let HER allocate a new
+                # outer-stage budget merely because the final typed failure is
+                # normally transient.
+                failure.error_retryable = False
+                metadata["provider_local_recovery_exhausted"] = True
             metadata["meter"] = {"provider_calls": provider_calls}
             metadata["multimodal_routing"] = list(media_routing)
             metadata["multimodal_fallback_attempted"] = media_fallback_attempted

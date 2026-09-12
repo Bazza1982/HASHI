@@ -1,4 +1,6 @@
 from __future__ import annotations
+import base64
+import hashlib
 import html
 import re
 import sys
@@ -20,6 +22,12 @@ from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import DEFAULT_AGENT_MODE, FlexibleAgentConfig, GlobalConfig
+from orchestrator.config_json import (
+    ConfigDocument,
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.agent_move.package import AgentMoveError
 from orchestrator.bootstrap_logging import refresh_console_output_filters
 from orchestrator.command_ui import (
@@ -804,7 +812,7 @@ class FlexibleAgentRuntime:
         # immutable QueuedRequest snapshots the choice for the full Turn.
         from orchestrator.frontend_delivery import telegram_delivery_for_admission
 
-        deliver_to_telegram = telegram_delivery_for_admission(
+        telegram_requested = telegram_delivery_for_admission(
             source=source,
             request_metadata=request_metadata,
         )
@@ -843,7 +851,7 @@ class FlexibleAgentRuntime:
                 else None
             )
         if move_guard is not None:
-            if deliver_to_telegram and not silent:
+            if telegram_requested and not silent:
                 await self._send_text(
                     chat_id,
                     ui_language.tr(
@@ -861,6 +869,7 @@ class FlexibleAgentRuntime:
         # neither assert a frontend identity nor inherit authorization.
         from orchestrator.message_context import (
             CONNECTOR_EVIDENCE_METADATA_KEY,
+            HCHAT_CONTEXT_METADATA_KEY,
             MESSAGE_CONTEXT_METADATA_KEY,
             PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
             PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
@@ -868,7 +877,13 @@ class FlexibleAgentRuntime:
             PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
             apply_connector_evidence,
             build_message_context_snapshot,
+            resolve_message_source_fact,
             resolve_private_authorizations,
+        )
+        from orchestrator.frontend_delivery import (
+            RUN_DELIVERY_ROUTE_METADATA_KEY,
+            freeze_run_delivery_route,
+            route_destination,
         )
 
         metadata = apply_connector_evidence(
@@ -883,6 +898,61 @@ class FlexibleAgentRuntime:
                 metadata=metadata,
                 prompt=clean_prompt,
             )
+        )
+        # PAO resolves the Session and the complete per-Run Connector route
+        # before PCM is built. Passing that exact Session back into admission
+        # prevents a later binding lookup from silently selecting another
+        # Conversation if a frontend switches while this request is queued.
+        (
+            resolved_session,
+            resolved_owner,
+            resolved_surface,
+            resolved_channel_key,
+        ) = await asyncio.to_thread(
+            runtime_session.resolve_request_session,
+            self,
+            source=source,
+            chat_id=chat_id,
+            metadata=metadata,
+        )
+        metadata.update(
+            {
+                "session_id": resolved_session["session_id"],
+                "owner_id": resolved_owner,
+                "session_surface": resolved_surface,
+                "session_channel_key": resolved_channel_key,
+            }
+        )
+        source_fact = resolve_message_source_fact(
+            source=source,
+            chat_id=chat_id,
+            metadata=metadata,
+        )
+        primary_channel_key = resolved_channel_key
+        hchat_context = metadata.get(HCHAT_CONTEXT_METADATA_KEY)
+        if source_fact["id"] == "hchat" and isinstance(hchat_context, Mapping):
+            from_agent = str(hchat_context.get("from_agent") or "unknown").strip().casefold()
+            from_instance = str(hchat_context.get("from_instance") or "").strip().upper()
+            primary_channel_key = (
+                f"{from_agent}@{from_instance}" if from_instance else from_agent
+            )
+        metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = freeze_run_delivery_route(
+            message_source_id=str(source_fact["id"]),
+            session_surface=resolved_surface,
+            session_channel_key=resolved_channel_key,
+            chat_id=chat_id,
+            telegram_requested=telegram_requested,
+            primary_channel_key=primary_channel_key,
+            terminal_exchange=bool(metadata.get("system_exchange_terminal")),
+        )
+        # The legacy execution flag is now only a derived instruction to the
+        # Telegram Connector. Other connector callbacks use the same frozen
+        # route and cannot be enabled or disabled by this boolean.
+        deliver_to_telegram = (
+            route_destination(
+                metadata[RUN_DELIVERY_ROUTE_METADATA_KEY], "telegram"
+            )
+            is not None
         )
         metadata[MESSAGE_CONTEXT_METADATA_KEY] = build_message_context_snapshot(
             self,
@@ -1109,6 +1179,7 @@ class FlexibleAgentRuntime:
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "send")
         delivery_mode = kwargs.pop("_delivery_mode", "normal_send")
+        raise_delivery_error = bool(kwargs.pop("_raise_delivery_error", False))
         if delivery_mode != "failover_notice":
             if await telegram_delivery_failover.handle_blocked_send(
                 self,
@@ -1133,10 +1204,14 @@ class FlexibleAgentRuntime:
                     text=text,
                 )
                 self.telegram_logger.warning(f"Send failed: {exc}")
+                if raise_delivery_error:
+                    raise
                 return None
             except Exception as e:
                 last_error = e
                 self.telegram_logger.warning(f"Send failed: {e}")
+                if raise_delivery_error:
+                    raise
                 await asyncio.sleep(0.8)
         raise last_error
 
@@ -1389,6 +1464,7 @@ class FlexibleAgentRuntime:
                 "think": self._think,
             },
             "presentation_status": runtime_presentation_status(self),
+            "workzone_state": dict(getattr(self, "_workzone_state", {}) or {}),
             "channels": {
                 "telegram": self.telegram_connected,
                 "workbench": True,
@@ -1518,17 +1594,13 @@ class FlexibleAgentRuntime:
 
     def _load_runtime_session_state(self) -> dict:
         if not self.runtime_session_path.exists():
-            return {}
-        try:
-            return json.loads(self.runtime_session_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+            return new_config_json(self.runtime_session_path)
+        return read_config_json(self.runtime_session_path)
 
     def _save_runtime_session_state(self, payload: dict):
-        self.runtime_session_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
-            encoding="utf-8",
-        )
+        if not isinstance(payload, ConfigDocument):
+            raise ValueError("runtime session updates require a revision-bearing read")
+        write_config_json(self.runtime_session_path, payload)
 
     def _detect_instance_name(self) -> str:
         return str(getattr(self.global_config, "instance_id", None) or "HASHI").upper()
@@ -1975,6 +2047,59 @@ class FlexibleAgentRuntime:
             self._mark_error(f"Voice reply failed: {e}")
             return False
 
+    def tui_voice_state(self) -> dict[str, Any]:
+        """Return the shared Agent voice identity without Telegram UI state."""
+
+        return {
+            "profile": self.voice_manager.get_voice_profile_id(),
+            "profiles": [
+                {"id": profile_id, "label": str(profile.get("label") or profile_id)}
+                for profile_id, profile in self.voice_manager.get_voice_profiles()
+            ],
+        }
+
+    def set_tui_voice_profile(self, profile_id: str) -> dict[str, Any]:
+        """Set the existing shared voice identity for a TUI client."""
+
+        available = {profile for profile, _value in self.voice_manager.get_voice_profiles()}
+        if str(profile_id or "").strip().casefold() not in available:
+            raise ValueError("unknown semantic voice profile")
+        self.voice_manager.set_voice_profile(profile_id)
+        return self.tui_voice_state()
+
+    async def synthesize_tui_speech(self, text: str, request_id: str) -> dict[str, Any]:
+        """Generate a bounded local-presentation asset without any Bot send."""
+
+        spoken = str(text or "").strip()
+        if not spoken:
+            raise ValueError("speech text is required")
+        if len(spoken) > 20_000:
+            raise ValueError("speech text is too long")
+        asset = await self.voice_manager.synthesize_reply(
+            self.name,
+            str(request_id or f"tui-say-{uuid4().hex}"),
+            spoken,
+            force=True,
+        )
+        if asset is None:
+            raise RuntimeError("TTS is unavailable for this Agent")
+        try:
+            content = await asyncio.to_thread(asset.ogg_path.read_bytes)
+        except OSError:
+            raise RuntimeError("the generated speech asset could not be read") from None
+        if not content.startswith(b"OggS"):
+            raise RuntimeError("the TTS provider returned malformed Ogg audio")
+        if len(content) > 3 * 1024 * 1024:
+            raise RuntimeError("the generated speech asset exceeds the TUI limit")
+        return {
+            "content_b64": base64.b64encode(content).decode("ascii"),
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "media_type": "audio/ogg",
+            "profile": self.voice_manager.get_voice_profile_id(),
+            "request_id": str(request_id or ""),
+        }
+
     def _format_status_mode_block(self, mode: str, state: Mapping[str, Any], detailed: bool) -> list[str]:
         return runtime_status.format_status_mode_block(mode, state, detailed)
 
@@ -2213,6 +2338,51 @@ class FlexibleAgentRuntime:
             return
         sender_name = sender["agent"].lower()
         sender_instance = (sender.get("instance_id") or "").upper()
+        reply_channel = (
+            f"{sender_name}@{sender_instance}" if sender_instance else sender_name
+        )
+
+        def outcome(
+            delivered: bool,
+            disposition: str,
+            *,
+            error_type: str = "",
+            state: str | None = None,
+        ) -> dict[str, Any]:
+            result = {
+                "attempted": True,
+                "delivered": bool(delivered),
+                "surface": "hchat",
+                "channel_key": reply_channel,
+                "transport": "hchat",
+                "disposition": disposition,
+                "state": state or ("delivered" if delivered else "failed"),
+            }
+            if error_type:
+                result["error_type"] = error_type
+            return result
+
+        request_metadata = getattr(item, "request_metadata", None)
+        if isinstance(request_metadata, Mapping):
+            from orchestrator.frontend_delivery import (
+                RUN_DELIVERY_ROUTE_METADATA_KEY,
+                route_destination,
+            )
+
+            has_frozen_route = RUN_DELIVERY_ROUTE_METADATA_KEY in request_metadata
+            planned = route_destination(
+                request_metadata.get(RUN_DELIVERY_ROUTE_METADATA_KEY), "hchat"
+            )
+            if has_frozen_route and (
+                planned is None or planned["channel_key"] != reply_channel
+            ):
+                self.logger.error(
+                    "Hchat reply route mismatch for %s: planned=%s observed=%s",
+                    getattr(item, "request_id", "unknown"),
+                    planned["channel_key"] if planned is not None else "none",
+                    reply_channel,
+                )
+                return outcome(False, "route_mismatch")
         try:
             from tools.hchat_send import _get_instance_id, _load_config
             local_instance = str(_get_instance_id(_load_config()) or "").upper()
@@ -2227,15 +2397,35 @@ class FlexibleAgentRuntime:
                 for rt in getattr(orchestrator, "runtimes", []):
                     if getattr(rt, "name", "") == sender_name and hasattr(rt, "enqueue_api_text"):
                         try:
-                            await rt.enqueue_api_text(
+                            request_id = await rt.enqueue_api_text(
                                 reply_text,
                                 source=f"hchat-reply:{self.name}",
                                 deliver_to_telegram=True,
+                                request_metadata={
+                                    "system_exchange": True,
+                                    "system_exchange_kind": "reply",
+                                    "system_exchange_terminal": True,
+                                },
                             )
-                            self.logger.info(f"Hchat reply routed to local runtime '{sender_name}'")
+                            if request_id:
+                                self.logger.info(f"Hchat reply routed to local runtime '{sender_name}'")
+                                return outcome(
+                                    False,
+                                    "local_agent_enqueued",
+                                    state="queued",
+                                )
+                            self.logger.warning(
+                                "Hchat reply to local runtime '%s' was not admitted",
+                                sender_name,
+                            )
+                            return outcome(False, "local_agent_not_admitted")
                         except Exception as e:
                             self.logger.warning(f"Failed to route hchat reply to '{sender_name}': {e}")
-                        return
+                            return outcome(
+                                False,
+                                "local_agent_exception",
+                                error_type=type(e).__name__,
+                            )
 
         # ── 2. Explicit cross-instance reply when sender instance is known ────
         if sender_instance and sender_instance != local_instance:
@@ -2248,8 +2438,12 @@ class FlexibleAgentRuntime:
                     functools.partial(send_hchat, sender_name, self.name, reply_text, target_instance=sender_instance),
                 )
                 if ok:
-                    self.logger.info(f"Hchat reply cross-instance delivered to '{sender_name}@{sender_instance}'")
-                    return
+                    self.logger.info(f"Hchat reply cross-instance enqueued for '{sender_name}@{sender_instance}'")
+                    return outcome(
+                        False,
+                        "cross_instance_enqueued",
+                        state="queued",
+                    )
             except Exception as e:
                 self.logger.warning(f"Hchat reply: cross-instance delivery to '{sender_name}@{sender_instance}' failed: {e}")
 
@@ -2271,11 +2465,16 @@ class FlexibleAgentRuntime:
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                             if resp.status < 300:
-                                self.logger.info(f"Hchat reply delivered to external '{sender_name}' via {url}")
+                                self.logger.info(f"Hchat reply enqueued for external '{sender_name}' via {url}")
+                                return outcome(
+                                    False,
+                                    "contact_http_enqueued",
+                                    state="queued",
+                                )
                             else:
                                 body = await resp.text()
                                 self.logger.warning(f"Hchat reply to '{sender_name}' got HTTP {resp.status}: {body[:200]}")
-                    return
+                                return outcome(False, f"contact_http_{resp.status}")
         except Exception as e:
             self.logger.warning(f"Hchat reply: contacts fallback for '{sender_name}' failed: {e}")
 
@@ -2286,14 +2485,19 @@ class FlexibleAgentRuntime:
             loop = asyncio.get_event_loop()
             ok = await loop.run_in_executor(None, functools.partial(send_hchat, sender_name, self.name, reply_text))
             if ok:
-                self.logger.info(f"Hchat reply cross-instance delivered to '{sender_name}'")
-                return
+                self.logger.info(f"Hchat reply cross-instance enqueued for '{sender_name}'")
+                return outcome(
+                    False,
+                    "cross_instance_discovered_enqueued",
+                    state="queued",
+                )
         except Exception as e:
             self.logger.warning(f"Hchat reply: cross-instance delivery to '{sender_name}' failed: {e}")
 
         self.logger.warning(
             f"Hchat reply: sender '{sender_name}' not found locally, in contacts, or cross-instance"
         )
+        return outcome(False, "route_unavailable")
 
     async def enqueue_api_media(
         self,
@@ -2440,23 +2644,20 @@ class FlexibleAgentRuntime:
         requested: str,
     ) -> tuple[str, str, int]:
         reset = requested == "default"
-        if reset:
-            ui_language.reset_preferred_locale(self, update)
-            selected = ui_language.preferred_locale(self, update)
-        else:
-            selected = ui_language.normalize_locale(requested, fallback="")
-            if selected not in ui_language.SUPPORTED_LOCALES:
-                raise ValueError(requested)
-            ui_language.set_preferred_locale(self, selected, update)
-
-        chat_id = ui_language.chat_id_from_update(update)
-        failures = 0
-        if chat_id is not None:
-            failures = await runtime_command_binding.sync_user_command_menus(
-                self,
-                chat_id=chat_id,
-                locale=selected,
-            )
+        selected = (
+            ui_language.configured_default_locale(self)
+            if reset else ui_language.normalize_locale(requested, fallback="")
+        )
+        if selected not in ui_language.SUPPORTED_LOCALES:
+            raise ValueError(requested)
+        try:
+            if reset:
+                ui_language.reset_preferred_locale(self, update)
+                selected = ui_language.preferred_locale(self, update)
+            else:
+                ui_language.set_preferred_locale(self, selected, update)
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise RuntimeError(f"language preference save failed: {exc}") from exc
         catalog = ui_language.load_catalog(selected)
         key = "language.reset" if reset else "language.changed"
         notice = ui_language.tr(
@@ -2464,7 +2665,75 @@ class FlexibleAgentRuntime:
             locale=selected,
             language=catalog.native_name,
         )
-        return selected, notice, failures
+        return selected, notice, 0
+
+    def _schedule_language_menu_sync(
+        self,
+        update: Update,
+        *,
+        chat_id: int | str | None,
+        locale: str,
+    ) -> None:
+        if chat_id is None:
+            return
+        key = str(chat_id)
+        generations = getattr(self, "_language_menu_sync_generations", None)
+        if not isinstance(generations, dict):
+            generations = {}
+            self._language_menu_sync_generations = generations
+        generation = int(generations.get(key, 0)) + 1
+        generations[key] = generation
+        locks = getattr(self, "_language_menu_sync_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._language_menu_sync_locks = locks
+        lock = locks.setdefault(key, asyncio.Lock())
+
+        async def run() -> None:
+            async with lock:
+                if generations.get(key) != generation:
+                    return
+                result = await runtime_command_binding.sync_user_command_menus(
+                    self, chat_id=chat_id, locale=locale
+                )
+                if generations.get(key) != generation or not result.failures:
+                    return
+                codes = {item["code"] for item in result.failures}
+                if locale == "zh-CN":
+                    if "request_timeout" in codes:
+                        cause = "菜单同步超时"
+                    elif "connection_unavailable" in codes:
+                        cause = "菜单同步无法连接"
+                    else:
+                        cause = "菜单同步失败"
+                    if result.succeeded:
+                        cause = "部分 Agent 菜单已更新；" + cause
+                    warning = (
+                        f"语言偏好已保存，但{cause}（{result.failure_count} 个 Agent）。"
+                        "稍后会在重连时重试。"
+                    )
+                else:
+                    if "request_timeout" in codes:
+                        cause = "menu synchronization timed out"
+                    elif "connection_unavailable" in codes:
+                        cause = "menu synchronization could not connect"
+                    else:
+                        cause = "menu synchronization failed"
+                    if result.succeeded:
+                        cause = "some Agent menus updated; " + cause
+                    warning = (
+                        f"Language preference was saved, but {cause} for "
+                        f"{result.failure_count} Agent(s). It will retry on reconnect."
+                    )
+                await self._reply_text(update, f"⚠️ {warning}")
+
+        tasks = getattr(self, "_language_menu_sync_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            self._language_menu_sync_tasks = tasks
+        task = asyncio.create_task(run(), name=f"language-menu-sync:{key}:{generation}")
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     async def cmd_language(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -2472,13 +2741,12 @@ class FlexibleAgentRuntime:
         arg = " ".join(context.args).strip() if context.args else ""
         current = ui_language.preferred_locale(self, update)
         notice = None
-        failures = 0
         if arg and arg.casefold() not in {"status", "menu"}:
             requested = arg.casefold()
             if requested in {"default", "reset", "auto"}:
                 requested = "default"
             try:
-                current, notice, failures = await self._apply_ui_language(
+                current, notice, _failures = await self._apply_ui_language(
                     update,
                     requested=requested,
                 )
@@ -2488,19 +2756,25 @@ class FlexibleAgentRuntime:
                     ui_language.tr("language.invalid", locale=current),
                 )
                 return
-        if failures:
-            warning = ui_language.tr(
-                "language.menu_sync_warning",
-                locale=current,
-                count=failures,
-            )
-            notice = f"{notice}\n⚠️ {warning}" if notice else f"⚠️ {warning}"
+            except RuntimeError:
+                await self._reply_text(
+                    update,
+                    "语言偏好无法安全保存；原设置保持不变。" if current == "zh-CN" else
+                    "The language preference could not be saved safely; the previous setting was kept.",
+                )
+                return
         await self._reply_text(
             update,
             self._language_menu_text(locale=current, notice=notice),
             parse_mode="HTML",
             reply_markup=self._language_keyboard(locale=current),
         )
+        if notice:
+            self._schedule_language_menu_sync(
+                update,
+                chat_id=ui_language.chat_id_from_update(update),
+                locale=current,
+            )
 
     async def callback_language(self, update: Update, context: Any):
         del context
@@ -2520,7 +2794,7 @@ class FlexibleAgentRuntime:
             )
             return
         try:
-            selected, notice, failures = await self._apply_ui_language(
+            selected, notice, _failures = await self._apply_ui_language(
                 update,
                 requested=requested,
             )
@@ -2530,18 +2804,24 @@ class FlexibleAgentRuntime:
                 show_alert=True,
             )
             return
-        if failures:
-            notice += "\n⚠️ " + ui_language.tr(
-                "language.menu_sync_warning",
-                locale=selected,
-                count=failures,
+        except RuntimeError:
+            await query.answer(
+                "语言偏好无法安全保存。" if old_locale == "zh-CN" else
+                "The language preference could not be saved safely.",
+                show_alert=True,
             )
+            return
         await query.edit_message_text(
             self._language_menu_text(locale=selected, notice=notice),
             parse_mode="HTML",
             reply_markup=self._language_keyboard(locale=selected),
         )
         await query.answer(notice.splitlines()[0][:200])
+        self._schedule_language_menu_sync(
+            update,
+            chat_id=ui_language.chat_id_from_update(update),
+            locale=selected,
+        )
 
     def _startable_agent_keyboard(self) -> InlineKeyboardMarkup | None:
         orchestrator = getattr(self, "orchestrator", None)
@@ -8445,18 +8725,22 @@ class FlexibleAgentRuntime:
     async def cmd_promote(self, update: Update, context: Any):
         await runtime_session.cmd_promote(self, update, context)
 
-    def _get_skill_state(self) -> dict:
+    def _get_skill_state(self, *, strict: bool = False) -> dict:
         path = self.workspace_dir / "skill_state.json"
+        if not path.exists():
+            return new_config_json(path)
         try:
-            return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            return read_config_json(path)
         except Exception:
+            if strict:
+                raise
             return {}
 
     def _set_skill_state(self, key: str, value):
         path = self.workspace_dir / "skill_state.json"
-        state = self._get_skill_state()
+        state = self._get_skill_state(strict=True)
         state[key] = value
-        path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_config_json(path, state)
 
     async def cmd_memory(self, update: Update, context: Any):
         await runtime_workspace.cmd_memory(self, update, context)
@@ -10600,6 +10884,16 @@ class FlexibleAgentRuntime:
                             engine=self.config.active_backend,
                             line_items=_meter_line_items,
                             token_source="provider",
+                            prompt_cache_hit_tokens=getattr(
+                                response.usage,
+                                "prompt_cache_hit_tokens",
+                                None,
+                            ),
+                            prompt_cache_miss_tokens=getattr(
+                                response.usage,
+                                "prompt_cache_miss_tokens",
+                                None,
+                            ),
                         )
                     else:
                         # CLI backend: estimate from full assembled prompt (includes history)

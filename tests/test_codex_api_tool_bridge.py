@@ -306,6 +306,7 @@ class _FakeAppServerProcess:
                             "tokenUsage": {
                                 "total": {
                                     "inputTokens": 11,
+                                    "cachedInputTokens": 7,
                                     "outputTokens": 3,
                                     "reasoningOutputTokens": 1,
                                 }
@@ -826,6 +827,8 @@ async def test_codex_app_server_returns_final_text_and_usage_in_stream_mode(monk
     assert response.usage.input_tokens == 11
     assert response.usage.output_tokens == 3
     assert response.usage.thinking_tokens == 1
+    assert response.usage.prompt_cache_hit_tokens == 7
+    assert response.usage.prompt_cache_miss_tokens == 4
     activity_events = [
         event for event in events if event.kind == KIND_PROVIDER_ACTIVITY
     ]

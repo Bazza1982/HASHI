@@ -80,6 +80,10 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     thinking_tokens: int = 0
+    # ``None`` means the backend omitted the metric; zero means it reported
+    # an observed zero. Keep these at the end for positional compatibility.
+    prompt_cache_hit_tokens: int | None = None
+    prompt_cache_miss_tokens: int | None = None
 
 
 @dataclass

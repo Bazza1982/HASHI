@@ -163,9 +163,33 @@ def accept_request(
     session, resolved_owner, surface, channel_key = resolve_request_session(
         runtime, source=source, chat_id=chat_id, metadata=request_metadata
     )
+    metadata = dict(request_metadata or {})
+    expected_session_id = str(metadata.get("session_id") or "").strip()
+    expected_owner = str(metadata.get("owner_id") or "").strip()
+    expected_surface = str(metadata.get("session_surface") or "").strip().casefold()
+    expected_channel = str(metadata.get("session_channel_key") or "").strip()
+    if (
+        (expected_session_id and expected_session_id != session["session_id"])
+        or (expected_owner and expected_owner != resolved_owner)
+        or (expected_surface and expected_surface != surface)
+        or (expected_channel and expected_channel != channel_key)
+    ):
+        raise SessionConflict("request route changed during admission")
+    route = metadata.get("_run_delivery_route")
+    message_context = metadata.get("message_context_snapshot")
+    if route is not None:
+        from orchestrator.frontend_delivery import project_run_delivery_route
+
+        try:
+            projected_route = project_run_delivery_route(route)
+        except ValueError as exc:
+            raise SessionConflict("request delivery route is invalid") from exc
+        if not isinstance(message_context, Mapping) or dict(
+            message_context.get("output_destination") or {}
+        ) != projected_route:
+            raise SessionConflict("request PCM route projection is inconsistent")
     if str(source or "").strip().lower() in _INTERNAL_NON_CHAT_SOURCES:
         return session, None, resolved_owner, surface, channel_key
-    metadata = dict(request_metadata or {})
     blocks = metadata.get("session_message_content")
     if isinstance(blocks, list):
         blocks = [dict(block) for block in blocks if isinstance(block, Mapping)]
@@ -201,6 +225,11 @@ def accept_request(
         message_context=(
             metadata.get("message_context_snapshot")
             if isinstance(metadata.get("message_context_snapshot"), Mapping)
+            else None
+        ),
+        delivery_route=(
+            metadata.get("_run_delivery_route")
+            if isinstance(metadata.get("_run_delivery_route"), Mapping)
             else None
         ),
     )
@@ -536,41 +565,53 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
 
 def record_assistant_delivery(
     runtime: Any,
-    item: Any,
+    item: Any | None,
     *,
     delivered: bool,
     assistant_text: str | None = None,
     transport: str,
     completion_path: str,
     disposition: str = "",
+    request_id: str | None = None,
+    surface: str | None = None,
+    channel_key: str | None = None,
+    outcome_state: str | None = None,
 ) -> dict[str, Any] | None:
     """Record a final delivery outcome without disrupting response flow."""
 
-    if not getattr(item, "run_id", None):
-        return None
-    surface = str(getattr(item, "session_surface", None) or "").strip().lower()
-    channel_key = str(
-        getattr(item, "session_channel_key", None) or ""
+    resolved_request_id = str(
+        request_id or getattr(item, "request_id", None) or ""
     ).strip()
-    if not surface or not channel_key:
+    if not resolved_request_id:
+        return None
+    if item is not None and not getattr(item, "run_id", None) and request_id is None:
+        return None
+    resolved_surface = str(
+        surface or getattr(item, "session_surface", None) or ""
+    ).strip().lower()
+    resolved_channel_key = str(
+        channel_key or getattr(item, "session_channel_key", None) or ""
+    ).strip()
+    if not resolved_surface or not resolved_channel_key:
         return None
     try:
         return ensure_store(runtime).record_assistant_delivery(
-            item.request_id,
+            resolved_request_id,
             delivered=delivered,
             assistant_text=assistant_text,
-            surface=surface,
-            channel_key=channel_key,
+            surface=resolved_surface,
+            channel_key=resolved_channel_key,
             transport=transport,
             completion_path=completion_path,
             disposition=disposition,
+            outcome_state=outcome_state,
         )
     except Exception as exc:
         logger = getattr(runtime, "logger", None)
         if logger is not None:
             logger.warning(
                 "Failed to persist assistant delivery receipt for %s: %s: %s",
-                getattr(item, "request_id", "unknown"),
+                resolved_request_id,
                 type(exc).__name__,
                 exc,
             )

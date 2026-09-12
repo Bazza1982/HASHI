@@ -7,6 +7,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from orchestrator.config_json import new_config_json, read_config_json, write_config_json
+
 
 def load_languages(bridge_home: Path) -> list[dict]:
     lang_dir = bridge_home / "onboarding" / "languages"
@@ -18,7 +20,7 @@ def load_languages(bridge_home: Path) -> list[dict]:
     langs = []
     for f in files:
         try:
-            data = json.loads(f.read_text(encoding="utf-8"))
+            data = json.loads(f.read_bytes().decode("utf-8-sig"))
             data["_file"] = f.name
             langs.append(data)
         except Exception:
@@ -66,6 +68,21 @@ def verify_openrouter(key: str) -> bool:
 
 def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key: str | None = None):
     """Create agents.json, secrets.json, and workspace for the onboarding agent."""
+    agents_path = bridge_home / "agents.json"
+    secrets_path = bridge_home / "secrets.json"
+    # Validate every existing declaration before creating workspace artefacts
+    # or publishing either configuration file.
+    agents_json = (
+        read_config_json(agents_path)
+        if agents_path.exists()
+        else new_config_json(agents_path)
+    )
+    secrets = (
+        read_config_json(secrets_path)
+        if secrets_path.exists()
+        else new_config_json(secrets_path)
+    )
+
     workspace_dir = bridge_home / "workspaces" / "onboarding_agent"
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,22 +140,32 @@ def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key
         "telegram_token_key": "hashiko",
     }
 
-    agents_json = {"global": {"authorized_id": 0, "whatsapp": {"enabled": False}}, "agents": [agent_cfg]}
-
-    # Write agents.json
-    agents_path = bridge_home / "agents.json"
-    agents_path.write_text(json.dumps(agents_json, indent=2, ensure_ascii=False), encoding="utf-8")
+    if agents_path.exists():
+        rows = agents_json.get("agents", [])
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("agents.json agents must be a list of objects")
+        for index, row in enumerate(rows):
+            if row.get("name") == "hashiko":
+                rows[index] = agent_cfg
+                break
+        else:
+            rows.append(agent_cfg)
+        agents_json["agents"] = rows
+        agents_json.setdefault(
+            "global", {"authorized_id": 0, "whatsapp": {"enabled": False}}
+        )
+    else:
+        agents_json.update(
+            {
+                "global": {"authorized_id": 0, "whatsapp": {"enabled": False}},
+                "agents": [agent_cfg],
+            }
+        )
+    write_config_json(agents_path, agents_json)
 
     # Write secrets.json (merge if exists)
-    secrets_path = bridge_home / "secrets.json"
-    secrets = {}
-    if secrets_path.exists():
-        try:
-            secrets = json.loads(secrets_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
     secrets.setdefault("hashiko", "WORKBENCH_ONLY_NO_TOKEN")
     secrets.setdefault("authorized_telegram_id", 0)
     if or_key:
         secrets["openrouter_key"] = or_key
-    secrets_path.write_text(json.dumps(secrets, indent=2), encoding="utf-8")
+    write_config_json(secrets_path, secrets)

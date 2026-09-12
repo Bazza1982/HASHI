@@ -37,12 +37,24 @@ class ConfigDurabilityError(OSError):
 class ConfigDocument(dict):
     """A normal JSON object with out-of-band, non-serialized source metadata."""
 
-    def __init__(self, value: dict, *, source: Path, revision: str):
+    def __init__(self, value: dict, *, source: Path, revision: str | None):
         super().__init__(value)
         self.source = source
         self.revision = revision
 
     def copy(self) -> ConfigDocument:
+        return type(self)(self, source=self.source, revision=self.revision)
+
+
+class ConfigList(list):
+    """Revision-bearing compatibility view for a legacy root JSON array."""
+
+    def __init__(self, value: list, *, source: Path, revision: str | None):
+        super().__init__(value)
+        self.source = source
+        self.revision = revision
+
+    def copy(self) -> ConfigList:
         return type(self)(self, source=self.source, revision=self.revision)
 
 
@@ -57,6 +69,31 @@ def read_config_json(path: str | Path) -> ConfigDocument:
     if not isinstance(value, dict):
         raise ValueError("configuration must be a JSON object")
     return ConfigDocument(value, source=source, revision=_revision(raw))
+
+
+def read_managed_json(path: str | Path) -> ConfigDocument | ConfigList:
+    """Read an object, or a retained legacy root array, with a revision."""
+
+    source = Path(path).expanduser().resolve()
+    raw = source.read_bytes()
+    value = json.loads(raw.decode("utf-8-sig"))
+    if isinstance(value, dict):
+        return ConfigDocument(value, source=source, revision=_revision(raw))
+    if isinstance(value, list):
+        return ConfigList(value, source=source, revision=_revision(raw))
+    raise ValueError("managed JSON must be an object or legacy array")
+
+
+def new_config_json(path: str | Path, value: dict | None = None) -> ConfigDocument:
+    """Return an absent-file snapshot for a race-safe first publication.
+
+    The returned document behaves like a normal dictionary, but its ``None``
+    revision means that publication is allowed only while the destination is
+    still absent.  This avoids the common ``exists()``/write creation race.
+    """
+
+    source = Path(path).expanduser().resolve()
+    return ConfigDocument(dict(value or {}), source=source, revision=None)
 
 
 @contextmanager
@@ -140,7 +177,7 @@ def _sync_directory(path: Path) -> None:
 
 def write_config_json(
     path: str | Path,
-    payload: dict,
+    payload: dict | ConfigList,
     *,
     expected_revision: str | None | object = _UNSPECIFIED,
     lock_timeout: float = 5.0,
@@ -148,16 +185,17 @@ def write_config_json(
     """Publish validated UTF-8/LF bytes, with no BOM or partial destination.
 
     A ConfigDocument carries its read revision automatically. Plain dicts are
-    backwards-compatible full replacements; pass an explicit read revision for
+    backwards-compatible full replacements; a revision-bearing ``ConfigList``
+    is accepted only for legacy root-array migration paths. Pass a read revision for
     optimistic concurrency, or None to require an absent destination. All
     participating writers use the same lock. Unmigrated/external writers do not.
     Errors before os.replace preserve the destination. ConfigDurabilityError is
     deliberately different: committed=True means do not blindly retry/rollback.
     """
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) and not isinstance(payload, ConfigList):
         raise TypeError("configuration must be a JSON object")
     target = Path(path).expanduser().resolve()
-    if isinstance(payload, ConfigDocument):
+    if isinstance(payload, (ConfigDocument, ConfigList)):
         if payload.source != target:
             raise ConfigConflictError("configuration snapshot belongs to another file")
         if expected_revision is _UNSPECIFIED:
@@ -189,7 +227,7 @@ def write_config_json(
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(candidate, target)
-            if isinstance(payload, ConfigDocument):
+            if isinstance(payload, (ConfigDocument, ConfigList)):
                 payload.revision = revision
             try:
                 _sync_directory(target.parent)
@@ -202,3 +240,36 @@ def write_config_json(
                 os.close(descriptor)
             candidate.unlink(missing_ok=True)
     return revision
+
+
+def delete_config_json(
+    path: str | Path,
+    *,
+    expected_revision: str,
+    lock_timeout: float = 5.0,
+) -> None:
+    """Delete one managed document only if it is still the observed version."""
+
+    if not isinstance(expected_revision, str) or len(expected_revision) != 64:
+        raise ValueError("expected_revision must be a SHA-256 revision")
+    if any(char not in "0123456789abcdef" for char in expected_revision):
+        raise ValueError("expected_revision must be a SHA-256 revision")
+    target = Path(path).expanduser().resolve()
+    with _write_lock(target, lock_timeout):
+        try:
+            current = _revision(target.read_bytes())
+        except FileNotFoundError as exc:
+            raise ConfigConflictError(
+                "configuration changed since it was read; reload before deleting"
+            ) from exc
+        if current != expected_revision:
+            raise ConfigConflictError(
+                "configuration changed since it was read; reload before deleting"
+            )
+        target.unlink()
+        try:
+            _sync_directory(target.parent)
+        except OSError as exc:
+            raise ConfigDurabilityError(
+                "configuration was deleted, but directory synchronization failed"
+            ) from exc

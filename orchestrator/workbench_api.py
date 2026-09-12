@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import hashlib
+import inspect
 import json
 import logging
 import mimetypes
@@ -22,6 +25,7 @@ from orchestrator.admin_local_testing import (
 )
 from orchestrator.agent_overview import build_agent_overview
 from orchestrator.capability_broker import CapabilityBrokerError
+from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
@@ -75,6 +79,7 @@ from orchestrator.flexible_backend_registry import (
     is_selectable_backend,
 )
 from orchestrator.frontend_delivery import (
+    RUN_DELIVERY_ROUTE_METADATA_KEY,
     normalize_tui_run_delivery_policy,
     tui_request_metadata,
 )
@@ -613,6 +618,8 @@ class WorkbenchApiServer:
             "/api/project-chat/{name}/{project}", self.handle_project_chat_log
         )
         self.app.router.add_post("/api/chat", self.handle_chat)
+        self.app.router.add_post("/api/tui/speech", self.handle_tui_speech)
+        self.app.router.add_post("/api/tui/voice", self.handle_tui_voice)
         self.app.router.add_get(
             "/api/capabilities/message-source", self.handle_message_source_capabilities
         )
@@ -731,7 +738,7 @@ class WorkbenchApiServer:
         return list(self.runtimes)
 
     def _load_agent_rows(self, *, include_inactive: bool = False) -> list[dict]:
-        raw = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
+        raw = read_config_json(self.config_path)
         return [
             agent
             for agent in raw.get("agents", [])
@@ -739,33 +746,10 @@ class WorkbenchApiServer:
         ]
 
     def _load_raw_agent_config(self) -> dict:
-        return json.loads(self.config_path.read_text(encoding="utf-8-sig"))
+        return read_config_json(self.config_path)
 
     def _write_raw_agent_config(self, raw: dict) -> None:
-        original = self.config_path.read_bytes()
-        uses_bom = original.startswith(b"\xef\xbb\xbf")
-        newline = "\r\n" if b"\r\n" in original else "\n"
-        rendered = json.dumps(raw, indent=2, ensure_ascii=False) + "\n"
-        if newline == "\r\n":
-            rendered = rendered.replace("\n", "\r\n")
-        encoded = rendered.encode("utf-8")
-        if uses_bom:
-            encoded = b"\xef\xbb\xbf" + encoded
-        temporary = self.config_path.with_name(
-            f".{self.config_path.name}.tmp-{os.getpid()}-{time.time_ns()}"
-        )
-        try:
-            temporary.write_bytes(encoded)
-            try:
-                temporary.chmod(self.config_path.stat().st_mode)
-            except OSError:
-                pass
-            temporary.replace(self.config_path)
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+        write_config_json(self.config_path, raw)
 
     def _load_agent_capability_rows(self):
         capabilities_path = self.config_path.parent / "agent_capabilities.json"
@@ -5185,6 +5169,154 @@ class WorkbenchApiServer:
         local_path.write_bytes(payload)
         return local_path, filename
 
+    def _decode_tui_attachment(self, attachment: Mapping[str, Any]) -> tuple[bytes, str, str]:
+        filename = Path(str(attachment.get("filename") or "")).name
+        if not filename or filename != str(attachment.get("filename") or ""):
+            raise ValueError("invalid attachment filename")
+        try:
+            payload = base64.b64decode(
+                str(attachment.get("content_b64") or ""), validate=True
+            )
+        except (ValueError, binascii.Error):
+            raise ValueError("invalid attachment encoding") from None
+        if not payload or len(payload) > 25 * 1024 * 1024:
+            raise ValueError("attachment must contain at most 25 MiB")
+        declared_size = attachment.get("size_bytes")
+        if declared_size is not None and int(declared_size) != len(payload):
+            raise ValueError("attachment size mismatch")
+        digest = hashlib.sha256(payload).hexdigest()
+        declared_digest = str(attachment.get("sha256") or "")
+        if declared_digest and declared_digest != digest:
+            raise ValueError("attachment digest mismatch")
+        media_type = str(attachment.get("media_type") or "application/octet-stream")
+        return payload, filename, media_type
+
+    def _resolve_workzone_attachment(self, runtime: Any, reference: str) -> tuple[bytes, str, str]:
+        from orchestrator.workzone import active_workzone_slots, normalize_workzone_state
+
+        raw_reference = str(reference or "").strip()
+        relative = Path(raw_reference)
+        if (
+            not raw_reference
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise ValueError("Workzone attachment must be a relative file reference")
+        state = getattr(runtime, "_workzone_state", None)
+        if state is None:
+            state = dict(getattr(runtime, "metadata", {}) or {}).get("workzone_state")
+        slots = active_workzone_slots(normalize_workzone_state(state), available_only=True)
+        if not slots:
+            raise ValueError("no enabled Workzone is available for this Agent")
+        for slot in slots:
+            root = Path(str(slot.get("path") or "")).resolve()
+            candidate = (root / relative).resolve()
+            if candidate.is_relative_to(root) and candidate.is_file():
+                try:
+                    if candidate.stat().st_size > 25 * 1024 * 1024:
+                        raise ValueError("Workzone attachment exceeds the 25 MiB limit")
+                    payload = candidate.read_bytes()
+                except OSError:
+                    raise ValueError("Workzone attachment could not be read") from None
+                return (
+                    payload,
+                    candidate.name,
+                    mimetypes.guess_type(candidate.name)[0] or "application/octet-stream",
+                )
+        raise ValueError("Workzone attachment was not found in an enabled Workzone")
+
+    async def handle_tui_voice(self, request):
+        """Read or change the selected Agent's shared semantic voice profile."""
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "code": "invalid_json", "error": "invalid JSON body"},
+                status=400,
+            )
+        runtime = self._runtime_map().get(str(payload.get("agent") or ""))
+        if runtime is None:
+            return web.json_response(
+                {"ok": False, "code": "agent_not_found", "error": "agent not found"},
+                status=404,
+            )
+        profile = str(payload.get("profile") or "").strip().casefold()
+        method_name = "set_tui_voice_profile" if profile else "tui_voice_state"
+        method = getattr(runtime, method_name, None)
+        if not callable(method):
+            return web.json_response(
+                {"ok": False, "code": "voice_unavailable", "error": "voice controls are unavailable"},
+                status=503,
+            )
+        try:
+            result = method(profile) if profile else method()
+            if inspect.isawaitable(result):
+                result = await result
+        except ValueError as exc:
+            return web.json_response(
+                {"ok": False, "code": "invalid_voice_profile", "error": str(exc)},
+                status=400,
+            )
+        except RuntimeError as exc:
+            return web.json_response(
+                {"ok": False, "code": "voice_update_failed", "error": str(exc)},
+                status=503,
+            )
+        state = dict(result or {})
+        return web.json_response({"ok": True, **state})
+
+    async def handle_tui_speech(self, request):
+        """Generate a TUI-only audio asset without a Connector delivery side effect."""
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "code": "invalid_json", "error": "invalid JSON body"},
+                status=400,
+            )
+        runtime = self._runtime_map().get(str(payload.get("agent") or ""))
+        if runtime is None:
+            return web.json_response(
+                {"ok": False, "code": "agent_not_found", "error": "agent not found"},
+                status=404,
+            )
+        text = str(payload.get("text") or "").strip()
+        request_id = str(payload.get("request_id") or "").strip()
+        if not text or len(text) > 20_000 or not request_id or len(request_id) > 160:
+            return web.json_response(
+                {"ok": False, "code": "invalid_speech_request", "error": "valid text and request_id are required"},
+                status=400,
+            )
+        method = getattr(runtime, "synthesize_tui_speech", None)
+        if not callable(method):
+            return web.json_response(
+                {"ok": False, "code": "tts_unavailable", "error": "TTS is unavailable for this Agent"},
+                status=503,
+            )
+        try:
+            result = method(text, request_id)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            logging.getLogger("BridgeU.Workbench").warning(
+                "TUI speech generation failed: agent=%s error=%s",
+                getattr(runtime, "name", "unknown"),
+                exc,
+            )
+            return web.json_response(
+                {"ok": False, "code": "tts_generation_failed", "error": str(exc)},
+                status=503,
+            )
+        response = dict(result or {})
+        if len(str(response.get("content_b64") or "")) > 4_200_000:
+            return web.json_response(
+                {"ok": False, "code": "speech_asset_too_large", "error": "generated speech is too large"},
+                status=502,
+            )
+        return web.json_response({"ok": True, **response})
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -5309,6 +5441,8 @@ class WorkbenchApiServer:
         payload = await request.json()
         agent_name = payload.get("agent") or payload.get("agentId")
         text = (payload.get("text") or "").strip()
+        attachment_spec = payload.get("attachment")
+        workzone_ref = str(payload.get("workzone_ref") or "").strip()
         runtime = runtime_map.get(agent_name)
         if runtime is None:
             from orchestrator.agent_move.service import moved_agent_destination
@@ -5330,7 +5464,7 @@ class WorkbenchApiServer:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
-        if not text:
+        if not text and not isinstance(attachment_spec, Mapping) and not workzone_ref:
             return web.json_response(
                 {"ok": False, "error": "text is required"}, status=400
             )
@@ -5361,6 +5495,7 @@ class WorkbenchApiServer:
                 PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
                 PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
                 PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+                RUN_DELIVERY_ROUTE_METADATA_KEY,
             }
             session_metadata.update(
                 {
@@ -5456,6 +5591,50 @@ class WorkbenchApiServer:
             ]
         if isinstance(binding, Mapping):
             session_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = dict(binding)
+        if isinstance(attachment_spec, Mapping) or workzone_ref:
+            if isinstance(attachment_spec, Mapping) and workzone_ref:
+                return web.json_response(
+                    {"ok": False, "error": "exactly one attachment source is required"},
+                    status=400,
+                )
+            try:
+                if isinstance(attachment_spec, Mapping):
+                    media_payload, filename, declared_type = self._decode_tui_attachment(
+                        attachment_spec
+                    )
+                else:
+                    media_payload, filename, declared_type = self._resolve_workzone_attachment(
+                        runtime, workzone_ref
+                    )
+                local_path, original_name = self._save_upload(
+                    runtime, filename=filename, payload=media_payload
+                )
+                media_kind = self._classify_upload(
+                    original_name,
+                    declared_media_type="",
+                    content_type=declared_type,
+                )
+                request_id = await runtime.enqueue_api_media(
+                    local_path=local_path,
+                    media_kind=media_kind,
+                    filename=original_name,
+                    caption=text,
+                    source=source,
+                    deliver_to_telegram=telegram_mirror,
+                    request_metadata=session_metadata,
+                    idempotency_key=str(payload.get("idempotency_key") or "") or None,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                return web.json_response(
+                    {"ok": False, "error": str(exc), "error_code": "attachment_rejected"},
+                    status=400,
+                )
+            if not request_id:
+                return web.json_response(
+                    {"ok": False, "error": "attachment request was not accepted"},
+                    status=409,
+                )
+            return web.json_response({"ok": True, "request_id": request_id})
         slash_result = await try_execute_slash_command_text(
             runtime,
             text,
@@ -6997,10 +7176,16 @@ class WorkbenchApiServer:
                 ttl_seconds=float(payload.get("ttl_seconds") or 90),
             )
         except (ValueError, TypeError, CapabilityBrokerError) as exc:
+            workers = getattr(self.orchestrator, "function_workers", None)
+            if workers is not None:
+                await workers.broadcast_topology()
             return web.json_response(
                 {"ok": False, "error": str(exc)},
                 status=403,
             )
+        workers = getattr(self.orchestrator, "function_workers", None)
+        if workers is not None:
+            await workers.broadcast_topology()
         return web.json_response(
             {"ok": True, "registration": registration.to_dict()}
         )

@@ -16,6 +16,13 @@ from uuid import uuid4
 import yaml
 
 from orchestrator.her_v2.models import effort_display_label
+from orchestrator.config_json import (
+    ConfigDocument,
+    ConfigList,
+    new_config_json,
+    read_managed_json,
+    write_config_json,
+)
 from orchestrator.her_v2.request_policy import (
     discard_legacy_job_effort_in_place,
     job_effort_policy,
@@ -271,46 +278,51 @@ class SkillManager:
     def _skill_state_path(self, workspace_dir: Path) -> Path:
         return Path(workspace_dir) / "skill_state.json"
 
-    def _load_json(self, path: Path, default: Any) -> Any:
+    def _load_json(self, path: Path, default: Any, *, strict: bool = False) -> Any:
         if not path.exists():
-            return default
+            return new_config_json(path, default) if isinstance(default, dict) else default
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return read_managed_json(path)
         except Exception:
+            if strict:
+                raise
             return default
 
     def _save_json(self, path: Path, payload: Any):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8"
-        )
+        if not isinstance(payload, (ConfigDocument, ConfigList)):
+            if path.exists():
+                raise ValueError(
+                    f"revision-bearing read required before updating {path.name}"
+                )
+            if not isinstance(payload, dict):
+                raise ValueError("new managed Skill state must be an object")
+            payload = new_config_json(path, payload)
+        write_config_json(path, payload)
 
-    def _load_skill_registry(self) -> dict[str, Any]:
+    def _load_skill_registry(self, *, strict: bool = False) -> dict[str, Any]:
         payload = self._load_json(
-            self.skill_registry_path, {"version": 1, "skills": {}}
+            self.skill_registry_path,
+            {"version": 1, "skills": {}},
+            strict=strict,
         )
         if not isinstance(payload, dict):
+            if strict:
+                raise ValueError("Skill registry must be a JSON object")
             return {"version": 1, "skills": {}}
         entries = payload.get("skills")
         if not isinstance(entries, dict):
-            entries = {}
-        return {"version": 1, "skills": dict(entries)}
+            if strict:
+                raise ValueError("Skill registry skills must be a JSON object")
+            return {"version": 1, "skills": {}}
+        payload.setdefault("version", 1)
+        return payload
 
     def _save_skill_registry(self, payload: dict[str, Any]) -> None:
         """Atomically persist install provenance without touching Skill packages."""
 
         self.skill_registry_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.skill_registry_path.with_name(
-            f".{self.skill_registry_path.name}.{uuid4().hex}.tmp"
-        )
-        try:
-            temporary.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, self.skill_registry_path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        self._save_json(self.skill_registry_path, payload)
 
     def list_skills(self) -> list[SkillDefinition]:
         registry_entries = self._load_skill_registry().get("skills", {})
@@ -412,7 +424,7 @@ class SkillManager:
         if skill is None:
             return False, f"Unknown Skill: {skill_id}"
         state_path = self._skill_state_path(workspace_dir)
-        state = self._load_json(state_path, {})
+        state = self._load_json(state_path, {}, strict=True)
         if not isinstance(state, dict):
             state = {}
         disabled = state.get("disabled_skills", {})
@@ -708,7 +720,7 @@ class SkillManager:
         if destination.exists() or destination.is_symlink():
             return False, f"Skill '{source_skill.id}' already exists.", None
         self.skills_dir.mkdir(parents=True, exist_ok=True)
-        registry = self._load_skill_registry()
+        registry = self._load_skill_registry(strict=True)
         if source_skill.id in registry["skills"]:
             return (
                 False,
@@ -789,7 +801,7 @@ class SkillManager:
                 None,
             )
 
-        registry = self._load_skill_registry()
+        registry = self._load_skill_registry(strict=True)
         old_entry = registry["skills"].pop(skill.id, None)
         recovery_path: Path | None = None
         linked_target: Path | None = None
@@ -864,7 +876,7 @@ class SkillManager:
             return False, f"Unknown runtime setting: {skill_id}"
 
         state_path = self._skill_state_path(workspace_dir)
-        state = self._load_json(state_path, {})
+        state = self._load_json(state_path, {}, strict=True)
         active = state.get("active_skills", {})
         if not isinstance(active, dict):
             active = {}
@@ -914,7 +926,9 @@ class SkillManager:
 
     def _load_tasks(self) -> dict[str, Any]:
         tasks = self._load_json(
-            self.tasks_path, {"version": 1, "heartbeats": [], "crons": [], "nudges": []}
+            self.tasks_path,
+            {"version": 1, "heartbeats": [], "crons": [], "nudges": []},
+            strict=True,
         )
         tasks.setdefault("heartbeats", [])
         tasks.setdefault("crons", [])
@@ -947,7 +961,20 @@ class SkillManager:
         return [dict(job) for job in jobs if isinstance(job, dict)]
 
     def _save_active_heartbeats(self, jobs: list[dict[str, Any]]):
-        self._save_json(self.active_heartbeats_path, {"heartbeats": jobs})
+        payload = self._load_json(
+            self.active_heartbeats_path,
+            {"heartbeats": []},
+            strict=True,
+        )
+        if isinstance(payload, ConfigList):
+            write_config_json(
+                self.active_heartbeats_path,
+                {"heartbeats": jobs},
+                expected_revision=payload.revision,
+            )
+            return
+        payload["heartbeats"] = jobs
+        self._save_json(self.active_heartbeats_path, payload)
 
     def _ensure_active_heartbeats_migrated(self):
         tasks = self._load_tasks()

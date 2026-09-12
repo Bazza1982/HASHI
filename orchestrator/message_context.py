@@ -152,12 +152,15 @@ def apply_connector_evidence(
     inputs = dict(metadata or {})
     evidence = inputs.get(CONNECTOR_EVIDENCE_METADATA_KEY)
     declared_hchat = inputs.get(HCHAT_CONTEXT_METADATA_KEY)
+    from orchestrator.frontend_delivery import RUN_DELIVERY_ROUTE_METADATA_KEY
+
     for key in (
         MESSAGE_CONTEXT_METADATA_KEY,
         MESSAGE_SOURCE_RESERVED_METADATA_KEY,
         HCHAT_CONTEXT_METADATA_KEY,
         PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
         PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
+        RUN_DELIVERY_ROUTE_METADATA_KEY,
     ):
         inputs.pop(key, None)
     if isinstance(declared_hchat, Mapping):
@@ -247,6 +250,25 @@ def system_source(source_id: str, display_name: str | None = None) -> dict[str, 
 def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) -> str:
     surface = str(metadata.get("session_surface") or "").strip().casefold()
     normalized = str(source or "").strip().casefold()
+    if normalized in {
+        "scheduler",
+        "scheduler-retry",
+        "scheduler-skill",
+        "loop_skill",
+        "heartbeat",
+        "cron",
+        "proactive",
+        "background-job-event",
+        "background_job_event",
+        "startup",
+        "system",
+        "session_reset",
+    } or normalized.startswith(
+        ("scheduler:", "cron:", "heartbeat:", "proactive:", "bridge:")
+    ):
+        # Runtime work remains a system source even when the Connector needs a
+        # Telegram chat ID for its eventual notification.
+        return "hashi.internal"
     if surface == "whatsapp" or normalized.startswith("wa:"):
         return "whatsapp"
     if surface == "telegram":
@@ -261,8 +283,6 @@ def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) ->
         ("protocol:message", "protocol:reply", "hchat-reply:")
     ):
         return "hchat"
-    if normalized.startswith(("scheduler", "startup", "system", "bridge:")):
-        return "hashi.internal"
     if chat_id not in (None, 0, "0", ""):
         # Telegram command/media handlers retain many legacy source labels.
         # Explicit API/HChat/internal cases above take precedence.
@@ -315,15 +335,35 @@ def _normalized_authorization_results(value: Any) -> list[dict[str, Any]]:
 
 
 def _output_destination(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    from orchestrator.frontend_delivery import (
+        RUN_DELIVERY_ROUTE_METADATA_KEY,
+        project_run_delivery_route,
+    )
+
+    route = metadata.get(RUN_DELIVERY_ROUTE_METADATA_KEY)
+    if isinstance(route, Mapping):
+        try:
+            return project_run_delivery_route(route)
+        except ValueError:
+            # Compatibility for archived messages that predate the route
+            # contract. Production admission never accepts a malformed route.
+            pass
     destination = {
         "surface": str(metadata.get("session_surface") or "unknown").strip().casefold()
-        or "unknown"
+        or "unknown",
+        "mirrors": [],
+        "automatic": bool(metadata.get("session_surface")),
     }
     policy = metadata.get("frontend_delivery_policy")
     if isinstance(policy, Mapping):
         telegram = policy.get("telegram")
         if isinstance(telegram, Mapping) and isinstance(telegram.get("mirror"), bool):
             destination["telegram_mirror"] = bool(telegram["mirror"])
+            if telegram["mirror"] and destination["surface"] != "telegram":
+                destination["mirrors"] = ["telegram"]
+            destination["automatic"] = bool(
+                destination["surface"] != "unknown" or destination["mirrors"]
+            )
     return destination
 
 
@@ -355,6 +395,16 @@ def _source_fact(
     return {**reserved_source(source_id), "assurance": assurance}
 
 
+def resolve_message_source_fact(
+    *, source: str, chat_id: Any, metadata: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Return PAO's typed source fact without consulting message text."""
+
+    return copy.deepcopy(
+        _source_fact(source=source, chat_id=chat_id, metadata=dict(metadata or {}))
+    )
+
+
 def build_message_context_snapshot(
     runtime: Any,
     *,
@@ -367,7 +417,9 @@ def build_message_context_snapshot(
 
     del prompt  # Source and authorization facts must never be inferred from text.
     inputs = dict(metadata or {})
-    source_fact = _source_fact(source=source, chat_id=chat_id, metadata=inputs)
+    source_fact = resolve_message_source_fact(
+        source=source, chat_id=chat_id, metadata=inputs
+    )
     authorizations = _normalized_authorization_results(
         inputs.get(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY)
     )
@@ -379,7 +431,14 @@ def build_message_context_snapshot(
         "ingress_transport": str(source or "unknown").strip().casefold() or "unknown",
         "legacy_source": str(source or ""),
         "processing_instance": _processing_instance(runtime),
-        "sender": {"kind": "human_or_client", "assurance": source_fact["assurance"]},
+        "sender": {
+            "kind": (
+                "system"
+                if source_fact["id"].startswith(SYSTEM_SOURCE_NAMESPACE)
+                else ("agent" if source_fact["id"] == "hchat" else "human_or_client")
+            ),
+            "assurance": source_fact["assurance"],
+        },
         "network_authentication": "not_applicable",
         "relay_chain": [],
         "output_destination": _output_destination(inputs),
@@ -558,6 +617,7 @@ __all__ = [
     "pcm_message_context_section",
     "public_source_capabilities",
     "render_message_context_section",
+    "resolve_message_source_fact",
     "resolve_private_authorizations",
     "reserved_source",
     "seal_connector_evidence",

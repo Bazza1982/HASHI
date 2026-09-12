@@ -24,8 +24,10 @@ from adapters.openrouter_api import (
     _iter_provider_stream_lines,
     _message_structured_data,
     _provider_request_id,
+    _read_http_error_body,
     _request_wire_evidence,
     _response_wire_evidence,
+    _stream_error_exception,
     _tool_call_protocol_summary,
 )
 from adapters.stream_events import KIND_THINKING, StreamEvent
@@ -89,7 +91,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
     # current SSE call after earlier tool results have already been committed.
     # Retry only that unfinished HTTP call; the base adapter never replays the
     # completed tool loops.
-    TRANSIENT_PROVIDER_CALL_RETRIES = 1
+    TRANSIENT_PROVIDER_CALL_RETRIES = 3
+
+    def _provider_evidence_url(self) -> str:
+        return _DEEPSEEK_URL
 
     def _request_headers(self) -> dict[str, str]:
         return self._deepseek_headers()
@@ -161,6 +166,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         response = await self.client.post(_DEEPSEEK_URL, json=payload, headers=headers)
+        await _read_http_error_body(response)
         response.raise_for_status()
         try:
             response_request = response.request
@@ -288,8 +294,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
             "reasoning_length": 0,
             "tool_calls": [],
         }
+        protocol_state["wire_evidence"] = wire_evidence
 
         async with self.client.stream("POST", _DEEPSEEK_URL, json=payload, headers=headers) as response:
+            await _read_http_error_body(response)
             response.raise_for_status()
             transport_request_id = _provider_request_id(response)
             protocol_state["transport_request_id"] = transport_request_id
@@ -326,6 +334,18 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 if data.get("id"):
                     provider_response_id = str(data.get("id"))
                     protocol_state["provider_response_id"] = provider_response_id
+
+                stream_error = _stream_error_exception(
+                    data,
+                    request=stream_request,
+                    provider_activity_observed=bool(
+                        reasoning_chunks or text_chunks or tool_calls_acc
+                    ),
+                )
+                if stream_error is not None:
+                    raise _annotate_stream_exception(
+                        stream_error, protocol_state
+                    )
 
                 if data.get("usage"):
                     stream_usage = data["usage"]
@@ -436,9 +456,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     )[0]
 
         if not saw_done and not finish_reason:
-            raise httpx.RemoteProtocolError(
+            error = httpx.RemoteProtocolError(
                 "provider stream ended without a completion marker"
             )
+            raise _annotate_stream_exception(error, protocol_state)
         full_text = "".join(text_chunks)
         reasoning_content = "".join(reasoning_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None

@@ -20,6 +20,10 @@ from orchestrator.message_context import (
     seal_connector_evidence,
     apply_connector_evidence,
 )
+from orchestrator.frontend_delivery import (
+    RUN_DELIVERY_ROUTE_METADATA_KEY,
+    freeze_run_delivery_route,
+)
 from orchestrator.session_store import SessionStore
 
 
@@ -74,6 +78,8 @@ def test_message_context_is_current_message_scoped_and_separates_output(tmp_path
     assert "origin_instance" not in snapshot
     assert snapshot["output_destination"] == {
         "surface": "workbench",
+        "mirrors": ["telegram"],
+        "automatic": True,
         "telegram_mirror": True,
     }
     assert snapshot["private_authorizations"] == []
@@ -111,6 +117,49 @@ def test_legacy_media_source_maps_without_changing_legacy_source_semantics(tmp_p
     assert telegram["legacy_source"] == "voice"
     assert whatsapp["message_source"]["id"] == "whatsapp"
     assert unknown["message_source"]["id"] == "unknown"
+
+
+def test_background_job_with_chat_id_is_system_with_automatic_telegram_route(tmp_path):
+    route = freeze_run_delivery_route(
+        message_source_id="hashi.internal",
+        session_surface="scheduled",
+        session_channel_key="default",
+        chat_id=123,
+        telegram_requested=True,
+    )
+    snapshot = build_message_context_snapshot(
+        _runtime(tmp_path),
+        source="background-job-event",
+        chat_id=123,
+        prompt="job completed",
+        metadata={
+            "session_surface": "scheduled",
+            RUN_DELIVERY_ROUTE_METADATA_KEY: route,
+        },
+    )
+
+    assert snapshot["message_source"]["id"] == "hashi.internal"
+    assert snapshot["sender"]["kind"] == "system"
+    assert snapshot["output_destination"] == {
+        "surface": "telegram",
+        "mirrors": [],
+        "automatic": True,
+        "telegram_mirror": False,
+    }
+
+
+def test_hchat_is_an_agent_source_even_without_private_authorization(tmp_path):
+    snapshot = build_message_context_snapshot(
+        _runtime(tmp_path),
+        source="protocol:message",
+        chat_id=123,
+        prompt="peer request",
+        metadata={},
+    )
+
+    assert snapshot["message_source"]["id"] == "hchat"
+    assert snapshot["sender"]["kind"] == "agent"
+    assert snapshot["private_authorization_state"] == "none"
 
 
 def test_snapshot_does_not_trust_forged_runtime_result_or_mutate_inputs(tmp_path):
@@ -290,7 +339,16 @@ def test_connector_evidence_is_prompt_bound_and_preserves_verified_origin(tmp_pa
     )
     verified = apply_connector_evidence(
         runtime,
-        metadata={"_connector_evidence": evidence},
+        metadata={
+            "_connector_evidence": evidence,
+            RUN_DELIVERY_ROUTE_METADATA_KEY: freeze_run_delivery_route(
+                message_source_id="telegram",
+                session_surface="telegram",
+                session_channel_key="attacker",
+                chat_id="attacker",
+                telegram_requested=True,
+            ),
+        },
         prompt="same prompt",
     )
     rejected = apply_connector_evidence(
@@ -309,6 +367,7 @@ def test_connector_evidence_is_prompt_bound_and_preserves_verified_origin(tmp_pa
         "id": "HASHI1",
         "assurance": "shared_network_hmac",
     }
+    assert RUN_DELIVERY_ROUTE_METADATA_KEY not in verified
     assert "_origin_instance_evidence" not in rejected
 
 
