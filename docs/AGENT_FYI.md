@@ -195,7 +195,13 @@ decimal 1 GB preflight. `accepted` is not `completed`. See
 
 Use only tools and skills exposed for the current turn. Browser, computer,
 voice, media, Remote, and external Providers are optional capabilities; check
-current configuration and authority before use. Use HASHI-managed Jobs for long
+current configuration and authority before use. Device tools appear only while
+a same-instance Worker advertises the required action with an unexpired
+registration. If one disappears after selection, treat the typed
+`capability_unavailable` result as a fresh-planning signal; do not blindly retry.
+Use `web_fetch` for ordinary public documents, but do not claim it replaces a
+browser where JavaScript, login state, or interaction is required. Use
+HASHI-managed Jobs for long
 processes rather than inventing another manager. Superloop receipt review needs
 opt-in, matching identities, Session-pinned idempotency, and a concrete next
 action for every unresolved check. Reports are not delivery. See

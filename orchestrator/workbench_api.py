@@ -7176,10 +7176,16 @@ class WorkbenchApiServer:
                 ttl_seconds=float(payload.get("ttl_seconds") or 90),
             )
         except (ValueError, TypeError, CapabilityBrokerError) as exc:
+            workers = getattr(self.orchestrator, "function_workers", None)
+            if workers is not None:
+                await workers.broadcast_topology()
             return web.json_response(
                 {"ok": False, "error": str(exc)},
                 status=403,
             )
+        workers = getattr(self.orchestrator, "function_workers", None)
+        if workers is not None:
+            await workers.broadcast_topology()
         return web.json_response(
             {"ok": True, "registration": registration.to_dict()}
         )

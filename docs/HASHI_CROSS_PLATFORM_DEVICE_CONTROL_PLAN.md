@@ -128,6 +128,15 @@ Locking, logoff, Remote Desktop session changes, display changes, and WSL
 restart are capability-state changes. They must make the affected worker
 unavailable or degraded without making HASHI Core unhealthy.
 
+The PAO Tool Registry publishes only the intersection of permission and a live,
+same-instance registration supporting the requested action. Function Workers
+consume the topology snapshot broadcast on registration and heartbeat; isolated
+Tool Gateways query the same Broker status endpoint. Expired or missing Browser
+and Computer Workers therefore remove their tools from PCM/HER catalogues
+without a Function reload, and recovery adds them back. A second check directly
+before dispatch closes the selection/execution race and returns the typed
+`capability_unavailable` result with an actionable reason.
+
 ## Dynamic discovery and endpoint rules
 
 No Browser Worker, Computer Worker, Function Worker, health path, recovery
