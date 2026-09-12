@@ -26,6 +26,7 @@ from orchestrator.agent_move.service import (
 )
 from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.pcm import render_pcm_document
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
 def _write_json(path: Path, value) -> None:
@@ -182,6 +183,83 @@ def test_stage_commit_activate_and_recoverable_rollback(tmp_path):
     quarantine = target / "state" / "agent_moves" / "rolled_back"
     assert any(path.name.endswith("-zelda") for path in quarantine.iterdir())
     assert (source / "workspaces" / "zelda").is_dir()
+
+
+def test_move_commit_adopts_owned_delivery_state_and_rollback_retires_it(tmp_path):
+    source, target, _ = _roots(tmp_path)
+    lifecycle_id = "4" * 32
+    source_config = json.loads((source / "agents.json").read_text())
+    source_config["agents"][0]["agent_lifecycle_id"] = lifecycle_id
+    _write_json(source / "agents.json", source_config)
+    undelivered = source / "workspaces" / "zelda" / "undelivered"
+    undelivered.mkdir()
+    (undelivered / "req-owned.md").write_text("owned response", encoding="utf-8")
+    _write_json(
+        source / "state" / "telegram_delivery_health.json",
+        {
+            "version": 2,
+            "agents": {
+                "zelda": {
+                    "owner": {
+                        "instance_id": "HASHI1",
+                        "agent_lifecycle_id": lifecycle_id,
+                        "telegram_bot_fingerprint": telegram_bot_fingerprint(
+                            "agent-token"
+                        ),
+                    },
+                    "status": "blocked",
+                    "incident_id": "move-owned-incident",
+                    "per_chat": {
+                        "123": {"undelivered_request_ids": ["req-owned"]}
+                    },
+                }
+            },
+            "quarantine": [],
+        },
+    )
+    package_path = tmp_path / "owned-state.hashi-agent"
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        include_agent_secrets=True,
+        secret_passphrase="shared-secret",
+        transfer_mode="workspace",
+    )
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        secret_passphrase="shared-secret",
+    )
+
+    committed = commit_agent_move(
+        target, staged["package_id"], secret_passphrase="shared-secret"
+    )
+
+    delivery = json.loads(
+        (target / "state" / "telegram_delivery_health.json").read_text()
+    )
+    record = delivery["agents"]["zelda"]
+    assert committed["telegram_delivery_state"]["imported"] is True
+    assert record["incident_id"] == "move-owned-incident"
+    assert record["owner"] == {
+        "instance_id": "HASHI2",
+        "agent_lifecycle_id": lifecycle_id,
+        "telegram_bot_fingerprint": telegram_bot_fingerprint("agent-token"),
+    }
+    assert (
+        target / "workspaces" / "zelda" / "undelivered" / "req-owned.md"
+    ).read_text() == "owned response"
+
+    rollback_agent_move(target, staged["package_id"])
+    delivery = json.loads(
+        (target / "state" / "telegram_delivery_health.json").read_text()
+    )
+    assert "zelda" not in delivery["agents"]
+    assert delivery["quarantine"][-1]["reason"] == "agent_transfer_rolled_back"
 
 
 @pytest.mark.skipif(
@@ -907,6 +985,11 @@ def test_source_deactivation_journal_recovers_interrupted_write(tmp_path, monkey
         target_instance="HASHI2",
     )
     assert disabled["status"] == "source_disabled_pending_reboot"
+    lifecycle_id = disabled["source_agent_lifecycle_id"]
+    assert len(lifecycle_id) == 32
+    assert json.loads((source / "agents.json").read_text())["agents"][0][
+        "agent_lifecycle_id"
+    ] == lifecycle_id
     restored = restore_source_agent(source, package_id)
     assert restored["status"] == "source_restored_pending_reboot"
     assert (

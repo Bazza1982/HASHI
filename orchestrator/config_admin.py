@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 from orchestrator.config_json import read_config_json, write_config_json
 
 from orchestrator.pathing import BridgePaths
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
 from orchestrator.config import default_agent_mode_for_backend
+from orchestrator.agent_incarnation import (
+    AGENT_LIFECYCLE_FIELD,
+    new_agent_lifecycle_id,
+)
+
+logger = logging.getLogger("BridgeU.ConfigAdmin")
 
 
 class ConfigAdmin:
@@ -64,6 +72,27 @@ class ConfigAdmin:
         raw["agents"] = remaining
         if len(raw["agents"]) < orig_len:
             self.write_raw_config(raw)
+            # The config publication is authoritative.  Retire only the exact
+            # deleted incarnation; a state error must never restore the row.
+            try:
+                from orchestrator.telegram_delivery_failover import (
+                    retire_agent_delivery_state,
+                )
+
+                for row in removed:
+                    retire_agent_delivery_state(
+                        self.paths.config_path.parent,
+                        agent_name,
+                        lifecycle_id=row.get(AGENT_LIFECYCLE_FIELD),
+                        reason="agent_deleted",
+                    )
+            except Exception as exc:
+                # A subsequent watcher will quarantine the now-unowned record.
+                logger.error(
+                    "Agent delivery state retirement deferred agent=%s error=%s",
+                    agent_name,
+                    type(exc).__name__,
+                )
             return True
         return False
 
@@ -111,6 +140,10 @@ class ConfigAdmin:
                 "telegram_token_key": agent_name if not token else f"{agent_name}_telegram_token",
             }
         new_entry.setdefault("name", agent_name)
+        # Ordinary creation is a new incarnation even if a caller supplied a
+        # stale row copied from a deleted Agent. Move has its own narrow import
+        # path and is the only operation allowed to preserve this identity.
+        new_entry[AGENT_LIFECYCLE_FIELD] = new_agent_lifecycle_id()
         new_entry.setdefault("workspace_dir", f"workspaces/{agent_name}")
         new_entry.pop("system_md", None)
         new_entry.setdefault("is_active", True)

@@ -853,6 +853,9 @@ class FunctionWorkerHost:
         from orchestrator.skill_manager import SkillManager
 
         self.paths = build_bridge_paths(self.code_root, bridge_home=self.bridge_home, canonical_home=True)
+        from orchestrator.agent_incarnation import ensure_agent_lifecycle_id
+
+        ensure_agent_lifecycle_id(self.paths.config_path, self.agent_name)
         manager = ConfigManager(
             self.paths.config_path,
             self.paths.secrets_path,
@@ -950,6 +953,9 @@ class FunctionWorkerHost:
 
     def metadata(self) -> dict[str, Any]:
         runtime = self._require_runtime()
+        from orchestrator.agent_incarnation import lifecycle_id_from_config
+        from orchestrator.telegram_delivery_failover import telegram_bot_fingerprint
+
         result = dict(runtime.get_runtime_metadata())
         agent_mode = str(
             getattr(getattr(runtime, "backend_manager", None), "agent_mode", "")
@@ -1038,6 +1044,13 @@ class FunctionWorkerHost:
                 "queue_depth": int(runtime.queue.qsize()),
                 "current_request_meta": self._current_request_metadata(runtime),
                 "org_id": getattr(runtime, "org_id", None),
+                "agent_lifecycle_id": lifecycle_id_from_config(runtime.config),
+                "telegram_bot_fingerprint": telegram_bot_fingerprint(
+                    getattr(runtime, "token", None)
+                ),
+                "telegram_token_key": str(
+                    getattr(runtime.config, "telegram_token_key", runtime.name)
+                ),
             }
         )
         return json_value(result)
@@ -1373,12 +1386,34 @@ class FunctionWorkerHost:
             await self.emit_metadata()
             return result
         if method == "runtime.send_text":
-            await runtime._send_text(
-                int(params["chat_id"]),
-                str(params.get("text") or ""),
-                **dict(params.get("kwargs") or {}),
+            from orchestrator.telegram_delivery_errors import (
+                classify_telegram_delivery_error,
             )
-            return True
+
+            kwargs = dict(params.get("kwargs") or {})
+            kwargs["_raise_delivery_error"] = True
+            try:
+                message = await runtime._send_text(
+                    int(params["chat_id"]),
+                    str(params.get("text") or ""),
+                    **kwargs,
+                )
+            except Exception as exc:
+                error = classify_telegram_delivery_error(exc)
+                return {"sent": False, "error": error.to_mapping()}
+            if message is None:
+                return {
+                    "sent": False,
+                    "error": {
+                        "code": "delivery_not_confirmed",
+                        "retryable": True,
+                        "permanent": False,
+                        "retry_after_s": None,
+                        "error_type": "UnconfirmedDelivery",
+                        "reason": "telegram_send_returned_no_receipt",
+                    },
+                }
+            return {"sent": True}
         if method == "runtime.send_long_message":
             result = await runtime.send_long_message(
                 int(params["chat_id"]),

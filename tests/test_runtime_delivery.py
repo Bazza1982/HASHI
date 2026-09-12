@@ -9,6 +9,7 @@ from telegram import constants
 from telegram.error import RetryAfter
 
 from orchestrator import runtime_delivery
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
 class _Logger:
@@ -41,10 +42,15 @@ def _runtime(tmp_path: Path, *, connected: bool = True, bot_error=None):
     bot = _Bot(error=bot_error)
     return SimpleNamespace(
         app=SimpleNamespace(bot=bot),
-        config=SimpleNamespace(active_backend="codex-cli", telegram_token_key="test-agent"),
-        global_config=SimpleNamespace(project_root=tmp_path),
+        config=SimpleNamespace(
+            active_backend="codex-cli",
+            telegram_token_key="test-agent",
+            extra={"agent_lifecycle_id": "a" * 32},
+        ),
+        global_config=SimpleNamespace(project_root=tmp_path, instance_id="HASHI1"),
         logger=_Logger(),
         name="test-agent",
+        token="token-test-agent",
         session_dir=tmp_path,
         telegram_connected=connected,
         telegram_logger=_Logger(),
@@ -393,9 +399,16 @@ async def test_send_long_message_resumes_immediately_after_retry_wait(tmp_path):
     state_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "agents": {
                     "test-agent": {
+                        "owner": {
+                            "instance_id": "HASHI1",
+                            "agent_lifecycle_id": "a" * 32,
+                            "telegram_bot_fingerprint": telegram_bot_fingerprint(
+                                "token-test-agent"
+                            ),
+                        },
                         "token_key": "telegram:test-agent",
                         "status": "blocked",
                         "blocked_until": "2000-01-01T00:00:00+00:00",

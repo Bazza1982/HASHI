@@ -696,6 +696,8 @@
     "status.delivery.remaining_unknown": "剩余时间未知",
     "status.delivery.remaining": "约 {duration} 后恢复",
     "status.delivery.due": "现在应尝试恢复",
+    "status.delivery.recovery_stopped": "自动恢复已停止；正常投递仍可使用",
+    "status.delivery.quarantined": "旧恢复状态已隔离，未执行外送",
     "status.delivery.until": "截至",
     "status.delivery.via": "经由",
     "status.duration.days": "{days} 天 {hours} 小时",

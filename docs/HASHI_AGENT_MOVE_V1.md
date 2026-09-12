@@ -42,6 +42,8 @@ receiver. The source never writes a target filesystem path directly.
   secret. A move includes its Telegram credential for a single-consumer
   cutover; a clone always excludes every Telegram credential;
 - the Agent-owned capability/tool/permission declaration;
+- owned Telegram delivery state, but only for a Move whose instance,
+  `agent_lifecycle_id`, and actual Bot fingerprint are verifiable;
 - access requirements and an explicit target-rebind list.
 
 `agent.md` is always the sole live PCM identity. On case-sensitive sources,
@@ -61,6 +63,17 @@ symlinks, source workzone/absolute paths, and common plaintext credential
 files. Instance-level provider/OAuth, browser, filesystem, and
 operating-system access remains target-owned. Imported schedules are always
 disabled drafts.
+
+An Agent name is reusable, so delivery recovery state is not keyed by name
+alone. Preview remains read-only; actual preparation revision-safely assigns a
+missing lifecycle ID. Move preserves that ID and carries no raw Bot token in
+delivery state. The receiver validates the transferred credential, rebinds only
+the instance component, and publishes the state before activation. Clone always
+creates a fresh lifecycle ID, excludes Telegram credentials, pending recovery
+state, and `undelivered/` content. A Move with referenced undelivered business
+responses must use full-workspace mode; identity-memory mode fails before
+source mutation. Rollback and verified source cleanup retire only the exact
+incarnation, so retry/continue cannot resurrect a stale same-name event.
 
 Every preview reports included file count, package size, and excluded-path
 count. Explicit `workspace` transfers inspect the complete logical workspace
@@ -110,6 +123,8 @@ before the source is changed.
 2. Preview builds and verifies a disposable package and changes neither side.
 3. Prepare creates a checksummed package and stages it on the target. The
    target verifies it without modifying live Agent configuration.
+   Owned Telegram recovery metadata is checksummed with the access declaration;
+   full-workspace mode also carries referenced undelivered response files.
 4. An explicit operator confirmation persists an execution intent; the shared
    Functions manager commits the target Agent inactive.
 5. Before a move cutover, the source rebuilds a disposable durable-state
@@ -126,6 +141,8 @@ before the source is changed.
 8. The receiver verifies target identity, canonical PCM, durable workspace and
    memory digests, remapped Agent credentials, portable paths, disabled
    schedules, capability declaration, and live Workbench availability.
+   It also proves lifecycle/Bot ownership before adopting delivery state; a
+   mismatched target residue is quarantined and Clone imports none.
 9. Only after verification does the source delete its registry entry,
    workspace, Agent-only secrets, schedules, capability declaration, and
    temporary package. It retains an audit-only move journal and destination

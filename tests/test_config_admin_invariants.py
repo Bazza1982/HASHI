@@ -4,6 +4,8 @@ import json
 from types import SimpleNamespace
 
 from orchestrator.config_admin import ConfigAdmin
+from orchestrator.pcm import render_pcm_document
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
 def _admin(tmp_path, agents):
@@ -141,3 +143,67 @@ def test_config_admin_concurrent_deactivation_preserves_one_active_agent(tmp_pat
         {"name": "one", "is_active": True},
         {"name": "two", "is_active": False},
     ]
+
+
+def test_delete_and_recreate_assigns_new_incarnation_and_quarantines_old_state(
+    tmp_path,
+):
+    anchor = {
+        "name": "anchor",
+        "type": "flex",
+        "is_active": True,
+        "active_backend": "codex-cli",
+        "allowed_backends": [{"engine": "codex-cli"}],
+    }
+    admin, path = _admin(tmp_path, [anchor])
+    workspace = tmp_path / "workspaces" / "anchor"
+    workspace.mkdir(parents=True)
+    (workspace / "agent.md").write_text(
+        render_pcm_document(persona="Anchor", system="Follow policy"),
+        encoding="utf-8",
+    )
+
+    assert admin.add_agent_to_config("zelda") is True
+    first = next(
+        row
+        for row in json.loads(path.read_text())["agents"]
+        if row["name"] == "zelda"
+    )["agent_lifecycle_id"]
+    state_path = tmp_path / "state" / "telegram_delivery_health.json"
+    state_path.parent.mkdir()
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "agents": {
+                    "zelda": {
+                        "owner": {
+                            "instance_id": "HASHI1",
+                            "agent_lifecycle_id": first,
+                            "telegram_bot_fingerprint": telegram_bot_fingerprint(
+                                "old-token"
+                            ),
+                        },
+                        "status": "recovery_due",
+                        "incident_id": "old-incident",
+                        "per_chat": {"123": {}},
+                    }
+                },
+                "quarantine": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert admin.delete_agent_from_config("zelda") is True
+    assert admin.add_agent_to_config("zelda") is True
+
+    second = next(
+        row
+        for row in json.loads(path.read_text())["agents"]
+        if row["name"] == "zelda"
+    )["agent_lifecycle_id"]
+    delivery = json.loads(state_path.read_text())
+    assert first != second
+    assert "zelda" not in delivery["agents"]
+    assert delivery["quarantine"][-1]["reason"] == "agent_deleted"

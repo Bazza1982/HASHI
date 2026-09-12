@@ -209,10 +209,14 @@ def _runtime():
     runtime = SimpleNamespace()
     runtime.config = SimpleNamespace(
         active_backend="codex-cli",
-        extra={"telegram_stream_enabled": True},
+        extra={
+            "telegram_stream_enabled": True,
+            "agent_lifecycle_id": "a" * 32,
+        },
     )
     runtime.name = "zelda"
     runtime.config.telegram_token_key = runtime.name
+    runtime.token = "token-zelda"
     runtime.global_config = SimpleNamespace(
         project_root=Path(tempfile.mkdtemp(prefix="hashi-pipeline-test-")),
         instance_id="HASHI1",
@@ -2250,7 +2254,7 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
     runtime.name = "kasumi"
     runtime.workspace_dir = tmp_path / "workspaces" / "kasumi"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
-    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path, instance_id="HASHI1")
     runtime.config.telegram_token_key = "kasumi"
     runtime.telegram_connected = True
     runtime.startup_success = True
@@ -2261,8 +2265,11 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
     failover_runtime = SimpleNamespace(
         name="lin_yueru",
         workspace_dir=tmp_path / "workspaces" / "lin_yueru",
-        config=SimpleNamespace(extra={}, telegram_token_key="lin_yueru"),
-        global_config=SimpleNamespace(project_root=tmp_path),
+        config=SimpleNamespace(
+            extra={"agent_lifecycle_id": "b" * 32},
+            telegram_token_key="lin_yueru",
+        ),
+        global_config=SimpleNamespace(project_root=tmp_path, instance_id="HASHI1"),
         app=SimpleNamespace(bot=_Bot()),
         telegram_connected=True,
         startup_success=True,
@@ -2300,7 +2307,7 @@ async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocke
     runtime.name = "kasumi"
     runtime.workspace_dir = tmp_path / "workspaces" / "kasumi"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
-    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path, instance_id="HASHI1")
     runtime.config.telegram_token_key = "kasumi"
     runtime.telegram_connected = True
     runtime.startup_success = True
@@ -2310,8 +2317,11 @@ async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocke
     failover_runtime = SimpleNamespace(
         name="lin_yueru",
         workspace_dir=tmp_path / "workspaces" / "lin_yueru",
-        config=SimpleNamespace(extra={}, telegram_token_key="lin_yueru"),
-        global_config=SimpleNamespace(project_root=tmp_path),
+        config=SimpleNamespace(
+            extra={"agent_lifecycle_id": "b" * 32},
+            telegram_token_key="lin_yueru",
+        ),
+        global_config=SimpleNamespace(project_root=tmp_path, instance_id="HASHI1"),
         app=SimpleNamespace(bot=_Bot()),
         telegram_connected=True,
         startup_success=True,
@@ -2327,9 +2337,16 @@ async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocke
     state_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "agents": {
                     "kasumi": {
+                        "owner": {
+                            "instance_id": "HASHI1",
+                            "agent_lifecycle_id": "a" * 32,
+                            "telegram_bot_fingerprint": failover.telegram_bot_fingerprint(
+                                "token-kasumi"
+                            ),
+                        },
                         "token_key": "telegram:kasumi",
                         "status": "blocked",
                         "blocked_until": "2030-01-01T00:00:00+10:00",
@@ -2485,6 +2502,7 @@ async def test_typing_only_does_not_route_answer_deltas_or_edit_placeholder():
         "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
+        "agent_lifecycle_id": "a" * 32,
     }
     _set_stream_policy(runtime, placeholder=True, preview=True)
 
@@ -2600,6 +2618,7 @@ async def test_answer_preview_disables_after_retry_after():
         "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
+        "agent_lifecycle_id": "a" * 32,
     }
     runtime.app.bot = _Bot(edit_error=RetryAfter(timedelta(seconds=123)))
     stream_state = runtime_pipeline.StreamedAnswerState(
@@ -2643,20 +2662,28 @@ async def test_answer_preview_disables_after_retry_after():
 @pytest.mark.asyncio
 async def test_answer_preview_skips_edits_when_delivery_blocked(tmp_path):
     runtime = _runtime()
-    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path, instance_id="HASHI1")
     runtime.config.extra = {
         "telegram_stream_enabled": True,
         "answer_stream_edit_interval_s": 0.01,
         "answer_stream_min_chars": 1,
+        "agent_lifecycle_id": "a" * 32,
     }
     state_path = tmp_path / "state" / "telegram_delivery_health.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "agents": {
                     "zelda": {
+                        "owner": {
+                            "instance_id": "HASHI1",
+                            "agent_lifecycle_id": "a" * 32,
+                            "telegram_bot_fingerprint": failover.telegram_bot_fingerprint(
+                                "token-zelda"
+                            ),
+                        },
                         "token_key": "telegram:zelda",
                         "status": "blocked",
                         "blocked_until": "2030-01-01T00:00:00+10:00",
@@ -4548,7 +4575,7 @@ async def test_finalize_streamed_answer_promotes_placeholder_to_final_text():
 @pytest.mark.asyncio
 async def test_finalize_streamed_answer_skips_promotion_when_delivery_blocked(tmp_path):
     runtime = _runtime()
-    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path, instance_id="HASHI1")
     runtime.workspace_dir = tmp_path / "workspaces" / "zelda"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
     item = _item()
@@ -4567,9 +4594,16 @@ async def test_finalize_streamed_answer_skips_promotion_when_delivery_blocked(tm
     state_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "agents": {
                     "zelda": {
+                        "owner": {
+                            "instance_id": "HASHI1",
+                            "agent_lifecycle_id": "a" * 32,
+                            "telegram_bot_fingerprint": failover.telegram_bot_fingerprint(
+                                "token-zelda"
+                            ),
+                        },
                         "token_key": "telegram:zelda",
                         "status": "blocked",
                         "blocked_until": "2030-01-01T00:00:00+10:00",

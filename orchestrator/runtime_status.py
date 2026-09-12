@@ -56,6 +56,20 @@ def _delivery_line(delivery: Mapping[str, Any] | None) -> str:
     status = str(delivery.get("status") or "blocked")
     remaining_text = ui_language.tr("status.delivery.remaining_unknown")
 
+    if status in {"recovery_stopped", "quarantined"}:
+        detail_key = (
+            "status.delivery.recovery_stopped"
+            if status == "recovery_stopped"
+            else "status.delivery.quarantined"
+        )
+        reason = str(delivery.get("reason") or "").strip()
+        suffix = f" · <code>{html.escape(reason)}</code>" if reason else ""
+        return (
+            f"<b>{html.escape(ui_language.tr('common.delivery'))}</b> · "
+            f"<code>{html.escape(status.upper())}</code> · "
+            f"{html.escape(ui_language.tr(detail_key))}{suffix}"
+        )
+
     if blocked_until_raw and status == "blocked":
         try:
             blocked_until = datetime.fromisoformat(str(blocked_until_raw))

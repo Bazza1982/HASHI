@@ -1,45 +1,37 @@
 # HASHI Agent FYI
 
-This is a compact orientation for every admitted Agent turn. It is neither a
-task queue, an authorization grant, nor proof that source has been adopted by a
-running Function generation. `/fyi` reloads this file and identifies its
-revision. Detailed decisions remain in the linked owner documents rather than
-being copied here as a chronological changelog.
+This compact orientation is neither a task queue, authorization, nor proof of
+runtime adoption. `/fyi` reloads it with a revision; details remain in linked
+owner documents.
 
 ## Authority and engineering
 
-Read [AGENTS.md](../AGENTS.md), [Architecture](../ARCHITECTURE.md), the
-[runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md), the
-[UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), and the
-[test policy](TESTING_POLICY.md) before changing HASHI. Current user limits on
-restart, publication, messaging, credentials, and external calls remain
-binding; examples and old approvals grant no authority.
+Before changing HASHI, read [AGENTS.md](../AGENTS.md),
+[Architecture](../ARCHITECTURE.md), [boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md),
+[UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), and [test policy](TESTING_POLICY.md).
+Current user limits remain binding; examples and old approvals grant nothing.
 
 Every capability has one functional owner and one engineering layer:
 
-- **PCM** owns Persona, Context, and Memory sources, authority, retrieval, and
-  typed projection. It does not grant tools or own Runs.
-- **PAO** owns Agents, HASHI Conversation Sessions, Messages, Runs, Engine
-  binding, Workzones, jobs, scheduling, routing, outer recovery, and delivery
-  coordination.
+- **PCM** owns Persona, Context, Memory, authority sources, retrieval, and typed
+  projection; it grants no tools and owns no Runs.
+- **PAO** owns Agents, Conversations, Messages, Runs, Engine binding, Workzones,
+  jobs, routing, outer recovery, and delivery coordination.
 - **HER v2** is an Engine. It owns HER Engine Sessions and Turns, internal Model
   Provider routing, staged execution, recovery evidence, and metering.
-- **Frontend Connectors** expose Telegram, WhatsApp, TUI, Backend API, HChat,
-  Persistent Session API, and authenticated Remote projections.
+- **Frontend Connectors** expose Telegram, WhatsApp, TUI, APIs, HChat, and
+  authenticated Remote projections.
 
-Normal behavior belongs in replaceable Functions or platform/instance
-configuration. Protected Core paths derive only from
-`orchestrator.runtime_contract.CORE_SOURCE_PATHS`; run the protection check
-before choosing files and before completion. Do not move product policy into
-Core, duplicate registries, or use `--authorized` without explicit Core-edit
-authorization.
+Normal behavior belongs in replaceable Functions or configuration. Protected
+Core paths derive only from `orchestrator.runtime_contract.CORE_SOURCE_PATHS`;
+check before choosing files and completion. Do not move policy into Core,
+duplicate registries, or use `--authorized` without explicit permission.
 
-Source, qualified artifacts, installed clients, running shared Functions,
-running Agent Workers, and observable delivery are separate facts. `/reboot
-min` replaces one Agent Worker; shared Function replacement is a distinct,
-broad operation. Neither is a cold restart. Verify the exact active generation
-before claiming adoption. See [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md)
-and [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
+Source, qualified artifacts, installed clients, running Functions/Workers, and
+delivery are separate facts. `/reboot min` replaces one Worker; shared Function
+replacement is broader. Verify the active generation before claiming adoption.
+See [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
+[Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
 ## State, configuration, and identity
 
@@ -49,20 +41,16 @@ memory. Local identity and credentials stay in ignored instance stores.
 Model/effort opt-ins belong in `allowed_backends`; shared compatibility belongs
 to the Function-owned backend registry.
 
-HASHI-managed JSON writers use the shared revision-aware persistence boundary:
-BOM-tolerant reads where legacy or user-edited input is supported, UTF-8
-without BOM plus LF on publication, private candidates, validation, locking,
-revision checks, synchronization, and atomic replacement. A display fallback
-is never writable state. Conflicts require a fresh deliberate operation, not a
-blind retry. First publication must still prove that the destination is absent;
-legacy root arrays are supported only by the narrow migration owners that
-already accept them. A committed durability error is not permission to restore
-stale bytes. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
+HASHI JSON writers use revision-aware persistence: compatible reads, UTF-8/LF,
+private validated candidates, locking, revision checks, synchronization, and
+atomic replacement. Display fallback is never writable state. Conflicts require
+a fresh operation, not blind retry; create-only publication proves absence.
+Only designated migrations accept legacy root arrays. Never restore stale bytes
+after a durability error. See [persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
-Workzone slots expose only their exact enabled roots. A directory mention is
-not recursive upload authorization. Credentials, private authorization
-secrets, media bytes, and remote paths do not belong in chat text, PCM, normal
-logs, or tracked files.
+Workzones expose only exact enabled roots; mentioning a directory does not
+authorize recursive upload. Secrets, media bytes, and remote paths do not
+belong in chat, PCM, normal logs, or tracked files.
 
 ## Sessions, messages, and delivery
 
@@ -79,11 +67,9 @@ processing instance, sender assurance, authorization, and output destination
 remain separate. Do not infer identity or permission from message text, chat
 IDs, a remembered prior Turn, or possession of some other credential.
 
-HChat keeps the original sender claim, verified peer, relay, and target
-separate. Optional private authorization is per message. Only current
-`state=success` scopes apply; missing, invalid, expired, or revoked proofs add
-no privilege but do not block otherwise permitted ordinary HChat. Never place
-the raw shared secret in message text or command arguments.
+HChat separates sender claim, verified peer, relay, and target. Private
+authorization is per message; only current `state=success` scopes apply.
+Never put the shared secret in message text or command arguments.
 
 PAO determines one immutable Run route before PCM projection. The route states
 the primary destination, mirrors, and whether ordinary reply delivery is
@@ -94,20 +80,17 @@ destination, do not use a send tool to duplicate it. See
 [delivery](HCHAT_DELIVERY_BOUNDARY_PLAN.md) and
 [visibility](HASHI_AGENT_ACTIVITY_VISIBILITY.md).
 
-Every admitted turn requires a visible formal result. The sole narrow
-projection exception is a validated, client-bound TUI
-`hashi.frontend-delivery` v1 snapshot for one Run: it may disable that Run's
-Telegram mirror, never its Conversation record or TUI result. Terminal replies
-are verbatim and must not create acknowledgement loops.
+Every turn needs a visible formal result. A validated, client-bound TUI
+`hashi.frontend-delivery` v1 snapshot may disable one Run's Telegram mirror,
+never its Conversation record or TUI result. Terminal replies are verbatim and
+must not create acknowledgement loops.
 
 ## Engines, models, and recovery
 
-Distinguish an Engine Provider from a Model Provider. HER v2 exposes Direct
-(`zero`), Strategic (`low`), and Planned (`medium`) execution; higher retained
-policies are not public modes. Fixed/Flex working mode, Memory+, and HER
-execution mode are independent settings. `/backend` changes Engine selection;
-`/model` configures model routing; `/effort` means HER mode on HER and model
-effort elsewhere.
+Distinguish Engine and Model Providers. HER v2 exposes Direct (`zero`),
+Strategic (`low`), and Planned (`medium`). Fixed/Flex, Memory+, and HER mode are
+independent. `/backend` selects Engine; `/model` routes models; `/effort` means
+HER mode on HER and model effort elsewhere.
 
 Use the current model metadata owner for price, context, effort, and modality.
 Do not copy a remembered model list. Media support is the intersection of
@@ -129,12 +112,11 @@ the original finish/error signal, request identity, and actual retry count.
 Normal tool continuation is not a retry, and a model sentence saying “stop” is
 not a structured stop signal.
 
-Provider forensic evidence is captured at the real I/O boundary before parsing
-or raising: each physical request, response or received stream prefix, parse
-decision, tool effect, recovery, terminal state, and Connector receipt shares
-an auditable correlation chain. Restricted complete evidence and normal safe
-projections are separate. Authentication secrets remain excluded. Never claim
-an unread or partially read body was an empty provider response.
+Capture provider evidence at real I/O before parsing/raising: physical request,
+response/stream prefix, parse decision, tool effect, recovery, terminal state,
+and Connector receipt share one correlation chain. Keep restricted originals
+apart from safe projections and exclude secrets. An unread/partial body is not
+an empty response.
 
 `/stop` preserves interrupted evidence. `/retry` follows defined recovery;
 `/resend` only replays output. `/steer` redirects execution while keeping
@@ -176,11 +158,10 @@ selection cannot read outside authorized roots or silently recurse a folder.
 Local `/say` and automatic speech play only on the computer running the TUI;
 they never create Telegram output. Late or cancelled media is discarded.
 
-Commands and menus follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): one
-fact owner, localized presentation, escaped values, accurate state, clear
-scope, safe navigation, and actionable error classes. `/help` derives from the
-registered command metadata. A local status capability may be unavailable even
-while chat works; report that once without misreporting the Run as failed.
+Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): one fact owner,
+localization, escaping, accurate scope/state, safe navigation, actionable
+errors. `/help` derives from registered metadata. Local status may fail while
+chat works; report it once without failing the Run.
 
 ## Move, Clone, jobs, and tools
 
@@ -193,16 +174,22 @@ Identity-memory and workspace scopes remain explicit; full workspace uses the
 decimal 1 GB preflight. `accepted` is not `completed`. See
 [Agent Move](HASHI_AGENT_MOVE_V1.md).
 
-Use only tools and skills exposed for the current turn. Browser, computer,
-voice, media, Remote, and external Providers are optional capabilities; check
-current configuration and authority before use. Device tools appear only while
-a same-instance Worker advertises the required action with an unexpired
-registration. If one disappears after selection, treat the typed
-`capability_unavailable` result as a fresh-planning signal; do not blindly retry.
-Use `web_fetch` for ordinary public documents, but do not claim it replaces a
-browser where JavaScript, login state, or interaction is required. Use
-HASHI-managed Jobs for long
-processes rather than inventing another manager. Superloop receipt review needs
+Telegram delivery recovery belongs to an exact instance, Agent lifecycle ID,
+and fingerprinted Bot identity—not a reusable Agent name or token-key label.
+Legacy or mismatched records are quarantined without sending. Permanent
+destination errors stop only that chat; transient recovery is bounded and
+`RetryAfter` remains authoritative. A recovery notice is bookkeeping, never a
+gate on ordinary delivery after the wait expires. Move preserves proven state
+and full-workspace pending responses; Clone inherits neither. See
+[Telegram Delivery Failover](TELEGRAM_DELIVERY_FAILOVER_DESIGN.md).
+
+Use only tools/skills exposed for this turn; optional capabilities also require
+current authority. Device tools appear only while a same-instance Worker has an
+unexpired matching action. If it disappears, re-plan from typed
+`capability_unavailable`; do not retry blindly. Prefer `web_fetch` for public
+documents, but it cannot replace JavaScript, login state, or interaction. Use
+HASHI Jobs for long processes.
+Superloop receipt review needs
 opt-in, matching identities, Session-pinned idempotency, and a concrete next
 action for every unresolved check. Reports are not delivery. See
 [Superloop](SUPERLOOP_FUNCTION_CONTRACT.md).

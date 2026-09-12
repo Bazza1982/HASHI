@@ -28,7 +28,16 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
+from orchestrator.agent_incarnation import (
+    AGENT_LIFECYCLE_FIELD,
+    valid_agent_lifecycle_id,
+)
 from orchestrator.pcm_transfer import is_portable_memory_path
+from orchestrator.telegram_delivery_state import (
+    export_owned_state,
+    record_owner,
+    telegram_bot_fingerprint,
+)
 from orchestrator.pcm import (
     PCM_FILENAME,
     PCMValidationError,
@@ -387,6 +396,36 @@ def create_agent_move_package(
     secret_values, required_secret_keys, telegram_secret_key = _collect_agent_secrets(
         root, raw_config, name
     )
+    delivery_state = None
+    if transfer_operation == "move":
+        lifecycle_id = raw_config.get(AGENT_LIFECYCLE_FIELD)
+        bot_fingerprint = telegram_bot_fingerprint(
+            secret_values.get(telegram_secret_key)
+        )
+        if valid_agent_lifecycle_id(lifecycle_id) and bot_fingerprint:
+            delivery_state = export_owned_state(
+                root,
+                name,
+                {
+                    "instance_id": str(
+                        source_instance or _configured_instance_id(root) or "HASHI"
+                    ).upper(),
+                    "agent_lifecycle_id": str(lifecycle_id).casefold(),
+                    "telegram_bot_fingerprint": bot_fingerprint,
+                },
+            )
+        pending_requests = {
+            str(request_id)
+            for chat in (delivery_state or {}).get("per_chat", {}).values()
+            if isinstance(chat, dict)
+            for request_id in chat.get("undelivered_request_ids", [])
+            if request_id
+        }
+        if pending_requests and transfer_mode != "workspace":
+            raise AgentMoveError(
+                "Agent has owned undelivered Telegram content; use the full "
+                "workspace transfer mode so business responses are preserved"
+            )
     if not include_telegram_secret:
         secret_values.pop(telegram_secret_key, None)
         required_secret_keys = [
@@ -411,6 +450,7 @@ def create_agent_move_package(
             workspace,
             max_workspace_bytes=WORKSPACE_LIMIT_BYTES if transfer_mode else MAX_WORKSPACE_BYTES,
             transfer_mode=transfer_mode,
+            include_undelivered=transfer_operation == "move",
         )
 
     source_kind = detect_environment_kind()
@@ -439,6 +479,7 @@ def create_agent_move_package(
                     include_telegram_secret and telegram_secret_key in secret_values
                 ),
                 "operation": transfer_operation,
+                "telegram_delivery_state": delivery_state,
             }
         )
     workspace_metadata = {
@@ -687,6 +728,20 @@ def read_agent_move_package(
                 )
             if operation == "clone" and access.get("telegram_secret_included"):
                 raise AgentMoveError("clone package declares a Telegram credential")
+            delivery_state = access.get("telegram_delivery_state")
+            if delivery_state is not None:
+                if operation != "move" or not isinstance(delivery_state, dict):
+                    raise AgentMoveError(
+                        "only a move package may carry owned Telegram delivery state"
+                    )
+                if record_owner(delivery_state) is None:
+                    raise AgentMoveError(
+                        "packaged Telegram delivery state has no verifiable owner"
+                    )
+                if any(key in delivery_state for key in ("token", "telegram_token")):
+                    raise AgentMoveError(
+                        "packaged Telegram delivery state contains raw credential data"
+                    )
         schedules = _read_json(archive, "schedules/tasks.json")
         workspace_metadata = _read_json(archive, "metadata/workspace.json")
         if int(manifest.get("schema_version") or 0) >= 4:
@@ -1061,6 +1116,7 @@ def _scan_workspace(
     *,
     max_workspace_bytes: int,
     transfer_mode: str | None = None,
+    include_undelivered: bool = False,
 ) -> tuple[list[WorkspaceEntry], list[dict[str, str]]]:
     entries: list[WorkspaceEntry] = []
     excluded: list[dict[str, str]] = []
@@ -1079,7 +1135,12 @@ def _scan_workspace(
                     f"workspace/{relative} conflicts with the reserved Agent identity; "
                     "only exact root AGENT.md may be retained as a non-authoritative attachment"
                 )
-            if normalized_directory in _SKIP_DIR_NAMES and (
+            if normalized_directory in _SKIP_DIR_NAMES and not (
+                include_undelivered
+                and transfer_mode == "workspace"
+                and current_path == workspace
+                and normalized_directory == "undelivered"
+            ) and (
                 not transfer_mode or current_path == workspace
                 or normalized_directory not in {"state", "tmp", "undelivered", "backend_state"}
             ):

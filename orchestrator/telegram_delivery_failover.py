@@ -8,15 +8,33 @@ from datetime import datetime, timedelta
 from math import ceil
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from telegram.error import RetryAfter
 
 from orchestrator import telegram_stream_policy
 from orchestrator.process_resources import async_path_lock
+from orchestrator.telegram_delivery_errors import (
+    TelegramDeliveryError,
+    classify_telegram_delivery_error,
+)
+from orchestrator.telegram_delivery_state import (
+    DeliveryStateError,
+    mutate_state,
+    owned_record,
+    owner_for_runtime,
+    quarantine_record,
+    read_state,
+    record_owner,
+    retire_agent_state,
+    telegram_bot_fingerprint,
+)
 
 DEFAULT_FAILOVER_AGENT = "lin_yueru"
 DEFAULT_WARNING_REMINDER_SECONDS = 600
 DEFAULT_WATCHER_POLL_SECONDS = 60
+MAX_RECOVERY_ATTEMPTS = 3
+RECOVERY_ATTEMPT_LEASE_SECONDS = 300
 
 logger = logging.getLogger("BridgeU.TelegramDeliveryFailover")
 
@@ -35,7 +53,10 @@ def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value))
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_now().tzinfo)
+        return parsed
     except Exception:
         return None
 
@@ -77,11 +98,30 @@ def retry_after_seconds(exc: Any) -> int:
 
 
 def _pending_recovery_chat_keys(record: dict[str, Any]) -> list[str]:
-    return [
-        str(chat_key)
-        for chat_key, chat_state in (record.get("per_chat") or {}).items()
-        if not chat_state.get("recovery_notice_sent_at")
-    ]
+    now = _now()
+    pending: list[str] = []
+    per_chat = record.get("per_chat") or {}
+    if not isinstance(per_chat, dict):
+        return pending
+    for chat_key, chat_state in per_chat.items():
+        if not isinstance(chat_state, dict):
+            continue
+        if chat_state.get("recovery_notice_sent_at") or chat_state.get(
+            "recovery_stopped_at"
+        ):
+            continue
+        next_at = _parse_iso(chat_state.get("next_recovery_at"))
+        if next_at is not None and next_at > now:
+            continue
+        claim_id = chat_state.get("recovery_attempt_id")
+        if claim_id:
+            started = _parse_iso(chat_state.get("recovery_attempt_started_at"))
+            if started is None or (
+                now - started
+            ).total_seconds() < RECOVERY_ATTEMPT_LEASE_SECONDS:
+                continue
+        pending.append(str(chat_key))
+    return pending
 
 
 def preview_preferences_path(runtime: Any) -> Path:
@@ -123,28 +163,32 @@ def delivery_state_path(runtime_or_kernel: Any) -> Path:
 
 
 def _load_health_state_sync(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"version": 1, "agents": {}}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"version": 1, "agents": {}}
-    if not isinstance(payload, dict):
-        return {"version": 1, "agents": {}}
-    payload.setdefault("version", 1)
-    payload.setdefault("agents", {})
-    if not isinstance(payload["agents"], dict):
-        payload["agents"] = {}
-    return payload
-
-
-def _save_health_state_sync(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return read_state(path)
+    except DeliveryStateError as exc:
+        logger.error("Telegram delivery state unavailable: %s", exc)
+        return {"version": 2, "agents": {}, "quarantine": [], "read_error": str(exc)}
 
 
 def load_health_state(runtime_or_kernel: Any) -> dict[str, Any]:
     return _load_health_state_sync(delivery_state_path(runtime_or_kernel))
+
+
+def retire_agent_delivery_state(
+    project_root: str | Path,
+    agent_name: str,
+    *,
+    lifecycle_id: object = None,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Narrow lifecycle hook used by delete/recreate administration."""
+
+    return retire_agent_state(
+        project_root,
+        agent_name,
+        lifecycle_id=lifecycle_id,
+        reason=reason,
+    )
 
 
 def runtime_token_key(runtime: Any) -> str:
@@ -153,24 +197,72 @@ def runtime_token_key(runtime: Any) -> str:
 
 
 def _agent_record(state: dict[str, Any], runtime: Any) -> dict[str, Any]:
+    owner = owner_for_runtime(runtime)
+    if owner is None:
+        raise DeliveryStateError(
+            f"Telegram delivery owner is incomplete for {getattr(runtime, 'name', 'unknown')}"
+        )
     agents = state.setdefault("agents", {})
-    record = agents.setdefault(getattr(runtime, "name", "unknown"), {})
+    agent_name = getattr(runtime, "name", "unknown")
+    existing = agents.get(agent_name)
+    if isinstance(existing, dict) and record_owner(existing) != owner:
+        quarantine_record(
+            state,
+            agent_name,
+            reason=(
+                "legacy_record_has_no_owner"
+                if record_owner(existing) is None
+                else "runtime_owner_mismatch"
+            ),
+            expected_owner=owner,
+        )
+        existing = None
+    record = existing if isinstance(existing, dict) else {}
+    agents[agent_name] = record
+    record["owner"] = owner
     record.setdefault("token_key", runtime_token_key(runtime))
     record.setdefault("status", "healthy")
     record.setdefault("per_chat", {})
     return record
 
 
-def _find_record_by_token(state: dict[str, Any], token_key: str) -> tuple[str, dict[str, Any]] | tuple[None, None]:
-    for agent_name, record in (state.get("agents") or {}).items():
-        if str(record.get("token_key") or "") == token_key:
-            return agent_name, record
-    return None, None
+def _owned_record_or_quarantine(
+    state: dict[str, Any], runtime: Any
+) -> tuple[dict[str, Any] | None, bool]:
+    agent_name = getattr(runtime, "name", "unknown")
+    owner = owner_for_runtime(runtime)
+    record = (state.get("agents") or {}).get(agent_name)
+    if not isinstance(record, dict):
+        return None, False
+    if owner is not None and record_owner(record) == owner:
+        return record, False
+    reason = (
+        "runtime_owner_incomplete"
+        if owner is None
+        else (
+            "legacy_record_has_no_owner"
+            if record_owner(record) is None
+            else "runtime_owner_mismatch"
+        )
+    )
+    quarantine_record(
+        state,
+        agent_name,
+        reason=reason,
+        expected_owner=owner,
+    )
+    logger.warning(
+        "Telegram delivery state quarantined agent=%s reason=%s incident_id=%s",
+        agent_name,
+        reason,
+        record.get("incident_id"),
+    )
+    return None, True
 
 
 def get_blocked_record(runtime: Any) -> dict[str, Any] | None:
     state = load_health_state(runtime)
-    _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
+    record = owned_record(state, getattr(runtime, "name", "unknown"), owner_for_runtime(runtime))
     if not record:
         return None
     if _record_has_active_block(record):
@@ -184,17 +276,38 @@ def is_delivery_blocked(runtime: Any) -> bool:
 
 def delivery_status_summary(runtime: Any) -> dict[str, Any] | None:
     state = load_health_state(runtime)
-    _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
-    if not record:
+    agent_name = getattr(runtime, "name", "unknown")
+    runtime_owner = owner_for_runtime(runtime)
+    record = owned_record(state, agent_name, runtime_owner)
+    if record:
+        status = str(record.get("status") or "healthy")
+        if _record_has_active_block(record) or status in {
+            "recovery_due",
+            "recovery_stopped",
+        }:
+            return {
+                "blocked_until": record.get("blocked_until"),
+                "status": status,
+                "active_failover_agent": record.get("active_failover_agent"),
+                "incident_id": record.get("incident_id"),
+                "reason": record.get("last_recovery_error"),
+            }
         return None
-    if not _record_has_active_block(record):
-        return None
-    return {
-        "blocked_until": record.get("blocked_until"),
-        "status": record.get("status"),
-        "active_failover_agent": record.get("active_failover_agent"),
-        "incident_id": record.get("incident_id"),
-    }
+
+    # A quarantined stale record is not a delivery block, but exposing one
+    # concise status prevents operators from mistaking isolation for delivery.
+    for entry in reversed(state.get("quarantine") or []):
+        if not isinstance(entry, dict) or entry.get("agent_name") != agent_name:
+            continue
+        expected_owner = entry.get("expected_owner")
+        if expected_owner and expected_owner != runtime_owner:
+            continue
+        return {
+            "status": "quarantined",
+            "incident_id": entry.get("incident_id"),
+            "reason": entry.get("reason"),
+        }
+    return None
 
 
 def warning_reminder_seconds(runtime: Any) -> int:
@@ -268,7 +381,7 @@ def _runtime_candidates(source_runtime: Any) -> list[Any]:
     ]
 
 
-def _eligible_failover_runtime(source_runtime: Any, candidate: Any, *, blocked_tokens: set[str]) -> bool:
+def _eligible_failover_runtime(source_runtime: Any, candidate: Any, *, blocked_bots: set[str]) -> bool:
     if candidate is source_runtime:
         return False
     if getattr(candidate, "name", None) == getattr(source_runtime, "name", None):
@@ -277,9 +390,15 @@ def _eligible_failover_runtime(source_runtime: Any, candidate: Any, *, blocked_t
         return False
     if str(getattr(candidate, "token", "") or "") == "WORKBENCH_ONLY_NO_TOKEN":
         return False
-    if runtime_token_key(candidate) in blocked_tokens:
+    candidate_owner = owner_for_runtime(candidate)
+    source_owner = owner_for_runtime(source_runtime)
+    candidate_bot = (candidate_owner or {}).get("telegram_bot_fingerprint")
+    source_bot = (source_owner or {}).get("telegram_bot_fingerprint")
+    if not candidate_bot:
         return False
-    if runtime_token_key(candidate) == runtime_token_key(source_runtime):
+    if candidate_bot in blocked_bots:
+        return False
+    if candidate_bot == source_bot:
         return False
     return True
 
@@ -301,8 +420,8 @@ def _select_failover_runtime_from_state(
     exclude_names: set[str] | None = None,
 ) -> Any | None:
     exclude_names = exclude_names or set()
-    blocked_tokens = {
-        str(record.get("token_key") or "")
+    blocked_bots = {
+        str((record_owner(record) or {}).get("telegram_bot_fingerprint") or "")
         for record in (state.get("agents") or {}).values()
         if _record_has_active_block(record)
     }
@@ -310,12 +429,12 @@ def _select_failover_runtime_from_state(
     if preferred_name:
         for candidate in candidates:
             if candidate.name == preferred_name and candidate.name not in exclude_names:
-                if _eligible_failover_runtime(source_runtime, candidate, blocked_tokens=blocked_tokens):
+                if _eligible_failover_runtime(source_runtime, candidate, blocked_bots=blocked_bots):
                     return candidate
     for candidate in candidates:
         if candidate.name in exclude_names:
             continue
-        if _eligible_failover_runtime(source_runtime, candidate, blocked_tokens=blocked_tokens):
+        if _eligible_failover_runtime(source_runtime, candidate, blocked_bots=blocked_bots):
             return candidate
     return None
 
@@ -369,10 +488,26 @@ def _recovery_text(source_agent: str) -> str:
 
 
 async def _send_direct(runtime: Any, *, chat_id: int, text: str) -> None:
-    if getattr(runtime, "is_function_worker_proxy", False):
-        await runtime._send_text(chat_id, text)
-        return
-    await runtime.app.bot.send_message(chat_id=chat_id, text=text)
+    try:
+        sender = getattr(runtime, "_send_text", None)
+        if callable(sender):
+            result = await sender(
+                chat_id,
+                text,
+                _delivery_mode="failover_notice",
+                _raise_delivery_error=True,
+            )
+            if result is False or result is None:
+                raise TelegramDeliveryError(
+                    "delivery_not_confirmed",
+                    retryable=True,
+                    permanent=False,
+                    reason="telegram_send_returned_no_receipt",
+                )
+            return
+        await runtime.app.bot.send_message(chat_id=chat_id, text=text)
+    except Exception as exc:
+        raise classify_telegram_delivery_error(exc) from exc
 
 
 async def send_runtime_notice(
@@ -399,16 +534,6 @@ async def send_runtime_notice(
         )
     )
     health = load_health_state(kernel)
-    blocked = {
-        name
-        for name, record in health.get("agents", {}).items()
-        if _record_has_active_block(record)
-    }
-    blocked_keys = {
-        record.get("token_key")
-        for record in health.get("agents", {}).values()
-        if _record_has_active_block(record)
-    }
 
     def token_for(name):
         return str(
@@ -418,12 +543,38 @@ async def send_runtime_notice(
             )
         )
 
+    instance_id = str(getattr(kernel.global_cfg, "instance_id", "") or "").upper()
+
+    def configured_owner(name):
+        row = configs.get(name, {})
+        lifecycle_id = str(row.get("agent_lifecycle_id") or "").strip().casefold()
+        fingerprint = telegram_bot_fingerprint(token_for(name))
+        if not instance_id or not lifecycle_id or not fingerprint:
+            return None
+        return {
+            "instance_id": instance_id,
+            "agent_lifecycle_id": lifecycle_id,
+            "telegram_bot_fingerprint": fingerprint,
+        }
+
+    blocked = {
+        name
+        for name, record in health.get("agents", {}).items()
+        if _record_has_active_block(record)
+        and record_owner(record) == configured_owner(name)
+    }
+    blocked_bots = {
+        str((record_owner(record) or {}).get("telegram_bot_fingerprint") or "")
+        for name, record in health.get("agents", {}).items()
+        if name in blocked
+    }
+
     tried_tokens = {
         token_for(name)
         for name in names
         if name in blocked
-        or f"telegram:{configs.get(name, {}).get('telegram_token_key', name)}"
-        in blocked_keys
+        or str((configured_owner(name) or {}).get("telegram_bot_fingerprint") or "")
+        in blocked_bots
     }
     retry_delay = 5
     try:
@@ -479,44 +630,52 @@ async def _prepare_warning(
         return None
     async with async_path_lock(delivery_state_path(source_runtime)):
         path = delivery_state_path(source_runtime)
-        state = _load_health_state_sync(path)
-        _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
-        if not record or not _record_has_active_block(record):
-            return None
-        chat_key = str(chat_id)
-        per_chat = record.setdefault("per_chat", {})
-        entry = per_chat.setdefault(chat_key, {})
-        now = _now()
-        last_warned_at = _parse_iso(entry.get("last_warned_at"))
-        if last_warned_at is not None:
-            if (now - last_warned_at).total_seconds() < warning_reminder_seconds(source_runtime):
-                return None
-        preferred_name = str(record.get("active_failover_agent") or configured_default_failover_agent(source_runtime))
-        chosen = _select_failover_runtime_from_state(
-            source_runtime,
-            state,
-            preferred_name=preferred_name,
-            exclude_names=exclude_names,
-        )
-        if chosen is None:
-            record["failover_failed"] = True
-            record["last_failover_error"] = "no eligible failover runtime"
-            _save_health_state_sync(path, state)
-            return None
-        warning_text = _warn_text(
-            instance_id=str(
-                getattr(getattr(source_runtime, "global_config", None), "instance_id", None)
-                or "HASHI"
-            ),
-            source_agent=source_runtime.name,
-            request_id=request_id,
-            retry_after_s=record.get("retry_after_s"),
-            blocked_until=record.get("blocked_until"),
-            response_path=response_path,
-            failover_agent=chosen.name,
-            status=str(record.get("status") or "blocked"),
-        )
-        return chosen, warning_text
+
+        def mutation(state):
+            record, changed = _owned_record_or_quarantine(state, source_runtime)
+            if not record or not _record_has_active_block(record):
+                return None, changed
+            entry = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
+            now = _now()
+            last_warned_at = _parse_iso(entry.get("last_warned_at"))
+            if last_warned_at is not None and (
+                now - last_warned_at
+            ).total_seconds() < warning_reminder_seconds(source_runtime):
+                return None, changed
+            preferred_name = str(
+                record.get("active_failover_agent")
+                or configured_default_failover_agent(source_runtime)
+            )
+            chosen = _select_failover_runtime_from_state(
+                source_runtime,
+                state,
+                preferred_name=preferred_name,
+                exclude_names=exclude_names,
+            )
+            if chosen is None:
+                record["failover_failed"] = True
+                record["last_failover_error"] = "no_eligible_failover_runtime"
+                return None, True
+            warning_text = _warn_text(
+                instance_id=str(
+                    getattr(
+                        getattr(source_runtime, "global_config", None),
+                        "instance_id",
+                        None,
+                    )
+                    or "HASHI"
+                ),
+                source_agent=source_runtime.name,
+                request_id=request_id,
+                retry_after_s=record.get("retry_after_s"),
+                blocked_until=record.get("blocked_until"),
+                response_path=response_path,
+                failover_agent=chosen.name,
+                status=str(record.get("status") or "blocked"),
+            )
+            return (chosen, warning_text), changed
+
+        return mutate_state(path, mutation)
 
 
 async def _record_warning_result(
@@ -530,24 +689,29 @@ async def _record_warning_result(
 ) -> None:
     async with async_path_lock(delivery_state_path(source_runtime)):
         path = delivery_state_path(source_runtime)
-        state = _load_health_state_sync(path)
-        _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
-        if not record:
-            return
-        entry = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
-        if success:
-            now = _now()
-            record["active_failover_agent"] = failover_agent
-            record["failover_failed"] = False
-            record.pop("last_failover_error", None)
-            entry.setdefault("first_warned_at", _iso(now))
-            entry["last_warned_at"] = _iso(now)
-            entry["last_warning_request_id"] = request_id
-        else:
-            record["failover_failed"] = True
-            if error is not None:
-                record["last_failover_error"] = f"{type(error).__name__}: {error}"
-        _save_health_state_sync(path, state)
+
+        def mutation(state):
+            record, changed = _owned_record_or_quarantine(state, source_runtime)
+            if not record:
+                return None, changed
+            entry = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
+            if success:
+                now = _now()
+                record["active_failover_agent"] = failover_agent
+                record["failover_failed"] = False
+                record.pop("last_failover_error", None)
+                entry.setdefault("first_warned_at", _iso(now))
+                entry["last_warned_at"] = _iso(now)
+                entry["last_warning_request_id"] = request_id
+            else:
+                classified = classify_telegram_delivery_error(
+                    error or RuntimeError("failover warning failed")
+                )
+                record["failover_failed"] = True
+                record["last_failover_error"] = classified.code
+            return None, True
+
+        mutate_state(path, mutation)
 
 
 async def _maybe_send_warning(
@@ -578,7 +742,17 @@ async def _maybe_send_warning(
             failover_agent=chosen.name,
             success=True,
         )
-    except RetryAfter:
+    except TelegramDeliveryError as delivery_error:
+        if delivery_error.code != "retry_after":
+            await _record_warning_result(
+                source_runtime,
+                chat_id=chat_id,
+                request_id=request_id,
+                failover_agent=chosen.name,
+                success=False,
+                error=delivery_error,
+            )
+            return
         alternate_prepared = await _prepare_warning(
             source_runtime,
             chat_id=chat_id,
@@ -634,57 +808,70 @@ async def handle_blocked_send(
     purpose: str,
     text: str | None = None,
 ) -> bool:
-    response_path = None
-    blocked_record = None
     async with async_path_lock(delivery_state_path(runtime)):
         path = delivery_state_path(runtime)
-        state = _load_health_state_sync(path)
-        _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
-        if not record:
-            return False
-        if not _record_has_active_block(record):
-            if str(record.get("status") or "") == "blocked":
-                record["status"] = (
-                    "recovery_due"
-                    if _pending_recovery_chat_keys(record)
-                    else "healthy"
+
+        def mutation(state):
+            record, changed = _owned_record_or_quarantine(state, runtime)
+            if not record:
+                return {"blocked": False}, changed
+            if not _record_has_active_block(record):
+                if str(record.get("status") or "") == "blocked":
+                    record["status"] = (
+                        "recovery_due"
+                        if _pending_recovery_chat_keys(record)
+                        else "healthy"
+                    )
+                    record["delivery_restored_at"] = _iso(_now())
+                    record["active_failover_agent"] = None
+                    record["failover_failed"] = False
+                    if record["status"] == "healthy":
+                        record.pop("recovery_failed", None)
+                        record.pop("last_recovery_error", None)
+                    logger.info(
+                        "Telegram delivery wait elapsed; normal delivery restored "
+                        "agent=%s incident_id=%s blocked_until=%s",
+                        getattr(runtime, "name", "unknown"),
+                        record.get("incident_id"),
+                        record.get("blocked_until"),
+                    )
+                    return {"blocked": False}, True
+                return {"blocked": False}, changed
+            response_path = None
+            if text:
+                response_path = persist_undelivered_response(
+                    runtime,
+                    request_id=request_id,
+                    chat_id=chat_id,
+                    text=text,
+                    purpose=purpose,
+                    incident_id=record.get("incident_id"),
+                    retry_after_s=record.get("retry_after_s"),
+                    blocked_until=record.get("blocked_until"),
+                    failover_agent=record.get("active_failover_agent"),
                 )
-                record["delivery_restored_at"] = _iso(_now())
-                record["active_failover_agent"] = None
-                record["failover_failed"] = False
-                if record["status"] == "healthy":
-                    record.pop("recovery_failed", None)
-                    record.pop("last_recovery_error", None)
-                _save_health_state_sync(path, state)
-                logger.info(
-                    "Telegram delivery wait elapsed; normal delivery restored "
-                    "agent=%s incident_id=%s blocked_until=%s",
-                    getattr(runtime, "name", "unknown"),
-                    record.get("incident_id"),
-                    record.get("blocked_until"),
-                )
-            return False
-        if text:
-            response_path = persist_undelivered_response(
-                runtime,
-                request_id=request_id,
-                chat_id=chat_id,
-                text=text,
-                purpose=purpose,
-                incident_id=record.get("incident_id"),
-                retry_after_s=record.get("retry_after_s"),
-                blocked_until=record.get("blocked_until"),
-                failover_agent=record.get("active_failover_agent"),
-            )
-            if chat_id is not None:
-                per_chat = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
-                requests = per_chat.setdefault("undelivered_request_ids", [])
-                if request_id and request_id not in requests:
-                    requests.append(request_id)
-        blocked_record = dict(record)
-        _save_health_state_sync(path, state)
-    if blocked_record is not None:
-        await _maybe_send_warning(runtime, chat_id=chat_id, record=blocked_record, request_id=request_id, response_path=response_path)
+                if chat_id is not None:
+                    entry = record.setdefault("per_chat", {}).setdefault(
+                        str(chat_id), {}
+                    )
+                    requests = entry.setdefault("undelivered_request_ids", [])
+                    if request_id and request_id not in requests:
+                        requests.append(request_id)
+            return {
+                "blocked": True,
+                "record": dict(record),
+                "response_path": response_path,
+            }, True
+
+        result = mutate_state(path, mutation)
+    if result.get("blocked"):
+        await _maybe_send_warning(
+            runtime,
+            chat_id=chat_id,
+            record=result["record"],
+            request_id=request_id,
+            response_path=result["response_path"],
+        )
         return True
     return False
 
@@ -703,57 +890,71 @@ async def handle_retry_after(
     blocked_until_dt = now + timedelta(seconds=max(retry_after_s, 1))
     runtime_name = getattr(runtime, "name", "unknown")
     incident_id = f"tg-{runtime_name}-{now.strftime('%Y%m%dT%H%M%S%f')}"
-    response_path = None
-    saved_record: dict[str, Any]
     async with async_path_lock(delivery_state_path(runtime)):
         path = delivery_state_path(runtime)
-        state = _load_health_state_sync(path)
-        record = _agent_record(state, runtime)
-        continuing_incident = _record_has_active_block(record, now=now)
-        if continuing_incident and record.get("incident_id"):
-            incident_id = str(record.get("incident_id"))
-        else:
-            for entry in (record.get("per_chat") or {}).values():
-                for key in (
-                    "first_warned_at",
-                    "last_warned_at",
-                    "last_warning_request_id",
-                    "recovery_notice_sent_at",
-                ):
-                    entry.pop(key, None)
-            record["active_failover_agent"] = None
-            record["failover_failed"] = False
-            record.pop("last_failover_error", None)
-        record["status"] = "blocked"
-        record["token_key"] = runtime_token_key(runtime)
-        record["blocked_until"] = _iso(blocked_until_dt)
-        record["retry_after_s"] = retry_after_s
-        record["incident_id"] = incident_id
-        record["last_incident_at"] = _iso(now)
-        record["last_request_id"] = request_id
-        record.pop("delivery_restored_at", None)
-        record.pop("recovery_failed", None)
-        record.pop("last_recovery_error", None)
-        if text:
-            response_path = persist_undelivered_response(
-                runtime,
-                request_id=request_id,
-                chat_id=chat_id,
-                text=text,
-                purpose=purpose,
-                incident_id=incident_id,
-                retry_after_s=retry_after_s,
-                blocked_until=record["blocked_until"],
-                failover_agent=record.get("active_failover_agent"),
-            )
-        if chat_id is not None:
-            per_chat = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
-            requests = per_chat.setdefault("undelivered_request_ids", [])
-            if request_id and request_id not in requests:
-                requests.append(request_id)
-        saved_record = dict(record)
-        _save_health_state_sync(path, state)
-    await _maybe_send_warning(runtime, chat_id=chat_id, record=saved_record, request_id=request_id, response_path=response_path)
+
+        def mutation(state):
+            current_incident_id = incident_id
+            record = _agent_record(state, runtime)
+            continuing_incident = _record_has_active_block(record, now=now)
+            if continuing_incident and record.get("incident_id"):
+                current_incident_id = str(record.get("incident_id"))
+            else:
+                for entry in (record.get("per_chat") or {}).values():
+                    for key in (
+                        "first_warned_at",
+                        "last_warned_at",
+                        "last_warning_request_id",
+                        "recovery_notice_sent_at",
+                        "recovery_stopped_at",
+                        "recovery_stop_reason",
+                        "recovery_attempt_id",
+                        "recovery_attempt_started_at",
+                        "recovery_attempts",
+                        "next_recovery_at",
+                    ):
+                        entry.pop(key, None)
+                record["active_failover_agent"] = None
+                record["failover_failed"] = False
+                record.pop("last_failover_error", None)
+            record["status"] = "blocked"
+            record["token_key"] = runtime_token_key(runtime)
+            record["blocked_until"] = _iso(blocked_until_dt)
+            record["retry_after_s"] = retry_after_s
+            record["incident_id"] = current_incident_id
+            record["last_incident_at"] = _iso(now)
+            record["last_request_id"] = request_id
+            record.pop("delivery_restored_at", None)
+            record.pop("recovery_failed", None)
+            record.pop("last_recovery_error", None)
+            response_path = None
+            if text:
+                response_path = persist_undelivered_response(
+                    runtime,
+                    request_id=request_id,
+                    chat_id=chat_id,
+                    text=text,
+                    purpose=purpose,
+                    incident_id=current_incident_id,
+                    retry_after_s=retry_after_s,
+                    blocked_until=record["blocked_until"],
+                    failover_agent=record.get("active_failover_agent"),
+                )
+            if chat_id is not None:
+                entry = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
+                requests = entry.setdefault("undelivered_request_ids", [])
+                if request_id and request_id not in requests:
+                    requests.append(request_id)
+            return (dict(record), response_path), True
+
+        saved_record, response_path = mutate_state(path, mutation)
+    await _maybe_send_warning(
+        runtime,
+        chat_id=chat_id,
+        record=saved_record,
+        request_id=request_id,
+        response_path=response_path,
+    )
     return saved_record
 
 
@@ -769,139 +970,307 @@ async def delivery_health_watcher(kernel: Any) -> None:
 
 
 async def _tick_recovery(kernel: Any) -> None:
-    notices: list[tuple[str, Any, int, str | None]] = []
+    notices: list[tuple[str, Any, int, str | None, dict[str, str], str]] = []
     async with async_path_lock(delivery_state_path(kernel)):
         path = delivery_state_path(kernel)
-        state = _load_health_state_sync(path)
-        changed = False
         runtimes = {getattr(rt, "name", None): rt for rt in getattr(kernel, "runtimes", [])}
-        for agent_name, record in (state.get("agents") or {}).items():
-            status = str(record.get("status") or "")
-            if status not in {"blocked", "recovery_due"}:
-                continue
-            if status == "blocked" and _record_has_active_block(record):
-                continue
-            if status == "blocked":
-                if _record_has_active_block(record):
+
+        def claim_mutation(state):
+            changed = False
+            now = _now()
+            for agent_name, record in list((state.get("agents") or {}).items()):
+                if not isinstance(record, dict):
+                    quarantine_record(
+                        state,
+                        agent_name,
+                        reason="malformed_agent_delivery_record",
+                    )
+                    changed = True
                     continue
-            runtime = runtimes.get(agent_name)
-            if runtime is None or not getattr(runtime, "telegram_connected", False):
-                continue
-            record["status"] = "recovery_due"
-            if status == "blocked":
-                logger.info(
-                    "Telegram delivery block expired; recovery due agent=%s",
-                    agent_name,
-                )
-            else:
-                logger.info(
-                    "Retrying pending Telegram delivery recovery agent=%s",
-                    agent_name,
-                )
-            pending_chat_keys = _pending_recovery_chat_keys(record)
-            for chat_key in pending_chat_keys:
-                notices.append(
-                    (agent_name, runtime, int(chat_key), record.get("incident_id"))
-                )
-            if not pending_chat_keys:
-                record["status"] = "healthy"
-                record["active_failover_agent"] = None
-                record["failover_failed"] = False
-                record.pop("recovery_failed", None)
-                record.pop("last_recovery_error", None)
-                logger.info("Telegram delivery recovered agent=%s", agent_name)
-            changed = True
-        if changed:
-            _save_health_state_sync(path, state)
+                owner = record_owner(record)
+                if owner is None:
+                    quarantine_record(
+                        state,
+                        agent_name,
+                        reason="legacy_record_has_no_owner",
+                    )
+                    logger.warning(
+                        "Telegram delivery state quarantined agent=%s "
+                        "reason=legacy_record_has_no_owner incident_id=%s",
+                        agent_name,
+                        record.get("incident_id"),
+                    )
+                    changed = True
+                    continue
+                runtime = runtimes.get(agent_name)
+                if runtime is None:
+                    continue
+                runtime_owner = owner_for_runtime(runtime)
+                if runtime_owner != owner:
+                    quarantine_record(
+                        state,
+                        agent_name,
+                        reason="runtime_owner_mismatch",
+                        expected_owner=runtime_owner,
+                    )
+                    logger.warning(
+                        "Telegram delivery state quarantined agent=%s "
+                        "reason=runtime_owner_mismatch incident_id=%s",
+                        agent_name,
+                        record.get("incident_id"),
+                    )
+                    changed = True
+                    continue
+                if not isinstance(record.get("per_chat"), dict):
+                    quarantine_record(
+                        state,
+                        agent_name,
+                        reason="malformed_per_chat_delivery_state",
+                        expected_owner=runtime_owner,
+                    )
+                    logger.warning(
+                        "Telegram delivery state quarantined agent=%s "
+                        "reason=malformed_per_chat_delivery_state incident_id=%s",
+                        agent_name,
+                        record.get("incident_id"),
+                    )
+                    changed = True
+                    continue
+                status = str(record.get("status") or "")
+                if status not in {"blocked", "recovery_due"}:
+                    continue
+                if status == "blocked" and _record_has_active_block(record, now=now):
+                    continue
+                if not getattr(runtime, "telegram_connected", False):
+                    continue
+                if status == "blocked":
+                    record["status"] = "recovery_due"
+                    logger.info(
+                        "Telegram delivery block expired; recovery due agent=%s",
+                        agent_name,
+                    )
+                    changed = True
+                for chat_key, chat_state in (record.get("per_chat") or {}).items():
+                    if not isinstance(chat_state, dict):
+                        continue
+                    if chat_state.get("recovery_notice_sent_at") or chat_state.get(
+                        "recovery_stopped_at"
+                    ):
+                        continue
+                    claim_id = chat_state.get("recovery_attempt_id")
+                    if claim_id:
+                        started = _parse_iso(chat_state.get("recovery_attempt_started_at"))
+                        if started is not None and (
+                            now - started
+                        ).total_seconds() < RECOVERY_ATTEMPT_LEASE_SECONDS:
+                            continue
+                        # The prior process may have sent before losing its
+                        # receipt. Do not risk a duplicate recovery notice.
+                        chat_state["recovery_stopped_at"] = _iso(now)
+                        chat_state["recovery_stop_reason"] = (
+                            "prior_attempt_outcome_unknown"
+                        )
+                        chat_state.pop("recovery_attempt_id", None)
+                        chat_state.pop("recovery_attempt_started_at", None)
+                        changed = True
+                        continue
+                    next_at = _parse_iso(chat_state.get("next_recovery_at"))
+                    if next_at is not None and next_at > now:
+                        continue
+                    try:
+                        chat_id = int(chat_key)
+                        if chat_id == 0:
+                            raise ValueError("zero chat ID")
+                    except (TypeError, ValueError):
+                        chat_state["recovery_stopped_at"] = _iso(now)
+                        chat_state["recovery_stop_reason"] = "invalid_chat_id"
+                        chat_state["last_recovery_error_code"] = "invalid_chat_id"
+                        record["recovery_failed"] = True
+                        record["last_recovery_error"] = "invalid_chat_id"
+                        logger.warning(
+                            "Telegram delivery recovery stopped agent=%s "
+                            "chat_id=invalid reason=invalid_chat_id",
+                            agent_name,
+                        )
+                        changed = True
+                        continue
+                    attempt_id = uuid4().hex
+                    chat_state["recovery_attempt_id"] = attempt_id
+                    chat_state["recovery_attempt_started_at"] = _iso(now)
+                    notices.append(
+                        (
+                            agent_name,
+                            runtime,
+                            chat_id,
+                            record.get("incident_id"),
+                            dict(owner),
+                            attempt_id,
+                        )
+                    )
+                    changed = True
+                status_before_normalize = str(record.get("status") or "")
+                _normalize_recovery_status(record)
+                if str(record.get("status") or "") != status_before_normalize:
+                    changed = True
+            return None, changed
+
+        mutate_state(path, claim_mutation)
     if not notices:
         return
-    results: list[
-        tuple[str, int, str | None, str, int | None, Exception | None]
-    ] = []
-    for agent_name, runtime, chat_id, incident_id in notices:
+    results: list[tuple[str, int, str | None, dict[str, str], str, str, TelegramDeliveryError | None]] = []
+    for agent_name, runtime, chat_id, incident_id, owner, attempt_id in notices:
         try:
             await _send_direct(runtime, chat_id=chat_id, text=_recovery_text(agent_name))
-            results.append((agent_name, chat_id, incident_id, "sent", None, None))
-        except RetryAfter as exc:
-            retry_after_s = retry_after_seconds(exc)
             results.append(
-                (agent_name, chat_id, incident_id, "retry_after", retry_after_s, exc)
+                (agent_name, chat_id, incident_id, owner, attempt_id, "sent", None)
+            )
+        except TelegramDeliveryError as exc:
+            results.append(
+                (agent_name, chat_id, incident_id, owner, attempt_id, "error", exc)
             )
         except Exception as exc:
-            results.append((agent_name, chat_id, incident_id, "error", None, exc))
+            results.append(
+                (
+                    agent_name,
+                    chat_id,
+                    incident_id,
+                    owner,
+                    attempt_id,
+                    "error",
+                    classify_telegram_delivery_error(exc),
+                )
+            )
     async with async_path_lock(delivery_state_path(kernel)):
         path = delivery_state_path(kernel)
-        state = _load_health_state_sync(path)
-        changed = False
-        for agent_name, chat_id, incident_id, status, retry_after_s, error in results:
-            record = (state.get("agents") or {}).get(agent_name)
-            if not record:
-                continue
-            if record.get("incident_id") != incident_id:
-                logger.info(
-                    "Ignoring stale Telegram recovery result agent=%s incident_id=%s",
-                    agent_name,
-                    incident_id,
-                )
-                continue
-            if (
-                str(record.get("status") or "") == "blocked"
-                and _record_has_active_block(record)
-            ):
-                logger.info(
-                    "Ignoring Telegram recovery result after a new active block "
-                    "agent=%s incident_id=%s",
-                    agent_name,
-                    incident_id,
-                )
-                continue
-            chat_state = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
-            if status == "sent":
-                chat_state["recovery_notice_sent_at"] = _iso(_now())
-                logger.info(
-                    "Telegram delivery recovery notice sent agent=%s chat_id=%s",
-                    agent_name,
-                    chat_id,
-                )
-            elif status == "retry_after":
-                record["status"] = "blocked"
-                record["retry_after_s"] = retry_after_s
-                record["blocked_until"] = _iso(_now() + timedelta(seconds=max(int(retry_after_s or 0), 1)))
-                logger.warning(
-                    "Telegram delivery recovery flood-limited agent=%s "
-                    "chat_id=%s retry_after_s=%s",
-                    agent_name,
-                    chat_id,
-                    retry_after_s,
-                )
+
+        def result_mutation(state):
+            changed = False
+            for (
+                agent_name,
+                chat_id,
+                incident_id,
+                owner,
+                attempt_id,
+                status,
+                error,
+            ) in results:
+                record = owned_record(state, agent_name, owner)
+                if not record or record.get("incident_id") != incident_id:
+                    logger.info(
+                        "Ignoring stale Telegram recovery result agent=%s "
+                        "incident_id=%s attempt_id=%s",
+                        agent_name,
+                        incident_id,
+                        attempt_id,
+                    )
+                    continue
+                chat_state = (record.get("per_chat") or {}).get(str(chat_id))
+                if not isinstance(chat_state, dict) or (
+                    chat_state.get("recovery_attempt_id") != attempt_id
+                ):
+                    logger.info(
+                        "Ignoring superseded Telegram recovery result agent=%s "
+                        "incident_id=%s attempt_id=%s",
+                        agent_name,
+                        incident_id,
+                        attempt_id,
+                    )
+                    continue
+                chat_state.pop("recovery_attempt_id", None)
+                chat_state.pop("recovery_attempt_started_at", None)
+                now = _now()
+                if status == "sent":
+                    chat_state["recovery_notice_sent_at"] = _iso(now)
+                    chat_state.pop("next_recovery_at", None)
+                    logger.info(
+                        "Telegram delivery recovery notice sent agent=%s chat_id=%s",
+                        agent_name,
+                        chat_id,
+                    )
+                elif error is not None and error.code == "retry_after":
+                    wait = max(int(error.retry_after_s or 0), 1)
+                    record["status"] = "blocked"
+                    record["retry_after_s"] = wait
+                    record["blocked_until"] = _iso(now + timedelta(seconds=wait))
+                    chat_state["last_recovery_error_code"] = error.code
+                    logger.warning(
+                        "Telegram delivery recovery rate-limited agent=%s "
+                        "chat_id=%s retry_after_s=%s",
+                        agent_name,
+                        chat_id,
+                        wait,
+                    )
+                elif error is not None and error.permanent:
+                    chat_state["recovery_stopped_at"] = _iso(now)
+                    chat_state["recovery_stop_reason"] = error.code
+                    chat_state["last_recovery_error_code"] = error.code
+                    record["recovery_failed"] = True
+                    record["last_recovery_error"] = error.code
+                    logger.warning(
+                        "Telegram delivery recovery stopped agent=%s chat_id=%s "
+                        "reason=%s",
+                        agent_name,
+                        chat_id,
+                        error.code,
+                    )
+                else:
+                    attempts = int(chat_state.get("recovery_attempts") or 0) + 1
+                    chat_state["recovery_attempts"] = attempts
+                    code = error.code if error is not None else "transient_unknown"
+                    chat_state["last_recovery_error_code"] = code
+                    record["recovery_failed"] = True
+                    record["last_recovery_error"] = code
+                    if attempts >= MAX_RECOVERY_ATTEMPTS:
+                        chat_state["recovery_stopped_at"] = _iso(now)
+                        chat_state["recovery_stop_reason"] = (
+                            "transient_retry_exhausted"
+                        )
+                        logger.warning(
+                            "Telegram delivery recovery stopped agent=%s "
+                            "chat_id=%s reason=transient_retry_exhausted",
+                            agent_name,
+                            chat_id,
+                        )
+                    else:
+                        delay = min(300, 5 * (2 ** (attempts - 1)))
+                        chat_state["next_recovery_at"] = _iso(
+                            now + timedelta(seconds=delay)
+                        )
+                        logger.warning(
+                            "Telegram delivery recovery deferred agent=%s "
+                            "chat_id=%s reason=%s attempt=%s",
+                            agent_name,
+                            chat_id,
+                            code,
+                            attempts,
+                        )
+                if str(record.get("status") or "") != "blocked":
+                    _normalize_recovery_status(record)
                 changed = True
-                continue
-            else:
-                record["status"] = "recovery_due"
-                record["recovery_failed"] = True
-                record["last_recovery_error"] = f"{type(error).__name__}: {error}"
-                logger.warning(
-                    "Telegram delivery recovery notice failed; will retry "
-                    "agent=%s chat_id=%s error=%s: %s",
-                    agent_name,
-                    chat_id,
-                    type(error).__name__,
-                    error,
-                )
-                changed = True
-                continue
-            pending = [
-                key
-                for key, value in (record.get("per_chat") or {}).items()
-                if not value.get("recovery_notice_sent_at")
-            ]
-            if not pending:
-                record["status"] = "healthy"
-                record["active_failover_agent"] = None
-                record["failover_failed"] = False
-                record.pop("recovery_failed", None)
-                record.pop("last_recovery_error", None)
-                logger.info("Telegram delivery recovered agent=%s", agent_name)
-            changed = True
-        if changed:
-            _save_health_state_sync(path, state)
+            return None, changed
+
+        mutate_state(path, result_mutation)
+
+
+def _normalize_recovery_status(record: dict[str, Any]) -> None:
+    chats = [
+        value
+        for value in (record.get("per_chat") or {}).values()
+        if isinstance(value, dict)
+    ]
+    if any(
+        not value.get("recovery_notice_sent_at")
+        and not value.get("recovery_stopped_at")
+        for value in chats
+    ):
+        record["status"] = "recovery_due"
+        return
+    if any(value.get("recovery_stopped_at") for value in chats):
+        record["status"] = "recovery_stopped"
+        record["active_failover_agent"] = None
+        return
+    record["status"] = "healthy"
+    record["active_failover_agent"] = None
+    record["failover_failed"] = False
+    record.pop("recovery_failed", None)
+    record.pop("last_recovery_error", None)

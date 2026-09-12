@@ -20,6 +20,7 @@ from orchestrator.agent_move.package import (
     read_agent_move_package,
 )
 from orchestrator.pcm import render_pcm_document
+from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
 def _write_json(path: Path, value) -> None:
@@ -204,6 +205,78 @@ def test_clone_package_carries_capabilities_and_safe_secrets_but_never_telegram(
     assert decrypt_agent_secrets(package, "shared-secret") == {
         "zelda_api_key": "agent-only-api-key"
     }
+
+
+def test_owned_pending_delivery_requires_full_move_and_clone_never_inherits_it(
+    tmp_path,
+):
+    root = _source_root(tmp_path)
+    lifecycle_id = "1" * 32
+    config = json.loads((root / "agents.json").read_text())
+    config["agents"][0]["agent_lifecycle_id"] = lifecycle_id
+    _write_json(root / "agents.json", config)
+    undelivered = root / "workspaces" / "zelda" / "undelivered"
+    undelivered.mkdir()
+    (undelivered / "req-1.md").write_text("owned response", encoding="utf-8")
+    (root / "state").mkdir()
+    _write_json(
+        root / "state" / "telegram_delivery_health.json",
+        {
+            "version": 2,
+            "agents": {
+                "zelda": {
+                    "owner": {
+                        "instance_id": "HASHI1",
+                        "agent_lifecycle_id": lifecycle_id,
+                        "telegram_bot_fingerprint": telegram_bot_fingerprint(
+                            "telegram-token"
+                        ),
+                    },
+                    "status": "blocked",
+                    "incident_id": "owned-incident",
+                    "per_chat": {
+                        "123": {"undelivered_request_ids": ["req-1"]}
+                    },
+                }
+            },
+            "quarantine": [],
+        },
+    )
+
+    with pytest.raises(AgentMoveError, match="full workspace transfer mode"):
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "identity-only.hashi-agent",
+            source_instance="HASHI1",
+            operation="move",
+            transfer_mode="identity_memory",
+        )
+
+    moved = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "full-move.hashi-agent",
+        source_instance="HASHI1",
+        operation="move",
+        transfer_mode="workspace",
+    )
+    assert moved.access_requirements["telegram_delivery_state"]["incident_id"] == (
+        "owned-incident"
+    )
+    assert "workspace/undelivered/req-1.md" in moved.names
+
+    cloned = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "full-clone.hashi-agent",
+        source_instance="HASHI1",
+        operation="clone",
+        transfer_mode="workspace",
+        include_telegram_secret=False,
+    )
+    assert cloned.access_requirements["telegram_delivery_state"] is None
+    assert "workspace/undelivered/req-1.md" not in cloned.names
 
 
 def test_package_rejects_inactive_retained_source_copy(tmp_path):

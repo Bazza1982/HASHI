@@ -1179,6 +1179,7 @@ class FlexibleAgentRuntime:
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "send")
         delivery_mode = kwargs.pop("_delivery_mode", "normal_send")
+        raise_delivery_error = bool(kwargs.pop("_raise_delivery_error", False))
         if delivery_mode != "failover_notice":
             if await telegram_delivery_failover.handle_blocked_send(
                 self,
@@ -1203,10 +1204,14 @@ class FlexibleAgentRuntime:
                     text=text,
                 )
                 self.telegram_logger.warning(f"Send failed: {exc}")
+                if raise_delivery_error:
+                    raise
                 return None
             except Exception as e:
                 last_error = e
                 self.telegram_logger.warning(f"Send failed: {e}")
+                if raise_delivery_error:
+                    raise
                 await asyncio.sleep(0.8)
         raise last_error
 

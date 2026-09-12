@@ -20,6 +20,11 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator.agent_directory import AgentDirectory
+from orchestrator.agent_incarnation import (
+    AGENT_LIFECYCLE_FIELD,
+    new_agent_lifecycle_id,
+    valid_agent_lifecycle_id,
+)
 from orchestrator.config import (
     SESSION_MODE_BACKENDS,
     SUPPORTED_AGENT_MODES,
@@ -41,6 +46,11 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.process_execution import process_is_alive
 from orchestrator.pcm import PCMValidationError, canonical_agent_md, load_pcm_document
+from orchestrator.telegram_delivery_state import (
+    adopt_transferred_state,
+    retire_agent_state,
+    telegram_bot_fingerprint,
+)
 
 from .package import (
     AGENT_MOVE_CAPABILITY,
@@ -440,6 +450,24 @@ def commit_agent_move(
             operation=operation,
             secret_key_mapping=secret_key_mapping,
         )
+        lifecycle_id = str(
+            imported_config.get(AGENT_LIFECYCLE_FIELD) or ""
+        ).casefold()
+        journal_lifecycle = str(
+            record.get("imported_agent_lifecycle_id") or ""
+        ).casefold()
+        if journal_lifecycle:
+            if not valid_agent_lifecycle_id(journal_lifecycle):
+                raise AgentMoveError(
+                    "Agent transfer journal lifecycle identity is malformed"
+                )
+            if operation != "clone" and lifecycle_id != journal_lifecycle:
+                raise AgentMoveError(
+                    "Agent transfer lifecycle identity changed across commit retry"
+                )
+            lifecycle_id = journal_lifecycle
+            imported_config[AGENT_LIFECYCLE_FIELD] = lifecycle_id
+        record["imported_agent_lifecycle_id"] = lifecycle_id
 
         agents_path = root / "agents.json"
         tasks_path = root / "tasks.json"
@@ -517,6 +545,7 @@ def commit_agent_move(
         record["commit_started_at"] = utc_now_iso()
         _atomic_json(record_dir / "state.json", record, mode=0o600)
 
+        adopted_delivery_lifecycle: str | None = None
         try:
             if dormant:
                 dormant_workspace = _dormant_workspace_backup(record_dir)
@@ -557,6 +586,54 @@ def commit_agent_move(
                     capabilities_data.revision,
                 )
 
+            if operation == "clone":
+                delivery_receipt = retire_agent_state(
+                    root,
+                    target_agent_id,
+                    reason="clone_starts_without_source_delivery_state",
+                )
+                delivery_result = {
+                    "imported": False,
+                    "operation": "clone",
+                    "quarantined_existing": bool(delivery_receipt),
+                }
+            else:
+                token_key = str(imported_config.get("telegram_token_key") or "")
+                bot_fingerprint = telegram_bot_fingerprint(
+                    secret_values.get(token_key) or secrets_data.get(token_key)
+                )
+                transferred_delivery = package.access_requirements.get(
+                    "telegram_delivery_state"
+                )
+                if transferred_delivery is not None and not bot_fingerprint:
+                    raise AgentMoveError(
+                        "owned Telegram delivery state cannot be adopted until "
+                        "the transferred Bot credential is available"
+                    )
+                if bot_fingerprint:
+                    delivery_result = adopt_transferred_state(
+                        root,
+                        target_agent_id,
+                        target_owner={
+                            "instance_id": _configured_instance_id(root),
+                            "agent_lifecycle_id": lifecycle_id,
+                            "telegram_bot_fingerprint": bot_fingerprint,
+                        },
+                        transferred_record=(
+                            transferred_delivery
+                            if isinstance(transferred_delivery, Mapping)
+                            else None
+                        ),
+                        operation="move",
+                    )
+                    adopted_delivery_lifecycle = lifecycle_id
+                else:
+                    delivery_result = {
+                        "imported": False,
+                        "operation": "move",
+                        "reason": "no_telegram_bot_configured",
+                    }
+
             credential_status = _credential_status(
                 root,
                 package,
@@ -587,6 +664,7 @@ def commit_agent_move(
                         credential_status.get("required_keys") or []
                     ),
                     "credential_status": credential_status,
+                    "telegram_delivery_state": delivery_result,
                     "warnings": warnings,
                     "reboot_required": False,
                 }
@@ -594,6 +672,16 @@ def commit_agent_move(
             _atomic_json(record_dir / "state.json", record, mode=0o600)
             return _public_state(record)
         except Exception as exc:
+            if adopted_delivery_lifecycle:
+                try:
+                    retire_agent_state(
+                        root,
+                        target_agent_id,
+                        lifecycle_id=adopted_delivery_lifecycle,
+                        reason="agent_transfer_commit_rolled_back",
+                    )
+                except Exception:
+                    pass
             _restore_recovery_snapshots(root, record_dir)
             _recover_interrupted_workspace_commit(root, record_dir, record)
             record["status"] = "staged"
@@ -788,6 +876,13 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
                 f"Agent move cannot be rolled back from status {status!r}"
             )
 
+        if record.get("imported_agent_lifecycle_id"):
+            retire_agent_state(
+                root,
+                str(record.get("target_agent_id") or record.get("agent_id") or ""),
+                lifecycle_id=record.get("imported_agent_lifecycle_id"),
+                reason="agent_transfer_rolled_back",
+            )
         record.update(
             {
                 "status": "rolled_back",
@@ -854,6 +949,21 @@ def deactivate_source_agent(
         )
         if row is None:
             raise AgentMoveError(f"source Agent '{agent_id}' was not found")
+        source_lifecycle_id = str(
+            row.get(AGENT_LIFECYCLE_FIELD) or ""
+        ).strip().casefold()
+        if not source_lifecycle_id:
+            source_lifecycle_id = new_agent_lifecycle_id()
+            row[AGENT_LIFECYCLE_FIELD] = source_lifecycle_id
+        if not valid_agent_lifecycle_id(source_lifecycle_id):
+            raise AgentMoveError("source Agent lifecycle identity is malformed")
+        journal_lifecycle = str(
+            (state or {}).get("source_agent_lifecycle_id") or ""
+        ).strip().casefold()
+        if journal_lifecycle and journal_lifecycle != source_lifecycle_id:
+            raise AgentMoveError(
+                "source Agent lifecycle identity changed during move"
+            )
         if state is None:
             active_names = [
                 str(item.get("name") or item.get("id") or "")
@@ -923,6 +1033,7 @@ def deactivate_source_agent(
                 "schema_version": MOVE_STATE_SCHEMA_VERSION,
                 "package_id": package_id,
                 "agent_id": agent_id,
+                "source_agent_lifecycle_id": source_lifecycle_id,
                 "target_instance": _normalize_instance(target_instance),
                 "previous_active": bool(row.get("is_active", True)),
                 "previous_transfer_fields": previous_transfer_fields,
@@ -933,6 +1044,9 @@ def deactivate_source_agent(
                 "workspace_path": str(_source_workspace_path(root, row, agent_id)),
                 "reboot_required": False,
             })
+            _atomic_json(state_path, state, mode=0o600)
+        elif not journal_lifecycle:
+            state["source_agent_lifecycle_id"] = source_lifecycle_id
             _atomic_json(state_path, state, mode=0o600)
 
         for key in _SOURCE_TRANSFER_FIELDS:
@@ -1109,6 +1223,16 @@ def cleanup_source_agent(
             raise AgentMoveError("source Agent config is not unique during cleanup")
         if matches:
             row = matches[0]
+            source_lifecycle_id = str(
+                row.get(AGENT_LIFECYCLE_FIELD) or ""
+            ).strip().casefold()
+            journal_lifecycle = str(
+                state.get("source_agent_lifecycle_id") or ""
+            ).strip().casefold()
+            if journal_lifecycle and source_lifecycle_id != journal_lifecycle:
+                raise AgentMoveError(
+                    "source Agent lifecycle identity changed before cleanup"
+                )
             if (
                 row.get("is_active") is not False
                 or row.get("transfer_state") != "moved_out_pending_reboot"
@@ -1118,6 +1242,10 @@ def cleanup_source_agent(
                     "source Agent config changed before verified move cleanup"
                 )
             rows.remove(row)
+        else:
+            source_lifecycle_id = str(
+                state.get("source_agent_lifecycle_id") or ""
+            ).strip().casefold()
 
         tasks = _load_json_or_default(
             tasks_path,
@@ -1175,6 +1303,13 @@ def cleanup_source_agent(
                 target_instance=target_instance,
                 target_agent_id=target_agent_id,
             )
+            if valid_agent_lifecycle_id(source_lifecycle_id):
+                retire_agent_state(
+                    root,
+                    agent_id,
+                    lifecycle_id=source_lifecycle_id,
+                    reason="verified_move_source_cleaned",
+                )
         except Exception as exc:
             state["status"] = "source_cleanup_pending"
             state["last_error"] = str(exc)
@@ -1261,8 +1396,15 @@ def _prepare_import_config(
     row["name"] = target_agent_id
     row["workspace_dir"] = f"workspaces/{target_agent_id}"
     if operation == "clone":
+        row[AGENT_LIFECYCLE_FIELD] = new_agent_lifecycle_id()
         row["telegram_token_key"] = target_agent_id
     else:
+        lifecycle_id = row.get(AGENT_LIFECYCLE_FIELD)
+        if lifecycle_id is None:
+            lifecycle_id = new_agent_lifecycle_id()
+            row[AGENT_LIFECYCLE_FIELD] = lifecycle_id
+        if not valid_agent_lifecycle_id(lifecycle_id):
+            raise AgentMoveError("imported Agent lifecycle identity is malformed")
         source_token_key = str(
             package.access_requirements.get("telegram_secret_key")
             or row.get("telegram_token_key")
@@ -2435,6 +2577,7 @@ def _public_state(record: Mapping[str, Any]) -> dict[str, Any]:
         "workspace",
         "imported_task_ids",
         "credential_status",
+        "telegram_delivery_state",
         "retained_identity",
         "replaces_dormant_source",
         "dormant_package_id",
