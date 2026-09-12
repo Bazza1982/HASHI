@@ -1458,6 +1458,14 @@ class FunctionWorkerHost:
             )
         if method == "runtime.cos_query":
             return await runtime.cos_query(str(params.get("question") or ""))
+        if method == "runtime.command_interaction":
+            from orchestrator.command_interaction_bridge import dispatch_command_interaction
+            result = await dispatch_command_interaction(
+                runtime, params.get("payload") or {}, params.get("metadata") or {},
+            )
+            if (params.get("payload") or {}).get("op") in {"open", "act"}:
+                await self.publish_metadata()
+            return result
         if method == "runtime.slash":
             from orchestrator.admin_local_testing import (
                 try_execute_slash_command_text,

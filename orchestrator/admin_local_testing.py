@@ -248,6 +248,8 @@ async def execute_local_command(
     chat_id: int | str | None = None,
     source_channel: str = "workbench_api",
     session_metadata: Mapping[str, Any] | None = None,
+    *,
+    capture_store: Any | None = None,
 ) -> dict[str, Any]:
     if getattr(runtime, "is_function_worker_proxy", False):
         result = await runtime.execute_slash_command(
@@ -308,7 +310,7 @@ async def execute_local_command(
         else:
             session.handler_kind = "native"
 
-        store = _CaptureStore(messages=[])
+        store = capture_store if capture_store is not None else _CaptureStore(messages=[])
         local_session_metadata = _local_command_session_metadata(
             source_channel=source_channel,
             chat_id=chat_id,

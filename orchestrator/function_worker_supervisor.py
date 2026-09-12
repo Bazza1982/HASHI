@@ -923,6 +923,11 @@ class AgentRuntimeHandle:
             or {}
         )
 
+    async def execute_command_interaction(self, payload, metadata):
+        return dict(await self._route("runtime.command_interaction", {
+            "payload": dict(payload), "metadata": dict(metadata),
+        }) or {})
+
     async def execute_slash_command(
         self,
         text: str,

@@ -163,6 +163,14 @@ localization, escaping, accurate scope/state, safe navigation, actionable
 errors. `/help` derives from registered metadata. Local status may fail while
 chat works; report it once without failing the Run.
 
+Workbench command menus reuse the authenticated Backend API command endpoint
+and route a versioned `command_ui` envelope to the selected Agent Worker.
+The Worker projects existing registered commands and callbacks into bounded
+cards with opaque action IDs, current-policy, binding, revision and expiry
+checks; raw callback data stays server-side. Projection and replay state are
+memory-only, and governed profiles remain unsupported in v1. See
+[Frontend command interactions](FRONTEND_COMMAND_MENUS_V1.md).
+
 ## Move, Clone, jobs, and tools
 
 `/move` migrates; `/clone` clones. Both use the same authenticated package,
