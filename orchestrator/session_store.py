@@ -930,6 +930,7 @@ class SessionStore:
         response_preferences: Mapping[str, Any] | None = None,
         message_context: Mapping[str, Any] | None = None,
         delivery_route: Mapping[str, Any] | None = None,
+        expected_context_generation: int | None = None,
     ) -> AcceptedRun:
         clean = str(text or "").strip()
         blocks = list(content or ({"type": "text", "text": clean},))
@@ -957,6 +958,8 @@ class SessionStore:
             ).fetchone()
             if session is None:
                 raise SessionNotFound(session_id)
+            if expected_context_generation is not None and int(session["context_generation"]) != int(expected_context_generation):
+                raise SessionConflict("session_context_generation_changed")
             audio_rows: list[sqlite3.Row] = []
             attachment_fingerprints: list[dict[str, Any]] = []
             normalized_blocks: list[dict[str, Any]] = []
@@ -3006,6 +3009,20 @@ class SessionStore:
         if row is None:
             raise SessionNotFound(str(run_id))
         return self._run_dict(row)
+
+    def recent_session_runs(self, session_id: str, *, owner_id: str, limit: int = 64, context_generation: int | None = None) -> list[dict[str, Any]]:
+        """Bounded read-only request discovery for the caller's current Session."""
+        session = self.get_session(session_id, owner_id=owner_id)
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT request_id, run_id, session_id, agent_id, context_generation,
+                          state, created_at, completed_at, final_message_id
+                   FROM runs WHERE session_id = ? AND context_generation = ?
+                   ORDER BY (state IN ('queued', 'running', 'awaiting_approval')) DESC,
+                            created_at DESC, run_id DESC LIMIT ?""",
+                (session_id, context_generation if context_generation is not None else session["context_generation"], max(1, min(int(limit), 64))),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_run_by_request(
         self,

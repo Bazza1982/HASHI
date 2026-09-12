@@ -2748,6 +2748,13 @@ async def setup_interactive_feedback(
 
     activity_store = getattr(runtime, "request_activity", None)
 
+    if activity_store is not None:
+        activity_store.presentation_settings = lambda: {
+            "think": bool(getattr(runtime, "_think", False)),
+            "commentary": bool(getattr(runtime, "_commentary", True)),
+            "verbose": bool(getattr(runtime, "_verbose", False)),
+        }
+
     stream_callback = wrap_her_persona_stream(
         runtime,
         item,
@@ -3404,8 +3411,10 @@ def persist_success_memory(
                 request_tokens.pop(item.request_id, None)
     if not is_bridge_request:
         handoff_builder = runtime_session.session_handoff_builder(runtime, item=item)
-        handoff_builder.append_transcript("user", item.prompt, item.source)
-        handoff_builder.append_transcript("assistant", visible_text, item.source)
+        handoff_builder.append_transcript("user", item.prompt, item.source,
+            metadata=runtime_session.transcript_message_metadata(item, "user"))
+        handoff_builder.append_transcript("assistant", visible_text, item.source,
+            metadata=runtime_session.transcript_message_metadata(item, "assistant"))
         handoff_builder.refresh_recent_context()
         runtime.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
 

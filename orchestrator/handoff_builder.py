@@ -52,13 +52,16 @@ class HandoffBuilder:
         self.last_omission_audit: dict[str, Any] = {}
         self.canonical_audit = canonical_audit
 
-    def append_transcript(self, role: str, text: str, source: str = "text"):
+    def append_transcript(self, role: str, text: str, source: str = "text", *, metadata: dict | None = None):
         entry = {
             "role": role,
             "text": text,
             "source": source,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        for key in ("request_id", "run_id", "session_id", "context_generation", "message_ref", "kind"):
+            if metadata and metadata.get(key) is not None:
+                entry[key] = metadata[key]
         try:
             with open(self.transcript_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")

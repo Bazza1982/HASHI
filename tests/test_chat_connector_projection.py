@@ -1,0 +1,212 @@
+import json
+import logging
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from adapters.stream_events import StreamEvent
+from orchestrator.chat_transcript_projection import read_chat_transcript
+from orchestrator.her_message_router import HERMessageRouter
+from orchestrator.request_activity import RequestActivityStore
+from orchestrator.session_store import SessionStore
+from orchestrator.workbench_api import WorkbenchApiServer
+
+
+def test_activity_projects_real_public_channels_and_keeps_disabled_internal_private():
+    settings = {"think": True, "commentary": True, "verbose": False}
+    store = RequestActivityStore()
+    store.presentation_settings = lambda: settings
+    store.start("r")
+    for event in [
+        StreamEvent(kind="thinking", summary="summary", raw_delta=" exact delta ", event_id="t"),
+        StreamEvent(kind="commentary", summary="checkpoint", event_id="c"),
+        StreamEvent(kind="tool_start", summary="tool", event_id="v"),
+        StreamEvent(kind="thinking", summary="private", delivery_class="internal", event_id="i"),
+    ]:
+        store.publish_stream("r", event)
+    events = store.poll("r")["events"][1:]
+    assert [e["presentation_enabled"] for e in events] == [True, True, False, False]
+    assert [e["presentation_channel"] for e in events[:2]] == ["thinking", "commentary"]
+    assert events[0]["raw_delta"] == " exact delta "
+    settings["think"] = False
+    store.publish_stream("r", StreamEvent(kind="thinking", summary="off", raw_delta="off"))
+    disabled = store.poll("r")["events"][-1]
+    assert disabled["presentation_enabled"] is False
+    assert "raw_delta" not in disabled
+
+
+def test_activity_reports_retention_hole_instead_of_empty_complete_replay():
+    store = RequestActivityStore(max_events_per_request=32)
+    store.start("r")
+    for number in range(40):
+        store.publish_stream("r", StreamEvent(kind="commentary", summary=str(number)))
+    payload = store.poll("r", after_sequence=0)
+    assert payload["earliest_available_sequence"] == 10
+    assert payload["replay_complete"] is False
+    assert store.poll("r", after_sequence=9)["replay_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp_path: Path):
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(instance_id="test", authorized_id=7, deployment_profile="personal")
+    server.session_store = SessionStore(tmp_path / "sessions.sqlite", instance_id="test")
+    server._runtime_map = lambda: {}
+    server._load_agent_rows = lambda: [{"name": "a", "workspace_dir": str(tmp_path)}]
+    session = server.session_store.resolve_session(owner_id="user:7", agent_id="a", surface="workbench", channel_key="default")
+    accepted = server.session_store.accept_run(session_id=session["session_id"], owner_id="user:7", agent_id="a", request_id="r", text="hello", source="api", idempotency_key="first")
+    workspace = server.session_store.session_workspace(session["session_id"], session["context_generation"])
+    workspace.mkdir(parents=True, exist_ok=True)
+    path = workspace / "transcript.jsonl"
+    first = json.dumps({"role": "user", "text": "重复", "ts": "2026-09-12T09:00:00.123456+00:00"}, ensure_ascii=False) + "\n"
+    path.write_text(first + first, encoding="utf-8")
+    request = SimpleNamespace(match_info={"name": "a"}, query={})
+    payload = json.loads((await server.handle_transcript_recent(request)).text)
+    assert payload["session_id"] == session["session_id"]
+    assert payload["context_generation"] == 1
+    refs = [m["message_ref"] for m in payload["messages"]]
+    assert len(set(refs)) == 2
+    poll = SimpleNamespace(match_info={"name": "a"}, query={"offset": str(len(first.encode()))})
+    increment = json.loads((await server.handle_transcript_poll(poll)).text)
+    assert increment["messages"][0]["message_ref"] == refs[1]
+    assert payload["requests"][0]["request_id"] == accepted.request_id
+    assert payload["requests"][0]["session_id"] == session["session_id"]
+    assert "text" not in payload["requests"][0]
+
+
+def _server(tmp_path: Path):
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(instance_id="test", authorized_id=7, deployment_profile="personal")
+    server.session_store = SessionStore(tmp_path / "sessions.sqlite", instance_id="test")
+    server._load_agent_rows = lambda: [{"name": "a", "workspace_dir": str(tmp_path)}]
+    server._runtime_map = lambda: {}
+    return server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", ["handle_transcript_recent", "handle_transcript_poll"])
+async def test_transcript_requires_authenticated_owner_without_creating_anonymous_session(tmp_path: Path, handler: str):
+    server = _server(tmp_path)
+    server.global_config.deployment_profile = "enterprise"
+    server.identity_service = None
+    request = SimpleNamespace(match_info={"name": "a"}, query={}, headers={})
+
+    response = await getattr(server, handler)(request)
+
+    assert response.status == 401
+    assert json.loads(response.text)["error_code"] == "not_authenticated"
+    assert server.session_store.list_sessions(owner_id="None") == []
+    assert server.session_store.list_sessions(owner_id="user:7") == []
+
+
+@pytest.mark.asyncio
+async def test_transcript_path_rows_and_discovery_share_one_binding_snapshot(tmp_path: Path, monkeypatch):
+    server = _server(tmp_path)
+    store = server.session_store
+    first = store.resolve_session(owner_id="user:7", agent_id="a", surface="workbench", channel_key="default")
+    second = store.create_session(owner_id="user:7", agent_id="a")
+    for session, request_id in [(first, "r-first"), (second, "r-second")]:
+        store.accept_run(session_id=session["session_id"], owner_id="user:7", agent_id="a",
+                         request_id=request_id, text=request_id, source="api", idempotency_key=request_id)
+        workspace = store.session_workspace(session["session_id"], session["context_generation"])
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "transcript.jsonl").write_text(json.dumps({"role": "assistant", "text": request_id}) + "\n")
+
+    original_resolve = store.resolve_session
+    resolutions = []
+
+    def resolve_then_switch(**kwargs):
+        captured = original_resolve(**kwargs)
+        resolutions.append(captured["session_id"])
+        store.bind_channel(owner_id="user:7", agent_id="a", surface="workbench", channel_key="default",
+                           session_id=second["session_id"])
+        return captured
+
+    monkeypatch.setattr(store, "resolve_session", resolve_then_switch)
+    response = await server.handle_transcript_recent(SimpleNamespace(match_info={"name": "a"}, query={}))
+    payload = json.loads(response.text)
+
+    assert payload["messages"][0]["text"] == "r-first"
+    assert payload["messages"][0]["session_id"] == first["session_id"]
+    assert payload["session_id"] == first["session_id"]
+    assert [run["request_id"] for run in payload["requests"]] == ["r-first"]
+    assert resolutions == [first["session_id"]]
+
+
+@pytest.mark.parametrize("cursor_kind", ["middle", "utf8-middle", "negative", "past-end", "partial-end"])
+def test_invalid_transcript_cursors_return_a_bounded_snapshot_with_an_explicit_gap(tmp_path: Path, cursor_kind: str):
+    session = {"session_id": "fixture-session", "context_generation": 1}
+    path = tmp_path / "transcript.jsonl"
+    lines = [(json.dumps({"role": "assistant", "text": text}, ensure_ascii=False) + "\n").encode()
+             for text in ["first", "第二条", "third"]]
+    complete = b"".join(lines)
+    partial = b'{"role":"assistant","text":"pending'
+    path.write_bytes(complete + partial)
+    offsets = {"middle": len(lines[0]) + 2,
+               "utf8-middle": len(lines[0]) + lines[1].index("第".encode()) + 1,
+               "negative": -1, "past-end": len(complete + partial) + 30,
+               "partial-end": len(complete + partial)}
+
+    payload = read_chat_transcript(path, session=session, offset=offsets[cursor_kind], limit=2)
+
+    assert payload["cursor_reset"] is True
+    assert payload["history_complete"] is False
+    assert [row["text"] for row in payload["messages"]] == ["第二条", "third"]
+    assert payload["offset"] == len(complete)
+    assert [row["source_sequence"] for row in payload["messages"]] == [len(lines[0]), len(lines[0] + lines[1])]
+
+
+def test_transcript_half_record_is_not_acknowledged_and_replays_once_after_completion(tmp_path: Path):
+    session = {"session_id": "fixture-session", "context_generation": 1}
+    path = tmp_path / "transcript.jsonl"
+    first = (json.dumps({"role": "user", "text": "first"}) + "\n").encode()
+    last = (json.dumps({"role": "assistant", "text": "second"}) + "\n").encode()
+    path.write_bytes(first + last[:20])
+    pending = read_chat_transcript(path, session=session, offset=len(first))
+    assert pending["cursor_reset"] is False
+    assert pending["messages"] == []
+    assert pending["offset"] == len(first)
+
+    with path.open("ab") as stream:
+        stream.write(last[20:])
+    completed = read_chat_transcript(path, session=session, offset=pending["offset"])
+    assert [row["text"] for row in completed["messages"]] == ["second"]
+    assert completed["offset"] == len(first + last)
+    assert read_chat_transcript(path, session=session, offset=completed["offset"])["messages"] == []
+
+
+def test_transcript_foreign_identity_is_excluded_instead_of_relabeled(tmp_path: Path):
+    session = {"session_id": "fixture-session", "context_generation": 2}
+    path = tmp_path / "transcript.jsonl"
+    rows = [
+        {"role": "assistant", "text": "legacy"},
+        {"role": "assistant", "text": "current", "session_id": "fixture-session", "context_generation": 2},
+        {"role": "assistant", "text": "foreign", "session_id": "other-session", "context_generation": 2},
+        {"role": "assistant", "text": "old-context", "session_id": "fixture-session", "context_generation": 1},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    result = read_chat_transcript(path, session=session)
+    assert [row["text"] for row in result["messages"]] == ["legacy", "current"]
+    assert all(row["session_id"] == session["session_id"] and row["context_generation"] == 2
+               for row in result["messages"])
+    assert result["offset"] == path.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_required_commentary_matches_canonical_router_with_optional_switch_off():
+    store = RequestActivityStore()
+    store.presentation_settings = lambda: {"commentary": False, "think": False, "verbose": False}
+    store.start("r-required")
+    event = StreamEvent(kind="commentary", summary="mandatory public notice", event_id="required",
+                        delivery_class="user_commentary", required=True)
+    delivered = []
+    router = HERMessageRouter(request_id="r-required", logger=logging.getLogger("test"),
+                              commentary_enabled=lambda: False, commentary_presenter=delivered.append)
+    await router.route(event)
+    store.publish_stream("r-required", event)
+    assert delivered == [event]
+    projected = store.poll("r-required")["events"][-1]
+    assert projected["presentation_enabled"] is True
+    assert projected["presentation_channel"] == "commentary"
+    assert projected["summary"] == event.summary

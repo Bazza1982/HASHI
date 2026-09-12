@@ -16,6 +16,8 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from adapters.stream_events import legacy_delivery_class
+
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer [REDACTED]"),
@@ -254,6 +256,33 @@ class RequestActivityStore:
                     status=status,
                     timestamp=getattr(event, "timestamp", None),
                 )
+                # A Connector projection of the existing delivery owner and
+                # runtime switches. Internal/unknown HER events stay closed.
+                owner = str(getattr(event, "delivery_class", "") or "")
+                if not owner and not str(getattr(event, "origin", "")).startswith("her_v2"):
+                    owner = legacy_delivery_class(kind)
+                channel = {"reasoning": "thinking", "user_commentary": "commentary",
+                           "technical": "verbose", "control": "control"}.get(owner)
+                probe = getattr(self, "presentation_settings", None)
+                settings = probe() if callable(probe) else {}
+                enabled = bool(channel and (settings.get(channel if channel != "thinking" else "think", False)
+                               if channel != "control" else getattr(event, "required", False)))
+                if channel == "commentary" and bool(getattr(event, "required", False)):
+                    enabled = True
+                projected = record["events"][-1]
+                projected.update(delivery_class=owner, presentation_channel=channel or "internal",
+                                 presentation_enabled=enabled)
+                if enabled and channel == "thinking" and getattr(event, "raw_delta", ""):
+                    projected["raw_delta"] = _safe_text(event.raw_delta, limit=8_000)
+                    projected["body_truncated"] = len(str(event.raw_delta)) > 8_000
+                elif enabled:
+                    body = str(getattr(event, "summary", "") or getattr(event, "detail", "") or "")
+                    projected["body_truncated"] = len(body) > (2_000 if getattr(event, "summary", "") else 8_000)
+                if channel == "thinking":
+                    # Sequence of the first event in this contiguous source block
+                    # stays stable when another transport page is interleaved.
+                    previous = record["events"][-2] if len(record["events"]) > 1 else {}
+                    projected["block_id"] = previous.get("block_id", previous.get("sequence")) if previous.get("presentation_channel") == channel else projected["sequence"]
         except Exception as exc:  # display telemetry must not break generation
             self.logger.warning(
                 "Request activity stream event dropped for %s (%s)",
@@ -315,5 +344,8 @@ class RequestActivityStore:
                 "started_at": record["started_at"],
                 "completed_at": record["completed_at"],
                 "latest_sequence": int(record["latest_sequence"]),
+                "earliest_available_sequence": int(record["events"][0]["sequence"]) if record["events"] else 0,
+                "replay_complete": not record["events"] or after >= int(record["events"][0]["sequence"]) - 1,
+                "presentation_available": callable(getattr(self, "presentation_settings", None)),
                 "events": events,
             }

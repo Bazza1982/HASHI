@@ -210,3 +210,13 @@ direct consumers; live canaries need explicit authority. Never claim a live
 feature from a source file, documentation, unit test, saved setting, or old
 transcript. Preserve unrelated checkout changes and report failures, skips,
 unverified platforms, and adoption separately.
+
+Local chat-connector candidate (2026-09-12): Frontend Connector Functions
+project canonical Session/Run identity and public activity with runtime display
+preferences; bounded activity is not durable history. Basic voice uses existing
+STT and Session admission, refuses unsupported Safe Voice confirmation and fences
+context reset at acceptance. External frontend unread metadata never changes
+Telegram read state. Implementation/offline tests on
+`feature/chat-connector-ux-20260912` do not prove shared/Worker adoption or real
+microphone delivery. This task authorizes no production restart or push. See the
+[Frontend Connector decision](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).

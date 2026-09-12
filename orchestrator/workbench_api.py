@@ -24,6 +24,7 @@ from orchestrator.admin_local_testing import (
     try_execute_slash_command_text,
 )
 from orchestrator.agent_overview import build_agent_overview
+from orchestrator.chat_transcript_projection import read_chat_transcript
 from orchestrator.capability_broker import CapabilityBrokerError
 from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.conversation_router import ConversationRouter
@@ -3854,38 +3855,37 @@ class WorkbenchApiServer:
     async def handle_transcript_recent(self, request):
         name = request.match_info["name"]
         limit = max(1, min(int(request.query.get("limit", 50)), 200))
-        runtime_map = self._runtime_map()
         agent_row = next(
             (row for row in self._load_agent_rows() if row["name"] == name), None
         )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
-        transcript_path = self._resolve_transcript_path(
-            agent_row,
-            runtime_map.get(name),
-            owner_id=self._v1_owner_id(request),
-            surface="workbench",
-            channel_key="default",
-        )
-        return web.json_response(_read_jsonl_recent(transcript_path, limit=limit))
+        return self._chat_transcript_response(request, name, limit=limit)
 
     async def handle_transcript_poll(self, request):
         name = request.match_info["name"]
         offset = int(request.query.get("offset", 0))
-        runtime_map = self._runtime_map()
         agent_row = next(
             (row for row in self._load_agent_rows() if row["name"] == name), None
         )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
-        transcript_path = self._resolve_transcript_path(
-            agent_row,
-            runtime_map.get(name),
-            owner_id=self._v1_owner_id(request),
-            surface="workbench",
-            channel_key="default",
-        )
-        return web.json_response(_read_jsonl_increment(transcript_path, offset=offset))
+        return self._chat_transcript_response(request, name, offset=offset)
+
+    def _chat_transcript_response(self, request, name, *, limit=200, offset=None):
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return web.json_response(
+                {"ok": False, "error": "not authenticated", "error_code": "not_authenticated"},
+                status=401,
+            )
+        session = self.session_store.resolve_session(owner_id=owner_id, agent_id=name,
+                                                     surface="workbench", channel_key="default")
+        path = self.session_store.session_workspace(session["session_id"], session["context_generation"]) / "transcript.jsonl"
+        payload = read_chat_transcript(path, session=session, offset=offset, limit=limit)
+        payload["requests"] = self.session_store.recent_session_runs(session["session_id"], owner_id=owner_id, context_generation=session["context_generation"])
+        payload["request_discovery_complete"] = len(payload["requests"]) < 64
+        return web.json_response(payload)
 
     async def handle_request_activity(self, request):
         """Return an owner-scoped live stream with a durable Run fallback."""
@@ -3996,6 +3996,9 @@ class WorkbenchApiServer:
             "latest_sequence": after_sequence,
             "events": [],
             "recovered_from": "session_store",
+            "replay_complete": False,
+            "presentation_available": False,
+            "expects_final": bool(run.get("final_message_id")) if terminal else None,
         }
         return web.json_response(recovered)
 
@@ -5362,6 +5365,15 @@ class WorkbenchApiServer:
                 "session_surface": fields.get("surface") or "workbench",
                 "session_channel_key": fields.get("client_id") or "default",
             }
+            if fields.get("session_context_generation"):
+                try:
+                    generation = int(fields["session_context_generation"])
+                    if generation < 1:
+                        raise ValueError("invalid generation")
+                    session_metadata["session_context_generation"] = generation
+                except ValueError:
+                    return web.json_response({"ok": False, "accepted": False,
+                        "error_code": "voice_session_changed"}, status=409)
             source_declaration_text = str(fields.get("message_source") or "").strip()
             if source_declaration_text:
                 try:
@@ -5414,19 +5426,45 @@ class WorkbenchApiServer:
                     declared_media_type,
                     upload["content_type"],
                 )
-                request_id = await runtime.enqueue_api_media(
-                    local_path=local_path,
-                    media_kind=media_kind,
-                    filename=original_name,
-                    caption=caption or text,
-                    emoji=emoji,
-                    request_metadata=session_metadata,
-                    idempotency_key=(
-                        f"{base_idempotency_key}:{upload_index}"
-                        if base_idempotency_key
-                        else None
-                    ),
-                )
+                try:
+                    request_id = await runtime.enqueue_api_media(
+                        local_path=local_path,
+                        media_kind=media_kind,
+                        filename=original_name,
+                        caption=caption or text,
+                        emoji=emoji,
+                        request_metadata=session_metadata,
+                        idempotency_key=(
+                            f"{base_idempotency_key}:{upload_index}"
+                            if base_idempotency_key
+                            else None
+                        ),
+                    )
+                except Exception as exc:
+                    from orchestrator.runtime_media import VoiceIngressError
+                    remote = getattr(exc, "error", {})
+                    code = str(exc) if isinstance(exc, VoiceIngressError) else (
+                        str(remote.get("message", "")) if isinstance(remote, dict)
+                        and remote.get("type") == "VoiceIngressError" else "")
+                    statuses = {"voice_safe_confirmation_required": 409,
+                        "voice_transcription_unavailable": 503, "voice_transcription_empty": 422,
+                        "voice_session_changed": 409}
+                    if isinstance(exc, SessionConflict) and str(exc) == "session_context_generation_changed":
+                        code = "voice_session_changed"
+                    if isinstance(remote, dict) and remote.get("type") == "SessionConflict" and remote.get("message") == "session_context_generation_changed":
+                        code = "voice_session_changed"
+                    if media_kind == "voice" and code in statuses:
+                        local_path.unlink(missing_ok=True)
+                        rejection = {"ok": False,
+                            "accepted": None if request_ids else False,
+                            "error_code": code}
+                        if request_ids:
+                            # Earlier files in this multipart request have
+                            # already crossed admission. Do not invite replay
+                            # by describing the whole upload as unaccepted.
+                            rejection["request_ids"] = request_ids
+                        return web.json_response(rejection, status=statuses[code])
+                    raise
                 request_ids.append(request_id)
 
             if not request_ids:
@@ -5434,8 +5472,16 @@ class WorkbenchApiServer:
                     {"ok": False, "error": "empty payload"}, status=400
                 )
 
+            accepted_identity = {}
+            try:
+                accepted_run = self.session_store.get_run_by_request(request_ids[0],
+                    owner_id=self._v1_owner_id(request), agent_id=agent_name)
+                accepted_identity = {key: accepted_run[key] for key in (
+                    "session_id", "run_id", "context_generation")}
+            except SessionNotFound:
+                pass  # Legacy runtimes may not expose the richer identity.
             return web.json_response(
-                {"ok": True, "request_id": request_ids[0], "request_ids": request_ids}
+                {"ok": True, "request_id": request_ids[0], "request_ids": request_ids, **accepted_identity}
             )
 
         payload = await request.json()

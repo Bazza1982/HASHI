@@ -214,6 +214,7 @@ def accept_request(
         text=persistent_text,
         source=source,
         idempotency_key=str(idempotency_key or f"legacy:{request_id}"),
+        expected_context_generation=metadata.get("session_context_generation"),
         execution_mode=str(metadata.get("execution_mode") or "") or None,
         content=blocks,
         parent_run_id=str(metadata.get("parent_run_id") or "") or None,
@@ -396,6 +397,19 @@ def session_memory_store(runtime: Any, item: Any) -> Any:
         store = BridgeMemoryStore(workspace)
         stores[key] = store
     return store
+
+
+def transcript_message_metadata(item: Any, role: str) -> dict[str, Any]:
+    """Carry the accepted Run identity into its existing delivered transcript."""
+    request_id = str(getattr(item, "request_id", "") or "")
+    run_id = str(getattr(item, "run_id", "") or "")
+    session_id = str(getattr(item, "session_id", "") or "")
+    if not request_id or not session_id:
+        return {}
+    kind = "final" if role == "assistant" else "message"
+    return {"request_id": request_id, "run_id": run_id or None, "session_id": session_id,
+            "context_generation": int(getattr(item, "context_generation", 1) or 1),
+            "message_ref": f"run:{run_id or request_id}:{role}", "kind": kind}
 
 
 def session_handoff_builder(

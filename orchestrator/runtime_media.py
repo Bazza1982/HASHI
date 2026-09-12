@@ -849,6 +849,85 @@ async def finish_native_voice_transcript_path(
     return await complete_native_audio_response(state, payload)
 
 
+class VoiceIngressError(ValueError):
+    """A basic API voice upload was rejected before request admission.
+
+    The stable message also survives the existing Function Worker error envelope.
+    This is not the Session-native audio confirmation transport.
+    """
+
+
+async def enqueue_api_voice(
+    runtime: Any,
+    *,
+    local_path: Path,
+    filename: str,
+    caption: str = "",
+    source: str = "api",
+    deliver_to_telegram: bool = True,
+    request_metadata: Any = None,
+    idempotency_key: str | None = None,
+) -> str | None:
+    """Adapt an uploaded voice file through the existing local STT owner.
+
+    Basic chat has no Safe Voice confirmation exchange. Refuse that path when
+    confirmation is required; neither a file classification nor pressing Send
+    silently accepts a transcript. Telegram and Session-native audio keep their
+    established confirmation lifecycles.
+    """
+    if bool(getattr(runtime, "_safevoice_enabled", False)):
+        raise VoiceIngressError("voice_safe_confirmation_required")
+    from orchestrator.voice_transcriber import get_transcriber
+
+    try:
+        audio_digest = await asyncio.to_thread(
+            lambda: hashlib.sha256(Path(local_path).read_bytes()).hexdigest()
+        )
+        transcript = str(await get_transcriber().transcribe(local_path)).strip()
+    except Exception as exc:
+        raise VoiceIngressError("voice_transcription_unavailable") from exc
+    if transcript.startswith("[Transcription error]"):
+        raise VoiceIngressError("voice_transcription_unavailable")
+    if not transcript:
+        raise VoiceIngressError("voice_transcription_empty")
+    if bool(getattr(runtime, "_safevoice_enabled", False)):
+        raise VoiceIngressError("voice_safe_confirmation_required")
+    metadata = dict(request_metadata or {})
+    expected_generation = metadata.get("session_context_generation")
+    if expected_generation is not None:
+        from orchestrator.runtime_session import resolve_request_session
+
+        try:
+            session, *_ = await asyncio.to_thread(
+                resolve_request_session,
+                runtime, source=source, chat_id=runtime._primary_chat_id(),
+                metadata=metadata,
+            )
+        except Exception as exc:
+            raise VoiceIngressError("voice_session_changed") from exc
+        if int(session.get("context_generation", -1)) != int(expected_generation):
+            raise VoiceIngressError("voice_session_changed")
+    prompt = f"[Voice message transcription] {transcript}"
+    if caption:
+        prompt += f'\nCaption: "{caption}"'
+    metadata.update({
+        "voice_origin": True,
+        "session_message_text": prompt,
+        "session_message_content": [{
+            "type": "text", "text": prompt,
+            "provenance": "local_stt", "source_audio_sha256": audio_digest,
+        }],
+    })
+    # Uploaded filenames contain fresh UUIDs. The persisted content uses the
+    # transcript and audio digest so the same key/file does not conflict merely
+    # because the second HTTP request saved it under a different local path.
+    return await runtime.enqueue_request(
+        runtime._primary_chat_id(), prompt, source, f"voice: {filename}",
+        deliver_to_telegram=deliver_to_telegram,
+        request_metadata=metadata, idempotency_key=idempotency_key,
+    )
+
+
 async def handle_voice_or_audio(
     runtime: Any,
     update: Any,

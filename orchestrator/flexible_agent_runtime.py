@@ -2520,6 +2520,12 @@ class FlexibleAgentRuntime:
                     purpose="transfer-redirect",
                 )
             return None
+        if media_kind.lower() == "voice":
+            return await runtime_media.enqueue_api_voice(
+                self, local_path=local_path, filename=filename, caption=caption,
+                source=source, deliver_to_telegram=deliver_to_telegram,
+                request_metadata=request_metadata, idempotency_key=idempotency_key,
+            )
         if media_kind.lower() in {"photo", "document"} and is_image_file(filename):
             local_path, filename = normalize_image_file(local_path, filename)
             media_kind = "photo"
@@ -11020,8 +11026,10 @@ class FlexibleAgentRuntime:
                 handoff_builder = runtime_session.session_handoff_builder(
                     self, item=item
                 )
-                handoff_builder.append_transcript("user", item.prompt, item.source)
-                handoff_builder.append_transcript("assistant", visible_text, item.source)
+                handoff_builder.append_transcript("user", item.prompt, item.source,
+                    metadata=runtime_session.transcript_message_metadata(item, "user"))
+                handoff_builder.append_transcript("assistant", visible_text, item.source,
+                    metadata=runtime_session.transcript_message_metadata(item, "assistant"))
                 handoff_builder.refresh_recent_context()
                 self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                 _print_final_response(self.name, visible_text)

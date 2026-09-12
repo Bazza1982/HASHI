@@ -396,3 +396,43 @@ is never fabricated to authorize a local configuration operation. The client
 checks the selected instance identity before submitting and waits for the
 authenticated PAO receipt to reach succeeded before dismissing the local page.
 Acceptance alone never claims completed adoption.
+
+
+## Basic chat projection and voice adaptation (2026-09-12)
+
+The external chat UX task authorizes minimal Frontend Connector Functions
+changes, not Core edits or production lifecycle actions. Basic transcript reads
+resolve one authenticated canonical Session snapshot for its path, identities
+and bounded recent-Run discovery. Untagged legacy JSONL receives path/epoch/byte
+record identities; explicitly foreign Session/context rows are excluded. A
+partial final line is not acknowledged. Invalid byte cursors report a bounded
+reset snapshot and a completeness gap. No anonymous owner is created.
+
+RequestActivityStore publishes only its existing classified public projection,
+using current runtime think/commentary/verbose preferences and HER required
+commentary/control semantics. Provider-internal delivery stays internal. The
+actual pipeline attaches the preferences before routing its callbacks. Source
+sequence, stable thinking-block identity and explicit retention/truncation facts
+support client replay; this in-memory store is not a durable transcript.
+Delivered JSONL records carry accepted Run/request/Session/context metadata from
+the existing persistence path. Legacy append time is recorded time, not recovered
+human-send time. API compatibility identifiers remain Backend API identifiers.
+
+Basic uploaded voice now uses the existing local STT owner before ordinary
+Session admission. It refuses Safe Voice when that interface cannot perform the
+required confirmation. Text provenance and audio digest keep same-file retries
+independent of temporary upload paths. The existing SessionStore acceptance
+transaction checks the expected context generation; a concurrent reset cannot
+silently admit old-session speech. Typed pre-admission errors are distinguishable
+from uncertain transport outcomes, including partially admitted multi-file
+uploads. No database schema, authentication, provider or audio-confirmation
+protocol is introduced.
+
+External frontend reading state remains that frontend's metadata: HASHI does not
+write Telegram read state on its behalf. The bounded activity store cannot prove
+complete offline replay; source limitations must remain visible to the client.
+
+Implementation and offline validation are scoped to the local candidate branch
+feature/chat-connector-ux-20260912. Shared API source adoption, Worker source
+adoption, qualified artifacts, current STT dependencies and terminal delivery are
+separate facts. This task did not adopt a running generation or restart production.

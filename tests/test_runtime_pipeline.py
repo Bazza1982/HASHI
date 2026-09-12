@@ -148,7 +148,7 @@ class _HandoffBuilder:
         self.transcript = []
         self.refreshed = False
 
-    def append_transcript(self, role, text, source=None):
+    def append_transcript(self, role, text, source=None, *, metadata=None):
         self.transcript.append((role, text, source))
 
     def refresh_recent_context(self):
@@ -1951,27 +1951,38 @@ async def test_medium_her_v2_acknowledgement_composes_with_request_activity():
 
 @pytest.mark.asyncio
 async def test_non_her_request_activity_callback_does_not_recurse():
+    from orchestrator.request_activity import RequestActivityStore
+
     runtime = _runtime()
-    published = []
-    runtime.request_activity = SimpleNamespace(
-        publish_stream=lambda request_id, event: published.append(
-            (request_id, event.kind)
-        )
-    )
+    runtime.request_activity = RequestActivityStore()
+    runtime.request_activity.start("req-1")
+    runtime._think = True
+    runtime._commentary = True
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
-        _item(),
+        _item(deliver_to_telegram=False),
         audit_active=False,
         audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(kind=KIND_PROGRESS, summary="Task started")
     )
-
-    assert published == [("req-1", KIND_PROGRESS)]
-    feedback.stop_typing.set()
-    await feedback.typing_task
+    await feedback.on_stream_event(StreamEvent(kind=KIND_THINKING, summary="thinking", raw_delta="actual callback delta"))
+    await feedback.on_stream_event(StreamEvent(kind=KIND_COMMENTARY, summary="public checkpoint"))
+    runtime._think = False
+    await feedback.on_stream_event(StreamEvent(kind=KIND_THINKING, summary="off", raw_delta="disabled delta"))
+    await feedback.on_stream_event(StreamEvent(kind=KIND_THINKING, summary="private", raw_delta="internal delta", delivery_class="internal"))
+    events = runtime.request_activity.poll("req-1")["events"][1:]
+    assert len(events) == 5  # The real callback publishes each provider event once.
+    assert events[1]["presentation_enabled"] is True
+    assert events[1]["raw_delta"] == "actual callback delta"
+    assert events[2]["presentation_channel"] == "commentary"
+    assert events[2]["presentation_enabled"] is True
+    assert events[3]["presentation_enabled"] is False
+    assert events[4]["presentation_enabled"] is False
+    assert "raw_delta" not in events[3] and "raw_delta" not in events[4]
+    assert feedback.typing_task is None
 
 
 @pytest.mark.asyncio
