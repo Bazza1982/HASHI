@@ -3292,7 +3292,9 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     @staticmethod
     def _parse_workzone_reference(text: str) -> tuple[str | None, str]:
         try:
-            parts = shlex.split(str(text or ""), posix=os.name != "nt")
+            # Workzone references are target-relative protocol paths, never
+            # native Windows paths. Keep caption quote removal platform-neutral.
+            parts = shlex.split(str(text or ""), posix=True)
         except ValueError:
             return None, text
         if not parts or not parts[0].startswith("@") or len(parts[0]) == 1:

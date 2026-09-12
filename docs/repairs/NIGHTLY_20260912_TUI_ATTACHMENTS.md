@@ -23,6 +23,9 @@ is unchanged.
 - pending data is bound to client connection generation, instance, and Agent.
   Switching any of them clears it, and a late response cannot render in the new
   scope.
+- Workzone references are protocol-relative rather than native Windows paths,
+  so their captions use the same quote-removal rules on every launch platform.
+  Native `/attach` paths retain the platform path parser.
 
 The TUI limit is 25 MiB per attachment. Directories, traversal, ambiguous
 byte/reference requests, corrupt digests, and unavailable Workzones fail
