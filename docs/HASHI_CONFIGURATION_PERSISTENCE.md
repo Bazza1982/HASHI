@@ -1,8 +1,9 @@
 # HASHI configuration persistence
 
-Scope: HN-20260911-002 / W1, migrated Functions-layer configuration and workspace-state persistence only.
+Scope: HN-20260911-002 / W1, Functions-layer declarative configuration and preference persistence.
 Parent: [Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
-This contract does not claim that all configuration writers have migrated.
+Operational journals, evidence, caches and user content are classified below;
+they are not silently redefined as configuration by this contract.
 
 ## Ownership and current coverage
 
@@ -19,7 +20,10 @@ publication. It does not own business schemas or restart/adoption policy.
 | API Gateway configuration and legacy seeding | PAO / shared Functions | Batch 04 migrates `api_gateway_config`; ServiceManager changes its enabled flag only after a successful save |
 | `WorkspaceStateStore` / workspace `state.json` | PAO persistence boundary / Functions | Batch 05 reuses the file primitive for strict revision-checked updates and explicit replacements; per-field business ownership is unchanged |
 | Local Memory/Wiki consolidation scanner | Memory consolidation job / Functions | Batch 03 validates all sources before opening the target, scans under one transaction and uses stable cross-instance source identity; the ignored implementation stays machine-local |
-| Other writers | Respective existing owners | Still require inventory and separate implementation; not covered by the migrated consumers above |
+| Root config loaders, migration, Workbench Agent edits and onboarding | PAO / Frontend Connector | BOM-compatible strict reads; revision-bearing updates; absent-only creation; unrelated declarations retained; migration publication precedes runtime effects |
+| Agent Move and Hermes import/export declarations | PAO / Functions | Root Agent, task, secret and capability edits retain revisions, including narrow legacy-array compatibility; rollback restores only the transaction's still-current publication |
+| Scheduler and local runtime declarations | PAO / Functions | Scheduler definitions/state, skill registry/state/tasks, runtime-session state, observer declarations, terminal/stream/voice preferences and stable port assignments share strict writable snapshots |
+| TUI and channel preferences | Frontend Connector / Functions | Per-client TUI preferences and WhatsApp route declarations accept legacy bytes, retain unknown fields and fail without changing their in-memory view when publication is stale |
 
 Normal configuration edits must still go through the owning business operation.
 Do not turn a scanner into a configuration writer, introduce a parallel storage
@@ -30,9 +34,13 @@ service, or import these Functions owners into Core.
 A read/modify/write retains its `ConfigDocument` metadata until publication.
 Copying it with `dict(document)` loses its revision and must not silently turn
 an edit into a full-document replacement. A first creation explicitly requires
-an absent destination (`expected_revision=None`). A stale operation raises
+an absent destination (`new_config_json()` or `expected_revision=None`). A stale operation raises
 `ConfigConflictError`; it neither publishes nor silently retries. A new,
 deliberate operation may reload the latest state and apply only its own edit.
+
+`ConfigList` exists only for retained root-array formats in Agent Move and
+Hermes compatibility paths. It carries the same source and revision metadata;
+it is not permission for new configuration schemas to use array roots.
 
 The existing primitive gives participating writers one stable OS lock; a
 process-local threading lock alone does not serialize different Workers.
@@ -149,6 +157,35 @@ backup files are left alone; no migration or historical cleanup is performed.
 Old generations and nonparticipating editors still require the adoption boundary
 stated above; an OS lock cannot retroactively constrain them.
 
+## Additional declarative consumers and exclusions
+
+Root `agents.json`, `secrets.json`, `tasks.json` and Agent capability changes
+now keep their read revisions through config loading/migration, Workbench edits,
+onboarding, Agent Move and Hermes import paths. A missing file is represented by
+an absent-file snapshot rather than an `exists()`/write race. Agent Move recovery
+journals each published whole-document revision; rollback restores or deletes a
+file only while that exact publication remains current. An intervening writer is
+preserved and recovery stops for reconciliation.
+
+Mutable declarations with their own schemas also use the same byte and conflict
+boundary: Scheduler definitions/state; skill registry, task and per-Agent skill
+state; runtime-session state; Memory+ and dual-brain observer declarations;
+Anatta configuration/observers; Telegram stream policy; TUI preferences;
+terminal presentation; voice preferences; WhatsApp chat routes; and stable port
+assignments. Display paths may retain their safe fallback. A mutation must use a
+strict fresh snapshot, preserve unknown fields it does not own, publish before
+changing the matching runtime flag/view, and surface a conflict without replay.
+
+This is deliberately not a universal JSON serializer. Protected Core stays
+unchanged. Provider wire evidence, append-only audit/log streams, generated
+metadata caches, immutable transfer packages, transaction/receipt/lifecycle
+journals with their own recovery protocol, media, Markdown, arbitrary workspace
+content and Workzones retain their existing owners and formats. The standalone
+instance registry is a bootstrap boundary that cannot import the orchestrator;
+it already owns BOM-compatible reads, UTF-8/LF candidates, an exclusive registry
+lock and atomic replacement. These classified boundaries must not be routed
+through a configuration writer merely to make a static search empty.
+
 ## Operator and Agent FYI
 
 UTF-8 editor output with or without BOM is supported at these migrated read
@@ -185,9 +222,11 @@ CI and native/live adoption.
 
 Memory/Wiki configuration preflight before writes, database rollback and stable
 scan identity are implemented in the ignored local scanner and recorded in
-`repairs/NIGHTLY_20260911_BATCH_03.md`. Remaining configuration writers, native
-Windows/macOS evidence and instance adoption are still open. The read-only
-duplicate inventory is not a cleanup and does not by itself close W1.
+`repairs/NIGHTLY_20260911_BATCH_03.md`. The tracked declarative-writer inventory
+and final focused evidence are recorded in
+`repairs/NIGHTLY_20260912_CONFIGURATION_WRITERS.md`. Native Windows evidence and
+instance adoption remain separate until their receipts are recorded. The
+read-only duplicate inventory is not a cleanup and does not itself authorize one.
 
 Gateway focused coverage is `tests/test_api_gateway_config.py`; its direct
 consumer remains `tests/test_api_gateway_command.py`. The new focused module

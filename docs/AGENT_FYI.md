@@ -54,8 +54,10 @@ BOM-tolerant reads where legacy or user-edited input is supported, UTF-8
 without BOM plus LF on publication, private candidates, validation, locking,
 revision checks, synchronization, and atomic replacement. A display fallback
 is never writable state. Conflicts require a fresh deliberate operation, not a
-blind retry. A committed durability error is not permission to restore stale
-bytes. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
+blind retry. First publication must still prove that the destination is absent;
+legacy root arrays are supported only by the narrow migration owners that
+already accept them. A committed durability error is not permission to restore
+stale bytes. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
 Workzone slots expose only their exact enabled roots. A directory mention is
 not recursive upload authorization. Credentials, private authorization

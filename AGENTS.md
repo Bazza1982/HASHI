@@ -36,7 +36,7 @@ choose verification using `docs/TESTING_POLICY.md`.
 - For migrated HASHI JSON configuration, reuse `orchestrator.config_json` and
   retain the read revision; a display fallback is never a writable snapshot.
   Do not blindly retry a conflict or a committed durability error. See
-  `docs/HASHI_CONFIGURATION_PERSISTENCE.md` for scope and remaining migrations.
+  `docs/HASHI_CONFIGURATION_PERSISTENCE.md` for scope and classified exceptions.
 - Reboot/restart is an operational action, not a test shortcut. Follow the current
   user's scope. If forbidden, finish code and offline checks and explicitly leave
   live adoption unverified. Source changes, qualified artifacts, and running Worker

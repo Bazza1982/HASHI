@@ -31,8 +31,8 @@ audio is private and deleted after completion or cancellation.
 
 The Agent `voice_state.json` owner now uses the common BOM-compatible,
 UTF-8/LF, private atomic, revision-checked writer. Mutations fresh-read and
-retry conflicts; corrupt state is never overwritten and unrelated fields are
-preserved.
+report conflicts without replaying the setting action; corrupt state is never
+overwritten and unrelated fields are preserved.
 
 Focused tests cover direct/Remote field routing, generated-asset integrity,
 TUI-only `/say`, local preference reopening, duplicate suppression, shared
