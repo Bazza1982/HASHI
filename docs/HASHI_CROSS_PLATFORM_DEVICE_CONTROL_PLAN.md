@@ -124,6 +124,14 @@ code stays in the platform worker. In particular:
 - capability health must report the real OS, desktop session, display state,
   protocol version, and supported action set.
 
+For a Windows user-session Worker serving a WSL-hosted instance, installation
+keeps two paths distinct: `BridgeHome` is the instance state/configuration root
+(and may be a plain UNC path), while `CodeRoot` is a Windows-local checkout used
+as the Scheduled Task working directory. PowerShell provider-qualified paths
+must never be persisted into task arguments. Worker logs are isolated below an
+instance-specific directory so two HASHI instances cannot rotate or overwrite
+each other's device-control diagnostics.
+
 Locking, logoff, Remote Desktop session changes, display changes, and WSL
 restart are capability-state changes. They must make the affected worker
 unavailable or degraded without making HASHI Core unhealthy.

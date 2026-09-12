@@ -39,6 +39,29 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 The installer uses `.venv\Scripts\python.exe` when present, otherwise the `python.exe` on `PATH`.
+It derives an instance-scoped namespace, extension identity, named pipe,
+authentication file, native-host registration, and installation directory.
+Loading one instance's unpacked extension does not authorize another instance.
+
+Install the persistent Browser Worker separately. When HASHI itself is hosted
+in WSL, pass the instance's UNC path as `BridgeHome` and a Windows-local checkout
+of the same qualified release as `CodeRoot`; Windows Scheduled Tasks cannot use
+a UNC directory as their process working directory. The installer stores the
+plain filesystem path in arguments and keeps logs under the corresponding
+instance directory:
+
+```powershell
+.\scripts\install_device_control_workers.ps1 `
+  -BridgeHome "\\wsl.localhost\<distro>\path\to\HASHI" `
+  -CodeRoot "C:\path\to\qualified\HASHI" `
+  -PythonwExe "C:\path\to\qualified\HASHI\.venv\Scripts\pythonw.exe" `
+  -BrowserOnly
+```
+
+The Worker deliberately remains unregistered until the matching unpacked
+extension is loaded and its authenticated health handshake succeeds. During
+that interval the shared Tool Registry omits browser tools rather than exposing
+calls that cannot execute.
 
 From WSL for Windows Chrome (legacy WSL-backed transport):
 

@@ -36,6 +36,12 @@ def test_device_workers_install_as_windowless_dynamic_endpoint_tasks() -> None:
     assert "-LogonType Interactive" in script
     assert '"--host", $BindHost' in script
     assert '"--advertise-host", $AdvertiseHost' in script
+    assert '[string]$CodeRoot = ""' in script
+    assert "$Resolved.ProviderPath" in script
+    assert '"--bridge-home", $BridgeHome' in script
+    assert "-WorkingDirectory $CodeRoot" in script
+    assert '"HASHI\\device_control\\$InstanceId\\logs"' in script
+    assert '"--log-dir", $LogDir' in script
     assert '"--port"' not in script
     assert "Stop-ScheduledTask" in script
 
