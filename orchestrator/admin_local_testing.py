@@ -9,6 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
+from orchestrator.command_interaction_transport import (
+    try_dispatch_command_interaction_transport,
+)
 from orchestrator.command_registry import runtime_command_map
 from orchestrator.runtime_command_binding import COMMAND_BINDINGS
 from orchestrator import slash_command_audit, ui_language
@@ -195,6 +198,13 @@ async def try_execute_slash_command_text(
     chat_id: int | str | None = None,
     session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    interaction = await try_dispatch_command_interaction_transport(
+        runtime,
+        text,
+        source_channel=source_channel,
+    )
+    if interaction is not None:
+        return interaction
     if not looks_like_slash_command(text):
         return None
     if getattr(runtime, "is_function_worker_proxy", False):

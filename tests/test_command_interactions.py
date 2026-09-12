@@ -6,11 +6,14 @@ import dataclasses
 import json
 import unittest
 
+import pytest
+
 from orchestrator.command_interactions import (
     Binding, Capture, InteractionError, MenuStore, markup_rows, perform_action, safe_url,
 )
 
 
+@pytest.mark.asyncio
 class MenuTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.now = 100.0

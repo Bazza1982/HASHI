@@ -163,8 +163,11 @@ localization, escaping, accurate scope/state, safe navigation, actionable
 errors. `/help` derives from registered metadata. Local status may fail while
 chat works; report it once without failing the Run.
 
-Workbench command menus reuse the authenticated Backend API command endpoint
-and route a versioned `command_ui` envelope to the selected Agent Worker.
+Workbench command menus reuse the authenticated Backend API admin-command endpoint
+and its existing `runtime.slash` Worker RPC. The Workbench server serializes a
+bounded, versioned operation into the endpoint's existing `command` string; the
+shared API and Supervisor have no menu-specific behavior, so one Agent
+`/reboot` adopts the backend Function change.
 The Worker projects existing registered commands and callbacks into bounded
 cards with opaque action IDs, current-policy, binding, revision and expiry
 checks; raw callback data stays server-side. Projection and replay state are

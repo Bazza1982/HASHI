@@ -6370,9 +6370,6 @@ class WorkbenchApiServer:
         """Handle /api/agents/{name}/command - simpler endpoint for frontend."""
         agent_name = request.match_info.get("name")
         payload = await request.json()
-        if isinstance(payload, Mapping) and "command_ui" in payload:
-            from orchestrator.command_interaction_api import handle_command_interaction
-            return await handle_command_interaction(self, request, payload)
         command = (payload.get("command") or "").strip()
 
         runtime = self._runtime_map().get(agent_name)

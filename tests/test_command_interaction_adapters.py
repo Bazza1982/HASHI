@@ -4,7 +4,6 @@ Exercises the production ingress and dispatcher, not a real HASHI process.
 The separately provided notify integration test uses HASHI's real executor.
 """
 from __future__ import annotations
-import importlib.util
 import json
 import sys
 import types
@@ -15,6 +14,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 import orchestrator
+import pytest
 from orchestrator import command_interaction_bridge as bridge
 
 
@@ -24,6 +24,7 @@ def module(name, **values):
     return result
 
 
+@pytest.mark.asyncio
 class DispatcherTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.metadata = {'actor_id': 7, 'instance_id': 'test', 'session_id': 'canonical',
@@ -182,94 +183,6 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first['error_code'], 'command_menu_outcome_unknown')
         self.assertNotIn('sensitive-path', json.dumps(first))
         self.assertIs(self.runtime._send_text, self.original_send)
-
-
-class IngressTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        # Only the SessionStore dependency is substituted; the actual HTTP
-        # helper is loaded under a private module name, not installed globally.
-        fake_session = module('orchestrator.session_store', SessionStore=NS(owner_id_for=lambda cfg: 'canonical-owner'))
-        path = Path(bridge.__file__).with_name('command_interaction_api.py')
-        spec = importlib.util.spec_from_file_location('_command_ui_api_under_test', path)
-        self.ingress = importlib.util.module_from_spec(spec)
-        with patch.dict(sys.modules, {'orchestrator.session_store': fake_session}):
-            spec.loader.exec_module(self.ingress)
-        self.bound, self.forwarded = [], []
-        def resolve(**kwargs):
-            self.bound.append(kwargs)
-            return {'session_id': 'server-session', 'context_generation': 3}
-        async def execute(payload, metadata):
-            self.forwarded.append((payload, metadata))
-            return {'ok': True, 'command_ui_version': 1, 'messages': []}
-        self.runtime = NS(is_function_worker_proxy=True, execute_command_interaction=execute)
-        self.api = NS(_check_admin_auth=lambda req: True, _is_governed_profile=lambda: False,
-                      admin_token='fixture-only', global_config=NS(authorized_id=7, instance_id='test'),
-                      _runtime_map=lambda: {'agent': self.runtime}, session_store=NS(resolve_session=resolve))
-        self.request = NS(match_info={'name': 'agent'})
-        self.payload = {'command': '/example', 'actor_id': 999, 'session_id': 'forged', 'command_ui': {
-            'version': 1, 'op': 'open', 'client_id': 'clientabcdefghijk',
-            'request_id': 'requestabcdefghijkl', 'connection_binding': 'bindingabcdefghijk'}}
-
-    async def call(self):
-        response = await self.ingress.handle_command_interaction(self.api, self.request, self.payload)
-        return response.status, json.loads(response.text)
-
-    async def test_auth_fails_before_session_creation_or_worker_call(self):
-        self.api._check_admin_auth = lambda req: False
-        self.assertEqual((await self.call())[0], 403)
-        self.assertEqual(self.bound, []); self.assertEqual(self.forwarded, [])
-
-    async def test_governed_identity_is_not_impersonated_as_personal_owner(self):
-        self.api._is_governed_profile = lambda: True
-        self.assertEqual((await self.call())[0], 501)
-        self.assertEqual(self.bound, [])
-
-    async def test_missing_admin_token_is_not_an_anonymous_authorization_path(self):
-        self.api.admin_token = ''
-        self.assertEqual((await self.call())[0], 403)
-        self.assertEqual(self.bound, [])
-
-    async def test_binding_is_server_owned_and_client_supplied_actor_ignored(self):
-        status, result = await self.call()
-        self.assertEqual(status, 200)
-        payload, binding = self.forwarded[0]
-        self.assertEqual(binding['actor_id'], 7)
-        self.assertEqual(binding['session_id'], 'server-session')
-        self.assertEqual(binding['context_generation'], 3)
-        self.assertEqual(self.bound[0]['owner_id'], 'canonical-owner')
-        self.assertNotIn('actor_id', payload)
-        self.assertNotIn('session_id', payload)
-
-    async def test_malformed_operation_fails_before_canonical_session_resolution(self):
-        self.payload['command_ui']['version'] = True
-        self.assertEqual((await self.call())[0], 400)
-        self.assertEqual(self.bound, [])
-
-    async def test_catalogue_does_not_create_or_change_a_conversation_session(self):
-        self.payload['command_ui']['op'] = 'catalogue'
-        self.payload['command'] = ''
-        status, _ = await self.call()
-        self.assertEqual(status, 200)
-        self.assertEqual(self.bound, [])
-        self.assertNotIn('session_id', self.forwarded[0][1])
-
-    async def test_old_worker_is_not_retried_as_a_slash_command(self):
-        del self.runtime.execute_command_interaction
-        status, result = await self.call()
-        self.assertEqual(status, 501)
-        self.assertEqual(result['error_code'], 'command_menu_worker_upgrade_required')
-        self.assertEqual(self.forwarded, [])
-
-    async def test_ipc_failure_is_unknown_outcome_without_automatic_retry(self):
-        async def broken(payload, metadata):
-            self.forwarded.append(1)
-            raise RuntimeError('private error details')
-        self.runtime.execute_command_interaction = broken
-        status, result = await self.call()
-        self.assertEqual(status, 502)
-        self.assertEqual(self.forwarded, [1])
-        self.assertEqual(result['error_code'], 'command_menu_outcome_unknown')
-        self.assertNotIn('private', json.dumps(result))
 
 
 if __name__ == '__main__':

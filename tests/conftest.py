@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import os
-import unittest
 
 import pytest
 
@@ -26,14 +25,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if {"contract", "ete"}.intersection(item.path.parts):
             item.add_marker(contract_marker)
         obj = getattr(item, "obj", None)
-        item_class = getattr(item, "cls", None)
         if (
             obj is not None
             and inspect.iscoroutinefunction(obj)
-            and not (
-                inspect.isclass(item_class)
-                and issubclass(item_class, unittest.TestCase)
-            )
             and item.get_closest_marker("asyncio") is None
         ):
             item.add_marker(anyio_marker)
