@@ -872,6 +872,7 @@ class FlexibleAgentRuntime:
             CONNECTOR_EVIDENCE_METADATA_KEY,
             HCHAT_CONTEXT_METADATA_KEY,
             MESSAGE_CONTEXT_METADATA_KEY,
+            MESSAGE_SOURCE_RESERVED_METADATA_KEY,
             PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
             PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
             PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
@@ -892,6 +893,20 @@ class FlexibleAgentRuntime:
             metadata=request_metadata,
             prompt=clean_prompt,
         )
+        if str(source or "").strip().casefold() == "hchat-exchange":
+            exchange_context = metadata.get(HCHAT_CONTEXT_METADATA_KEY)
+            if not (
+                metadata.get(MESSAGE_SOURCE_RESERVED_METADATA_KEY) == "hchat"
+                and isinstance(exchange_context, Mapping)
+                and exchange_context.get("sender_assurance") == "exchange_verified"
+                and exchange_context.get("network_authentication") == "exchange_wss"
+                and isinstance(exchange_context.get("remote_principal"), Mapping)
+                and isinstance(exchange_context.get("exchange_message"), Mapping)
+            ):
+                self.error_logger.error(
+                    "Rejected unauthenticated Exchange ingress request"
+                )
+                return None
         metadata.pop(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY, None)
         metadata[PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY] = (
             resolve_private_authorizations(

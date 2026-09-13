@@ -371,6 +371,43 @@ def test_connector_evidence_is_prompt_bound_and_preserves_verified_origin(tmp_pa
     assert "_origin_instance_evidence" not in rejected
 
 
+def test_connector_evidence_uses_bridge_home_when_code_root_differs(tmp_path):
+    code_root = tmp_path / "code"
+    instance_root = tmp_path / "instance"
+    code_root.mkdir()
+    instance_root.mkdir()
+    (instance_root / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "synthetic-instance-secret"}),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(
+            project_root=code_root,
+            bridge_home=instance_root,
+        )
+    )
+    evidence = seal_connector_evidence(
+        instance_root,
+        claims={
+            "_message_source_reserved": "hchat",
+            "_hchat_context": {
+                "sender_assurance": "exchange_verified",
+                "network_authentication": "exchange_wss",
+            },
+        },
+        prompt="cross-root request",
+    )
+
+    verified = apply_connector_evidence(
+        runtime,
+        metadata={"_connector_evidence": evidence},
+        prompt="cross-root request",
+    )
+
+    assert verified["_message_source_reserved"] == "hchat"
+    assert verified["_hchat_context"]["sender_assurance"] == "exchange_verified"
+
+
 def test_ordinary_metadata_cannot_self_assert_exchange_verified_identity(
     tmp_path,
 ):

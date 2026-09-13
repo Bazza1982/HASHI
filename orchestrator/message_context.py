@@ -654,7 +654,10 @@ def public_source_capabilities() -> dict[str, Any]:
 
 
 def project_root_for_runtime(runtime: Any) -> Path | None:
-    value = getattr(getattr(runtime, "global_config", None), "project_root", None)
+    global_config = getattr(runtime, "global_config", None)
+    value = getattr(global_config, "bridge_home", None) or getattr(
+        global_config, "project_root", None
+    )
     return Path(value) if value else None
 
 
