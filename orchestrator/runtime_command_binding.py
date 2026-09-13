@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
 from dataclasses import dataclass
 
 from telegram import BotCommand, BotCommandScopeChat
@@ -11,6 +10,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, f
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands, runtime_command_map
 from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.private_wol import private_wol_available
+from orchestrator.slash_command_audit import split_slash_command_words
 from orchestrator import ui_language
 
 logger = logging.getLogger("BridgeU.RuntimeCommandBinding")
@@ -103,10 +103,7 @@ def _split_runtime_command_text(text: str) -> tuple[str, list[str]]:
     raw = (text or "").strip()
     if not raw.startswith("/"):
         return "", []
-    try:
-        parts = shlex.split(raw[1:])
-    except Exception:
-        parts = raw[1:].split()
+    parts = split_slash_command_words(raw[1:])
     if not parts:
         return "", []
     command = parts[0].split("@", 1)[0].lower()

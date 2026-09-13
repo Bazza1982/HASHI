@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.admin_local_testing import execute_local_command
+from orchestrator.admin_local_testing import try_execute_slash_command_text
 from orchestrator import (
     runtime_debug_reporting,
     runtime_media,
@@ -342,8 +342,25 @@ async def test_debug_on_requires_target_and_journal(tmp_path: Path):
     assert "/debug on" in replies[-1]
 
 
+@pytest.mark.parametrize(
+    ("journal", "journal_arg"),
+    [
+        (
+            r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md",
+            r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md",
+        ),
+        (
+            r"C:\Users\thene\Desktop\HASHI Nightly Batch Inbox.md",
+            r'"C:\Users\thene\Desktop\HASHI Nightly Batch Inbox.md"',
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_local_command_preserves_windows_journal_path(tmp_path: Path):
+async def test_local_command_preserves_windows_journal_path(
+    tmp_path: Path,
+    journal: str,
+    journal_arg: str,
+):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.name = "source"
     runtime.workspace_dir = tmp_path / "workspaces" / "source"
@@ -358,19 +375,19 @@ async def test_local_command_preserves_windows_journal_path(tmp_path: Path):
     runtime.skill_manager = None
     runtime.logger = _Logger()
     runtime._is_authorized_user = lambda user_id: user_id == 7
+    runtime._is_command_allowed = lambda _command: True
     replies: list[str] = []
 
     async def reply(_update, text, **_kwargs):
         replies.append(text)
 
     runtime._reply_text = reply
-    journal = r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md"
-
-    result = await execute_local_command(
+    result = await try_execute_slash_command_text(
         runtime,
-        f"/debug on zhaojun@HASHI1 {journal}",
+        f"/debug on zhaojun@HASHI1 {journal_arg}",
     )
 
+    assert result is not None
     assert result["ok"] is True
     assert result["args"][-1] == journal
     assert runtime_debug_reporting.load_settings(runtime).journal == journal

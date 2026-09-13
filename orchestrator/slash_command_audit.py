@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -237,17 +238,35 @@ def looks_like_slash_command(text: str) -> bool:
     return bool(body.split()[0])
 
 
-def parse_slash_command_text(text: str) -> tuple[str, list[str]]:
-    import shlex
+def split_slash_command_words(body: str) -> list[str]:
+    """Split command words while preserving /debug's opaque journal path."""
 
+    raw = (body or "").strip()
+    if not raw:
+        return []
+    try:
+        command_token = raw.split(maxsplit=1)[0].split("@", 1)[0].casefold()
+        if command_token != "debug":
+            return shlex.split(raw)
+        # Non-POSIX parsing preserves Windows separators while grouping quoted
+        # paths.  Strip only the quotes used for that grouping.
+        return [
+            part[1:-1]
+            if len(part) >= 2
+            and part[0] == part[-1]
+            and part[0] in {'"', "'"}
+            else part
+            for part in shlex.split(raw, posix=False)
+        ]
+    except Exception:
+        return raw.split()
+
+
+def parse_slash_command_text(text: str) -> tuple[str, list[str]]:
     raw = (text or "").strip()
     if not raw.startswith("/"):
         return "", []
-    body = raw[1:]
-    try:
-        parts = shlex.split(body)
-    except Exception:
-        parts = body.split()
+    parts = split_slash_command_words(raw[1:])
     if not parts:
         return "", []
     return parts[0].split("@", 1)[0].lower(), parts[1:]
