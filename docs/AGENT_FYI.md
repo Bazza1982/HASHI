@@ -69,17 +69,12 @@ IDs, a remembered prior Turn, or possession of some other credential.
 
 HChat separates sender claim, verified peer, relay, and target. Private
 authorization is per message; only current `state=success` scopes apply.
-Never put the shared secret in message text or command arguments.
-Remote mDNS metadata must keep every DNS-SD TXT record within 255 bytes and
-split growing capability lists across contiguous records. Treat discovery as
-a route hint only; trust, full capabilities, and Agent directories come from
-the authenticated handshake.
-On Windows, cross-account setup must pass the intended Remote task principal
-to the private-file ACL helper. The supervisor installer repairs that exact
-principal before register/start and refuses an implicit service-account owner.
-Missing shared-token configuration may use discovery-only mode; an existing
-unreadable or malformed secrets file is fatal and must never masquerade as
-"not configured".
+Never put shared secrets in messages or command arguments. Discovery is only a
+route hint; trust and capabilities require an authenticated handshake. Keep
+DNS-SD TXT records within 255 bytes. On Windows, bind private files to the
+intended task principal; service-account setup must name it. Only a missing
+token permits discovery-only; unreadable or malformed secrets are fatal. See
+[Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
 PAO determines one immutable Run route before PCM projection. The route states
 the primary destination, mirrors, and whether ordinary reply delivery is
@@ -204,39 +199,14 @@ gate on ordinary delivery after the wait expires. Move preserves proven state
 and full-workspace pending responses; Clone inherits neither. See
 [Telegram Delivery Failover](TELEGRAM_DELIVERY_FAILOVER_DESIGN.md).
 
-Use only tools/skills exposed for this turn; optional capabilities also require
-current authority. Device tools appear only while a same-instance Worker has an
-unexpired matching action. If it disappears, re-plan from typed
-`capability_unavailable`; do not retry blindly. Prefer `web_fetch` for public
-documents, but it cannot replace JavaScript, login state, or interaction. Use
-HASHI Jobs for long processes.
-Superloop receipt review needs
-opt-in, matching identities, Session-pinned idempotency, and a concrete next
-action for every unresolved check. Reports are not delivery. See
-[Superloop](SUPERLOOP_FUNCTION_CONTRACT.md).
+Use only capabilities exposed for the current turn and authority; device
+actions also need a live same-instance Worker. Re-plan on typed
+`capability_unavailable`; use HASHI Jobs for long work. Superloop review needs
+opt-in,
+matching identities, Session-pinned idempotency, and a concrete next action;
+reports are not delivery. See [Superloop](SUPERLOOP_FUNCTION_CONTRACT.md).
 
-Tests prove only their selected scope. Prefer focused red/green evidence and
-direct consumers; live canaries need explicit authority. Never claim a live
-feature from a source file, documentation, unit test, saved setting, or old
-transcript. Preserve unrelated checkout changes and report failures, skips,
-unverified platforms, and adoption separately.
-
-Local chat-connector candidate (2026-09-12): Frontend Connector Functions
-project canonical Session/Run identity and public activity with runtime display
-preferences; bounded activity is not durable history. Basic voice uses existing
-STT and Session admission, refuses unsupported Safe Voice confirmation and fences
-context reset at acceptance. External frontend unread metadata never changes
-Telegram read state. Implementation/offline tests on
-`feature/chat-connector-ux-20260912` do not prove shared/Worker adoption or real
-microphone delivery. This task authorizes no production restart or push. See the
-[Frontend Connector decision](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
-
-Targeted chat-projection follow-up (2026-09-12): a bounded reserved version-1
-request now crosses the existing authenticated admin-command / `runtime.slash`
-path to the selected Worker. The Worker derives the configured actor and current
-Session and uses the same transcript projection builder as HTTP. Requests cannot
-select another owner, Session or path, enter model admission, or log chat bodies
-as commands. The user permits only the explicitly named Agent's `reboot min` for
-this adoption; Core and shared/instance restart remain forbidden. This candidate
-implementation and focused tests do not prove qualification, running adoption or
-user-terminal delivery; the integration task records those separately.
+Tests prove selected scope only; live canaries require authority. Never claim
+adoption or delivery from code, docs, tests, settings, or old transcripts.
+Preserve unrelated changes; distinguish failures, skips, unverified platforms,
+adoption, and delivery.
