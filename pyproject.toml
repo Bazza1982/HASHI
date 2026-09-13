@@ -139,6 +139,11 @@ worker-model = "per-agent-process"
 worker-protocol = 1
 generation-schema = 2
 
+[tool.uv]
+# The repository-local virtual environment may belong to a running HASHI Core.
+# Project-aware uv commands must never lock or synchronize it implicitly.
+managed = false
+
 [tool.setuptools.packages.find]
 include = ["flow*", "nagare*"]
 

@@ -10,9 +10,13 @@ from packaging.requirements import Requirement
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _project_metadata() -> dict:
+def _pyproject() -> dict:
     with (ROOT / "pyproject.toml").open("rb") as handle:
-        return tomllib.load(handle)["project"]
+        return tomllib.load(handle)
+
+
+def _project_metadata() -> dict:
+    return _pyproject()["project"]
 
 
 def _requirement_key(value: str) -> tuple[str, str, str]:
@@ -78,6 +82,10 @@ def test_development_requirements_extend_standard_without_runtime_duplication():
     test_extra = _project_metadata()["optional-dependencies"]["test"]
 
     assert _keys(dev_requirements) == _keys(test_extra)
+
+
+def test_uv_cannot_implicitly_manage_the_runtime_environment():
+    assert _pyproject()["tool"]["uv"]["managed"] is False
 
 
 def test_setup_py_is_metadata_free_compatibility_shim():

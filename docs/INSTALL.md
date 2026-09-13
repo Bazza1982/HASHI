@@ -249,6 +249,12 @@ contains a native Windows `.venv`. Do not install or upgrade packages in a
 running Core environment; rebuild the environment and perform a planned Core
 migration instead.
 
+HASHI sets `[tool.uv] managed = false` because the repository-local environment
+may belong to a running Core. Run diagnostics with that environment's Python
+directly. For disposable helpers, use `uv run --no-project` or an explicitly
+isolated environment; project-aware `uv run`, `uv lock`, and `uv sync` must not
+modify the runtime environment implicitly.
+
 Minimal or specialised environments can install from `pyproject.toml` instead:
 
 ```bash
