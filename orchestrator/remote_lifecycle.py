@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import signal
+import ssl
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -475,18 +476,54 @@ async def _start_child_remote(
                 "supervisor_fallback": supervisor_fallback,
             }
         )
+    owned = await _wait_for_owned_remote(settings)
+    if owned is None:
+        result.update(
+            {
+                "ok": False,
+                "action": (
+                    "started_child_fallback_unhealthy"
+                    if supervisor_fallback
+                    else "started_child_unhealthy"
+                ),
+                "reason": (
+                    "Remote child was launched but did not publish owned health "
+                    f"on configured port {settings.port}"
+                ),
+            }
+        )
+    else:
+        result.update(owned)
+        if owned.get("remote_ready") is False:
+            result.update(
+                {
+                    "ok": False,
+                    "action": (
+                        "started_child_fallback_degraded"
+                        if supervisor_fallback
+                        else "started_child_degraded"
+                    ),
+                    "reason": (
+                        "Remote child is reachable but discovery or trusted "
+                        "handshaking is degraded"
+                    ),
+                }
+            )
     return result
 
 
 async def _wait_for_owned_remote(
     settings: RemoteLifecycleSettings,
 ) -> dict[str, Any] | None:
+    last_owned = None
     for _attempt in range(_SUPERVISOR_HEALTH_ATTEMPTS):
         owned = await _find_owned_remote(settings)
-        if owned:
+        if owned and owned.get("remote_ready") is not False:
             return owned
+        if owned:
+            last_owned = owned
         await asyncio.sleep(_SUPERVISOR_HEALTH_INTERVAL_SECONDS)
-    return None
+    return last_owned
 
 
 async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any]:
@@ -510,6 +547,14 @@ async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any
             refresh = await activate_remote_supervisor(settings.root)
             result["supervisor_refresh"] = refresh
             result["service_name"] = str(refresh.get("service_name") or "")
+        if owned.get("remote_ready") is False:
+            result.update(
+                {
+                    "ok": False,
+                    "action": "already_running_degraded",
+                    "reason": "Remote process is reachable but discovery or trusted handshaking is degraded",
+                }
+            )
         return result
     if settings.supervised:
         control = await control_remote_supervisor(settings.root, action="start")
@@ -518,13 +563,22 @@ async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any
         if control.get("ok"):
             owned = await _wait_for_owned_remote(settings)
             if owned:
-                return {
+                result = {
                     **control,
                     "ok": True,
                     "action": "started_supervisor",
                     "settings": settings,
                     **owned,
                 }
+                if owned.get("remote_ready") is False:
+                    result.update(
+                        {
+                            "ok": False,
+                            "action": "started_supervisor_degraded",
+                            "reason": "Remote started but discovery or trusted handshaking is degraded",
+                        }
+                    )
+                return result
             return {
                 **control,
                 "ok": False,
@@ -549,7 +603,7 @@ async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any
         # child lifecycle for this session.
         owned = await _find_owned_remote(settings)
         if owned:
-            return {
+            result = {
                 "ok": True,
                 "action": "already_running",
                 "settings": settings,
@@ -557,6 +611,15 @@ async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any
                 "supervisor_fallback": control,
                 **owned,
             }
+            if owned.get("remote_ready") is False:
+                result.update(
+                    {
+                        "ok": False,
+                        "action": "already_running_degraded",
+                        "reason": "Remote process is reachable but discovery or trusted handshaking is degraded",
+                    }
+                )
+            return result
         try:
             return await _start_child_remote(
                 settings,
@@ -662,7 +725,11 @@ async def _find_owned_remote(settings: RemoteLifecycleSettings) -> dict[str, Any
 
     for port in ports:
         for host in local_http_hosts():
-            health = await _fetch_remote_health(host, port)
+            health = await _fetch_remote_health(
+                host,
+                port,
+                use_tls=settings.use_tls,
+            )
             if not health:
                 continue
             instance = health.get("instance") or {}
@@ -671,22 +738,55 @@ async def _find_owned_remote(settings: RemoteLifecycleSettings) -> dict[str, Any
             claim_root = str(runtime_claim.get("root") or "").strip()
             root_matches = not claim_root or Path(claim_root).expanduser().resolve() == settings.root
             if actual_id == expected_id and root_matches:
-                return {"port": port, "health": health, "health_host": host}
+                discovery = health.get("discovery") if isinstance(health.get("discovery"), dict) else {}
+                discovery_state = str(discovery.get("state") or discovery.get("readiness") or "legacy")
+                remote_ready = str(health.get("status") or "ready") == "ready"
+                return {
+                    "port": port,
+                    "health": health,
+                    "health_host": host,
+                    "remote_ready": remote_ready,
+                    "remote_state": str(health.get("status") or "ready"),
+                    "discovery": discovery,
+                    "discovery_state": discovery_state,
+                    "trust_state": str(discovery.get("trust_state") or "unknown"),
+                }
     if claim and not pid_is_alive(claim.get("pid")):
         remove_runtime_claim(settings.root)
     return None
 
 
-async def _fetch_remote_health(host: str, port: int) -> dict[str, Any] | None:
-    url = f"http://{host}:{int(port)}/health"
-    try:
-        return await asyncio.get_running_loop().run_in_executor(None, lambda: _fetch_json(url))
-    except Exception:
-        return None
+async def _fetch_remote_health(
+    host: str,
+    port: int,
+    *,
+    use_tls: bool = False,
+) -> dict[str, Any] | None:
+    schemes = ("https", "http") if use_tls else ("http",)
+    for scheme in schemes:
+        url = f"{scheme}://{host}:{int(port)}/health"
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda target=url, tls=scheme == "https": _fetch_json(
+                    target,
+                    allow_self_signed=tls,
+                ),
+            )
+        except Exception:
+            continue
+        if result is not None:
+            return result
+    return None
 
 
-def _fetch_json(url: str) -> dict[str, Any] | None:
-    with urllib.request.urlopen(url, timeout=0.8) as resp:
+def _fetch_json(
+    url: str,
+    *,
+    allow_self_signed: bool = False,
+) -> dict[str, Any] | None:
+    context = ssl._create_unverified_context() if allow_self_signed else None
+    with urllib.request.urlopen(url, timeout=0.8, context=context) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return data if isinstance(data, dict) else None
 

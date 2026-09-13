@@ -194,6 +194,7 @@ def preview_outbound_clone(
     source_instance: str,
     target_agent_id: str | None = None,
     transfer_mode: str | None = "workspace",
+    history_mode: str = "none",
 ) -> dict[str, Any]:
     return _preview_outbound_transfer(
         hashi_root,
@@ -203,6 +204,7 @@ def preview_outbound_clone(
         source_instance=source_instance,
         operation="clone",
         transfer_mode=transfer_mode,
+        history_mode=history_mode,
         requested_agent_id=target_agent_id,
     )
 
@@ -217,6 +219,7 @@ def _preview_outbound_transfer(
     operation: str,
     requested_agent_id: str | None = None,
     transfer_mode: str | None = None,
+    history_mode: str | None = None,
 ) -> dict[str, Any]:
 
     root = Path(hashi_root).expanduser().resolve()
@@ -256,6 +259,7 @@ def _preview_outbound_transfer(
             operation=operation,
             include_telegram_secret=operation == "move",
             transfer_mode=transfer_mode,
+            history_mode=history_mode,
         )
         compatibility_check = getattr(client, "ensure_package_compatible", None)
         if callable(compatibility_check):
@@ -272,6 +276,10 @@ def _preview_outbound_transfer(
             "target_environment": client.capabilities.get("environment_kind"),
             "package_schema": package.manifest.get("schema_version"),
             "transfer_mode": package.manifest.get("transfer_mode"),
+            "history_mode": package.manifest.get("history_mode"),
+            "conversation_continuity_summary": package.manifest.get(
+                "conversation_continuity_summary"
+            ),
             "workspace_inventory": package.workspace_metadata.get("inventory", []),
             "discarded_files": package.workspace_metadata.get("discarded", []),
             "total_workspace_bytes": package.workspace_metadata.get("total_workspace_bytes"),
@@ -327,6 +335,7 @@ def prepare_outbound_clone(
     source_instance: str,
     target_agent_id: str | None = None,
     transfer_mode: str | None = "workspace",
+    history_mode: str = "none",
 ) -> dict[str, Any]:
     return _prepare_outbound_transfer(
         hashi_root,
@@ -336,6 +345,7 @@ def prepare_outbound_clone(
         source_instance=source_instance,
         operation="clone",
         transfer_mode=transfer_mode,
+        history_mode=history_mode,
         requested_agent_id=target_agent_id,
     )
 
@@ -351,6 +361,7 @@ def _prepare_outbound_transfer(
     requested_agent_id: str | None = None,
     keep_source: bool = False,
     transfer_mode: str | None = None,
+    history_mode: str | None = None,
 ) -> dict[str, Any]:
 
     root = Path(hashi_root).expanduser().resolve()
@@ -398,6 +409,7 @@ def _prepare_outbound_transfer(
             "target_agent_id": str(resolved["target_agent_id"]),
             "status": "packaging",
             "created_at": utc_now_iso(),
+            "history_mode": history_mode,
         }
         _atomic_json(state_path, state)
     try:
@@ -416,6 +428,7 @@ def _prepare_outbound_transfer(
             operation="clone" if operation == "clone" else "move",
             include_telegram_secret=operation != "clone",
             transfer_mode=transfer_mode,
+            history_mode=history_mode,
         )
         compatibility_check = getattr(client, "ensure_package_compatible", None)
         if callable(compatibility_check):
@@ -429,6 +442,10 @@ def _prepare_outbound_transfer(
                 "source_environment": package.manifest.get("source_environment"),
                 "package_schema": package.manifest.get("schema_version"),
                 "transfer_mode": package.manifest.get("transfer_mode"),
+                "history_mode": package.manifest.get("history_mode"),
+                "conversation_continuity_summary": package.manifest.get(
+                    "conversation_continuity_summary"
+                ),
                 "workspace_inventory": package.workspace_metadata.get("inventory", []),
                 "discarded_files": package.workspace_metadata.get("discarded", []),
                 "total_workspace_bytes": package.workspace_metadata.get("total_workspace_bytes"),
@@ -590,6 +607,7 @@ def _confirm_outbound_move_locked(
                 str(state["agent_id"]),
                 package_id,
                 target_instance=str(state["target_instance"]),
+                history_mode=state.get("history_mode"),
             )
         state["source_disabled"] = True
         _atomic_json(directory / "state.json", state)
@@ -719,6 +737,7 @@ def _confirm_new_outbound_move_locked(
                 str(state["agent_id"]),
                 str(state["package_id"]),
                 target_instance=str(state["target_instance"]),
+                history_mode=state.get("history_mode"),
             )
         state.update(
             {
@@ -1622,6 +1641,7 @@ def _assert_source_snapshot_current(
             include_telegram_secret=True,
             schema_version=int(original.manifest.get("schema_version") or 1),
             transfer_mode=original.manifest.get("transfer_mode"),
+            history_mode=original.manifest.get("history_mode"),
         )
         actual = archive_snapshot_fingerprint(current, secret_passphrase=token)
     if actual != expected:

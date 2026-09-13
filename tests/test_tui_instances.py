@@ -187,6 +187,43 @@ async def test_transcript_poll_waits_for_initial_history_offset(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_transcript_poll_requests_generation_and_marks_history_reset(monkeypatch):
+    client = TuiApiClient()
+    requests = []
+
+    async def fake_request(method, path, **_kwargs):
+        requests.append((method, path))
+        if "poll" in path:
+            return {
+                "messages": [{"role": "assistant", "text": "imported"}],
+                "offset": 2,
+                "history_generation": 2,
+                "cursor_reset": True,
+                "history_reset": True,
+            }
+        return {
+            "messages": [{"role": "assistant", "text": "recent"}],
+            "offset": 8,
+            "history_generation": 1,
+        }
+
+    monkeypatch.setattr(client, "_direct_request", fake_request)
+    client.reset_offset("portable")
+    await client.get_recent_transcript("portable")
+
+    messages = await client.poll_transcript("portable")
+
+    assert [message["text"] for message in messages] == ["imported"]
+    assert requests[-1] == (
+        "GET",
+        "/api/transcript/portable/poll?offset=8&history_generation=1",
+    )
+    assert client._offsets["portable"] == 2
+    assert client.consume_transcript_reset("portable") is True
+    assert client.consume_transcript_reset("portable") is False
+
+
+@pytest.mark.asyncio
 async def test_direct_tui_reads_durable_run_status(monkeypatch):
     client = TuiApiClient()
     requests = []

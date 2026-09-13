@@ -348,6 +348,42 @@ work survives shared Functions replacement; recovery commands reconcile the
 background receipt. Detailed workspace inventories remain in the coordinator
 journal, not duplicated in the bounded background receipt.
 
+### Agent transfer conversation authority (2026-09-13)
+
+SessionStore remains the sole authority for formal Conversation history across
+Move and Clone. Agent Move schema 5 carries an execution-free, owner-checked
+continuity capsule instead of copying a database or reading a legacy workspace
+transcript. Move imports eligible history before target publication and retires
+source bindings only after verified cutover. Clone starts fresh unless the
+operator explicitly chooses archived read-only inheritance or an independent
+context copy. Stable origin references, a transfer journal, independent target
+IDs, reference-counted origin claims, and one SQLite transaction own
+deduplication and rollback. Rollback preserves later target messages and user
+rebindings; source history retirement is the first destructive source-cleanup
+boundary after target verification.
+
+`history_generation` is the authoritative invalidation signal for derived chat
+projections. Frontend Connectors that poll a transcript provide their known
+generation and replace their local projection when SessionStore returns
+`history_reset`/`cursor_reset`. This is a projection refresh, not a second
+history owner; workspace `transcript.jsonl` never substitutes for missing
+SessionStore state.
+
+### Remote discovery and trust projection (2026-09-13)
+
+The Remote Function owns discovery readiness and authenticated peer hydration.
+mDNS carries bounded routing/identity hints and fixed digests; the mutually
+authenticated handshake owns full capabilities, addresses, supervisor facts,
+and Agent directory. Backend advertising/browsing health, bounded retries,
+credential generation, trust counts, and static-seed fallback are projected
+through Remote status without exposing shared-token material. A token or
+advertised digest revision invalidates the old trusted projection until a new
+handshake succeeds. Platform lifecycle helpers consume this status but do not
+become another discovery or trust owner.
+An empty successful backend snapshot retracts only that backend's observations;
+it cannot leave a departed mDNS peer visible or erase a surviving fallback
+route.
+
 ### Health after local Clone and Move (2026-09-10)
 
 PAO startup health is a projection of current Worker/connector state. A Worker

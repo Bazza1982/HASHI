@@ -26,6 +26,7 @@ from .shared_token import (
 
 _LAZY_EXPORTS = {
     "PairingManager": (".pairing", "PairingManager"),
+    "get_shared_token": (".auth", "get_shared_token"),
     "has_shared_token": (".auth", "has_shared_token"),
     "load_or_generate_cert": (".tls", "load_or_generate_cert"),
     "protocol_auth_mode": (".auth", "protocol_auth_mode"),
@@ -62,6 +63,7 @@ __all__ = [
     "PairingManager",
     "TIMESTAMP_WINDOW_SECONDS",
     "build_auth_headers",
+    "get_shared_token",
     "has_shared_token",
     "load_or_generate_cert",
     "load_shared_token",

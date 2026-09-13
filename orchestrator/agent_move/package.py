@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import platform
@@ -46,11 +47,17 @@ from orchestrator.pcm import (
     parse_pcm_text,
 )
 from orchestrator.process_execution import is_wsl
+from orchestrator.session_store import (
+    SessionConflict,
+    SessionStore,
+    validate_conversation_continuity_capsule,
+)
 
 PACKAGE_TYPE = "hashi-agent-move"
 PACKAGE_SCHEMA_MIN_VERSION = 1
-PACKAGE_SCHEMA_VERSION = 4
+PACKAGE_SCHEMA_VERSION = 5
 TRANSFER_MODES_CAPABILITY = "agent_transfer_modes_v1"
+CONVERSATION_CONTINUITY_CAPABILITY = "agent_conversation_continuity_v1"
 WORKSPACE_LIMIT_BYTES = 1_000_000_000
 TRANSFER_MODES = {"identity_memory", "workspace"}
 AGENT_MOVE_CAPABILITY = "agent_move_receive_v1"
@@ -60,6 +67,7 @@ PACKAGE_EXTENSION = ".hashi-agent"
 RETAINED_IDENTITY_ARCHIVE_PATH = "retained-identity/AGENT.md"
 RETAINED_IDENTITY_METADATA_PATH = "metadata/retained-identity.json"
 AGENT_CAPABILITY_ARCHIVE_PATH = "identity/capability.json"
+CONVERSATION_CONTINUITY_ARCHIVE_PATH = "continuity/conversations.json"
 MAX_ARCHIVE_MEMBERS = 100_000
 MAX_UNPACKED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_WORKSPACE_BYTES = MAX_UNPACKED_BYTES - (16 * 1024 * 1024)
@@ -68,6 +76,7 @@ _CONTROL_MEMBER_LIMITS = {
     "identity/agent.json": 4 * 1024 * 1024,
     "identity/agent.md": 16 * 1024 * 1024,
     AGENT_CAPABILITY_ARCHIVE_PATH: 4 * 1024 * 1024,
+    CONVERSATION_CONTINUITY_ARCHIVE_PATH: 128 * 1024 * 1024,
     RETAINED_IDENTITY_ARCHIVE_PATH: 16 * 1024 * 1024,
     RETAINED_IDENTITY_METADATA_PATH: 1024 * 1024,
     "access/requirements.json": 4 * 1024 * 1024,
@@ -172,6 +181,7 @@ class AgentMoveArchive:
     workspace_metadata: dict[str, Any]
     retained_identity: dict[str, Any] | None
     agent_capability: dict[str, Any] | None
+    conversation_continuity: dict[str, Any] | None
     checksums: dict[str, str]
     names: tuple[str, ...]
 
@@ -338,6 +348,8 @@ def create_agent_move_package(
     include_telegram_secret: bool = True,
     schema_version: int | None = None,
     transfer_mode: str | None = None,
+    history_mode: str | None = None,
+    conversation_owner_id: str | None = None,
 ) -> AgentMoveArchive:
     """Create one checksummed Agent move archive.
 
@@ -379,7 +391,7 @@ def create_agent_move_package(
         else _read_retained_identity(workspace, name)
     )
     pcm_text = _read_canonical_pcm(workspace, name)
-    requested_schema = int(schema_version) if schema_version is not None else (4 if transfer_mode else 3)
+    requested_schema = int(schema_version) if schema_version is not None else (5 if transfer_mode else 3)
     if transfer_mode and requested_schema < 4:
         raise AgentMoveError("explicit transfer modes require schema 4")
     if requested_schema not in range(PACKAGE_SCHEMA_MIN_VERSION, PACKAGE_SCHEMA_VERSION + 1):
@@ -390,6 +402,44 @@ def create_agent_move_package(
         _collect_agent_capability(root, name) if requested_schema >= 3 else None
     )
     package_schema = requested_schema
+    normalized_history_mode: str | None = None
+    conversation_continuity: dict[str, Any] | None = None
+    if package_schema >= 5:
+        normalized_history_mode = str(
+            history_mode
+            if history_mode is not None
+            else ("move" if transfer_operation == "move" else "none")
+        ).strip().lower()
+        allowed_history_modes = (
+            {"move"}
+            if transfer_operation == "move"
+            else {"none", "inherit_read_only", "copy"}
+        )
+        if normalized_history_mode not in allowed_history_modes:
+            raise AgentMoveError(
+                f"history mode {normalized_history_mode!r} is invalid for {transfer_operation}"
+            )
+        if normalized_history_mode != "none":
+            configured_source_id = str(_configured_instance_id(root) or "").upper()
+            if not configured_source_id:
+                raise AgentMoveError(
+                    "source instance identity is not configured for conversation history"
+                )
+            source_id = str(source_instance or configured_source_id).upper()
+            if source_id != configured_source_id:
+                raise AgentMoveError(
+                    "conversation history source instance does not match configuration"
+                )
+            conversation_continuity = _export_conversation_continuity_snapshot(
+                root,
+                source_instance=source_id,
+                agent_id=name,
+                transfer_id=package_key,
+                history_mode=normalized_history_mode,
+                explicit_owner_id=conversation_owner_id,
+            )
+    elif history_mode is not None or conversation_owner_id is not None:
+        raise AgentMoveError("conversation history options require package schema 5")
 
     agent_config, config_warnings = _portable_agent_config(raw_config, name)
     schedules = _collect_schedules(root, name)
@@ -564,6 +614,24 @@ def create_agent_move_package(
     if transfer_mode:
         manifest["transfer_mode"] = transfer_mode
         manifest["required_receiver_capabilities"].append(TRANSFER_MODES_CAPABILITY)
+    if package_schema >= 5:
+        manifest["history_mode"] = normalized_history_mode
+        manifest["sections"]["conversation_continuity"] = (
+            conversation_continuity is not None
+        )
+        manifest["conversation_continuity_summary"] = (
+            dict(conversation_continuity.get("summary") or {})
+            if conversation_continuity is not None
+            else {
+                "session_count": 0,
+                "eligible_message_count": 0,
+                "excluded_message_count": 0,
+                "attachments_included": 0,
+            }
+        )
+        manifest["required_receiver_capabilities"].append(
+            CONVERSATION_CONTINUITY_CAPABILITY
+        )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.{package_key}.tmp")
@@ -598,6 +666,13 @@ def create_agent_move_package(
                         archive,
                         AGENT_CAPABILITY_ARCHIVE_PATH,
                         _json_bytes(agent_capability),
+                        checksums,
+                    )
+                if conversation_continuity is not None:
+                    _write_bytes(
+                        archive,
+                        CONVERSATION_CONTINUITY_ARCHIVE_PATH,
+                        _json_bytes(conversation_continuity),
                         checksums,
                     )
                 if retained_identity_bytes is not None and retained_identity is not None:
@@ -663,6 +738,22 @@ def create_agent_move_package(
                 final_inventory = _workspace_inventory(workspace)
                 if final_inventory != inventory:
                     raise AgentMoveError("workspace changed while packaging; prepare a fresh transfer")
+            if conversation_continuity is not None:
+                final_continuity = _export_conversation_continuity_snapshot(
+                    root,
+                    source_instance=str(conversation_continuity["source_instance"]),
+                    agent_id=name,
+                    transfer_id=package_key,
+                    history_mode=str(conversation_continuity["history_mode"]),
+                    explicit_owner_id=str(conversation_continuity["owner_id"]),
+                )
+                if not hmac.compare_digest(
+                    str(final_continuity["capsule_digest"]),
+                    str(conversation_continuity["capsule_digest"]),
+                ):
+                    raise AgentMoveError(
+                        "conversation history changed while packaging; prepare a fresh transfer"
+                    )
             os.replace(temporary, output)
         except Exception:
             temporary.unlink(missing_ok=True)
@@ -758,6 +849,77 @@ def read_agent_move_package(
             if mode == "identity_memory" and any(name.startswith("workspace/") and not is_portable_memory_path(name[len("workspace/"):]) for name in names):
                 raise AgentMoveError("identity-memory package contains files outside PCM scope")
 
+        conversation_continuity: dict[str, Any] | None = None
+        continuity_present = CONVERSATION_CONTINUITY_ARCHIVE_PATH in names
+        package_schema = int(manifest.get("schema_version") or 0)
+        if package_schema >= 5:
+            operation = str(manifest.get("operation") or "").strip().lower()
+            history_mode = str(manifest.get("history_mode") or "").strip().lower()
+            allowed_history_modes = (
+                {"move"}
+                if operation == "move"
+                else {"none", "inherit_read_only", "copy"}
+            )
+            if history_mode not in allowed_history_modes:
+                raise AgentMoveError("package conversation history mode is invalid")
+            declared = (manifest.get("sections") or {}).get(
+                "conversation_continuity"
+            )
+            if not isinstance(declared, bool) or declared != continuity_present:
+                raise AgentMoveError(
+                    "conversation continuity attachment does not match the manifest"
+                )
+            if (history_mode == "none") != (not continuity_present):
+                raise AgentMoveError(
+                    "package conversation history mode and attachment are inconsistent"
+                )
+            if CONVERSATION_CONTINUITY_CAPABILITY not in manifest.get(
+                "required_receiver_capabilities", []
+            ):
+                raise AgentMoveError(
+                    "package omits conversation continuity receiver capability"
+                )
+            if continuity_present:
+                conversation_continuity = _read_json(
+                    archive,
+                    CONVERSATION_CONTINUITY_ARCHIVE_PATH,
+                )
+                try:
+                    validated = validate_conversation_continuity_capsule(
+                        conversation_continuity,
+                        source_agent_id=str(manifest.get("agent_id") or ""),
+                        transfer_id=str(manifest.get("package_id") or ""),
+                        history_mode=history_mode,
+                    )
+                except SessionConflict as exc:
+                    raise AgentMoveError(str(exc)) from exc
+                summary = dict(conversation_continuity.get("summary") or {})
+                if summary != manifest.get("conversation_continuity_summary"):
+                    raise AgentMoveError(
+                        "conversation continuity summary does not match the manifest"
+                    )
+                if str(validated["payload"].get("source_instance") or "").upper() != str(
+                    manifest.get("source_instance") or ""
+                ).upper():
+                    raise AgentMoveError(
+                        "conversation continuity source instance does not match the manifest"
+                    )
+            elif manifest.get("conversation_continuity_summary") != {
+                "session_count": 0,
+                "eligible_message_count": 0,
+                "excluded_message_count": 0,
+                "attachments_included": 0,
+            }:
+                raise AgentMoveError(
+                    "empty conversation continuity summary is invalid"
+                )
+        elif continuity_present or (manifest.get("sections") or {}).get(
+            "conversation_continuity"
+        ) not in {None, False}:
+            raise AgentMoveError(
+                "legacy Agent move packages cannot contain conversation continuity"
+            )
+
         pcm_text = _read_required(archive, "identity/agent.md").decode("utf-8")
         try:
             parse_pcm_text(pcm_text, path=Path("agent.md"))
@@ -791,6 +953,7 @@ def read_agent_move_package(
         workspace_metadata=workspace_metadata,
         retained_identity=retained_identity,
         agent_capability=agent_capability,
+        conversation_continuity=conversation_continuity,
         checksums={str(k): str(v) for k, v in checksums.items()},
         names=tuple(names),
     )
@@ -929,12 +1092,19 @@ def archive_snapshot_fingerprint(
             }
         )
     credentials = decrypt_agent_secrets(package, secret_passphrase)
+    stable_continuity = None
+    if package.conversation_continuity is not None:
+        stable_continuity = dict(package.conversation_continuity)
+        stable_continuity.pop("transfer_id", None)
+        stable_continuity.pop("capsule_digest", None)
     payload = {
         "schema_version": int(package.manifest.get("schema_version") or 1),
         "file_checksums": dict(sorted(file_checksums.items())),
         "portable_files": sorted(portable_files, key=lambda item: item["path"]),
         "agent_credentials": credentials,
         "transfer_mode": package.manifest.get("transfer_mode"),
+        "history_mode": package.manifest.get("history_mode"),
+        "conversation_continuity": stable_continuity,
         "deletion_inventory": [item for item in package.workspace_metadata.get("inventory", [])
                                if str(item.get("path", "")).casefold() not in _FRESHNESS_EXCLUDED_WORKSPACE_PATHS],
     }
@@ -997,6 +1167,101 @@ def _configured_instance_id(root: Path) -> str | None:
     if not isinstance(data, dict):
         return None
     return str((data.get("global") or {}).get("instance_id") or "").strip() or None
+
+
+def _configured_owner_id(root: Path) -> str:
+    data = _load_json_file(root / "agents.json")
+    global_config = data.get("global") if isinstance(data, Mapping) else {}
+    raw_owner = (global_config or {}).get("authorized_id") or 0
+    secrets_path = root / "secrets.json"
+    if secrets_path.is_file():
+        secrets = _load_json_file(secrets_path)
+        if isinstance(secrets, Mapping):
+            raw_owner = secrets.get("authorized_telegram_id") or raw_owner
+    try:
+        configured = int(raw_owner)
+    except (TypeError, ValueError) as exc:
+        raise AgentMoveError(
+            "source authorized conversation owner configuration is invalid"
+        ) from exc
+    if configured <= 0:
+        raise AgentMoveError(
+            "source authorized conversation owner is not configured"
+        )
+    return f"user:{configured}"
+
+
+def _export_conversation_continuity_snapshot(
+    root: Path,
+    *,
+    source_instance: str,
+    agent_id: str,
+    transfer_id: str,
+    history_mode: str,
+    explicit_owner_id: str | None,
+) -> dict[str, Any]:
+    """Export through a disposable SQLite snapshot without migrating live state."""
+
+    source_path = root / "state" / "sessions.sqlite3"
+    with tempfile.TemporaryDirectory(prefix="hashi-session-continuity-") as name:
+        snapshot_path = Path(name) / "sessions.sqlite3"
+        if source_path.is_file():
+            try:
+                source_uri = source_path.resolve().as_uri() + "?mode=ro"
+                with (
+                    closing(sqlite3.connect(source_uri, uri=True)) as source_db,
+                    closing(sqlite3.connect(snapshot_path)) as snapshot_db,
+                ):
+                    source_db.backup(snapshot_db)
+            except (OSError, sqlite3.DatabaseError) as exc:
+                raise AgentMoveError(
+                    "could not create a consistent SessionStore snapshot"
+                ) from exc
+        store = SessionStore(snapshot_path, instance_id=source_instance)
+        owner = _resolve_conversation_owner(
+            root,
+            store,
+            agent_id=agent_id,
+            explicit_owner_id=explicit_owner_id,
+        )
+        return store.export_conversation_continuity(
+            owner_id=owner,
+            agent_id=agent_id,
+            source_instance=source_instance,
+            transfer_id=transfer_id,
+            history_mode=history_mode,
+        )
+
+
+def _resolve_conversation_owner(
+    root: Path,
+    store: SessionStore,
+    *,
+    agent_id: str,
+    explicit_owner_id: str | None,
+) -> str:
+    observed = store.conversation_owner_ids(agent_id=agent_id)
+    configured = _configured_owner_id(root)
+    explicit = str(explicit_owner_id or "").strip()
+    if explicit:
+        owner = explicit
+        if observed and owner not in observed:
+            raise AgentMoveError(
+                "requested conversation owner has no SessionStore history for this Agent"
+            )
+    elif len(observed) == 1:
+        owner = observed[0]
+    elif len(observed) > 1:
+        raise AgentMoveError(
+            "Agent history has multiple owners; an exact conversation_owner_id is required"
+        )
+    else:
+        owner = configured
+    if owner != configured:
+        raise AgentMoveError(
+            "SessionStore history owner does not match the configured authorized owner"
+        )
+    return owner
 
 
 def _collect_agent_capability(
@@ -1420,6 +1685,15 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
             raise AgentMoveError(
                 "schema 3 must declare whether Agent capabilities are attached"
             )
+        if schema >= 5:
+            if not isinstance(sections.get("conversation_continuity"), bool):
+                raise AgentMoveError(
+                    "schema 5 must declare whether conversation continuity is attached"
+                )
+            if CONVERSATION_CONTINUITY_CAPABILITY not in required:
+                raise AgentMoveError(
+                    "schema 5 manifest does not require conversation continuity support"
+                )
 
 
 def _read_and_validate_agent_capability(

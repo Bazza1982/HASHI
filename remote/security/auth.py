@@ -39,6 +39,12 @@ def has_shared_token() -> bool:
     return bool(_shared_token)
 
 
+def get_shared_token() -> str | None:
+    """Return the in-process credential snapshot used by request authentication."""
+
+    return _shared_token
+
+
 def protocol_auth_mode() -> str:
     return "shared-token" if _shared_token else "discovery-only"
 

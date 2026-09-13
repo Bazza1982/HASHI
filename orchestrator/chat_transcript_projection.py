@@ -11,18 +11,122 @@ if TYPE_CHECKING:
     from orchestrator.session_store import SessionStore
 
 
-def build_chat_projection(store: SessionStore, *, session: dict, owner_id: str,
-                          offset: int | None = None, limit: int = 200) -> dict:
+def build_chat_projection(
+    store: SessionStore,
+    *,
+    session: dict,
+    owner_id: str,
+    offset: int | None = None,
+    limit: int = 200,
+    known_history_generation: int | None = None,
+) -> dict:
     """Project one already-resolved Session snapshot for HTTP and Worker reads."""
+    limit = max(1, min(int(limit), 200))
     requests = store.recent_session_runs(
         session["session_id"], owner_id=owner_id,
         context_generation=session["context_generation"],
     )
     path = store.session_workspace(session["session_id"], session["context_generation"]) / "transcript.jsonl"
-    payload = read_chat_transcript(path, session=session, offset=offset, limit=limit)
+    history_generation = int(session.get("history_generation") or 1)
+    history_reset = (
+        known_history_generation is not None
+        and int(known_history_generation) != history_generation
+    )
+    snapshot = offset is None or history_reset
+    payload = read_chat_transcript(
+        path,
+        session=session,
+        offset=None if history_reset else offset,
+        limit=limit,
+    )
+    if snapshot:
+        canonical = store.recent_messages(
+            session["session_id"],
+            owner_id=owner_id,
+            context_generation=int(session["context_generation"]),
+            limit=limit + 1,
+        )
+        canonical_overflow = len(canonical) > limit
+        if canonical_overflow:
+            canonical = canonical[-limit:]
+        canonical_rows = [_canonical_projection_row(item) for item in canonical]
+        payload["messages"] = _merge_snapshot_rows(
+            canonical_rows,
+            payload["messages"],
+            limit=limit,
+        )
+        payload["history_complete"] = bool(
+            payload.get("history_complete") and not canonical_overflow
+        )
+    if history_reset:
+        payload["cursor_reset"] = True
+        payload["history_reset"] = True
+    else:
+        payload["history_reset"] = False
+    payload["history_generation"] = history_generation
     payload["requests"] = requests
     payload["request_discovery_complete"] = len(requests) < 64
     return payload
+
+
+def _canonical_projection_row(message: dict) -> dict:
+    run_id = str(message.get("run_id") or "")
+    role = str(message.get("role") or "")
+    message_id = str(message.get("message_id") or "")
+    return {
+        "role": role,
+        "text": str(message.get("text") or ""),
+        "source": str(message.get("source") or "session_store"),
+        "message_id": message_id,
+        "message_ref": (
+            f"run:{run_id}:{role}" if run_id else f"message:{message_id}"
+        ),
+        "session_id": str(message.get("session_id") or ""),
+        "context_generation": int(message.get("context_generation") or 1),
+        "source_sequence": int(message.get("ordinal") or 0),
+        "created_at": str(message.get("created_at") or ""),
+        "canonical": True,
+    }
+
+
+def _merge_snapshot_rows(
+    canonical_rows: list[dict],
+    transcript_rows: list[dict],
+    *,
+    limit: int,
+) -> list[dict]:
+    """Prepend imported canonical rows without displacing transcript-only events."""
+
+    by_ref = {str(item["message_ref"]): item for item in canonical_rows}
+    if not any(str(item.get("message_ref") or "") in by_ref for item in transcript_rows):
+        return (canonical_rows + transcript_rows)[-limit:]
+
+    merged: list[dict] = []
+    emitted: set[str] = set()
+    canonical_index = 0
+    for transcript_row in transcript_rows:
+        message_ref = str(transcript_row.get("message_ref") or "")
+        matched = by_ref.get(message_ref)
+        if matched is None:
+            merged.append(transcript_row)
+            continue
+        target_ordinal = int(matched.get("source_sequence") or 0)
+        while canonical_index < len(canonical_rows):
+            candidate = canonical_rows[canonical_index]
+            candidate_ordinal = int(candidate.get("source_sequence") or 0)
+            if candidate_ordinal > target_ordinal:
+                break
+            candidate_ref = str(candidate["message_ref"])
+            if candidate_ref not in emitted:
+                merged.append(candidate)
+                emitted.add(candidate_ref)
+            canonical_index += 1
+    for candidate in canonical_rows[canonical_index:]:
+        candidate_ref = str(candidate["message_ref"])
+        if candidate_ref not in emitted:
+            merged.append(candidate)
+            emitted.add(candidate_ref)
+    return merged[-limit:]
 
 
 def _cursor_at_record_boundary(stream, offset: int, size: int) -> bool:

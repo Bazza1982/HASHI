@@ -11,7 +11,13 @@ from fastapi.testclient import TestClient
 from remote.api.server import create_app
 from remote.protocol_manager import ProtocolManager
 from remote.security.pairing import PairingManager
-from remote.security.shared_token import build_auth_headers, load_shared_token
+from remote.security.shared_token import (
+    HEADER_NONCE,
+    build_auth_headers,
+    build_response_auth,
+    load_shared_token,
+    verify_response_auth,
+)
 from remote.terminal.executor import TerminalExecutor
 
 
@@ -88,14 +94,14 @@ def _client_lan_mode(tmp_path, *, lan_mode: bool):
 def test_load_shared_token_reports_an_unreadable_existing_file(tmp_path, monkeypatch):
     secrets_path = tmp_path / "secrets.json"
     secrets_path.write_text("{}\n", encoding="utf-8")
-    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
 
     def denied(path, *args, **kwargs):
         if path == secrets_path:
             raise PermissionError(13, "Access is denied", str(path))
-        return original_read_text(path, *args, **kwargs)
+        return original_read_bytes(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", denied)
+    monkeypatch.setattr(Path, "read_bytes", denied)
 
     with pytest.raises(PermissionError, match="shared token file is not readable"):
         load_shared_token(tmp_path)
@@ -274,7 +280,15 @@ def test_protocol_handshake_accepts_valid_shared_token(tmp_path):
     response = client.post("/protocol/handshake", content=body, headers=headers)
 
     assert response.status_code == 200
-    assert response.json()["status"] == "handshake_accept"
+    response_payload = response.json()
+    response_auth = response_payload.pop("response_auth")
+    assert response_payload["status"] == "handshake_accept"
+    assert verify_response_auth(
+        shared_token=token,
+        request_nonce="nonce-1",
+        payload=response_payload,
+        response_auth=response_auth,
+    )
     assert protocol.handshakes[0]["_client_ip"] is not None
 
 
@@ -844,6 +858,35 @@ def test_protocol_directory_accepts_valid_shared_token(tmp_path):
     assert body["trusted_view"] is True
 
 
+def test_legacy_protocol_agents_requires_auth_when_token_configured(tmp_path):
+    _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+
+    response = client.get("/protocol/agents")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "auth_required"
+
+
+def test_legacy_protocol_agents_accepts_valid_shared_token(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+    headers = build_auth_headers(
+        shared_token=token,
+        method="GET",
+        path="/protocol/agents",
+        from_instance="HASHI2",
+        body_bytes=b"",
+        timestamp=int(time.time()),
+        nonce="legacy-agents-1",
+    )
+
+    response = client.get("/protocol/agents", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "agents": [{"id": "local-agent"}]}
+
+
 def test_remote_config_defaults_lan_mode_off():
     config_path = Path(__file__).resolve().parent.parent / "remote" / "config.yaml"
     text = config_path.read_text(encoding="utf-8")
@@ -864,6 +907,9 @@ def test_protocol_manager_post_json_signs_protocol_requests(tmp_path, monkeypatc
     class _Resp:
         status = 200
 
+        def __init__(self, payload):
+            self.payload = payload
+
         def __enter__(self):
             return self
 
@@ -871,11 +917,22 @@ def test_protocol_manager_post_json_signs_protocol_requests(tmp_path, monkeypatc
             return False
 
         def read(self):
-            return b"{}"
+            return json.dumps(self.payload).encode("utf-8")
 
     def fake_urlopen(req, timeout=None, context=None):
         seen["headers"] = dict(req.header_items())
-        return _Resp()
+        payload = {"status": "handshake_accept", "instance_id": "HASHI2"}
+        request_nonce = next(
+            value
+            for key, value in seen["headers"].items()
+            if key.lower() == HEADER_NONCE.lower()
+        )
+        payload["response_auth"] = build_response_auth(
+            shared_token="shared-secret",
+            request_nonce=request_nonce,
+            payload=payload,
+        )
+        return _Resp(payload)
 
     monkeypatch.setattr("remote.protocol_manager.urllib_request.urlopen", fake_urlopen)
 
@@ -887,3 +944,37 @@ def test_protocol_manager_post_json_signs_protocol_requests(tmp_path, monkeypatc
 
     assert seen["headers"]["X-hashi-auth-scheme"] == "hashi-shared-hmac-v1"
     assert seen["headers"]["X-hashi-from-instance"] == "HASHI_LOCAL"
+
+
+def test_protocol_manager_rejects_unsigned_handshake_accept(tmp_path, monkeypatch):
+    _write_shared_token(tmp_path)
+    manager = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI_LOCAL"},
+        peer_registry=None,
+        workbench_port=18800,
+    )
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"status":"handshake_accept","instance_id":"HASHI2"}'
+
+    monkeypatch.setattr(
+        "remote.protocol_manager.urllib_request.urlopen",
+        lambda *_args, **_kwargs: _Resp(),
+    )
+
+    with pytest.raises(RuntimeError, match="response authentication"):
+        manager._post_json(
+            "http://127.0.0.1:8767/protocol/handshake",
+            {"from_instance": "HASHI_LOCAL"},
+            timeout=1,
+        )

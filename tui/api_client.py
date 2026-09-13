@@ -60,6 +60,8 @@ class TuiApiClient:
         self.remote_url = str(remote_url or "").rstrip("/")
         self.target_instance = str(target_instance or "").strip().upper()
         self._offsets: dict[str, int | None] = {}
+        self._history_generations: dict[str, int] = {}
+        self._transcript_resets: set[str] = set()
 
     @property
     def proxied(self) -> bool:
@@ -138,6 +140,7 @@ class TuiApiClient:
         attachment: dict | None = None,
         workzone_ref: str | None = None,
         offset: int = 0,
+        history_generation: int | None = None,
         limit: int = 20,
         timeout: float = 25,
     ) -> dict:
@@ -149,6 +152,8 @@ class TuiApiClient:
         }
         if agent is not None:
             payload["agent"] = agent
+        if history_generation is not None:
+            payload["history_generation"] = int(history_generation)
         if text is not None:
             payload["text"] = text
         if client_id is not None:
@@ -456,20 +461,37 @@ class TuiApiClient:
             # not race that request from byte zero or the initial assistant
             # messages will be rendered twice.
             return []
+        history_generation = self._history_generations.get(agent)
         if self.proxied:
-            data = await self._proxy_request("transcript_poll", agent=agent, offset=offset)
+            data = await self._proxy_request(
+                "transcript_poll",
+                agent=agent,
+                offset=offset,
+                history_generation=history_generation,
+            )
         else:
             encoded_agent = quote(agent, safe="")
+            generation_query = (
+                f"&history_generation={history_generation}"
+                if history_generation is not None
+                else ""
+            )
             data = await self._direct_request(
                 "GET",
-                f"/api/transcript/{encoded_agent}/poll?offset={offset}",
+                f"/api/transcript/{encoded_agent}/poll?offset={offset}{generation_query}",
             )
         if not data.get("ok", True) and data.get("error"):
             logger.warning("TUI transcript poll failed: agent=%s error=%s", agent, data.get("error"))
             return []
         new_offset = data.get("offset", offset)
-        if isinstance(new_offset, int) and new_offset > offset:
+        reset = data.get("cursor_reset") is True and data.get("history_reset") is True
+        if isinstance(new_offset, int) and (new_offset > offset or reset):
             self._offsets[agent] = new_offset
+        new_history_generation = data.get("history_generation")
+        if isinstance(new_history_generation, int) and new_history_generation >= 1:
+            self._history_generations[agent] = new_history_generation
+        if reset:
+            self._transcript_resets.add(agent)
         messages = data.get("messages", [])
         return messages if isinstance(messages, list) else []
 
@@ -487,8 +509,20 @@ class TuiApiClient:
             return []
         offset = data.get("offset", 0)
         self._offsets[agent] = offset if isinstance(offset, int) else 0
+        history_generation = data.get("history_generation")
+        if isinstance(history_generation, int) and history_generation >= 1:
+            self._history_generations[agent] = history_generation
+        self._transcript_resets.discard(agent)
         messages = data.get("messages", [])
         return messages if isinstance(messages, list) else []
 
     def reset_offset(self, agent: str):
         self._offsets[agent] = None
+        self._history_generations.pop(agent, None)
+        self._transcript_resets.discard(agent)
+
+    def consume_transcript_reset(self, agent: str) -> bool:
+        if agent not in self._transcript_resets:
+            return False
+        self._transcript_resets.discard(agent)
+        return True

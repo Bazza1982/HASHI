@@ -634,11 +634,49 @@ async def clone_show_target_picker(
     )
 
 
+async def clone_show_history_options(
+    runtime: Any,
+    update: Any,
+    agent_id: str,
+    target: str,
+) -> None:
+    rows = [
+        [
+            InlineKeyboardButton(
+                ui_language.tr(f"remote.clone.history.{mode}"),
+                callback_data=_move_callback_data(
+                    runtime,
+                    f"clone:history:{agent_id}:{target}:{mode}",
+                ),
+            )
+        ]
+        for mode in ("none", "inherit_read_only", "copy")
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                ui_language.tr("remote.move.button.keep"),
+                callback_data="clone:cancel",
+            )
+        ]
+    )
+    await update.callback_query.edit_message_text(
+        f"{card_title('🧬', 'Clone agent')}\n\n"
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
+        f"{ui_language.tr('remote.clone.history.choose')}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
 async def clone_show_options(
     runtime: Any,
     update: Any,
     agent_id: str,
     target: str,
+    *,
+    history_mode: str = "none",
 ) -> None:
     markup = InlineKeyboardMarkup(
         [
@@ -647,14 +685,14 @@ async def clone_show_options(
                     ui_language.tr("remote.clone.button.clone"),
                     callback_data=_move_callback_data(
                         runtime,
-                        f"clone:exec:{agent_id}:{target}:clone",
+                        f"clone:exec:{agent_id}:{target}:{history_mode}:clone",
                     ),
                 ),
                 InlineKeyboardButton(
                     ui_language.tr("remote.move.button.preview"),
                     callback_data=_move_callback_data(
                         runtime,
-                        f"clone:exec:{agent_id}:{target}:dry",
+                        f"clone:exec:{agent_id}:{target}:{history_mode}:dry",
                     ),
                 ),
             ],
@@ -670,6 +708,7 @@ async def clone_show_options(
         f"{card_title('🧬', 'Clone agent')}\n\n"
         f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
         f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
+        f"{ui_language.tr('remote.clone.history.selected', mode=html.escape(ui_language.tr(f'remote.clone.history.{history_mode}')))}\n\n"
         f"{ui_language.tr('remote.clone.choose')}",
         parse_mode="HTML",
         reply_markup=markup,
@@ -685,6 +724,7 @@ async def do_clone(
     *,
     target_agent_id: str | None = None,
     dry_run: bool = False,
+    history_mode: str = "none",
 ) -> None:
     chat_id = update.effective_chat.id
     selected_runtime = _find_agent_runtime(runtime, agent_id)
@@ -732,6 +772,7 @@ async def do_clone(
                 resolved_target,
                 source_instance=source_instance,
                 target_agent_id=target_agent_id,
+                history_mode=history_mode,
             )
             await runtime._send_text(
                 chat_id,
@@ -747,6 +788,7 @@ async def do_clone(
             resolved_target,
             source_instance=source_instance,
             target_agent_id=target_agent_id,
+            history_mode=history_mode,
         )
         package_id = str(result["package_id"])
         markup = InlineKeyboardMarkup(
@@ -780,6 +822,7 @@ async def do_clone(
 
 
 def _render_clone_preview(result: dict[str, Any]) -> str:
+    history = _render_history_summary(result)
     return (
         f"{card_title('🔎', 'Agent clone preview')}\n\n"
         f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · "
@@ -790,12 +833,14 @@ def _render_clone_preview(result: dict[str, Any]) -> str:
         f"<b>{html.escape(ui_language.tr('remote.move.workspace_files'))}</b> · "
         f"<code>{int(result.get('workspace_files') or 0)}</code>\n"
         f"<b>{html.escape(ui_language.tr('remote.move.schedules'))}</b> · "
-        f"<code>{int(result.get('schedule_count') or 0)}</code>\n\n"
+        f"<code>{int(result.get('schedule_count') or 0)}</code>\n"
+        f"{history}\n\n"
         f"{ui_language.tr('remote.clone.preview_clean', target_agent=html.escape(str(result.get('target_agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
     )
 
 
 def _render_clone_prepared(result: dict[str, Any]) -> str:
+    history = _render_history_summary(result)
     return (
         f"{card_title('🛡️', 'Agent clone prepared')}\n\n"
         f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · "
@@ -804,7 +849,8 @@ def _render_clone_prepared(result: dict[str, Any]) -> str:
         f"<b>{html.escape(ui_language.tr('common.target'))}</b> · "
         f"<code>{html.escape(str(result.get('target_instance')))}</code>\n"
         f"<b>{html.escape(ui_language.tr('remote.move.package_id'))}</b> · "
-        f"<code>{html.escape(str(result.get('package_id')))}</code>\n\n"
+        f"<code>{html.escape(str(result.get('package_id')))}</code>\n"
+        f"{history}\n\n"
         f"{ui_language.tr('remote.clone.prepared_safe')}"
     )
 
@@ -865,6 +911,8 @@ def _render_move_prepared(result: dict[str, Any]) -> str:
 
 def _render_move_review_notes(result: dict[str, Any]) -> list[str]:
     lines: list[str] = []
+    if result.get("history_mode"):
+        lines.append(_render_history_summary(result))
     mode = result.get("transfer_mode")
     if mode in {"identity_memory", "workspace"}:
         discarded = result.get("discarded_files") or []
@@ -902,6 +950,18 @@ def _render_move_review_notes(result: dict[str, Any]) -> list[str]:
         lines.append(ui_language.tr("remote.move.review_notes"))
         lines.extend(f"  • {html.escape(item)}" for item in warnings[:8])
     return lines
+
+
+def _render_history_summary(result: dict[str, Any]) -> str:
+    summary = result.get("conversation_continuity_summary") or {}
+    mode = str(result.get("history_mode") or "none")
+    return ui_language.tr(
+        "remote.move.history_summary",
+        mode=html.escape(ui_language.tr(f"remote.clone.history.{mode}")),
+        sessions=int(summary.get("session_count") or 0),
+        messages=int(summary.get("eligible_message_count") or 0),
+        excluded=int(summary.get("excluded_message_count") or 0),
+    )
 
 
 def _render_move_complete(result: dict[str, Any]) -> str:
@@ -1256,20 +1316,52 @@ async def _handle_clone_callback(runtime: Any, update: Any, context: Any) -> Non
         )
         return
     if action == "target" and len(parts) >= 4:
-        await clone_show_options(runtime, update, parts[2], parts[3])
+        await clone_show_history_options(runtime, update, parts[2], parts[3])
+        return
+    if action == "history" and len(parts) >= 4:
+        target_mode = parts[3].split(":", 1)
+        if len(target_mode) != 2 or target_mode[1] not in {
+            "none",
+            "inherit_read_only",
+            "copy",
+        }:
+            await query.edit_message_text(
+                ui_language.tr("remote.clone.selection_expired")
+            )
+            return
+        await clone_show_options(
+            runtime,
+            update,
+            parts[2],
+            target_mode[0],
+            history_mode=target_mode[1],
+        )
         return
     if action == "exec" and len(parts) >= 4:
         agent_id = parts[2]
-        target_mode = parts[3].split(":", 1)
+        target_mode = parts[3].split(":")
         target = target_mode[0]
-        dry_run = len(target_mode) > 1 and target_mode[1] == "dry"
+        if len(target_mode) >= 3:
+            history_mode = target_mode[1]
+            execution = target_mode[2]
+        else:
+            history_mode = "none"
+            execution = target_mode[1] if len(target_mode) > 1 else "clone"
+        if history_mode not in {"none", "inherit_read_only", "copy"}:
+            await query.edit_message_text(
+                ui_language.tr("remote.clone.selection_expired")
+            )
+            return
+        dry_run = execution == "dry"
         instances = await load_clone_instances(runtime)
-        await runtime._do_clone(
+        await do_clone(
+            runtime,
             update,
             agent_id,
             target,
             instances,
             dry_run=dry_run,
+            history_mode=history_mode,
         )
         return
     if action in {"commit", "abort"} and len(parts) >= 3:

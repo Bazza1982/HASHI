@@ -26,6 +26,7 @@ from orchestrator.agent_move.service import (
 )
 from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.pcm import render_pcm_document
+from orchestrator.session_store import SessionStore
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
@@ -129,6 +130,39 @@ def _roots(tmp_path: Path) -> tuple[Path, Path, Path]:
     return source, target, package_path
 
 
+def _complete_history(
+    store: SessionStore,
+    *,
+    session_id: str,
+    agent_id: str,
+    request_id: str,
+    question: str,
+    answer: str,
+) -> None:
+    accepted = store.accept_run(
+        session_id=session_id,
+        owner_id="user:7",
+        agent_id=agent_id,
+        request_id=request_id,
+        text=question,
+        source="workbench",
+        idempotency_key=request_id,
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text=answer,
+        assistant_source="fixture",
+    )
+
+
+def _authorize_owner(root: Path, owner_number: int = 7) -> None:
+    agents = json.loads((root / "agents.json").read_text())
+    agents["global"]["authorized_id"] = owner_number
+    _write_json(root / "agents.json", agents)
+
+
 def test_stage_commit_activate_and_recoverable_rollback(tmp_path):
     source, target, package_path = _roots(tmp_path)
     agents_before = (target / "agents.json").read_bytes()
@@ -185,8 +219,227 @@ def test_stage_commit_activate_and_recoverable_rollback(tmp_path):
     assert (source / "workspaces" / "zelda").is_dir()
 
 
+def test_schema5_commit_prepends_history_idempotently_and_rollback_preserves_target_work(
+    tmp_path,
+):
+    source, target, _ = _roots(tmp_path)
+    _authorize_owner(source)
+    _authorize_owner(target)
+    source_store = SessionStore(
+        source / "state" / "sessions.sqlite3", instance_id="HASHI1"
+    )
+    source_session = source_store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda",
+        surface="workbench",
+        channel_key="default",
+    )
+    source_store.bind_channel(
+        owner_id="user:7",
+        agent_id="zelda",
+        surface="telegram",
+        channel_key="7",
+        session_id=source_session["session_id"],
+    )
+    _complete_history(
+        source_store,
+        session_id=source_session["session_id"],
+        agent_id="zelda",
+        request_id="source-old",
+        question="old source question",
+        answer="old source answer",
+    )
+    target_store = SessionStore(
+        target / "state" / "sessions.sqlite3", instance_id="HASHI2"
+    )
+    target_session = target_store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda",
+        surface="workbench",
+        channel_key="default",
+    )
+    _complete_history(
+        target_store,
+        session_id=target_session["session_id"],
+        agent_id="zelda",
+        request_id="target-new",
+        question="new target question",
+        answer="new target answer",
+    )
+    package_path = tmp_path / "history-move.hashi-agent"
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        transfer_mode="identity_memory",
+    )
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        operation="move",
+    )
+
+    committed = commit_agent_move(target, staged["package_id"])
+    replayed = commit_agent_move(target, staged["package_id"])
+
+    resolved = target_store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda",
+        surface="workbench",
+        channel_key="default",
+    )
+    assert [
+        item["text"]
+        for item in target_store.messages(
+            resolved["session_id"], owner_id="user:7"
+        )
+    ] == [
+        "old source question",
+        "old source answer",
+        "new target question",
+        "new target answer",
+    ]
+    assert committed["conversation_continuity"]["imported_messages"] == 2
+    assert replayed["conversation_continuity"]["imported_messages"] == 2
+
+    rollback_agent_move(target, staged["package_id"])
+    assert [
+        item["text"]
+        for item in target_store.messages(
+            resolved["session_id"], owner_id="user:7"
+        )
+    ] == ["new target question", "new target answer"]
+    assert source_store.messages(
+        source_session["session_id"], owner_id="user:7"
+    )[0]["text"] == "old source question"
+
+
+def test_schema5_commit_failure_compensates_conversation_import(tmp_path, monkeypatch):
+    source, target, _ = _roots(tmp_path)
+    _authorize_owner(source)
+    _authorize_owner(target)
+    source_store = SessionStore(
+        source / "state" / "sessions.sqlite3", instance_id="HASHI1"
+    )
+    source_session = source_store.ensure_default_session(
+        owner_id="user:7", agent_id="zelda"
+    )
+    _complete_history(
+        source_store,
+        session_id=source_session["session_id"],
+        agent_id="zelda",
+        request_id="source",
+        question="must roll back",
+        answer="must also roll back",
+    )
+    package_path = tmp_path / "failing-history.hashi-agent"
+    package = create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        transfer_mode="identity_memory",
+    )
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        operation="move",
+    )
+    monkeypatch.setattr(
+        service,
+        "_credential_status",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AgentMoveError("injected post-history failure")
+        ),
+    )
+
+    with pytest.raises(AgentMoveError, match="injected post-history failure"):
+        commit_agent_move(target, staged["package_id"])
+
+    target_store = SessionStore(
+        target / "state" / "sessions.sqlite3", instance_id="HASHI2"
+    )
+    assert target_store.conversation_continuity_import_status(package.package_id) is None
+    assert target_store.list_sessions(owner_id="user:7") == []
+    assert json.loads((target / "agents.json").read_text())["agents"] == []
+
+
+def test_schema5_clone_read_only_history_is_archived_and_source_is_unchanged(tmp_path):
+    source, target, _ = _roots(tmp_path)
+    _authorize_owner(source)
+    _authorize_owner(target)
+    source_store = SessionStore(
+        source / "state" / "sessions.sqlite3", instance_id="HASHI1"
+    )
+    source_session = source_store.ensure_default_session(
+        owner_id="user:7", agent_id="zelda"
+    )
+    _complete_history(
+        source_store,
+        session_id=source_session["session_id"],
+        agent_id="zelda",
+        request_id="clone-source",
+        question="read only source",
+        answer="read only answer",
+    )
+    package_path = tmp_path / "read-only-clone.hashi-agent"
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        operation="clone",
+        include_telegram_secret=False,
+        transfer_mode="identity_memory",
+        history_mode="inherit_read_only",
+    )
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        operation="clone",
+        target_agent_id="zelda-copy",
+    )
+    commit_agent_move(target, staged["package_id"])
+
+    target_store = SessionStore(
+        target / "state" / "sessions.sqlite3", instance_id="HASHI2"
+    )
+    inherited = target_store.list_sessions(
+        owner_id="user:7", agent_id="zelda-copy", include_archived=True
+    )
+    assert len(inherited) == 1
+    assert inherited[0]["status"] == "archived"
+    assert inherited[0]["is_default"] is False
+    assert [
+        item["text"]
+        for item in target_store.messages(
+            inherited[0]["session_id"], owner_id="user:7"
+        )
+    ] == ["read only source", "read only answer"]
+    active = target_store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda-copy",
+        surface="workbench",
+        channel_key="default",
+    )
+    assert active["session_id"] != inherited[0]["session_id"]
+    assert target_store.messages(active["session_id"], owner_id="user:7") == []
+    assert len(
+        source_store.messages(source_session["session_id"], owner_id="user:7")
+    ) == 2
+
+
 def test_move_commit_adopts_owned_delivery_state_and_rollback_retires_it(tmp_path):
     source, target, _ = _roots(tmp_path)
+    _authorize_owner(source)
+    _authorize_owner(target)
     lifecycle_id = "4" * 32
     source_config = json.loads((source / "agents.json").read_text())
     source_config["agents"][0]["agent_lifecycle_id"] = lifecycle_id
@@ -593,6 +846,7 @@ def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
         target_agent_id="zelda",
     )
     assert cleaned["status"] == "source_cleaned"
+    assert cleaned["conversation_history_retirement"]["skipped"] is True
     remaining = json.loads((source / "agents.json").read_text())
     assert remaining["groups"]["local"]["members"] == ["anchor", "zelda@HASHI2"]
     assert remaining["groups"]["local"]["description"] == "zelda"
@@ -610,6 +864,129 @@ def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
         for item in json.loads((source / "tasks.json").read_text())["heartbeats"]
     )
     assert moved_agent_destination(source, "ZELDA")["address"] == "zelda@HASHI2"
+
+
+def test_schema5_move_cleanup_archives_source_history_and_rejects_unknown_owner(
+    tmp_path,
+    monkeypatch,
+):
+    source, _, _ = _roots(tmp_path)
+    source_store = SessionStore(
+        source / "state" / "sessions.sqlite3", instance_id="HASHI1"
+    )
+    source_session = source_store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda",
+        surface="workbench",
+        channel_key="default",
+    )
+    _complete_history(
+        source_store,
+        session_id=source_session["session_id"],
+        agent_id="zelda",
+        request_id="source-to-retire",
+        question="recoverable source question",
+        answer="recoverable source answer",
+    )
+    package_id = "schema5-history-cleanup"
+    deactivate_source_agent(
+        source,
+        "zelda",
+        package_id,
+        target_instance="HASHI2",
+        history_mode="move",
+    )
+    agents_before = (source / "agents.json").read_bytes()
+    workspace_before = source / "workspaces" / "zelda" / "memory" / "facts.md"
+
+    with pytest.raises(
+        AgentMoveError, match="authorized conversation owner is not configured"
+    ):
+        cleanup_source_agent(
+            source,
+            package_id,
+            source_secret_keys=["zelda"],
+            target_instance="HASHI2",
+            target_agent_id="zelda",
+        )
+
+    assert (source / "agents.json").read_bytes() == agents_before
+    assert workspace_before.is_file()
+    _authorize_owner(source)
+    authorized_agents_before = (source / "agents.json").read_bytes()
+    real_session_store = service._session_store
+
+    class FailingRetirementStore:
+        def archive_agent_conversation_sessions(self, **_kwargs):
+            raise OSError("retirement storage unavailable")
+
+    monkeypatch.setattr(
+        service,
+        "_session_store",
+        lambda _root: FailingRetirementStore(),
+    )
+    with pytest.raises(OSError, match="retirement storage unavailable"):
+        cleanup_source_agent(
+            source,
+            package_id,
+            source_secret_keys=["zelda"],
+            target_instance="HASHI2",
+            target_agent_id="zelda",
+        )
+    assert (source / "agents.json").read_bytes() == authorized_agents_before
+    assert workspace_before.is_file()
+
+    monkeypatch.setattr(service, "_session_store", real_session_store)
+    cleaned = cleanup_source_agent(
+        source,
+        package_id,
+        source_secret_keys=["zelda"],
+        target_instance="HASHI2",
+        target_agent_id="zelda",
+    )
+    replayed = cleanup_source_agent(
+        source,
+        package_id,
+        source_secret_keys=["zelda"],
+        target_instance="HASHI2",
+        target_agent_id="zelda",
+    )
+
+    retirement = cleaned["conversation_history_retirement"]
+    assert retirement["session_ids"] == [source_session["session_id"]]
+    assert retirement["replayed"] is False
+    assert replayed == cleaned
+    archived = source_store.get_session(
+        source_session["session_id"], owner_id="user:7"
+    )
+    assert archived["status"] == "archived"
+    assert archived["is_default"] is False
+    assert [
+        item["text"]
+        for item in source_store.messages(
+            source_session["session_id"], owner_id="user:7"
+        )
+    ] == ["recoverable source question", "recoverable source answer"]
+
+
+def test_source_deactivation_rejects_history_mode_change_on_retry(tmp_path):
+    source, _, _ = _roots(tmp_path)
+    deactivate_source_agent(
+        source,
+        "zelda",
+        "history-mode-conflict",
+        target_instance="HASHI2",
+        history_mode="move",
+    )
+
+    with pytest.raises(AgentMoveError, match="history mode conflicts"):
+        deactivate_source_agent(
+            source,
+            "zelda",
+            "history-mode-conflict",
+            target_instance="HASHI2",
+            history_mode="none",
+        )
 
 
 def test_schema3_clone_is_active_without_telegram_and_schedules_stay_disabled(

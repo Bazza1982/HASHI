@@ -65,6 +65,654 @@ def _complete(
     return accepted
 
 
+def test_conversation_continuity_capsule_imports_history_before_new_target_messages_idempotently(tmp_path):
+    owner = "user:7"
+    source = SessionStore(tmp_path / "source" / "state" / "sessions.sqlite3", instance_id="HASHI2")
+    source_session = source.ensure_default_session(owner_id=owner, agent_id="lily")
+    source.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+        session_id=source_session["session_id"],
+    )
+    source.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="telegram",
+        channel_key="7",
+        session_id=source_session["session_id"],
+    )
+    _complete(
+        source,
+        session_id=source_session["session_id"],
+        owner_id=owner,
+        request_id="source-old",
+        key="source-old",
+        text="old user message",
+        answer="old assistant message",
+        source="workbench",
+    )
+
+    capsule = source.export_conversation_continuity(
+        owner_id=owner,
+        agent_id="lily",
+        source_instance="HASHI2",
+        transfer_id="transfer-0001",
+        history_mode="move",
+    )
+
+    target = SessionStore(tmp_path / "target" / "state" / "sessions.sqlite3", instance_id="HASHI3")
+    target_session = target.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        target,
+        session_id=target_session["session_id"],
+        owner_id=owner,
+        request_id="target-new",
+        key="target-new",
+        text="new target message",
+        answer="new target answer",
+        source="workbench",
+    )
+
+    first = target.import_conversation_continuity(
+        capsule,
+        owner_id=owner,
+        agent_id="lily",
+        transfer_id="transfer-0001",
+        history_mode="move",
+    )
+    second = target.import_conversation_continuity(
+        capsule,
+        owner_id=owner,
+        agent_id="lily",
+        transfer_id="transfer-0001",
+        history_mode="move",
+    )
+
+    resolved = target.resolve_session(
+        owner_id=owner,
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+    )
+    messages = target.messages(resolved["session_id"], owner_id=owner)
+    assert [item["text"] for item in messages] == [
+        "old user message",
+        "old assistant message",
+        "new target message",
+        "new target answer",
+    ]
+    assert len({item["message_id"] for item in messages}) == 4
+    provenance = messages[0]["message_context"]["conversation_continuity"]
+    assert provenance == {
+        "schema_version": 1,
+        "source_instance": "HASHI2",
+        "source_session_id": source_session["session_id"],
+        "source_message_id": source.messages(source_session["session_id"])[0]["message_id"],
+        "source_ordinal": 1,
+        "source_created_at": source.messages(source_session["session_id"])[0]["created_at"],
+        "origin_ref": capsule["sessions"][0]["messages"][0]["origin_ref"],
+        "transfer_id": "transfer-0001",
+        "history_mode": "move",
+    }
+    assert first["imported_messages"] == 2
+    assert second["imported_messages"] == 0
+    assert second["replayed"] is True
+
+
+def test_read_only_history_dedup_does_not_create_an_empty_archive_for_a_new_transfer(tmp_path):
+    owner = "user:7"
+    source = SessionStore(
+        tmp_path / "source-read-only.sqlite",
+        instance_id="HASHI2",
+    )
+    source_session = source.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        source,
+        session_id=source_session["session_id"],
+        owner_id=owner,
+        request_id="read-only-source",
+        key="read-only-source",
+        text="stable source message",
+        answer="stable source answer",
+    )
+    first_capsule = source.export_conversation_continuity(
+        owner_id=owner,
+        agent_id="lily",
+        source_instance="HASHI2",
+        transfer_id="read-only-transfer-1",
+        history_mode="inherit_read_only",
+    )
+    second_capsule = source.export_conversation_continuity(
+        owner_id=owner,
+        agent_id="lily",
+        source_instance="HASHI2",
+        transfer_id="read-only-transfer-2",
+        history_mode="inherit_read_only",
+    )
+    target = SessionStore(
+        tmp_path / "target-read-only.sqlite",
+        instance_id="HASHI3",
+    )
+
+    first = target.import_conversation_continuity(
+        first_capsule,
+        owner_id=owner,
+        agent_id="lily-clone",
+        transfer_id="read-only-transfer-1",
+        history_mode="inherit_read_only",
+    )
+    second = target.import_conversation_continuity(
+        second_capsule,
+        owner_id=owner,
+        agent_id="lily-clone",
+        transfer_id="read-only-transfer-2",
+        history_mode="inherit_read_only",
+    )
+
+    sessions = target.list_sessions(
+        owner_id=owner,
+        agent_id="lily-clone",
+        include_archived=True,
+    )
+    assert len(sessions) == 1
+    assert second["target_session_ids"] == first["target_session_ids"]
+    assert second["created_session_ids"] == []
+    assert second["imported_messages"] == 0
+    assert second["deduplicated_messages"] == 2
+
+    first_rollback = target.rollback_conversation_continuity(
+        "read-only-transfer-1"
+    )
+    surviving_session = target.get_session(
+        first["target_session_ids"][0],
+        owner_id=owner,
+    )
+    assert first_rollback["removed_messages"] == 0
+    assert first_rollback["retained_shared_messages"] == 2
+    assert [
+        item["text"]
+        for item in target.messages(surviving_session["session_id"], owner_id=owner)
+    ] == ["stable source message", "stable source answer"]
+    assert target.conversation_continuity_import_status(
+        "read-only-transfer-2"
+    )["imported_messages"] == 2
+
+    second_rollback = target.rollback_conversation_continuity(
+        "read-only-transfer-2"
+    )
+    assert second_rollback["removed_messages"] == 2
+    assert target.list_sessions(
+        owner_id=owner,
+        agent_id="lily-clone",
+        include_archived=True,
+    ) == []
+
+
+def test_conversation_continuity_preserves_independent_surface_sessions_and_owner_scope(tmp_path):
+    owner = "user:7"
+    source = SessionStore(
+        tmp_path / "source-surfaces.sqlite",
+        instance_id="HASHI2",
+    )
+    workbench = source.ensure_default_session(owner_id=owner, agent_id="lily")
+    telegram = source.create_session(owner_id=owner, agent_id="lily")
+    source.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+        session_id=workbench["session_id"],
+    )
+    source.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="telegram",
+        channel_key="7",
+        session_id=telegram["session_id"],
+    )
+    _complete(
+        source,
+        session_id=workbench["session_id"],
+        owner_id=owner,
+        request_id="surface-workbench",
+        key="surface-workbench",
+        text="workbench history",
+        answer="workbench answer",
+        source="workbench",
+    )
+    _complete(
+        source,
+        session_id=telegram["session_id"],
+        owner_id=owner,
+        request_id="surface-telegram",
+        key="surface-telegram",
+        text="telegram history",
+        answer="telegram answer",
+        source="telegram",
+    )
+    other_owner = source.ensure_default_session(owner_id="user:8", agent_id="lily")
+    _complete(
+        source,
+        session_id=other_owner["session_id"],
+        owner_id="user:8",
+        request_id="surface-other-owner",
+        key="surface-other-owner",
+        text="must not transfer",
+        answer="private answer",
+    )
+
+    capsule = source.export_conversation_continuity(
+        owner_id=owner,
+        agent_id="lily",
+        source_instance="HASHI2",
+        transfer_id="surface-transfer",
+        history_mode="copy",
+    )
+    target = SessionStore(
+        tmp_path / "target-surfaces.sqlite",
+        instance_id="HASHI3",
+    )
+    existing_target = target.ensure_default_session(owner_id=owner, agent_id="lily")
+    for surface, channel_key in (("workbench", "default"), ("telegram", "7")):
+        target.bind_channel(
+            owner_id=owner,
+            agent_id="lily",
+            surface=surface,
+            channel_key=channel_key,
+            session_id=existing_target["session_id"],
+        )
+    imported = target.import_conversation_continuity(
+        capsule,
+        owner_id=owner,
+        agent_id="lily",
+        transfer_id="surface-transfer",
+        history_mode="copy",
+    )
+
+    workbench_target = target.resolve_session(
+        owner_id=owner,
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+    )
+    telegram_target = target.resolve_session(
+        owner_id=owner,
+        agent_id="lily",
+        surface="telegram",
+        channel_key="7",
+    )
+    assert workbench_target["session_id"] != telegram_target["session_id"]
+    assert imported["source_session_map"] == {
+        workbench["session_id"]: workbench_target["session_id"],
+        telegram["session_id"]: telegram_target["session_id"],
+    }
+    assert [
+        item["text"]
+        for item in target.messages(workbench_target["session_id"], owner_id=owner)
+    ] == ["workbench history", "workbench answer"]
+    assert [
+        item["text"]
+        for item in target.messages(telegram_target["session_id"], owner_id=owner)
+    ] == ["telegram history", "telegram answer"]
+    assert all(
+        item["text"] != "must not transfer"
+        for session in target.list_sessions(owner_id=owner, agent_id="lily")
+        for item in target.messages(session["session_id"], owner_id=owner)
+    )
+
+
+def test_conversation_continuity_import_is_atomic_on_mid_insert_failure(tmp_path):
+    owner = "user:7"
+    source = SessionStore(
+        tmp_path / "source-atomic.sqlite",
+        instance_id="HASHI2",
+    )
+    source_session = source.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        source,
+        session_id=source_session["session_id"],
+        owner_id=owner,
+        request_id="atomic-source",
+        key="atomic-source",
+        text="atomic user",
+        answer="atomic assistant",
+    )
+    capsule = source.export_conversation_continuity(
+        owner_id=owner,
+        agent_id="lily",
+        source_instance="HASHI2",
+        transfer_id="atomic-transfer",
+        history_mode="copy",
+    )
+    target = SessionStore(
+        tmp_path / "target-atomic.sqlite",
+        instance_id="HASHI3",
+    )
+    with sqlite3.connect(target.db_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_continuity_insert
+            BEFORE INSERT ON messages
+            WHEN NEW.source LIKE 'continuity:%' AND NEW.text = 'atomic assistant'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced continuity failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced continuity failure"):
+        target.import_conversation_continuity(
+            capsule,
+            owner_id=owner,
+            agent_id="lily",
+            transfer_id="atomic-transfer",
+            history_mode="copy",
+        )
+
+    assert target.list_sessions(
+        owner_id=owner,
+        agent_id="lily",
+        include_archived=True,
+    ) == []
+    with sqlite3.connect(target.db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM conversation_continuity_imports"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM conversation_continuity_batches"
+        ).fetchone()[0] == 0
+        connection.execute("DROP TRIGGER fail_continuity_insert")
+
+    imported = target.import_conversation_continuity(
+        capsule,
+        owner_id=owner,
+        agent_id="lily",
+        transfer_id="atomic-transfer",
+        history_mode="copy",
+    )
+    assert imported["imported_messages"] == 2
+
+
+def test_conversation_continuity_rejects_owner_change_and_rolls_back_only_imported_history(tmp_path):
+    source = SessionStore(tmp_path / "source" / "state" / "sessions.sqlite3", instance_id="HASHI2")
+    source_session = source.ensure_default_session(owner_id="user:7", agent_id="lily")
+    _complete(
+        source,
+        session_id=source_session["session_id"],
+        owner_id="user:7",
+        request_id="old",
+        key="old",
+        text="old",
+        answer="answer",
+    )
+    capsule = source.export_conversation_continuity(
+        owner_id="user:7",
+        agent_id="lily",
+        source_instance="HASHI2",
+        transfer_id="transfer-0002",
+        history_mode="copy",
+    )
+    target = SessionStore(tmp_path / "target" / "state" / "sessions.sqlite3", instance_id="HASHI3")
+
+    with pytest.raises(SessionConflict, match="owner"):
+        target.import_conversation_continuity(
+            capsule,
+            owner_id="user:8",
+            agent_id="lily",
+            transfer_id="transfer-0002",
+            history_mode="move",
+        )
+
+    imported = target.import_conversation_continuity(
+        capsule,
+        owner_id="user:7",
+        agent_id="kasumi-clone",
+        transfer_id="transfer-0002",
+        history_mode="copy",
+    )
+    session = target.get_session(imported["target_session_ids"][0], owner_id="user:7")
+    _complete(
+        target,
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="kasumi-clone",
+        request_id="after-import",
+        key="after-import",
+        text="target survives",
+        answer="still here",
+    )
+
+    rolled_back = target.rollback_conversation_continuity("transfer-0002")
+    remaining = target.messages(session["session_id"], owner_id="user:7")
+
+    assert rolled_back["removed_messages"] == 2
+    assert [item["text"] for item in remaining] == ["target survives", "still here"]
+    assert source.messages(source_session["session_id"], owner_id="user:7")[0]["text"] == "old"
+
+
+def test_conversation_rollback_restores_preexisting_channel_bindings(tmp_path):
+    owner = "user:7"
+    source = SessionStore(
+        tmp_path / "source-bindings.sqlite", instance_id="HASHI2"
+    )
+    source_session = source.ensure_default_session(owner_id=owner, agent_id="lily")
+    for surface, channel_key in (("workbench", "default"), ("telegram", "7")):
+        source.bind_channel(
+            owner_id=owner,
+            agent_id="lily",
+            surface=surface,
+            channel_key=channel_key,
+            session_id=source_session["session_id"],
+        )
+    _complete(
+        source,
+        session_id=source_session["session_id"],
+        owner_id=owner,
+        request_id="bound-source",
+        key="bound-source",
+        text="bound source",
+        answer="bound answer",
+    )
+    capsule = source.export_conversation_continuity(
+        owner_id=owner,
+        agent_id="lily",
+        source_instance="HASHI2",
+        transfer_id="binding-rollback",
+        history_mode="move",
+    )
+
+    target = SessionStore(
+        tmp_path / "target-bindings.sqlite", instance_id="HASHI3"
+    )
+    workbench_session = target.ensure_default_session(
+        owner_id=owner, agent_id="lily"
+    )
+    telegram_session = target.create_session(owner_id=owner, agent_id="lily")
+    target.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+        session_id=workbench_session["session_id"],
+    )
+    target.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="telegram",
+        channel_key="7",
+        session_id=telegram_session["session_id"],
+    )
+
+    imported = target.import_conversation_continuity(
+        capsule,
+        owner_id=owner,
+        agent_id="lily",
+        transfer_id="binding-rollback",
+        history_mode="move",
+    )
+    imported_target = imported["target_session_ids"][0]
+    for surface, channel_key in (("workbench", "default"), ("telegram", "7")):
+        assert target.resolve_session(
+            owner_id=owner,
+            agent_id="lily",
+            surface=surface,
+            channel_key=channel_key,
+        )["session_id"] == imported_target
+
+    target.rollback_conversation_continuity("binding-rollback")
+
+    assert target.resolve_session(
+        owner_id=owner,
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+    )["session_id"] == workbench_session["session_id"]
+    assert target.resolve_session(
+        owner_id=owner,
+        agent_id="lily",
+        surface="telegram",
+        channel_key="7",
+    )["session_id"] == telegram_session["session_id"]
+
+
+def test_conversation_rollback_preserves_a_later_user_channel_rebind(tmp_path):
+    owner = "user:7"
+    source = SessionStore(
+        tmp_path / "source-later-binding.sqlite",
+        instance_id="HASHI2",
+    )
+    source_session = source.ensure_default_session(owner_id=owner, agent_id="lily")
+    for surface, channel_key in (("workbench", "default"), ("telegram", "7")):
+        source.bind_channel(
+            owner_id=owner,
+            agent_id="lily",
+            surface=surface,
+            channel_key=channel_key,
+            session_id=source_session["session_id"],
+        )
+    _complete(
+        source,
+        session_id=source_session["session_id"],
+        owner_id=owner,
+        request_id="later-binding-source",
+        key="later-binding-source",
+        text="source history",
+        answer="source answer",
+    )
+    capsule = source.export_conversation_continuity(
+        owner_id=owner,
+        agent_id="lily",
+        source_instance="HASHI2",
+        transfer_id="later-binding-rollback",
+        history_mode="move",
+    )
+
+    target = SessionStore(
+        tmp_path / "target-later-binding.sqlite",
+        instance_id="HASHI3",
+    )
+    original_workbench = target.ensure_default_session(
+        owner_id=owner,
+        agent_id="lily",
+    )
+    original_telegram = target.create_session(owner_id=owner, agent_id="lily")
+    target.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+        session_id=original_workbench["session_id"],
+    )
+    target.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="telegram",
+        channel_key="7",
+        session_id=original_telegram["session_id"],
+    )
+    imported = target.import_conversation_continuity(
+        capsule,
+        owner_id=owner,
+        agent_id="lily",
+        transfer_id="later-binding-rollback",
+        history_mode="move",
+    )
+    imported_target = imported["target_session_ids"][0]
+    later_session = target.create_session(owner_id=owner, agent_id="lily")
+    changed_surface = (
+        "workbench"
+        if imported_target != original_workbench["session_id"]
+        else "telegram"
+    )
+    changed_channel = "default" if changed_surface == "workbench" else "7"
+    target.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface=changed_surface,
+        channel_key=changed_channel,
+        session_id=later_session["session_id"],
+    )
+
+    target.rollback_conversation_continuity("later-binding-rollback")
+
+    assert target.resolve_session(
+        owner_id=owner,
+        agent_id="lily",
+        surface=changed_surface,
+        channel_key=changed_channel,
+    )["session_id"] == later_session["session_id"]
+
+
+def test_moved_source_conversation_retirement_is_archival_and_idempotent(tmp_path):
+    store = SessionStore(tmp_path / "retire.sqlite", instance_id="HASHI2")
+    session = store.resolve_session(
+        owner_id="user:7",
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+    )
+    _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id="user:7",
+        request_id="retire",
+        key="retire",
+        text="recoverable",
+        answer="still stored",
+    )
+
+    first = store.archive_agent_conversation_sessions(
+        owner_id="user:7",
+        agent_id="lily",
+        transfer_id="retirement-1",
+    )
+    second = store.archive_agent_conversation_sessions(
+        owner_id="user:7",
+        agent_id="lily",
+        transfer_id="retirement-1",
+    )
+
+    archived = store.get_session(session["session_id"], owner_id="user:7")
+    assert archived["status"] == "archived"
+    assert archived["is_default"] is False
+    assert [
+        item["text"]
+        for item in store.messages(session["session_id"], owner_id="user:7")
+    ] == ["recoverable", "still stored"]
+    assert first["session_ids"] == [session["session_id"]]
+    assert first["replayed"] is False
+    assert second["replayed"] is True
+    replacement = store.resolve_session(
+        owner_id="user:7",
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+    )
+    assert replacement["session_id"] != session["session_id"]
+
+
 def test_assistant_delivery_receipts_are_route_scoped_and_success_only(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"

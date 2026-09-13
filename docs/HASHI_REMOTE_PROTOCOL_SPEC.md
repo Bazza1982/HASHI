@@ -39,11 +39,25 @@ Advertised fields:
 - `hashi_version`
 - `workbench_port`
 
-DNS-SD encodes each TXT character-string within the 255-byte wire limit.
-Growing CSV metadata such as `capabilities` is therefore published as
-contiguous `capabilities`, `capabilities_1`, ... records. Discovery metadata is
-only a routing hint; the authenticated handshake returns the authoritative,
-complete capability set.
+DNS-SD encodes each TXT character-string within the 255-byte wire limit. HASHI
+discovery metadata schema 2 additionally caps the aggregate TXT payload at
+8 KiB, each scalar hint at 160 UTF-8 bytes, and each address-hint collection at
+four entries. Values that need fragmentation use an explicit manifest
+(`<field>_meta`) containing schema version, fragment count, UTF-8 byte length,
+and SHA-256, followed by zero-based `<field>_0`, `<field>_1`, ... fragments.
+Readers accept fragments in any order but reject gaps, duplicate numeric
+indices, unknown versions, impossible lengths, checksum mismatches, oversized
+individual records, and aggregate payloads over budget.
+
+Schema 2 advertisements carry bounded identity and route hints plus fixed-size
+`identity_digest`, `capabilities_digest`, and `address_candidates_digest`
+values. Complete display metadata, capabilities, address candidates, Remote
+supervisor facts, and the Agent directory come only from the mutually
+authenticated handshake. A stable digest preserves the last authenticated
+projection; a changed digest immediately changes the peer to
+`rehydrate_required` and removes the old capability/directory proof. Legacy
+bounded scalar and contiguous capability records remain readable as routing
+hints during mixed-version adoption.
 
 ### Discovery result
 
@@ -57,6 +71,26 @@ Discovery does not mean:
 - trust is established
 - protocol is compatible
 - agent directory is known
+
+### Discovery readiness and recovery
+
+Every configured backend reports `advertising`, `browsing`, `readiness`, peer
+count, last classified error, attempt/success timestamps, retry count, and next
+retry time. Partial startup is cleaned up as one unit. Startup and advertisement
+update failures use bounded exponential backoff; an unsuccessful update never
+advances the advertised snapshot revision.
+
+The public health/status projection distinguishes:
+
+- `ready_empty`: advertising and browsing work, but no peer is currently seen;
+- `ready`: discovery works and at least one peer has a trusted handshake;
+- `starting`: a configured backend has not completed initialization;
+- `degraded`: discovery failed, or visible peers have no accepted trust result;
+- `disabled`: no discovery backend is configured.
+
+Static `instances.json` discovery is an observable bootstrap fallback. A peer
+reached through it is marked as such and must not be reported as proof that
+mDNS discovery succeeded.
 
 ### Multi-backend merge rules
 
@@ -74,6 +108,10 @@ Merge behaviour:
 - observations from multiple backends for the same `instance_id` must merge into one canonical peer record
 - canonical peer record keeps backend-specific endpoints as alternate routes
 - discovery alone must not create duplicate peer entries in directory or routing tables
+- every snapshot identifies its backend even when it contains zero peers; an
+  empty successful snapshot retracts only that backend's observations, so a
+  departed mDNS peer is removed without discarding a surviving static or
+  Tailscale route
 
 Default endpoint preference:
 
@@ -197,7 +235,10 @@ or:
 
 `GET /health` may remain public with redacted metadata. Unauthenticated
 `GET /peers` must return only aggregate count information, not peer entries.
-Full peer lists require successful shared-token authentication.
+Full peer lists require successful shared-token authentication. The legacy
+`GET /protocol/agents` compatibility endpoint likewise requires shared-token
+HMAC authentication (or an actual loopback request); discovery alone never
+grants an Agent-directory snapshot.
 
 ### Handshake accept
 
@@ -208,6 +249,12 @@ Returns:
 - pairing requirement
 - agent directory sync support
 - optional initial agent snapshot
+
+When a shared token is configured, a successful `handshake_accept` also carries
+`hashi-shared-response-v1` proof. The proof HMAC binds the canonical JSON
+response to the request nonce. A client must reject an absent, forged, or
+nonce-mismatched proof, so request authentication cannot be turned into a
+one-sided trust decision by a forged HTTP success response.
 
 ### Handshake reject
 
@@ -247,6 +294,17 @@ Re-handshake triggers:
 - peer advertised `capabilities` changes
 - peer advertised `hashi_version` changes
 - local sidecar restart with stale peer state
+- local shared-token revision is added, rotated, or removed
+- an advertised identity, capability, address, or directory digest changes
+
+The Remote process watches the authoritative environment/file credential
+boundary while it is running. A valid token revision atomically becomes the
+in-process credential used by both request authentication and protected API
+operations, clears cached trusted peer metadata, and schedules all peers for a
+new handshake. A malformed or unreadable revision is classified in status but
+does not silently replace a working in-memory credential. Health, logs, mDNS,
+and directory views expose only configuration state/generation, never token
+bytes or a reusable credential digest.
 
 Rediscovery rule:
 
@@ -564,3 +622,24 @@ Operational goal:
 - enable with `/remote off` then `/remote on`
 - or during normal `/reboot`
 - never require cold restart of the whole HASHI system
+
+## Implementation and verification receipt — 2026-09-13
+
+- Owner/layer: PAO Remote Function plus the Windows lifecycle adapter; no Core
+  source changed. Implementation is on `fix/nightly-20260913-open-items`, based
+  on shared main `54ddadf6`.
+- Focused Remote/Move/SessionStore/Frontend regression passed 398 tests with 13
+  platform/live skips. The repository Core gate passed 667 tests with 1 skip;
+  protected-Core, Python compilation, JSON, PowerShell parsing, Ruff for the
+  changed scope, whitespace, and FYI-size checks passed.
+- An isolated production-path canary used the HASHI3 Windows and HASHI2 WSL
+  Python environments, randomized DNS-SD service identity, empty peer state,
+  and no `instances.json`. The real advertiser, browser, status API, mutual-HMAC
+  handshake, directory hydration, malformed-token retention, token rotation,
+  trust invalidation, and bidirectional re-handshake passed in 47.86 seconds.
+- The canary started only disposable processes and removed them. Formal HASHI2
+  and HASHI3 Remote PIDs/start times were unchanged; HASHI1 and HASHI4 were not
+  touched. No formal runtime has adopted this branch yet.
+- Static seeds remain an observable fallback and were not removed. Their removal
+  is a separate post-adoption decision after the same zero-seed result is
+  confirmed on the intended formal deployment topology.

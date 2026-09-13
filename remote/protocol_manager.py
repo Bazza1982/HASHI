@@ -21,7 +21,7 @@ import ssl
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
@@ -35,7 +35,12 @@ from remote.routing import build_route_candidates, same_machine_hint, validate_s
 from remote.local_http import local_http_hosts, local_http_url
 from remote.live_endpoints import read_live_endpoints
 from remote.peer.base import is_valid_instance_id
-from remote.security.shared_token import build_auth_headers, load_shared_token
+from remote.security.shared_token import (
+    HEADER_NONCE,
+    build_auth_headers,
+    load_shared_token,
+    verify_response_auth,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +132,7 @@ class ProtocolManager:
         poll_interval_seconds: float = 0.5,
         settle_window_seconds: float = 2.0,
         use_tls: bool = True,
+        discovery_status_provider: Callable[[], dict[str, Any]] | None = None,
     ):
         self._hashi_root = hashi_root
         self._instance_info = instance_info
@@ -138,6 +144,7 @@ class ProtocolManager:
         self._poll_interval_seconds = max(0.2, float(poll_interval_seconds))
         self._settle_window_seconds = max(0.5, float(settle_window_seconds))
         self._use_tls = bool(use_tls)
+        self._discovery_status_provider = discovery_status_provider
         self._bootstrap_retry_seconds = 60.0
         self._state_dir = Path.home() / ".hashi-remote"
         self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +155,10 @@ class ProtocolManager:
         if self._mark_nonterminal_inflight_abandoned_after_restart():
             self._save_inflight()
         self._shared_token = load_shared_token(self._hashi_root)
+        self._credential_generation = 1
+        self._last_credential_reload_at = 0
+        self._credential_config_state = "configured" if self._shared_token else "absent"
+        self._credential_config_error = ""
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_bootstrap_run = 0.0
@@ -169,9 +180,13 @@ class ProtocolManager:
 
     def get_protocol_status(self) -> dict:
         peers = []
+        peer_trust_incomplete = False
         if self._peer_registry:
             for peer in self._peer_registry.get_peers():
                 peers.append(self._peer_registry.get_peer_state(peer.instance_id))
+                peer_trust_incomplete = peer_trust_incomplete or str(
+                    (peer.properties or {}).get("handshake_state") or "handshake_pending"
+                ).strip().lower() != "handshake_accepted"
         local_profile = self._local_network_profile()
         active_inflight_count = sum(
             1
@@ -179,6 +194,17 @@ class ProtocolManager:
             if str((item or {}).get("state") or "") not in TERMINAL_INFLIGHT_STATES
         )
         total_inflight_count = len(self._inflight)
+        discovery = {}
+        discovery_status_provider = getattr(self, "_discovery_status_provider", None)
+        if callable(discovery_status_provider):
+            try:
+                discovery = dict(discovery_status_provider() or {})
+            except Exception as exc:
+                discovery = {
+                    "readiness": "degraded",
+                    "ready": False,
+                    "last_error": f"status unavailable: {type(exc).__name__}",
+                }
         return {
             "protocol_version": PROTOCOL_VERSION,
             "display_handle": self.display_handle,
@@ -188,12 +214,61 @@ class ProtocolManager:
             "local_agent_directory": self.get_local_agent_directory_state(),
             "local_network_profile": local_profile,
             "route_diagnostics": self.get_route_diagnostics(),
+            "discovery": discovery,
+            "credential": {
+                "configured": bool(getattr(self, "_shared_token", None)),
+                "generation": int(getattr(self, "_credential_generation", 1)),
+                "last_reload_at": int(getattr(self, "_last_credential_reload_at", 0)),
+                "rehandshake_required": bool(
+                    getattr(self, "_force_handshake", False)
+                    or (
+                        getattr(self, "_shared_token", None)
+                        and peer_trust_incomplete
+                    )
+                ),
+                "configuration_state": str(
+                    getattr(self, "_credential_config_state", "unknown")
+                ),
+                "configuration_error": str(
+                    getattr(self, "_credential_config_error", "")
+                ),
+            },
             "peers": peers,
             "inflight_count": active_inflight_count,
             "inflight_total_count": total_inflight_count,
             "inflight_terminal_count": total_inflight_count - active_inflight_count,
             "max_allowed_ttl": self._max_allowed_ttl,
         }
+
+    def reload_shared_token(self, token: str | None) -> bool:
+        """Adopt a credential change and invalidate every established trust result."""
+        normalized = str(token or "").strip() or None
+        if normalized == self._shared_token:
+            return False
+        self._shared_token = normalized
+        self._credential_generation += 1
+        self._last_credential_reload_at = int(time.time())
+        self._force_handshake = True
+        if self._peer_registry:
+            for peer in self._peer_registry.get_peers():
+                self._peer_registry.mark_handshake_result(
+                    peer.instance_id,
+                    state="rehydrate_required",
+                )
+        return True
+
+    def record_shared_token_config_state(self, state: str, error: str = "") -> None:
+        allowed_states = {
+            "absent",
+            "configured",
+            "configured_environment",
+            "configured_file",
+            "invalid",
+        }
+        normalized = str(state or "unknown").strip().lower()
+        self._credential_config_state = normalized if normalized in allowed_states else "unknown"
+        # The loader emits classifications only; never surface exception text or bytes.
+        self._credential_config_error = str(error or "")[:120]
 
     @property
     def display_handle(self) -> str:
@@ -770,6 +845,7 @@ class ProtocolManager:
             local_profile = self._local_network_profile()
             payload = {
                 "from_instance": self._instance_info.get("instance_id"),
+                "display_name": self._instance_info.get("display_name"),
                 "display_handle": self.display_handle,
                 "protocol_version": PROTOCOL_VERSION,
                 "capabilities": list(getattr(self, "_capabilities", DEFAULT_CAPABILITIES)),
@@ -837,6 +913,29 @@ class ProtocolManager:
                             state="handshake_accepted",
                             protocol_version=str(result.get("protocol_version") or PROTOCOL_VERSION),
                             capabilities=list(result.get("capabilities") or []),
+                            hashi_version=str(result.get("hashi_version") or "unknown"),
+                            display_name=str(
+                                result.get("display_name")
+                                or result.get("display_handle")
+                                or peer.instance_id
+                            ),
+                            display_handle=str(
+                                result.get("display_handle")
+                                or f"@{peer.instance_id.lower()}"
+                            ),
+                            remote_port=result.get("remote_port"),
+                            workbench_port=result.get("workbench_port"),
+                            platform=str(result.get("platform") or "unknown"),
+                            host_identity=str(result.get("host_identity") or ""),
+                            environment_kind=str(
+                                result.get("environment_kind") or ""
+                            ),
+                            address_candidates=list(
+                                result.get("address_candidates") or []
+                            ),
+                            observed_candidates=list(
+                                result.get("observed_candidates") or []
+                            ),
                             remote_agents=list(result.get("agents") or []),
                             remote_agent_directory=dict(result.get("agent_directory") or {}),
                             remote_supervisor=dict(result.get("remote_supervisor") or {}),
@@ -878,7 +977,11 @@ class ProtocolManager:
             )
             peer = PeerInfo(
                 instance_id=from_instance,
-                display_name=str(payload.get("display_handle") or from_instance),
+                display_name=str(
+                    payload.get("display_name")
+                    or payload.get("display_handle")
+                    or from_instance
+                ),
                 host=effective_host,
                 port=remote_port,
                 workbench_port=int(payload.get("workbench_port") or DEFAULT_WORKBENCH_PORT),
@@ -908,6 +1011,7 @@ class ProtocolManager:
         return {
             "status": "handshake_accept",
             "instance_id": self._instance_info.get("instance_id"),
+            "display_name": self._instance_info.get("display_name"),
             "display_handle": self.display_handle,
             "protocol_version": PROTOCOL_VERSION,
             "capabilities": list(self._capabilities),
@@ -1659,7 +1763,11 @@ class ProtocolManager:
         body_bytes = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         path = urlsplit(url).path
-        if self._shared_token and path in {"/protocol/handshake", "/protocol/message"}:
+        if self._shared_token and path in {
+            "/protocol/announce",
+            "/protocol/handshake",
+            "/protocol/message",
+        }:
             headers.update(
                 build_auth_headers(
                     shared_token=self._shared_token,
@@ -1678,7 +1786,7 @@ class ProtocolManager:
         context = ssl._create_unverified_context() if str(url).startswith("https://") else None
         try:
             with urllib_request.urlopen(req, timeout=timeout, context=context) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                result = json.loads(resp.read().decode("utf-8"))
         except HTTPError as exc:
             body = exc.read().decode("utf-8")
             try:
@@ -1687,7 +1795,27 @@ class ProtocolManager:
                 raise
             if isinstance(result, dict):
                 result["__http_status"] = exc.code
-            return result
+        if (
+            self._shared_token
+            and path in {"/protocol/announce", "/protocol/handshake"}
+            and isinstance(result, dict)
+            and str(result.get("status") or "").lower() == "handshake_accept"
+        ):
+            response_auth = result.get("response_auth")
+            authenticated_payload = {
+                key: value
+                for key, value in result.items()
+                if key not in {"response_auth", "__http_status"}
+            }
+            if not verify_response_auth(
+                shared_token=self._shared_token,
+                request_nonce=str(headers.get(HEADER_NONCE) or ""),
+                payload=authenticated_payload,
+                response_auth=response_auth,
+            ):
+                raise RuntimeError("protocol handshake response authentication failed")
+            result.pop("response_auth", None)
+        return result
 
     def _response_is_error(self, result: dict) -> bool:
         if not isinstance(result, dict):

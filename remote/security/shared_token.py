@@ -7,6 +7,7 @@ import os
 import secrets
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode
 
@@ -21,49 +22,94 @@ TIMESTAMP_WINDOW_SECONDS = 300
 NONCE_TTL_SECONDS = TIMESTAMP_WINDOW_SECONDS * 2
 
 
-def load_shared_token(hashi_root: Path | str | None) -> str | None:
+@dataclass(frozen=True, repr=False)
+class SharedTokenSnapshot:
+    token: str | None
+    revision: str
+    state: str
+    error: str = ""
+
+    def require_valid(self, hashi_root: Path | str | None) -> SharedTokenSnapshot:
+        if self.state != "invalid":
+            return self
+
+        secrets_path = (
+            Path(hashi_root) / "secrets.json" if hashi_root is not None else None
+        )
+        if self.error == "read_error:PermissionError":
+            raise PermissionError(
+                13,
+                f"HASHI Remote shared token file is not readable: {secrets_path}",
+                str(secrets_path),
+            )
+        if self.error.startswith("read_error:"):
+            raise OSError(
+                f"HASHI Remote shared token file could not be read: {secrets_path}"
+            )
+        if self.error == "invalid_encoding":
+            raise ValueError(
+                f"HASHI Remote shared token file is not valid UTF-8: {secrets_path}"
+            )
+        if self.error == "invalid_json":
+            raise ValueError(
+                f"HASHI Remote shared token file is not valid JSON: {secrets_path}"
+            )
+        if self.error == "non_object_root":
+            raise ValueError(
+                "HASHI Remote shared token file must contain a JSON object: "
+                f"{secrets_path}"
+            )
+        raise ValueError(
+            f"HASHI Remote shared token configuration is invalid ({self.error}): "
+            f"{secrets_path}"
+        )
+
+
+def load_shared_token_snapshot(hashi_root: Path | str | None) -> SharedTokenSnapshot:
+    """Read the credential with a non-secret revision and classified validity."""
     env_value = str(os.getenv("HASHI_REMOTE_SHARED_TOKEN") or "").strip()
     if env_value:
-        return env_value
+        revision = hashlib.sha256(b"environment\0" + env_value.encode("utf-8")).hexdigest()
+        return SharedTokenSnapshot(env_value, revision, "configured_environment")
 
     if hashi_root is None:
-        return None
+        return SharedTokenSnapshot(None, "no-root", "absent")
 
     secrets_path = Path(hashi_root) / "secrets.json"
     try:
-        raw = secrets_path.read_text(encoding="utf-8-sig")
+        raw = secrets_path.read_bytes()
     except FileNotFoundError:
-        return None
-    except PermissionError as exc:
-        raise PermissionError(
-            exc.errno or 13,
-            f"HASHI Remote shared token file is not readable: {secrets_path}",
-            str(secrets_path),
-        ) from exc
+        return SharedTokenSnapshot(None, "absent", "absent")
     except OSError as exc:
-        raise OSError(
-            exc.errno,
-            f"HASHI Remote shared token file could not be read: {secrets_path}",
-            str(secrets_path),
-        ) from exc
-    except UnicodeError as exc:
-        raise ValueError(
-            f"HASHI Remote shared token file is not valid UTF-8: {secrets_path}"
-        ) from exc
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"HASHI Remote shared token file is not valid JSON: {secrets_path}"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"HASHI Remote shared token file must contain a JSON object: {secrets_path}"
+        return SharedTokenSnapshot(
+            None,
+            "unreadable",
+            "invalid",
+            f"read_error:{type(exc).__name__}",
         )
+    revision = hashlib.sha256(b"secrets-file\0" + raw).hexdigest()
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except UnicodeError:
+        return SharedTokenSnapshot(None, revision, "invalid", "invalid_encoding")
+    except json.JSONDecodeError:
+        return SharedTokenSnapshot(None, revision, "invalid", "invalid_json")
+    if not isinstance(data, dict):
+        return SharedTokenSnapshot(None, revision, "invalid", "non_object_root")
+    raw_token = data.get("hashi_remote_shared_token")
+    if raw_token is None or raw_token == "":
+        return SharedTokenSnapshot(None, revision, "absent")
+    if not isinstance(raw_token, str):
+        return SharedTokenSnapshot(None, revision, "invalid", "token_not_string")
+    token = raw_token.strip()
+    if not token:
+        return SharedTokenSnapshot(None, revision, "absent")
+    return SharedTokenSnapshot(token, revision, "configured_file")
 
-    token = str(data.get("hashi_remote_shared_token") or "").strip()
-    return token or None
+
+def load_shared_token(hashi_root: Path | str | None) -> str | None:
+    """Load a startup credential, failing closed for an invalid existing file."""
+    return load_shared_token_snapshot(hashi_root).require_valid(hashi_root).token
 
 
 def canonical_payload_hash(body_bytes: bytes) -> str:

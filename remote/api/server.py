@@ -83,6 +83,7 @@ from ..protocol_outbound import (
 from ..protocol_router import validate_protocol_envelope
 from ..security.auth import (
     authenticate_request_detailed,
+    get_shared_token,
     has_shared_token,
     is_lan_mode,
     is_loopback_request,
@@ -199,6 +200,8 @@ def _redacted_protocol_status() -> dict[str, Any]:
     if status:
         capabilities = list(status.get("capabilities") or [])
         remote_supervisor = dict(status.get("remote_supervisor") or {})
+    discovery = dict(status.get("discovery") or {})
+    credential = dict(status.get("credential") or {})
     capabilities = _protocol_capabilities_with_api_endpoints(capabilities)
     return {
         "protocol_version": status.get("protocol_version", "2.0"),
@@ -207,6 +210,15 @@ def _redacted_protocol_status() -> dict[str, Any]:
         "remote_supervisor": remote_supervisor,
         "protocol_auth_mode": protocol_auth_mode(),
         "shared_token_configured": has_shared_token(),
+        "discovery": discovery,
+        "credential": {
+            "configured": bool(credential.get("configured", has_shared_token())),
+            "generation": int(credential.get("generation") or 1),
+            "last_reload_at": int(credential.get("last_reload_at") or 0),
+            "rehandshake_required": bool(credential.get("rehandshake_required")),
+            "configuration_state": str(credential.get("configuration_state") or "unknown"),
+            "configuration_error": str(credential.get("configuration_error") or ""),
+        },
         "lan_mode": is_lan_mode(),
         "trusted_view": False,
     }
@@ -284,6 +296,7 @@ class PairRequestPayload(BaseModel):
 
 class ProtocolHandshakePayload(BaseModel):
     from_instance: str
+    display_name: Optional[str] = None
     display_handle: Optional[str] = None
     protocol_version: str = "2.0"
     capabilities: list[str] = []
@@ -355,6 +368,7 @@ class TuiProxyRequest(BaseModel):
     attachment: Optional[dict[str, Any]] = None
     workzone_ref: Optional[str] = None
     offset: int = 0
+    history_generation: Optional[int] = None
     limit: int = 20
 
 
@@ -375,6 +389,7 @@ class ProtocolTuiRequest(BaseModel):
     attachment: Optional[dict[str, Any]] = None
     workzone_ref: Optional[str] = None
     offset: int = 0
+    history_generation: Optional[int] = None
     limit: int = 20
 
 
@@ -431,21 +446,16 @@ class ProtocolMessageWithAttachmentsPayload(BaseModel):
 MAX_FILE_PUSH_BYTES = 256 * 1024 * 1024
 
 
-def _agent_move_response(
+def _shared_token_response(
     request: Request,
     content: dict[str, Any],
     *,
     status_code: int = 200,
 ) -> JSONResponse:
-    """Authenticate a receiver response against its request nonce.
-
-    Request HMAC protects the target from an impersonated source. This proof
-    provides the other half of the exchange: the source must not disable its
-    local Agent after accepting a forged success response from another host.
-    """
+    """Authenticate a receiver response against its request nonce."""
 
     payload = dict(content)
-    shared_token = load_shared_token(Path(_hashi_root) if _hashi_root else None)
+    shared_token = get_shared_token()
     request_nonce = str(request.headers.get(HEADER_NONCE) or "").strip()
     if shared_token and request_nonce:
         payload["response_auth"] = build_response_auth(
@@ -454,6 +464,21 @@ def _agent_move_response(
             payload=payload,
         )
     return JSONResponse(status_code=status_code, content=payload)
+
+
+def _agent_move_response(
+    request: Request,
+    content: dict[str, Any],
+    *,
+    status_code: int = 200,
+) -> JSONResponse:
+    """Authenticate an Agent Move receiver response against its request nonce.
+
+    Request HMAC protects the target from an impersonated source. This proof
+    provides the other half of the exchange: the source must not disable its
+    local Agent after accepting a forged success response from another host.
+    """
+    return _shared_token_response(request, content, status_code=status_code)
 
 
 def _resolve_file_push_destination(dest_path: str) -> Path:
@@ -529,7 +554,7 @@ def _merge_attachment_text(
 def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
     body_bytes = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
-    shared_token = load_shared_token(Path(_hashi_root) if _hashi_root else None)
+    shared_token = get_shared_token()
     if shared_token:
         headers.update(
             build_auth_headers(
@@ -680,6 +705,8 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
                 return False, "invalid_run_identity"
     if payload.offset < 0:
         return False, "invalid_offset"
+    if payload.history_generation is not None and payload.history_generation < 1:
+        return False, "invalid_history_generation"
     if payload.limit < 1 or payload.limit > 200:
         return False, "invalid_limit"
     return True, "ok"
@@ -777,6 +804,8 @@ def _local_workbench_tui_request(
             f"/api/transcript/{quote(agent, safe='')}/poll?offset="
             f"{int(payload.offset)}"
         )
+        if payload.history_generation is not None:
+            path += f"&history_generation={int(payload.history_generation)}"
     elif operation == "log_tail":
         root = Path(_hashi_root) if _hashi_root else None
         candidates = (
@@ -1406,6 +1435,13 @@ def create_app(
             else:
                 peers = [p.to_dict() for p in _peer_registry.get_peers()]
         local_network_profile = _protocol_manager._local_network_profile() if _protocol_manager else None
+        protocol_status_view = _protocol_manager.get_protocol_status() if _protocol_manager else {}
+        discovery_status = dict(protocol_status_view.get("discovery") or {})
+        health_state = (
+            "ready"
+            if not discovery_status or discovery_status.get("state") in {"ready", "ready_empty", "disabled"}
+            else "degraded"
+        )
         if not authenticated:
             instance_view = {
                 "instance_id": _instance_info.get("instance_id"),
@@ -1436,9 +1472,12 @@ def create_app(
                 ),
                 "trusted_view": False,
                 "shared_token_configured": has_shared_token(),
+                "status": health_state,
+                "discovery": discovery_status,
             }
         return {
             "ok": True,
+            "status": health_state,
             "instance": _instance_info,
             "hostname": socket.gethostname(),
             "platform": platform.system().lower(),
@@ -1454,6 +1493,8 @@ def create_app(
                 _pairing_manager.token_ttl_seconds if _pairing_manager else None
             ),
             "trusted_view": True,
+            "discovery": discovery_status,
+            "credential": dict(protocol_status_view.get("credential") or {}),
         }
 
     @app.get("/version/v1")
@@ -1644,6 +1685,7 @@ def create_app(
             attachment=payload.attachment,
             workzone_ref=payload.workzone_ref,
             offset=payload.offset,
+            history_generation=payload.history_generation,
             limit=payload.limit,
         )
         valid, validation_error = _validate_tui_proxy_payload(protocol_payload)
@@ -1777,7 +1819,7 @@ def create_app(
         data["_client_ip"] = client_ip
         result = _protocol_manager.handle_handshake(data)
         status = 200 if str(result.get("status")) == "handshake_accept" else 409
-        return JSONResponse(status_code=status, content=result)
+        return _shared_token_response(request, result, status_code=status)
 
     @app.post("/protocol/handshake")
     async def protocol_handshake(request: Request, payload: ProtocolHandshakePayload):
@@ -1788,9 +1830,19 @@ def create_app(
         return await _handle_protocol_handshake_like(request, payload, endpoint_name="announce")
 
     @app.get("/protocol/agents")
-    async def protocol_agents():
+    async def protocol_agents(request: Request):
         if _protocol_manager is None:
             return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
+        authenticated = try_authenticate_request(request, allow_loopback=True)
+        if not authenticated:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "auth_required",
+                    "code": "auth_required",
+                },
+            )
         return {"ok": True, "agents": _protocol_manager.get_local_agents_snapshot()}
 
     @app.get("/protocol/directory")
@@ -2817,7 +2869,7 @@ def create_app(
                     raise AgentMoveError("Agent move transport envelope was truncated")
                 await asyncio.to_thread(
                     decrypt_package_file, envelope, plaintext, max_plaintext_bytes=MAX_PACKAGE_BYTES,
-                    shared_token=load_shared_token(Path(_hashi_root)) or "",
+                    shared_token=get_shared_token() or "",
                     source_instance=sender or from_instance,
                     target_instance=str(_instance_info.get("instance_id") or "HASHI"),
                     package_sha256=sha256)
@@ -2825,7 +2877,7 @@ def create_app(
                     stage_agent_move, Path(_hashi_root), plaintext, expected_sha256=sha256,
                     source_instance=sender or from_instance,
                     target_instance=str(_instance_info.get("instance_id") or "HASHI"),
-                    secret_passphrase=load_shared_token(Path(_hashi_root)),
+                    secret_passphrase=get_shared_token(),
                     operation=operation, target_agent_id=target_agent_id or None)
                 return _agent_move_response(request, result)
         except (AgentMoveError, OSError, ValueError) as exc:
@@ -2886,7 +2938,7 @@ def create_app(
             package_bytes = await asyncio.to_thread(
                 decrypt_package_transport,
                 envelope,
-                shared_token=load_shared_token(Path(_hashi_root)) or "",
+                shared_token=get_shared_token() or "",
                 source_instance=authenticated_instance or payload.from_instance,
                 target_instance=str(_instance_info.get("instance_id") or ""),
                 package_sha256=payload.sha256,
@@ -2898,7 +2950,7 @@ def create_app(
                 expected_sha256=payload.sha256,
                 source_instance=authenticated_instance or payload.from_instance,
                 target_instance=str(_instance_info.get("instance_id") or "HASHI"),
-                secret_passphrase=load_shared_token(Path(_hashi_root)),
+                secret_passphrase=get_shared_token(),
                 operation=payload.operation,
                 target_agent_id=payload.target_agent_id,
             )
@@ -2995,7 +3047,7 @@ def create_app(
                 )
             kwargs = {}
             if action is commit_agent_move:
-                kwargs["secret_passphrase"] = load_shared_token(Path(_hashi_root))
+                kwargs["secret_passphrase"] = get_shared_token()
             result = await asyncio.to_thread(
                 action,
                 Path(_hashi_root),

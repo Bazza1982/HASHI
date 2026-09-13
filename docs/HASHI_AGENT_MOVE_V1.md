@@ -15,9 +15,11 @@ receiver. The source never writes a target filesystem path directly.
 
 - An outbound instance must implement this protocol.
 - A target must advertise `agent_move_receive_v1`. New move/clone transactions
-  use schema version 3 for legacy callers, or schema 4 for explicit transfer modes,
-  and require `agent_transfer_lifecycle_v1`; schema 4 also requires
-  `agent_transfer_modes_v1`; an exact root
+  use schema version 3 for legacy callers, schema 4 for explicit transfer
+  modes, or schema 5 when the normal UI also declares conversation-history
+  policy. All require `agent_transfer_lifecycle_v1`; schema 4 and later require
+  `agent_transfer_modes_v1`; schema 5 additionally requires
+  `agent_conversation_continuity_v1`; an exact root
   `AGENT.md` additionally requires `agent_move_retained_identity_v1`.
 - Schema versions 1 and 2 remain readable so historical transaction journals
   can still be reconciled or rolled back. New clients do not expose their old
@@ -45,6 +47,9 @@ receiver. The source never writes a target filesystem path directly.
 - owned Telegram delivery state, but only for a Move whose instance,
   `agent_lifecycle_id`, and actual Bot fingerprint are verifiable;
 - access requirements and an explicit target-rebind list.
+- for schema 5 Move, a versioned owner-checked conversation-continuity capsule;
+  Clone carries one only when the operator explicitly selects read-only
+  inheritance or an independent context copy.
 
 `agent.md` is always the sole live PCM identity. On case-sensitive sources,
 one additional exact, root-level, ordinary file named `AGENT.md` is preserved
@@ -63,6 +68,17 @@ symlinks, source workzone/absolute paths, and common plaintext credential
 files. Instance-level provider/OAuth, browser, filesystem, and
 operating-system access remains target-owned. Imported schedules are always
 disabled drafts.
+
+The conversation capsule is not a SessionStore database copy. It contains only
+terminal, visible, history-eligible user/assistant text plus the minimum source
+instance/session/message ordinal, timestamp, channel-binding, provenance, and
+stable origin reference needed for deterministic import. It excludes active
+runs, queues, leases, approvals, backend threads, delivery claims/routes,
+temporary events, media attachments, and credentials. Export is taken through
+a disposable SQLite backup, so preview neither creates nor migrates the live
+source SessionStore. A second snapshot at packaging completion and the normal
+pre-cutover freshness fingerprint reject source history that changed after
+staging.
 
 An Agent name is reusable, so delivery recovery state is not keyed by name
 alone. Preview remains read-only; actual preparation revision-safely assigns a
@@ -116,6 +132,42 @@ Confirmation is durably accepted by the shared Functions `AgentMoveManager`;
 acceptance is distinct from terminal completion. A missing background owner fails
 before the source is changed.
 
+## Conversation continuity
+
+Move schema 5 always uses `history_mode=move`: the exact configured owner's
+eligible history is imported before target activation. Existing target messages
+are retained after the imported prefix, shared Workbench/Telegram bindings stay
+shared, and independently bound source Sessions remain independent even when
+the target previously pointed both surfaces at one Session. Source Sessions are
+archived and unbound only after target activation and verification; the source
+rows remain recoverable rather than being deleted.
+
+Clone defaults to `history_mode=none`, yielding a fresh active conversation.
+The explicit alternatives are:
+
+- `inherit_read_only`: create archived, unbound history Sessions for reference;
+- `copy`: import history into independently identified active target Sessions
+  and bindings.
+
+All target Session/message IDs are newly generated. Capsule and message digests,
+stable origin references, and an import-batch journal make retry idempotent even
+under a different transfer ID. Import prepends history without overwriting later
+target work; rollback removes only that batch's imported messages, restores its
+binding changes only when the binding still has the imported value, and leaves
+subsequent target messages or user rebindings intact. Stable-origin claims are
+shared across transfer batches: rolling back one claimant retains a message
+still referenced by another, transfers cleanup ownership, and removes it only
+after the final claim is rolled back. Owner mismatch, tampering, invalid modes,
+malformed provenance, and partial database writes fail atomically before the
+Agent is published.
+
+SessionStore increments `history_generation` whenever continuity import,
+rollback, or moved-source retirement changes visible history. Transcript
+clients send their known generation while polling. A mismatch returns a fresh
+canonical snapshot with `history_reset` and `cursor_reset`; the TUI clears and
+re-renders it. Canonical SessionStore rows remain authoritative—clients must
+not synthesize a pass by falling back to legacy workspace `transcript.jsonl`.
+
 ## Transaction
 
 1. The source validates the live target identity and authenticated receiver
@@ -124,9 +176,12 @@ before the source is changed.
 3. Prepare creates a checksummed package and stages it on the target. The
    target verifies it without modifying live Agent configuration.
    Owned Telegram recovery metadata is checksummed with the access declaration;
-   full-workspace mode also carries referenced undelivered response files.
+   full-workspace mode also carries referenced undelivered response files. A
+   schema-5 receiver validates the continuity owner, mode, digest, summary, and
+   provenance before accepting the stage.
 4. An explicit operator confirmation persists an execution intent; the shared
-   Functions manager commits the target Agent inactive.
+   Functions manager atomically imports target configuration/workspace and the
+   continuity batch while the target Agent remains inactive.
 5. Before a move cutover, the source rebuilds a disposable durable-state
    snapshot and compares it to the staged package. If memory, configuration,
    schedules, permissions, or Agent-owned credentials changed, the target is
@@ -141,12 +196,15 @@ before the source is changed.
 8. The receiver verifies target identity, canonical PCM, durable workspace and
    memory digests, remapped Agent credentials, portable paths, disabled
    schedules, capability declaration, and live Workbench availability.
-   It also proves lifecycle/Bot ownership before adopting delivery state; a
+   It also verifies continuity digest, owner, target Agent, mode, and satisfied
+   message count. It proves lifecycle/Bot ownership before adopting delivery state; a
    mismatched target residue is quarantined and Clone imports none.
-9. Only after verification does the source delete its registry entry,
-   workspace, Agent-only secrets, schedules, capability declaration, and
-   temporary package. It retains an audit-only move journal and destination
-   tombstone. A cleanup error becomes `move_completed_cleanup_pending`; the
+9. Only after verification does the source archive/unbind its formal
+   conversation Sessions as the first destructive cleanup boundary. If that
+   retirement succeeds, it deletes the registry entry, workspace, Agent-only
+   secrets, schedules, capability declaration, and temporary package. It
+   retains an audit-only move journal and destination tombstone. A cleanup
+   error becomes `move_completed_cleanup_pending`; the
    already verified target remains authoritative and the source is never
    re-enabled.
 
@@ -342,3 +400,23 @@ receiver caps incoming bytes, keeps temporary files private, verifies the full
 GCM tag and digest before staging, and removes temporary state on truncation,
 authentication or disk failures. No plaintext is imported before verification.
 This transport addition does not itself change the workspace size/mode contract.
+
+## Conversation-continuity verification receipt — 2026-09-13
+
+- PAO/Functions owns schema-5 packaging, SessionStore import/retirement, and
+  rollback; Frontend Connectors consume `history_generation` reset signals. No
+  Core source changed. Implementation is on
+  `fix/nightly-20260913-open-items`, based on shared main `54ddadf6`.
+- Focused owner and direct-consumer regression passed 398 tests with 13 skips;
+  the repository Core gate passed 667 tests with 1 skip. Tests cover owner and
+  lifecycle rejection, changed-source refusal, atomic failure boundaries,
+  stable-origin deduplication and shared claims, conditional binding rollback,
+  history generation/reset, all Clone history modes, and cleanup ordering.
+- An isolated production-package/service canary ran both WSL-to-Windows and
+  Windows-to-WSL transfers through real schema-5 SQLite stores. It verified
+  UTF-8 history, independent IDs and provenance, preserved target messages,
+  shared bindings, source retirement, and retry idempotence in 13.94 seconds.
+- The canary used temporary roots and changed no formal Agent or SessionStore.
+  Formal HASHI2/HASHI3 processes were not restarted or rebooted; HASHI1/HASHI4
+  were untouched by this work. Branch adoption, the HASHI4 20-Agent dry-run and
+  backfill, and a real browser Workbench refresh remain separate operations.

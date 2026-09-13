@@ -713,6 +713,38 @@ def test_remote_agent_names_falls_back_to_workbench_agents(monkeypatch):
     assert agents == ["lily", "agent1"]
 
 
+def test_legacy_remote_agent_directory_fallback_keeps_shared_token_auth(monkeypatch):
+    seen_headers = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"agents":[{"agent_name":"lily","is_active":true}]}'
+
+    def fake_urlopen(req, timeout):
+        if req.full_url.endswith("/protocol/directory"):
+            raise URLError("new directory unavailable")
+        seen_headers.update(dict(req.header_items()))
+        return FakeResponse()
+
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(hchat_send, "_load_config", _local_cfg)
+    monkeypatch.setattr(hchat_send.urllib_request, "urlopen", fake_urlopen)
+
+    agents = hchat_send._load_remote_agents_live(
+        {"remote_port": 40050, "lan_ip": "192.168.50.6"}
+    )
+
+    assert agents == ["lily"]
+    assert seen_headers["X-hashi-auth-scheme"] == "hashi-shared-hmac-v1"
+    assert seen_headers["X-hashi-from-instance"] == "HASHI1"
+
+
 def test_remote_agent_names_prefers_authenticated_protocol_directory(monkeypatch):
     captured = {}
 

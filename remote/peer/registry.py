@@ -148,8 +148,13 @@ class PeerRegistry:
             return now_ts - timestamp > LEGACY_INSTANCE_TTL_SECONDS
         return any(str((props or {}).get("live_status") or "").strip().lower() == "offline" for props in prop_sets)
 
-    def on_peers_changed(self, peers: list[PeerInfo]) -> None:
-        """Callback for LanDiscovery — called whenever peers list changes."""
+    def on_peers_changed(
+        self,
+        peers: list[PeerInfo],
+        *,
+        backend: str | None = None,
+    ) -> None:
+        """Apply one backend's complete peer snapshot or an incremental observation."""
         valid_peers = []
         now_ts = int(time.time())
         for peer in peers:
@@ -160,23 +165,27 @@ class PeerRegistry:
             props = dict(peer.properties or {})
             props["route_observed_at"] = now_ts
             valid_peers.append(dataclasses.replace(peer, instance_id=iid, properties=props))
-        backend = None
-        if valid_peers:
-            backend = str(valid_peers[0].properties.get("discovery", "") or "").lower() or None
-        if not backend:
-            backend = "unknown"
+        source_backend = str(backend or "").strip().lower()
+        if not source_backend and valid_peers:
+            source_backend = (
+                str(valid_peers[0].properties.get("discovery", "") or "")
+                .strip()
+                .lower()
+            )
+        if not source_backend:
+            source_backend = "unknown"
         current_ids = set()
         for peer in valid_peers:
             iid = peer.instance_id
             current_ids.add(iid)
-            self._observations.setdefault(iid, {})[backend] = peer
+            self._observations.setdefault(iid, {})[source_backend] = peer
         # Only discovery backends that report a full current snapshot should
         # prune peers that are missing from this callback. Incremental sources
         # like bootstrap/handshake_inbound would otherwise delete each other.
-        if backend in {"lan", "tailscale", "unknown"}:
+        if source_backend in {"lan", "tailscale", "unknown"}:
             for iid, by_backend in list(self._observations.items()):
-                if backend in by_backend and iid not in current_ids:
-                    del by_backend[backend]
+                if source_backend in by_backend and iid not in current_ids:
+                    del by_backend[source_backend]
                 if not by_backend:
                     del self._observations[iid]
         self._rebuild_canonical_peers()
@@ -331,6 +340,16 @@ class PeerRegistry:
         state: str,
         protocol_version: str | None = None,
         capabilities: list[str] | None = None,
+        hashi_version: str | None = None,
+        display_name: str | None = None,
+        display_handle: str | None = None,
+        remote_port: int | None = None,
+        workbench_port: int | None = None,
+        platform: str | None = None,
+        host_identity: str | None = None,
+        environment_kind: str | None = None,
+        address_candidates: list[dict] | None = None,
+        observed_candidates: list[dict] | None = None,
         last_error: str | None = None,
         remote_agents: list[dict] | None = None,
         remote_agent_directory: dict | None = None,
@@ -356,10 +375,24 @@ class PeerRegistry:
         props["last_handshake_at"] = now_ts
         props.setdefault("preferred_backend", props.get("discovery"))
         props.setdefault("alternate_backends", [])
+        if state in {"rehydrate_required", "handshake_rejected"}:
+            # A credential/metadata revision or an authenticated rejection
+            # invalidates the trusted projection. Keep routes needed for the
+            # next handshake, but never present old capability/directory proof
+            # as current while trust is absent or being re-established.
+            peer.capabilities = []
+            for key in (
+                "remote_agents",
+                "remote_agent_directory",
+                "remote_supervisor",
+                "remote_supervisor_mode",
+            ):
+                props.pop(key, None)
         if state == "handshake_accepted":
             props["last_seen_ok"] = now_ts
             props["consecutive_failures"] = 0
             props.pop("last_error", None)
+            props.pop("trust_revalidation_reason", None)
             props["live_status"] = self._derive_live_status(props, now=now_ts)
         elif last_error:
             props["last_error"] = last_error
@@ -382,6 +415,32 @@ class PeerRegistry:
             peer.protocol_version = protocol_version
         if capabilities is not None:
             peer.capabilities = list(capabilities)
+        if hashi_version:
+            peer.hashi_version = str(hashi_version)
+        if display_name:
+            peer.display_name = str(display_name)
+        if display_handle:
+            peer.display_handle = str(display_handle)
+        if platform:
+            peer.platform = str(platform)
+        for value, attribute in (
+            (remote_port, "port"),
+            (workbench_port, "workbench_port"),
+        ):
+            try:
+                port = int(value or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if 1 <= port <= 65535:
+                setattr(peer, attribute, port)
+        if host_identity is not None:
+            props["host_identity"] = _normalize_identity(host_identity)
+        if environment_kind is not None:
+            props["environment_kind"] = str(environment_kind).strip().lower()
+        if address_candidates is not None:
+            props["address_candidates"] = list(address_candidates)
+        if observed_candidates is not None:
+            props["observed_candidates"] = list(observed_candidates)
         peer.properties = props
         self._peers[iid] = peer
         self._sync_to_instances_json()
@@ -1100,6 +1159,45 @@ class PeerRegistry:
                     == str(merged.properties.get("preferred_backend") or "").strip().lower()
                 )
                 prev_props = dict(previous.properties or {})
+                metadata_changed = False
+                metadata_pairs = [
+                    (previous.protocol_version, merged.protocol_version, False),
+                    (
+                        prev_props.get("identity_digest"),
+                        merged.properties.get("identity_digest"),
+                        True,
+                    ),
+                    (
+                        prev_props.get("capabilities_digest"),
+                        merged.properties.get("capabilities_digest"),
+                        True,
+                    ),
+                    (
+                        prev_props.get("address_candidates_digest"),
+                        merged.properties.get("address_candidates_digest"),
+                        True,
+                    ),
+                    (
+                        prev_props.get("agent_snapshot_version"),
+                        merged.properties.get("agent_snapshot_version"),
+                        False,
+                    ),
+                ]
+                if not (
+                    str(prev_props.get("identity_digest") or "").strip()
+                    or str(merged.properties.get("identity_digest") or "").strip()
+                ):
+                    metadata_pairs.append(
+                        (previous.hashi_version, merged.hashi_version, False)
+                    )
+                for old_value, new_value, presence_sensitive in metadata_pairs:
+                    old_text = str(old_value or "").strip()
+                    new_text = str(new_value or "").strip()
+                    if old_text != new_text and (
+                        presence_sensitive or (old_text and new_text)
+                    ):
+                        metadata_changed = True
+                        break
                 if not route_changed:
                     try:
                         prev_handshake = int(prev_props.get("last_handshake_at") or 0)
@@ -1147,6 +1245,50 @@ class PeerRegistry:
                             merged.properties["consecutive_failures"] = prev_props["consecutive_failures"]
                     if "same_host_loopback" in prev_props:
                         merged.properties["same_host_loopback"] = prev_props["same_host_loopback"]
+                    if (
+                        not metadata_changed
+                        and not merged.capabilities
+                        and previous.capabilities
+                    ):
+                        # Discovery carries only a capability digest in schema 2;
+                        # the authenticated handshake remains authoritative.
+                        merged.capabilities = list(previous.capabilities)
+                    if (
+                        not metadata_changed
+                        and str(prev_props.get("handshake_state") or "")
+                        == "handshake_accepted"
+                    ):
+                        # Schema 2 advertisements intentionally carry bounded
+                        # identity hints. Preserve the authenticated full values
+                        # while their fixed-size advertisement digest is stable.
+                        merged.display_name = previous.display_name
+                        merged.display_handle = previous.display_handle
+                        merged.hashi_version = previous.hashi_version
+                        merged.platform = previous.platform
+                        merged.protocol_version = previous.protocol_version
+                    if not metadata_changed:
+                        for key in (
+                            "remote_agent_directory",
+                            "remote_supervisor",
+                            "remote_supervisor_mode",
+                            "address_candidates",
+                            "observed_candidates",
+                        ):
+                            if key in prev_props:
+                                merged.properties[key] = prev_props[key]
+                    if (
+                        metadata_changed
+                        and str(prev_props.get("handshake_state") or "") == "handshake_accepted"
+                    ):
+                        merged.properties["handshake_state"] = "rehydrate_required"
+                        merged.properties["trust_revalidation_reason"] = "advertised_metadata_changed"
+                        for key in (
+                            "remote_agents",
+                            "remote_agent_directory",
+                            "remote_supervisor",
+                            "remote_supervisor_mode",
+                        ):
+                            merged.properties.pop(key, None)
             if self._same_machine_hint(iid, by_backend, chosen):
                 merged.properties["same_host_loopback"] = "127.0.0.1"
             merged.properties = self._normalize_live_props(merged.properties)

@@ -3865,14 +3865,52 @@ class WorkbenchApiServer:
     async def handle_transcript_poll(self, request):
         name = request.match_info["name"]
         offset = int(request.query.get("offset", 0))
+        raw_history_generation = request.query.get("history_generation")
+        try:
+            history_generation = (
+                int(raw_history_generation)
+                if raw_history_generation is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "history_generation must be a positive integer",
+                    "error_code": "invalid_history_generation",
+                },
+                status=400,
+            )
+        if history_generation is not None and history_generation < 1:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "history_generation must be a positive integer",
+                    "error_code": "invalid_history_generation",
+                },
+                status=400,
+            )
         agent_row = next(
             (row for row in self._load_agent_rows() if row["name"] == name), None
         )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
-        return self._chat_transcript_response(request, name, offset=offset)
+        return self._chat_transcript_response(
+            request,
+            name,
+            offset=offset,
+            known_history_generation=history_generation,
+        )
 
-    def _chat_transcript_response(self, request, name, *, limit=200, offset=None):
+    def _chat_transcript_response(
+        self,
+        request,
+        name,
+        *,
+        limit=200,
+        offset=None,
+        known_history_generation=None,
+    ):
         owner_id = self._v1_owner_id(request)
         if owner_id is None:
             return web.json_response(
@@ -3882,7 +3920,12 @@ class WorkbenchApiServer:
         session = self.session_store.resolve_session(owner_id=owner_id, agent_id=name,
                                                      surface="workbench", channel_key="default")
         payload = build_chat_projection(
-            self.session_store, session=session, owner_id=owner_id, offset=offset, limit=limit,
+            self.session_store,
+            session=session,
+            owner_id=owner_id,
+            offset=offset,
+            limit=limit,
+            known_history_generation=known_history_generation,
         )
         return web.json_response(payload)
 

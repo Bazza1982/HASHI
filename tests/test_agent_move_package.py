@@ -11,6 +11,8 @@ import pytest
 
 from orchestrator.agent_move.package import (
     AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
+    CONVERSATION_CONTINUITY_ARCHIVE_PATH,
+    CONVERSATION_CONTINUITY_CAPABILITY,
     RETAINED_IDENTITY_CAPABILITY,
     AgentMoveError,
     archive_snapshot_fingerprint,
@@ -20,6 +22,7 @@ from orchestrator.agent_move.package import (
     read_agent_move_package,
 )
 from orchestrator.pcm import render_pcm_document
+from orchestrator.session_store import SessionStore
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
 
@@ -77,7 +80,7 @@ def _source_root(tmp_path: Path) -> Path:
     _write_json(
         root / "agents.json",
         {
-            "global": {"instance_id": "HASHI1"},
+            "global": {"instance_id": "HASHI1", "authorized_id": 7},
             "agents": [
                 {
                     "name": "zelda",
@@ -277,6 +280,265 @@ def test_owned_pending_delivery_requires_full_move_and_clone_never_inherits_it(
     )
     assert cloned.access_requirements["telegram_delivery_state"] is None
     assert "workspace/undelivered/req-1.md" not in cloned.names
+
+
+def test_schema5_move_carries_owner_checked_conversation_history_without_run_state(
+    tmp_path,
+):
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda",
+        surface="workbench",
+        channel_key="default",
+    )
+    store.bind_channel(
+        owner_id="user:7",
+        agent_id="zelda",
+        surface="telegram",
+        channel_key="7",
+        session_id=session["session_id"],
+    )
+    completed = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="zelda",
+        request_id="completed",
+        text="portable question",
+        source="workbench",
+        idempotency_key="completed",
+    )
+    store.mark_request_running(completed.request_id, worker_id="fixture")
+    store.finish_request(
+        completed.request_id,
+        success=True,
+        assistant_text="portable answer",
+        assistant_source="fixture",
+    )
+    store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="zelda",
+        request_id="active",
+        text="must not carry active work",
+        source="workbench",
+        idempotency_key="active",
+    )
+
+    package = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "history.hashi-agent",
+        source_instance="HASHI1",
+        transfer_mode="identity_memory",
+    )
+
+    assert package.manifest["schema_version"] == 5
+    assert package.manifest["history_mode"] == "move"
+    assert package.manifest["sections"]["conversation_continuity"] is True
+    assert CONVERSATION_CONTINUITY_CAPABILITY in package.manifest[
+        "required_receiver_capabilities"
+    ]
+    assert CONVERSATION_CONTINUITY_ARCHIVE_PATH in package.names
+    capsule = package.conversation_continuity
+    assert capsule is not None
+    assert capsule["owner_id"] == "user:7"
+    assert capsule["summary"]["eligible_message_count"] == 2
+    assert [
+        item["text"]
+        for exported_session in capsule["sessions"]
+        for item in exported_session["messages"]
+    ] == ["portable question", "portable answer"]
+    serialized = json.dumps(capsule)
+    assert "run_id" not in serialized
+    assert "request_id" not in serialized
+    assert "worker" not in serialized
+
+
+def test_schema5_preview_export_does_not_create_or_migrate_source_session_store(
+    tmp_path,
+):
+    root = _source_root(tmp_path)
+    session_db = root / "state" / "sessions.sqlite3"
+    assert not session_db.exists()
+
+    package = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "empty-history.hashi-agent",
+        source_instance="HASHI1",
+        transfer_mode="identity_memory",
+    )
+
+    assert not session_db.exists()
+    assert package.conversation_continuity is not None
+    assert package.conversation_continuity["owner_id"] == "user:7"
+    assert package.conversation_continuity["summary"][
+        "eligible_message_count"
+    ] == 0
+
+
+def test_schema5_history_rejects_source_without_configured_authorized_owner(tmp_path):
+    root = _source_root(tmp_path)
+    agents = json.loads((root / "agents.json").read_text(encoding="utf-8"))
+    agents["global"].pop("authorized_id")
+    _write_json(root / "agents.json", agents)
+    store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="zelda",
+        request_id="unknown-owner",
+        text="must not cross an unknown authorization boundary",
+        source="workbench",
+        idempotency_key="unknown-owner",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="must remain local",
+        assistant_source="fixture",
+    )
+
+    with pytest.raises(AgentMoveError, match="authorized conversation owner is not configured"):
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "unknown-owner.hashi-agent",
+            source_instance="HASHI1",
+            transfer_mode="identity_memory",
+        )
+
+
+def test_schema5_history_rejects_source_instance_mismatch(tmp_path):
+    root = _source_root(tmp_path)
+
+    with pytest.raises(AgentMoveError, match="source instance does not match"):
+        create_agent_move_package(
+            root,
+            "zelda",
+            tmp_path / "wrong-source.hashi-agent",
+            source_instance="HASHI9",
+            transfer_mode="identity_memory",
+        )
+
+
+def test_schema5_clone_defaults_empty_and_offers_explicit_read_only_history(tmp_path):
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="zelda",
+        request_id="clone-history",
+        text="source stays",
+        source="workbench",
+        idempotency_key="clone-history",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="source answer",
+        assistant_source="fixture",
+    )
+
+    blank = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "clone-blank.hashi-agent",
+        source_instance="HASHI1",
+        operation="clone",
+        include_telegram_secret=False,
+        transfer_mode="workspace",
+    )
+    inherited = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "clone-history.hashi-agent",
+        source_instance="HASHI1",
+        operation="clone",
+        include_telegram_secret=False,
+        transfer_mode="workspace",
+        history_mode="inherit_read_only",
+    )
+
+    assert blank.manifest["history_mode"] == "none"
+    assert blank.conversation_continuity is None
+    assert CONVERSATION_CONTINUITY_ARCHIVE_PATH not in blank.names
+    assert inherited.manifest["history_mode"] == "inherit_read_only"
+    assert inherited.conversation_continuity is not None
+    assert inherited.conversation_continuity["summary"][
+        "eligible_message_count"
+    ] == 2
+
+
+def test_conversation_history_is_in_freshness_fingerprint_and_tampering_is_rejected(
+    tmp_path,
+):
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+
+    first = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "first.hashi-agent",
+        source_instance="HASHI1",
+        transfer_mode="identity_memory",
+    )
+    second = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "second.hashi-agent",
+        source_instance="HASHI1",
+        transfer_mode="identity_memory",
+    )
+    assert archive_snapshot_fingerprint(first) == archive_snapshot_fingerprint(second)
+
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="zelda",
+        request_id="changed",
+        text="new history",
+        source="workbench",
+        idempotency_key="changed",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="new answer",
+        assistant_source="fixture",
+    )
+    third = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "third.hashi-agent",
+        source_instance="HASHI1",
+        transfer_mode="identity_memory",
+    )
+    assert archive_snapshot_fingerprint(third) != archive_snapshot_fingerprint(first)
+
+    tampered_capsule = dict(third.conversation_continuity or {})
+    tampered_capsule["owner_id"] = "user:8"
+    tampered = tmp_path / "tampered-history.hashi-agent"
+    _rewrite_archive(
+        third.package_path,
+        tampered,
+        replacements={
+            CONVERSATION_CONTINUITY_ARCHIVE_PATH: json.dumps(
+                tampered_capsule
+            ).encode("utf-8")
+        },
+    )
+    with pytest.raises(AgentMoveError, match="digest"):
+        read_agent_move_package(tampered)
 
 
 def test_package_rejects_inactive_retained_source_copy(tmp_path):
@@ -721,7 +983,7 @@ def test_explicit_transfer_modes_preserve_memory_and_preflight_whole_workspace(t
     big.unlink()
     full = create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
     assert "workspace/project/agent.md" in full.names
-    assert full.manifest["schema_version"] == 4
+    assert full.manifest["schema_version"] == 5
     # Boundaries use the complete logical inventory, including excluded runtime
     # material, with exact equality accepted before any compression begins.
     total = full.workspace_metadata["total_workspace_bytes"]

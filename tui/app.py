@@ -1666,6 +1666,12 @@ class HASHITuiApp(App):
                         if generation != self._connection_generation or client is not self.api:
                             logger.debug("Discarded stale TUI poll result: agent=%s generation=%s", agent, generation)
                             break
+                        history_reset = client.consume_transcript_reset(agent)
+                        if history_reset and agent == self.current_agent:
+                            self.query_one("#chat-history", ChatHistory).clear()
+                            for msg in messages:
+                                self._render_transcript_message(msg)
+                            continue
                         received = False
                         for msg in messages:
                             if msg.get("role") == "assistant":

@@ -133,7 +133,7 @@ def test_lan_discovery_prefers_advertised_non_loopback_candidate_when_mdns_addre
     assert peer.host == "192.168.50.21"
 
 
-def test_lan_advertisement_chunks_capabilities_within_mdns_txt_record_limit(monkeypatch):
+def test_lan_advertisement_uses_bounded_digest_and_leaves_capabilities_to_handshake(monkeypatch):
     captured = {}
 
     class CapturingServiceInfo:
@@ -177,7 +177,8 @@ def test_lan_advertisement_chunks_capabilities_within_mdns_txt_record_limit(monk
     decoded = _service_info_to_peer(captured["service"], "HASHI3")
 
     assert decoded is not None
-    assert decoded.capabilities == capabilities
+    assert decoded.capabilities == []
+    assert decoded.properties["capabilities_digest"]
 
 
 def test_registry_rejects_unknown_peer_and_prunes_unknown_instance_seed(tmp_path):

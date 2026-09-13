@@ -304,6 +304,26 @@ def test_build_child_command_supports_separate_portable_control_root(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_fetch_remote_health_uses_configured_tls_before_plain_fallback(monkeypatch):
+    calls = []
+
+    def fake_fetch(url, *, allow_self_signed=False):
+        calls.append((url, allow_self_signed))
+        return {"ok": True, "status": "ready"}
+
+    monkeypatch.setattr(remote_lifecycle, "_fetch_json", fake_fetch)
+
+    health = await remote_lifecycle._fetch_remote_health(
+        "127.0.0.1",
+        19001,
+        use_tls=True,
+    )
+
+    assert health == {"ok": True, "status": "ready"}
+    assert calls == [("https://127.0.0.1:19001/health", True)]
+
+
+@pytest.mark.asyncio
 async def test_find_owned_remote_accepts_claim_port_with_matching_identity(monkeypatch, tmp_path):
     (tmp_path / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "HASHI1"}}),
@@ -329,7 +349,7 @@ async def test_find_owned_remote_accepts_claim_port_with_matching_identity(monke
 
     monkeypatch.setattr(remote_lifecycle, "local_http_hosts", lambda: ("127.0.0.1",))
 
-    async def fake_health(host, port):
+    async def fake_health(host, port, *, use_tls=False):
         if port == 23456:
             return {
                 "ok": True,
@@ -365,7 +385,7 @@ async def test_find_owned_remote_rejects_wrong_identity(monkeypatch, tmp_path):
 
     monkeypatch.setattr(remote_lifecycle, "local_http_hosts", lambda: ("127.0.0.1",))
 
-    async def fake_health(host, port):
+    async def fake_health(host, port, *, use_tls=False):
         return {
             "ok": True,
             "instance": {
@@ -388,6 +408,55 @@ async def test_ensure_remote_started_skips_when_explicitly_disabled(tmp_path):
     assert result["ok"] is False
     assert result["action"] == "skipped"
     assert result["reason"] == "remote explicitly disabled"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_owned_remote_reports_last_degraded_health(monkeypatch, tmp_path):
+    settings = remote_lifecycle.load_settings(tmp_path)
+    degraded = {
+        "port": settings.port,
+        "health": {"ok": True, "status": "degraded"},
+        "health_host": "127.0.0.1",
+        "remote_ready": False,
+        "remote_state": "degraded",
+    }
+    calls = 0
+
+    async def fake_owned(_settings):
+        nonlocal calls
+        calls += 1
+        return degraded
+
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(remote_lifecycle, "_SUPERVISOR_HEALTH_ATTEMPTS", 2)
+    monkeypatch.setattr(remote_lifecycle, "_SUPERVISOR_HEALTH_INTERVAL_SECONDS", 0)
+
+    assert await remote_lifecycle._wait_for_owned_remote(settings) is degraded
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_remote_started_does_not_report_degraded_remote_as_ready(
+    monkeypatch,
+    tmp_path,
+):
+    async def fake_owned(_settings):
+        return {
+            "port": 8766,
+            "health": {"ok": True, "status": "degraded"},
+            "health_host": "127.0.0.1",
+            "remote_ready": False,
+            "remote_state": "degraded",
+            "discovery_state": "degraded",
+        }
+
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+
+    result = await remote_lifecycle.ensure_remote_started(tmp_path)
+
+    assert result["ok"] is False
+    assert result["action"] == "already_running_degraded"
+    assert result["remote_state"] == "degraded"
 
 
 @pytest.mark.asyncio

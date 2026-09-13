@@ -9,9 +9,13 @@ No configuration needed — plug and play on the same network.
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import socket
+import time
+from collections.abc import Mapping
 from typing import Optional, Callable
 
 from zeroconf import IPVersion, InterfaceChoice, ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
@@ -33,6 +37,195 @@ _SCOPE_TO_CODE = {
 }
 _CODE_TO_SCOPE = {value: key for key, value in _SCOPE_TO_CODE.items()}
 _MDNS_TXT_RECORD_MAX_BYTES = 255
+_MDNS_TXT_FIELD_MAX_BYTES = 16 * 1024
+_MDNS_TXT_FIELD_MAX_CHUNKS = 96
+_MDNS_TXT_TOTAL_MAX_BYTES = 8 * 1024
+_MDNS_TXT_HINT_MAX_BYTES = 160
+_MDNS_TXT_CHUNK_VERSION = 1
+_MDNS_ROUTE_HINT_LIMIT = 4
+
+
+class TxtRecordDecodeError(ValueError):
+    """A versioned DNS-SD TXT field is incomplete, ambiguous, or invalid."""
+
+
+def _metadata_digest(value: object) -> str:
+    canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _bounded_utf8_hint(value: object, max_bytes: int = _MDNS_TXT_HINT_MAX_BYTES) -> str:
+    """Return a valid UTF-8 prefix suitable for fixed-size discovery hints."""
+    payload = str(value or "").encode("utf-8")
+    if len(payload) <= max_bytes:
+        return payload.decode("utf-8")
+    return payload[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _split_utf8_for_txt(base_key: str, value: str) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_bytes = 0
+    for character in value:
+        encoded = character.encode("utf-8")
+        index = len(chunks)
+        key = f"{base_key}_{index}"
+        budget = _MDNS_TXT_RECORD_MAX_BYTES - len(key.encode("utf-8")) - 1
+        if budget <= 0 or len(encoded) > budget:
+            raise ValueError(f"TXT key is too long: {base_key}")
+        if current and current_bytes + len(encoded) > budget:
+            chunks.append("".join(current))
+            if len(chunks) >= _MDNS_TXT_FIELD_MAX_CHUNKS:
+                raise ValueError(f"TXT field has too many chunks: {base_key}")
+            current = []
+            current_bytes = 0
+            index = len(chunks)
+            key = f"{base_key}_{index}"
+            budget = _MDNS_TXT_RECORD_MAX_BYTES - len(key.encode("utf-8")) - 1
+        current.append(character)
+        current_bytes += len(encoded)
+    if current or not chunks:
+        chunks.append("".join(current))
+    return chunks
+
+
+def _encode_versioned_txt_records(base_key: str, value: str) -> dict[str, str]:
+    """Encode one UTF-8 value with bounded, checksummed, order-free fragments."""
+    text = str(value or "")
+    payload = text.encode("utf-8")
+    if len(payload) > _MDNS_TXT_FIELD_MAX_BYTES:
+        raise ValueError(
+            f"TXT field {base_key!r} exceeds {_MDNS_TXT_FIELD_MAX_BYTES} bytes"
+        )
+    chunks = _split_utf8_for_txt(base_key, text)
+    manifest = json.dumps(
+        {
+            "v": _MDNS_TXT_CHUNK_VERSION,
+            "n": len(chunks),
+            "l": len(payload),
+            "h": hashlib.sha256(payload).hexdigest(),
+        },
+        separators=(",", ":"),
+    )
+    meta_key = f"{base_key}_meta"
+    if _txt_record_size(meta_key, manifest) > _MDNS_TXT_RECORD_MAX_BYTES:
+        raise ValueError(f"TXT manifest key is too long: {base_key}")
+    records = {meta_key: manifest}
+    records.update({f"{base_key}_{index}": chunk for index, chunk in enumerate(chunks)})
+    return records
+
+
+def _decode_versioned_txt_records(
+    properties: Mapping[str, str],
+    base_key: str,
+) -> str:
+    """Decode a checksummed TXT field and reject gaps or ambiguous indices."""
+    meta_key = f"{base_key}_meta"
+    if meta_key not in properties:
+        raise TxtRecordDecodeError(f"missing {base_key} manifest")
+    try:
+        manifest = json.loads(str(properties.get(meta_key) or ""))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise TxtRecordDecodeError(f"invalid {base_key} manifest") from exc
+    if not isinstance(manifest, dict) or manifest.get("v") != _MDNS_TXT_CHUNK_VERSION:
+        raise TxtRecordDecodeError(f"unsupported {base_key} version")
+    try:
+        count = int(manifest.get("n"))
+        declared_length = int(manifest.get("l"))
+    except (TypeError, ValueError) as exc:
+        raise TxtRecordDecodeError(f"invalid {base_key} bounds") from exc
+    checksum = str(manifest.get("h") or "").lower()
+    if not 1 <= count <= _MDNS_TXT_FIELD_MAX_CHUNKS:
+        raise TxtRecordDecodeError(f"invalid {base_key} chunk count")
+    if not 0 <= declared_length <= _MDNS_TXT_FIELD_MAX_BYTES:
+        raise TxtRecordDecodeError(f"invalid {base_key} declared length")
+    if len(checksum) != 64 or any(ch not in "0123456789abcdef" for ch in checksum):
+        raise TxtRecordDecodeError(f"invalid {base_key} checksum")
+
+    fragments: dict[int, str] = {}
+    prefix = f"{base_key}_"
+    for raw_key, raw_value in properties.items():
+        key = str(raw_key)
+        if not key.startswith(prefix) or key == meta_key:
+            continue
+        suffix = key[len(prefix):]
+        if not suffix.isdigit():
+            continue
+        index = int(suffix)
+        if index in fragments:
+            raise TxtRecordDecodeError(f"duplicate {base_key} chunk {index}")
+        if index < 0 or index >= count:
+            raise TxtRecordDecodeError(f"unexpected {base_key} chunk {index}")
+        fragments[index] = str(raw_value or "")
+    if set(fragments) != set(range(count)):
+        raise TxtRecordDecodeError(f"missing {base_key} chunk")
+    text = "".join(fragments[index] for index in range(count))
+    payload = text.encode("utf-8")
+    if len(payload) != declared_length:
+        raise TxtRecordDecodeError(f"{base_key} length mismatch")
+    if not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), checksum):
+        raise TxtRecordDecodeError(f"{base_key} checksum mismatch")
+    return text
+
+
+def _encode_txt_value_records(base_key: str, value: object) -> dict[str, str]:
+    text = str(value or "")
+    if _txt_record_size(base_key, text) <= _MDNS_TXT_RECORD_MAX_BYTES:
+        return {base_key: text}
+    return _encode_versioned_txt_records(base_key, text)
+
+
+def _decode_txt_value(properties: Mapping[str, str], base_key: str, default: str = "") -> str:
+    if f"{base_key}_meta" in properties:
+        return _decode_versioned_txt_records(properties, base_key)
+    if base_key not in properties:
+        return default
+    value = str(properties.get(base_key) or "")
+    if _txt_record_size(base_key, value) > _MDNS_TXT_RECORD_MAX_BYTES:
+        raise TxtRecordDecodeError(f"oversized legacy {base_key} record")
+    return value
+
+
+def _decode_service_properties(raw_properties: Mapping[object, object]) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    total_size = 0
+    for raw_key, raw_value in (raw_properties or {}).items():
+        key = raw_key.decode("utf-8") if isinstance(raw_key, bytes) else str(raw_key)
+        if key in properties:
+            raise TxtRecordDecodeError(f"duplicate TXT key: {key}")
+        value = raw_value.decode("utf-8") if isinstance(raw_value, bytes) else str(raw_value)
+        record_size = _txt_record_size(key, value)
+        if record_size > _MDNS_TXT_RECORD_MAX_BYTES:
+            raise TxtRecordDecodeError(f"oversized TXT record: {key}")
+        total_size += 1 + record_size
+        if total_size > _MDNS_TXT_TOTAL_MAX_BYTES:
+            raise TxtRecordDecodeError("mDNS TXT payload exceeds aggregate byte budget")
+        properties[key] = value
+    return properties
+
+
+def _route_hints(items: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        host = _bounded_utf8_hint(
+            str(item.get("host") or "").strip(),
+            _MDNS_TXT_HINT_MAX_BYTES,
+        )
+        if not host or host in seen:
+            continue
+        seen.add(host)
+        result.append({**item, "host": host})
+        if len(result) >= _MDNS_ROUTE_HINT_LIMIT:
+            break
+    return result
 
 
 def _normalize_host_identity(value: str) -> str:
@@ -318,15 +511,13 @@ def build_local_network_profile(info: PeerInfo) -> dict:
 def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[PeerInfo]:
     """Convert a zeroconf ServiceInfo into a PeerInfo. Returns None if it's ourselves."""
     try:
-        props = {
-            k.decode() if isinstance(k, bytes) else k:
-            v.decode() if isinstance(v, bytes) else v
-            for k, v in (info.properties or {}).items()
-        }
-        address_candidates = _decode_candidate_records(props.get("address_candidates_json", "[]") or "[]")
-        observed_candidates = _decode_candidate_records(props.get("observed_candidates_json", "[]") or "[]")
+        props = _decode_service_properties(info.properties or {})
+        address_raw = _decode_txt_value(props, "address_candidates_json", "[]")
+        observed_raw = _decode_txt_value(props, "observed_candidates_json", "[]")
+        address_candidates = _decode_candidate_records(address_raw)
+        observed_candidates = _decode_candidate_records(observed_raw)
 
-        instance_id = normalize_instance_id(props.get("instance_id"))
+        instance_id = normalize_instance_id(_decode_txt_value(props, "instance_id"))
         if not is_valid_instance_id(instance_id):
             logger.debug(
                 "LanDiscovery: ignoring service without valid instance_id: server=%s port=%s",
@@ -342,22 +533,26 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
 
         return PeerInfo(
             instance_id=instance_id,
-            display_name=props.get("display_name", instance_id),
+            display_name=_decode_txt_value(props, "display_name", instance_id),
             host=host,
             port=info.port,
-            workbench_port=int(props.get("workbench_port", DEFAULT_WORKBENCH_PORT)),
-            platform=props.get("platform", "unknown"),
-            version=props.get("version", "unknown"),
-            hashi_version=props.get("hashi_version", "unknown"),
-            display_handle=props.get("display_handle", f"@{instance_id.lower()}"),
-            protocol_version=props.get("protocol_version", "1.0"),
+            workbench_port=int(_decode_txt_value(props, "workbench_port", str(DEFAULT_WORKBENCH_PORT))),
+            platform=_decode_txt_value(props, "platform", "unknown"),
+            version=_decode_txt_value(props, "version", "unknown"),
+            hashi_version=_decode_txt_value(props, "hashi_version", "unknown"),
+            display_handle=_decode_txt_value(props, "display_handle", f"@{instance_id.lower()}"),
+            protocol_version=_decode_txt_value(props, "protocol_version", "1.0"),
             capabilities=_decode_csv_txt_records(props, "capabilities"),
             properties={
                 "discovery": "lan",
-                "host_identity": _normalize_host_identity(props.get("host_identity", "")),
-                "environment_kind": props.get("environment_kind", "").strip().lower(),
-                "agent_snapshot_version": props.get("agent_snapshot_version", ""),
-                "directory_state": props.get("directory_state", ""),
+                "metadata_schema": _decode_txt_value(props, "metadata_schema", "1"),
+                "host_identity": _normalize_host_identity(_decode_txt_value(props, "host_identity", "")),
+                "environment_kind": _decode_txt_value(props, "environment_kind", "").strip().lower(),
+                "agent_snapshot_version": _decode_txt_value(props, "agent_snapshot_version", ""),
+                "directory_state": _decode_txt_value(props, "directory_state", ""),
+                "identity_digest": _decode_txt_value(props, "identity_digest", ""),
+                "capabilities_digest": _decode_txt_value(props, "capabilities_digest", ""),
+                "address_candidates_digest": _decode_txt_value(props, "address_candidates_digest", ""),
                 "address_candidates": address_candidates,
                 "observed_candidates": observed_candidates,
             },
@@ -421,6 +616,14 @@ class LanDiscovery(PeerDiscovery):
         self._listener: Optional[_HashiListener] = None
         self._browser: Optional[ServiceBrowser] = None
         self._advertising = False
+        self._browsing = False
+        self._last_error = ""
+        self._last_failure_stage = ""
+        self._last_attempt_at = 0.0
+        self._last_success_at = 0.0
+        self._next_retry_at = 0.0
+        self._retry_count = 0
+        self._stopped = False
 
     @property
     def backend_name(self) -> str:
@@ -428,15 +631,24 @@ class LanDiscovery(PeerDiscovery):
 
     async def advertise(self, info: PeerInfo) -> bool:
         """Register this instance on the LAN via mDNS."""
-        if self._advertising:
-            logger.warning("LanDiscovery: already advertising")
+        if self._advertising and self._browsing:
             return True
 
+        self._stopped = False
+        self._last_attempt_at = time.time()
         try:
             loop = asyncio.get_event_loop()
+            if self._zeroconf or self._service_info or self._browser:
+                await loop.run_in_executor(None, self._cleanup_sync)
             await loop.run_in_executor(None, self._start_advertising, info)
+            self._record_success()
             return self._advertising
         except Exception as e:
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, self._cleanup_sync)
+            except Exception:
+                pass
+            self._record_failure("startup", e)
             logger.error("LanDiscovery: advertise failed: %s", e)
             return False
 
@@ -444,13 +656,63 @@ class LanDiscovery(PeerDiscovery):
         """Refresh mDNS properties without restarting Remote."""
         if not self._advertising or not self._zeroconf or not self._service_info:
             return await self.advertise(info)
+        self._last_attempt_at = time.time()
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self._update_service_info, info)
+            self._record_success()
             return True
         except Exception as e:
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, self._cleanup_sync)
+            except Exception:
+                pass
+            self._record_failure("update", e)
             logger.warning("LanDiscovery: advertisement update failed: %s", e)
             return False
+
+    def retry_due(self) -> bool:
+        return not self._stopped and not (
+            self._advertising and self._browsing
+        ) and time.time() >= self._next_retry_at
+
+    def get_status(self) -> dict:
+        if self._stopped:
+            readiness = "stopped"
+        elif self._advertising and self._browsing and not self._last_error:
+            readiness = "ready"
+        elif self._last_attempt_at:
+            readiness = "degraded"
+        else:
+            readiness = "starting"
+        return {
+            "backend": "lan",
+            "name": self.backend_name,
+            "readiness": readiness,
+            "advertising": bool(self._advertising),
+            "browsing": bool(self._browsing),
+            "peer_count": len(self._listener.get_peers()) if self._listener else 0,
+            "last_error": self._last_error,
+            "last_failure_stage": self._last_failure_stage,
+            "retry_count": self._retry_count,
+            "last_attempt_at": self._last_attempt_at,
+            "last_success_at": self._last_success_at,
+            "next_retry_at": self._next_retry_at,
+        }
+
+    def _record_success(self) -> None:
+        self._last_success_at = time.time()
+        self._last_error = ""
+        self._last_failure_stage = ""
+        self._next_retry_at = 0.0
+        self._retry_count = 0
+
+    def _record_failure(self, stage: str, error: Exception) -> None:
+        self._last_error = f"{type(error).__name__}: {error}"
+        self._last_failure_stage = str(stage)
+        self._retry_count += 1
+        backoff = min(30.0, float(2 ** min(self._retry_count - 1, 5)))
+        self._next_retry_at = time.time() + backoff
 
     def _service_info_for_peer(self, info: PeerInfo) -> ServiceInfo:
         hostname = socket.gethostname()
@@ -458,7 +720,8 @@ class LanDiscovery(PeerDiscovery):
         network_profile = build_local_network_profile(info)
         extra = dict(info.properties or {})
 
-        props = {
+        scalar_props = {
+            "metadata_schema": "2",
             "instance_id": info.instance_id,
             "display_name": info.display_name,
             "display_handle": info.display_handle or f"@{info.instance_id.lower()}",
@@ -471,11 +734,46 @@ class LanDiscovery(PeerDiscovery):
             "environment_kind": str(network_profile.get("environment_kind") or ""),
             "agent_snapshot_version": str(extra.get("agent_snapshot_version") or ""),
             "directory_state": str(extra.get("directory_state") or ""),
-            "address_candidates_json": _encode_candidate_records(network_profile.get("address_candidates") or []),
-            "observed_candidates_json": _encode_candidate_records(network_profile.get("observed_candidates") or []),
         }
-        props.update(_encode_csv_txt_records("capabilities", info.capabilities or []))
-        props_bytes = {k: v.encode() for k, v in props.items()}
+        identity_digest = _metadata_digest(
+            {
+                "instance_id": info.instance_id,
+                "display_name": info.display_name,
+                "display_handle": info.display_handle or f"@{info.instance_id.lower()}",
+                "platform": info.platform,
+                "hashi_version": info.hashi_version,
+                "protocol_version": info.protocol_version or "1.0",
+            }
+        )
+        props: dict[str, str] = {}
+        for key, value in scalar_props.items():
+            props.update(_encode_txt_value_records(key, _bounded_utf8_hint(value)))
+        address_candidates = list(network_profile.get("address_candidates") or [])
+        observed_candidates = list(network_profile.get("observed_candidates") or [])
+        props.update(
+            _encode_versioned_txt_records(
+                "address_candidates_json",
+                _encode_candidate_records(_route_hints(address_candidates)),
+            )
+        )
+        props.update(
+            _encode_versioned_txt_records(
+                "observed_candidates_json",
+                _encode_candidate_records(_route_hints(observed_candidates)),
+            )
+        )
+        props.update(_encode_txt_value_records("capabilities_digest", _metadata_digest(info.capabilities or [])))
+        props.update(_encode_txt_value_records("address_candidates_digest", _metadata_digest(address_candidates)))
+        props.update(_encode_txt_value_records("identity_digest", identity_digest))
+        for key, value in props.items():
+            if _txt_record_size(key, value) > _MDNS_TXT_RECORD_MAX_BYTES:
+                raise ValueError(f"mDNS TXT record exceeds 255 bytes: {key}")
+        total_size = sum(1 + _txt_record_size(key, value) for key, value in props.items())
+        if total_size > _MDNS_TXT_TOTAL_MAX_BYTES:
+            raise ValueError(
+                f"mDNS TXT payload exceeds {_MDNS_TXT_TOTAL_MAX_BYTES} bytes"
+            )
+        props_bytes = {k: v.encode("utf-8") for k, v in props.items()}
         service_name = f"{info.instance_id} - Hashi Remote.{HASHI_SERVICE_TYPE}"
         return ServiceInfo(
             type_=HASHI_SERVICE_TYPE,
@@ -493,13 +791,13 @@ class LanDiscovery(PeerDiscovery):
         # Tailscale is the default route (which would otherwise shadow the LAN NIC).
         self._zeroconf = Zeroconf(ip_version=IPVersion.V4Only, interfaces=InterfaceChoice.All)
 
-        # Start browser to discover other peers
-        self._listener = _HashiListener(self._self_id, self._on_peers_changed)
-        self._browser = ServiceBrowser(self._zeroconf, HASHI_SERVICE_TYPE, self._listener)
-
-        # Register ourselves
+        # Register first, then browse. A failure in either phase is rolled back
+        # by advertise(), so health never reports a half-started backend.
         self._zeroconf.register_service(self._service_info)
         self._advertising = True
+        self._listener = _HashiListener(self._self_id, self._on_peers_changed)
+        self._browser = ServiceBrowser(self._zeroconf, HASHI_SERVICE_TYPE, self._listener)
+        self._browsing = True
         logger.info(
             "LanDiscovery: advertising as %s @ %s:%d",
             info.instance_id, _get_local_ip(), info.port,
@@ -507,10 +805,36 @@ class LanDiscovery(PeerDiscovery):
 
     def _update_service_info(self, info: PeerInfo) -> None:
         if not self._zeroconf:
-            return
+            raise RuntimeError("mDNS backend is not initialized")
         self._service_info = self._service_info_for_peer(info)
         self._zeroconf.update_service(self._service_info)
         logger.info("LanDiscovery: refreshed advertisement for %s", info.instance_id)
+
+    def _cleanup_sync(self) -> None:
+        browser = self._browser
+        zeroconf = self._zeroconf
+        service_info = self._service_info
+        try:
+            cancel = getattr(browser, "cancel", None)
+            if callable(cancel):
+                cancel()
+        except Exception:
+            pass
+        try:
+            if zeroconf and service_info and self._advertising:
+                zeroconf.unregister_service(service_info)
+        except Exception:
+            pass
+        try:
+            if zeroconf:
+                zeroconf.close()
+        finally:
+            self._advertising = False
+            self._browsing = False
+            self._zeroconf = None
+            self._service_info = None
+            self._browser = None
+            self._listener = None
 
     async def discover(self) -> list[PeerInfo]:
         """Return currently known peers."""
@@ -519,21 +843,13 @@ class LanDiscovery(PeerDiscovery):
         return []
 
     async def stop(self) -> None:
-        if not self._advertising:
-            return
         try:
-            if self._zeroconf and self._service_info:
-                self._zeroconf.unregister_service(self._service_info)
-            if self._zeroconf:
-                self._zeroconf.close()
+            await asyncio.get_event_loop().run_in_executor(None, self._cleanup_sync)
         except Exception as e:
             logger.warning("LanDiscovery: error during stop: %s", e)
         finally:
-            self._advertising = False
-            self._zeroconf = None
-            self._service_info = None
-            self._browser = None
-            self._listener = None
+            self._stopped = True
+            self._next_retry_at = 0.0
             logger.info("LanDiscovery: stopped")
 
 

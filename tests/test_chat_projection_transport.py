@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
-from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
@@ -81,15 +80,20 @@ async def test_command_reads_real_session_history_without_audit_chat_or_model_si
     assert payload["session_id"] == session["session_id"]
     assert payload["context_generation"] == 1
     assert payload["offset"] == len(duplicate) * 2
-    assert len({row["message_ref"] for row in payload["messages"]}) == 2
-    assert [row["source_sequence"] for row in payload["messages"]] == [0, len(duplicate)]
+    assert len({row["message_ref"] for row in payload["messages"]}) == 3
+    assert payload["messages"][0]["text"] == "private request body"
+    assert payload["messages"][0]["canonical"] is True
+    assert [row["source_sequence"] for row in payload["messages"][1:]] == [
+        0,
+        len(duplicate),
+    ]
     assert [run["request_id"] for run in payload["requests"]] == [accepted.request_id]
     assert "text" not in payload["requests"][0]
     assert payload["request_discovery_complete"] is True
     assert payload["activity_replay_durable"] is False
 
     polled = await entry(runtime, _wire(op="poll", offset=len(duplicate)), source_channel="workbench_api")
-    assert polled["projection"]["messages"] == payload["messages"][1:]
+    assert polled["projection"]["messages"] == payload["messages"][2:]
     assert _database_snapshot(tmp_path) == before
     assert path.read_bytes() == duplicate + duplicate
     assert not (tmp_path / "slash_command_audit.jsonl").exists()
@@ -133,7 +137,10 @@ async def test_projection_uses_current_binding_and_generation_for_messages_and_r
     payload = result["projection"]
     assert payload["session_id"] == fresh["session_id"]
     assert payload["context_generation"] == 2
-    assert [row["text"] for row in payload["messages"]] == ["current"]
+    assert [row["text"] for row in payload["messages"]] == [
+        "selected-run",
+        "current",
+    ]
     assert [run["request_id"] for run in payload["requests"]] == ["selected-run"]
 
 

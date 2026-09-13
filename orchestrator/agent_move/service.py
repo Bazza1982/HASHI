@@ -51,9 +51,11 @@ from orchestrator.telegram_delivery_state import (
     retire_agent_state,
     telegram_bot_fingerprint,
 )
+from orchestrator.session_store import SessionConflict, SessionStore
 
 from .package import (
     AGENT_MOVE_CAPABILITY,
+    CONVERSATION_CONTINUITY_CAPABILITY,
     AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
     MAX_UNPACKED_BYTES,
     MAX_TRANSFER_PACKAGE_BYTES,
@@ -106,6 +108,7 @@ def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
             TRANSFER_MODES_CAPABILITY,
             RETAINED_IDENTITY_CAPABILITY,
             AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
+            CONVERSATION_CONTINUITY_CAPABILITY,
         ],
         "package_type": "hashi-agent-move",
         "schema_min": PACKAGE_SCHEMA_MIN_VERSION,
@@ -124,6 +127,11 @@ def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
         "move_clone_lifecycle": True,
         "target_id_suffixing": True,
         "clone_without_telegram": True,
+        "conversation_continuity": {
+            "version": 1,
+            "move_default": "move",
+            "clone_modes": ["none", "inherit_read_only", "copy"],
+        },
         "max_access_scope": _target_max_access_scope(root),
     }
 
@@ -255,6 +263,12 @@ def stage_agent_move(
         )
         if target == source and transfer_operation != "clone":
             raise AgentMoveError("source and target HASHI instances must be different")
+        if package.conversation_continuity is not None:
+            target_owner = _configured_session_owner_id(root)
+            if str(package.conversation_continuity.get("owner_id") or "") != target_owner:
+                raise AgentMoveError(
+                    "conversation continuity owner does not match the target authorized owner"
+                )
         if "secrets/agent.enc" in package.names:
             # Decrypt during staging so a bad/mismatched shared key fails before
             # any target configuration is touched.
@@ -343,6 +357,10 @@ def stage_agent_move(
                 "sha256": digest,
                 "package_bytes": size,
                 "package_schema": package.manifest.get("schema_version"),
+                "history_mode": package.manifest.get("history_mode"),
+                "conversation_continuity_summary": package.manifest.get(
+                    "conversation_continuity_summary"
+                ),
                 "status": "staged",
                 "staged_at": utc_now_iso(),
                 "credential_status": credential_status,
@@ -398,6 +416,8 @@ def commit_agent_move(
                 "rolled-back Agent move packages cannot be committed again"
             )
         if record.get("status") == "committing":
+            if str(record.get("history_mode") or "none") != "none":
+                _rollback_target_conversation_continuity(root, str(package_id))
             _restore_recovery_snapshots(root, record_dir)
             _recover_interrupted_workspace_commit(root, record_dir, record)
             record["status"] = "staged"
@@ -634,6 +654,32 @@ def commit_agent_move(
                         "reason": "no_telegram_bot_configured",
                     }
 
+            continuity_result: dict[str, Any]
+            if package.conversation_continuity is not None:
+                try:
+                    continuity_result = _session_store(root).import_conversation_continuity(
+                        package.conversation_continuity,
+                        owner_id=_configured_session_owner_id(root),
+                        agent_id=target_agent_id,
+                        transfer_id=package.package_id,
+                        history_mode=str(package.manifest.get("history_mode") or ""),
+                    )
+                except (SessionConflict, ValueError) as exc:
+                    raise AgentMoveError(
+                        f"conversation continuity import failed: {exc}"
+                    ) from exc
+            else:
+                continuity_result = {
+                    "transfer_id": package.package_id,
+                    "history_mode": str(
+                        package.manifest.get("history_mode") or "none"
+                    ),
+                    "target_session_ids": [],
+                    "created_session_ids": [],
+                    "imported_messages": 0,
+                    "replayed": False,
+                }
+
             credential_status = _credential_status(
                 root,
                 package,
@@ -665,6 +711,7 @@ def commit_agent_move(
                     ),
                     "credential_status": credential_status,
                     "telegram_delivery_state": delivery_result,
+                    "conversation_continuity": continuity_result,
                     "warnings": warnings,
                     "reboot_required": False,
                 }
@@ -682,10 +729,29 @@ def commit_agent_move(
                     )
                 except Exception:
                     pass
+            compensation_errors: list[str] = []
+            if package.conversation_continuity is not None:
+                try:
+                    _rollback_target_conversation_continuity(
+                        root,
+                        package.package_id,
+                    )
+                except Exception as compensation_exc:
+                    compensation_errors.append(
+                        "conversation continuity rollback failed: "
+                        f"{type(compensation_exc).__name__}: {compensation_exc}"
+                    )
+            # Configuration persistence conflicts are durability boundaries,
+            # not best-effort cleanup. Let either recovery helper surface its
+            # classified error and leave the durable journal in ``committing``.
             _restore_recovery_snapshots(root, record_dir)
             _recover_interrupted_workspace_commit(root, record_dir, record)
             record["status"] = "staged"
             record["last_error"] = str(exc)
+            if compensation_errors:
+                record["compensation_errors"] = compensation_errors
+            else:
+                record.pop("compensation_errors", None)
             _atomic_json(record_dir / "state.json", record, mode=0o600)
             raise
 
@@ -843,6 +909,8 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
         if status == "rolled_back":
             return _public_state(record)
         if status == "committing":
+            if str(record.get("history_mode") or "none") != "none":
+                _rollback_target_conversation_continuity(root, str(package_id))
             _restore_recovery_snapshots(root, record_dir)
             _recover_interrupted_workspace_commit(root, record_dir, record)
         elif status in {
@@ -866,6 +934,7 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
             record["status"] = "rolling_back"
             record.setdefault("rollback_started_at", utc_now_iso())
             _atomic_json(record_dir / "state.json", record, mode=0o600)
+            _rollback_target_conversation_continuity(root, str(package_id))
             if record.get("replaces_dormant_source"):
                 _restore_recovery_snapshots(root, record_dir)
                 _recover_interrupted_workspace_commit(root, record_dir, record)
@@ -875,6 +944,11 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
             raise AgentMoveError(
                 f"Agent move cannot be rolled back from status {status!r}"
             )
+        elif str(record.get("history_mode") or "none") != "none":
+            # A prior compensation failure can leave a fully journaled import
+            # behind while the config/workspace transaction safely returns to
+            # staged. Explicit rollback must still retire that import.
+            _rollback_target_conversation_continuity(root, str(package_id))
 
         if record.get("imported_agent_lifecycle_id"):
             retire_agent_state(
@@ -914,15 +988,26 @@ def deactivate_source_agent(
     package_id: str,
     *,
     target_instance: str,
+    history_mode: str | None = None,
 ) -> dict[str, Any]:
     """Disable the source config while retaining its complete workspace."""
 
     root = _root(hashi_root)
+    normalized_history_mode = str(history_mode or "none").strip().lower()
+    if normalized_history_mode not in {"none", "move"}:
+        raise AgentMoveError("source Move conversation history mode is invalid")
     with _mutation_lock(root):
         state_path = _source_state_path(root, package_id)
         state: dict[str, Any] | None = None
         if state_path.exists():
             state = _load_json(state_path)
+            journal_history_mode = str(
+                state.get("history_mode") or "none"
+            ).strip().lower()
+            if journal_history_mode != normalized_history_mode:
+                raise AgentMoveError(
+                    "source move conversation history mode conflicts with this move"
+                )
             if state.get("status") == "source_disabled_pending_reboot":
                 return state
             if (
@@ -1035,6 +1120,7 @@ def deactivate_source_agent(
                 "agent_id": agent_id,
                 "source_agent_lifecycle_id": source_lifecycle_id,
                 "target_instance": _normalize_instance(target_instance),
+                "history_mode": normalized_history_mode,
                 "previous_active": bool(row.get("is_active", True)),
                 "previous_transfer_fields": previous_transfer_fields,
                 "schedule_states": schedule_states,
@@ -1208,6 +1294,15 @@ def cleanup_source_agent(
         agent_id = str(state.get("agent_id") or "")
         if not agent_id:
             raise AgentMoveError("source cleanup journal has no Agent ID")
+        history_mode = str(state.get("history_mode") or "none").strip().lower()
+        if history_mode not in {"none", "move"}:
+            raise AgentMoveError("source cleanup conversation history mode is invalid")
+        # Resolve the configured owner before publishing any destructive source
+        # cleanup. An absent owner is a hard provenance boundary, not a reason to
+        # archive an inferred/default user's Sessions after config removal.
+        history_owner = (
+            _configured_session_owner_id(root) if history_mode == "move" else None
+        )
         agents_path = root / "agents.json"
         tasks_path = root / "tasks.json"
         secrets_path = root / "secrets.json"
@@ -1289,6 +1384,22 @@ def cleanup_source_agent(
         state.setdefault("cleanup_started_at", utc_now_iso())
         _atomic_json(state_path, state, mode=0o600)
         try:
+            if history_mode == "move":
+                history_retirement = _session_store(
+                    root
+                ).archive_agent_conversation_sessions(
+                    owner_id=str(history_owner),
+                    agent_id=agent_id,
+                    transfer_id=package_id,
+                )
+            else:
+                history_retirement = {
+                    "transfer_id": package_id,
+                    "session_ids": [],
+                    "replayed": False,
+                    "skipped": True,
+                }
+            state["conversation_history_retirement"] = history_retirement
             _atomic_json(agents_path, agents)
             _atomic_json(tasks_path, tasks)
             if secrets_path.exists() or source_secret_keys:
@@ -2059,6 +2170,39 @@ def _verify_target_import(
                 "target Agent capability differs from the committed import"
             )
 
+    continuity_status = None
+    if package.conversation_continuity is not None:
+        continuity_status = _session_store(root).conversation_continuity_import_status(
+            package_id
+        )
+        if continuity_status is None:
+            raise AgentMoveError(
+                "target conversation continuity import is missing"
+            )
+        expected_digest = str(
+            package.conversation_continuity.get("capsule_digest") or ""
+        )
+        if (
+            continuity_status.get("capsule_digest") != expected_digest
+            or continuity_status.get("owner_id") != _configured_session_owner_id(root)
+            or continuity_status.get("agent_id") != target_agent_id
+            or continuity_status.get("history_mode")
+            != str(package.manifest.get("history_mode") or "")
+        ):
+            raise AgentMoveError(
+                "target conversation continuity import differs from the package"
+            )
+        expected_messages = int(
+            (package.conversation_continuity.get("summary") or {}).get(
+                "eligible_message_count"
+            )
+            or 0
+        )
+        if int(continuity_status.get("satisfied_messages") or 0) != expected_messages:
+            raise AgentMoveError(
+                "target conversation continuity message count is incomplete"
+            )
+
     return {
         "registry": True,
         "runtime_online": True,
@@ -2066,6 +2210,10 @@ def _verify_target_import(
         "workspace_files": verified_files,
         "credentials": len(required),
         "disabled_schedules": verified_tasks,
+        "conversation_messages": int(
+            (continuity_status or {}).get("imported_messages") or 0
+        ),
+        "history_mode": str(package.manifest.get("history_mode") or "none"),
         "telegram_configured": bool(
             _record_operation(record) != "clone"
             and package.access_requirements.get("telegram_secret_included")
@@ -2552,6 +2700,36 @@ def _configured_instance_id(root: Path) -> str:
     return "HASHI"
 
 
+def _configured_session_owner_id(root: Path) -> str:
+    agents = _load_json(root / "agents.json")
+    global_config = agents.get("global") if isinstance(agents, Mapping) else {}
+    raw_owner = (global_config or {}).get("authorized_id") or 0
+    secrets = _load_json_or_default(root / "secrets.json", {})
+    if isinstance(secrets, Mapping):
+        raw_owner = secrets.get("authorized_telegram_id") or raw_owner
+    try:
+        owner_number = int(raw_owner)
+    except (TypeError, ValueError) as exc:
+        raise AgentMoveError("target authorized owner configuration is invalid") from exc
+    if owner_number <= 0:
+        raise AgentMoveError("target authorized conversation owner is not configured")
+    return f"user:{owner_number}"
+
+
+def _session_store(root: Path) -> SessionStore:
+    return SessionStore(
+        root / "state" / "sessions.sqlite3",
+        instance_id=_configured_instance_id(root),
+    )
+
+
+def _rollback_target_conversation_continuity(
+    root: Path,
+    package_id: str,
+) -> dict[str, Any]:
+    return _session_store(root).rollback_conversation_continuity(package_id)
+
+
 def _public_state(record: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {
         "schema_version",
@@ -2567,6 +2745,8 @@ def _public_state(record: Mapping[str, Any]) -> dict[str, Any]:
         "sha256",
         "package_bytes",
         "package_schema",
+        "history_mode",
+        "conversation_continuity_summary",
         "status",
         "staged_at",
         "committed_at",
@@ -2578,6 +2758,7 @@ def _public_state(record: Mapping[str, Any]) -> dict[str, Any]:
         "imported_task_ids",
         "credential_status",
         "telegram_delivery_state",
+        "conversation_continuity",
         "retained_identity",
         "replaces_dormant_source",
         "dormant_package_id",

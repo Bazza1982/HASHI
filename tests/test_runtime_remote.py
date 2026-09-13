@@ -180,6 +180,52 @@ async def test_move_show_options_edits_callback_message(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_clone_requires_explicit_history_choice_and_carries_it_to_execution(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = _runtime(tmp_path)
+    calls = []
+
+    async def _do_clone(runtime_arg, update, agent_id, target, instances, **kwargs):
+        assert runtime_arg is runtime
+        calls.append((agent_id, target, kwargs))
+
+    monkeypatch.setattr(runtime_remote, "do_clone", _do_clone)
+    update = SimpleNamespace(callback_query=_Query())
+    await runtime_remote.clone_show_history_options(
+        runtime, update, "zelda", "HASHI_TEST"
+    )
+    history_callbacks = [
+        button.callback_data
+        for row in update.callback_query.edits[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert any("inherit_read_only" in callback for callback in history_callbacks)
+    inherit_callback = next(
+        callback for callback in history_callbacks if "inherit_read_only" in callback
+    )
+
+    update.callback_query.data = inherit_callback
+    await runtime_remote.handle_clone_callback(runtime, update, SimpleNamespace())
+    execution_callbacks = [
+        button.callback_data
+        for row in update.callback_query.edits[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    execute_callback = next(
+        callback
+        for callback in execution_callbacks
+        if ":inherit_read_only:clone" in callback
+    )
+    update.callback_query.data = execute_callback
+    await runtime_remote.handle_clone_callback(runtime, update, SimpleNamespace())
+
+    assert calls[0][0:2] == ("zelda", "HASHI_TEST")
+    assert calls[0][2]["history_mode"] == "inherit_read_only"
+
+
+@pytest.mark.asyncio
 async def test_handle_move_callback_cancel(tmp_path):
     runtime = _runtime(tmp_path)
     update = SimpleNamespace(callback_query=_Query("move:cancel"))

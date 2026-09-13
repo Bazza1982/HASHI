@@ -1,8 +1,7 @@
 # HASHI Agent FYI
 
-This compact orientation is neither a task queue, authorization, nor proof of
-runtime adoption. `/fyi` reloads it with a revision; details remain in linked
-owner documents.
+This orientation is not a task queue, authorization, or adoption proof.
+`/fyi` reloads it; details remain in linked owner documents.
 
 ## Authority and engineering
 
@@ -41,12 +40,11 @@ memory. Local identity and credentials stay in ignored instance stores.
 Model/effort opt-ins belong in `allowed_backends`; shared compatibility belongs
 to the Function-owned backend registry.
 
-HASHI JSON writers use revision-aware persistence: compatible reads, UTF-8/LF,
-private validated candidates, locking, revision checks, synchronization, and
-atomic replacement. Display fallback is never writable state. Conflicts require
-a fresh operation, not blind retry; create-only publication proves absence.
-Only designated migrations accept legacy root arrays. Never restore stale bytes
-after a durability error. See [persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
+HASHI JSON writers use validated private candidates, locks, revisions, and
+atomic replacement. Display fallback is never writable; conflicts require a
+fresh operation, and durability errors never restore stale bytes. Only named
+migrations accept legacy roots. See
+[persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
 Workzones expose only exact enabled roots; mentioning a directory does not
 authorize recursive upload. Secrets, media bytes, and remote paths do not
@@ -168,15 +166,9 @@ localization, escaping, accurate scope/state, safe navigation, actionable
 errors. `/help` derives from registered metadata. Local status may fail while
 chat works; report it once without failing the Run.
 
-Workbench command menus reuse the authenticated Backend API admin-command endpoint
-and its existing `runtime.slash` Worker RPC. The Workbench server serializes a
-bounded, versioned operation into the endpoint's existing `command` string; the
-shared API and Supervisor have no menu-specific behavior, so one Agent
-`/reboot` adopts the backend Function change.
-The Worker projects existing registered commands and callbacks into bounded
-cards with opaque action IDs, current-policy, binding, revision and expiry
-checks; raw callback data stays server-side. Projection and replay state are
-memory-only, and governed profiles remain unsupported in v1. See
+Workbench command menus reuse authenticated `runtime.slash`; the Worker derives
+bounded cards from registered commands and keeps opaque, policy/binding/revision
+checked actions server-side. See
 [Frontend command interactions](FRONTEND_COMMAND_MENUS_V1.md).
 
 ## Move, Clone, jobs, and tools
@@ -189,6 +181,17 @@ not copy Telegram credentials, and imports Scheduler entries disabled.
 Identity-memory and workspace scopes remain explicit; full workspace uses the
 decimal 1 GB preflight. `accepted` is not `completed`. See
 [Agent Move](HASHI_AGENT_MOVE_V1.md).
+
+Move imports the exact owner's eligible formal history into SessionStore before
+target publication, never execution or media. Clone starts fresh unless the
+operator chooses an archived read-only view or independent context copy; both
+use new IDs and provenance. On `history_generation` change, replace the
+projection—never substitute a legacy workspace transcript.
+
+Remote discovery is not trust: mDNS exposes bounded hints/digests; full data
+requires mutual handshake. Distinguish `ready_empty`, `ready`, `starting`,
+`degraded`, and static-seed fallback. Token changes invalidate trust until
+re-handshake; never expose token material.
 
 Telegram delivery recovery belongs to an exact instance, Agent lifecycle ID,
 and fingerprinted Bot identity—not a reusable Agent name or token-key label.

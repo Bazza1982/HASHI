@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.stream_events import StreamEvent
-from orchestrator.chat_transcript_projection import read_chat_transcript
+from orchestrator.chat_transcript_projection import (
+    build_chat_projection,
+    read_chat_transcript,
+)
 from orchestrator.her_message_router import HERMessageRouter
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.session_store import SessionStore
@@ -66,13 +69,196 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     assert payload["session_id"] == session["session_id"]
     assert payload["context_generation"] == 1
     refs = [m["message_ref"] for m in payload["messages"]]
-    assert len(set(refs)) == 2
+    assert len(set(refs)) == 3
+    assert payload["messages"][0]["text"] == "hello"
+    assert payload["messages"][0]["canonical"] is True
     poll = SimpleNamespace(match_info={"name": "a"}, query={"offset": str(len(first.encode()))})
     increment = json.loads((await server.handle_transcript_poll(poll)).text)
     assert increment["messages"][0]["message_ref"] == refs[1]
     assert payload["requests"][0]["request_id"] == accepted.request_id
     assert payload["requests"][0]["session_id"] == session["session_id"]
     assert "text" not in payload["requests"][0]
+
+
+@pytest.mark.asyncio
+async def test_open_transcript_receives_history_generation_reset_after_continuity_import(
+    tmp_path: Path,
+):
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(
+        instance_id="HASHI3",
+        authorized_id=7,
+        deployment_profile="personal",
+    )
+    server.session_store = SessionStore(
+        tmp_path / "target.sqlite", instance_id="HASHI3"
+    )
+    server._runtime_map = lambda: {}
+    server._load_agent_rows = lambda: [{"name": "a", "workspace_dir": str(tmp_path)}]
+    target_session = server.session_store.resolve_session(
+        owner_id="user:7",
+        agent_id="a",
+        surface="workbench",
+        channel_key="default",
+    )
+    target_run = server.session_store.accept_run(
+        session_id=target_session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="target-new",
+        text="new target question",
+        source="workbench",
+        idempotency_key="target-new",
+    )
+    server.session_store.mark_request_running(
+        target_run.request_id, worker_id="fixture"
+    )
+    server.session_store.finish_request(
+        target_run.request_id,
+        success=True,
+        assistant_text="new target answer",
+        assistant_source="fixture",
+    )
+    initial = json.loads(
+        (
+            await server.handle_transcript_recent(
+                SimpleNamespace(match_info={"name": "a"}, query={})
+            )
+        ).text
+    )
+    assert initial["history_generation"] == 1
+
+    source = SessionStore(tmp_path / "source.sqlite", instance_id="HASHI2")
+    source_session = source.ensure_default_session(owner_id="user:7", agent_id="a")
+    source_run = source.accept_run(
+        session_id=source_session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="source-old",
+        text="old source question",
+        source="workbench",
+        idempotency_key="source-old",
+    )
+    source.mark_request_running(source_run.request_id, worker_id="fixture")
+    source.finish_request(
+        source_run.request_id,
+        success=True,
+        assistant_text="old source answer",
+        assistant_source="fixture",
+    )
+    capsule = source.export_conversation_continuity(
+        owner_id="user:7",
+        agent_id="a",
+        source_instance="HASHI2",
+        transfer_id="open-page-reset",
+        history_mode="move",
+    )
+    server.session_store.import_conversation_continuity(
+        capsule,
+        owner_id="user:7",
+        agent_id="a",
+        transfer_id="open-page-reset",
+        history_mode="move",
+    )
+
+    reset = json.loads(
+        (
+            await server.handle_transcript_poll(
+                SimpleNamespace(
+                    match_info={"name": "a"},
+                    query={
+                        "offset": str(initial["offset"]),
+                        "history_generation": str(initial["history_generation"]),
+                    },
+                )
+            )
+        ).text
+    )
+
+    assert reset["history_generation"] == 2
+    assert reset["history_reset"] is True
+    assert reset["cursor_reset"] is True
+    assert [item["text"] for item in reset["messages"]] == [
+        "old source question",
+        "old source answer",
+        "new target question",
+        "new target answer",
+    ]
+    assert len({item["message_ref"] for item in reset["messages"]}) == 4
+
+
+def test_canonical_snapshot_keeps_transcript_only_thinking_between_run_messages(
+    tmp_path: Path,
+):
+    store = SessionStore(tmp_path / "ordered.sqlite", instance_id="HASHI3")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="a")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="ordered",
+        text="question",
+        source="workbench",
+        idempotency_key="ordered",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="answer",
+        assistant_source="fixture",
+    )
+    workspace = store.session_workspace(
+        session["session_id"], session["context_generation"]
+    )
+    workspace.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "role": "user",
+            "text": "question",
+            "message_ref": f"run:{accepted.run_id}:user",
+        },
+        {"role": "thinking", "text": "working"},
+        {
+            "role": "assistant",
+            "text": "answer",
+            "message_ref": f"run:{accepted.run_id}:assistant",
+        },
+    ]
+    (workspace / "transcript.jsonl").write_text(
+        "".join(json.dumps(item) + "\n" for item in rows),
+        encoding="utf-8",
+    )
+
+    payload = build_chat_projection(
+        store,
+        session=store.get_session(session["session_id"]),
+        owner_id="user:7",
+    )
+
+    assert [item["text"] for item in payload["messages"]] == [
+        "question",
+        "working",
+        "answer",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["bad", "0", "-1"])
+async def test_transcript_poll_rejects_invalid_history_generation(
+    tmp_path: Path,
+    value: str,
+):
+    server = _server(tmp_path)
+    response = await server.handle_transcript_poll(
+        SimpleNamespace(
+            match_info={"name": "a"},
+            query={"offset": "0", "history_generation": value},
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error_code"] == "invalid_history_generation"
 
 
 def _server(tmp_path: Path):

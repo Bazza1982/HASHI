@@ -166,6 +166,144 @@ function Get-RemotePort {
     return 8766
 }
 
+function Get-RemoteUseTls {
+    if ($NoTls -or $env:HASHI_REMOTE_NO_TLS -eq "1") {
+        return $false
+    }
+    $ConfigPath = Join-Path $HashiRoot "remote\config.yaml"
+    if (Test-Path $ConfigPath) {
+        $Match = Select-String -Path $ConfigPath -Pattern '^\s*use_tls:\s*(true|false|yes|no|1|0)\s*(?:#.*)?$' |
+            Select-Object -First 1
+        if ($Match -and $Match.Matches.Count -gt 0) {
+            return $Match.Matches[0].Groups[1].Value -match '^(?i:true|yes|1)$'
+        }
+    }
+    return $true
+}
+
+function Get-RemoteHealthProbe {
+    param([int]$EffectivePort)
+
+    $Schemes = if (Get-RemoteUseTls) { @("https", "http") } else { @("http") }
+    $LastError = $null
+    foreach ($Scheme in $Schemes) {
+        $Uri = "${Scheme}://127.0.0.1:$EffectivePort/health"
+        $PreviousCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        try {
+            if ($Scheme -eq "https") {
+                # The bundled Remote certificate is local and self-signed. This
+                # callback is scoped to this short-lived controller process and
+                # the loopback health URL only.
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+            }
+            $Health = Invoke-RestMethod -Method Get -Uri $Uri -TimeoutSec 2
+            return [PSCustomObject]@{
+                Health = $Health
+                Uri = $Uri
+                Error = $null
+            }
+        } catch {
+            $LastError = $_.Exception.Message
+        } finally {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $PreviousCertificateCallback
+        }
+    }
+    return [PSCustomObject]@{
+        Health = $null
+        Uri = $null
+        Error = $LastError
+    }
+}
+
+function Get-RemoteHealthAcceptance {
+    param($Probe)
+
+    $Health = if ($null -ne $Probe) { $Probe.Health } else { $null }
+    if ($null -eq $Health) {
+        return [PSCustomObject]@{
+            Accepted = $false
+            Mode = "unreachable"
+            Reason = if ($Probe -and $Probe.Error) { $Probe.Error } else { "Remote health is unreachable" }
+        }
+    }
+    $ActualInstance = [string]$Health.instance.instance_id
+    if (-not $ActualInstance.Equals(
+        [string]$SupervisorIdentity.instance_id,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        return [PSCustomObject]@{
+            Accepted = $false
+            Mode = "wrong_instance"
+            Reason = "Health endpoint belongs to '$ActualInstance', not '$($SupervisorIdentity.instance_id)'"
+        }
+    }
+
+    $Discovery = $Health.discovery
+    if ($null -eq $Discovery) {
+        return [PSCustomObject]@{
+            Accepted = $false
+            Mode = "discovery_unavailable"
+            Reason = "Remote health did not expose discovery state"
+        }
+    }
+    $Backends = @($Discovery.backends)
+    $Advertising = $Backends.Count -gt 0 -and
+        @($Backends | Where-Object { $_.advertising -ne $true }).Count -eq 0
+    $Browsing = $Backends.Count -gt 0 -and
+        @($Backends | Where-Object { $_.browsing -ne $true }).Count -eq 0
+    $State = [string]$Discovery.state
+    $Readiness = [string]$Discovery.readiness
+    $TrustState = [string]$Discovery.trust_state
+    $PeerCount = [int]($Discovery.peer_count)
+    $TrustedPeerCount = [int]($Discovery.trusted_peer_count)
+    if ([string]$Health.status -ne "ready" -or $Readiness -ne "ready" -or -not $Advertising -or -not $Browsing) {
+        return [PSCustomObject]@{
+            Accepted = $false
+            Mode = if ($State) { $State } else { "degraded" }
+            Reason = "discovery is not ready (state=$State advertising=$Advertising browsing=$Browsing)"
+        }
+    }
+    if ($PeerCount -eq 0 -and $TrustState -eq "no_peers" -and $State -eq "ready_empty") {
+        return [PSCustomObject]@{
+            Accepted = $true
+            Mode = "ready_empty"
+            Reason = "advertising and browsing are ready; no peer is currently visible"
+        }
+    }
+    if ($TrustedPeerCount -gt 0 -and $TrustState -eq "accepted" -and $State -eq "ready") {
+        return [PSCustomObject]@{
+            Accepted = $true
+            Mode = "trusted_peer"
+            Reason = "$TrustedPeerCount trusted peer handshake(s) accepted"
+        }
+    }
+    return [PSCustomObject]@{
+        Accepted = $false
+        Mode = if ($TrustState) { $TrustState } else { "trust_unknown" }
+        Reason = "peer discovery has no accepted trusted handshake (peers=$PeerCount trusted=$TrustedPeerCount trust=$TrustState)"
+    }
+}
+
+function Wait-RemoteHealthAcceptance {
+    param([int]$EffectivePort)
+
+    $LastAcceptance = $null
+    for ($Attempt = 0; $Attempt -lt 24; $Attempt++) {
+        $Probe = Get-RemoteHealthProbe -EffectivePort $EffectivePort
+        $Acceptance = Get-RemoteHealthAcceptance -Probe $Probe
+        if ($Acceptance.Accepted) {
+            Write-Host "Remote startup accepted: $($Acceptance.Mode) - $($Acceptance.Reason)"
+            return $Acceptance
+        }
+        $LastAcceptance = $Acceptance
+        if ($Attempt -lt 23) {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    $Reason = if ($LastAcceptance) { $LastAcceptance.Reason } else { "health unavailable" }
+    throw "Remote startup acceptance failed: $Reason"
+}
+
 function Test-OwnedRemoteCommandLine {
     param([string]$CommandLine)
 
@@ -245,6 +383,18 @@ function Show-RemoteDoctor {
     if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
         $WslStatus = (& wsl.exe --status 2>$null) -join "`n"
     }
+    $Probe = Get-RemoteHealthProbe -EffectivePort $EffectivePort
+    $Health = $Probe.Health
+    $HealthError = $Probe.Error
+    $Acceptance = Get-RemoteHealthAcceptance -Probe $Probe
+    $Discovery = if ($null -ne $Health) { $Health.discovery } else { $null }
+    $Backends = if ($null -ne $Discovery) { @($Discovery.backends) } else { @() }
+    $Advertising = if ($Backends.Count -gt 0) {
+        @($Backends | Where-Object { $_.advertising -ne $true }).Count -eq 0
+    } else { $false }
+    $Browsing = if ($Backends.Count -gt 0) {
+        @($Backends | Where-Object { $_.browsing -ne $true }).Count -eq 0
+    } else { $false }
     [PSCustomObject]@{
         HashiRoot = $HashiRoot
         RemotePort = $EffectivePort
@@ -253,8 +403,27 @@ function Show-RemoteDoctor {
         FirewallRules = @($FirewallRules | Select-Object -ExpandProperty DisplayName)
         WslAvailable = [bool](Get-Command wsl.exe -ErrorAction SilentlyContinue)
         WslStatus = $WslStatus
+        RemoteReachable = $null -ne $Health
+        RemoteHealthUri = $Probe.Uri
+        RemoteHealthState = if ($null -ne $Health) { $Health.status } else { "unreachable" }
+        RemoteHealthMode = $Acceptance.Mode
+        RemoteAccepted = [bool]$Acceptance.Accepted
+        AcceptanceReason = $Acceptance.Reason
+        DiscoveryState = if ($null -ne $Discovery) { $Discovery.state } else { "unavailable" }
+        DiscoveryReadiness = if ($null -ne $Discovery) { $Discovery.readiness } else { "unavailable" }
+        Advertising = $Advertising
+        Browsing = $Browsing
+        PeerCount = if ($null -ne $Discovery) { $Discovery.peer_count } else { 0 }
+        TrustState = if ($null -ne $Discovery) { $Discovery.trust_state } else { "unknown" }
+        TrustedPeerCount = if ($null -ne $Discovery) { $Discovery.trusted_peer_count } else { 0 }
+        StaticSeedFallbackActive = if ($null -ne $Discovery) { $Discovery.static_seed_fallback_active } else { $false }
+        DiscoveryErrors = @($Backends | Where-Object { $_.last_error } | ForEach-Object { "$($_.backend): $($_.last_error)" })
+        HealthError = $HealthError
         Command = $CommandPreview
     } | Format-List
+    if (-not $Acceptance.Accepted) {
+        exit 2
+    }
 }
 
 switch ($Action) {
@@ -265,6 +434,7 @@ switch ($Action) {
         Register-HashiRemoteSupervisor
         Enable-ScheduledTask -TaskName $TaskName | Out-Null
         Start-ScheduledTask -TaskName $TaskName
+        Wait-RemoteHealthAcceptance -EffectivePort (Get-RemotePort) | Out-Null
         Write-Host "Activated Remote supervisor task '$TaskName'"
     }
     "disable" {
@@ -281,6 +451,7 @@ switch ($Action) {
         $ResolvedPrincipal = Resolve-RemoteTaskPrincipal
         Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
         Start-ScheduledTask -TaskName $TaskName
+        Wait-RemoteHealthAcceptance -EffectivePort (Get-RemotePort) | Out-Null
     }
     "stop" {
         Stop-RemoteSupervisor
@@ -290,6 +461,7 @@ switch ($Action) {
         Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
         Stop-RemoteSupervisor
         Start-ScheduledTask -TaskName $TaskName
+        Wait-RemoteHealthAcceptance -EffectivePort (Get-RemotePort) | Out-Null
     }
     "status" {
         $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

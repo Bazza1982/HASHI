@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import sqlite3
 import threading
@@ -26,6 +27,11 @@ from orchestrator.storage_profile import removable_storage_profile
 TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "stopped", "superseded", "interrupted"}
 )
+CONVERSATION_CONTINUITY_TYPE = "hashi.conversation-continuity"
+CONVERSATION_CONTINUITY_VERSION = 1
+CONVERSATION_HISTORY_MODES = frozenset({"move", "copy", "inherit_read_only"})
+MAX_CONTINUITY_SESSIONS = 500
+MAX_CONTINUITY_MESSAGES = 100_000
 
 
 def _utc_now() -> str:
@@ -48,6 +54,31 @@ def _json_object(value: str | None) -> dict[str, Any]:
     return dict(decoded) if isinstance(decoded, Mapping) else {}
 
 
+def conversation_continuity_digest(payload: Mapping[str, Any]) -> str:
+    body = {key: value for key, value in payload.items() if key != "capsule_digest"}
+    return hashlib.sha256(_json(body).encode("utf-8")).hexdigest()
+
+
+def _continuity_origin_ref(
+    *,
+    source_instance: str,
+    source_session_id: str,
+    source_message_id: str,
+    source_ordinal: int,
+    content_hash: str,
+) -> str:
+    basis = "\n".join(
+        (
+            str(source_instance).strip().upper(),
+            str(source_session_id),
+            str(source_message_id),
+            str(int(source_ordinal)),
+            str(content_hash).lower(),
+        )
+    )
+    return "origin:" + hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
 class SessionStoreError(RuntimeError):
     code = "session_store_error"
 
@@ -68,6 +99,197 @@ class StaleFencingToken(SessionConflict):
     code = "stale_fencing_token"
 
 
+def validate_conversation_continuity_capsule(
+    capsule: Mapping[str, Any],
+    *,
+    owner_id: str | None = None,
+    source_agent_id: str | None = None,
+    transfer_id: str | None = None,
+    history_mode: str | None = None,
+) -> dict[str, Any]:
+    """Validate and normalize one portable, execution-free history capsule."""
+
+    if not isinstance(capsule, Mapping):
+        raise SessionConflict("conversation continuity capsule must be an object")
+    payload = dict(capsule)
+    if payload.get("type") != CONVERSATION_CONTINUITY_TYPE:
+        raise SessionConflict("conversation continuity capsule type is invalid")
+    if payload.get("schema_version") != CONVERSATION_CONTINUITY_VERSION:
+        raise SessionConflict("conversation continuity capsule version is unsupported")
+
+    capsule_owner = str(payload.get("owner_id") or "").strip()
+    capsule_agent = str(payload.get("agent_id") or "").strip().lower()
+    capsule_transfer = str(payload.get("transfer_id") or "").strip()
+    capsule_mode = str(payload.get("history_mode") or "").strip().lower()
+    source_instance = str(payload.get("source_instance") or "").strip().upper()
+    if not all((capsule_owner, capsule_agent, capsule_transfer, source_instance)):
+        raise SessionConflict("conversation continuity identity is incomplete")
+    if capsule_mode not in CONVERSATION_HISTORY_MODES:
+        raise SessionConflict("conversation continuity history mode is invalid")
+    if owner_id is not None and capsule_owner != str(owner_id).strip():
+        raise SessionConflict("conversation continuity owner does not match target owner")
+    if (
+        source_agent_id is not None
+        and capsule_agent != str(source_agent_id).strip().lower()
+    ):
+        raise SessionConflict("conversation continuity source Agent does not match")
+    if transfer_id is not None and capsule_transfer != str(transfer_id).strip():
+        raise SessionConflict("conversation continuity transfer identity does not match")
+    if history_mode is not None and capsule_mode != str(history_mode).strip().lower():
+        raise SessionConflict("conversation history mode does not match the capsule")
+
+    expected_digest = conversation_continuity_digest(payload)
+    capsule_digest = str(payload.get("capsule_digest") or "").lower()
+    if not capsule_digest or not hmac.compare_digest(expected_digest, capsule_digest):
+        raise SessionConflict("conversation continuity capsule digest does not match")
+
+    sessions = payload.get("sessions")
+    if not isinstance(sessions, list) or len(sessions) > MAX_CONTINUITY_SESSIONS:
+        raise SessionConflict("conversation continuity session count is invalid")
+    normalized_sessions: list[dict[str, Any]] = []
+    seen_sessions: set[str] = set()
+    seen_origins: set[str] = set()
+    message_count = 0
+    for raw_session in sessions:
+        if not isinstance(raw_session, Mapping):
+            raise SessionConflict("conversation continuity session is invalid")
+        source_session_id = str(raw_session.get("source_session_id") or "")
+        if not source_session_id or source_session_id in seen_sessions:
+            raise SessionConflict("conversation continuity source Session is duplicated")
+        seen_sessions.add(source_session_id)
+        raw_messages = raw_session.get("messages")
+        raw_bindings = raw_session.get("bindings")
+        if not isinstance(raw_messages, list) or not isinstance(raw_bindings, list):
+            raise SessionConflict("conversation continuity Session members are invalid")
+        normalized_messages: list[dict[str, Any]] = []
+        for raw_message in raw_messages:
+            if not isinstance(raw_message, Mapping):
+                raise SessionConflict("conversation continuity message is invalid")
+            item = dict(raw_message)
+            role = str(item.get("role") or "").lower()
+            content = item.get("content")
+            if role not in {"user", "assistant"}:
+                raise SessionConflict("conversation continuity message role is invalid")
+            if (
+                not isinstance(content, list)
+                or not all(
+                    isinstance(part, Mapping)
+                    and str(part.get("type") or "").casefold() == "text"
+                    and isinstance(part.get("text"), str)
+                    for part in content
+                )
+                or contains_persistent_inline_media(content)
+            ):
+                raise SessionConflict(
+                    "conversation continuity contains unsupported attachments"
+                )
+            item_source_instance = str(item.get("source_instance") or "").upper()
+            item_source_session = str(item.get("source_session_id") or "")
+            source_message_id = str(item.get("source_message_id") or "")
+            source_created_at = str(item.get("source_created_at") or "")
+            try:
+                source_ordinal = int(item.get("source_ordinal"))
+            except (TypeError, ValueError) as exc:
+                raise SessionConflict("conversation continuity ordinal is invalid") from exc
+            if not all(
+                (
+                    item_source_instance,
+                    item_source_session,
+                    source_message_id,
+                    source_created_at,
+                )
+            ) or source_ordinal < 1:
+                raise SessionConflict("conversation continuity message identity is incomplete")
+            content_json = _json([dict(part) for part in content])
+            content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
+            if not hmac.compare_digest(
+                content_hash,
+                str(item.get("content_hash") or "").lower(),
+            ):
+                raise SessionConflict("conversation continuity message content was changed")
+            origin_ref = _continuity_origin_ref(
+                source_instance=item_source_instance,
+                source_session_id=item_source_session,
+                source_message_id=source_message_id,
+                source_ordinal=source_ordinal,
+                content_hash=content_hash,
+            )
+            if not hmac.compare_digest(origin_ref, str(item.get("origin_ref") or "")):
+                raise SessionConflict("conversation continuity origin reference is invalid")
+            if origin_ref in seen_origins:
+                raise SessionConflict("conversation continuity message is duplicated")
+            seen_origins.add(origin_ref)
+            item.update(
+                {
+                    "role": role,
+                    "content": [dict(part) for part in content],
+                    "content_json": content_json,
+                    "content_hash": content_hash,
+                    "origin_ref": origin_ref,
+                    "source_instance": item_source_instance,
+                    "source_session_id": item_source_session,
+                    "source_message_id": source_message_id,
+                    "source_created_at": source_created_at,
+                    "source_ordinal": source_ordinal,
+                    "text": str(item.get("text") or ""),
+                    "source": str(item.get("source") or "unknown"),
+                }
+            )
+            normalized_messages.append(item)
+            message_count += 1
+            if message_count > MAX_CONTINUITY_MESSAGES:
+                raise SessionConflict("conversation continuity message count is too large")
+        bindings: list[dict[str, str]] = []
+        seen_bindings: set[tuple[str, str]] = set()
+        for raw_binding in raw_bindings:
+            if not isinstance(raw_binding, Mapping):
+                raise SessionConflict("conversation continuity binding is invalid")
+            surface = str(raw_binding.get("surface") or "").strip().lower()
+            channel_key = str(raw_binding.get("channel_key") or "").strip()
+            key = (surface, channel_key)
+            if not surface or not channel_key or key in seen_bindings:
+                raise SessionConflict(
+                    "conversation continuity binding is invalid or duplicated"
+                )
+            seen_bindings.add(key)
+            bindings.append({"surface": surface, "channel_key": channel_key})
+        normalized_sessions.append(
+            {
+                "source_session_id": source_session_id,
+                "title": str(raw_session.get("title") or "Imported history")[:500],
+                "title_source": str(raw_session.get("title_source") or "system"),
+                "status": str(raw_session.get("status") or "active"),
+                "is_default": bool(raw_session.get("is_default")),
+                "created_at": str(raw_session.get("created_at") or ""),
+                "bindings": bindings,
+                "messages": normalized_messages,
+            }
+        )
+
+    summary = payload.get("summary")
+    if not isinstance(summary, Mapping):
+        raise SessionConflict("conversation continuity summary is invalid")
+    if (
+        summary.get("session_count") != len(normalized_sessions)
+        or summary.get("eligible_message_count") != message_count
+        or summary.get("attachments_included") != 0
+        or not isinstance(summary.get("excluded_message_count"), int)
+        or isinstance(summary.get("excluded_message_count"), bool)
+        or int(summary.get("excluded_message_count")) < 0
+    ):
+        raise SessionConflict("conversation continuity summary does not match payload")
+    return {
+        "payload": payload,
+        "capsule_digest": capsule_digest,
+        "sessions": normalized_sessions,
+        "message_count": message_count,
+        "owner_id": capsule_owner,
+        "source_agent_id": capsule_agent,
+        "transfer_id": capsule_transfer,
+        "history_mode": capsule_mode,
+    }
+
+
 @dataclass(frozen=True)
 class AcceptedRun:
     session_id: str
@@ -86,7 +308,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(self, db_path: str | Path, *, instance_id: str = "HASHI"):
         self.db_path = Path(db_path)
@@ -158,6 +380,7 @@ class SessionStore:
                     workzone TEXT,
                     workzone_revision INTEGER NOT NULL DEFAULT 0,
                     revision INTEGER NOT NULL DEFAULT 1,
+                    history_generation INTEGER NOT NULL DEFAULT 1,
                     next_message_ordinal INTEGER NOT NULL DEFAULT 1,
                     next_event_sequence INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
@@ -341,6 +564,53 @@ class SessionStore:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_continuity_imports (
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    origin_ref TEXT NOT NULL,
+                    transfer_id TEXT NOT NULL,
+                    target_session_id TEXT NOT NULL,
+                    target_message_id TEXT NOT NULL UNIQUE,
+                    capsule_digest TEXT NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_id, agent_id, origin_ref),
+                    FOREIGN KEY(target_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(target_message_id) REFERENCES messages(message_id)
+                );
+                CREATE INDEX IF NOT EXISTS continuity_imports_transfer
+                    ON conversation_continuity_imports(transfer_id);
+
+                CREATE TABLE IF NOT EXISTS conversation_continuity_batches (
+                    transfer_id TEXT PRIMARY KEY,
+                    capsule_digest TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    history_mode TEXT NOT NULL,
+                    details_json TEXT NOT NULL,
+                    imported_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_continuity_origin_claims (
+                    transfer_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    origin_ref TEXT NOT NULL,
+                    claimed_at TEXT NOT NULL,
+                    PRIMARY KEY(transfer_id, owner_id, agent_id, origin_ref)
+                );
+                CREATE INDEX IF NOT EXISTS continuity_origin_claims_origin
+                    ON conversation_continuity_origin_claims(
+                        owner_id, agent_id, origin_ref
+                    );
+
+                CREATE TABLE IF NOT EXISTS conversation_continuity_retirements (
+                    transfer_id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    session_ids_json TEXT NOT NULL,
+                    retired_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS agent_memory_records (
@@ -555,6 +825,11 @@ class SessionStore:
                     "ALTER TABLE sessions ADD COLUMN "
                     "workzone_revision INTEGER NOT NULL DEFAULT 0"
                 )
+            if "history_generation" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN "
+                    "history_generation INTEGER NOT NULL DEFAULT 1"
+                )
             # One-time compatibility projection.  The former scalar Workzone
             # becomes the enabled ``main`` slot without changing the Session's
             # effective working directory.
@@ -566,6 +841,18 @@ class SessionStore:
                 SELECT session_id, 'main', workzone, 1, '', created_at, updated_at
                 FROM sessions
                 WHERE workzone IS NOT NULL AND TRIM(workzone) != ''
+                """
+            )
+            # Schema 7 originally recorded only the transfer that materialized
+            # an origin.  Preserve those installations as the first claimant
+            # when opening a database created by an earlier qualified build.
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO conversation_continuity_origin_claims(
+                    transfer_id, owner_id, agent_id, origin_ref, claimed_at
+                )
+                SELECT transfer_id, owner_id, agent_id, origin_ref, imported_at
+                FROM conversation_continuity_imports
                 """
             )
             connection.execute(
@@ -3112,6 +3399,1057 @@ class SessionStore:
                 ),
             ).fetchall()
         return [self._message_dict(row) for row in rows]
+
+    def recent_messages(
+        self,
+        session_id: str,
+        *,
+        owner_id: str | None = None,
+        context_generation: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return the newest canonical visible messages in display order."""
+
+        session = self.get_session(session_id, owner_id=owner_id)
+        generation = int(
+            context_generation
+            if context_generation is not None
+            else session["context_generation"]
+        )
+        bounded = max(1, min(int(limit), 1001))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM messages
+                WHERE session_id=? AND context_generation=?
+                  AND visibility='visible' AND history_eligible=1
+                ORDER BY ordinal DESC LIMIT ?
+                """,
+                (str(session_id), generation, bounded),
+            ).fetchall()
+        return [self._message_dict(row) for row in reversed(rows)]
+
+    def conversation_owner_ids(self, *, agent_id: str) -> list[str]:
+        """Return authoritative Session owners observed for one local Agent."""
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT owner_id FROM sessions
+                WHERE instance_id = ? AND agent_id = ? AND status != 'deleted'
+                ORDER BY owner_id
+                """,
+                (self.instance_id, str(agent_id).strip().lower()),
+            ).fetchall()
+        return [str(row["owner_id"]) for row in rows]
+
+    def export_conversation_continuity(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        source_instance: str,
+        transfer_id: str,
+        history_mode: str = "move",
+    ) -> dict[str, Any]:
+        """Export owner-checked visible history without carrying execution state."""
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().lower()
+        source = str(source_instance or "").strip().upper()
+        transfer = str(transfer_id or "").strip()
+        mode = str(history_mode or "").strip().lower()
+        if not owner or not agent or not transfer:
+            raise ValueError("owner_id, agent_id, and transfer_id are required")
+        if source != self.instance_id:
+            raise SessionConflict("conversation source instance does not match SessionStore")
+        if mode not in CONVERSATION_HISTORY_MODES:
+            raise ValueError("unsupported conversation history mode")
+
+        exported_sessions: list[dict[str, Any]] = []
+        eligible_count = 0
+        excluded_count = 0
+        seen_origins: set[str] = set()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN")
+            sessions = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                  AND status != 'deleted'
+                ORDER BY is_default DESC, created_at, session_id
+                """,
+                (self.instance_id, owner, agent),
+            ).fetchall()
+            for session in sessions:
+                session_id = str(session["session_id"])
+                bindings = connection.execute(
+                    """
+                    SELECT surface, channel_key FROM channel_bindings
+                    WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                      AND session_id = ?
+                    ORDER BY surface, channel_key
+                    """,
+                    (self.instance_id, owner, agent, session_id),
+                ).fetchall()
+                rows = connection.execute(
+                    """
+                    SELECT m.*, r.state AS run_state
+                    FROM messages AS m
+                    LEFT JOIN runs AS r ON r.run_id = m.run_id
+                    WHERE m.session_id = ?
+                      AND m.visibility = 'visible'
+                      AND m.history_eligible = 1
+                      AND m.role IN ('user', 'assistant')
+                      AND (m.run_id IS NULL OR r.state IN ('completed', 'failed',
+                           'stopped', 'superseded', 'interrupted'))
+                    ORDER BY m.ordinal
+                    """,
+                    (session_id,),
+                ).fetchall()
+                messages: list[dict[str, Any]] = []
+                all_message_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()[0]
+                )
+                for row in rows:
+                    try:
+                        content = json.loads(str(row["content_json"] or "[]"))
+                    except (TypeError, ValueError):
+                        excluded_count += 1
+                        continue
+                    if (
+                        not isinstance(content, list)
+                        or not all(
+                            isinstance(part, Mapping)
+                            and str(part.get("type") or "").strip().casefold() == "text"
+                            and isinstance(part.get("text"), str)
+                            for part in content
+                        )
+                        or contains_persistent_inline_media(content)
+                    ):
+                        excluded_count += 1
+                        continue
+                    existing_context = _json_object(row["message_context_json"])
+                    prior = existing_context.get("conversation_continuity")
+                    if not isinstance(prior, Mapping):
+                        prior = {}
+                    origin_instance = str(prior.get("source_instance") or source).upper()
+                    origin_session_id = str(prior.get("source_session_id") or session_id)
+                    origin_message_id = str(prior.get("source_message_id") or row["message_id"])
+                    origin_ordinal = int(prior.get("source_ordinal") or row["ordinal"])
+                    origin_created_at = str(prior.get("source_created_at") or row["created_at"])
+                    origin_ref = str(prior.get("origin_ref") or "") or _continuity_origin_ref(
+                        source_instance=origin_instance,
+                        source_session_id=origin_session_id,
+                        source_message_id=origin_message_id,
+                        source_ordinal=origin_ordinal,
+                        content_hash=str(row["content_hash"]),
+                    )
+                    if origin_ref in seen_origins:
+                        raise SessionConflict("duplicate conversation origin in source history")
+                    seen_origins.add(origin_ref)
+                    messages.append(
+                        {
+                            "origin_ref": origin_ref,
+                            "source_instance": origin_instance,
+                            "source_session_id": origin_session_id,
+                            "source_message_id": origin_message_id,
+                            "source_ordinal": origin_ordinal,
+                            "source_created_at": origin_created_at,
+                            "role": str(row["role"]),
+                            "source": str(row["source"]),
+                            "content": [dict(part) for part in content],
+                            "text": str(row["text"]),
+                            "content_hash": str(row["content_hash"]),
+                        }
+                    )
+                excluded_count += max(0, all_message_count - len(rows))
+                eligible_count += len(messages)
+                exported_sessions.append(
+                    {
+                        "source_session_id": session_id,
+                        "title": str(session["title"]),
+                        "title_source": str(session["title_source"]),
+                        "status": str(session["status"]),
+                        "is_default": bool(session["is_default"]),
+                        "created_at": str(session["created_at"]),
+                        "bindings": [
+                            {
+                                "surface": str(binding["surface"]),
+                                "channel_key": str(binding["channel_key"]),
+                            }
+                            for binding in bindings
+                        ],
+                        "messages": messages,
+                    }
+                )
+        capsule: dict[str, Any] = {
+            "type": CONVERSATION_CONTINUITY_TYPE,
+            "schema_version": CONVERSATION_CONTINUITY_VERSION,
+            "transfer_id": transfer,
+            "source_instance": source,
+            "owner_id": owner,
+            "agent_id": agent,
+            "history_mode": mode,
+            "sessions": exported_sessions,
+            "summary": {
+                "session_count": len(exported_sessions),
+                "eligible_message_count": eligible_count,
+                "excluded_message_count": excluded_count,
+                "attachments_included": 0,
+            },
+        }
+        capsule["capsule_digest"] = conversation_continuity_digest(capsule)
+        return capsule
+
+    def import_conversation_continuity(
+        self,
+        capsule: Mapping[str, Any],
+        *,
+        owner_id: str,
+        agent_id: str,
+        transfer_id: str,
+        history_mode: str,
+    ) -> dict[str, Any]:
+        """Atomically prepend validated history and retain stable import provenance."""
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().lower()
+        transfer = str(transfer_id or "").strip()
+        mode = str(history_mode or "").strip().lower()
+        if mode not in CONVERSATION_HISTORY_MODES:
+            raise ValueError("unsupported conversation history mode")
+        validated = validate_conversation_continuity_capsule(
+            capsule,
+            owner_id=owner,
+            transfer_id=transfer,
+            history_mode=mode,
+        )
+        payload = validated["payload"]
+        capsule_digest = str(validated["capsule_digest"])
+        normalized_sessions = list(validated["sessions"])
+        message_count = int(validated["message_count"])
+
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_batch = connection.execute(
+                "SELECT * FROM conversation_continuity_batches WHERE transfer_id = ?",
+                (transfer,),
+            ).fetchone()
+            if existing_batch is not None:
+                if (
+                    str(existing_batch["capsule_digest"]) != capsule_digest
+                    or str(existing_batch["owner_id"]) != owner
+                    or str(existing_batch["agent_id"]) != agent
+                    or str(existing_batch["history_mode"]) != mode
+                ):
+                    raise SessionConflict("conversation continuity transfer ID is already in use")
+                details = _json_object(existing_batch["details_json"])
+                return {
+                    **details,
+                    "imported_messages": 0,
+                    "replayed": True,
+                }
+
+            mapping: dict[str, str] = {}
+            created_session_ids: list[str] = []
+            state_before: dict[str, dict[str, Any]] = {}
+            binding_state_before: dict[str, str | None] = {}
+            binding_state_after: dict[str, str] = {}
+            origin_refs = [
+                str(message["origin_ref"])
+                for source_session in normalized_sessions
+                for message in source_session["messages"]
+            ]
+            existing_import_targets: dict[str, str] = {}
+            # Keep this below SQLite's common bind-variable limit while avoiding
+            # one lookup per message for large continuity capsules.
+            for offset in range(0, len(origin_refs), 400):
+                chunk = origin_refs[offset : offset + 400]
+                placeholders = ",".join("?" for _item in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT origin_ref, target_session_id
+                    FROM conversation_continuity_imports
+                    WHERE owner_id=? AND agent_id=?
+                      AND origin_ref IN ({placeholders})
+                    """,
+                    (owner, agent, *chunk),
+                ).fetchall()
+                existing_import_targets.update(
+                    {
+                        str(row["origin_ref"]): str(row["target_session_id"])
+                        for row in rows
+                    }
+                )
+
+            def current_default() -> sqlite3.Row | None:
+                return connection.execute(
+                    """
+                    SELECT * FROM sessions WHERE instance_id=? AND owner_id=?
+                      AND agent_id=? AND is_default=1
+                    """,
+                    (self.instance_id, owner, agent),
+                ).fetchone()
+
+            def create_target_session(source_session: Mapping[str, Any]) -> str:
+                session_id = _new_id("ses")
+                now = _utc_now()
+                read_only = mode == "inherit_read_only"
+                wants_default = bool(source_session.get("is_default")) and not read_only
+                is_default = bool(wants_default and current_default() is None)
+                status = "archived" if read_only else (
+                    "archived" if source_session.get("status") == "archived" else "active"
+                )
+                title = str(source_session.get("title") or "Imported history")
+                if read_only:
+                    title = f"{title} (inherited history)"
+                connection.execute(
+                    """
+                    INSERT INTO sessions(
+                        session_id, instance_id, owner_id, agent_id, title,
+                        title_source, status, is_default, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        self.instance_id,
+                        owner,
+                        agent,
+                        title[:500],
+                        str(source_session.get("title_source") or "system"),
+                        status,
+                        int(is_default),
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO session_participants(session_id, agent_id, created_at) VALUES (?, ?, ?)",
+                    (session_id, agent, now),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO session_context_generations(session_id, generation, reason, created_at)
+                    VALUES (?, 1, 'conversation_continuity_import', ?)
+                    """,
+                    (session_id, now),
+                )
+                self._append_event(
+                    connection,
+                    session_id=session_id,
+                    run_id=None,
+                    kind="session.created",
+                    status=status,
+                    summary="Session created for imported conversation history",
+                    detail={"history_mode": mode, "transfer_id": transfer},
+                )
+                created_session_ids.append(session_id)
+                return session_id
+
+            for source_session in normalized_sessions:
+                target_session_id = ""
+                claimed_target_ids = set(mapping.values())
+                if mode != "inherit_read_only":
+                    for binding in source_session["bindings"]:
+                        bound = connection.execute(
+                            """
+                            SELECT session_id FROM channel_bindings
+                            WHERE instance_id=? AND owner_id=? AND agent_id=?
+                              AND surface=? AND channel_key=?
+                            """,
+                            (
+                                self.instance_id,
+                                owner,
+                                agent,
+                                binding["surface"],
+                                binding["channel_key"],
+                            ),
+                        ).fetchone()
+                        candidate_session_id = (
+                            str(bound["session_id"])
+                            if bound is not None
+                            else ""
+                        )
+                        if (
+                            candidate_session_id
+                            and candidate_session_id not in claimed_target_ids
+                        ):
+                            target_session_id = candidate_session_id
+                            break
+                    if not target_session_id and source_session["is_default"]:
+                        default = current_default()
+                        candidate_session_id = (
+                            str(default["session_id"])
+                            if default is not None
+                            else ""
+                        )
+                        if candidate_session_id not in claimed_target_ids:
+                            target_session_id = candidate_session_id
+                if not target_session_id and source_session["messages"]:
+                    prior_targets = {
+                        existing_import_targets.get(str(message["origin_ref"]))
+                        for message in source_session["messages"]
+                    }
+                    prior_targets.discard(None)
+                    if (
+                        len(prior_targets) == 1
+                        and all(
+                            str(message["origin_ref"]) in existing_import_targets
+                            for message in source_session["messages"]
+                        )
+                    ):
+                        # A differently identified retry must not manufacture an
+                        # empty read-only archive after stable origins were
+                        # already satisfied for this owner and target Agent.
+                        target_session_id = str(next(iter(prior_targets)))
+                if not target_session_id:
+                    target_session_id = create_target_session(source_session)
+                mapping[source_session["source_session_id"]] = target_session_id
+
+                target_row = connection.execute(
+                    "SELECT * FROM sessions WHERE session_id=? AND instance_id=? AND owner_id=? AND agent_id=?",
+                    (target_session_id, self.instance_id, owner, agent),
+                ).fetchone()
+                if target_row is None:
+                    raise SessionConflict("conversation continuity target Session is not owned by the target")
+                state_before.setdefault(
+                    target_session_id,
+                    {
+                        "revision": int(target_row["revision"]),
+                        "history_generation": int(target_row["history_generation"]),
+                        "next_message_ordinal": int(target_row["next_message_ordinal"]),
+                        "updated_at": str(target_row["updated_at"]),
+                    },
+                )
+                if mode != "inherit_read_only" and str(target_row["status"]) == "active":
+                    for binding in source_session["bindings"]:
+                        binding_key = f"{binding['surface']}\u0000{binding['channel_key']}"
+                        if binding_key not in binding_state_before:
+                            previous = connection.execute(
+                                """
+                                SELECT session_id FROM channel_bindings
+                                WHERE instance_id=? AND owner_id=? AND agent_id=?
+                                  AND surface=? AND channel_key=?
+                                """,
+                                (
+                                    self.instance_id,
+                                    owner,
+                                    agent,
+                                    binding["surface"],
+                                    binding["channel_key"],
+                                ),
+                            ).fetchone()
+                            binding_state_before[binding_key] = (
+                                str(previous["session_id"])
+                                if previous is not None
+                                else None
+                            )
+                        connection.execute(
+                            """
+                            INSERT INTO channel_bindings(
+                                instance_id, owner_id, agent_id, surface,
+                                channel_key, session_id, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(instance_id, owner_id, agent_id, surface, channel_key)
+                            DO UPDATE SET session_id=excluded.session_id, updated_at=excluded.updated_at
+                            """,
+                            (
+                                self.instance_id,
+                                owner,
+                                agent,
+                                binding["surface"],
+                                binding["channel_key"],
+                                target_session_id,
+                                _utc_now(),
+                            ),
+                        )
+                        binding_state_after[binding_key] = target_session_id
+
+            by_target: dict[str, list[dict[str, Any]]] = {}
+            for source_session in normalized_sessions:
+                target_session_id = mapping[source_session["source_session_id"]]
+                by_target.setdefault(target_session_id, []).extend(source_session["messages"])
+
+            imported_count = 0
+            inserted_by_session: dict[str, int] = {}
+            imported_at = _utc_now()
+            for target_session_id, candidates in by_target.items():
+                new_messages = [
+                    item
+                    for item in candidates
+                    if str(item["origin_ref"]) not in existing_import_targets
+                ]
+                new_messages.sort(
+                    key=lambda item: (
+                        str(item.get("source_created_at") or ""),
+                        str(item.get("source_session_id") or ""),
+                        int(item.get("source_ordinal") or 0),
+                        str(item.get("origin_ref") or ""),
+                    )
+                )
+                count = len(new_messages)
+                inserted_by_session[target_session_id] = count
+                if not count:
+                    continue
+                bounds = connection.execute(
+                    "SELECT COALESCE(MAX(ordinal), 0) AS maximum FROM messages WHERE session_id=?",
+                    (target_session_id,),
+                ).fetchone()
+                maximum = int(bounds["maximum"])
+                shift = maximum + count + 1000
+                connection.execute(
+                    "UPDATE messages SET ordinal=ordinal+? WHERE session_id=?",
+                    (shift, target_session_id),
+                )
+                connection.execute(
+                    "UPDATE messages SET ordinal=ordinal-?+? WHERE session_id=?",
+                    (shift, count, target_session_id),
+                )
+                target_session = connection.execute(
+                    "SELECT context_generation FROM sessions WHERE session_id=?",
+                    (target_session_id,),
+                ).fetchone()
+                generation = int(target_session["context_generation"])
+                for ordinal, item in enumerate(new_messages, 1):
+                    message_id = _new_id("msg")
+                    provenance = {
+                        "schema_version": CONVERSATION_CONTINUITY_VERSION,
+                        "source_instance": item["source_instance"],
+                        "source_session_id": str(item["source_session_id"]),
+                        "source_message_id": str(item["source_message_id"]),
+                        "source_ordinal": int(item["source_ordinal"]),
+                        "source_created_at": str(item["source_created_at"]),
+                        "origin_ref": str(item["origin_ref"]),
+                        "transfer_id": transfer,
+                        "history_mode": mode,
+                    }
+                    author_id = owner if item["role"] == "user" else agent
+                    connection.execute(
+                        """
+                        INSERT INTO messages(
+                            message_id, session_id, run_id, ordinal,
+                            context_generation, role, author_id, source,
+                            message_context_json, content_json, text, visibility,
+                            history_eligible, content_hash, created_at
+                        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', 1, ?, ?)
+                        """,
+                        (
+                            message_id,
+                            target_session_id,
+                            ordinal,
+                            generation,
+                            item["role"],
+                            author_id,
+                            f"continuity:{str(item.get('source') or 'unknown')[:120]}",
+                            _json({"conversation_continuity": provenance}),
+                            item["content_json"],
+                            str(item.get("text") or ""),
+                            item["content_hash"],
+                            str(item.get("source_created_at") or imported_at),
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO conversation_continuity_imports(
+                            owner_id, agent_id, origin_ref, transfer_id,
+                            target_session_id, target_message_id,
+                            capsule_digest, imported_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            owner,
+                            agent,
+                            item["origin_ref"],
+                            transfer,
+                            target_session_id,
+                            message_id,
+                            capsule_digest,
+                            imported_at,
+                        ),
+                    )
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET next_message_ordinal=next_message_ordinal+?,
+                        revision=revision+1,
+                        history_generation=history_generation+1,
+                        updated_at=?
+                    WHERE session_id=?
+                    """,
+                    (count, imported_at, target_session_id),
+                )
+                self._append_event(
+                    connection,
+                    session_id=target_session_id,
+                    run_id=None,
+                    kind="session.history_imported",
+                    status="completed",
+                    phase="migration",
+                    summary="Conversation history imported",
+                    detail={
+                        "transfer_id": transfer,
+                        "history_mode": mode,
+                        "message_count": count,
+                        "source_instance": str(payload.get("source_instance") or ""),
+                    },
+                )
+                imported_count += count
+
+            details = {
+                "transfer_id": transfer,
+                "history_mode": mode,
+                "target_session_ids": sorted(set(mapping.values())),
+                "created_session_ids": created_session_ids,
+                "source_session_map": mapping,
+                "session_state_before": state_before,
+                "binding_state_before": binding_state_before,
+                "binding_state_after": binding_state_after,
+                "inserted_by_session": inserted_by_session,
+                "imported_messages": imported_count,
+                "satisfied_messages": message_count,
+                "deduplicated_messages": message_count - imported_count,
+                "replayed": False,
+            }
+            connection.execute(
+                """
+                INSERT INTO conversation_continuity_batches(
+                    transfer_id, capsule_digest, owner_id, agent_id,
+                    history_mode, details_json, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    transfer,
+                    capsule_digest,
+                    owner,
+                    agent,
+                    mode,
+                    _json(details),
+                    imported_at,
+                ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO conversation_continuity_origin_claims(
+                    transfer_id, owner_id, agent_id, origin_ref, claimed_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (transfer, owner, agent, origin_ref, imported_at)
+                    for origin_ref in origin_refs
+                ],
+            )
+            return details
+
+    def rollback_conversation_continuity(self, transfer_id: str) -> dict[str, Any]:
+        """Remove only one transfer's imported messages, preserving later target work."""
+        transfer = str(transfer_id or "").strip()
+        if not transfer:
+            raise ValueError("transfer_id is required")
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            batch = connection.execute(
+                "SELECT * FROM conversation_continuity_batches WHERE transfer_id=?",
+                (transfer,),
+            ).fetchone()
+            if batch is None:
+                return {"transfer_id": transfer, "removed_messages": 0, "replayed": True}
+            details = _json_object(batch["details_json"])
+            created = set(details.get("created_session_ids") or [])
+            connection.execute(
+                "DELETE FROM conversation_continuity_origin_claims WHERE transfer_id=?",
+                (transfer,),
+            )
+            imports = connection.execute(
+                """
+                SELECT * FROM conversation_continuity_imports
+                WHERE transfer_id=? ORDER BY target_session_id, target_message_id
+                """,
+                (transfer,),
+            ).fetchall()
+            by_session: dict[str, list[str]] = {}
+            retained_shared_messages = 0
+            replacement_sessions: dict[str, set[str]] = {}
+            for item in imports:
+                replacement = connection.execute(
+                    """
+                    SELECT claim.transfer_id, batch.capsule_digest
+                    FROM conversation_continuity_origin_claims AS claim
+                    JOIN conversation_continuity_batches AS batch
+                      ON batch.transfer_id = claim.transfer_id
+                    WHERE claim.owner_id=? AND claim.agent_id=?
+                      AND claim.origin_ref=?
+                    ORDER BY batch.imported_at, claim.transfer_id
+                    LIMIT 1
+                    """,
+                    (
+                        str(item["owner_id"]),
+                        str(item["agent_id"]),
+                        str(item["origin_ref"]),
+                    ),
+                ).fetchone()
+                if replacement is not None:
+                    replacement_transfer = str(replacement["transfer_id"])
+                    connection.execute(
+                        """
+                        UPDATE conversation_continuity_imports
+                        SET transfer_id=?, capsule_digest=?
+                        WHERE owner_id=? AND agent_id=? AND origin_ref=?
+                        """,
+                        (
+                            replacement_transfer,
+                            str(replacement["capsule_digest"]),
+                            str(item["owner_id"]),
+                            str(item["agent_id"]),
+                            str(item["origin_ref"]),
+                        ),
+                    )
+                    replacement_sessions.setdefault(
+                        replacement_transfer,
+                        set(),
+                    ).add(str(item["target_session_id"]))
+                    retained_shared_messages += 1
+                    continue
+                connection.execute(
+                    """
+                    DELETE FROM conversation_continuity_imports
+                    WHERE owner_id=? AND agent_id=? AND origin_ref=?
+                    """,
+                    (
+                        str(item["owner_id"]),
+                        str(item["agent_id"]),
+                        str(item["origin_ref"]),
+                    ),
+                )
+                by_session.setdefault(str(item["target_session_id"]), []).append(
+                    str(item["target_message_id"])
+                )
+
+            # If another transfer deduplicated against a Session created by the
+            # batch being rolled back, hand that cleanup responsibility (and
+            # the original binding predecessor) to every remaining claimant.
+            for replacement_transfer, session_ids in replacement_sessions.items():
+                replacement_batch = connection.execute(
+                    """
+                    SELECT details_json FROM conversation_continuity_batches
+                    WHERE transfer_id=?
+                    """,
+                    (replacement_transfer,),
+                ).fetchone()
+                if replacement_batch is None:
+                    raise SessionConflict(
+                        "conversation continuity replacement journal is missing"
+                    )
+                replacement_details = _json_object(
+                    replacement_batch["details_json"]
+                )
+                inherited_created = set(
+                    replacement_details.get("created_session_ids") or []
+                )
+                inherited_created.update(created.intersection(session_ids))
+                replacement_details["created_session_ids"] = sorted(
+                    inherited_created
+                )
+                current_before = dict(details.get("binding_state_before") or {})
+                current_after = dict(details.get("binding_state_after") or {})
+                replacement_before = dict(
+                    replacement_details.get("binding_state_before") or {}
+                )
+                replacement_after = dict(
+                    replacement_details.get("binding_state_after") or {}
+                )
+                for key, target_session_id in current_after.items():
+                    if (
+                        str(target_session_id) in session_ids
+                        and replacement_after.get(key) == target_session_id
+                        and replacement_before.get(key) == target_session_id
+                    ):
+                        replacement_before[key] = current_before.get(key)
+                replacement_details["binding_state_before"] = replacement_before
+                connection.execute(
+                    """
+                    UPDATE conversation_continuity_batches SET details_json=?
+                    WHERE transfer_id=?
+                    """,
+                    (_json(replacement_details), replacement_transfer),
+                )
+            for message_ids in by_session.values():
+                connection.executemany(
+                    "DELETE FROM messages WHERE message_id=?",
+                    [(message_id,) for message_id in message_ids],
+                )
+
+            empty_created_sessions: list[str] = []
+            for session_id in set(details.get("target_session_ids") or []) | set(by_session):
+                session = connection.execute(
+                    "SELECT * FROM sessions WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if session is None:
+                    continue
+                remaining = connection.execute(
+                    "SELECT message_id FROM messages WHERE session_id=? ORDER BY ordinal",
+                    (session_id,),
+                ).fetchall()
+                if session_id in created and not remaining:
+                    empty_created_sessions.append(session_id)
+                    continue
+                high = len(remaining) + 1_000_000
+                for index, row in enumerate(remaining, 1):
+                    connection.execute(
+                        "UPDATE messages SET ordinal=? WHERE message_id=?",
+                        (high + index, str(row["message_id"])),
+                    )
+                for index, row in enumerate(remaining, 1):
+                    connection.execute(
+                        "UPDATE messages SET ordinal=? WHERE message_id=?",
+                        (index, str(row["message_id"])),
+                    )
+                connection.execute(
+                    """
+                    UPDATE sessions SET next_message_ordinal=?, revision=revision+1,
+                        history_generation=history_generation+1, updated_at=?
+                    WHERE session_id=?
+                    """,
+                    (len(remaining) + 1, _utc_now(), session_id),
+                )
+            binding_state_after = dict(details.get("binding_state_after") or {})
+            for key, previous_session_id in dict(
+                details.get("binding_state_before") or {}
+            ).items():
+                surface, separator, channel_key = str(key).partition("\u0000")
+                if not separator:
+                    raise SessionConflict(
+                        "conversation continuity rollback binding journal is invalid"
+                    )
+                expected_session_id = str(binding_state_after.get(key) or "")
+                if expected_session_id:
+                    current_binding = connection.execute(
+                        """
+                        SELECT session_id FROM channel_bindings
+                        WHERE instance_id=? AND owner_id=? AND agent_id=?
+                          AND surface=? AND channel_key=?
+                        """,
+                        (
+                            self.instance_id,
+                            str(batch["owner_id"]),
+                            str(batch["agent_id"]),
+                            surface,
+                            channel_key,
+                        ),
+                    ).fetchone()
+                    current_session_id = (
+                        str(current_binding["session_id"])
+                        if current_binding is not None
+                        else ""
+                    )
+                    if current_session_id != expected_session_id:
+                        # A user or later operation has rebound this channel.
+                        # The rollback owns only the value it published.
+                        continue
+                    remaining_claim = connection.execute(
+                        """
+                        SELECT 1
+                        FROM conversation_continuity_origin_claims AS claim
+                        JOIN conversation_continuity_imports AS imported
+                          ON imported.owner_id = claim.owner_id
+                         AND imported.agent_id = claim.agent_id
+                         AND imported.origin_ref = claim.origin_ref
+                        WHERE claim.owner_id=? AND claim.agent_id=?
+                          AND imported.target_session_id=?
+                        LIMIT 1
+                        """,
+                        (
+                            str(batch["owner_id"]),
+                            str(batch["agent_id"]),
+                            expected_session_id,
+                        ),
+                    ).fetchone()
+                    if remaining_claim is not None:
+                        continue
+                if previous_session_id:
+                    connection.execute(
+                        """
+                        INSERT INTO channel_bindings(
+                            instance_id, owner_id, agent_id, surface,
+                            channel_key, session_id, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(instance_id, owner_id, agent_id, surface, channel_key)
+                        DO UPDATE SET session_id=excluded.session_id,
+                                      updated_at=excluded.updated_at
+                        """,
+                        (
+                            self.instance_id,
+                            str(batch["owner_id"]),
+                            str(batch["agent_id"]),
+                            surface,
+                            channel_key,
+                            str(previous_session_id),
+                            _utc_now(),
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        DELETE FROM channel_bindings
+                        WHERE instance_id=? AND owner_id=? AND agent_id=?
+                          AND surface=? AND channel_key=?
+                        """,
+                        (
+                            self.instance_id,
+                            str(batch["owner_id"]),
+                            str(batch["agent_id"]),
+                            surface,
+                            channel_key,
+                        ),
+                    )
+            for session_id in empty_created_sessions:
+                for table in (
+                    "delivery_outbox",
+                    "event_consumers",
+                    "run_events",
+                    "session_workzones",
+                    "session_participants",
+                    "session_context_generations",
+                    "channel_bindings",
+                ):
+                    connection.execute(
+                        f"DELETE FROM {table} WHERE session_id=?",
+                        (session_id,),
+                    )
+                connection.execute(
+                    "DELETE FROM sessions WHERE session_id=?",
+                    (session_id,),
+                )
+            connection.execute(
+                "DELETE FROM conversation_continuity_batches WHERE transfer_id=?",
+                (transfer,),
+            )
+            return {
+                "transfer_id": transfer,
+                "removed_messages": sum(len(items) for items in by_session.values()),
+                "retained_shared_messages": retained_shared_messages,
+                "replayed": False,
+            }
+
+    def conversation_continuity_import_status(
+        self,
+        transfer_id: str,
+    ) -> dict[str, Any] | None:
+        transfer = str(transfer_id or "").strip()
+        if not transfer:
+            raise ValueError("transfer_id is required")
+        with self._lock, self._connection() as connection:
+            batch = connection.execute(
+                "SELECT * FROM conversation_continuity_batches WHERE transfer_id=?",
+                (transfer,),
+            ).fetchone()
+            if batch is None:
+                return None
+            imported = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM conversation_continuity_imports
+                    WHERE transfer_id=?
+                    """,
+                    (transfer,),
+                ).fetchone()[0]
+            )
+        return {
+            **_json_object(batch["details_json"]),
+            "transfer_id": transfer,
+            "capsule_digest": str(batch["capsule_digest"]),
+            "owner_id": str(batch["owner_id"]),
+            "agent_id": str(batch["agent_id"]),
+            "history_mode": str(batch["history_mode"]),
+            "imported_messages": imported,
+            "imported_at": str(batch["imported_at"]),
+        }
+
+    def archive_agent_conversation_sessions(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        transfer_id: str,
+    ) -> dict[str, Any]:
+        """Retire one moved source's bindings without deleting recoverable history."""
+
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().lower()
+        transfer = str(transfer_id or "").strip()
+        if not all((owner, agent, transfer)):
+            raise ValueError("owner_id, agent_id, and transfer_id are required")
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT * FROM conversation_continuity_retirements
+                WHERE transfer_id=?
+                """,
+                (transfer,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["owner_id"]) != owner
+                    or str(existing["agent_id"]) != agent
+                ):
+                    raise SessionConflict(
+                        "conversation retirement transfer ID is already in use"
+                    )
+                return {
+                    "transfer_id": transfer,
+                    "session_ids": json.loads(existing["session_ids_json"]),
+                    "replayed": True,
+                }
+            sessions = connection.execute(
+                """
+                SELECT session_id FROM sessions
+                WHERE instance_id=? AND owner_id=? AND agent_id=?
+                  AND status != 'deleted'
+                ORDER BY session_id
+                """,
+                (self.instance_id, owner, agent),
+            ).fetchall()
+            session_ids = [str(row["session_id"]) for row in sessions]
+            retired_at = _utc_now()
+            for session_id in session_ids:
+                connection.execute(
+                    """
+                    UPDATE sessions SET status='archived', is_default=0,
+                        revision=revision+1,
+                        history_generation=history_generation+1,
+                        updated_at=? WHERE session_id=?
+                    """,
+                    (retired_at, session_id),
+                )
+                connection.execute(
+                    "DELETE FROM channel_bindings WHERE session_id=?",
+                    (session_id,),
+                )
+                self._append_event(
+                    connection,
+                    session_id=session_id,
+                    run_id=None,
+                    kind="session.history_moved_out",
+                    status="archived",
+                    phase="migration",
+                    summary="Conversation history retired after verified Agent move",
+                    detail={"transfer_id": transfer},
+                )
+            connection.execute(
+                """
+                INSERT INTO conversation_continuity_retirements(
+                    transfer_id, owner_id, agent_id, session_ids_json, retired_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (transfer, owner, agent, _json(session_ids), retired_at),
+            )
+            return {
+                "transfer_id": transfer,
+                "session_ids": session_ids,
+                "replayed": False,
+            }
 
     def recent_exchanges(
         self,

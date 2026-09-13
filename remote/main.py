@@ -61,7 +61,8 @@ from remote.runtime_identity import (
     write_runtime_claim,
 )
 from remote.security.pairing import PairingManager
-from remote.security.shared_token import load_shared_token
+from remote.security.auth import set_shared_token
+from remote.security.shared_token import load_shared_token_snapshot
 from remote.security.tls import load_or_generate_cert
 from remote.terminal.executor import AuthLevel, TerminalExecutor
 
@@ -282,7 +283,82 @@ class HashiRemoteApplication:
         self._protocol_manager: Optional[ProtocolManager] = None
         self._advertisement_task: Optional[asyncio.Task] = None
         self._last_advertised_agent_snapshot = ""
+        self._advertised_snapshot_by_backend: dict[int, str] = {}
         self._instance_id = ""
+        self._last_loaded_shared_token: str | None = None
+        self._last_shared_token_revision = ""
+
+    def _discovery_status(self) -> dict:
+        backends = []
+        for discovery in self._discoveries:
+            get_status = getattr(discovery, "get_status", None)
+            if callable(get_status):
+                status = dict(get_status() or {})
+            else:
+                status = {
+                    "backend": str(getattr(discovery, "backend_name", "unknown")),
+                    "readiness": "unknown",
+                    "advertising": None,
+                    "browsing": None,
+                }
+            backends.append(status)
+
+        peer_states: list[str] = []
+        fallback_active = False
+        peer_count = 0
+        if self._registry:
+            peers = self._registry.get_peers()
+            peer_count = len(peers)
+            for peer in peers:
+                properties = dict(peer.properties or {})
+                peer_states.append(str(properties.get("handshake_state") or "discovered"))
+                preferred = str(
+                    properties.get("preferred_backend")
+                    or properties.get("discovery")
+                    or ""
+                ).lower()
+                fallback_active = fallback_active or preferred.startswith("bootstrap")
+
+        configured = bool(backends)
+        ready = configured and all(item.get("readiness") == "ready" for item in backends)
+        if not configured:
+            readiness = "disabled"
+        elif ready:
+            readiness = "ready"
+        elif any(item.get("readiness") == "starting" for item in backends):
+            readiness = "starting"
+        else:
+            readiness = "degraded"
+        accepted_count = sum(state == "handshake_accepted" for state in peer_states)
+        rejected_count = sum(state == "handshake_rejected" for state in peer_states)
+        if not peer_states:
+            trust_state = "no_peers"
+        elif accepted_count:
+            trust_state = "accepted"
+        elif rejected_count:
+            trust_state = "rejected"
+        else:
+            trust_state = "pending"
+        if readiness == "ready" and trust_state == "no_peers":
+            state = "ready_empty"
+        elif readiness == "ready" and trust_state == "accepted":
+            state = "ready"
+        elif readiness in {"starting", "disabled"}:
+            state = readiness
+        else:
+            state = "degraded"
+        return {
+            "backend": self._discovery_backend,
+            "readiness": readiness,
+            "ready": ready,
+            "backends": backends,
+            "peer_count": peer_count,
+            "trusted_peer_count": accepted_count,
+            "rejected_peer_count": rejected_count,
+            "trust_state": trust_state,
+            "state": state,
+            "static_seed_fallback_active": fallback_active,
+        }
 
     def _build_self_peer(
         self,
@@ -369,11 +445,19 @@ class HashiRemoteApplication:
             ),
         )
         logger.info("  Discovery: %s", self._discovery_backend)
-        shared_token = load_shared_token(self._hashi_root)
+        token_snapshot = load_shared_token_snapshot(self._hashi_root)
+        # Startup is fail-closed. Only a later malformed revision may retain an
+        # already loaded in-memory credential in the maintenance loop.
+        token_snapshot.require_valid(self._hashi_root)
+        shared_token = token_snapshot.token
+        self._last_loaded_shared_token = shared_token
+        self._last_shared_token_revision = token_snapshot.revision
         logger.info("  Auth     : %s", "shared-token" if shared_token else "discovery-only")
         logger.info("═" * 55)
         if not shared_token:
             logger.warning("Shared token is not configured; protocol trust is disabled and Remote is running in discovery-only mode")
+        if token_snapshot.state == "invalid":
+            logger.error("Shared-token configuration is invalid: %s", token_snapshot.error)
         if self._lan_mode:
             logger.warning("Legacy LAN mode is enabled; pairing-auth endpoints remain permissive on trusted LANs")
 
@@ -402,7 +486,10 @@ class HashiRemoteApplication:
             self._discoveries.append(
                 LanDiscovery(
                     self_instance_id=instance_id,
-                    on_peers_changed=self._registry.on_peers_changed,
+                    on_peers_changed=lambda peers: self._registry.on_peers_changed(
+                        peers,
+                        backend="lan",
+                    ),
                 )
             )
         if self._discovery_backend in {"tailscale", "both"}:
@@ -410,7 +497,10 @@ class HashiRemoteApplication:
                 TailscaleDiscovery(
                     self_instance_id=instance_id,
                     hashi_root=self._hashi_root,
-                    on_peers_changed=self._registry.on_peers_changed,
+                    on_peers_changed=lambda peers: self._registry.on_peers_changed(
+                        peers,
+                        backend="tailscale",
+                    ),
                 )
             )
 
@@ -438,6 +528,11 @@ class HashiRemoteApplication:
             workbench_port=workbench_port,
             local_capabilities=local_capabilities,
             use_tls=self._use_tls,
+            discovery_status_provider=self._discovery_status,
+        )
+        self._protocol_manager.record_shared_token_config_state(
+            token_snapshot.state,
+            token_snapshot.error,
         )
         await self._protocol_manager.start()
         self._advertisement_task = asyncio.create_task(
@@ -498,32 +593,122 @@ class HashiRemoteApplication:
     ) -> None:
         while not self._shutdown_event.is_set():
             try:
-                if not self._protocol_manager:
-                    await asyncio.sleep(30)
-                    continue
-                directory = self._protocol_manager.get_local_agent_directory_state()
-                version = str(directory.get("version") or "")
-                directory_state = str(directory.get("directory_state") or "")
-                advertisement_key = f"{version}:{directory_state}"
-                should_refresh = advertisement_key != self._last_advertised_agent_snapshot
-                if should_refresh:
-                    peer_self = self._build_self_peer(
-                        instance_info=instance_info,
-                        instance_id=instance_id,
-                        workbench_port=workbench_port,
-                        local_capabilities=local_capabilities,
-                        agent_directory=directory,
-                    )
-                    write_live_endpoint(self._hashi_root, peer_self)
-                    for discovery in self._discoveries:
-                        update = getattr(discovery, "update_advertisement", None)
-                        if update is not None:
-                            await update(peer_self)
-                    self._last_advertised_agent_snapshot = advertisement_key
-                    logger.info("Advertisement refreshed with agent snapshot %s", version or "none")
+                await self._maintain_discovery_once(
+                    instance_info=instance_info,
+                    instance_id=instance_id,
+                    workbench_port=workbench_port,
+                    local_capabilities=local_capabilities,
+                )
             except Exception as exc:
-                logger.warning("Advertisement refresh failed: %s", exc)
-            await asyncio.sleep(30)
+                logger.warning("Discovery maintenance failed: %s", exc)
+            await asyncio.sleep(1)
+
+    async def _maintain_discovery_once(
+        self,
+        *,
+        instance_info: dict,
+        instance_id: str,
+        workbench_port: int,
+        local_capabilities: list[str],
+    ) -> dict:
+        if not self._protocol_manager:
+            return {"refreshed": False, "failed_backends": [], "reason": "protocol_unavailable"}
+
+        token_snapshot = load_shared_token_snapshot(self._hashi_root)
+        if token_snapshot.revision != self._last_shared_token_revision:
+            self._last_shared_token_revision = token_snapshot.revision
+            self._protocol_manager.record_shared_token_config_state(
+                token_snapshot.state,
+                token_snapshot.error,
+            )
+            if token_snapshot.state == "invalid":
+                logger.error(
+                    "Shared-token configuration reload rejected; retaining the current credential: %s",
+                    token_snapshot.error,
+                )
+            else:
+                loaded_token = token_snapshot.token
+                set_shared_token(loaded_token)
+                changed = self._protocol_manager.reload_shared_token(loaded_token)
+                self._last_loaded_shared_token = loaded_token
+                if changed:
+                    logger.info(
+                        "Shared-token configuration changed; authenticated peer handshakes will be re-established"
+                    )
+
+        directory = self._protocol_manager.get_local_agent_directory_state()
+        version = str(directory.get("version") or "")
+        directory_state = str(directory.get("directory_state") or "")
+        advertisement_key = f"{version}:{directory_state}"
+        should_refresh = advertisement_key != self._last_advertised_agent_snapshot
+        peer_self = self._build_self_peer(
+            instance_info=instance_info,
+            instance_id=instance_id,
+            workbench_port=workbench_port,
+            local_capabilities=local_capabilities,
+            agent_directory=directory,
+        )
+
+        results: list[tuple[str, bool, bool]] = []
+        for discovery in self._discoveries:
+            name = str(getattr(discovery, "backend_name", "unknown"))
+            backend_key = id(discovery)
+            if self._advertised_snapshot_by_backend.get(backend_key) == advertisement_key:
+                continue
+            if should_refresh:
+                get_status = getattr(discovery, "get_status", None)
+                status = dict(get_status() or {}) if callable(get_status) else {}
+                retry_due = getattr(discovery, "retry_due", None)
+                recovering = str(status.get("readiness") or "") not in {
+                    "",
+                    "ready",
+                    "unknown",
+                }
+                if recovering and callable(retry_due) and not retry_due():
+                    results.append((name, False, False))
+                    continue
+                update = getattr(discovery, "update_advertisement", None)
+                ok = bool(await update(peer_self)) if callable(update) else False
+                if ok and callable(get_status):
+                    ok = str((get_status() or {}).get("readiness") or "") == "ready"
+                if ok:
+                    self._advertised_snapshot_by_backend[backend_key] = advertisement_key
+                results.append((name, ok, True))
+                continue
+            retry_due = getattr(discovery, "retry_due", None)
+            if callable(retry_due) and retry_due():
+                ok = bool(await discovery.advertise(peer_self))
+                get_status = getattr(discovery, "get_status", None)
+                if ok and callable(get_status):
+                    ok = str((get_status() or {}).get("readiness") or "") == "ready"
+                results.append((name, ok, True))
+
+        failed_backends = [name for name, ok, _attempted in results if not ok]
+        attempted_failures = [
+            name for name, ok, attempted in results if attempted and not ok
+        ]
+        all_backends_current = bool(self._discoveries) and all(
+            self._advertised_snapshot_by_backend.get(id(discovery)) == advertisement_key
+            for discovery in self._discoveries
+        )
+        refreshed = bool(should_refresh and all_backends_current)
+        if refreshed:
+            write_live_endpoint(self._hashi_root, peer_self)
+            self._last_advertised_agent_snapshot = advertisement_key
+            logger.info("Advertisement refreshed with agent snapshot %s", version or "none")
+        elif should_refresh and attempted_failures:
+            logger.warning(
+                "Advertisement refresh remains pending; failed backends: %s",
+                ", ".join(attempted_failures),
+            )
+        return {
+            "refreshed": refreshed,
+            "failed_backends": failed_backends,
+            "attempted_backends": [
+                name for name, _ok, attempted in results if attempted
+            ],
+            "discovery": self._discovery_status(),
+        }
 
     def run(self) -> int:
         self._setup_logging()

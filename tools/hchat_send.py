@@ -564,7 +564,20 @@ def _load_remote_agents_live(instance_info: dict) -> list[str]:
             pass
     url = f"http://{host}:{int(remote_port)}/protocol/agents"
     try:
-        req = urllib_request.Request(url, method="GET")
+        headers = {}
+        if shared_token:
+            cfg = _load_config()
+            source_instance = _normalize_instance_id(_get_instance_id(cfg))
+            headers = build_client_auth_headers(
+                url=url,
+                method="GET",
+                data=b"",
+                token=None,
+                shared_token=shared_token,
+                from_instance=source_instance,
+                normalize_instance=_normalize_instance_id,
+            )
+        req = urllib_request.Request(url, headers=headers, method="GET")
         with urllib_request.urlopen(req, timeout=3) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except Exception:

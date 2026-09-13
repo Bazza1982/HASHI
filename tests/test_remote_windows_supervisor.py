@@ -219,6 +219,18 @@ $global:RemoteRows = @(
 function Get-CimInstance {{ param($ClassName) @($global:RemoteRows) }}
 function Stop-ScheduledTask {{ param($TaskName) }}
 function Start-ScheduledTask {{ param($TaskName) Set-Content -LiteralPath {_ps_string(started)} -Value $TaskName }}
+function Invoke-RestMethod {{
+    param($Method, $Uri, $TimeoutSec)
+    [pscustomobject]@{{
+        ok=$true; status='ready';
+        instance=[pscustomobject]@{{instance_id='SUPERVISOR-TEST'}};
+        discovery=[pscustomobject]@{{
+            state='ready_empty'; readiness='ready'; peer_count=0;
+            trusted_peer_count=0; trust_state='no_peers';
+            backends=@([pscustomobject]@{{advertising=$true; browsing=$true}})
+        }}
+    }}
+}}
 function Stop-Process {{
     param([int]$Id, [switch]$Force)
     Add-Content -LiteralPath {_ps_string(stopped)} -Value $Id
@@ -262,6 +274,18 @@ function Start-ScheduledTask {{
     param($TaskName)
     Set-Content -LiteralPath {_ps_string(started)} -Value $TaskName
 }}
+function Invoke-RestMethod {{
+    param($Method, $Uri, $TimeoutSec)
+    [pscustomobject]@{{
+        ok=$true; status='ready';
+        instance=[pscustomobject]@{{instance_id='SUPERVISOR-DELAYED'}};
+        discovery=[pscustomobject]@{{
+            state='ready_empty'; readiness='ready'; peer_count=0;
+            trusted_peer_count=0; trust_state='no_peers';
+            backends=@([pscustomobject]@{{advertising=$true; browsing=$true}})
+        }}
+    }}
+}}
 function Stop-Process {{ param([int]$Id, [switch]$Force) }}
 & {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
 """)
@@ -269,3 +293,79 @@ function Stop-Process {{ param([int]$Id, [switch]$Force) }}
     assert started.read_text(encoding="utf-8-sig").strip() == (
         "HashiRemote-supervisor-delayed"
     )
+
+
+def test_start_rejects_reachable_remote_with_degraded_discovery(tmp_path):
+    root = tmp_path / "hashi degraded"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-DEGRADED"}}),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py"
+    )
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+function Start-ScheduledTask {{ param($TaskName) }}
+function Start-Sleep {{ param([int]$Milliseconds) }}
+function Invoke-RestMethod {{
+    param($Method, $Uri, $TimeoutSec)
+    [pscustomobject]@{{
+        ok=$true; status='degraded';
+        instance=[pscustomobject]@{{instance_id='SUPERVISOR-DEGRADED'}};
+        discovery=[pscustomobject]@{{
+            state='degraded'; readiness='degraded'; peer_count=0;
+            trusted_peer_count=0; trust_state='no_peers';
+            backends=@([pscustomobject]@{{advertising=$false; browsing=$false; last_error='browser failed'}})
+        }}
+    }}
+}}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} start -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -NoTls
+""")
+
+    assert result.returncode != 0
+    assert "discovery" in result.stderr.lower()
+
+
+def test_doctor_uses_configured_tls_and_accepts_ready_empty(tmp_path):
+    root = tmp_path / "hashi tls"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-TLS"}}),
+        encoding="utf-8",
+    )
+    (remote / "config.yaml").write_text(
+        "server:\n  port: 19001\n  use_tls: true\n",
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py"
+    )
+    observed_uri = tmp_path / "health-uri.txt"
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+function Get-NetFirewallRule {{ @() }}
+function Get-NetTCPConnection {{ @() }}
+function Invoke-RestMethod {{
+    param($Method, $Uri, $TimeoutSec)
+    Set-Content -LiteralPath {_ps_string(observed_uri)} -Value $Uri
+    [pscustomobject]@{{
+        ok=$true; status='ready';
+        instance=[pscustomobject]@{{instance_id='SUPERVISOR-TLS'}};
+        discovery=[pscustomobject]@{{
+            state='ready_empty'; readiness='ready'; peer_count=0;
+            trusted_peer_count=0; trust_state='no_peers';
+            backends=@([pscustomobject]@{{advertising=$true; browsing=$true}})
+        }}
+    }}
+}}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} doctor -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+""")
+
+    assert result.returncode == 0, result.stderr
+    assert observed_uri.read_text(encoding="utf-8-sig").strip() == "https://127.0.0.1:19001/health"
+    assert "RemoteHealthMode" in result.stdout
+    assert "ready_empty" in result.stdout
