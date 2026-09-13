@@ -189,6 +189,14 @@ bounded cards from registered commands and keeps opaque, policy/binding/revision
 checked actions server-side. See
 [Frontend command interactions](FRONTEND_COMMAND_MENUS_V1.md).
 
+Workbench press-to-talk is transcript-first. Safe Voice off admits the local
+transcript as ordinary user text. Safe Voice on holds it in the selected Worker
+for a bounded preview: only **Confirm and send** admits a request; **Discard**,
+expiry, Session/context change, or turning Safe Voice off leaves no model
+request. The reserved confirmation transport derives authority and the current
+`workbench/default` Session inside the Worker; never put transcript text,
+owner, Session or delivery policy in its command envelope.
+
 ## Move, Clone, jobs, and tools
 
 `/move` migrates; `/clone` clones. Both use the same authenticated package,

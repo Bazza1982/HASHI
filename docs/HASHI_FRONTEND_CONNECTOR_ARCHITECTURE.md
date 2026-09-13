@@ -419,15 +419,51 @@ Delivered JSONL records carry accepted Run/request/Session/context metadata from
 the existing persistence path. Legacy append time is recorded time, not recovered
 human-send time. API compatibility identifiers remain Backend API identifiers.
 
-Basic uploaded voice now uses the existing local STT owner before ordinary
-Session admission. It refuses Safe Voice when that interface cannot perform the
-required confirmation. Text provenance and audio digest keep same-file retries
-independent of temporary upload paths. The existing SessionStore acceptance
-transaction checks the expected context generation; a concurrent reset cannot
-silently admit old-session speech. Typed pre-admission errors are distinguishable
-from uncertain transport outcomes, including partially admitted multi-file
-uploads. No database schema, authentication, provider or audio-confirmation
-protocol is introduced.
+Basic uploaded voice uses the existing local STT owner before ordinary Session
+admission. With Safe Voice off, the transcript continues directly through the
+existing admission owner. With Safe Voice on, the selected Worker holds only
+the transcript and its admission metadata in a ten-minute, in-memory
+confirmation record; it retains no raw audio. The basic upload remains an
+explicit pre-admission rejection until Workbench reads that record and confirms
+it. Discard, expiry, Safe Voice being turned off, or a Session/context change
+makes the record inert and never submits it automatically.
+
+Text provenance and audio digest keep same-file retries independent of
+temporary upload paths. The existing SessionStore acceptance transaction checks
+the expected context generation again at confirmation; a concurrent reset
+cannot silently admit old-session speech. Typed pre-admission errors remain
+distinguishable from uncertain transport outcomes, including partially admitted
+multi-file uploads. No database schema, authentication, provider, Core or
+shared-ingress protocol is introduced.
+
+### Targeted Workbench Safe Voice adoption (2026-09-13)
+
+The existing authenticated admin-command transport may carry the reserved
+`__hashi_voice_confirmation_v1__:` envelope through the unchanged
+`runtime.slash` RPC. This lets one selected Agent Worker adopt Workbench Safe
+Voice with `/reboot min`; the shared Backend API can continue returning its
+established `voice_safe_confirmation_required` pre-admission response.
+
+The base64url JSON object is exactly one of:
+
+- `{"version":1,"op":"read","idempotency_key":"..."}`; or
+- `{"version":1,"op":"decide","pending_id":"...","decision":"confirm|discard"}`.
+
+Only authenticated `workbench_api` calls in a personal deployment are
+accepted. The Worker derives the configured positive actor and current
+`workbench/default` Session. A caller cannot select an owner, Session,
+generation, prompt, transcript or delivery policy through the decision
+envelope. Every reserved request terminates before ordinary command parsing and
+slash-command audit.
+
+Read returns the bounded local-STT transcript, opaque pending identity,
+expiration and authoritative Session/context. Confirm rechecks that binding and
+calls the ordinary request admission owner exactly once; repeated confirms
+return the same request identity while that Worker retains its receipt. Discard
+is terminal and idempotent. Expired,
+discarded, disabled, missing or wrong-generation records cannot enter the Agent.
+An admission exception or a missing receipt after Worker replacement is
+explicitly uncertain, never presented as a known success or known rejection.
 
 External frontend reading state remains that frontend's metadata: HASHI does not
 write Telegram read state on its behalf. The bounded activity store cannot prove

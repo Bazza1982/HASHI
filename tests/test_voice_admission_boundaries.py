@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
 from orchestrator import runtime_session
-from orchestrator import runtime_media
+from orchestrator import runtime_media, voice_transcriber
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.function_worker_protocol import FunctionWorkerRemoteError
 from orchestrator.runtime_media import VoiceIngressError
@@ -86,7 +86,7 @@ async def test_actual_multipart_route_preserves_scope_and_only_typed_pre_admissi
 
 
 @pytest.mark.asyncio
-async def test_multi_file_voice_rejection_reports_prior_admission_and_keeps_normal_media_identity(tmp_path):
+async def test_multi_file_voice_rejection_reports_prior_admission_and_keeps_normal_media_identity(tmp_path, monkeypatch):
     config_path = tmp_path / "agents.json"
     config_path.write_text(json.dumps({"global": {}, "agents": [{"name": "voice-agent"}]}))
     media_dir = tmp_path / "media"
@@ -118,6 +118,13 @@ async def test_multi_file_voice_rejection_reports_prior_admission_and_keeps_norm
         return await FlexibleAgentRuntime.enqueue_api_media(runtime, **kwargs)
 
     runtime.enqueue_api_media = enqueue_media
+    monkeypatch.setattr(
+        voice_transcriber,
+        "get_transcriber",
+        lambda: SimpleNamespace(
+            transcribe=AsyncMock(return_value="pending safe voice transcript")
+        ),
+    )
     async with TestClient(TestServer(server.app)) as client:
         multipart = FormData()
         multipart.add_field("agent", runtime.name)
