@@ -1,14 +1,41 @@
 """Platform adaptation for owner-only local credential files."""
 from __future__ import annotations
+import argparse
 import os
 import csv
 import ctypes
+import re
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 import subprocess
 
 
-def protect_private_file(path: Path) -> None:
+_WINDOWS_SID = re.compile(r"S-1(?:-\d+)+", re.IGNORECASE)
+
+
+def _normalize_windows_sid(value: str) -> str:
+    sid = str(value or "").strip().upper()
+    if not _WINDOWS_SID.fullmatch(sid):
+        raise ValueError(f"Invalid Windows SID: {value!r}")
+    return sid
+
+
+def protect_private_file(
+    path: Path,
+    *,
+    additional_full_control_sids: Iterable[str] = (),
+) -> None:
+    """Replace broad access with the writer and explicit runtime principals.
+
+    A deployment may create an instance as an elevated service account while
+    its long-running process uses a Limited user token.  Such setup code must
+    pass that runtime user's SID explicitly; otherwise the writer remains the
+    sole non-system principal, as before.
+    """
+
     if os.name != 'nt':
+        if tuple(additional_full_control_sids):
+            raise ValueError("Additional Windows principals require Windows")
         path.chmod(0o700 if path.is_dir() else 0o600)
         return
     # Replace the DACL atomically: removing inheritance alone leaves any
@@ -19,11 +46,18 @@ def protect_private_file(path: Path) -> None:
                             check=True,creationflags=subprocess.CREATE_NO_WINDOW)
     rows = list(csv.reader(result.stdout.strip().splitlines()))
     sid = rows[0][-1] if len(rows) == 1 and len(rows[0]) == 2 else ''
-    if not sid.startswith('S-1-') or any(c not in 'S-0123456789' for c in sid):
+    try:
+        sid = _normalize_windows_sid(sid)
+    except ValueError:
         raise OSError('Unable to identify the credential file owner')
+    permitted_sids = [sid]
+    for candidate in additional_full_control_sids:
+        normalized = _normalize_windows_sid(candidate)
+        if normalized not in permitted_sids:
+            permitted_sids.append(normalized)
     inheritance = 'OICI' if path.is_dir() else ''
     sddl = 'D:P' + ''.join(f'(A;{inheritance};FA;;;{account})'
-                          for account in (sid, 'SY', 'BA'))
+                          for account in (*permitted_sids, 'SY', 'BA'))
     security = ctypes.WinDLL('advapi32', use_last_error=True)
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     pointer = ctypes.c_void_p
@@ -51,3 +85,26 @@ def protect_private_file(path: Path) -> None:
             raise ctypes.WinError(error)
     finally:
         kernel.LocalFree(descriptor)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Apply HASHI's private-file ACL to one exact path.",
+    )
+    parser.add_argument(
+        "--allow-full-control-sid",
+        action="append",
+        default=[],
+        help="Additional intended Windows runtime principal SID.",
+    )
+    parser.add_argument("path", type=Path)
+    args = parser.parse_args(argv)
+    protect_private_file(
+        args.path,
+        additional_full_control_sids=args.allow_full_control_sid,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

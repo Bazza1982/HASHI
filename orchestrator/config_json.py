@@ -15,6 +15,7 @@ import os
 import stat
 import tempfile
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -156,11 +157,20 @@ def _write_lock(path: Path, timeout: float) -> Iterator[None]:
             local.release()
 
 
-def _protect_candidate(path: Path) -> None:
+def _protect_candidate(
+    path: Path,
+    *,
+    private_full_control_sids: tuple[str, ...] = (),
+) -> None:
     if os.name == "nt":
         from tools.private_files import protect_private_file
-        protect_private_file(path)
+        protect_private_file(
+            path,
+            additional_full_control_sids=private_full_control_sids,
+        )
     else:
+        if private_full_control_sids:
+            raise ValueError("Additional Windows principals require Windows")
         path.chmod(0o600)
 
 
@@ -181,6 +191,7 @@ def write_config_json(
     *,
     expected_revision: str | None | object = _UNSPECIFIED,
     lock_timeout: float = 5.0,
+    private_full_control_sids: Iterable[str] = (),
 ) -> str:
     """Publish validated UTF-8/LF bytes, with no BOM or partial destination.
 
@@ -189,11 +200,16 @@ def write_config_json(
     is accepted only for legacy root-array migration paths. Pass a read revision for
     optimistic concurrency, or None to require an absent destination. All
     participating writers use the same lock. Unmigrated/external writers do not.
+    Windows setup running under a different account may explicitly bind the
+    intended runtime principals through ``private_full_control_sids``.
     Errors before os.replace preserve the destination. ConfigDurabilityError is
     deliberately different: committed=True means do not blindly retry/rollback.
     """
     if not isinstance(payload, dict) and not isinstance(payload, ConfigList):
         raise TypeError("configuration must be a JSON object")
+    if isinstance(private_full_control_sids, (str, bytes)):
+        raise TypeError("private_full_control_sids must be an iterable of SIDs")
+    private_sids = tuple(private_full_control_sids)
     target = Path(path).expanduser().resolve()
     if isinstance(payload, (ConfigDocument, ConfigList)):
         if payload.source != target:
@@ -220,7 +236,13 @@ def write_config_json(
         candidate = Path(name)
         try:
             # In particular, apply the Windows DACL while the file is empty.
-            _protect_candidate(candidate)
+            if private_sids:
+                _protect_candidate(
+                    candidate,
+                    private_full_control_sids=private_sids,
+                )
+            else:
+                _protect_candidate(candidate)
             with os.fdopen(descriptor, "wb") as stream:
                 descriptor = -1
                 stream.write(encoded)

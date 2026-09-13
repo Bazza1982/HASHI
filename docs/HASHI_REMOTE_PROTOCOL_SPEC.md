@@ -105,6 +105,24 @@ Sent after discovery to establish:
 Protocol trust requires `hashi-shared-hmac-v1` unless a deployment explicitly
 enables legacy compatibility mode. Discovery alone does not establish trust.
 
+An absent `secrets.json`, or an existing valid document with no
+`hashi_remote_shared_token`, may intentionally start Remote in discovery-only
+mode. An existing secrets file that is unreadable, invalid UTF-8, invalid JSON,
+or not a JSON object is a configuration failure and must stop startup with an
+actionable diagnostic. It must not be reported as an unconfigured token or
+silently weaken an intended authenticated deployment.
+
+On Windows, the Remote supervisor installer binds the protected secrets-file
+ACL to the intended scheduled-task principal before registration or start. It
+uses the invoking interactive identity unless an operator supplies
+`-TaskUserId`; an installer or controller running as `SYSTEM`, `LOCAL SERVICE`,
+or `NETWORK SERVICE` must name the intended Limited user explicitly. The
+private ACL contains only the setup writer, that runtime SID, `SYSTEM`, and
+Administrators; it never grants `Users` or `Everyone` access. Cross-account
+configuration publication passes the same runtime SID to the shared JSON
+writer so the initial file is born readable, rather than relying only on a
+later supervisor repair.
+
 Handshake and protocol message requests include:
 
 ```json

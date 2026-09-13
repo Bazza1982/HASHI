@@ -6,6 +6,7 @@ param(
     [string]$HashiRoot,
     [string]$Python,
     [string]$TaskName,
+    [string]$TaskUserId = $env:HASHI_REMOTE_TASK_USER,
     [string]$InstanceId = $env:HASHI_INSTANCE_ID,
     [string]$MaxTerminalLevel = $env:HASHI_REMOTE_MAX_TERMINAL_LEVEL,
     [string]$Discovery = $env:HASHI_REMOTE_DISCOVERY,
@@ -73,8 +74,54 @@ function Ensure-LogDir {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 }
 
+function Resolve-RemoteTaskPrincipal {
+    $Candidate = $TaskUserId
+    $Current = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not $Candidate) {
+        $CurrentSid = [string]$Current.User.Value
+        if ($CurrentSid -in @("S-1-5-18", "S-1-5-19", "S-1-5-20")) {
+            throw "Remote setup is running as a Windows service account. Pass -TaskUserId for the intended Limited user."
+        }
+        $Candidate = [string]$Current.Name
+    }
+    try {
+        $Account = New-Object System.Security.Principal.NTAccount($Candidate)
+        $Sid = [string]$Account.Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        throw "Could not resolve Remote task principal '$Candidate' to a Windows SID: $($_.Exception.Message)"
+    }
+    [PSCustomObject]@{
+        UserId = $Candidate
+        Sid = $Sid
+    }
+}
+
+function Protect-RemoteCredentialAccess {
+    param([Parameter(Mandatory = $true)]$Principal)
+
+    $SecretsPath = Join-Path $HashiRoot "secrets.json"
+    if (-not (Test-Path -LiteralPath $SecretsPath -PathType Leaf)) {
+        return
+    }
+    $PrivateFileTool = Join-Path (Split-Path -Parent $PSScriptRoot) "tools\private_files.py"
+    if (-not (Test-Path -LiteralPath $PrivateFileTool -PathType Leaf)) {
+        throw "Missing private-file ACL helper: $PrivateFileTool"
+    }
+    $ToolOutput = & $Python $PrivateFileTool `
+        --allow-full-control-sid $Principal.Sid `
+        $SecretsPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $Details = ($ToolOutput | Out-String).Trim()
+        throw "Could not grant Remote task principal '$($Principal.UserId)' access to secrets.json. $Details"
+    }
+}
+
 function Register-HashiRemoteSupervisor {
     Ensure-LogDir
+    $ResolvedPrincipal = Resolve-RemoteTaskPrincipal
+    Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
     $RunnerArgs = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
@@ -98,7 +145,7 @@ function Register-HashiRemoteSupervisor {
         -RestartCount 999 `
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -Priority 4
-    $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+    $Principal = New-ScheduledTaskPrincipal -UserId $ResolvedPrincipal.UserId -LogonType Interactive -RunLevel Limited
     $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal
     Register-ScheduledTask -TaskName $TaskName -InputObject $Task -Force -ErrorAction Stop | Out-Null
     Write-Host "Registered and enabled Remote supervisor task '$TaskName'"
@@ -231,12 +278,16 @@ switch ($Action) {
         Write-Host "Unregistered Remote supervisor task '$TaskName'"
     }
     "start" {
+        $ResolvedPrincipal = Resolve-RemoteTaskPrincipal
+        Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
         Start-ScheduledTask -TaskName $TaskName
     }
     "stop" {
         Stop-RemoteSupervisor
     }
     "restart" {
+        $ResolvedPrincipal = Resolve-RemoteTaskPrincipal
+        Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
         Stop-RemoteSupervisor
         Start-ScheduledTask -TaskName $TaskName
     }
@@ -254,6 +305,7 @@ switch ($Action) {
             LastRunTime = $Info.LastRunTime
             LastTaskResult = $Info.LastTaskResult
             NextRunTime = $Info.NextRunTime
+            UserId = $Task.Principal.UserId
             Command = $CommandPreview
         } | Format-List
     }

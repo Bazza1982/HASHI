@@ -5,12 +5,13 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from remote.api.server import create_app
 from remote.protocol_manager import ProtocolManager
 from remote.security.pairing import PairingManager
-from remote.security.shared_token import build_auth_headers
+from remote.security.shared_token import build_auth_headers, load_shared_token
 from remote.terminal.executor import TerminalExecutor
 
 
@@ -82,6 +83,33 @@ def _client_lan_mode(tmp_path, *, lan_mode: bool):
         workbench_port=18800,
     )
     return TestClient(app), protocol
+
+
+def test_load_shared_token_reports_an_unreadable_existing_file(tmp_path, monkeypatch):
+    secrets_path = tmp_path / "secrets.json"
+    secrets_path.write_text("{}\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def denied(path, *args, **kwargs):
+        if path == secrets_path:
+            raise PermissionError(13, "Access is denied", str(path))
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+
+    with pytest.raises(PermissionError, match="shared token file is not readable"):
+        load_shared_token(tmp_path)
+
+
+def test_load_shared_token_keeps_absent_configuration_distinct(tmp_path):
+    assert load_shared_token(tmp_path) is None
+
+
+def test_load_shared_token_rejects_malformed_existing_configuration(tmp_path):
+    (tmp_path / "secrets.json").write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="shared token file is not valid JSON"):
+        load_shared_token(tmp_path)
 
 
 def test_protocol_handshake_requires_auth_when_token_configured(tmp_path):

@@ -74,6 +74,12 @@ Remote mDNS metadata must keep every DNS-SD TXT record within 255 bytes and
 split growing capability lists across contiguous records. Treat discovery as
 a route hint only; trust, full capabilities, and Agent directories come from
 the authenticated handshake.
+On Windows, cross-account setup must pass the intended Remote task principal
+to the private-file ACL helper. The supervisor installer repairs that exact
+principal before register/start and refuses an implicit service-account owner.
+Missing shared-token configuration may use discovery-only mode; an existing
+unreadable or malformed secrets file is fatal and must never masquerade as
+"not configured".
 
 PAO determines one immutable Run route before PCM projection. The route states
 the primary destination, mirrors, and whether ordinary reply delivery is
