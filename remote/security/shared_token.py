@@ -30,15 +30,39 @@ def load_shared_token(hashi_root: Path | str | None) -> str | None:
         return None
 
     secrets_path = Path(hashi_root) / "secrets.json"
-    if not secrets_path.exists():
-        return None
-
     try:
-        data = json.loads(secrets_path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        raw = secrets_path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
         return None
+    except PermissionError as exc:
+        raise PermissionError(
+            exc.errno or 13,
+            f"HASHI Remote shared token file is not readable: {secrets_path}",
+            str(secrets_path),
+        ) from exc
+    except OSError as exc:
+        raise OSError(
+            exc.errno,
+            f"HASHI Remote shared token file could not be read: {secrets_path}",
+            str(secrets_path),
+        ) from exc
+    except UnicodeError as exc:
+        raise ValueError(
+            f"HASHI Remote shared token file is not valid UTF-8: {secrets_path}"
+        ) from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"HASHI Remote shared token file is not valid JSON: {secrets_path}"
+        ) from exc
 
-    token = str((data or {}).get("hashi_remote_shared_token") or "").strip()
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"HASHI Remote shared token file must contain a JSON object: {secrets_path}"
+        )
+
+    token = str(data.get("hashi_remote_shared_token") or "").strip()
     return token or None
 
 

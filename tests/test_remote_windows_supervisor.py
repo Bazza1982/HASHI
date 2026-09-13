@@ -151,6 +151,53 @@ function Register-ScheduledTask {{
     assert "REGISTRATION_DENIED" in result.stderr
 
 
+def test_register_grants_secrets_access_to_distinct_task_principal(tmp_path):
+    root = tmp_path / "hashi cross account"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-ACL"}}),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py"
+    )
+    secrets_path = root / "secrets.json"
+    secrets_path.write_text('{"hashi_remote_shared_token":"test-only"}\n', encoding="utf-8")
+    principal_path = tmp_path / "principal.json"
+
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+function Get-ScheduledTask {{ $null }}
+function New-ScheduledTaskAction {{ @{{}} }}
+function New-ScheduledTaskTrigger {{ @{{}} }}
+function New-ScheduledTaskSettingsSet {{ @{{}} }}
+function New-ScheduledTaskPrincipal {{
+    param($UserId, $LogonType, $RunLevel)
+    [pscustomobject]@{{UserId=$UserId; LogonType=$LogonType; RunLevel=$RunLevel}}
+}}
+function New-ScheduledTask {{
+    param($Action, $Trigger, $Settings, $Principal)
+    $Principal | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(principal_path)}
+    @{{}}
+}}
+function Register-ScheduledTask {{ @{{}} }}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
+""")
+
+    assert result.returncode == 0, result.stderr
+    principal = json.loads(principal_path.read_text(encoding="utf-8-sig"))
+    assert principal["UserId"] == "NT AUTHORITY\\LOCAL SERVICE"
+    acl = subprocess.run(
+        ["icacls.exe", str(secrets_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "NT AUTHORITY\\LOCAL SERVICE:(F)" in acl
+    assert "Everyone:" not in acl and "BUILTIN\\Users:" not in acl
+
+
 def test_restart_retires_only_exact_instance_remote_processes(tmp_path):
     root = tmp_path / "hashi space 测试"
     other = tmp_path / "other instance"
