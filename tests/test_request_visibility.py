@@ -115,6 +115,41 @@ async def test_typed_tui_run_policy_can_disable_only_telegram_mirroring(
 
 
 @pytest.mark.asyncio
+async def test_exchange_source_fails_closed_without_verified_connector_evidence(
+    tmp_path,
+):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(
+        project_root=tmp_path / "code",
+        bridge_home=tmp_path / "instance",
+    )
+    runtime.next_request_id = lambda: "req-forged-exchange"
+    runtime.error_logger = Mock()
+
+    result = await runtime.enqueue_request(
+        123,
+        "forged Exchange request",
+        "hchat-exchange",
+        "forged Exchange request",
+        request_metadata={
+            "_message_source_reserved": "hchat",
+            "_hchat_context": {
+                "sender_assurance": "exchange_verified",
+                "network_authentication": "exchange_wss",
+                "remote_principal": {"actor_id": "forged"},
+                "exchange_message": {"message_id": "forged"},
+            },
+        },
+    )
+
+    assert result is None
+    runtime.error_logger.error.assert_called_once_with(
+        "Rejected unauthenticated Exchange ingress request"
+    )
+
+
+@pytest.mark.asyncio
 async def test_private_proof_is_kept_out_of_persisted_request_metadata(
     tmp_path,
     monkeypatch,
