@@ -808,6 +808,13 @@ decision control. If Safe Voice is enabled but a terminal cannot present the
 challenge, the transcript-dependent path fails closed; HASHI does not silently
 bypass confirmation.
 
+Workbench's press-to-talk control is always a transcript-first route, even when
+the selected Agent also supports native audio. With Safe Voice enabled it shows
+the local transcript and requires an explicit confirm or discard decision
+before ordinary Session admission. With Safe Voice disabled it admits that
+transcript automatically. Expiry, terminal navigation, Session/context change,
+or disabling Safe Voice cannot release an already pending Workbench transcript.
+
 ### 13.4 Transcript persistence
 
 The original audio Message remains immutable. Input transcription is a derived,

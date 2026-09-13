@@ -775,7 +775,7 @@ async def _present_safe_voice_transcript(
 
 
 def disable_safe_voice(runtime: Any) -> None:
-    """Resolve native transcript waiters when Safe Voice is switched off.
+    """Resolve native waiters and discard Workbench confirmation records.
 
     A transcript that has already reached the confirmation boundary keeps the
     legacy Safe Voice meaning: clearing the pending challenge discards that
@@ -785,6 +785,11 @@ def disable_safe_voice(runtime: Any) -> None:
     on an event whose UI control has disappeared.
     """
 
+    from orchestrator.voice_confirmation_transport import (
+        discard_pending_voice_confirmations,
+    )
+
+    discard_pending_voice_confirmations(runtime)
     registry = getattr(runtime, "_native_voice_transcripts", None)
     if not isinstance(registry, dict):
         return
@@ -868,16 +873,37 @@ async def enqueue_api_voice(
     request_metadata: Any = None,
     idempotency_key: str | None = None,
 ) -> str | None:
-    """Adapt an uploaded voice file through the existing local STT owner.
+    """Transcribe a basic upload, admitting it only when policy permits.
 
-    Basic chat has no Safe Voice confirmation exchange. Refuse that path when
-    confirmation is required; neither a file classification nor pressing Send
-    silently accepts a transcript. Telegram and Session-native audio keep their
-    established confirmation lifecycles.
+    Safe Voice uploads are held in a Worker-owned, short-lived confirmation
+    record.  Workbench must read and explicitly confirm that transcript through
+    the versioned confirmation transport before a model request exists.
     """
-    if bool(getattr(runtime, "_safevoice_enabled", False)):
+    safe_voice_at_start = bool(getattr(runtime, "_safevoice_enabled", False))
+    if safe_voice_at_start and not idempotency_key:
         raise VoiceIngressError("voice_safe_confirmation_required")
     from orchestrator.voice_transcriber import get_transcriber
+
+    metadata = dict(request_metadata or {})
+    expected_generation = metadata.get("session_context_generation")
+    initial_session = None
+    if safe_voice_at_start or expected_generation is not None:
+        from orchestrator.runtime_session import resolve_request_session
+
+        try:
+            initial_session, *_ = await asyncio.to_thread(
+                resolve_request_session,
+                runtime, source=source, chat_id=runtime._primary_chat_id(),
+                metadata=metadata,
+            )
+        except Exception as exc:
+            raise VoiceIngressError("voice_session_changed") from exc
+        if (
+            expected_generation is not None
+            and int(initial_session.get("context_generation", -1))
+            != int(expected_generation)
+        ):
+            raise VoiceIngressError("voice_session_changed")
 
     try:
         audio_digest = await asyncio.to_thread(
@@ -890,22 +916,34 @@ async def enqueue_api_voice(
         raise VoiceIngressError("voice_transcription_unavailable")
     if not transcript:
         raise VoiceIngressError("voice_transcription_empty")
-    if bool(getattr(runtime, "_safevoice_enabled", False)):
+    safe_voice_required = safe_voice_at_start or bool(
+        getattr(runtime, "_safevoice_enabled", False)
+    )
+    if safe_voice_required and not idempotency_key:
         raise VoiceIngressError("voice_safe_confirmation_required")
-    metadata = dict(request_metadata or {})
-    expected_generation = metadata.get("session_context_generation")
-    if expected_generation is not None:
+    current_session = initial_session
+    if safe_voice_required or expected_generation is not None:
         from orchestrator.runtime_session import resolve_request_session
 
         try:
-            session, *_ = await asyncio.to_thread(
+            current_session, *_ = await asyncio.to_thread(
                 resolve_request_session,
                 runtime, source=source, chat_id=runtime._primary_chat_id(),
                 metadata=metadata,
             )
         except Exception as exc:
             raise VoiceIngressError("voice_session_changed") from exc
-        if int(session.get("context_generation", -1)) != int(expected_generation):
+        if (
+            expected_generation is not None
+            and int(current_session.get("context_generation", -1))
+            != int(expected_generation)
+        ):
+            raise VoiceIngressError("voice_session_changed")
+        if initial_session is not None and (
+            current_session.get("session_id") != initial_session.get("session_id")
+            or int(current_session.get("context_generation", -1))
+            != int(initial_session.get("context_generation", -2))
+        ):
             raise VoiceIngressError("voice_session_changed")
     prompt = f"[Voice message transcription] {transcript}"
     if caption:
@@ -918,6 +956,27 @@ async def enqueue_api_voice(
             "provenance": "local_stt", "source_audio_sha256": audio_digest,
         }],
     })
+    if safe_voice_required:
+        from orchestrator.voice_confirmation_transport import (
+            register_pending_voice_confirmation,
+        )
+
+        try:
+            register_pending_voice_confirmation(
+                runtime,
+                transcript=transcript,
+                prompt=prompt,
+                audio_digest=audio_digest,
+                source=source,
+                summary=f"voice: {filename}",
+                deliver_to_telegram=deliver_to_telegram,
+                request_metadata=metadata,
+                idempotency_key=str(idempotency_key),
+                session=current_session,
+            )
+        except ValueError as exc:
+            raise VoiceIngressError("voice_confirmation_registration_failed") from exc
+        raise VoiceIngressError("voice_safe_confirmation_required")
     # Uploaded filenames contain fresh UUIDs. The persisted content uses the
     # transcript and audio digest so the same key/file does not conflict merely
     # because the second HTTP request saved it under a different local path.
