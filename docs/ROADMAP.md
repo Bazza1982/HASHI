@@ -1,29 +1,22 @@
 # HASHI — Roadmap
 
-> High-level roadmap only. Keep it lightweight and current.
+> Current direction followed by delivered milestones and design records.
+> Historical feature descriptions below do not define current runtime behavior.
 
 ---
 
 ## Strategic Direction
 
-HASHI is moving through three connected stages:
+HASHI is a local-first platform for persistent AI agents, with PCM,
+provider-agnostic orchestration, the native HER v2 Engine, and Frontend
+Connectors. Personal/local operation is the primary path; team and enterprise
+governance remains available for Alpha evaluation.
 
-1. **Personal local agent project** — HASHI started as a vibe-coded,
-   human-directed AI agent system for one owner running local agents, backends,
-   voice, memory, scheduling, tools, and the now-retired Workbench.
-2. **Open-source orchestration platform** — HASHI now provides a broader
-   multi-agent runtime with backend adapters, Nagare workflows, HER mode,
-   Superloop operations, HChat, Remote, EXP guidebooks, and local-first
-   automation.
-3. **Enterprise-grade HASHI AAI** — the enterprise line turns the same codebase
-   into an Agent as Interface control plane: governed profiles, identity,
-   policy, approvals, audit, evidence, connectors, admin surfaces, and
-   deployment artifacts for organizations that want self-hostable, inspectable,
-   open-source agentic AI orchestration.
-
-The goal is not to abandon the personal project roots. The goal is to preserve
-smooth personal/local use while adding the governance and operational controls
-needed for professional enterprise adoption.
+The next release preparation focuses on installation and upgrade reliability,
+usable documentation, clear package provenance, and scoped platform validation.
+Beta maturity and its release number will be declared through the
+[versioning policy](HASHI_VERSIONING_POLICY.md) and
+[release checklist](RELEASE_CHECKLIST.md), after review of the release scope.
 
 Current version-line interpretation:
 
@@ -72,8 +65,8 @@ consolidated as the `v4.0.0-alpha.2` release candidate:
   `claw-cli`, the legacy fixed runtime, and the OpenClaw importer;
 - canonical Backend API Agent Overview and shared-token-authenticated remote
   terminal execution;
-- crash-safe HER v2 WIP context with explicit preserve/inject/clear audit
-  events, HER-internal OpenRouter/DeepSeek Model Provider selection, and exact
+- durable HER Engine Session recovery with WIP retained only as shadow
+  compatibility evidence, HER-internal OpenRouter/DeepSeek Model Provider selection, and exact
   DeepSeek native
   vision capability;
 - client-neutral persistent Session/Message/Run/Event services behind a
@@ -209,9 +202,9 @@ unreleased checkpoint above):
 
 ---
 
-## Active Design Items
+## Design Status
 
-### Wrapper Agent Mode
+### Wrapper Agent Mode (historical, retired)
 
 Status: **implemented in v3.2.0; retired from the product surface in v4.0.0-alpha.2**.
 

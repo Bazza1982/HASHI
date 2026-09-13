@@ -27,8 +27,9 @@ protected process core.
    when it removes present duplication or protects a real boundary.
 4. Treat a small change spanning many unrelated files as Shotgun Surgery.
    Establish one owner and derive compatibility views before adding the feature.
-5. Feature code should adopt through `/reboot`. Process-bootstrap changes must
-   say clearly that a cold restart is required.
+5. Agent Function changes adopt through scoped `/reboot`; shared Functions
+   use their separate replacement operation. Process-bootstrap changes must
+   declare the required Core migration.
 6. Never infer instance identity from a directory name. Read local
    `agents.json` / `instances.json`.
 7. Never use a computer-wide HASHI process lock or process-name kill scan.

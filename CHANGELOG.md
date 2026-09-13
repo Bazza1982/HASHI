@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation and packaging guidance
+
+- Shorten the project homepage and separate everyday usage, configuration,
+  integrations, troubleshooting, and release/distribution selection.
+- Consolidate installation instructions; document exact npm version selection,
+  pre-release channels, legacy data preservation, and npm/Portable boundaries.
+- Include the user guides in npm artifacts and check their package presence.
+- Refresh outdated connector, endpoint, working-mode, and runtime-ownership
+  descriptions; identify historical GitHub Releases without changing tags.
+- Condense Agent FYI to fit its existing reader limit, so the complete reference
+  is available without raising runtime limits.
+
 ### Removed
 
 - **Workbench retired** — removed the bundled frontend, Node server, launchers,

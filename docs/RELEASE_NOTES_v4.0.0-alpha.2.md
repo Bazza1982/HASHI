@@ -2,8 +2,13 @@
 
 Release focus: **advanced HASHI Engine Runtime (HER)**.
 
+Publication note (2026-09-11): these are source-candidate notes. A matching
+GitHub Release and npm artifact were not published at this review. Check
+[release/distribution status](RELEASES.md) for the dated registry observation;
+the version in this file is not a download or installation receipt.
+
 This alpha release candidate turns the original HER/Claw backend foundation
-into a clean-room, provider-neutral Python orchestration runtime. The retired
+into a HASHI-native, provider-neutral Python Engine runtime. The retired
 HER v1 Rust executable, packaged binaries, and rebuild workflow are no longer
 reachable; `her` resolves forward to `her-v2`.
 
@@ -27,8 +32,10 @@ active version.
 > [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md).
 
 > **Agent working-mode update (2026-09-01):** Fixed is now the default for
-> session-capable backends, and Flex remains the explicit backend-switching
-> mode. Wrapper, Audit, and Dual-brain are no longer selectable. Persisted
+> session-capable backends, while Flex assembles context per request.
+> Backend selection is available directly in both modes under the current
+> [working-mode contract](FIXED_FLEX_WORKING_MODES.md).
+> Wrapper, Audit, and Dual-brain are no longer selectable. Persisted
 > legacy values migrate safely to Fixed or Flex while their historical
 > configuration blocks remain intact. See
 > [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
@@ -54,8 +61,8 @@ interfaces. Its release contract includes:
   `deepseek-v4-flash-vision-exp`, without granting image capability to
   text-only DeepSeek models;
 - explicit stream-channel ownership and idempotent user delivery;
-- crash-safe transient WIP context with separately auditable
-  start/inject/preserve/clear lifecycle events;
+- durable HER Engine Session recovery with typed Turn and Tool evidence;
+  the old WIP Journal remains shadow compatibility evidence;
 - isolated scheduler execution with one authoritative user conversation;
 - a client-neutral persistent Session/Message/Run/Event API behind a fail-closed
   qualification boundary, including restart reconciliation for orphaned Runs;

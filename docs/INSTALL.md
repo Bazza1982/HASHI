@@ -1,20 +1,28 @@
 # HASHI — Installation Guide (Windows / macOS / Linux)
 
 > This is the **single source of truth** for installing and running HASHI.
-> 
-> Scope: developer/local installs (Git clone), multi-instance friendly.
+>
+> Scope: current source-candidate installation, npm command packaging, and
+> isolated instances. Published packages may lag behind this source.
 
 ---
 
 ## Contents
 
 - [npm command install and named instances](#npm-command-install-and-named-instances)
+- [Source install](#source-install)
 - [Windows](#windows)
 - [macOS](#macos)
 - [Linux (native) / WSL2](#linux-native--wsl2)
 - [Python dependency profiles](#python-dependency-profiles)
 - [Multi-instance ports](#multi-instance-ports)
 - [Hashi Remote](#hashi-remote)
+- [Nagare developer install](#nagare-core-developer-install)
+
+Check [release and package selection](RELEASES.md) before choosing an archive
+or npm version. At the 2026-09-11 documentation review, npm latest was still
+1.0.1 and GitHub stable Latest was v2.0.0; neither represented the current
+v4.0.0-alpha.2 source candidate. Beta publication remains a separate step.
 
 ---
 
@@ -22,13 +30,26 @@
 
 The npm package name is **`hashi-bridge`**. The unscoped package name `hashi`
 belongs to an unrelated third party and must not be used for this project. A
-published `hashi-bridge` release installs the `hashi` and `hashi-onboard`
-commands:
+current-generation `hashi-bridge` package installs the `hashi` and
+`hashi-onboard` commands. Inspect what is published:
 
 ```bash
-npm install --global hashi-bridge
+npm view hashi-bridge dist-tags --json
+npm view hashi-bridge versions --json
+```
+
+Replace the placeholder below with an actually published version. A bare
+install selects npm's `latest` tag and may install a legacy package.
+Pre-release channels such as `beta` are usable only after publication:
+
+```bash
+npm install --global hashi-bridge@<published-version>
 hashi help
 ```
+
+Use Node.js 18+ and npm 9+ as declared in the package metadata, plus the
+approved CPython 3.12.13 interpreter in the same OS environment.
+For the unreleased source candidate, follow [Source install](#source-install).
 
 Post-install prepares a versioned, user-scoped Python 3.12.13 virtual
 environment from `constraints/standard-py312.lock`. It prints “runtime is
@@ -159,19 +180,78 @@ silently restored.
 
 ---
 
+## Source install
+
+Install Git and the approved CPython **3.12.13** interpreter first. Clone the
+repository; the directory name below matches Git's case-sensitive default:
+
+```bash
+git clone https://github.com/Bazza1982/HASHI.git
+cd HASHI
+python --version
+```
+
+`python --version` must report 3.12.13 before continuing. Use `python3.12` or
+the Windows `py -3.12` launcher instead if needed, after verifying its exact
+patch version.
+
+On Linux/macOS, create and activate a new virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+On WSL, use `.venv-wsl` so a shared checkout does not reuse a Windows venv:
+
+```bash
+python -m venv .venv-wsl
+source .venv-wsl/bin/activate
+```
+
+On Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+If activation is blocked by local shell policy, invoke the environment's
+Python directly; do not change machine-wide execution policy for this guide.
+Install and check the standard runtime using that environment:
+
+```bash
+python -m pip install -r constraints/standard-py312.lock
+python scripts/check_runtime_contract.py --json
+```
+
+Open the local connection page from the repository root:
+
+```bash
+python -m onboarding.onboarding_main
+```
+
+Choose a detected CLI engine or a HER v2 Model Provider, enter any required
+credentials in the masked local page, and confirm the minimal connection
+check. Telegram is optional. After setup, launch with the platform helper
+below, or run `python main.py` from the activated environment.
+
+This runs the checked-out source. A GitHub source archive uses the same setup
+steps after extraction; it is not a portable installation bundle.
+
 ## Windows
 
 ### Prerequisites
 - Windows 10/11
 - CPython 3.12.13 (approved Core; source compatibility is 3.12)
-- Node.js + npm only when developing the optional Nagare visual editor
+- Node.js + npm for npm installation or Nagare visual editor development;
+  the direct Python source runtime does not require them
 
 ### Install
-1) Clone repo
-2) Create venv and install Python deps (if required by your workflow)
+Follow [Source install](#source-install) or the explicit npm version path.
 
 For a self-contained Windows handoff, use the allowlisted Portable Windows
-builder described in [`packaging/portable_windows/README.md`](../packaging/portable_windows/README.md).
+builder described in the [Portable Windows guide](https://github.com/Bazza1982/HASHI/blob/main/packaging/portable_windows/README.md).
 The resulting USB is verified installation media; HASHI runs from the local
 copy installed on the recipient PC.
 
@@ -191,13 +271,12 @@ copy installed on the recipient PC.
 
 ### Prerequisites
 - macOS 12.0+ (Monterey) recommended
-- Homebrew
+- A way to install the approved Python runtime (Homebrew is optional)
 
 ### Install
-1) Install Homebrew
-2) Install approved CPython 3.12.13; install Node.js only for Nagare editor work
-3) Clone repo
-4) Install dependencies
+Follow [Source install](#source-install). Homebrew alone does not guarantee
+the exact approved Python patch. Install Node.js/npm when using the npm
+command path or working on the Nagare editor.
 
 For an offline handoff image, start from a clean checkout on a connected Mac:
 
@@ -219,7 +298,9 @@ native dependencies.
 ### Prerequisites
 - Ubuntu 22.04+ recommended
 - CPython 3.12.13 + venv
-- Node.js + npm only for Nagare editor work
+- Node.js + npm for npm installation or Nagare editor work
+
+Follow [Source install](#source-install) before launching.
 
 ### Run
 - Preferred: `./bin/bridge-u.sh --resume-last`
@@ -276,9 +357,9 @@ HASHI supports running multiple instances simultaneously.
 - Each instance should have its own `bridge_home` directory.
 - Each instance should use a unique `workbench_port`.
 
-Example (conceptual):
-- HASHI2: `workbench_port=18802`
-- HASHI9: `workbench_port=18819`
+Managed creation allocates ports and stores them in instance configuration.
+Use the selected instance's status/doctor output and configuration to discover
+them. Older named-instance port examples are not defaults for new installs.
 
 ---
 
@@ -361,7 +442,7 @@ lifecycle:
 ```
 
 Operators can also run `/remote off`, which writes
-`<HASHI_ROOT>/state/remote_disabled.json` and prevents supervised restart until
+`state/remote_disabled.json` under the configured Remote lifecycle root and prevents supervised restart until
 `/remote on` clears it.
 
 ---
@@ -376,17 +457,20 @@ Use this path when working on the extracted workflow engine directly.
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e .[test]
+python -m pip install -e ".[test]"
 ```
 
 ### Smoke verification
 
 ```bash
-pytest -q tests/contract
+python -m nagare.cli --help
 python -m nagare.cli run tests/fixtures/smoke_test.yaml --yes --silent --smoke-handler
 ```
 
 The `--smoke-handler` flag is for packaging and CI validation. It avoids external model CLIs and writes deterministic artifacts locally.
+The separately selected Nagare contract gate is documented in the
+[Nagare release checklist](https://github.com/Bazza1982/HASHI/blob/main/docs/NAGARE_RELEASE_CHECKLIST.md);
+the repository's entire contract directory is not a Nagare-only smoke test.
 Run state defaults to `flow/runs/` below the current directory. Pass
 `--runs-root <directory>` to relocate it. Pass `--repo-root <directory>` when
 relative `agent_md` paths should resolve against a different trusted checkout.
@@ -401,7 +485,7 @@ npm run build
 
 The current release gate for `nagare-viz` is a clean production build.
 
-### Terminal and local connection additions (2026-09-10 candidate)
+## Terminal and local connection
 
 Run `hashi help`, `hashi help tui` or `hashi help instance create` for syntax.
 Use `hashi status --all`, `hashi status --check`, `hashi doctor`,

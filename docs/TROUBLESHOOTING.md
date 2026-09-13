@@ -1,138 +1,110 @@
-# HASHI — Troubleshooting
+# HASHI Troubleshooting
 
-> Single source of truth for operational troubleshooting.
+[Install](INSTALL.md) · [User guide](USER_GUIDE.md) ·
+[Configuration](CONFIGURATION.md) · [Releases](RELEASES.md)
 
----
+## Identify what is installed
 
-## Quick Checklist (copy/paste)
+For the current npm command surface:
 
-### Core processes
-- [ ] Bridge / Orchestrator is running
-- [ ] Correct `bridge_home` is being used
-- [ ] `agents.json` exists in `bridge_home`
-- [ ] `secrets.json` exists in `bridge_home` (tokens/keys present)
+~~~bash
+hashi version
+hashi help
+hashi status --all
+hashi doctor
+hashi logs --lines 100
+~~~
 
-### Ports
-- [ ] HASHI Backend API port is listening (configured by the compatibility field `workbench_port`, e.g. 18819)
-- [ ] Hashi Remote peer port is listening (`remote_port`, e.g. 8766/8767/8768)
-- [ ] API Gateway (optional) is listening on `api_gateway_port`; default is `workbench_port + 1`
-- [ ] Multi-instance ports do not collide: HASHI1 `18800/18801`, HASHI2 `18802/18803`, HASHI9 `18819/18820`
-- [ ] Same-host HASHI instances do not share the same `remote_port`
+If help does not list these commands, first inspect the installed package:
 
-### HASHI API / API Gateway ownership
-- [ ] `curl http://<api_host>:<workbench_port>/api/health` returns the expected `instance_id`
-- [ ] `api_gateway_port` in `/api/health` matches the instance's expected gateway port
-- [ ] If `api_gateway_enabled` is true, `curl http://<api_host>:<api_gateway_port>/health` returns `{"status":"ok", ...}`
-- [ ] No other HASHI instance is listening on the same API Gateway port
-- [ ] In WSL, if `127.0.0.1` hangs but `10.255.255.254` works, use the `10.255.255.254` address reported by `/api/health` or startup logs
-- [ ] From Telegram, `/api` shows the live gateway address, `/v1/chat/completions`, `/v1/models`, enabled-on-restart state, and default API model
-- [ ] `/api on` and `/api off` change only the OpenAI-compatible API Gateway, not the agent's active `/backend` or `/model`
-- [ ] `/api model <model>` sets the gateway default for external API requests that omit `model`; callers may still override per request
+~~~bash
+npm list --global hashi-bridge --depth=0
+npm view hashi-bridge dist-tags --json
+~~~
 
-### /new and /fresh semantics
-- [ ] CLI backends use `/new` for a fresh CLI session reset
-- [ ] Non-CLI backends use `/fresh` for a clean API context
-- [ ] `/fresh` clears recent turns but preserves saved memories
-- [ ] `/fresh` disables saved-memory auto-injection until `/memory saved on` or `/memory on`
-- [ ] On HER v2, `/fresh` persists a cutoff that excludes every pre-command
-  timeline/receipt source, detaches the active Compact capsule without deleting
-  its archive, and pauses Memory+, scheduler/observer context, and Habit advice
-- [ ] A HER v2 post-`/fresh` prompt contains no pre-boundary turn context; new
-  turns accumulate normally and retained history remains explicitly searchable
+A legacy npm install can coexist with a newer Git checkout. Updating source
+files does not replace the global command, and replacing the global command
+does not prove an existing running instance adopted it.
 
-### /reboot semantics
-- [ ] `/reboot min` reloads current code/config, restarts only the requester,
-  and rebuilds hot managers even when a valid public class interface changed
-- [ ] `/reboot min` and `/reboot N` are never widened to all Agents; malformed
-  target input is rejected without stopping anyone
-- [ ] `/reboot max` restarts all running agents and rebuilds hot managers
-- [ ] Backend API stays healthy after reboot
-- [ ] Scheduler is recreated and started after reboot
-- [ ] No post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, or unexpected `LOCAL MODE` entries appear in `logs/bridge.log`
+On Windows use Get-Command hashi -All in PowerShell or where hashi in CMD.
+On Linux/macOS/WSL use command -v hashi. Keep native Windows and WSL
+installations in their intended OS environment.
 
-### Hashi Remote peer visibility
-- [ ] `/remote status` shows `Lifecycle: enabled` and the expected Remote port
-- [ ] `/remote status` does not report same-host Remote port conflicts
-- [ ] `/remote list` shows the peer as `online`, not only `pending` or `offline`
-- [ ] Both peers use the same `hashi_remote_shared_token` or `HASHI_REMOTE_SHARED_TOKEN`
-- [ ] Missing-token peers are expected to show as discovery-only or untrusted during rolling upgrades
-- [ ] On Windows, run `.\bin\hashi_remote_ctl.ps1 doctor` and check listening/firewall/WSL output
-- [ ] On Linux/WSL, run `bin/hashi-remote-ctl.sh status` and inspect `logs/hashi-remote-supervisor.log`
+## Runtime setup is incomplete
 
-### Hashi Remote rescue
-- [ ] `python tools/remote_rescue.py capabilities <INSTANCE>` shows `rescue_control: yes`
-- [ ] `python tools/remote_rescue.py status <INSTANCE>` reports `running`, `starting_or_stuck`, `stale_pid`, or `offline`
-- [ ] `rescue_start` is expected to be `no` unless `security.max_terminal_level` is `L3_RESTART`
-- [ ] `rescue_restart` is expected to be `no` unless `security.max_terminal_level` is `L3_RESTART`
-- [ ] `python tools/remote_rescue.py logs <INSTANCE> --name start` returns a bounded log tail
-- [ ] WatchTower-controlled restart writes `state/restarts/<restart_id>.json`
-- [ ] WatchTower-controlled restart appends to `logs/remote_rescue_audit.jsonl`
-- [ ] `/restart` in Telegram shows the WatchTower API address and fails closed if WatchTower is unreachable, unauthenticated, or does not support restart
+The current runtime requires the approved CPython patch and locked dependency
+set. A successful npm download is not sufficient if post-install reported
+incomplete runtime setup.
 
-### WatchTower cold restart
-- [ ] WatchTower is running outside the HASHI process it controls
-- [ ] WatchTower can reach the controlled HASHI root and launcher script
-- [ ] Supervised launch preserves required runtime environment: `USERPROFILE`, `HOME`, `APPDATA`, `LOCALAPPDATA`, backend auth/cache homes such as `CODEX_HOME`, and expected `PATH`
-- [ ] After `/restart`, `GET /api/health` shows the expected `instance_id`, online agents, API Gateway state, and ports
-- [ ] After `/restart`, send a real message to the subject agent and confirm backend success; health alone is not sufficient
-- [ ] Review the subject agent's latest `errors.log` for new backend/auth/cache errors after restart
+From a source checkout, use the approved interpreter to inspect the contract:
 
-### Anatta mode
-- [ ] `/anatta status` reports the current workspace mode
-- [ ] `/anatta shadow` records observation config without prompt injection
-- [ ] `/anatta on` enables pre-turn live self-assembly and post-turn observation
-- [ ] `/anatta off` disables Anatta while preserving the workspace config
+~~~bash
+python --version
+python scripts/check_runtime_contract.py --json
+~~~
 
----
+Follow the reported missing/runtime mismatch details. Prepare an environment
+for the intended program version; do not upgrade dependencies underneath a
+running Core. See [dependency profiles](DEPENDENCIES.md).
 
-## Fixed / Outstanding Tracking
+## Engine or provider cannot connect
 
-> Keep this list maintained. Each item must include the **branch** and **commit**.
+Use /connect in the local TUI, or hashi onboard. Choose an installed CLI or
+configure a HER v2 provider in the masked local page. Confirm the chosen
+provider's minimal connection check before expecting model tasks to work.
 
-### Fixed
-- [x] Windows onboarding launches bridge using `bridge-u.bat` (not `/usr/bin/bash`).
-  - Branch: `v1.1-debugging`
-  - Commit: (fill)
-  - Date: 2026-03-17
-- [x] Onboarding writes `agents.json/secrets.json` to the correct `bridge_home`.
-  - Branch: `v1.1-debugging`
-  - Commit: (fill)
-  - Date: 2026-03-17
-- [x] `/new` is **bare** for CLI session reset; non-CLI clean context uses `/fresh`.
-  - Branch: `v1.1-debugging`
-  - Commit: (fill)
-  - Date: 2026-03-17
+For CLI engines, verify the executable and authentication from the same OS
+and user environment as HASHI. For API providers, check the configured
+endpoint, credential reference, and model permission. Credentials entered
+into ordinary chat do not configure a connection.
 
-### Outstanding
-- [ ] (none)
+## Telegram does not respond
 
----
+Check the configured agent's telegram_token_key and corresponding private
+secret, the authorized numeric user ID, and whether the agent is enabled.
+Each polling Bot Token should be used by only one running poller.
+Telegram is optional; a skipped Telegram connection does not prevent local
+TUI use once an engine is connected.
 
-## Where to look for logs
+## An instance is already running or a port is occupied
 
-- Bridge logs: `logs/`
-- Main bridge lifecycle log: `logs/bridge.log`
-- Remote supervisor log: `logs/hashi-remote-supervisor.log`
-- Remote rescue start log: `logs/remote_rescue_hashi_start.log`
-- Remote rescue audit log: `logs/remote_rescue_audit.jsonl`
-- Browser/native host log: `logs/browser_native_host.log`
+Use status/doctor to identify the selected instance, its configured home,
+and live process. Multiple instances may run on one machine, but each needs
+its own identity/data scope and non-conflicting ports.
 
----
+Do not infer ownership from a directory name, delete a live lock file, or
+kill every Python/HASHI process. A duplicate launch of the same instance and
+a different process occupying its port are different problems.
 
-## Hashi Remote Rollback
+## A task is stalled
 
-Use rollback when a Remote rollout causes peer visibility or routing problems:
+Use /status and the relevant /queue or /bg status view. /stop cancels work;
+/steer changes direction; /resend repeats prior output; /retry executes the
+last retryable request again. Review possible side effects before retrying
+a task that may already have changed files or external state.
 
-1. Run `/remote off` from a local HASHI agent to write the persistent disabled state.
-2. Stop OS supervision:
-   - Linux/WSL: `bin/hashi-remote-ctl.sh stop`
-   - Windows: `.\bin\hashi_remote_ctl.ps1 stop`
-3. Set `remote/config.yaml`:
+A restart is an operational action, not a diagnostic prerequisite. Function
+adoption, shared replacement, and Core migration have different scopes.
 
-```yaml
-lifecycle:
-  remote_enabled: false
-```
+## A Remote peer appears offline
 
-4. Restart HASHI core. Legacy local operation does not require Remote.
-5. To re-enable, remove the config override or set `remote_enabled: true`, then run `/remote on` or start the supervisor.
+Check Remote health, its configured port, the peer handshake, and the
+capability required for the operation. Discovery-only is not a completed
+trusted connection. An available Remote peer does not imply that its Backend
+API, agents, or browser workers are ready.
+
+See [Remote setup](INSTALL.md#hashi-remote) and
+[TUI switching](https://github.com/Bazza1982/HASHI/blob/main/docs/TUI_INSTANCE_SWITCHING.md).
+
+## Logs and bug reports
+
+hashi logs reads the selected instance's runtime logs. Source instances
+normally keep logs under their configured bridge home. Gateway transport
+and observability logs can contain request/response material; review and
+redact them before sharing.
+
+Report issues at [GitHub Issues](https://github.com/Bazza1982/HASHI/issues).
+Include the program/package version, installation method, OS, Python version,
+selected engine/model, reproduction steps, and relevant redacted errors.
+Never attach secrets.json, OAuth profiles, Bot Tokens, or full private
+conversation/workspace dumps.

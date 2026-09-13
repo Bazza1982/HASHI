@@ -1,7 +1,7 @@
 {
   "name": "hashi-bridge",
   "version": "4.0.0-alpha.2",
-  "description": "HASHI \u2014 local-first, multi-backend AI agent orchestration with owner-controlled credentials and governed automation.",
+  "description": "HASHI \u2014 local-first control plane for persistent, provider-agnostic AI agents.",
   "keywords": [
     "ai",
     "agent",
@@ -12,6 +12,9 @@
     "telegram",
     "whatsapp",
     "multi-agent",
+    "local-first",
+    "self-hosted",
+    "persistent-agents",
     "chatbot",
     "automation"
   ],
@@ -107,6 +110,12 @@
     "docs/initial.md",
     "docs/AGENT_FYI.md",
     "docs/INSTALL.md",
+    "docs/DEPENDENCIES.md",
+    "docs/USER_GUIDE.md",
+    "docs/CONFIGURATION.md",
+    "docs/INTEGRATIONS.md",
+    "docs/TROUBLESHOOTING.md",
+    "docs/RELEASES.md",
     "examples/",
     "README.md",
     "LICENSE",

@@ -9,12 +9,18 @@ compatibility shim.
 
 | Need | Command | Includes |
 |---|---|---|
-| Normal local HASHI | `python -m pip install -r requirements.txt` | Core, media, Hashi Remote, TUI |
+| Normal local HASHI | `python -m pip install -r constraints/standard-py312.lock` | Core, media, Hashi Remote, TUI at the approved versions |
 | Development and tests | `python -m pip install -r requirements-dev.txt` | Standard profile and test tools |
-| Minimal/headless core | `python -m pip install -e .` | Telegram/API transport, YAML/schema, scheduler |
+| Minimal source-checkout environment | `python -m pip install -e .` | Base Python dependencies; optional APIs, Remote, and TUI need their extras |
 | Every declared integration | `python -m pip install -e ".[all]"` | All optional profiles; potentially very large |
 
 ## Feature extras
+
+These commands assume a source checkout and an environment being prepared
+for that feature profile. The published Python artifact contains the extracted
+Nagare/Flow packages, not the full HASHI application. The runtime contract
+still applies; do not modify dependencies in a running instance's environment.
+See [installation](INSTALL.md) and [distribution scope](RELEASES.md).
 
 Install one or combine several extras in one command, for example:
 

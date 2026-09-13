@@ -168,4 +168,4 @@ review request.
 - [Task-control commands: `/focus` and `/recall`](FOCUS_RECALL_COMMANDS.md)
 - [`/steer` detailed reference](STEER_COMMAND.md)
 - [Bridge operational command catalog](AGENT_FYI.md)
-- [Root README command table](../README.md#commands)
+- [User guide: commands and task control](USER_GUIDE.md#commands-and-task-control)

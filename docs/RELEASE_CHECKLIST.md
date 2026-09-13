@@ -27,6 +27,8 @@
 - Python source distribution and wheel: `python -m build`
 - npm publication boundary: `npm pack --dry-run --json` and
   `python -m pytest -q tests/contract/test_npm_package_contract.py`
+  - the user guides and their local navigation targets are present in the
+    package; development-only references use explicit repository links
   - the tarball includes `runtime-entry.json`; an installed program must be
     able to qualify its Function generation, not merely pass runtime-only setup
 - npm command and instance lifecycle:
@@ -77,7 +79,8 @@
   - no function change or failed generation directs the operator to a cold process restart
   - verify agents return to `ONLINE`
   - verify the Backend API, enabled API Gateway, scheduler, delivery watcher,
-    and background-job manager retain Core ownership and remain healthy
+    and background-job manager retain their shared Function ownership and
+    identity and remain healthy during an Agent-only reboot
   - introduce a syntax/import/contract error in a disposable candidate and
     verify the isolated staging worker rejects `/reboot` without stopping live
     agents or changing the active generation ID
@@ -150,6 +153,37 @@
   - At least one template dry-run or live controller loop records taskboard, waits, issues, evidence, and final closeout state before claiming superloop functionality
 
 ## GitHub Publication
+
+### Release channels and npm-derived installation packs
+
+- Review [release selection](RELEASES.md). Compare package metadata, the
+  outgoing source revision, GitHub tags/Releases, and npm dist-tags.
+- GitHub cannot mark Alpha/Beta pre-releases Latest. Preserve maturity and
+  historical tags; legacy release pages should point to current guidance.
+- Choose the next number using the versioning policy, including its Core
+  generation rule. Documentation cleanup alone does not select a Beta number.
+- Create the npm tarball from the reviewed clean source. Inspect the manifest
+  and BUILD_INFO provenance, unpack into a clean temporary directory, and
+  exercise the packaged `node cli.js help` and `node cli.js --version`
+  without relying on checkout-only assets.
+- Publish the reviewed tarball to an explicit pre-release channel, for
+  example `npm publish <reviewed-tarball.tgz> --tag beta` for an approved Beta
+  version. Use `alpha` for an Alpha. Do not use an unqualified publish to
+  silently promote a pre-release to `latest`.
+- After publishing, query `npm view hashi-bridge@<version> dist --json` and
+  `npm view hashi-bridge dist-tags --json`. Record the exact version,
+  integrity, tarball URL, and source revision. Source metadata alone is not
+  registry publication evidence.
+- An installer built from npm must consume that exact version/integrity,
+  bundle or declare its runtime and dependency inputs, and publish its own
+  platform/profile/checksum. The existing Windows source builder is a separate
+  build path; an npm tarball alone is not an offline installer.
+- Run the installed-entry and platform checks on the resulting installation
+  pack. Test data preservation from the intended older version, especially
+  legacy 1.x layouts. Report package inspection, installation, provider
+  connection, and running-generation adoption separately.
+
+### Repository publication review
 
 - Destination:
   - approved GitHub owner/repository URL is recorded

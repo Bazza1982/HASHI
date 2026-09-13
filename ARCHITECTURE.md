@@ -265,11 +265,11 @@ protocol/API versions require a planned Core migration. In-process module
 reload is forbidden. Contributor workflow and required checks are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-Core-owned Telegram and Workbench ingress sends slash control through the
+Shared Frontend Function ingress for Telegram and the Backend API sends slash control through the
 versioned Function Worker RPC. Each Worker also owns a dedicated out-of-band
 provider-interrupt lane, so stop, steer, focus, and retry can terminate active
 CLI work before normal event-loop cleanup. Session Workzone slots publish only
 their exact enabled roots to backends and tools; implementations must not widen
 multiple roots to their common parent. HASHI Remote rescue remains a separately
 deployed `L3_RESTART` sidecar, and its local hot-reboot hop must use the
-token-protected Workbench admin command endpoint.
+token-protected Backend API admin command endpoint.

@@ -1,118 +1,73 @@
 # HASHI Launcher Scripts
 
-This directory contains platform-specific launcher scripts for HASHI.
+For installation and prerequisites, use the
+[installation guide](../docs/INSTALL.md). npm-installed programs expose the
+hashi command; these scripts are source-checkout and platform helpers.
 
-**Platform Support:** Scripts are tested on Windows and Linux. macOS is untested but may work (standard bash).
+## Source launchers
 
----
+Run from the repository root, after setup:
 
-## Main Launchers
-
-### Launch HASHI
-
-**Linux:**
-```bash
+~~~bash
 ./bin/bridge-u.sh
-```
+~~~
 
-**Windows:**
-```cmd
-bin\bridge-u.bat
-```
+On Windows:
 
-**PowerShell (Windows):**
-```powershell
-.\bin\bridge_ctl.ps1
-```
+~~~powershell
+.\bin\bridge-u.bat
+~~~
 
----
+For a direct source launch with the approved Python environment:
 
-## Agent Management
+~~~bash
+python main.py
+~~~
 
-### Start Agent
-```bash
-./bin/start-agent.sh [agent_name]    # Linux
-bin\start-agent.bat [agent_name]     # Windows
-```
+macOS support and portable profiles have their own validation scope in the
+[installation guide](../docs/INSTALL.md#macos).
 
-### Stop Agent
-```bash
-./bin/stop-agent.sh [agent_name]     # Linux
-bin\stop-agent.bat [agent_name]      # Windows
-```
+## First connection
 
----
+The current local connection page selects a CLI engine or a model provider
+inside HER v2. Telegram is optional:
 
-## System Management
+~~~bash
+python -m onboarding.onboarding_main
+~~~
 
-### Restart HASHI
-```bash
-./bin/restart-bridge.sh              # Linux
-bin\restart_bridge_u_f.bat           # Windows
-```
+For npm installations, use hashi onboard or the hashi-onboard compatibility
+entry. Use hashi help to inspect the installed command surface.
 
-### Manage Hashi Remote as a Side Program
-```bash
-./bin/hashi-remote-ctl.sh enable     # Register, enable, and activate systemd --user
+## Instance inspection and lifecycle
+
+For registered instances, use hashi status, hashi doctor, and hashi logs.
+hashi stop performs a scoped graceful stop and refuses busy or unverifiable
+instances. See the [user guide](../docs/USER_GUIDE.md).
+
+Slash-command /reboot replaces Agent Function Workers. It is not the
+whole-instance restart operation. Core/runtime migrations and shared Function
+replacement have separate adoption boundaries in
+[Architecture](../ARCHITECTURE.md).
+
+## Remote supervision
+
+These commands register and start the per-instance Remote supervisor.
+Run them only when setting up that service.
+
+~~~bash
+./bin/hashi-remote-ctl.sh enable
 ./bin/hashi-remote-ctl.sh status
-```
+~~~
 
-```powershell
-.\bin\hashi_remote_ctl.ps1 enable    # Register, enable, and activate Task Scheduler
+On Windows:
+
+~~~powershell
+.\bin\hashi_remote_ctl.ps1 enable
 .\bin\hashi_remote_ctl.ps1 status
-```
+~~~
 
-Hashi Remote is already included with HASHI. These helpers only register and
-enable its OS supervisor so Remote can outlive the HASHI core process and
-support remote rescue workflows. The default supervisor identity is
-derived from `global.instance_id`: for example, HASHI1 and HASHI2 use
-`hashi-remote-hashi1.service` and `hashi-remote-hashi2.service` on Linux/WSL,
-or `HashiRemote-hashi1` and `HashiRemote-hashi2` in Windows Task Scheduler.
-`HASHI_REMOTE_SERVICE_NAME` (Linux/WSL) and `-TaskName` (Windows) remain explicit
-operator overrides.
-
-### Kill All Sessions
-```bash
-./bin/kill-sessions.sh               # Linux
-bin\kill_bridge_u_f_sessions.bat     # Windows
-```
-
----
-
-## Onboarding
-
-### Run Onboarding
-```cmd
-bin\onboard.bat                      # Windows
-```
-
-Or use the npm CLI:
-```bash
-hashi-onboard                        # If installed via npm
-```
-
-Or directly:
-```bash
-python onboarding/onboarding_main.py
-```
-
----
-
-## Chrome/Browser Helpers
-
-### Start Linux Chrome (WSL)
-```bash
-./bin/start-linux-chrome.sh
-```
-
----
-
-## Note
-
-Most of these scripts are wrappers around `main.py` or other Python entry points. You can also run HASHI directly with:
-
-```bash
-python main.py [--agents agent1 agent2] [--api-gateway]
-```
-
-See `python main.py --help` for all options.
+Remote derives supervisor identity from configured instance identity. See
+[Remote setup](../docs/INSTALL.md#hashi-remote) for trust, platform support,
+and opt-out settings. Legacy restart and kill scripts remain implementation
+utilities; they are not the normal installation or troubleshooting path.

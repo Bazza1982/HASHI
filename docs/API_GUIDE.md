@@ -1,6 +1,10 @@
 # HASHI API Gateway — OpenAI Compatible API Guide
 
-HASHI includes a built-in OpenAI-compatible API gateway. Any tool or library that works with the OpenAI API can connect to HASHI directly.
+HASHI includes an optional gateway for supported OpenAI-compatible endpoints.
+Clients must use the endpoint, model, media, and tool features this gateway
+implements; compatibility does not imply complete OpenAI API parity.
+This is separate from HASHI's authenticated Backend API. The Gateway itself
+does not enforce caller authentication and should remain private.
 
 ## Quick Start
 
@@ -28,13 +32,9 @@ You can also control the gateway at runtime from Telegram:
 agent's active `/backend` or `/model`; callers can still override the gateway
 default by supplying a request-level `model`.
 
-Common local ports:
-
-| Instance | HASHI Backend API | API Gateway |
-|---|---:|---:|
-| HASHI1 | `18800` | `18801` |
-| HASHI2 | `18802` | `18803` |
-| HASHI9 | `18819` | `18820` |
+Ports are assigned per instance. Discover the selected instance's actual
+address through `/api`, configuration, and service health rather than using
+another machine's historical example ports.
 
 ### 2. Connection Parameters
 
@@ -44,12 +44,11 @@ Common local ports:
 | **Port** | `global.api_gateway_port`, defaulting to `global.workbench_port + 1` |
 | **API Key** | Any non-empty string (no auth enforced, e.g. `"EMPTY"`) |
 
-By default, HASHI binds the Backend API and API Gateway to the configured
-`global.api_host`. If that value is `127.0.0.1` or `localhost` and the WSL host
-alias `10.255.255.254` is available, HASHI uses `10.255.255.254` instead. This
-avoids WSL loopback environments where `127.0.0.1` accepts a socket but does not
-serve aiohttp traffic reliably. Confirm the live address with Backend API
-`GET /api/health` or the startup log line.
+HASHI derives service binding from `global.api_host` and the shared endpoint
+resolver. For loopback configuration on WSL, that resolver may use a bindable
+address from live interface discovery. There is no universal WSL host address
+to copy into configuration. Confirm the actual address with `/api`, Backend
+API `GET /api/health`, or the startup log.
 
 ---
 
@@ -111,17 +110,8 @@ changing the saved `/api on|off` choice.
 
 ## Available Models
 
-The gateway exposes models from all configured backends:
-
-| Backend | Example Models |
-|---------|---------------|
-| Gemini CLI | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3-flash-preview` |
-| Claude CLI | `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
-| Codex CLI | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini` |
-| Grok CLI | `grok-4.5`, `grok-composer-2.5-fast` |
-| xAI API (`xai-api`) | `grok-4.5`, `grok-4.3`, `grok-build-0.1`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning`, `grok-4.20-multi-agent-0309`, `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-video`, `grok-imagine-video-1.5-preview` |
-
-Run `GET /v1/models` to see the current list. Models whose backend failed
+Run `GET /v1/models` to see the current available model list, derived from
+eligible engines, instance opt-ins, and preflight. Models whose backend failed
 preflight (missing CLI binary, no Hermes OAuth, etc.) are omitted until the
 backend becomes available.
 

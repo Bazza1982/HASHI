@@ -97,6 +97,24 @@ Release preparation must verify equivalent identities across package metadata,
 application labels, tags, and release notes; do not create competing product
 versions merely to satisfy ecosystem syntax.
 
+### Registry channels and release-page labels
+
+GitHub's Latest selector excludes drafts and pre-releases. During Alpha/Beta
+development it can legitimately select an older stable tag. Mark historical
+release pages as legacy and link current installation/development guidance;
+do not reclassify an Alpha as stable to obtain the badge or rewrite old tags.
+
+npm dist-tags are independent of GitHub. Publish pre-releases to an explicit
+stage channel such as `alpha` or `beta`; a bare `npm install` selects
+`latest`. Verify that the selected version/channel actually exists before
+documenting it as an installation path. Update `latest` only as part of
+reviewed release promotion.
+
+The [release/distribution guide](RELEASES.md) records dated public registry
+observations. The [release checklist](RELEASE_CHECKLIST.md) verifies exact
+source and package identity before publication. This clarification does not
+promote the current candidate or authorize publishing unrelated local commits.
+
 ## 4. Portable is a distribution, not a fourth version number
 
 | Distribution label | Meaning |
