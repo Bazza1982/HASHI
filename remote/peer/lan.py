@@ -32,6 +32,7 @@ _SCOPE_TO_CODE = {
     "peer": "p",
 }
 _CODE_TO_SCOPE = {value: key for key, value in _SCOPE_TO_CODE.items()}
+_MDNS_TXT_RECORD_MAX_BYTES = 255
 
 
 def _normalize_host_identity(value: str) -> str:
@@ -73,6 +74,65 @@ def _decode_candidate_records(raw: str) -> list[dict]:
         if host:
             items.append({"host": host, "scope": scope or "unknown", "source": source or "peer"})
     return items
+
+
+def _txt_record_size(key: str, value: str) -> int:
+    return len(str(key).encode("utf-8")) + 1 + len(str(value).encode("utf-8"))
+
+
+def _encode_csv_txt_records(base_key: str, values: list[str]) -> dict[str, str]:
+    """Encode a growing CSV field as bounded DNS-SD TXT character-strings."""
+    records: dict[str, str] = {}
+    chunk: list[str] = []
+    chunk_index = 0
+    seen: set[str] = set()
+
+    def record_key() -> str:
+        return base_key if chunk_index == 0 else f"{base_key}_{chunk_index}"
+
+    for raw_value in values or []:
+        value = str(raw_value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        candidate = ",".join([*chunk, value])
+        if _txt_record_size(record_key(), candidate) <= _MDNS_TXT_RECORD_MAX_BYTES:
+            chunk.append(value)
+            continue
+
+        if chunk:
+            records[record_key()] = ",".join(chunk)
+            chunk_index += 1
+            chunk = []
+        if _txt_record_size(record_key(), value) > _MDNS_TXT_RECORD_MAX_BYTES:
+            logger.warning(
+                "LanDiscovery: omitted oversized %s item from mDNS metadata (%d bytes)",
+                base_key,
+                len(value.encode("utf-8")),
+            )
+            continue
+        chunk.append(value)
+
+    if chunk:
+        records[record_key()] = ",".join(chunk)
+    return records
+
+
+def _decode_csv_txt_records(properties: dict[str, str], base_key: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    chunk_index = 0
+    while True:
+        key = base_key if chunk_index == 0 else f"{base_key}_{chunk_index}"
+        if key not in properties:
+            break
+        for raw_value in str(properties.get(key) or "").split(","):
+            value = raw_value.strip()
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+        chunk_index += 1
+    return values
 
 
 def _is_loopback_host(value: str | None) -> bool:
@@ -291,7 +351,7 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
             hashi_version=props.get("hashi_version", "unknown"),
             display_handle=props.get("display_handle", f"@{instance_id.lower()}"),
             protocol_version=props.get("protocol_version", "1.0"),
-            capabilities=[c for c in props.get("capabilities", "").split(",") if c],
+            capabilities=_decode_csv_txt_records(props, "capabilities"),
             properties={
                 "discovery": "lan",
                 "host_identity": _normalize_host_identity(props.get("host_identity", "")),
@@ -407,7 +467,6 @@ class LanDiscovery(PeerDiscovery):
             "version": HASHI_REMOTE_VERSION,
             "hashi_version": info.hashi_version,
             "protocol_version": info.protocol_version or "1.0",
-            "capabilities": ",".join(info.capabilities or []),
             "host_identity": str(network_profile.get("host_identity") or ""),
             "environment_kind": str(network_profile.get("environment_kind") or ""),
             "agent_snapshot_version": str(extra.get("agent_snapshot_version") or ""),
@@ -415,6 +474,7 @@ class LanDiscovery(PeerDiscovery):
             "address_candidates_json": _encode_candidate_records(network_profile.get("address_candidates") or []),
             "observed_candidates_json": _encode_candidate_records(network_profile.get("observed_candidates") or []),
         }
+        props.update(_encode_csv_txt_records("capabilities", info.capabilities or []))
         props_bytes = {k: v.encode() for k, v in props.items()}
         service_name = f"{info.instance_id} - Hashi Remote.{HASHI_SERVICE_TYPE}"
         return ServiceInfo(

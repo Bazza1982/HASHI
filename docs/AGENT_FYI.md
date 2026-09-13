@@ -70,6 +70,10 @@ IDs, a remembered prior Turn, or possession of some other credential.
 HChat separates sender claim, verified peer, relay, and target. Private
 authorization is per message; only current `state=success` scopes apply.
 Never put the shared secret in message text or command arguments.
+Remote mDNS metadata must keep every DNS-SD TXT record within 255 bytes and
+split growing capability lists across contiguous records. Treat discovery as
+a route hint only; trust, full capabilities, and Agent directories come from
+the authenticated handshake.
 
 PAO determines one immutable Run route before PCM projection. The route states
 the primary destination, mirrors, and whether ordinary reply delivery is

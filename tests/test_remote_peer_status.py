@@ -28,7 +28,7 @@ sys.modules.setdefault(
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from remote.peer.base import PeerInfo
-from remote.peer.lan import _service_info_to_peer
+from remote.peer.lan import LanDiscovery, _service_info_to_peer
 from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.protocol_manager import ProtocolManager
@@ -131,6 +131,53 @@ def test_lan_discovery_prefers_advertised_non_loopback_candidate_when_mdns_addre
 
     assert peer is not None
     assert peer.host == "192.168.50.21"
+
+
+def test_lan_advertisement_chunks_capabilities_within_mdns_txt_record_limit(monkeypatch):
+    captured = {}
+
+    class CapturingServiceInfo:
+        def __init__(self, *, type_, name, port, properties, server, addresses):
+            del type_, name, addresses
+            for key, value in properties.items():
+                assert len(key) + 1 + len(value) <= 255
+            self.properties = properties
+            self.port = port
+            self.server = server
+            captured["service"] = self
+
+        def parsed_addresses(self):
+            return ["127.0.0.1"]
+
+    monkeypatch.setattr("remote.peer.lan.ServiceInfo", CapturingServiceInfo)
+    monkeypatch.setattr("remote.peer.lan.socket.gethostname", lambda: "hashi-host")
+    monkeypatch.setattr("remote.peer.lan._get_local_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        "remote.peer.lan.build_local_network_profile",
+        lambda _peer: {
+            "host_identity": "hashi-host",
+            "environment_kind": "windows",
+            "address_candidates": [],
+            "observed_candidates": [],
+        },
+    )
+    capabilities = [f"capability_{index:02d}_{'x' * 12}" for index in range(20)]
+    peer = PeerInfo(
+        instance_id="HASHI4",
+        display_name="HASHI4",
+        host="127.0.0.1",
+        port=8771,
+        workbench_port=18806,
+        platform="windows",
+        protocol_version="2.0",
+        capabilities=capabilities,
+    )
+
+    LanDiscovery("HASHI4")._service_info_for_peer(peer)
+    decoded = _service_info_to_peer(captured["service"], "HASHI3")
+
+    assert decoded is not None
+    assert decoded.capabilities == capabilities
 
 
 def test_registry_rejects_unknown_peer_and_prunes_unknown_instance_seed(tmp_path):

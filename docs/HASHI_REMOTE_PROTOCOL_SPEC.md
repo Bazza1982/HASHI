@@ -39,6 +39,12 @@ Advertised fields:
 - `hashi_version`
 - `workbench_port`
 
+DNS-SD encodes each TXT character-string within the 255-byte wire limit.
+Growing CSV metadata such as `capabilities` is therefore published as
+contiguous `capabilities`, `capabilities_1`, ... records. Discovery metadata is
+only a routing hint; the authenticated handshake returns the authoritative,
+complete capability set.
+
 ### Discovery result
 
 Discovery only means:
