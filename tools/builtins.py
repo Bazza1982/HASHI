@@ -103,12 +103,40 @@ def _positive_seconds(value: object, *, label: str) -> tuple[float | None, str |
 
 
 def _bash_timeout(
-    args: Mapping[str, Any], timeout_max: float | None
+    args: Mapping[str, Any],
+    timeout_max: float | None,
+    timeout_default: float | None = None,
 ) -> tuple[float | None, dict[str, Any], str | None]:
-    """Resolve only an explicitly requested timeout and optional operator cap."""
+    """Resolve a caller timeout or an explicitly configured instance fuse."""
 
     if "timeout" not in args or args.get("timeout") is None:
-        return None, {"timeout_explicit": False}, None
+        if timeout_default is None:
+            return None, {"timeout_explicit": False}, None
+        default, error = _positive_seconds(
+            timeout_default, label="configured shell timeout_default"
+        )
+        if error is not None:
+            return None, {"timeout_explicit": False}, error
+        assert default is not None
+        configured_max = None
+        if timeout_max is not None:
+            configured_max, error = _positive_seconds(
+                timeout_max, label="configured bash timeout_max"
+            )
+            if error is not None:
+                return None, {"timeout_explicit": False}, error
+            assert configured_max is not None
+            default = min(default, configured_max)
+        return (
+            default,
+            {
+                "timeout_explicit": False,
+                "timeout_effective_s": default,
+                "timeout_source": "instance_safety_default",
+                "timeout_max_s": configured_max,
+            },
+            None,
+        )
     requested, error = _positive_seconds(args.get("timeout"), label="timeout")
     if error is not None:
         return None, {"timeout_explicit": True}, error
@@ -291,13 +319,16 @@ async def execute_shell(
     args: dict,
     workspace_dir: Path,
     timeout_max: float | None = None,
+    timeout_default: float | None = None,
     blocked_patterns: Optional[list[str]] = None,
 ) -> str | BuiltinExecutionResult:
     command = str(args.get("command", "")).strip()
     if not command:
         return "Error: no command provided"
 
-    timeout, timeout_details, timeout_error = _bash_timeout(args, timeout_max)
+    timeout, timeout_details, timeout_error = _bash_timeout(
+        args, timeout_max, timeout_default
+    )
     if timeout_error is not None:
         return BuiltinExecutionResult(timeout_error, timeout_details)
 
@@ -468,6 +499,7 @@ async def execute_bash(
     args: dict,
     workspace_dir: Path,
     timeout_max: float | None = None,
+    timeout_default: float | None = None,
     blocked_patterns: Optional[list[str]] = None,
 ) -> str | BuiltinExecutionResult:
     """Compatibility alias that always invokes a real Bash executable."""
@@ -478,13 +510,211 @@ async def execute_bash(
         compatibility_args,
         workspace_dir=workspace_dir,
         timeout_max=timeout_max,
+        timeout_default=timeout_default,
         blocked_patterns=blocked_patterns,
     )
 
 
 # ---------------------------------------------------------------------------
-# file_read
+# log_query / file_read
 # ---------------------------------------------------------------------------
+
+_LOG_QUERY_CHUNK_CHARS = 64 * 1024
+_LOG_QUERY_DEFAULT_MAX_RESULTS = 30
+_LOG_QUERY_MAX_RESULTS = 200
+_LOG_QUERY_DEFAULT_CONTEXT_CHARS = 300
+_LOG_QUERY_MAX_CONTEXT_CHARS = 2000
+_LOG_QUERY_MAX_TERMS = 32
+_LOG_QUERY_MAX_TERM_CHARS = 1024
+
+
+def _bounded_integer_argument(
+    value: object,
+    *,
+    label: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> tuple[int | None, str | None]:
+    if value is None:
+        return default, None
+    if isinstance(value, bool):
+        return None, f"Error: {label} must be an integer from {minimum} to {maximum}"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None, f"Error: {label} must be an integer from {minimum} to {maximum}"
+    if parsed < minimum or parsed > maximum:
+        return None, f"Error: {label} must be an integer from {minimum} to {maximum}"
+    return parsed, None
+
+
+def _literal_log_query(
+    path: Path,
+    *,
+    terms: tuple[str, ...],
+    case_sensitive: bool,
+    max_results: int,
+    context_chars: int,
+) -> dict[str, Any]:
+    flags = 0 if case_sensitive else re.IGNORECASE
+    patterns = tuple((term, re.compile(re.escape(term), flags)) for term in terms)
+    longest_term = max(len(term) for term in terms)
+    buffer = ""
+    buffer_offset = 0
+    newlines_before_buffer = 0
+    next_scan_offset = 0
+    characters_read = 0
+    matches: list[dict[str, Any]] = []
+    result_limit_reached = False
+
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as stream:
+        while True:
+            chunk = stream.read(_LOG_QUERY_CHUNK_CHARS)
+            eof = chunk == ""
+            if chunk:
+                buffer += chunk
+                characters_read += len(chunk)
+
+            safe_start_limit = buffer_offset + len(buffer)
+            if not eof:
+                safe_start_limit = max(
+                    next_scan_offset,
+                    safe_start_limit - context_chars - longest_term,
+                )
+            local_cursor = max(0, next_scan_offset - buffer_offset)
+            local_limit = max(local_cursor, safe_start_limit - buffer_offset)
+
+            while local_cursor < local_limit and len(matches) < max_results:
+                candidates: list[tuple[int, int, str, re.Match[str]]] = []
+                for index, (term, pattern) in enumerate(patterns):
+                    match = pattern.search(buffer, local_cursor)
+                    if match is not None and match.start() < local_limit:
+                        candidates.append((match.start(), index, term, match))
+                if not candidates:
+                    break
+                _start, _index, term, match = min(
+                    candidates, key=lambda candidate: (candidate[0], candidate[1])
+                )
+                start = match.start()
+                end = match.end()
+                excerpt_start = max(0, start - context_chars)
+                excerpt_end = min(len(buffer), end + context_chars)
+                matches.append(
+                    {
+                        "term": term,
+                        "line": newlines_before_buffer
+                        + buffer.count("\n", 0, start)
+                        + 1,
+                        "character_offset": buffer_offset + start,
+                        "excerpt": buffer[excerpt_start:excerpt_end],
+                    }
+                )
+                local_cursor = max(end, start + 1)
+
+            if len(matches) >= max_results:
+                result_limit_reached = True
+                break
+            next_scan_offset = safe_start_limit
+            if eof:
+                break
+
+            keep_from = max(buffer_offset, next_scan_offset - context_chars)
+            drop_count = keep_from - buffer_offset
+            if drop_count:
+                newlines_before_buffer += buffer.count("\n", 0, drop_count)
+                buffer = buffer[drop_count:]
+                buffer_offset = keep_from
+
+    return {
+        "path": str(path),
+        "file_size_bytes": path.stat().st_size,
+        "literal_only": True,
+        "case_sensitive": case_sensitive,
+        "terms": list(terms),
+        "matches": matches,
+        "result_limit_reached": result_limit_reached,
+        "characters_read": characters_read,
+    }
+
+
+async def execute_log_query(
+    args: dict,
+    access_root: Path | Sequence[Path],
+    workspace_dir: Path,
+) -> str | BuiltinExecutionResult:
+    """Search bounded literal excerpts without materialising whole records."""
+
+    raw_path = str(args.get("path") or "").strip()
+    if not raw_path:
+        return "Error: no path provided"
+    raw_terms = args.get("terms")
+    if not isinstance(raw_terms, list) or not raw_terms:
+        return "Error: terms must be a non-empty list of literal strings"
+    if len(raw_terms) > _LOG_QUERY_MAX_TERMS:
+        return f"Error: terms may contain at most {_LOG_QUERY_MAX_TERMS} values"
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw_term in raw_terms:
+        if not isinstance(raw_term, str) or not raw_term:
+            return "Error: every term must be a non-empty string"
+        if len(raw_term) > _LOG_QUERY_MAX_TERM_CHARS:
+            return (
+                f"Error: every term must contain at most "
+                f"{_LOG_QUERY_MAX_TERM_CHARS} characters"
+            )
+        if raw_term not in seen:
+            seen.add(raw_term)
+            terms.append(raw_term)
+    max_results, error = _bounded_integer_argument(
+        args.get("max_results"),
+        label="max_results",
+        default=_LOG_QUERY_DEFAULT_MAX_RESULTS,
+        minimum=1,
+        maximum=_LOG_QUERY_MAX_RESULTS,
+    )
+    if error is not None:
+        return error
+    context_chars, error = _bounded_integer_argument(
+        args.get("context_chars"),
+        label="context_chars",
+        default=_LOG_QUERY_DEFAULT_CONTEXT_CHARS,
+        minimum=0,
+        maximum=_LOG_QUERY_MAX_CONTEXT_CHARS,
+    )
+    if error is not None:
+        return error
+    case_sensitive = args.get("case_sensitive", False)
+    if not isinstance(case_sensitive, bool):
+        return "Error: case_sensitive must be a boolean"
+
+    try:
+        path = _resolve_path(raw_path, access_root, workspace_dir)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    if not path.is_file():
+        return f"Error: file not found: {path}"
+    assert max_results is not None and context_chars is not None
+    try:
+        payload = await asyncio.to_thread(
+            _literal_log_query,
+            path,
+            terms=tuple(terms),
+            case_sensitive=case_sensitive,
+            max_results=max_results,
+            context_chars=context_chars,
+        )
+    except OSError as exc:
+        return f"Error reading file: {exc}"
+    return BuiltinExecutionResult(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        {
+            "query_mode": "literal",
+            "file_size_bytes": payload["file_size_bytes"],
+            "match_count": len(payload["matches"]),
+            "result_limit_reached": payload["result_limit_reached"],
+        },
+    )
 
 async def execute_file_read(
     args: dict,

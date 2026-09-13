@@ -63,6 +63,9 @@ def test_execution_environment_contract_is_explicit_and_platform_honest() -> Non
     assert "Use `execution_path_style`" in rendered
     assert "legacy `bash` alias always means real Bash and never CMD" in rendered
     assert "PowerShell, CMD, and POSIX syntax separate" in rendered
+    assert "prefer it over grep, ripgrep" in rendered
+    assert "typed `needs_replan` Tool result" in rendered
+    assert "do not evade the admission guard" in rendered
 
 
 def test_external_prompt_inventory_is_complete_and_cwd_independent(

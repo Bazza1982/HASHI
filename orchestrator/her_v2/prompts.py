@@ -325,7 +325,12 @@ def render_execution_environment_contract(value: Any) -> str:
         "`user_facing_path_style` when reporting local file or folder locations. "
         "In WSL, Explorer-ready drive or distro-UNC paths belong in prose while "
         "commands executed inside WSL keep POSIX paths. Treat argv execution as "
-        "shell-free.\n\n"
+        "shell-free. When `log_query` is exposed, prefer it over grep, ripgrep, "
+        "or shell pipelines for literal searches in logs and JSONL, especially "
+        "when records may be very long. A typed `needs_replan` Tool result means "
+        "the command was not executed: follow its suggested tool and do not evade "
+        "the admission guard. Use managed background jobs for genuinely long "
+        "processes.\n\n"
         + json.dumps(environment, ensure_ascii=False, sort_keys=True, indent=2)
     )
 

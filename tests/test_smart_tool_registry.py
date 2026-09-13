@@ -343,3 +343,107 @@ async def test_her_receipt_stays_internal_to_five_field_result(
     assert row["task_id"] == "turn-77"
     assert row["stage"] == "execution"
     assert row["model"] == "execution-model"
+
+
+@pytest.mark.asyncio
+async def test_large_record_grep_is_rejected_before_dispatch_with_replan_guidance(
+    tmp_path, monkeypatch
+) -> None:
+    log_path = tmp_path / "events.jsonl"
+    log_path.write_text("x" * 512 + " token\n", encoding="utf-8")
+    registry = ToolRegistry(
+        allowed_tools=["shell", "log_query"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        tool_options={
+            "smart_registry": {
+                "enabled": True,
+                "ledger_path": "tool_ledger.jsonl",
+                "large_record_bytes": 128,
+                "file_probe_bytes": 4096,
+            }
+        },
+        audit_context={"task_id": "grep-regression", "stage": "execution"},
+    )
+    dispatched = False
+
+    async def unexpected_dispatch(_tool_name, _arguments, **_kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return "unsafe command ran"
+
+    monkeypatch.setattr(registry, "_dispatch", unexpected_dispatch)
+    result = await registry.execute(
+        "shell",
+        {
+            "shell": "bash",
+            "command": (
+                "grep -o '.\\{0,300\\}\\(telegram\\|token\\).\\{0,300\\}' "
+                "events.jsonl | tail -30"
+            ),
+        },
+        "call-risky-grep",
+    )
+
+    payload = _payload(result)
+    assert dispatched is False
+    assert result.is_error is True
+    assert payload["status"] == "needs_replan"
+    assert payload["effect"] == "no_change"
+    assert payload["error"]["code"] == "unsafe_text_search"
+    assert payload["data"]["suggested_tool"] == "log_query"
+    assert payload["data"]["record_over_limit"] is True
+    assert result.details["control_disposition"] == "needs_replan"
+
+
+@pytest.mark.asyncio
+async def test_log_query_bounds_an_18m_character_single_record(tmp_path) -> None:
+    target_size = 18_141_830
+    prefix = b'{"payload":"'
+    marker = b" TOKEN "
+    suffix = b'"}\n'
+    left_size = 9_000_000
+    right_size = target_size - len(prefix) - left_size - len(marker) - len(suffix)
+    log_path = tmp_path / "huge.jsonl"
+    with log_path.open("wb") as stream:
+        stream.write(prefix)
+        for _ in range(left_size // 1_000_000):
+            stream.write(b"x" * 1_000_000)
+        stream.write(b"x" * (left_size % 1_000_000))
+        stream.write(marker)
+        for _ in range(right_size // 1_000_000):
+            stream.write(b"y" * 1_000_000)
+        stream.write(b"y" * (right_size % 1_000_000))
+        stream.write(suffix)
+
+    registry = _registry(tmp_path, "log_query")
+    result = await registry.execute(
+        "log_query",
+        {
+            "path": "huge.jsonl",
+            "terms": ["token"],
+            "case_sensitive": False,
+            "max_results": 1,
+            "context_chars": 24,
+        },
+        "call-log-query",
+    )
+
+    payload = _payload(result)
+    assert result.is_error is False
+    assert payload["status"] == "success"
+    assert payload["effect"] == "observed"
+    data = payload["data"]
+    assert data["file_size_bytes"] == target_size
+    assert data["literal_only"] is True
+    assert data["result_limit_reached"] is True
+    assert data["matches"] == [
+        {
+            "character_offset": len(prefix) + left_size + 1,
+            "excerpt": "x" * 23 + " TOKEN " + "y" * 23,
+            "line": 1,
+            "term": "token",
+        }
+    ]
+    assert len(result.output) < 2000

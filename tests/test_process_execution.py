@@ -136,6 +136,23 @@ async def test_shell_contract_propagates_nonzero_exit_code(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_shell_enforces_an_explicit_instance_safety_default(tmp_path):
+    command = "Start-Sleep -Seconds 60" if os.name == "nt" else "sleep 60"
+
+    result = await execute_shell(
+        {"command": command},
+        workspace_dir=tmp_path,
+        timeout_default=0.1,
+    )
+
+    assert isinstance(result, BuiltinExecutionResult)
+    assert result.output == "Error: command timed out after 0.1s"
+    assert result.details["timeout_explicit"] is False
+    assert result.details["timeout_source"] == "instance_safety_default"
+    assert result.details["foreground_cleanup"]["process_reaped"] is True
+
+
+@pytest.mark.asyncio
 async def test_background_command_mode_uses_the_same_explicit_shell_contract(tmp_path):
     manager = BackgroundJobManager(tmp_path / "background_shell")
     await manager.start()

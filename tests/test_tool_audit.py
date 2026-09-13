@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.enterprise import ArtifactRegistry, IdentityService, TaskRegistry
-from tools.builtins import BuiltinExecutionResult
+from tools.builtins import BuiltinExecutionResult, _bash_timeout
 from tools.registry import ToolRegistry
 from tools.schemas import TOOL_SCHEMA_MAP
 from tools.tool_audit import build_tool_audit_record
@@ -43,7 +43,7 @@ def test_bash_schema_exposes_only_an_optional_positive_timeout():
     assert parameters["required"] == ["command"]
     assert timeout["type"] == "number"
     assert timeout["exclusiveMinimum"] == 0
-    assert "Omit it to run without a time limit" in timeout["description"]
+    assert "instance safety deadline" in timeout["description"]
 
 
 def test_shell_schema_declares_platform_default_and_explicit_selectors():
@@ -59,6 +59,33 @@ def test_shell_schema_declares_platform_default_and_explicit_selectors():
     assert "Do not mix POSIX, PowerShell, and CMD syntax" in parameters[
         "properties"
     ]["command"]["description"]
+
+
+def test_log_query_schema_is_literal_bounded_and_in_the_core_tier():
+    function = TOOL_SCHEMA_MAP["log_query"]["function"]
+    parameters = function["parameters"]
+
+    assert parameters["required"] == ["path", "terms"]
+    assert parameters["additionalProperties"] is False
+    assert parameters["properties"]["terms"]["maxItems"] == 32
+    assert parameters["properties"]["max_results"]["maximum"] == 200
+    assert parameters["properties"]["context_chars"]["maximum"] == 2000
+    assert "literal" in function["description"]
+
+
+def test_configured_safety_timeout_applies_when_caller_omits_timeout():
+    timeout, details, error = _bash_timeout(
+        {}, timeout_max=None, timeout_default=1800
+    )
+
+    assert error is None
+    assert timeout == 1800
+    assert details == {
+        "timeout_explicit": False,
+        "timeout_effective_s": 1800,
+        "timeout_source": "instance_safety_default",
+        "timeout_max_s": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -130,13 +157,18 @@ async def test_tool_registry_does_not_supply_an_implicit_bash_timeout_cap(
     captured = {}
 
     async def fake_execute_bash(
-        args, workspace_dir, timeout_max=None, blocked_patterns=None
+        args,
+        workspace_dir,
+        timeout_max=None,
+        timeout_default=None,
+        blocked_patterns=None,
     ):
         captured.update(
             {
                 "args": args,
                 "workspace_dir": workspace_dir,
                 "timeout_max": timeout_max,
+                "timeout_default": timeout_default,
                 "blocked_patterns": blocked_patterns,
             }
         )
@@ -156,6 +188,54 @@ async def test_tool_registry_does_not_supply_an_implicit_bash_timeout_cap(
 
     assert result.is_error is False
     assert captured["timeout_max"] is None
+    assert captured["timeout_default"] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_supplies_explicit_smart_safety_timeout(
+    tmp_path, monkeypatch
+):
+    captured = {}
+
+    async def fake_execute_shell(
+        args,
+        workspace_dir,
+        timeout_max=None,
+        timeout_default=None,
+        blocked_patterns=None,
+    ):
+        captured.update(
+            {
+                "args": args,
+                "workspace_dir": workspace_dir,
+                "timeout_max": timeout_max,
+                "timeout_default": timeout_default,
+                "blocked_patterns": blocked_patterns,
+            }
+        )
+        return BuiltinExecutionResult("ok")
+
+    monkeypatch.setattr("tools.builtins.execute_shell", fake_execute_shell)
+    registry = ToolRegistry(
+        allowed_tools=["shell"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        tool_options={
+            "smart_registry": {
+                "enabled": True,
+                "foreground_timeout_seconds": 1800,
+            }
+        },
+    )
+
+    result = await registry.execute(
+        "shell", {"command": "long-running-command"}, tool_call_id="smart-fuse"
+    )
+
+    assert result.is_error is False
+    assert captured["timeout_max"] is None
+    assert captured["timeout_default"] == 1800
 
 
 @pytest.mark.asyncio

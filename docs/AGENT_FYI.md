@@ -1,7 +1,7 @@
 # HASHI Agent FYI
 
-This orientation is not a task queue, authorization, or adoption proof.
-`/fyi` reloads it; details remain in linked owner documents.
+This orientation is neither a task queue, authorization, nor adoption proof.
+`/fyi` reloads it.
 
 ## Authority and engineering
 
@@ -26,10 +26,10 @@ Core paths derive only from `orchestrator.runtime_contract.CORE_SOURCE_PATHS`;
 check before choosing files and completion. Do not move policy into Core,
 duplicate registries, or use `--authorized` without explicit permission.
 
-Source, qualified artifacts, installed clients, running Functions/Workers, and
-delivery are separate facts. `/reboot min` replaces one Worker; shared Function
-replacement is broader. Verify the active generation before claiming adoption.
-See [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
+Source, artifacts, installed clients, running Workers, and delivery are separate
+facts. `/reboot min` replaces one Worker; shared replacement is broader. Verify
+the active generation before claiming adoption. See
+[Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
 [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
 ## State, configuration, and identity
@@ -193,28 +193,25 @@ operator chooses an archived read-only view or independent context copy; both
 use new IDs and provenance. On `history_generation` change, replace the
 projection—never substitute a legacy workspace transcript.
 
-Remote discovery is not trust: mDNS exposes bounded hints/digests; full data
-requires mutual handshake. Distinguish `ready_empty`, `ready`, `starting`,
-`degraded`, and static-seed fallback. Token changes invalidate trust until
-re-handshake; never expose token material.
+Remote discovery supplies bounded route hints, not trust; full data needs a
+mutual handshake. Distinguish `ready_empty`, `ready`, `starting`, `degraded`,
+and static fallback. Token changes require re-handshake; never expose tokens.
 
-Telegram delivery recovery belongs to an exact instance, Agent lifecycle ID,
-and fingerprinted Bot identity—not a reusable Agent name or token-key label.
-Legacy or mismatched records are quarantined without sending. Permanent
-destination errors stop only that chat; transient recovery is bounded and
-`RetryAfter` remains authoritative. A recovery notice is bookkeeping, never a
-gate on ordinary delivery after the wait expires. Move preserves proven state
-and full-workspace pending responses; Clone inherits neither. See
-[Telegram Delivery Failover](TELEGRAM_DELIVERY_FAILOVER_DESIGN.md).
+Telegram recovery binds the exact instance, Agent lifecycle, and fingerprinted
+Bot—not a reusable name or token label. Quarantine mismatches without sending.
+Permanent errors stop only that chat; transient recovery is bounded and
+`RetryAfter` wins. Recovery notices never gate later ordinary delivery. Move
+preserves proven state and full-workspace pending responses; Clone inherits
+neither. See [Telegram Delivery Failover](TELEGRAM_DELIVERY_FAILOVER_DESIGN.md).
 
-Use only capabilities exposed for the current turn and authority; device
-actions also need a live same-instance Worker. Re-plan on typed
-`capability_unavailable`; use HASHI Jobs for long work. Superloop review needs
+Use only currently authorised capabilities; device actions need a live
+same-instance Worker. Re-plan on `capability_unavailable` or `needs_replan`.
+Prefer `log_query` for literal log/JSONL search; never bypass its admission.
+Use Jobs for long work.
+Superloop review needs
 opt-in,
 matching identities, Session-pinned idempotency, and a concrete next action;
 reports are not delivery. See [Superloop](SUPERLOOP_FUNCTION_CONTRACT.md).
 
-Tests prove selected scope only; live canaries require authority. Never claim
-adoption or delivery from code, docs, tests, settings, or old transcripts.
-Preserve unrelated changes; distinguish failures, skips, unverified platforms,
-adoption, and delivery.
+Tests prove only selected scope; live adoption/delivery need separate evidence.
+Keep user changes; report failures and unverified scope.

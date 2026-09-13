@@ -261,6 +261,16 @@ pointers without injecting old prompts or full answers. Pausing it preserves
 all files. See [Memory+ v2 — Compact Work Continuity](MEMORY_PLUS_V2.md) for
 backend routing, rollover, migration, and writer ownership.
 
+## HER v2 Smart Tools
+
+`log_query` is the preferred Tool Registry path for literal searches in UTF-8
+logs, JSONL, NDJSON, and other files with potentially long records. It reads
+fixed-size chunks, treats all terms literally, and bounds match count and
+context. Do not replace a `needs_replan` result with differently quoted
+`grep`/`ripgrep`; follow its `suggested_tool`. Use `shell` for bounded foreground
+commands and HASHI Background Jobs for genuinely long processes. An instance
+may configure a generous process-local foreground safety fuse.
+
 ## Skills System
 - Skills live under `skills/` as `skills/<kebab-case-name>/SKILL.md` packages.
 - Frontmatter requires standard `name` and `description`; Agent Skills optional metadata fields are accepted, while the Markdown body supplies request instructions.

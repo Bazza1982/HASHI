@@ -1,6 +1,6 @@
 """
-Tool JSON Schema definitions in OpenAI function-calling format.
-These are injected into the OpenRouter API payload when tool use is enabled.
+Tool JSON Schema definitions in model-provider function-calling format.
+HER v2 exposes the permitted subset through the HASHI Tool Gateway.
 """
 
 TOOL_SCHEMAS = [
@@ -14,6 +14,10 @@ TOOL_SCHEMAS = [
                 "to Bash. Set shell='cmd' only for CMD/.bat/.cmd syntax. Output is UTF-8. "
                 "Use background_job_start for managed jobs and verification_run for "
                 "correctness checks."
+                " Prefer log_query over grep, ripgrep, or shell pipelines for literal "
+                "searches in logs, JSONL, or other files that may contain very long "
+                "records. Smart Tool admission may return needs_replan instead of "
+                "starting a risky foreground search."
             ),
             "parameters": {
                 "type": "object",
@@ -38,7 +42,8 @@ TOOL_SCHEMAS = [
                         "exclusiveMinimum": 0,
                         "description": (
                             "Optional timeout in seconds for this command only. "
-                            "Omit it to run without a time limit."
+                            "When omitted, an explicitly configured instance safety deadline "
+                            "may apply; otherwise there is no default deadline."
                         ),
                     },
                 },
@@ -68,11 +73,62 @@ TOOL_SCHEMAS = [
                         "exclusiveMinimum": 0,
                         "description": (
                             "Optional timeout in seconds for this command only. "
-                            "Omit it to run without a time limit."
+                            "When omitted, an explicitly configured instance safety deadline "
+                            "may apply; otherwise there is no default deadline."
                         ),
                     },
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_query",
+            "description": (
+                "Safely search one UTF-8 text, log, JSONL, or NDJSON file for literal "
+                "terms. The implementation reads fixed-size chunks, escapes every term "
+                "instead of executing user regex, and returns bounded excerpts. Prefer "
+                "this over shell grep/ripgrep when records may be very long."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or workspace-relative file path.",
+                    },
+                    "terms": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "description": (
+                            "One or more literal strings. Terms are never interpreted as regex."
+                        ),
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "Match case exactly when true. Default false.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200,
+                        "description": "Maximum returned matches. Default 30.",
+                    },
+                    "context_chars": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 2000,
+                        "description": (
+                            "Maximum characters retained before and after each match. Default 300."
+                        ),
+                    },
+                },
+                "required": ["path", "terms"],
+                "additionalProperties": False,
             },
         },
     },

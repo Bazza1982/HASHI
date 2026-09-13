@@ -1,8 +1,7 @@
 """
 ToolRegistry — permission-checked tool dispatcher for HASHI V2.2.
 
-Loaded by FlexibleBackendManager and injected into OpenRouterAdapter
-when the backend config contains a `tools` key.
+HER v2 and other Engine adapters consume it through the HASHI Tool Gateway.
 """
 from __future__ import annotations
 
@@ -26,7 +25,7 @@ from tools.smart_tools import SmartToolRuntime
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["shell", "file_read", "file_write", "file_list"],
+    "core": ["shell", "log_query", "file_read", "file_write", "file_list"],
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
     "verification": ["workspace_inspect", "verification_run"],
@@ -84,6 +83,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "hashi_scheduler_status",
         "media_read",
         "memory_search",
+        "log_query",
         "process_list",
         "wiki_search",
         "web_fetch",
@@ -594,6 +594,24 @@ class ToolRegistry:
         )
         if denial is not None:
             return denial
+        smart_admission = self.smart_tools.evaluate_admission(
+            tool_name=tool_name,
+            arguments=arguments,
+            access_roots=self.access_roots,
+        )
+        if smart_admission is not None:
+            admission_data = smart_admission.as_dict()
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=f"Error: Smart Tool requires replanning: {smart_admission.message}",
+                is_error=True,
+                details={
+                    "control_disposition": "needs_replan",
+                    "smart_admission": admission_data,
+                    "suggested_tool": smart_admission.suggested_tool,
+                    "tool_executed": False,
+                },
+            )
         return None
 
     def _check_system_exchange_loop_gate(
@@ -813,7 +831,7 @@ class ToolRegistry:
         return ToolResult(
             tool_call_id=result.tool_call_id,
             output=outcome.model_output(),
-            is_error=outcome.status in {"failed", "unavailable"},
+            is_error=outcome.status in {"failed", "unavailable", "needs_replan"},
             content=result.content,
             details=details,
         )
@@ -825,7 +843,14 @@ class ToolRegistry:
         *,
         tool_call_id: str,
     ) -> ToolResult | None:
-        if tool_name not in {"file_read", "file_write", "file_list", "apply_patch", "vision_inspect"}:
+        if tool_name not in {
+            "file_read",
+            "file_write",
+            "file_list",
+            "log_query",
+            "apply_patch",
+            "vision_inspect",
+        }:
             return None
         context = self._effective_audit_context()
         org_id = str(context.get("org_id") or "").strip()
@@ -1124,6 +1149,7 @@ class ToolRegistry:
         from tools.builtins import (
             execute_bash,
             execute_shell,
+            execute_log_query,
             execute_file_read,
             execute_file_write,
             execute_file_list,
@@ -1154,12 +1180,25 @@ class ToolRegistry:
                 if "timeout_max" in effective_opts
                 else None
             )
+            configured_timeout_default = (
+                self.smart_tools.foreground_timeout_seconds
+                if self.smart_tools.enabled
+                else None
+            )
             executor = execute_bash if tool_name == "bash" else execute_shell
             return await executor(
                 arguments,
                 workspace_dir=self.workspace_dir,
                 timeout_max=configured_timeout_max,
+                timeout_default=configured_timeout_default,
                 blocked_patterns=effective_opts.get("blocked_patterns"),
+            )
+
+        if tool_name == "log_query":
+            return await execute_log_query(
+                arguments,
+                access_root=self.access_roots,
+                workspace_dir=self.workspace_dir,
             )
 
         if tool_name == "file_read":

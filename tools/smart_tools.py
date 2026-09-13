@@ -2,8 +2,9 @@
 
 The module deliberately contains no service, model, semantic evidence scoring,
 or task-success attribution.  It gives :class:`tools.registry.ToolRegistry`
-four small capabilities when enabled by configuration:
+five bounded capabilities when enabled by configuration:
 
+* reject a mechanically unsafe command shape and name a safer Tool;
 * bind every tool to one shared behaviour profile;
 * adapt legacy string results into one five-field result contract;
 * add soft, task-local repeat warnings without blocking execution; and
@@ -15,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import threading
 import uuid
@@ -30,7 +32,9 @@ from tools.schemas import ALL_TOOL_NAMES, TOOL_SCHEMA_MAP
 _LOGGER = logging.getLogger("Tools.SmartRegistry")
 
 
-SMART_TOOL_STATUSES = frozenset({"success", "failed", "unavailable", "partial"})
+SMART_TOOL_STATUSES = frozenset(
+    {"success", "failed", "unavailable", "partial", "needs_replan"}
+)
 SMART_TOOL_EFFECTS = frozenset({"observed", "changed", "no_change", "unknown"})
 SMART_TOOL_PROFILES = frozenset(
     {
@@ -47,6 +51,7 @@ SMART_TOOL_PROFILES = frozenset(
 _QUERY_TOOLS = frozenset(
     {
         "file_read",
+        "log_query",
         "media_read",
         "vision_inspect",
         "web_search",
@@ -212,6 +217,24 @@ class SmartToolOutcome:
         )
 
 
+@dataclass(frozen=True)
+class SmartToolAdmission:
+    """Deterministic pre-execution result that asks HER to choose a safer tool."""
+
+    code: str
+    message: str
+    suggested_tool: str
+    data: Mapping[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "suggested_tool": self.suggested_tool,
+            **dict(self.data),
+        }
+
+
 @dataclass
 class _TaskRepeatState:
     last_fingerprint: str | None = None
@@ -224,6 +247,206 @@ class _TaskRepeatState:
             self.successful_side_effect_args = set()
         if self.successful_side_effect_order is None:
             self.successful_side_effect_order = deque()
+
+
+_TEXT_SEARCH_PROGRAM_RE = re.compile(
+    r"(?i)(?:^|[\s|;&()])(?:[^\s|;&()\\/]+[\\/])?"
+    r"(?:grep|egrep|fgrep|pcregrep|rg|ripgrep)(?:\.exe)?(?=\s|$)"
+)
+_ONLY_MATCHING_RE = re.compile(
+    r"(?i)(?<!\S)(?:-[A-Za-z]*o[A-Za-z]*|--only-matching)(?=\s|$)"
+)
+_BOUNDED_SEARCH_OUTPUT_RE = re.compile(
+    r"(?i)(?<!\S)(?:-[A-Za-z]*[qlc][A-Za-z]*|"
+    r"--(?:quiet|count|files-with-matches))(?=\s|$)"
+)
+_BRE_CONTEXT_RE = re.compile(r"\.\\\{\d*,\d+\\\}")
+_ERE_CONTEXT_RE = re.compile(r"\.\{\d*,\d+\}")
+_LOG_PATH_RE = re.compile(
+    r'''(?ix)
+    (?:
+        "(?P<double>[^"\r\n]+\.(?:jsonl|ndjson|log|txt))"
+      | '(?P<single>[^'\r\n]+\.(?:jsonl|ndjson|log|txt))'
+      | (?P<bare>[^\s|;&<>]+\.(?:jsonl|ndjson|log|txt))
+    )
+    '''
+)
+_DEFAULT_LARGE_RECORD_BYTES = 1_000_000
+_DEFAULT_FILE_PROBE_BYTES = 32 * 1024 * 1024
+
+
+def _positive_int_setting(
+    value: object, *, default: int, minimum: int, maximum: int
+) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if minimum <= parsed <= maximum else default
+
+
+def _positive_float_setting(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def _candidate_log_paths(
+    command: str,
+    *,
+    workspace_dir: Path,
+    access_roots: tuple[Path, ...],
+) -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for match in _LOG_PATH_RE.finditer(command):
+        raw = next((value for value in match.groupdict().values() if value), "")
+        if not raw:
+            continue
+        candidate = Path(raw)
+        try:
+            resolved = (
+                candidate.resolve()
+                if candidate.is_absolute()
+                else (workspace_dir / candidate).resolve()
+            )
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_file():
+            continue
+        if not any(
+            resolved == root or resolved.is_relative_to(root) for root in access_roots
+        ):
+            continue
+        seen.add(resolved)
+        candidates.append((raw, resolved))
+    return candidates
+
+
+def _probe_large_record(
+    path: Path, *, record_limit: int, probe_limit: int
+) -> dict[str, Any]:
+    scanned = 0
+    current_record = 0
+    line = 1
+    file_size = path.stat().st_size
+    with path.open("rb") as stream:
+        while scanned < probe_limit:
+            chunk = stream.read(min(64 * 1024, probe_limit - scanned))
+            if not chunk:
+                break
+            scanned += len(chunk)
+            parts = chunk.split(b"\n")
+            current_record += len(parts[0])
+            if current_record > record_limit:
+                return {
+                    "record_over_limit": True,
+                    "record_bytes_lower_bound": current_record,
+                    "record_line": line,
+                    "file_probe_bytes": scanned,
+                    "file_probe_complete": scanned >= file_size,
+                }
+            for part in parts[1:]:
+                line += 1
+                current_record = len(part)
+                if current_record > record_limit:
+                    return {
+                        "record_over_limit": True,
+                        "record_bytes_lower_bound": current_record,
+                        "record_line": line,
+                        "file_probe_bytes": scanned,
+                        "file_probe_complete": scanned >= file_size,
+                    }
+    return {
+        "record_over_limit": False,
+        "record_bytes_lower_bound": current_record,
+        "record_line": None,
+        "file_probe_bytes": scanned,
+        "file_probe_complete": scanned >= file_size,
+    }
+
+
+def _shell_text_search_admission(
+    arguments: Mapping[str, Any],
+    *,
+    workspace_dir: Path,
+    access_roots: tuple[Path, ...],
+    record_limit: int,
+    probe_limit: int,
+) -> SmartToolAdmission | None:
+    command = str((arguments or {}).get("command") or "")
+    if not command or _TEXT_SEARCH_PROGRAM_RE.search(command) is None:
+        return None
+    only_matching = _ONLY_MATCHING_RE.search(command) is not None
+    context_expansions = len(_BRE_CONTEXT_RE.findall(command)) + len(
+        _ERE_CONTEXT_RE.findall(command)
+    )
+    dangerous_context = bool(only_matching and context_expansions)
+    bounded_output = _BOUNDED_SEARCH_OUTPUT_RE.search(command) is not None
+    candidate_paths = _candidate_log_paths(
+        command,
+        workspace_dir=workspace_dir,
+        access_roots=access_roots,
+    )
+    selected_raw = ""
+    selected_probe: dict[str, Any] = {
+        "record_over_limit": False,
+        "record_bytes_lower_bound": None,
+        "record_line": None,
+        "file_probe_bytes": 0,
+        "file_probe_complete": False,
+    }
+    for raw, path in candidate_paths:
+        try:
+            probe = _probe_large_record(
+                path,
+                record_limit=record_limit,
+                probe_limit=probe_limit,
+            )
+        except OSError:
+            continue
+        if not selected_raw:
+            selected_raw = raw
+            selected_probe = probe
+        if probe["record_over_limit"]:
+            selected_raw = raw
+            selected_probe = probe
+            break
+
+    large_unbounded_record = bool(
+        selected_probe["record_over_limit"] and not bounded_output
+    )
+    if not dangerous_context and not large_unbounded_record:
+        return None
+    if selected_probe["record_over_limit"]:
+        message = (
+            "The requested line-oriented search targets a record larger than "
+            f"{record_limit} bytes. Running it in foreground shell can consume "
+            "unbounded CPU or output before HER regains control."
+        )
+    else:
+        message = (
+            "Only-matching wildcard context expansion is unsafe for unknown or "
+            "long records and must not run in foreground shell."
+        )
+    return SmartToolAdmission(
+        code="unsafe_text_search",
+        message=message,
+        suggested_tool="log_query",
+        data={
+            "path": selected_raw or None,
+            "record_limit_bytes": record_limit,
+            "only_matching": only_matching,
+            "context_expansions": context_expansions,
+            **selected_probe,
+        },
+    )
 
 
 def _profile_for(tool_name: str) -> str:
@@ -249,7 +472,7 @@ def smart_tool_spec(tool_name: str) -> SmartToolSpec:
     description = str((function or {}).get("description") or "").strip()
     return SmartToolSpec(
         name=name,
-        version="1.0.0",
+        version="2.0.0" if name in {"bash", "shell", "log_query"} else "1.0.0",
         profile=_profile_for(name),
         description=description,
         adapter=_TOOL_ADAPTERS.get(name),
@@ -363,6 +586,24 @@ def _bash_outcome(
     del spec
     text = str(output or "")
     lowered = text.casefold()
+    disposition = str(details.get("control_disposition") or "").casefold()
+    if disposition == "needs_replan":
+        admission = details.get("smart_admission")
+        data = dict(admission) if isinstance(admission, Mapping) else {}
+        code = str(data.get("code") or "needs_replan")
+        message = str(data.get("message") or _legacy_error_message(text))
+        suggested_tool = str(data.get("suggested_tool") or "log_query")
+        return SmartToolOutcome(
+            status="needs_replan",
+            effect="no_change",
+            data=data,
+            error=SmartToolError(code, message, False),
+            warning=SmartToolWarning(
+                "safer_tool_required",
+                "The command was not started because a safer bounded tool is available.",
+                f"Re-plan with {suggested_tool}; do not bypass the admission guard.",
+            ),
+        )
     raw_exit_code = details.get("exit_code")
     exit_code: int | None = None
     if isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool):
@@ -520,10 +761,11 @@ def adapt_legacy_result(
 
 
 class SmartToolRuntime:
-    """Request-local repeat intelligence plus one-row-per-call ledger output."""
+    """Deterministic admission, result shaping, repeat guidance, and Ledger output."""
 
     def __init__(self, workspace_dir: Path, options: Mapping[str, Any] | None):
         configured = dict(options or {})
+        self.workspace_dir = Path(workspace_dir).resolve()
         self.enabled = configured.get("enabled") is True
         raw_threshold = configured.get("repeat_threshold", 3)
         try:
@@ -531,6 +773,22 @@ class SmartToolRuntime:
         except (TypeError, ValueError):
             threshold = 3
         self.repeat_threshold = max(2, threshold)
+        self.shell_text_search_guard = configured.get("shell_text_search_guard", True) is True
+        self.large_record_bytes = _positive_int_setting(
+            configured.get("large_record_bytes"),
+            default=_DEFAULT_LARGE_RECORD_BYTES,
+            minimum=64,
+            maximum=64 * 1024 * 1024,
+        )
+        self.file_probe_bytes = _positive_int_setting(
+            configured.get("file_probe_bytes"),
+            default=max(_DEFAULT_FILE_PROBE_BYTES, self.large_record_bytes + 1),
+            minimum=self.large_record_bytes + 1,
+            maximum=512 * 1024 * 1024,
+        )
+        self.foreground_timeout_seconds = _positive_float_setting(
+            configured.get("foreground_timeout_seconds")
+        )
         raw_path = str(configured.get("ledger_path") or "tool_ledger.jsonl").strip()
         ledger_path = Path(raw_path)
         self.ledger_path = (
@@ -546,6 +804,29 @@ class SmartToolRuntime:
     @staticmethod
     def new_call_id() -> str:
         return f"call-{uuid.uuid4().hex}"
+
+    def evaluate_admission(
+        self,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        access_roots: tuple[Path, ...],
+    ) -> SmartToolAdmission | None:
+        """Return a deterministic safer-tool decision before process creation."""
+
+        if (
+            not self.enabled
+            or not self.shell_text_search_guard
+            or str(tool_name or "") not in {"bash", "shell"}
+        ):
+            return None
+        return _shell_text_search_admission(
+            arguments,
+            workspace_dir=self.workspace_dir,
+            access_roots=access_roots,
+            record_limit=self.large_record_bytes,
+            probe_limit=self.file_probe_bytes,
+        )
 
     def complete(
         self,

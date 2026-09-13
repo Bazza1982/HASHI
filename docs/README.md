@@ -78,6 +78,9 @@ line.
 
 ### Core references
 
+- [HASHI3_SMART_TOOL_TEXT_QUERY_PILOT_2026-09-13.md](HASHI3_SMART_TOOL_TEXT_QUERY_PILOT_2026-09-13.md) — HASHI3-only Smart Tool admission, bounded `log_query`, foreground safety-fuse implementation and verification record
+- [SMART_TOOL_REGISTRY.md](SMART_TOOL_REGISTRY.md) — HER v2 Smart Tool admission, typed results, specialised safe queries, repeat guidance, and Ledger contract
+
 - [HASHI_VERSIONING_POLICY.md](HASHI_VERSIONING_POLICY.md) — accepted Core/functional/maintenance numbering, pre-release maturity, Portable build identity, compatibility evidence, and prospective adoption boundary
 - [HASHI1_RELEASE_PREFLIGHT_2026-09-08.md](HASHI1_RELEASE_PREFLIGHT_2026-09-08.md) — HASHI1 unified-candidate delta, Core/ABI decision, local-config preservation, Codex READY and `/move` no-staging evidence, plus cold-adoption and rollback runbook
 - [HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md) — current HASHI3 live runtime/device-control receipts, completed gates, installed Browser/Computer components, and remaining operator-dependent canaries

@@ -119,7 +119,9 @@ The only already-authorised controls that may stop or bound work are:
   relevant transport/parser operation, which resets on qualifying activity and
   never encloses a complete HER stage or tool loop;
 - a timeout explicitly supplied for one tool invocation by its authorised
-  caller, where omitting the timeout means no default tool deadline;
+  caller, or an operator-configured Smart Tool safety fuse scoped only to one
+  foreground subprocess; omission means no default tool deadline when that
+  instance fuse is not configured;
 - the isolated, tool-free Auto Compact model-call watchdog explicitly defined
   in section 19.4 and the
   [Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md); this exception cannot
@@ -1476,10 +1478,13 @@ include foreground tool execution or a complete HER stage. A blank heartbeat
 does not qualify as activity. These guards classify an actual transport stall;
 they are not provider-attempt clocks.
 
-A tool may have a timeout only when the authorised caller explicitly supplies
-one for that individual invocation. Omission means that no default tool timeout
-is applied. An explicit tool timeout does not create or imply a turn, stage,
-provider, or later-tool budget.
+A tool may have a timeout when the authorised caller explicitly supplies one
+for that individual invocation. An instance operator may also configure a
+generous Smart Tool safety fuse scoped only to one foreground subprocess. That
+fuse is not a HER timeout: it does not enclose a stage, provider continuation,
+Tool loop, later Tool, or managed background job. If the fuse is absent,
+omission retains no default Tool timeout. Neither form creates or implies a
+turn, stage, provider, or later-tool budget.
 
 ### 19.3 Prohibited execution limits at every stage
 
