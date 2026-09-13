@@ -3149,12 +3149,17 @@ class SessionStore:
     ) -> list[dict[str, Any]]:
         """Terminalize Runs whose in-memory executor was lost on restart.
 
-        The current runtime has no durable queue or safe execution-stack replay.
+        The current runtime has no general durable queue or safe execution-stack replay.
         Leaving either an accepted ``queued`` Run or a claimed ``running`` Run
         non-terminal would make clients wait forever.  Reconciliation therefore
         fences every pre-existing non-terminal Run as ``interrupted``, preserves
         its user Message and evidence, and appends one durable terminal Event.
         A later user continuation is a new child Run with a new idempotency key.
+
+        The narrow hchat-exchange ingress is the exception for queued Runs: its
+        PAO-owned inbox retains the accepted input and can restore the queue
+        item with the same idempotency key.  A running Exchange Run is still
+        fenced as interrupted because unknown execution state is never replayed.
 
         Process startup reconciles the whole instance.  Per-Agent Function
         Worker startup and recovery pass ``agent_id`` so one executor cannot
@@ -3168,15 +3173,16 @@ class SessionStore:
             connection.execute("BEGIN IMMEDIATE")
             agent_clause = " AND r.agent_id = ?" if target_agent_id else ""
             params: tuple[str, ...] = (
-                (self.instance_id, target_agent_id)
+                (self.instance_id, "hchat-exchange", target_agent_id)
                 if target_agent_id
-                else (self.instance_id,)
+                else (self.instance_id, "hchat-exchange")
             )
             rows = connection.execute(
                 f"""
                 SELECT r.* FROM runs AS r
                 JOIN sessions AS s ON s.session_id = r.session_id
                 WHERE s.instance_id = ? AND r.state IN ('queued', 'running')
+                  AND NOT (r.source = ? AND r.state = 'queued')
                 {agent_clause}
                 ORDER BY r.created_at, r.run_id
                 """,

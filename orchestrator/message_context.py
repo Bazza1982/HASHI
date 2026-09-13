@@ -456,29 +456,90 @@ def build_message_context_snapshot(
         from_instance = str(hchat.get("from_instance") or "unknown").strip().upper()
         to_agent = str(hchat.get("to_agent") or "unknown").strip().casefold()
         to_instance = str(hchat.get("to_instance") or snapshot["processing_instance"]).strip().upper()
-        peer = str(hchat.get("authenticated_peer") or "").strip().upper()
+        exchange_verified = (
+            str(hchat.get("sender_assurance") or "").strip().casefold()
+            == "exchange_verified"
+            and str(hchat.get("network_authentication") or "").strip().casefold()
+            == "exchange_wss"
+        )
+        from_address = str(hchat.get("from_address") or "").strip()
+        to_address = str(hchat.get("to_address") or "").strip()
+        peer_raw = str(hchat.get("authenticated_peer") or "").strip()
+        peer = peer_raw if exchange_verified else peer_raw.upper()
         snapshot["sender"] = {
             "kind": "agent",
-            "claim": f"{from_agent}@{from_instance}",
+            "claim": (
+                from_address
+                if exchange_verified and from_address
+                else f"{from_agent}@{from_instance}"
+            ),
             "assurance": str(hchat.get("sender_assurance") or "declared"),
         }
-        snapshot["recipient"] = f"{to_agent}@{to_instance}"
+        snapshot["recipient"] = (
+            to_address
+            if exchange_verified and to_address
+            else f"{to_agent}@{to_instance}"
+        )
         snapshot["network_authentication"] = str(
             hchat.get("network_authentication") or "not_verified"
         )
         if peer:
             snapshot["authenticated_peer"] = peer
         snapshot["relay_chain"] = [
-            str(item).strip().upper()
+            (
+                str(item).strip()
+                if exchange_verified
+                else str(item).strip().upper()
+            )
             for item in hchat.get("relay_chain") or ()
             if str(item).strip()
         ]
         origin = hchat.get("origin_instance")
         if isinstance(origin, Mapping) and str(origin.get("id") or "").strip():
             snapshot["origin_instance"] = {
-                "id": str(origin["id"]).strip().upper(),
+                "id": (
+                    str(origin["id"]).strip()
+                    if exchange_verified
+                    else str(origin["id"]).strip().upper()
+                ),
                 "assurance": str(origin.get("assurance") or "declared"),
             }
+        if exchange_verified:
+            principal = hchat.get("remote_principal")
+            exchange_message = hchat.get("exchange_message")
+            if isinstance(principal, Mapping):
+                allowed_principal = {
+                    "authority_id",
+                    "actor_id",
+                    "registered_instance_id",
+                    "instance_alias",
+                    "username",
+                    "agent_id",
+                    "address",
+                    "connection_epoch",
+                    "delivery_id",
+                    "grant_revision",
+                    "assurance",
+                }
+                snapshot["verified_remote_principal"] = {
+                    key: copy.deepcopy(value)
+                    for key, value in principal.items()
+                    if key in allowed_principal
+                }
+            if isinstance(exchange_message, Mapping):
+                allowed_message = {
+                    "message_id",
+                    "conversation_id",
+                    "message_type",
+                    "in_reply_to",
+                    "expires_at",
+                    "authorization_expires_at",
+                }
+                snapshot["exchange_message"] = {
+                    key: copy.deepcopy(value)
+                    for key, value in exchange_message.items()
+                    if key in allowed_message
+                }
     else:
         origin = inputs.get("_origin_instance_evidence")
         if isinstance(origin, Mapping) and str(origin.get("id") or "").strip():

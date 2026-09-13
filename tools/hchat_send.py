@@ -40,6 +40,12 @@ if __name__ == "__main__":
     sys.modules.setdefault("tools.hchat_send", sys.modules[__name__])
 
 from remote.delivery_results import format_delivery_result  # noqa: E402
+from remote.internet_address import (  # noqa: E402
+    AddressError,
+    GroupAddress,
+    PublicAddress,
+    parse_hchat_address,
+)
 from remote.security.client_auth import build_client_auth_headers  # noqa: E402
 from orchestrator.runtime_defaults import (  # noqa: E402
     DEFAULT_HASHI_REMOTE_PORT,
@@ -58,7 +64,10 @@ SERVICE_ENDPOINTS_FILE = ROOT / "state" / "service_endpoints.json"
 DEFAULT_TTL = 3600
 DEFAULT_REMOTE_PORT = DEFAULT_HASHI_REMOTE_PORT
 LIVE_ENDPOINT_TTL_SECONDS = int(os.getenv("HASHI_HCHAT_LIVE_ENDPOINT_TTL", "7200"))
-HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
+HCHAT_HEADER_RE = re.compile(
+    r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w.-]+))?\]\s*(?P<body>.*)$",
+    re.DOTALL,
+)
 HCHAT_AUTOREPLY_INSTRUCTION = (
     "HChat protocol note: answer this request directly in your normal assistant "
     "response. Do not run hchat_send.py or send a separate HChat back to the "
@@ -428,13 +437,12 @@ def _normalize_instance_id(value: str | None) -> str | None:
 
 
 def _split_target_address(target: str) -> tuple[str, str | None]:
-    cleaned = target.strip()
-    if cleaned.startswith("@"):
-        return cleaned, None
-    if "@" not in cleaned:
-        return cleaned.lower(), None
-    agent, instance_id = cleaned.rsplit("@", 1)
-    return agent.strip().lower(), _normalize_instance_id(instance_id)
+    parsed = parse_hchat_address(target)
+    if isinstance(parsed, GroupAddress):
+        return parsed.canonical, None
+    if isinstance(parsed, PublicAddress):
+        return parsed.agent, parsed.instance_address
+    return parsed.agent, _normalize_instance_id(parsed.instance_id)
 
 
 def parse_return_address(hchat_header: str) -> dict | None:
@@ -964,6 +972,183 @@ def _shared_token_for_protocol() -> str | None:
         return None
 
 
+def _local_exchange_sidecar_url(cfg: dict) -> str | None:
+    instance_id = _normalize_instance_id(_get_instance_id(cfg))
+    instances = _load_instances()
+    entry = instances.get(str(instance_id or "").lower())
+    remote_port = (
+        entry.get("remote_port")
+        if isinstance(entry, dict)
+        else None
+    )
+    if remote_port is None:
+        remote_port = (cfg.get("global") or {}).get(
+            "remote_port",
+            DEFAULT_REMOTE_PORT,
+        )
+    try:
+        port = int(remote_port)
+    except (TypeError, ValueError):
+        return None
+    if port <= 0:
+        return None
+    scheme = _probe_remote(
+        "127.0.0.1",
+        port,
+        str(instance_id or ""),
+    )
+    if scheme is None:
+        return None
+    return f"{scheme}://127.0.0.1:{port}"
+
+
+def _local_exchange_request(
+    cfg: dict,
+    *,
+    path: str,
+    payload: dict | None = None,
+    timeout: int = 12,
+) -> tuple[int, dict]:
+    shared_token = _shared_token_for_protocol()
+    base_url = _local_exchange_sidecar_url(cfg)
+    if not shared_token or not base_url:
+        return 503, {
+            "ok": False,
+            "code": "LOCAL_EXCHANGE_AUTH_UNAVAILABLE",
+        }
+    method = "POST" if payload is not None else "GET"
+    data = (
+        json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if payload is not None
+        else b""
+    )
+    url = f"{base_url}{path}"
+    try:
+        headers = build_client_auth_headers(
+            url=url,
+            method=method,
+            data=data,
+            token=None,
+            shared_token=shared_token,
+            from_instance=_get_instance_id(cfg),
+            normalize_instance=_normalize_instance_id,
+        )
+        request = urllib_request.Request(
+            url,
+            data=data if payload is not None else None,
+            headers=headers,
+            method=method,
+        )
+        request_options = {"timeout": timeout}
+        if url.startswith("https://"):
+            # This is the authenticated loopback hop to HASHI's own Remote
+            # sidecar, whose optional certificate may be locally generated.
+            request_options["context"] = ssl._create_unverified_context()
+        with urllib_request.urlopen(request, **request_options) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            return int(getattr(response, "status", 200)), (
+                result if isinstance(result, dict) else {}
+            )
+    except HTTPError as exc:
+        try:
+            result = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            result = {"ok": False, "code": f"HTTP_{exc.code}"}
+        return int(exc.code), result if isinstance(result, dict) else {}
+    except Exception:
+        return 503, {"ok": False, "code": "LOCAL_EXCHANGE_UNAVAILABLE"}
+
+
+def _send_via_exchange_transport(
+    cfg: dict,
+    *,
+    destination: PublicAddress,
+    from_agent: str,
+    source_instance: str,
+    text: str,
+    message_id: str | None,
+    conversation_id: str | None,
+    message_type: str,
+    in_reply_to: str | None,
+) -> bool:
+    payload = {
+        "from_instance": source_instance,
+        "from_agent": from_agent.lower(),
+        "to_address": destination.canonical,
+        "text": text,
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "message_type": message_type,
+        "in_reply_to": in_reply_to,
+        "expires_in_seconds": 600,
+        "authorization_resources": [],
+        "private_authorization_proofs": [],
+    }
+    status, result = _local_exchange_request(
+        cfg,
+        path="/exchange/message",
+        payload=payload,
+    )
+    state = str(result.get("state") or "")
+    if status < 300 and result.get("ok") and state in {"accepted", "delivered"}:
+        _print_hchat_queue_receipt(
+            "independent Exchange",
+            from_agent,
+            destination.canonical,
+            text,
+        )
+        return True
+    print(
+        "❌ Independent Exchange delivery failed "
+        f"({str(result.get('code') or state or f'HTTP_{status}')}).",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _check_exchange_transport_route(
+    cfg: dict,
+    destination: PublicAddress,
+    *,
+    from_agent: str,
+) -> dict:
+    status, value = _local_exchange_request(
+        cfg,
+        path="/exchange/status",
+    )
+    published = {
+        str(agent).strip().lower()
+        for agent in value.get("published_agents") or []
+    }
+    connected = bool(
+        status < 300
+        and value.get("ok")
+        and value.get("connected")
+    )
+    sender_published = str(from_agent or "").strip().lower() in published
+    return {
+        "ok": connected and sender_published,
+        "route_type": "independent_exchange",
+        "public_address": destination.canonical,
+        "exchange_state": value.get("state"),
+        "authority_id": value.get("authority_id"),
+        "published_agents": sorted(published),
+        "error": (
+            None
+            if connected and sender_published
+            else (
+                "sender is not published"
+                if connected
+                else str(
+                    value.get("last_error_code")
+                    or value.get("code")
+                    or "exchange unavailable"
+                )
+            )
+        ),
+    }
+
+
 def _send_via_protocol_transport(
     to_agent: str,
     target_instance: str,
@@ -1292,13 +1477,56 @@ def send_hchat(
     reply_route_override: dict | None = None,
     private_credential_ids: list[str] | tuple[str, ...] | None = None,
     authorization_resources: list[str] | tuple[str, ...] | None = None,
+    message_id: str | None = None,
+    conversation_id: str | None = None,
+    message_type: str = "agent_message",
+    in_reply_to: str | None = None,
 ) -> bool:
     cfg = _load_config()
     local_port = _get_workbench_port(cfg)
     instance_id = _get_instance_id(cfg)
     source_instance = _normalize_instance_id(source_instance) or instance_id
     reply_route = reply_route_override or _build_reply_route(cfg)
-    to_agent, inline_instance = _split_target_address(to_agent)
+    try:
+        parsed_target = parse_hchat_address(to_agent)
+    except AddressError:
+        print(f"❌ Invalid HChat address: {to_agent}", file=sys.stderr)
+        return False
+    if isinstance(parsed_target, PublicAddress):
+        if target_instance:
+            print(
+                "❌ A complete public address cannot be combined with --instance.",
+                file=sys.stderr,
+            )
+            return False
+        if not _hchat_channel_egress_allowed(
+            cfg,
+            from_agent=from_agent,
+            to_agent=parsed_target.agent,
+            target_instance=parsed_target.instance_address,
+            source_instance=source_instance,
+        ):
+            return False
+        if private_credential_ids or authorization_resources:
+            print(
+                "❌ Exchange v1 has no negotiated private/resource proof "
+                "capability; refusing to downgrade the request.",
+                file=sys.stderr,
+            )
+            return False
+        return _send_via_exchange_transport(
+            cfg,
+            destination=parsed_target,
+            from_agent=from_agent,
+            source_instance=source_instance,
+            text=text,
+            message_id=message_id,
+            conversation_id=conversation_id,
+            message_type=message_type,
+            in_reply_to=in_reply_to,
+        )
+
+    to_agent, inline_instance = _split_target_address(parsed_target.canonical)
     target_instance = _normalize_instance_id(target_instance) or inline_instance
     authorization_kwargs = {}
     if private_credential_ids:
@@ -1454,7 +1682,65 @@ def check_hchat_route(
     local_port = _get_workbench_port(cfg)
     instance_id = _get_instance_id(cfg)
     source_instance = _normalize_instance_id(source_instance) or instance_id
-    to_agent, inline_instance = _split_target_address(to_agent)
+    try:
+        parsed_target = parse_hchat_address(to_agent)
+    except AddressError:
+        return {
+            "ok": False,
+            "delivery_attempted": False,
+            "from_agent": from_agent.lower(),
+            "to_agent": str(to_agent or ""),
+            "source_instance": source_instance,
+            "local_instance": instance_id,
+            "target_instance": None,
+            "route_type": None,
+            "host": None,
+            "port": None,
+            "remote_port": None,
+            "members": None,
+            "error": "invalid HChat address",
+        }
+    if isinstance(parsed_target, PublicAddress):
+        if target_instance:
+            return {
+                "ok": False,
+                "delivery_attempted": False,
+                "from_agent": from_agent.lower(),
+                "to_agent": parsed_target.agent,
+                "source_instance": source_instance,
+                "local_instance": instance_id,
+                "target_instance": parsed_target.instance_address,
+                "route_type": "independent_exchange",
+                "host": None,
+                "port": None,
+                "remote_port": None,
+                "members": None,
+                "public_address": parsed_target.canonical,
+                "error": "complete public address conflicts with target_instance",
+            }
+        exchange = _check_exchange_transport_route(
+            cfg,
+            parsed_target,
+            from_agent=from_agent,
+        )
+        return {
+            "delivery_attempted": False,
+            "from_agent": from_agent.lower(),
+            "to_agent": parsed_target.agent,
+            "source_instance": source_instance,
+            "local_instance": instance_id,
+            "target_instance": parsed_target.instance_address,
+            "host": "127.0.0.1",
+            "port": None,
+            "remote_port": (
+                (_load_instances().get(instance_id.lower()) or {}).get(
+                    "remote_port"
+                )
+            ),
+            "members": None,
+            **exchange,
+        }
+    to_agent, inline_instance = _split_target_address(parsed_target.canonical)
     target_instance = _normalize_instance_id(target_instance) or inline_instance
 
     result = {

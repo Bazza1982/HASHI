@@ -885,3 +885,188 @@ def test_find_exchange_instance_prefers_non_loopback_host(monkeypatch):
 
     assert route is not None
     assert route["host"] == "172.21.12.144"
+
+
+def test_complete_public_address_uses_only_independent_exchange(monkeypatch):
+    cfg = _local_cfg()
+    calls = []
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_exchange_transport",
+        lambda _cfg, **kwargs: calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_protocol_transport",
+        lambda *_args, **_kwargs: pytest.fail("public address used LAN protocol"),
+    )
+    monkeypatch.setattr(
+        hchat_send,
+        "_find_remote_instance",
+        lambda *_args, **_kwargs: pytest.fail("public address used LAN discovery"),
+    )
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_exchange",
+        lambda *_args, **_kwargs: pytest.fail("public address used legacy exchange proxy"),
+    )
+
+    assert (
+        hchat_send.send_hchat(
+            "reviewer@server.alice",
+            "zelda",
+            "Please review.",
+            message_id="message_1",
+            conversation_id="conversation_1",
+        )
+        is True
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["destination"].canonical == "reviewer@server.alice"
+    assert calls[0]["message_id"] == "message_1"
+    assert calls[0]["conversation_id"] == "conversation_1"
+
+
+def test_local_exchange_sidecar_discovers_optional_https(monkeypatch):
+    cfg = _local_cfg()
+    monkeypatch.setattr(
+        hchat_send,
+        "_load_instances",
+        lambda: {"hashi1": {"remote_port": 18766}},
+    )
+    probes = []
+    monkeypatch.setattr(
+        hchat_send,
+        "_probe_remote",
+        lambda host, port, instance: (
+            probes.append((host, port, instance)) or "https"
+        ),
+    )
+
+    assert hchat_send._local_exchange_sidecar_url(cfg) == (
+        "https://127.0.0.1:18766"
+    )
+    assert probes == [("127.0.0.1", 18766, "HASHI1")]
+
+
+def test_public_group_members_are_fanned_out_as_individual_sends(monkeypatch):
+    cfg = _local_cfg()
+    cfg["groups"] = {
+        "reviewers": {
+            "members": [
+                "reviewer@server.alice",
+                "reviewer@server.barry",
+            ],
+            "exclude_from_broadcast": [],
+        }
+    }
+    calls = []
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_exchange_transport",
+        lambda _cfg, **kwargs: calls.append(kwargs) or True,
+    )
+
+    assert hchat_send.send_hchat(
+        "@reviewers",
+        "zelda",
+        "Please review.",
+    )
+
+    assert [
+        call["destination"].canonical for call in calls
+    ] == [
+        "reviewer@server.alice",
+        "reviewer@server.barry",
+    ]
+
+
+def test_public_address_refuses_private_proof_without_downgrade(
+    monkeypatch,
+):
+    cfg = _local_cfg()
+    calls = []
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_exchange_transport",
+        lambda _cfg, **kwargs: calls.append(kwargs) or True,
+    )
+
+    assert (
+        hchat_send.send_hchat(
+            "reviewer@server.alice",
+            "zelda",
+            "Private request.",
+            private_credential_ids=["finance"],
+        )
+        is False
+    )
+    assert calls == []
+
+
+def test_public_route_probe_never_uses_lan_discovery(monkeypatch):
+    cfg = _local_cfg()
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(
+        hchat_send,
+        "_local_exchange_request",
+        lambda *_args, **_kwargs: (
+            200,
+            {
+                "ok": True,
+                "connected": True,
+                "state": "ready",
+                "authority_id": "authority_1",
+                "published_agents": ["zelda"],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        hchat_send,
+        "_find_remote_instance",
+        lambda *_args, **_kwargs: pytest.fail("public route used LAN discovery"),
+    )
+
+    result = hchat_send.check_hchat_route(
+        "reviewer@server.alice",
+        "zelda",
+    )
+
+    assert result["ok"] is True
+    assert result["route_type"] == "independent_exchange"
+    assert result["public_address"] == "reviewer@server.alice"
+
+
+def test_public_route_probe_reports_an_unpublished_sender(monkeypatch):
+    cfg = _local_cfg()
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(
+        hchat_send,
+        "_local_exchange_request",
+        lambda *_args, **_kwargs: (
+            200,
+            {
+                "ok": True,
+                "connected": True,
+                "state": "ready",
+                "authority_id": "authority_1",
+                "published_agents": ["akane"],
+            },
+        ),
+    )
+
+    result = hchat_send.check_hchat_route(
+        "reviewer@server.alice",
+        "zelda",
+    )
+
+    assert result["ok"] is False
+    assert result["route_type"] == "independent_exchange"
+    assert result["error"] == "sender is not published"

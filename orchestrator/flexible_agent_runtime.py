@@ -993,7 +993,23 @@ class FlexibleAgentRuntime:
             self.message_logger.info(
                 "Reused idempotent Session run %s for %s", accepted.run_id, accepted.request_id
             )
-            return accepted.request_id
+            if source != "hchat-exchange":
+                return accepted.request_id
+            # Exchange owns a narrow durable inbox.  After a process crash it
+            # may safely reconstruct a still-queued item with the original
+            # request/run IDs.  Running or terminal Runs are never replayed.
+            existing_run = self.session_store.get_run(
+                accepted.run_id,
+                owner_id=session_owner,
+            )
+            if str(existing_run.get("state") or "") != "queued":
+                return accepted.request_id
+            request_id = accepted.request_id
+            self.message_logger.info(
+                "Recovering queued Exchange run %s with original request %s",
+                accepted.run_id,
+                accepted.request_id,
+            )
         if normalized_request_content is not None:
             from orchestrator.multimodal_contract import (
                 request_content_is_voice_origin,
@@ -2332,6 +2348,70 @@ class FlexibleAgentRuntime:
         3. contacts.json entry for legacy external callers.
         4. Cross-instance delivery via send_hchat(name) when no instance is known.
         """
+        metadata = (
+            dict(getattr(item, "request_metadata", None) or {})
+            if isinstance(getattr(item, "request_metadata", None), Mapping)
+            else {}
+        )
+        from orchestrator.message_context import MESSAGE_CONTEXT_METADATA_KEY
+
+        message_context = metadata.get(MESSAGE_CONTEXT_METADATA_KEY)
+        if isinstance(message_context, Mapping):
+            principal = message_context.get("verified_remote_principal")
+            exchange_message = message_context.get("exchange_message")
+            if isinstance(principal, Mapping) and isinstance(
+                exchange_message, Mapping
+            ):
+                if exchange_message.get("message_type") == "agent_reply":
+                    self.logger.info(
+                        "Exchange HChat auto-reply suppressed for typed agent_reply"
+                    )
+                    return
+                sender_address = str(principal.get("address") or "").strip()
+                conversation_id = str(
+                    exchange_message.get("conversation_id") or ""
+                ).strip()
+                in_reply_to = str(
+                    exchange_message.get("message_id") or ""
+                ).strip()
+                if sender_address and conversation_id and in_reply_to:
+                    from tools.hchat_send import send_hchat
+                    import functools
+
+                    stable = (
+                        f"{in_reply_to}\0{self.name}\0"
+                        f"{getattr(item, 'request_id', '')}"
+                    )
+                    reply_message_id = (
+                        "reply_"
+                        + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:32]
+                    )
+                    loop = asyncio.get_running_loop()
+                    ok = await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            send_hchat,
+                            sender_address,
+                            self.name,
+                            response_text,
+                            message_id=reply_message_id,
+                            conversation_id=conversation_id,
+                            message_type="agent_reply",
+                            in_reply_to=in_reply_to,
+                        ),
+                    )
+                    if ok:
+                        self.logger.info(
+                            "Exchange HChat reply queued for %s",
+                            sender_address,
+                        )
+                    else:
+                        self.logger.warning(
+                            "Exchange HChat reply failed for %s",
+                            sender_address,
+                        )
+                    return
+
         try:
             from tools.hchat_send import (
                 format_hchat_terminal_reply,
@@ -2350,6 +2430,11 @@ class FlexibleAgentRuntime:
             return
         sender_name = sender["agent"].lower()
         sender_instance = (sender.get("instance_id") or "").upper()
+        if "." in sender_instance:
+            self.logger.warning(
+                "Unverified public-looking HChat reply target suppressed"
+            )
+            return
         reply_channel = (
             f"{sender_name}@{sender_instance}" if sender_instance else sender_name
         )

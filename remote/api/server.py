@@ -112,6 +112,7 @@ _peer_registry = None
 _pairing_manager: Optional[PairingManager] = None
 _terminal_executor: Optional[TerminalExecutor] = None
 _protocol_manager = None
+_exchange_transport = None
 _hashi_root: Optional[str] = None
 _control_hashi_root: Optional[str] = None
 _workbench_port: int = DEFAULT_WORKBENCH_PORT
@@ -349,6 +350,22 @@ class ProtocolAckPayload(BaseModel):
     to_instance: str
     state: str = "ack"
     details: Optional[dict] = None
+
+
+class ExchangeMessagePayload(BaseModel):
+    """Narrow local request; never exposes another Remote capability."""
+
+    from_instance: str
+    from_agent: str
+    to_address: str
+    text: str
+    message_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    message_type: str = "agent_message"
+    in_reply_to: Optional[str] = None
+    expires_in_seconds: int = 600
+    authorization_resources: list[str] = []
+    private_authorization_proofs: list[dict[str, Any]] = []
 
 
 class TuiProxyRequest(BaseModel):
@@ -1383,6 +1400,7 @@ def create_app(
     terminal_executor: TerminalExecutor,
     peer_registry=None,
     protocol_manager=None,
+    exchange_transport=None,
     workbench_port: int = DEFAULT_WORKBENCH_PORT,
     hashi_root: str = None,
     control_hashi_root: str = None,
@@ -1390,13 +1408,14 @@ def create_app(
     """Create the FastAPI application with all context injected."""
 
     global _instance_info, _peer_registry, _pairing_manager, _terminal_executor
-    global _workbench_port, _hashi_root, _control_hashi_root, _protocol_manager, _attachment_store
+    global _workbench_port, _hashi_root, _control_hashi_root, _protocol_manager, _exchange_transport, _attachment_store
 
     _instance_info = instance_info
     _peer_registry = peer_registry
     _pairing_manager = pairing_manager
     _terminal_executor = terminal_executor
     _protocol_manager = protocol_manager
+    _exchange_transport = exchange_transport
     _workbench_port = workbench_port
     _hashi_root = hashi_root
     _control_hashi_root = control_hashi_root or hashi_root
@@ -1960,6 +1979,130 @@ def create_app(
         if not result.get("ok"):
             return JSONResponse(status_code=400, content=result)
         return result
+
+    # ── Independent Exchange transport (local HChat only) ──
+
+    def _require_local_exchange_caller(
+        request: Request,
+        *,
+        body_bytes: bytes,
+        from_instance: str | None = None,
+    ) -> str:
+        if not is_loopback_request(request):
+            raise HTTPException(status_code=403, detail="Local caller required")
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=from_instance,
+        )
+        if not ok:
+            detail = (
+                "Shared token required"
+                if reason == "auth_required"
+                else "Invalid shared-token proof"
+            )
+            raise HTTPException(status_code=401, detail=detail)
+        local_instance = str(
+            _instance_info.get("instance_id") or ""
+        ).strip().upper()
+        if (
+            from_instance
+            and str(from_instance).strip().upper() != local_instance
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Exchange sender instance must be local",
+            )
+        return str(authenticated_instance or "")
+
+    @app.get("/exchange/status")
+    async def exchange_status(request: Request):
+        _require_local_exchange_caller(request, body_bytes=b"")
+        if _exchange_transport is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ok": False,
+                    "state": "disabled",
+                    "error": "Exchange transport unavailable",
+                },
+            )
+        return _exchange_transport.status()
+
+    @app.post("/exchange/message")
+    async def exchange_message(
+        request: Request,
+        payload: ExchangeMessagePayload,
+    ):
+        body_bytes = await request.body()
+        _require_local_exchange_caller(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if _exchange_transport is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ok": False,
+                    "state": "disabled",
+                    "code": "EXCHANGE_DISABLED",
+                },
+            )
+        if payload.authorization_resources or payload.private_authorization_proofs:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "state": "rejected",
+                    "code": "UNSUPPORTED_CAPABILITY",
+                },
+            )
+        try:
+            result = await _exchange_transport.send_message(
+                from_agent=payload.from_agent,
+                to_address=payload.to_address,
+                text=payload.text,
+                message_id=payload.message_id,
+                conversation_id=payload.conversation_id,
+                message_type=payload.message_type,
+                in_reply_to=payload.in_reply_to,
+                expires_in_seconds=payload.expires_in_seconds,
+                authorization_resources=payload.authorization_resources,
+                private_authorization_proofs=payload.private_authorization_proofs,
+            )
+            state = str(result.get("state") or "")
+            retryable = bool(result.get("retryable"))
+            status = (
+                200
+                if result.get("ok")
+                else (
+                    503
+                    if retryable or state in {"delivery_unknown", "unknown"}
+                    else 409
+                )
+            )
+            return JSONResponse(
+                status_code=status,
+                content=result,
+            )
+        except Exception as exc:
+            code = str(getattr(exc, "code", "INVALID_MESSAGE"))[:64]
+            retryable = bool(getattr(exc, "retryable", False))
+            status = (
+                503
+                if retryable or code in {"EXCHANGE_UNAVAILABLE", "EXCHANGE_DISABLED"}
+                else (409 if code == "UNSUPPORTED_CAPABILITY" else 400)
+            )
+            return JSONResponse(
+                status_code=status,
+                content={
+                    "ok": False,
+                    "state": "rejected",
+                    "code": code,
+                    "retryable": retryable,
+                },
+            )
 
     @app.post("/attachments/upload")
     async def attachment_upload(request: Request, payload: AttachmentUploadPayload):

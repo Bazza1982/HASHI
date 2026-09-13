@@ -267,6 +267,8 @@ class WorkbenchApiServer:
             if reconcile_session_runs
             else []
         )
+        self._exchange_ingress = None
+        self._exchange_recovery_task: asyncio.Task | None = None
         self._audio_cleanup_task: asyncio.Task | None = None
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self.identity_service = self._build_identity_service()
@@ -631,6 +633,12 @@ class WorkbenchApiServer:
         self.app.router.add_post("/api/bridge/reply", self.handle_bridge_reply)
         self.app.router.add_post(
             "/api/bridge/hchat-exchange", self.handle_hchat_exchange
+        )
+        self.app.router.add_post(
+            "/api/bridge/exchange/accept", self.handle_exchange_accept
+        )
+        self.app.router.add_post(
+            "/api/bridge/exchange/schedule", self.handle_exchange_schedule
         )
         self.app.router.add_post("/api/bridge/transfer", self.handle_bridge_transfer)
         self.app.router.add_post("/api/bridge/fork", self.handle_bridge_fork)
@@ -1270,6 +1278,134 @@ class WorkbenchApiServer:
             self._audio_cleanup_loop(),
             name="hashi-native-audio-cleanup",
         )
+        try:
+            from orchestrator.exchange_config import load_exchange_config
+
+            if load_exchange_config(self.config_path.parent).enabled:
+                service = self._exchange_ingress_service()
+                await service.recover_pending(recover_scheduled=True)
+                self._exchange_recovery_task = asyncio.create_task(
+                    self._exchange_recovery_loop(),
+                    name="hashi-exchange-inbox-recovery",
+                )
+        except Exception as exc:
+            logging.getLogger("HASHI.Workbench.Exchange").warning(
+                "Exchange inbox recovery is unavailable (%s)",
+                type(exc).__name__,
+            )
+
+    def _exchange_ingress_service(self):
+        if self._exchange_ingress is None:
+            from orchestrator.exchange_config import load_exchange_config
+            from orchestrator.exchange_ingress import (
+                ExchangeIngressPermissionError,
+                ExchangeIngressService,
+            )
+
+            config = load_exchange_config(self.config_path.parent)
+            if not config.enabled:
+                raise ExchangeIngressPermissionError("Exchange is disabled")
+            self._exchange_ingress = ExchangeIngressService(
+                hashi_root=self.config_path.parent,
+                runtime_map=self._runtime_map,
+                session_store=self.session_store,
+            )
+        return self._exchange_ingress
+
+    @staticmethod
+    def _exchange_error_response(exc):
+        from orchestrator.exchange_ingress import ExchangeIngressError
+
+        if isinstance(exc, ExchangeIngressError):
+            return web.json_response(
+                {"ok": False, "code": exc.code, "error": str(exc)},
+                status=exc.status,
+            )
+        if isinstance(exc, (ValueError, json.JSONDecodeError)):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "code": "INVALID_MESSAGE",
+                    "error": "Invalid Exchange ingress request",
+                },
+                status=400,
+            )
+        return web.json_response(
+            {
+                "ok": False,
+                "code": "RECIPIENT_UNAVAILABLE",
+                "error": "Exchange ingress is unavailable",
+            },
+            status=503,
+        )
+
+    async def _exchange_request_payload(self, request):
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Exchange ingress payload must be an object")
+        prompt = payload.get("prompt")
+        evidence = payload.get("connector_evidence")
+        if not isinstance(prompt, str) or not prompt:
+            raise ValueError("Exchange ingress prompt is required")
+        if not isinstance(evidence, Mapping):
+            raise ValueError("Exchange connector evidence is required")
+        return prompt, evidence
+
+    async def handle_exchange_accept(self, request):
+        """Persist a signed delivery before the Remote client emits its ACK."""
+
+        try:
+            prompt, evidence = await self._exchange_request_payload(request)
+            record = self._exchange_ingress_service().accept(
+                evidence=evidence,
+                prompt=prompt,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "state": "accepted",
+                    "inbox_key": record.inbox_key,
+                    "replayed": record.replayed,
+                }
+            )
+        except (ValueError, json.JSONDecodeError) as exc:
+            return self._exchange_error_response(exc)
+
+    async def handle_exchange_schedule(self, request):
+        """Schedule only after the Exchange client has emitted delivered ACK."""
+
+        try:
+            prompt, evidence = await self._exchange_request_payload(request)
+            record = await self._exchange_ingress_service().schedule(
+                evidence=evidence,
+                prompt=prompt,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "state": record.state,
+                    "inbox_key": record.inbox_key,
+                    "request_id": record.request_id,
+                    "run_id": record.run_id,
+                    "session_id": record.session_id,
+                    "message_id": record.message_id,
+                }
+            )
+        except (ValueError, json.JSONDecodeError) as exc:
+            return self._exchange_error_response(exc)
+
+    async def _exchange_recovery_loop(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            try:
+                await self._exchange_ingress_service().recover_pending()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.getLogger("HASHI.Workbench.Exchange").warning(
+                    "Exchange inbox recovery failed (%s)",
+                    type(exc).__name__,
+                )
 
     async def _audio_cleanup_loop(self) -> None:
         while True:
@@ -1289,6 +1425,12 @@ class WorkbenchApiServer:
         )
 
     async def shutdown(self):
+        if self._exchange_recovery_task is not None:
+            self._exchange_recovery_task.cancel()
+            await asyncio.gather(
+                self._exchange_recovery_task, return_exceptions=True
+            )
+            self._exchange_recovery_task = None
         if self._audio_cleanup_task is not None:
             self._audio_cleanup_task.cancel()
             await asyncio.gather(

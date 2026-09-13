@@ -44,6 +44,7 @@ from orchestrator.stable_port_allocator import (
     StablePortAllocator,
 )
 from remote.api.server import create_app
+from remote.exchange_transport import ExchangeTransport
 from remote.live_endpoints import remove_live_endpoint, write_live_endpoint
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery, build_local_network_profile
@@ -281,6 +282,7 @@ class HashiRemoteApplication:
         self._discoveries: list = []
         self._registry: Optional[PeerRegistry] = None
         self._protocol_manager: Optional[ProtocolManager] = None
+        self._exchange_transport: Optional[ExchangeTransport] = None
         self._advertisement_task: Optional[asyncio.Task] = None
         self._last_advertised_agent_snapshot = ""
         self._advertised_snapshot_by_backend: dict[int, str] = {}
@@ -535,6 +537,26 @@ class HashiRemoteApplication:
             token_snapshot.error,
         )
         await self._protocol_manager.start()
+        try:
+            from orchestrator.exchange_config import load_exchange_config
+
+            exchange_config = load_exchange_config(self._hashi_root)
+            if exchange_config.enabled:
+                self._exchange_transport = ExchangeTransport(
+                    hashi_root=self._hashi_root,
+                    instance_info=instance_info,
+                    workbench_port=workbench_port,
+                )
+                await self._exchange_transport.start()
+                logger.info("Exchange transport: enabled (outbound WSS)")
+            else:
+                logger.info("Exchange transport: disabled")
+        except Exception as exc:
+            self._exchange_transport = None
+            logger.error(
+                "Exchange transport refused to start (%s)",
+                type(exc).__name__,
+            )
         self._advertisement_task = asyncio.create_task(
             self._continuous_advertisement_loop(
                 instance_info=instance_info,
@@ -551,6 +573,7 @@ class HashiRemoteApplication:
             terminal_executor=terminal_executor,
             peer_registry=self._registry,
             protocol_manager=self._protocol_manager,
+            exchange_transport=self._exchange_transport,
             workbench_port=workbench_port,
             hashi_root=str(self._hashi_root),
             control_hashi_root=str(self._control_hashi_root),
@@ -581,7 +604,11 @@ class HashiRemoteApplication:
         logger.info("Server starting on %s:%d %s",
                     self._host, self._port, "(TLS)" if ssl_certfile else "(plain HTTP)")
 
-        await self._uvicorn_server.serve()
+        try:
+            await self._uvicorn_server.serve()
+        finally:
+            if self._exchange_transport is not None:
+                await self._exchange_transport.stop()
 
     async def _continuous_advertisement_loop(
         self,
@@ -752,6 +779,8 @@ class HashiRemoteApplication:
             self._advertisement_task.cancel()
         if self._protocol_manager:
             _stop(self._protocol_manager.stop())
+        if self._exchange_transport:
+            _stop(self._exchange_transport.stop())
         if self._instance_id:
             remove_live_endpoint(self._hashi_root, self._instance_id)
         remove_runtime_claim(self._hashi_root, pid=os.getpid())
