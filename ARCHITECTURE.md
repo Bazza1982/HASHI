@@ -222,6 +222,12 @@ authenticated remote protocols. HASHI includes:
 - HChat and necessary Remote projections used by compatible clients; and
 - shared connector contracts for attachments, controls, events, and delivery.
 
+The optional Internet HChat client for the independently operated HASHI
+Exchange is governed by
+[HASHI independent Exchange integration](docs/HASHI_EXCHANGE_INTEGRATION.md).
+Exchange remains a separate service and identity authority; HASHI owns only its
+client Connector and PAO admission boundary.
+
 An external desktop, web, mobile, IDE, or operations UI may use HASHI
 infrastructure when it conforms to the published protocol. The Connector and
 API belong to HASHI; the external UI, its packaging, layout, drafts, and

@@ -11,7 +11,6 @@ from typing import Callable
 
 SendHChatCallable = Callable[..., bool]
 
-_TARGET_RE = re.compile(r"^(?:all|@?[A-Za-z0-9_][A-Za-z0-9_-]*)(?:@[A-Za-z0-9_-]+)?$")
 _FENCED_JSON_RE = re.compile(r"^\s*```(?:json)?\s*(?P<body>.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 _COMMAND_START_RE = re.compile(r"^\s*(?:/[\w./-]+|(?:python|python3|bash|sh)\b)", re.IGNORECASE)
 
@@ -80,8 +79,15 @@ def validate_hchat_target_format(target: str) -> str:
         raise _parse_error('missing required field "target"')
     if any(ch.isspace() for ch in normalized):
         raise _parse_error('invalid "target": whitespace is not allowed')
-    if not _TARGET_RE.match(normalized):
-        raise _parse_error('invalid "target": expected agent, @group, all, or agent@INSTANCE')
+    try:
+        from remote.internet_address import parse_hchat_address
+
+        parse_hchat_address(normalized)
+    except ValueError:
+        raise _parse_error(
+            'invalid "target": expected agent, @group, all, agent@INSTANCE, '
+            "or agent@instance.username"
+        ) from None
     return normalized
 
 

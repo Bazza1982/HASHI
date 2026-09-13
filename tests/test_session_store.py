@@ -1569,6 +1569,60 @@ def test_restart_reconciliation_terminalizes_queued_and_running_runs_once(tmp_pa
     assert restarted.reconcile_incomplete_runs() == []
 
 
+def test_restart_preserves_only_queued_exchange_runs_for_inbox_recovery(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    owner = "exchange:authority_1:actor_alice"
+    session = store.resolve_session(
+        owner_id=owner,
+        agent_id="reviewer",
+        surface="hchat",
+        channel_key="instance_alice:conversation_1",
+    )
+    queued_exchange = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="reviewer",
+        request_id="request_exchange_queued",
+        text="accepted before restart",
+        source="hchat-exchange",
+        idempotency_key="exchange-queued",
+    )
+    running_exchange = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="reviewer",
+        request_id="request_exchange_running",
+        text="execution state is unknown",
+        source="hchat-exchange",
+        idempotency_key="exchange-running",
+    )
+    ordinary = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="reviewer",
+        request_id="request_ordinary_queued",
+        text="ordinary queue has no durable inbox",
+        source="api",
+        idempotency_key="ordinary-queued",
+    )
+    store.mark_request_running(
+        running_exchange.request_id,
+        worker_id="worker-before-restart",
+    )
+
+    reconciled = store.reconcile_incomplete_runs()
+
+    assert {row["run_id"] for row in reconciled} == {
+        running_exchange.run_id,
+        ordinary.run_id,
+    }
+    assert store.get_run(queued_exchange.run_id)["state"] == "queued"
+    assert store.get_run(running_exchange.run_id)["state"] == "interrupted"
+    assert store.get_run(ordinary.run_id)["state"] == "interrupted"
+
+
 def test_agent_restart_reconciliation_does_not_interrupt_other_agents(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"

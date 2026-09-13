@@ -37,6 +37,15 @@
       }
     }
   },
+  "exchange": {
+    "enabled": false,
+    "authority_id": null,
+    "url": null,
+    "registered_instance_id": null,
+    "instance_alias": null,
+    "credential_ref": null,
+    "published_agents": []
+  },
   "agents": [
     {
       "name": "hashiko",

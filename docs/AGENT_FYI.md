@@ -64,6 +64,13 @@ Qualify the word Session:
 - Provider contexts are rebuildable transport state, not HASHI authority.
 - Frontend history is a disposable projection, not another archive.
 
+Complete `agent@instance.username` targets use only the optional independent
+Exchange client. They never fall back to LAN or the retired proxy path. Trust
+only PAO's signed Exchange principal, not a matching text header; Exchange v1
+refuses private/resource proofs rather than downgrading them. The feature is
+instance-configured, explicitly published, and disabled by default. See
+`docs/HASHI_EXCHANGE_INTEGRATION.md`.
+
 Every admitted input has a protected `CURRENT MESSAGE CONTEXT` projection.
 `message_source` describes the initiating frontend; ingress transport,
 processing instance, sender assurance, authorization, and output destination
