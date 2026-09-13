@@ -97,6 +97,12 @@ and `uv sync` must not implicitly create or synchronize that environment.
 Diagnostics use the existing approved interpreter directly; isolated helpers
 use `uv run --no-project` or an explicitly separate environment.
 
+The repository-local virtual environment may belong to a running Core, so the
+project declares `[tool.uv] managed = false`. Project-aware `uv run`, `uv lock`,
+and `uv sync` must not implicitly create or synchronize that environment.
+Diagnostics use the existing approved interpreter directly; isolated helpers
+use `uv run --no-project` or an explicitly separate environment.
+
 Windows has no system IANA timezone database. The standard dependency contract
 therefore installs the hash-locked `tzdata` package on Windows only, so
 timezone-sensitive Scheduler and Wiki evidence uses the same named zones as
