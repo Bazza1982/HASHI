@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,9 @@ def git(root, *args):
 def repository(tmp_path):
     git(tmp_path, "init", "-q")
     (tmp_path / "main.py").write_text("original\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "hashi-test"\nversion = "4.1.2"\n'
+    )
     folder = tmp_path / "orchestrator"
     folder.mkdir()
     (folder / "runtime_contract.py").write_text(
@@ -63,6 +67,64 @@ def test_function_change_does_not_require_core_approval(repository):
     (repository / "feature.py").write_text("feature\n")
     git(repository, "add", "feature.py")
     assert check(repository, "--cached").returncode == 0
+
+
+def test_authorized_core_change_still_requires_major_release_evidence(repository):
+    (repository / "main.py").write_text("changed\n")
+    git(repository, "add", "main.py")
+
+    result = check(
+        repository,
+        "--cached",
+        "--base",
+        "HEAD",
+        "--authorized",
+        "--major-version-change",
+    )
+
+    assert result.returncode == 4
+    assert "major-version increment" in result.stderr
+    assert "independent review record" in result.stderr
+
+
+def test_reviewed_major_core_change_passes(repository):
+    (repository / "main.py").write_text("changed\n")
+    (repository / "pyproject.toml").write_text(
+        '[project]\nname = "hashi-test"\nversion = "5.0.0a1"\n'
+    )
+    git(repository, "add", "main.py", "pyproject.toml")
+    digest = check(repository, "--cached", "--print-core-digest").stdout.strip()
+    review = repository / "docs" / "core-reviews" / "v5-review.json"
+    review.parent.mkdir(parents=True)
+    review.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "change_id": "core-v5-migration",
+                "authorization_reference": "approved migration decision",
+                "implementer": "implementer-agent",
+                "reviewer": "reviewer-agent",
+                "reviewed_at": "2026-09-13T23:30:00+10:00",
+                "verdict": "approved",
+                "product_version": "5.0.0a1",
+                "core_digest": digest,
+                "summary": "Reviewed the complete candidate Core diff and risks.",
+            }
+        )
+    )
+    git(repository, "add", str(review.relative_to(repository)))
+
+    result = check(
+        repository,
+        "--cached",
+        "--base",
+        "HEAD",
+        "--authorized",
+        "--major-version-change",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "authorized major-version change" in result.stdout
 
 
 def test_installed_hook_blocks_core_commit_without_authorization(repository, monkeypatch):

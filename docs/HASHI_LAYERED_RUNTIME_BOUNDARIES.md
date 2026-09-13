@@ -107,9 +107,12 @@ Rules:
 
 - Core files are protected.
 - Feature changes must not edit core files by default.
-- Core changes require explicit user authorization.
-- Core changes require a focused plan, lightweight tests, and independent
-  review before merge.
+- Core changes require explicit user authorization for a Core major-version
+  migration; ordinary fixes, refactors, reboots, or broad approval do not count.
+- One migration pull request must raise the product major version, reset minor
+  and patch to zero, carry the `core-change-approved` label, and add a matching
+  independent review record before merge. Its implementer and reviewer differ.
+- Core changes require a focused plan and lightweight tests before review.
 - Core should not know about product ports, terminal rendering, Windows/WSL
   product policy, or instance names. OS process/lock/stdio primitives stay here.
 
@@ -160,15 +163,19 @@ python scripts/check_protected_core_changes.py --cached
 python scripts/check_protected_core_changes.py --base main
 ```
 
-If the user explicitly authorizes a core edit, rerun with:
+If the user explicitly authorizes a Core major-version migration, prepare its
+review digest and run the complete branch gate with:
 
 ```bash
-python scripts/check_protected_core_changes.py --authorized
+python scripts/check_protected_core_changes.py --print-core-digest
+python scripts/check_protected_core_changes.py \
+  --base <ref> --authorized --major-version-change
 ```
 
-or set `HASHI_CORE_EDIT_AUTHORIZED=1` for that check. CI validates the manifest
-and requires the `core-change-approved` pull-request label when protected paths
-change.
+The command-scoped `HASHI_CORE_EDIT_AUTHORIZED=1` records the same authorization
+but cannot waive any release gate. CI validates the manifest and requires the
+label, major-version increment, and matching added review record whenever
+protected paths change.
 
 ## Layer 2: HASHI Functions
 
@@ -454,7 +461,8 @@ message rather than booting into a wrong identity or conflicting port.
 
 Changes that touch these boundaries require focused checks:
 
-- protected core touched: explicit user authorization + independent review;
+- protected Core touched: explicit major-version authorization + version bump
+  + `core-change-approved` label + matching independent review record;
 - function layer touched: isolated probe plus `/reboot min` Worker switch;
 - platform config touched: at least one WSL/Windows/macOS-relevant fixture;
 - instance config touched: migration test preserving existing local values;

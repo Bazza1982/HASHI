@@ -29,7 +29,8 @@ jobs:
           CORE_CHANGE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'core-change-approved') }}
         run: |
           if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
-            python scripts/check_protected_core_changes.py --base "$BASE_SHA" --authorized
+            python scripts/check_protected_core_changes.py \
+              --base "$BASE_SHA" --authorized --major-version-change
           else
             python scripts/check_protected_core_changes.py --base "$BASE_SHA"
           fi
@@ -70,7 +71,8 @@ jobs:
           CORE_CHANGE_APPROVED: ${{ steps.merged_pr_approval.outputs.authorized }}
         run: |
           if [ "$CORE_CHANGE_APPROVED" = "true" ]; then
-            python scripts/check_protected_core_changes.py --base "$BASE_SHA" --authorized
+            python scripts/check_protected_core_changes.py \
+              --base "$BASE_SHA" --authorized --major-version-change
           else
             python scripts/check_protected_core_changes.py --base "$BASE_SHA"
           fi

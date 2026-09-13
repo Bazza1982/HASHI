@@ -12,11 +12,19 @@ choose verification using `docs/TESTING_POLICY.md`.
 - Protected paths are owned solely by `orchestrator.runtime_contract.CORE_SOURCE_PATHS`.
   Run `python scripts/check_protected_core_changes.py` when choosing files and
   before finishing. Its default covers staged, unstaged, and untracked changes.
-- Core edits require a concrete reason and explicit task authorization. Existing
-  authorization remains valid for its stated scope; do not ask for it again.
-  Naming a feature or approving an unrelated change is not blanket Core approval.
-  `--authorized` records an authorization already given; it does not grant one.
-  Do not persist `HASHI_CORE_EDIT_AUTHORIZED=1` in configuration or shell profiles.
+- Treat every protected Core path as immutable. Editing, moving, renaming, or
+  deleting one is allowed only when the current user explicitly authorizes a
+  **Core major-version migration**. A bug fix, refactor, reboot request, broad
+  approval, or request to "protect Core" is not that authorization.
+- An authorized Core migration must raise the product major version, reset its
+  minor and patch numbers, carry the `core-change-approved` pull-request label,
+  and add a matching independent review record under `docs/core-reviews/`.
+  The implementer and reviewer must differ. Batch one Core generation into one
+  reviewed pull request rather than splitting it across ordinary changes.
+- `--authorized` and command-scoped `HASHI_CORE_EDIT_AUTHORIZED=1` only record
+  authorization already given; neither bypasses the major-version and review
+  gates. Never persist Core authorization variables in configuration or shell
+  profiles. See `docs/HASHI_CORE_PROTECTION_HARDENING_2026-09-13.md`.
 - Model/effort opt-ins for an instance belong in `allowed_backends` and resolve
   through `runtime_effort_options`; do not edit the shared catalogue merely to
   add an instance model. Shared catalogue/Engine compatibility belongs to the

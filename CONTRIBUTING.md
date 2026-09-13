@@ -66,14 +66,20 @@ with `python -m pytest -q tests` is limited to collection or shared
 test-infrastructure audits. Contract, platform, and live checks are separate;
 live checks require explicit authority.
 
-Protected core edits require explicit authorization and focused regression
-tests. On GitHub, an authorized core pull request also needs the
-`core-change-approved` label.
+Protected Core edits are admitted only as an explicitly user-authorized major-
+version migration with focused regression tests. The pull request must raise
+the product major version relative to its base, reset minor and patch to zero,
+carry the `core-change-approved` label, and add a matching independent review
+record under `docs/core-reviews/`. The implementer and reviewer must differ.
+Use `python scripts/check_protected_core_changes.py --print-core-digest` when
+preparing that record; see the directory README for its schema.
 
 The Core guard checks unstaged, staged and untracked changes by default. Commit
 hooks check the index, and branch checks include the baseline's protected paths.
 `--authorized` only acknowledges explicit authorization already given for this
-change; never install a permanent authorization environment variable.
+change and no longer bypasses the major-release gate. A permitted migration is
+checked with `--authorized --major-version-change --base <ref>`. Never install
+a permanent authorization environment variable.
 
 Keep decision status scoped: approved design, source implementation, offline
 validation and live adoption are distinct. Record evidence in the owning decision

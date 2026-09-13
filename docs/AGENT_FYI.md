@@ -23,8 +23,11 @@ Every capability has one functional owner and one engineering layer:
 
 Normal behavior belongs in replaceable Functions or configuration. Protected
 Core paths derive only from `orchestrator.runtime_contract.CORE_SOURCE_PATHS`;
-check before choosing files and completion. Do not move policy into Core,
-duplicate registries, or use `--authorized` without explicit permission.
+check before choosing files and completion. Treat them as immutable unless the
+current user explicitly authorizes a Core major-version migration. Such a
+migration also needs a major-version increment, the `core-change-approved`
+label, and a matching independent review record. Do not move policy into Core,
+duplicate registries, or treat `--authorized` as permission.
 
 Source, artifacts, installed clients, running Workers, and delivery are separate
 facts. `/reboot min` replaces one Worker; shared replacement is broader. Verify

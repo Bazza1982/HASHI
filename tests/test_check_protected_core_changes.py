@@ -67,12 +67,16 @@ def test_main_blocks_protected_paths_without_authorization(monkeypatch, capsys) 
     assert "remote/main.py" not in captured.err
 
 
-def test_main_allows_protected_paths_with_authorization(monkeypatch) -> None:
+def test_explicit_authorization_alone_does_not_bypass_major_policy(
+    monkeypatch,
+    capsys,
+) -> None:
     monkeypatch.setattr(checker, "_repo_root", lambda: __import__("pathlib").Path("/tmp/repo"))
     monkeypatch.setattr(checker.os, "chdir", lambda path: None)
     monkeypatch.setattr(checker, "_changed_files", lambda args: {"main.py"})
 
-    assert checker.main(["--authorized"]) == 0
+    assert checker.main(["--authorized"]) == 4
+    assert "major-version migration" in capsys.readouterr().err
 
 
 def test_protected_core_manifest_only_names_existing_files() -> None:

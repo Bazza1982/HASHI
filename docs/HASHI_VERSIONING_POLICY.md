@@ -69,6 +69,12 @@ Apply these rules to the reviewed release scope, not to every commit:
 7. Ordinary commits do not each consume a release number. Once a release or
    pre-release is published, its tag and artifacts are immutable. Changed
    product code needs a new release/pre-release identifier, never an overwrite.
+8. Every pull request that changes a path in the authoritative Core manifest is
+   one reviewed Core-generation release scope. It raises `X` relative to its
+   base and resets `Y` and `Z` to zero. Batch one planned generation into that
+   pull request; a later Core-changing pull request starts another generation.
+   The required label and independent review record are authorization evidence,
+   not substitutes for the version change.
 
 Changing a number is descriptive, not authorization to edit Core, publish,
 restart, or broaden an adoption operation.
