@@ -146,7 +146,22 @@ def _split_command(command_line: str) -> tuple[str, list[str]]:
     if raw.startswith("/"):
         raw = raw[1:]
     try:
-        parts = shlex.split(raw)
+        command_token = raw.split(maxsplit=1)[0].split("@", 1)[0].casefold()
+        if command_token == "debug":
+            # /debug accepts an opaque journal reference.  Non-POSIX parsing
+            # preserves Windows path separators while still grouping quoted
+            # paths; remove only the grouping quotes from each argument.
+            parts = shlex.split(raw, posix=False)
+            parts = [
+                part[1:-1]
+                if len(part) >= 2
+                and part[0] == part[-1]
+                and part[0] in {'"', "'"}
+                else part
+                for part in parts
+            ]
+        else:
+            parts = shlex.split(raw)
     except Exception:
         parts = raw.split()
     if not parts:

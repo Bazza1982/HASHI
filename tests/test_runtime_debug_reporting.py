@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator.admin_local_testing import execute_local_command
 from orchestrator import (
     runtime_debug_reporting,
     runtime_media,
@@ -339,3 +340,37 @@ async def test_debug_on_requires_target_and_journal(tmp_path: Path):
 
     assert not runtime_debug_reporting.settings_path(runtime).exists()
     assert "/debug on" in replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_local_command_preserves_windows_journal_path(tmp_path: Path):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "source"
+    runtime.workspace_dir = tmp_path / "workspaces" / "source"
+    runtime.global_config = SimpleNamespace(
+        authorized_id=7,
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        instance_id="HASHI1",
+        ui_language="en",
+    )
+    runtime.config = SimpleNamespace(active_backend="codex-cli")
+    runtime.skill_manager = None
+    runtime.logger = _Logger()
+    runtime._is_authorized_user = lambda user_id: user_id == 7
+    replies: list[str] = []
+
+    async def reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    runtime._reply_text = reply
+    journal = r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md"
+
+    result = await execute_local_command(
+        runtime,
+        f"/debug on zhaojun@HASHI1 {journal}",
+    )
+
+    assert result["ok"] is True
+    assert result["args"][-1] == journal
+    assert runtime_debug_reporting.load_settings(runtime).journal == journal
