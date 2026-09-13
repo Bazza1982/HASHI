@@ -52,6 +52,7 @@ from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator import runtime_control
 from orchestrator import runtime_reboot
 from orchestrator import runtime_cross_session
+from orchestrator import runtime_debug_reporting
 from orchestrator import runtime_delivery
 from orchestrator import runtime_delivery_order
 from orchestrator import runtime_lifecycle
@@ -1120,6 +1121,17 @@ class FlexibleAgentRuntime:
             error=payload.get("error") or "",
             interrupted=bool(payload.get("interrupted")),
         )
+        if not bool(payload.get("success")) and not bool(payload.get("interrupted")):
+            try:
+                runtime_debug_reporting.schedule_failure_report(
+                    self, request_id, payload
+                )
+            except Exception as exc:  # debug reporting must never block delivery
+                self.logger.warning(
+                    "Automatic debug report scheduling failed for %s: %s",
+                    request_id,
+                    exc,
+                )
         callbacks = self._request_listeners.pop(request_id, [])
         if not callbacks:
             self._pending_request_results[request_id] = payload
@@ -5122,23 +5134,77 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         raw_args = list(context.args or [])
-        args = [a.strip().lower() for a in raw_args if a.strip()]
-        if args and args[0] in {"on", "off"}:
-            enabled = args[0] == "on"
-            if self.skill_manager:
-                _, msg = self.skill_manager.set_toggle_state(self.workspace_dir, "debug", enabled=enabled)
+        action = raw_args[0].strip().casefold() if raw_args else ""
+        if action == "on":
+            target = raw_args[1].strip() if len(raw_args) > 1 else ""
+            journal = " ".join(raw_args[2:]).strip() if len(raw_args) > 2 else ""
+            if not target or not journal:
+                await self._reply_text(
+                    update, ui_language.tr("debug.reporting_usage")
+                )
+                return
+            try:
+                settings = runtime_debug_reporting.enable(
+                    self,
+                    target=target,
+                    journal=journal,
+                )
+            except Exception as exc:
+                self.logger.warning("Could not enable automatic debug reporting: %s", exc)
                 await self._reply_text(
                     update,
-                    ui_language.tr(
-                        "skill.debug_state",
-                        state=status_label(enabled),
-                        message=msg,
-                    ),
+                    ui_language.tr("debug.reporting_save_failed", error=str(exc)),
                 )
-            else:
+                return
+            await self._reply_text(
+                update,
+                runtime_menu_views.debug_menu_text(
+                    enabled=settings.enabled,
+                    target=settings.target,
+                    journal=settings.journal,
+                ),
+                parse_mode="HTML",
+            )
+            return
+        if action == "off":
+            try:
+                settings = runtime_debug_reporting.disable(self)
+            except Exception as exc:
+                self.logger.warning("Could not disable automatic debug reporting: %s", exc)
                 await self._reply_text(
-                    update, ui_language.tr("skill.manager_unavailable")
+                    update,
+                    ui_language.tr("debug.reporting_save_failed", error=str(exc)),
                 )
+                return
+            await self._reply_text(
+                update,
+                runtime_menu_views.debug_menu_text(
+                    enabled=settings.enabled,
+                    target=settings.target,
+                    journal=settings.journal,
+                ),
+                parse_mode="HTML",
+            )
+            return
+        if not raw_args:
+            try:
+                settings = runtime_debug_reporting.load_settings(self, strict=True)
+            except Exception as exc:
+                self.logger.warning("Could not read automatic debug reporting state: %s", exc)
+                await self._reply_text(
+                    update,
+                    ui_language.tr("debug.reporting_read_failed", error=str(exc)),
+                )
+                return
+            await self._reply_text(
+                update,
+                runtime_menu_views.debug_menu_text(
+                    enabled=settings.enabled,
+                    target=settings.target,
+                    journal=settings.journal,
+                ),
+                parse_mode="HTML",
+            )
             return
         if not self.skill_manager:
             await self._reply_text(update, ui_language.tr("skill.system_unconfigured"))
@@ -5151,14 +5217,6 @@ class FlexibleAgentRuntime:
             )
             return
         prompt_text = " ".join(raw_args).strip()
-        if not prompt_text:
-            enabled = "debug" in self.skill_manager.get_active_toggle_ids(self.workspace_dir)
-            await self._reply_text(
-                update,
-                runtime_menu_views.debug_menu_text(enabled=enabled),
-                parse_mode="HTML",
-            )
-            return
         if not self.skill_manager.is_skill_enabled(self.workspace_dir, skill.id):
             await self._reply_text(
                 update,

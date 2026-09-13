@@ -79,6 +79,12 @@ intended task principal; service-account setup must name it. Only a missing
 token permits discovery-only; unreadable or malformed secrets are fatal. See
 [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
+`/debug on <agent@instance> <journal>` is an instance-level, one-way failure
+reporting preference. Each non-interrupted terminal error gets one best-effort
+HChat diagnosis assignment; the source does not queue, retry, await a receipt,
+write the journal, de-duplicate diagnoses, or fix the issue. HChat-origin errors
+are excluded to prevent loops. `/debug <request>` remains a one-shot Skill run.
+
 PAO determines one immutable Run route before PCM projection. The route states
 the primary destination, mirrors, and whether ordinary reply delivery is
 automatic. A plan to deliver, queue acceptance, and actual delivery are

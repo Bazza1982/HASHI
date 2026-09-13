@@ -873,15 +873,34 @@ def loop_list_text(loops: Iterable[tuple[str, dict[str, Any]]]) -> str:
     return "\n".join(lines)
 
 
-def debug_menu_text(*, enabled: bool) -> str:
+def debug_menu_text(
+    *,
+    enabled: bool,
+    target: str = "",
+    journal: str = "",
+) -> str:
+    facts = [_fact("common.scope", html.escape(_tr("menu.debug.scope")))]
+    if target:
+        facts.append(
+            _fact("common.target", f"<code>{html.escape(target)}</code>")
+        )
+    if journal:
+        facts.append(
+            _fact("common.path", f"<code>{html.escape(journal)}</code>")
+        )
     return setting_card(
         "🐛",
         "Debug mode",
         current=f"<b>{status_label(enabled)}</b>",
-        facts=[_fact("common.scope", html.escape(_tr("menu.debug.scope")))],
-        consequence=_tr("menu.debug.effect"),
+        facts=facts,
+        consequence=html.escape(_tr("menu.debug.effect")),
         action=(
-            _command_key("/debug on|off", "menu.debug.action.toggle")
+            _command_key(
+                "/debug on <agent@instance> <journal>",
+                "menu.debug.action.configure",
+            )
+            + "\n"
+            + _command_key("/debug off", "menu.debug.action.disable")
             + "\n"
             + _command_key("/debug <prompt>", "menu.debug.action.run")
         ),

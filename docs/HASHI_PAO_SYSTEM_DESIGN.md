@@ -288,10 +288,40 @@ Commands are connector entry points into domain contracts.
 | `/clear` | Coordinate Session/media/Engine cleanup | Connector media and selected Engine participate |
 | `/jobs`, `/loop`, `/bg` | Job and outer orchestration lifecycle | Connector renders status |
 | `/stop`, `/steer` | Outer cancellation, fencing, and new-Run/Turn coordination | Selected Engine terminates its internal work |
+| `/debug on|off` | Instance-level automatic terminal-failure forwarding preference | HChat transports one diagnosis assignment; the Connector renders status |
 
 HER-specific effort, Habit, Meditation, provider, and model settings reach HER
 through a Connector/PAO control surface, but their internal meaning remains
 HER-owned.
+
+Automatic debug reporting is deliberately a one-way PAO delivery convenience,
+not a diagnostic lifecycle. `/debug on <agent@instance> <journal>` persists the
+instance destination. Each non-interrupted terminal Run failure makes one
+best-effort HChat send containing the failure provenance, local diagnostic-log
+location, journal reference, and a diagnose-without-fixing instruction. PAO
+does not validate or write the remote journal, await acknowledgement, retry,
+queue, track resolution, or de-duplicate issues. The receiving Agent owns
+diagnosis and journal de-duplication. HChat-origin failures are excluded so a
+failed diagnostic assignment cannot create a reporting loop. `/debug <request>`
+retains the separate one-shot strict-debug Skill behavior.
+
+### HASHI1 automatic debug-reporting trial (2026-09-13)
+
+- **Approval:** the user authorized this PAO/Functions change and live trial on
+  HASHI1. No protected-Core source change is included.
+- **Implementation:** branch `trial/debug-error-forwarding-hashi1` adds the
+  instance preference, the common terminal-failure hook, the single existing
+  HChat send, and the localized `/debug` status/configuration surface.
+- **Offline verification:** the focused test failed at collection before the
+  owner module existed and then passed 17 tests. Adjacent delivery, command,
+  menu, language, and Skill consumers passed 99 tests plus 7 subtests. Ruff,
+  whitespace, and the protected-Core guard passed. The development environment
+  Core gate passed 655 tests; its 12 failures were all the known mismatch
+  between that test venv and the repository dependency lock. HASHI1's exact
+  production runtime separately passed the runtime-contract check.
+- **Live verification:** pending the authorized all-active-Agent Function
+  adoption. Activation and the first organic error delivery remain separate
+  facts and must be recorded after observation.
 
 ## 8. Workflow hierarchy
 

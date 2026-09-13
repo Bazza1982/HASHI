@@ -213,9 +213,13 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "debug",
         "cmd_debug",
-        "Run in strict debug mode",
+        "Configure automatic error reporting or run a strict debug task",
         "tools",
-        guide=CommandGuide("/debug <request>", example="/debug diagnose this failure"),
+        guide=CommandGuide(
+            "/debug [on <agent@instance> <journal>|off|<request>]",
+            ("on", "off"),
+            example="/debug on zhaojun@HASHI1 C:\\path\\journal.md",
+        ),
     ),
     CommandSpec(
         "skill",

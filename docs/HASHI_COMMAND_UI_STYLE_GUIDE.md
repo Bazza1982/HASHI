@@ -68,6 +68,11 @@ Every settings menu shows:
 - unavailable choices and why they are unavailable;
 - a safe way back or to refresh when the menu has sub-pages.
 
+The `/debug` status card shows its instance-wide ON/OFF value and, when
+configured, the exact diagnosis Agent and journal reference. It states that the
+preference is persistent and immediate, that each future terminal error is sent
+once, and that the source does not wait, retry, diagnose, or fix.
+
 When a command expresses a clear intent but the current mode blocks the action,
 offer a concise confirmation that can satisfy the intent instead of ending with
 instructions to run another command. The confirmation must state the current
