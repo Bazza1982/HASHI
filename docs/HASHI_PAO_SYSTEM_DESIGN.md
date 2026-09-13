@@ -312,16 +312,31 @@ retains the separate one-shot strict-debug Skill behavior.
 - **Implementation:** branch `trial/debug-error-forwarding-hashi1` adds the
   instance preference, the common terminal-failure hook, the single existing
   HChat send, and the localized `/debug` status/configuration surface.
-- **Offline verification:** the focused test failed at collection before the
-  owner module existed and then passed 17 tests. Adjacent delivery, command,
-  menu, language, and Skill consumers passed 99 tests plus 7 subtests. Ruff,
-  whitespace, and the protected-Core guard passed. The development environment
-  Core gate passed 655 tests; its 12 failures were all the known mismatch
-  between that test venv and the repository dependency lock. HASHI1's exact
-  production runtime separately passed the runtime-contract check.
-- **Live verification:** pending the authorized all-active-Agent Function
-  adoption. Activation and the first organic error delivery remain separate
-  facts and must be recorded after observation.
+- **Offline verification:** the focused suite first failed at collection before
+  the owner module existed and now passes 19 tests, including the complete
+  Worker RPC path for unquoted and quoted Windows journal paths. A selected
+  adjacent command, audit, UI, registry, and Skill run passes 93 tests (112
+  together with the focused suite). Ruff, compilation with HASHI1's production
+  interpreter, whitespace, the runtime-contract check, and the protected-Core
+  guard pass. The development environment Core gate passed 655 tests; its 12
+  failures were all the known mismatch between that test venv and the repository
+  dependency lock.
+- **Live verification:** reboot receipt
+  `b444575dd05346d6b890afd007be8710` committed generation
+  `sha256:7a38f179124b7cb0596ed4506c4c4be3b60a79d9057070401f278dd8d896a9c5`
+  for all five active Agents (`temp`, `lily`, `feiyan`, `zhaojun`, and `sunny`).
+  All Workers are ACTIVE, accepting, alive, and Telegram-connected; HASHI1 is
+  ready and non-degraded. Core PID 16361 and shared Functions PID 16380 at
+  generation
+  `sha256:c799eabb5dac93097ef0c639b31a43c7c5235663dd76120ccbf508db319515fa`
+  remained unchanged.
+- **Activation:** `/debug` is ON for `zhaojun@HASHI1` with journal
+  `C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md`. Enabling it through
+  `feiyan` and reading it through `lily` verified the shared instance setting
+  and its persisted Windows path. Two earlier path-corruption attempts were
+  disabled immediately, before any terminal error or debug report occurred.
+  The first organic failure delivery and receiving journal update remain trial
+  observations; no synthetic failure was generated for deployment verification.
 
 ## 8. Workflow hierarchy
 
