@@ -760,6 +760,37 @@ async def test_startup_manager_runs_remote_lifecycle(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_startup_manager_uses_bridge_home_when_code_root_differs(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+    code_root = tmp_path / "code"
+    bridge_home = tmp_path / "instance"
+
+    async def fake_ensure(root):
+        calls.append(root)
+        return {
+            "ok": True,
+            "action": "already_running",
+            "settings": SimpleNamespace(port=8766),
+        }
+
+    monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", fake_ensure)
+    kernel = SimpleNamespace(
+        global_config=SimpleNamespace(
+            project_root=code_root,
+            bridge_home=bridge_home,
+        )
+    )
+    manager = StartupManager(kernel, console_handler=None)
+
+    await manager._ensure_remote_lifecycle()
+
+    assert calls == [bridge_home]
+
+
+@pytest.mark.asyncio
 async def test_startup_manager_uses_portable_remote_root(monkeypatch, tmp_path):
     calls = []
     portable_root = tmp_path / "data"
@@ -770,7 +801,12 @@ async def test_startup_manager_uses_portable_remote_root(monkeypatch, tmp_path):
 
     monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", fake_ensure)
     monkeypatch.setenv("HASHI_REMOTE_ROOT", str(portable_root))
-    kernel = SimpleNamespace(global_config=SimpleNamespace(project_root=tmp_path / "code"))
+    kernel = SimpleNamespace(
+        global_config=SimpleNamespace(
+            project_root=tmp_path / "code",
+            bridge_home=tmp_path / "instance",
+        )
+    )
     manager = StartupManager(kernel, console_handler=None)
 
     await manager._ensure_remote_lifecycle()

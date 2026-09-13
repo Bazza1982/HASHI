@@ -220,7 +220,11 @@ class StartupManager:
                 None,
             )
         portable_root = str(os.environ.get("HASHI_REMOTE_ROOT") or "").strip()
-        root = portable_root or getattr(global_config, "project_root", None)
+        root = (
+            portable_root
+            or getattr(global_config, "bridge_home", None)
+            or getattr(global_config, "project_root", None)
+        )
         instance_id = str(
             getattr(global_config, "instance_id", None)
             or getattr(getattr(self.kernel, "paths", None), "instance_id", None)
