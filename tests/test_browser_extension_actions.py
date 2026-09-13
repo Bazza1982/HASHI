@@ -363,6 +363,92 @@ async def test_registry_projects_runtime_audit_before_browser_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_registry_injects_configured_browser_transport_for_isolated_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from tools.registry import ToolRegistry
+
+    captured: dict = {}
+
+    async def fake_active_tab(args: dict) -> str:
+        captured.update(args)
+        return "active"
+
+    monkeypatch.setattr(browser, "execute_browser_active_tab", fake_active_tab)
+    registry = ToolRegistry(
+        allowed_tools=["browser_active_tab"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        tool_options={
+            "browser": {
+                "bridge_endpoint": r"\\.\pipe\shared-browser-bridge",
+                "bridge_auth_file": str(tmp_path / "bridge-auth.key"),
+            }
+        },
+    )
+
+    result = await registry.execute("browser_active_tab", {}, "call-transport")
+
+    assert result.is_error is False
+    assert result.output == "active"
+    assert captured["_bridge_endpoint"] == r"\\.\pipe\shared-browser-bridge"
+    assert captured["_bridge_auth_file"] == str(tmp_path / "bridge-auth.key")
+
+
+@pytest.mark.asyncio
+async def test_extension_bridge_uses_private_configured_transport_without_forwarding_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from tools import browser_extension_bridge
+
+    endpoint = r"\\.\pipe\shared-browser-bridge"
+    auth_file = tmp_path / "bridge-auth.key"
+    observed: dict = {}
+
+    def fake_available(**kwargs) -> bool:
+        observed["available"] = kwargs
+        return True
+
+    def fake_session(**kwargs):
+        observed["session"] = kwargs
+        return {
+            "session": {"session_id": "default::momo"},
+            "extension_meta": {"extension_version": "0.2.2", "actions": ["active_tab"]},
+        }
+
+    def fake_command(action, args, **kwargs):
+        observed["command"] = (action, args, kwargs)
+        return {"ok": True, "output": "connected"}
+
+    monkeypatch.setattr(browser_extension_bridge, "bridge_available", fake_available)
+    monkeypatch.setattr(browser_extension_bridge, "ensure_bridge_session", fake_session)
+    monkeypatch.setattr(browser_extension_bridge, "send_bridge_command", fake_command)
+
+    result = await browser._maybe_execute_extension_bridge(
+        "active_tab",
+        {
+            "agent_name": "momo",
+            "_bridge_endpoint": endpoint,
+            "_bridge_auth_file": str(auth_file),
+        },
+    )
+
+    expected_transport = {"socket_path": endpoint, "auth_file": auth_file}
+    assert result == "connected"
+    assert observed["available"] == expected_transport
+    assert observed["session"]["socket_path"] == endpoint
+    assert observed["session"]["auth_file"] == auth_file
+    action, command_args, command_transport = observed["command"]
+    assert action == "active_tab"
+    assert command_transport == expected_transport
+    assert "_bridge_endpoint" not in command_args
+    assert "_bridge_auth_file" not in command_args
+
+
+@pytest.mark.asyncio
 async def test_extension_contract_rejects_advanced_action_not_advertised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

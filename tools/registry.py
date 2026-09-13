@@ -1393,6 +1393,18 @@ class ToolRegistry:
                     browser_args,
                     tool_call_id=tool_call_id,
                 )
+            browser_options = opts.get("browser", {})
+            if isinstance(browser_options, dict):
+                bridge_endpoint = str(
+                    browser_options.get("bridge_endpoint") or ""
+                ).strip()
+                bridge_auth_file = str(
+                    browser_options.get("bridge_auth_file") or ""
+                ).strip()
+                if bridge_endpoint:
+                    browser_args["_bridge_endpoint"] = bridge_endpoint
+                if bridge_auth_file:
+                    browser_args["_bridge_auth_file"] = bridge_auth_file
             from tools.browser import (
                 execute_browser_screenshot,
                 execute_browser_get_text,

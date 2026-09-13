@@ -21,6 +21,7 @@ import os
 import platform
 import re
 import uuid
+from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -146,6 +147,21 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
     if not _prefer_extension_bridge(args):
         return None
 
+    # The isolated Fixed-backend MCP gateway is intentionally a separate
+    # process.  It cannot inherit the Browser Worker's process-local bridge
+    # transport, so the registry may inject the same operator-configured
+    # endpoint and key-file path as private execution metadata.  Remove those
+    # values before building the extension payload or audit record.
+    bridge_args = dict(args)
+    bridge_endpoint = str(bridge_args.pop("_bridge_endpoint", "") or "").strip()
+    bridge_auth_raw = str(bridge_args.pop("_bridge_auth_file", "") or "").strip()
+    bridge_auth_file = Path(bridge_auth_raw).expanduser() if bridge_auth_raw else None
+    transport_kwargs = {}
+    if bridge_endpoint:
+        transport_kwargs["socket_path"] = bridge_endpoint
+    if bridge_auth_file is not None:
+        transport_kwargs["auth_file"] = bridge_auth_file
+
     try:
         from tools.browser_extension_bridge import (
             BrowserBridgeError,
@@ -157,7 +173,7 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
     except ImportError:
         return None
 
-    if not bridge_available():
+    if not bridge_available(**transport_kwargs):
         mode = str(args.get("bridge_backend") or os.environ.get(_BRIDGE_BACKEND_ENV, "auto")).lower()
         if mode in _EXTENSION_BACKENDS:
             return (
@@ -166,7 +182,6 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
             )
         return None
 
-    bridge_args = dict(args)
     audit = project_browser_audit_metadata(bridge_args.get("_audit"))
     bridge_args["_audit"] = audit
     owner = str(
@@ -186,6 +201,7 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
             args={**bridge_args, "_audit": audit, "agent_name": owner},
             url=bridge_args.get("url"),
             safety_mode=safety_mode,
+            **transport_kwargs,
         )
         if session.get("session", {}).get("session_id"):
             bridge_args["session_id"] = session["session"]["session_id"]
@@ -222,7 +238,12 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
         return f"Error: extension bridge session failure: {exc}"
 
     try:
-        response = await asyncio.to_thread(send_bridge_command, action, bridge_args)
+        response = await asyncio.to_thread(
+            send_bridge_command,
+            action,
+            bridge_args,
+            **transport_kwargs,
+        )
     except BrowserBridgeError as exc:
         return f"Error: extension bridge failure: {exc}"
 
