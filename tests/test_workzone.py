@@ -295,6 +295,36 @@ def test_tool_registry_wildcard_survives_global_default_merge():
     assert len(warnings) == 1
 
 
+def test_tool_registry_defaults_to_open_wildcard_without_instance_override():
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager._agents_json_global = {}
+    manager.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
+
+    merged = manager._resolve_tools_config({})
+
+    assert merged == {"allowed": ["*"]}
+
+
+def test_tool_registry_preserves_explicit_instance_restriction():
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager._agents_json_global = {
+        "default_tools": {"allowed": ["wiki_search"]}
+    }
+    manager.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
+
+    merged = manager._resolve_tools_config({})
+
+    assert merged == {"allowed": ["wiki_search"]}
+
+
+def test_tool_registry_fails_closed_after_global_config_read_failure():
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager._agents_json_global = None
+    manager.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
+
+    assert manager._resolve_tools_config({}) is None
+
+
 def test_tool_registry_wildcard_excludes_explicit_opt_in_tools(tmp_path: Path):
     manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
     manager.current_backend = SimpleNamespace(tool_registry=None)

@@ -392,12 +392,18 @@ Registry. It is not proof that every backend supports native tools.
 Tools listed in `agents.json` → `global.default_tools.allowed` merge with each
 backend/provider tool configuration. The selected runtime still applies its
 own capability and permission checks before advertising or executing them.
+Personal instances default to the wildcard when `default_tools` is absent, and
+new-instance creation persists that policy. Set an explicit instance allowlist
+to narrow the default, or set `tools.enabled` to `false` on a backend row to
+disable HASHI tools there. The wildcard does not bypass Workzone boundaries,
+provider support, live Browser/Computer Worker availability, or the explicit
+opt-in required by media and local-vision tools.
 
 ```json
 {
   "global": {
     "default_tools": {
-      "allowed": ["telegram_send_file"]
+      "allowed": ["*"]
     }
   }
 }

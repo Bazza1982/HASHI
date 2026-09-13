@@ -7,6 +7,7 @@ import pytest
 
 from orchestrator import config as config_module
 from orchestrator.config import (
+    DEFAULT_GLOBAL_ALLOWED_TOOLS,
     LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
     SESSION_MODE_BACKENDS,
     ConfigManager,
@@ -395,6 +396,9 @@ def test_her_v2_backend_policy_preserves_explicit_user_restrictions():
 
 def test_agents_sample_has_valid_her_v2_core_providers():
     sample = json.loads((ROOT / "agents.json.sample").read_text(encoding="utf-8"))
+    assert set(DEFAULT_GLOBAL_ALLOWED_TOOLS) <= set(
+        sample["global"]["default_tools"]["allowed"]
+    )
     providers = sample["global"]["her_providers"]["providers"]
     her_entries = []
 

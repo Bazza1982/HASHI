@@ -135,6 +135,13 @@ def test_legacy_onboarding_preserves_existing_declarations_and_normalizes_bytes(
     assert read_config_json(secrets)["existing"] == "kept"
 
 
+def test_legacy_onboarding_new_instance_defaults_tools_open(tmp_path):
+    write_config(tmp_path, "codex-cli", {"welcomePrompt": "Welcome"}, "en")
+
+    saved_agents = read_config_json(tmp_path / "agents.json")
+    assert saved_agents["global"]["default_tools"] == {"allowed": ["*"]}
+
+
 def test_legacy_onboarding_preflights_all_config_before_side_effects(tmp_path):
     agents = tmp_path / "agents.json"
     secrets = tmp_path / "secrets.json"

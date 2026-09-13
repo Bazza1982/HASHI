@@ -1459,7 +1459,7 @@ duplicate alias `/paswd` has been removed.
     "authorized_id": 123456789,
     "ui_language": "en",
     "default_tools": {
-      "allowed": ["shell", "file_read", "file_write", "file_list"]
+      "allowed": ["*"]
     },
     "her_providers": {
       "max_permission_mode": "danger-full-access",

@@ -356,10 +356,11 @@ separate facts.
 Only Hashiko's connection fields and scoped credential references are merged.
 Existing Agents, identities, history, optional integrations and TUI mirroring
 are retained. A connection revision is consumed once by the backend state
-owner to supersede old overrides. New Hashiko uses workspace access and no
-inherited HASHI tool wildcard. A local save may request only the existing
-controlled `/reboot min` for idle Hashiko; rejection leaves adoption pending,
-never triggers a whole-instance restart, and does not report ready.
+owner to supersede old overrides. New Hashiko uses workspace access and the
+PAO-owned open HASHI Tool default; the disposable connection probe remains
+tool-free. A local save may request only the existing controlled `/reboot min`
+for idle Hashiko; rejection leaves adoption pending, never triggers a
+whole-instance restart, and does not report ready.
 
 Optional Telegram setup uses a separate masked Bot Token and positive numeric
 user ID, verifies getMe, refuses conflicting existing ownership, and saves no

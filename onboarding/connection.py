@@ -12,7 +12,11 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from adapters.registry import packaged_backend_engines
-from orchestrator.config import FlexibleAgentConfig, GlobalConfig
+from orchestrator.config import (
+    FlexibleAgentConfig,
+    GlobalConfig,
+    default_global_tools_config,
+)
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
     get_available_models, get_default_model, get_backend_entry, PROVIDER_ONLY_ENGINE_IDS,
@@ -77,10 +81,10 @@ def backend_configuration(engine, model):
         her = {'profiles':profiles}
         HERv2Config.from_mapping(her)
         return 'her-v2', [
-            {'engine':'her-v2','model':'role-configured','effort':'zero','her_v2':her,'tools':{'enabled':False}},
-            {'engine':engine,'model':model,'api_key_secret':'hashiko.connection.' + engine,'tools':{'enabled':False}},
+            {'engine':'her-v2','model':'role-configured','effort':'zero','her_v2':her},
+            {'engine':engine,'model':model,'api_key_secret':'hashiko.connection.' + engine},
         ]
-    return engine, [{'engine':engine,'model':model,'tools':{'enabled':False}}]
+    return engine, [{'engine':engine,'model':model}]
 
 
 async def validate(home, engine, model, key, *, confirmed=False):
@@ -93,12 +97,15 @@ async def validate(home, engine, model, key, *, confirmed=False):
     if row['kind'] == 'api' and not key:
         raise ConnectionError('CREDENTIAL_REQUIRED')
     active, backends = backend_configuration(engine, model)
+    probe_backends = copy.deepcopy(backends)
+    for backend in probe_backends:
+        backend['tools'] = {'enabled': False}
     # Probe in a disposable workspace, through the same manager/adapter chain.
     # The selected credential stays in memory and is never copied into prompt/state.
     with tempfile.TemporaryDirectory(prefix='hashi-connect-') as directory:
         root = Path(directory)
         cfg = FlexibleAgentConfig(name='hashiko',workspace_dir=root,system_md=root/'agent.md',
-            telegram_token_key='',allowed_backends=backends,active_backend=active,
+            telegram_token_key='',allowed_backends=probe_backends,active_backend=active,
             access_scope='workspace',extra={},project_root=root)
         atomic_write_pcm(cfg.agent_md, render_pcm_document(persona='Connection check.',system='Reply with HASHI_CONNECTED only. Do not use tools.'))
         global_cfg = GlobalConfig(authorized_id=0,project_root=root,bridge_home=root,base_logs_dir=root/'logs')
@@ -128,6 +135,8 @@ def save(home, engine, model, key, *, verified, replace_confirmed=False, languag
     config_path, secrets_path = home/'agents.json', home/'secrets.json'
     before = {p:p.read_bytes() if p.exists() else None for p in (config_path,secrets_path)}
     cfg, secrets = _read(config_path), _read(secrets_path)
+    if before[config_path] is None:
+        cfg.setdefault('global', {})['default_tools'] = default_global_tools_config()
     reference = 'hashiko.connection.' + engine
     if key and secrets.get(reference) and secrets[reference] != key and not replace_confirmed:
         raise ConnectionError('REPLACE_CONFIRMATION_REQUIRED')

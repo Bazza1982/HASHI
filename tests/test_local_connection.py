@@ -40,6 +40,24 @@ def test_connection_save_preserves_identity_history_and_existing_credentials(tmp
     assert (tmp_path/'secrets.json').read_bytes()==before
 
 
+def test_connection_save_new_instance_defaults_tools_open(tmp_path):
+    result = save(
+        tmp_path,
+        'codex-cli',
+        'gpt-5.4',
+        '',
+        verified={'engine': 'codex-cli', 'model': 'gpt-5.4', 'verified': True},
+    )
+
+    saved = json.loads((tmp_path/'agents.json').read_text())
+    assert saved['global']['default_tools'] == {'allowed': ['*']}
+    assert all(
+        'tools' not in backend
+        for backend in saved['agents'][0]['allowed_backends']
+    )
+    assert result['runtime_ready'] is False
+
+
 def test_private_connection_save_protects_empty_temporary_before_secret_write(tmp_path, monkeypatch):
     from onboarding.onboarding_main import _atomic_write_json
     from tools import private_files
@@ -99,6 +117,7 @@ async def test_her_connection_uses_actual_http_adapter_and_keeps_key_out_of_prom
         result=await connection.validate(tmp_path,'openrouter-api',models[0],'scoped-credential',confirmed=True)
         assert result['verified']
         assert requests and requests[0][0]['Authorization']=='Bearer scoped-credential'
+        assert all(not body.get('tools') for _, body in requests)
         assert 'scoped-credential' not in json.dumps([body for _,body in requests])
         assert not (tmp_path/'secrets.json').exists()
     finally:
@@ -124,14 +143,15 @@ def test_verified_connection_revision_supersedes_old_backend_state_once(tmp_path
     assert manager.config.active_backend=='claude-cli'
 
 
-def test_connection_default_permissions_do_not_inherit_global_wildcard(tmp_path):
+def test_connection_default_permissions_inherit_global_wildcard(tmp_path):
     from orchestrator.config import FlexibleAgentConfig,GlobalConfig
     from orchestrator.flexible_backend_manager import FlexibleBackendManager
     (tmp_path/'agents.json').write_text('{"global":{"default_tools":{"allowed":["*"]}},"agents":[]}')
     active,backends=backend_configuration('codex-cli','gpt-5.4')
     cfg=FlexibleAgentConfig('hashiko',tmp_path,tmp_path/'agent.md','',backends,active,extra={},project_root=tmp_path)
-    manager=FlexibleBackendManager(cfg,GlobalConfig(0,project_root=tmp_path,bridge_home=tmp_path),{})
-    assert manager._resolve_tools_config(backends[0]) is None
+    manager=FlexibleBackendManager(cfg,GlobalConfig(0,project_root=tmp_path,bridge_home=tmp_path,
+        config_path=tmp_path/'agents.json'),{})
+    assert manager._resolve_tools_config(backends[0]) == {'allowed': ['*']}
 
 
 async def test_optional_telegram_rejects_missing_owner_before_any_network(tmp_path):

@@ -88,6 +88,15 @@ PCM projects the authorised catalogue into an Engine request. HER v2 decides
 when to request an available Tool during its Turn and preserves HER-level Tool
 evidence. Neither PCM nor HER may grant a capability withheld by PAO.
 
+Personal HASHI instances use an open Tool Registry default: when
+`global.default_tools` is absent, `allowed` resolves to `["*"]`, and new-instance
+creation paths persist that wildcard. The policy applies to every Agent whose
+selected Engine exposes the HASHI Tool Registry. An explicit instance Tool
+declaration still replaces the absent-value default, and a backend row with
+`tools.enabled=false` still disables HASHI tools. The wildcard grants registry
+permission only; Engine support, Workzone roots, device availability,
+stage-specific policy, and per-invocation authority remain independent gates.
+
 ## 3. Non-responsibilities
 
 PAO does not own:

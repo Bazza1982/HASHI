@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from orchestrator.config_json import new_config_json, read_config_json, write_config_json
+from orchestrator.config import default_global_tools_config
 
 
 def load_languages(bridge_home: Path) -> list[dict]:
@@ -157,7 +158,11 @@ def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key
     else:
         agents_json.update(
             {
-                "global": {"authorized_id": 0, "whatsapp": {"enabled": False}},
+                "global": {
+                    "authorized_id": 0,
+                    "whatsapp": {"enabled": False},
+                    "default_tools": default_global_tools_config(),
+                },
                 "agents": [agent_cfg],
             }
         )

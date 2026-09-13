@@ -40,6 +40,11 @@ memory. Local identity and credentials stay in ignored instance stores.
 Model/effort opt-ins belong in `allowed_backends`; shared compatibility belongs
 to the Function-owned backend registry.
 
+Personal instances and new Agents default to the open HASHI Tool wildcard when
+no instance override is declared. Explicit instance restrictions and backend
+`tools.enabled=false` remain authoritative. A wildcard is permission, not proof
+that an Engine, Workzone, or live Browser/Computer Worker supplies a capability.
+
 HASHI JSON writers use validated private candidates, locks, revisions, and
 atomic replacement. Display fallback is never writable; conflicts require a
 fresh operation, and durability errors never restore stale bytes. Only named

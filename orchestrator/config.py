@@ -44,7 +44,14 @@ SUPPORTED_AGENT_MODES = frozenset({"fixed", "flex"})
 RETIRED_AGENT_MODES = frozenset({"wrapper", "audit", "dual-brain"})
 LEGACY_FIXED_CONFIG_BACKUP_SUFFIX = ".pre-flex-migration.bak"
 LEGACY_PCM_CONFIG_BACKUP_SUFFIX = ".pre-pcm-migration.bak"
+DEFAULT_GLOBAL_ALLOWED_TOOLS = ("*",)
 config_logger = logging.getLogger("BridgeU.Config")
+
+
+def default_global_tools_config() -> dict[str, list[str]]:
+    """Return the personal-instance Tool policy used when none is declared."""
+
+    return {"allowed": list(DEFAULT_GLOBAL_ALLOWED_TOOLS)}
 
 
 def _backend_registry():

@@ -29,6 +29,7 @@ from orchestrator.config import (
     AgentConfig,
     FlexibleAgentConfig,
     GlobalConfig,
+    default_global_tools_config,
 )
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
@@ -102,7 +103,7 @@ class FlexibleBackendManager:
         self._agents_json_global = self._load_agents_json_global()
         self._load_state()
 
-    def _load_agents_json_global(self) -> dict:
+    def _load_agents_json_global(self) -> dict | None:
         """Load the 'global' section from agents.json for default_tools etc."""
         try:
             cfg_path = getattr(self.global_config, 'config_path', None)
@@ -111,9 +112,13 @@ class FlexibleBackendManager:
                 # agents.json. Keep this secondary read consistent; otherwise
                 # global default_tools silently disappear after agent startup.
                 raw = json.loads(Path(cfg_path).read_text(encoding="utf-8-sig"))
-                return raw.get("global", {})
+                global_raw = raw.get("global", {})
+                return global_raw if isinstance(global_raw, dict) else None
         except Exception:
-            pass
+            # A broken secondary read must not turn the open-by-default policy
+            # into a fail-open configuration load. ConfigManager normally
+            # rejects the same file before a Worker reaches this boundary.
+            return None
         return {}
 
     @staticmethod
@@ -1468,10 +1473,18 @@ class FlexibleBackendManager:
         Per-backend tool options override global ones. Historical ``max_loops``
         values are discarded because active execution has no tool-round cap.
         """
-        global_raw = getattr(self, '_agents_json_global', None) or {}
-        global_tools = global_raw.get("default_tools", {})
+        global_raw = getattr(self, '_agents_json_global', None)
+        if global_raw is None:
+            global_tools = {}
+        elif "default_tools" in global_raw:
+            global_tools = global_raw.get("default_tools") or {}
+        else:
+            global_tools = default_global_tools_config()
         backend_tools = backend_cfg_raw.get("tools", {})
         if isinstance(backend_tools, dict) and backend_tools.get("enabled") is False:
+            return None
+
+        if not isinstance(global_tools, dict) or not isinstance(backend_tools, dict):
             return None
 
         if not global_tools and not backend_tools:
