@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from orchestrator import runtime_delivery_order
+
 
 @dataclass(frozen=True)
 class PendingRemoval:
@@ -166,26 +168,28 @@ def _id_matches(candidate: str, requested: str) -> bool:
     return bool(wanted and (candidate == wanted or candidate.endswith(wanted)))
 
 
-def _finish_removed_runs(runtime: Any, items: list[Any]) -> None:
+async def _finish_removed_runs(runtime: Any, items: list[Any]) -> None:
     store = getattr(runtime, "session_store", None)
     finish = getattr(store, "finish_request", None)
-    if not callable(finish):
-        return
     for item in items:
         request_id = _request_id(item)
         if not request_id:
             continue
-        try:
-            finish(
-                request_id,
-                success=False,
-                error_text="request removed from the ready queue",
-                failure_state="superseded",
-            )
-        except Exception:
-            logger = getattr(runtime, "logger", None)
-            if logger is not None:
-                logger.warning("Could not terminalize removed Session Run %s", request_id)
+        if callable(finish):
+            try:
+                finish(
+                    request_id,
+                    success=False,
+                    error_text="request removed from the ready queue",
+                    failure_state="superseded",
+                )
+            except Exception:
+                logger = getattr(runtime, "logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "Could not terminalize removed Session Run %s", request_id
+                    )
+        await runtime_delivery_order.complete_turn(runtime, request_id)
 
 
 async def clear_ready(runtime: Any, *, session_id: str | None = None) -> int:
@@ -202,7 +206,7 @@ async def clear_ready(runtime: Any, *, session_id: str | None = None) -> int:
             _restore_ready_queue(runtime, kept)
         else:
             removed = drained
-        _finish_removed_runs(runtime, removed)
+        await _finish_removed_runs(runtime, removed)
         return len(removed)
 
 
@@ -273,7 +277,7 @@ async def recall_pending(
         kept = [item for item in drained if id(item) not in selected_ready]
         _restore_ready_queue(runtime, kept)
         removed_ready = [item for item in drained if id(item) in selected_ready]
-        _finish_removed_runs(runtime, removed_ready)
+        await _finish_removed_runs(runtime, removed_ready)
         return PendingRemoval(
             ready=len(drained) - len(kept),
             delayed=removed_delayed,
@@ -304,7 +308,7 @@ async def cancel_pending_by_id(
 
         if matched_ready:
             _restore_ready_queue(runtime, kept)
-            _finish_removed_runs(runtime, matched_ready)
+            await _finish_removed_runs(runtime, matched_ready)
             return PendingRemoval(ready=1)
 
         _restore_ready_queue(runtime, drained)

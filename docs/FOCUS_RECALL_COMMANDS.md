@@ -2,7 +2,7 @@
 
 **Status:** Implemented and regression-tested
 
-**Updated:** 2026-08-18
+**Updated:** 2026-09-14
 
 **Original focus/recall commit:** `da48df5`
 
@@ -104,6 +104,11 @@ first-out order.
 
 The reply reports how many READY and delayed requests were actually withdrawn.
 An empty combined queue is a successful no-op.
+
+Withdrawing a READY direct request terminalizes its Session Run as
+`superseded` and releases its per-chat delivery sequence. This keeps later
+requests deliverable after `/recall`, `/queue cancel`, or `/queue clear` removes
+an earlier waiting request.
 
 ## `/delay`
 

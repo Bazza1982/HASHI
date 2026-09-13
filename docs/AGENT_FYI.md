@@ -104,6 +104,10 @@ destination, do not use a send tool to duplicate it. See
 [delivery](HCHAT_DELIVERY_BOUNDARY_PLAN.md) and
 [visibility](HASHI_AGENT_ACTIVITY_VISIBILITY.md).
 
+Removing a READY direct request through recall or queue control terminalizes
+its Session Run and releases its per-chat delivery sequence so later replies
+cannot wait forever behind work that will never execute.
+
 Every turn needs a visible formal result. A validated, client-bound TUI
 `hashi.frontend-delivery` v1 snapshot may disable one Run's Telegram mirror,
 never its Conversation record or TUI result. Terminal replies are verbatim and
