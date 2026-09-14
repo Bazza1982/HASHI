@@ -178,11 +178,7 @@ Session/context change, or disabling it sends nothing. The reserved transport
 derives authority/current primary Session inside the Worker; its envelope never
 carries transcript, owner, Session, or delivery policy.
 
-Local STT runs under the instance's isolated transcription Python selected by
-`state/platform/transcription.json`; never add `faster-whisper`, `ctranslate2`,
-or `av` to a live Core environment. Provision with
-`scripts/provision_transcription_runtime.py`; helper absence fails closed and
-must not weaken `/reboot min` runtime verification.
+STT dependencies never enter Core; use its provisioner.
 
 ## Move, Clone, jobs, and tools
 
