@@ -9,7 +9,7 @@
         "provider": "openrouter",
         "endpoint": "https://openrouter.ai/api/v1",
         "allowed_hosts": ["openrouter.ai"],
-        "model": "deepseek/deepseek-v4-pro",
+        "model": "google/gemini-3.8-flash",
         "api_key_secret": "openrouter-api_key",
         "idle_timeout_seconds": 90
       }
