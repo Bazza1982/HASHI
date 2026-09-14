@@ -6,11 +6,14 @@ import json
 import pytest
 
 from remote.exchange_protocol import (
+    AUTHORIZED_ROUTES_CAPABILITY,
     CAPABILITIES,
+    REQUIRED_CAPABILITIES,
     ExchangeProtocolError,
     decode_server_frame,
     delivery_payload_digest,
     send_frame,
+    routes_frame,
     utc_timestamp,
     validate_delivery_deadline,
     validate_delivery_frame,
@@ -70,9 +73,9 @@ def test_server_welcome_is_strictly_validated():
         "connection_id": "connection_1",
         "epoch": "epoch_1",
         "authority_id": "authority_1",
-        "actor_id": "actor_barry",
-        "registered_instance_id": "instance_barry",
-        "instance_address": "server.barry",
+        "actor_id": "actor_example",
+        "registered_instance_id": "instance_example",
+        "instance_address": "node.example",
         "capabilities": list(CAPABILITIES),
         "limits": {
             "max_message_bytes": 65536,
@@ -83,9 +86,63 @@ def test_server_welcome_is_strictly_validated():
     }
 
     assert decode_server_frame(json.dumps(frame))["instance_address"] == (
-        "server.barry"
+        "node.example"
     )
     frame["authority_id"] = "bad.authority"
+    with pytest.raises(ExchangeProtocolError):
+        decode_server_frame(json.dumps(frame))
+
+
+def test_legacy_server_without_optional_directory_remains_compatible():
+    frame = {
+        "v": 1,
+        "type": "welcome",
+        "connection_id": "connection_1",
+        "epoch": "epoch_1",
+        "authority_id": "authority_1",
+        "actor_id": "actor_legacy",
+        "registered_instance_id": "instance_legacy",
+        "instance_address": "legacy.example",
+        "capabilities": list(REQUIRED_CAPABILITIES),
+        "limits": {
+            "max_message_bytes": 65536,
+            "max_published_agents": 100,
+        },
+        "heartbeat_seconds": 25,
+        "lease_expires_at": "2027-01-15T08:00:00Z",
+    }
+
+    decoded = decode_server_frame(json.dumps(frame))
+    assert AUTHORIZED_ROUTES_CAPABILITY not in decoded["capabilities"]
+
+
+def test_authorized_routes_snapshot_is_strict_and_bounded():
+    frame = {
+        "v": 1,
+        "type": "authorized_routes",
+        "request_id": "routes_1",
+        "grant_revision": 11,
+        "refreshed_at": "2027-01-15T08:00:00Z",
+        "routes": [{
+            "to": _address(
+                actor="actor_alice",
+                instance="instance_alice",
+                agent="planner",
+                address="planner@home.example",
+            ),
+            "message_kinds": ["agent_message", "agent_reply"],
+            "available": True,
+        }],
+    }
+
+    decoded = decode_server_frame(json.dumps(frame))
+    assert decoded["routes"][0]["to"]["address"] == "planner@home.example"
+    assert decoded["routes"][0]["available"] is True
+    assert routes_frame(request_id="routes_1") == {
+        "v": 1, "type": "routes", "request_id": "routes_1"
+    }
+
+    frame["routes"][0]["reason"] = "private-policy-detail"
     with pytest.raises(ExchangeProtocolError):
         decode_server_frame(json.dumps(frame))
 

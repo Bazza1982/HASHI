@@ -197,9 +197,9 @@ operator chooses an archived read-only view or independent context copy; both
 use new IDs and provenance. On `history_generation` change, replace the
 projection—never substitute a legacy workspace transcript.
 
-Remote discovery supplies bounded route hints, not trust; full data needs a
-mutual handshake. Distinguish `ready_empty`, `ready`, `starting`, `degraded`,
-and static fallback. Token changes require re-handshake; never expose tokens.
+`/remote` separates Direct/LAN from Exchange; discovery is not trust.
+Connected Exchange shows only granted routes. Never merge transports/hidden
+policy; local status remains HMAC-protected.
 
 Telegram recovery binds the exact instance, Agent lifecycle, and fingerprinted
 Bot—not a reusable name or token label. Quarantine mismatches without sending.

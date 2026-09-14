@@ -743,9 +743,9 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         "Control Hashi Remote",
         "tools",
         guide=CommandGuide(
-            "/remote [status|list|on|off]",
-            ("status", "list", "on", "off"),
-            example="/remote list",
+            "/remote [status|refresh|exchange|direct|on|off]",
+            ("status", "refresh", "exchange", "direct", "on", "off"),
+            example="/remote refresh",
         ),
     ),
     CommandSpec("wol", "cmd_wol", "Send Wake-on-LAN magic packet [pc_name]", "tools", menu_visible=False),

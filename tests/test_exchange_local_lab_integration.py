@@ -255,6 +255,19 @@ async def test_two_hashi_runtimes_accept_run_reply_and_deduplicate(
                 _wait_ready(home_transport),
                 _wait_ready(server_transport),
             )
+            async with asyncio.timeout(7):
+                while True:
+                    routes = home_transport.status()["authorized_routes"]
+                    if routes and routes[0]["available"]:
+                        break
+                    await asyncio.sleep(0.02)
+            expected_server_address = (
+                f"reviewer@{server_transport.status()['instance_address']}"
+            )
+            assert [route["to"]["address"] for route in routes] == [
+                expected_server_address
+            ]
+            assert home_transport.status()["routes_stale"] is False
 
             sent = await home_transport.send_message(
                 from_agent="planner",

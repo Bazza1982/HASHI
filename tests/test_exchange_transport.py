@@ -9,7 +9,11 @@ import pytest
 from aiohttp import web
 
 from orchestrator.exchange_config import ExchangeConfig
-from remote.exchange_protocol import send_frame, utc_timestamp
+from remote.exchange_protocol import (
+    AUTHORIZED_ROUTES_CAPABILITY,
+    send_frame,
+    utc_timestamp,
+)
 from remote.exchange_transport import ExchangeTransport, ExchangeTransportError
 
 
@@ -117,6 +121,63 @@ def test_explicit_retry_never_changes_content_under_the_same_id(tmp_path):
                 conversation_id="conversation_1",
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_authorized_route_snapshot_is_projected_and_becomes_stale(tmp_path):
+    now = 1_800_000_000.0
+    transport = _ready_transport(tmp_path, now=now)
+    transport._negotiated_capabilities = {AUTHORIZED_ROUTES_CAPABILITY}
+    target = _target()
+
+    async def fake_send(_ws, frame):
+        transport._request_waiters[frame["request_id"]].set_result({
+            "v": 1,
+            "type": "authorized_routes",
+            "request_id": frame["request_id"],
+            "grant_revision": 11,
+            "refreshed_at": "2027-01-15T08:00:00Z",
+            "routes": [{
+                "to": target,
+                "message_kinds": ["agent_message", "agent_reply"],
+                "available": True,
+            }],
+        })
+
+    transport._send_frame = fake_send
+    await transport._refresh_authorized_routes(transport._ws)
+
+    status = transport.status()
+    assert status["authorized_routes_supported"] is True
+    assert status["routes_grant_revision"] == 11
+    assert status["routes_stale"] is False
+    assert status["authorized_routes"] == [{
+        "to": target,
+        "message_kinds": ["agent_message", "agent_reply"],
+        "available": True,
+    }]
+
+    transport._ready_event.clear()
+    transport._routes_stale = True
+    assert transport.status()["routes_stale"] is True
+
+
+def test_server_without_route_capability_clears_old_snapshot(tmp_path):
+    transport = _ready_transport(tmp_path, now=1_800_000_000.0)
+    transport._authorized_routes = [{
+        "to": _target(),
+        "message_kinds": ["agent_message"],
+        "available": True,
+    }]
+    transport._routes_supported = True
+    transport._routes_stale = True
+
+    transport._clear_authorized_routes(supported=False)
+
+    status = transport.status()
+    assert status["authorized_routes_supported"] is False
+    assert status["authorized_routes"] == []
+    assert status["routes_stale"] is False
 
 
 def test_delivery_ack_happens_after_accept_and_before_pao_schedule(
@@ -262,7 +323,7 @@ async def test_websocket_redirect_is_rejected_before_followup_request(
                     "enabled": True,
                     "authority_id": "authority_1",
                     "url": f"ws://127.0.0.1:{port}/v1/connect",
-                    "registered_instance_id": "instance_barry",
+                    "registered_instance_id": "instance_example",
                     "instance_alias": "server",
                     "credential_ref": "exchange_token",
                     "published_agents": ["reviewer"],
