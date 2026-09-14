@@ -1,10 +1,17 @@
-"""Local speech-to-text through an isolated faster-whisper runtime.
+"""
+Local voice-to-text transcription using faster-whisper.
 
-The long-lived HASHI Core and Function Workers must keep the exact dependency
-set recorded by the Core runtime contract. Native speech dependencies are
-therefore loaded only by a short-lived helper interpreter selected from the
-instance platform configuration. A transcription feature install can never
-change the active Core/Worker environment or its ``/reboot min`` fingerprint.
+Provides GPU-accelerated (CUDA) or CPU-based speech-to-text for all agents.
+Voice/audio messages from Telegram are transcribed locally before dispatch
+to any backend, so every backend gets plain text regardless of whether it
+supports audio files natively.
+
+Device selection priority:
+  1. CUDA GPU  (if available — requires nvidia GPU + CUDA toolkit)
+  2. CPU       (automatic fallback — fast on modern AMD/Intel chips)
+
+Model is loaded lazily on first transcription and kept in memory for
+subsequent calls.
 """
 
 from __future__ import annotations
@@ -13,223 +20,287 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
-import sys
 from pathlib import Path
-from typing import Any
 
 from orchestrator import voice_transcription_worker
 
 logger = logging.getLogger("VoiceTranscriber")
 
+# Defaults — can be overridden via GlobalConfig / agents.json
 DEFAULT_MODEL_SIZE = "small"
-DEFAULT_LANGUAGE = None
-DEFAULT_TIMEOUT_SECONDS = 900.0
-TRANSCRIPTION_RESULT_PREFIX = voice_transcription_worker.RESULT_PREFIX
-TRANSCRIPTION_CONFIG_SCHEMA_VERSION = 1
+DEFAULT_LANGUAGE = None  # None = auto-detect
+EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS = 900.0
 
 
-class TranscriptionRuntimeError(RuntimeError):
-    """The isolated transcription runtime is unavailable or returned no result."""
+def _external_python() -> str:
+    """Resolve an optional isolated transcription interpreter.
 
-
-def _absolute_path(value: str | os.PathLike[str]) -> Path:
-    """Return an absolute path without resolving a venv's Python symlink."""
-
-    return Path(os.path.abspath(os.path.expanduser(os.fspath(value))))
-
-
-def _inside(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-    except ValueError:
-        return False
-    return True
-
-
-def _validate_isolated_python(value: str | os.PathLike[str]) -> Path:
-    candidate = _absolute_path(value)
-    if not candidate.is_file():
-        raise TranscriptionRuntimeError(
-            "Isolated transcription runtime Python does not exist"
-        )
-
-    active_executable = _absolute_path(sys.executable)
-    active_prefix = _absolute_path(sys.prefix)
-    if candidate == active_executable or _inside(candidate, active_prefix):
-        raise TranscriptionRuntimeError(
-            "Transcription Python must be isolated from the active HASHI runtime"
-        )
-    return candidate
-
-
-def _configured_transcription_python(bridge_home: Path) -> str:
-    config_path = bridge_home / "state" / "platform" / "transcription.json"
-    try:
-        payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
-        return ""
-    except (OSError, json.JSONDecodeError) as exc:
-        raise TranscriptionRuntimeError(
-            "Transcription platform configuration is unreadable"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise TranscriptionRuntimeError(
-            "Transcription platform configuration must be an object"
-        )
-    if payload.get("schema_version") != TRANSCRIPTION_CONFIG_SCHEMA_VERSION:
-        raise TranscriptionRuntimeError(
-            "Transcription platform configuration schema is unsupported"
-        )
-    python = payload.get("python", "")
-    if not isinstance(python, str):
-        raise TranscriptionRuntimeError(
-            "Transcription platform Python must be a string"
-        )
-    return python.strip()
-
-
-def resolve_transcription_python() -> Path | None:
-    """Resolve the configured helper interpreter without falling back to Core."""
+    Native transcription packages are Function dependencies. Instances that
+    keep them outside the stable HASHI runtime point at that environment here;
+    no package from it is imported into the Function Worker.
+    """
 
     override = str(os.environ.get("HASHI_TRANSCRIPTION_PYTHON") or "").strip()
     if override:
-        return _validate_isolated_python(override)
-
-    bridge_home_value = str(os.environ.get("BRIDGE_HOME") or "").strip()
-    if not bridge_home_value:
-        return None
-    configured = _configured_transcription_python(_absolute_path(bridge_home_value))
-    return _validate_isolated_python(configured) if configured else None
-
-
-def _result_payload(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
-    result_line = next(
-        (
-            line[len(TRANSCRIPTION_RESULT_PREFIX) :]
-            for line in reversed(completed.stdout.splitlines())
-            if line.startswith(TRANSCRIPTION_RESULT_PREFIX)
-        ),
-        None,
-    )
-    if result_line is None:
-        raise TranscriptionRuntimeError(
-            "Isolated transcription worker returned no result"
-        )
+        return override
+    bridge_home = str(os.environ.get("BRIDGE_HOME") or "").strip()
+    if not bridge_home:
+        return ""
+    config_path = Path(bridge_home) / "state" / "platform" / "transcription.json"
     try:
-        payload = json.loads(result_line)
-    except json.JSONDecodeError as exc:
-        raise TranscriptionRuntimeError(
-            "Isolated transcription worker returned invalid JSON"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise TranscriptionRuntimeError(
-            "Isolated transcription worker returned an invalid result"
-        )
-    if completed.returncode != 0 or payload.get("status") == "error":
-        detail = str(payload.get("error") or "isolated transcription worker failed")
-        raise TranscriptionRuntimeError(detail[:500])
-    return payload
+        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return ""
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("transcription platform configuration is unreadable") from exc
+    if not isinstance(config, dict):
+        raise ValueError("transcription platform configuration must be an object")
+    python = config.get("python", "")
+    if not isinstance(python, str):
+        raise ValueError("transcription platform python must be a string")
+    return python.strip()
 
 
 class VoiceTranscriber:
-    """Serialize local transcription calls through an isolated helper process."""
+    """Singleton-style local Whisper transcriber with lazy model loading."""
 
-    def __init__(
-        self,
-        model_size: str = DEFAULT_MODEL_SIZE,
-        language: str | None = DEFAULT_LANGUAGE,
-        *,
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-    ):
+    def __init__(self, model_size: str = DEFAULT_MODEL_SIZE, language: str | None = DEFAULT_LANGUAGE):
         self.model_size = model_size
         self.language = language
-        self.timeout_seconds = timeout_seconds
-        # These attributes remain for the existing runtime settings surface.
-        # The model itself belongs exclusively to the helper process.
         self._model = None
         self._device = None
         self._compute_type = None
         self._lock = asyncio.Lock()
+        self._external_process = None
+        self._external_process_python = ""
+        self._external_request_sequence = 0
 
-    def _transcribe_isolated(self, audio_path: Path) -> str:
-        python = resolve_transcription_python()
-        if python is None:
-            raise TranscriptionRuntimeError(
-                "Isolated transcription runtime is unavailable"
-            )
+    def _load_model(self):
+        """Load the faster-whisper model. Called once on first use."""
+        if self._model is not None:
+            return
 
-        worker_path = Path(voice_transcription_worker.__file__).resolve()
-        command = [
-            str(python),
-            "-I",
-            str(worker_path),
-            "--audio",
-            str(audio_path.resolve()),
-            "--model-size",
-            str(self.model_size),
-        ]
-        if self.language:
-            command.extend(("--language", str(self.language)))
+        from faster_whisper import WhisperModel
 
-        environment = dict(os.environ)
-        for inherited in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
-            environment.pop(inherited, None)
-        environment["PYTHONNOUSERSITE"] = "1"
+        # Detect best available device
+        device, compute_type = self._detect_device()
+        self._device = device
+        self._compute_type = compute_type
+
+        logger.info(
+            f"Loading Whisper model '{self.model_size}' on {device} "
+            f"(compute_type={compute_type})..."
+        )
+        self._model = WhisperModel(
+            self.model_size,
+            device=device,
+            compute_type=compute_type,
+        )
+        logger.info(f"Whisper model loaded successfully on {device}.")
+
+    @staticmethod
+    def _detect_device() -> tuple[str, str]:
+        """Detect best available compute device."""
         try:
-            completed = subprocess.run(
-                command,
-                cwd=str(worker_path.parent.parent),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout_seconds,
-                check=False,
-                env=environment,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TranscriptionRuntimeError(
-                f"Transcription exceeded the {self.timeout_seconds:g} second limit"
-            ) from exc
-        except OSError as exc:
-            raise TranscriptionRuntimeError(
-                "Isolated transcription worker could not start"
-            ) from exc
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                logger.info(f"CUDA GPU detected: {gpu_name}")
+                return "cuda", "float16"
+        except ImportError:
+            pass
 
-        if completed.stderr.strip():
-            logger.debug(
-                "Isolated transcription worker stderr: %s",
-                completed.stderr.strip()[-2000:],
-            )
-        payload = _result_payload(completed)
-        self._device = str(payload.get("device") or "") or None
-        self._compute_type = str(payload.get("compute_type") or "") or None
-        return str(payload.get("text") or "").strip()
+        # CTranslate2 (used by faster-whisper) can also check CUDA directly
+        try:
+            import ctranslate2
+            if "cuda" in ctranslate2.get_supported_compute_types("cuda"):
+                logger.info("CUDA available via CTranslate2")
+                return "cuda", "float16"
+        except Exception:
+            pass
+
+        logger.info("No CUDA GPU found, using CPU for Whisper inference.")
+        return "cpu", "int8"
 
     async def transcribe(self, audio_path: str | Path) -> str:
-        """Transcribe audio without importing speech packages into HASHI."""
+        """
+        Transcribe an audio file to text.
 
-        path = Path(audio_path)
-        if not path.exists():
-            return f"[Transcription error] File not found: {path}"
+        Runs the model in a thread executor to avoid blocking the event loop.
+        Returns the transcribed text, or an error message string prefixed
+        with [Transcription error] on failure.
+        """
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            return f"[Transcription error] File not found: {audio_path}"
+
         try:
+            external_python = _external_python()
+            if external_python:
+                return await self._transcribe_external(audio_path, external_python)
+            loop = asyncio.get_running_loop()
             async with self._lock:
-                return await asyncio.to_thread(self._transcribe_isolated, path)
-        except Exception as exc:
-            logger.error("Transcription failed for %s: %s", path, exc, exc_info=True)
-            return f"[Transcription error] {exc}"
+                # Lazy load on first call
+                if self._model is None:
+                    await loop.run_in_executor(None, self._load_model)
+            text = await loop.run_in_executor(None, self._transcribe_sync, str(audio_path))
+            return text
+        except Exception as e:
+            logger.error(f"Transcription failed for {audio_path}: {e}", exc_info=True)
+            return f"[Transcription error] {e}"
+
+    def _detach_external_process(self):
+        process = self._external_process
+        self._external_process = None
+        self._external_process_python = ""
+        return process
+
+    async def aclose(self) -> None:
+        """Close the isolated helper and wait for its stdio transports."""
+
+        process = self._detach_external_process()
+        if process is None:
+            return
+        stdin = process.stdin
+        if stdin is not None:
+            stdin.close()
+            wait_closed = getattr(stdin, "wait_closed", None)
+            if callable(wait_closed):
+                try:
+                    await wait_closed()
+                except (BrokenPipeError, ConnectionError):
+                    pass
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                process.terminate()
+                await process.wait()
+
+    async def _ensure_external_process(self, python: str):
+        process = self._external_process
+        if (
+            process is not None
+            and process.returncode is None
+            and self._external_process_python == python
+        ):
+            return process
+        await self.aclose()
+        worker_path = Path(voice_transcription_worker.__file__).resolve()
+        process = await asyncio.create_subprocess_exec(
+            python,
+            "-I",
+            str(worker_path),
+            "--serve",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=str(worker_path.parent.parent),
+        )
+        if process.stdin is None or process.stdout is None:
+            process.terminate()
+            raise RuntimeError("isolated transcription worker has no JSON channel")
+        self._external_process = process
+        self._external_process_python = python
+        return process
+
+    async def _read_external_result(self, process, request_id: str) -> dict:
+        total_bytes = 0
+        for _ in range(1000):
+            raw = await process.stdout.readline()
+            if not raw:
+                raise RuntimeError("isolated transcription worker exited without a result")
+            total_bytes += len(raw)
+            if total_bytes > voice_transcription_worker.MAX_OUTPUT_BYTES:
+                raise RuntimeError("isolated transcription worker output exceeded its limit")
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith(voice_transcription_worker.RESULT_PREFIX):
+                continue
+            try:
+                payload = json.loads(
+                    line[len(voice_transcription_worker.RESULT_PREFIX) :]
+                )
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "isolated transcription worker returned invalid JSON"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError("isolated transcription worker returned an invalid result")
+            if payload.get("version") != voice_transcription_worker.PROTOCOL_VERSION:
+                raise RuntimeError("isolated transcription worker protocol does not match")
+            if str(payload.get("id") or "") != request_id:
+                raise RuntimeError("isolated transcription worker response ID does not match")
+            return payload
+        raise RuntimeError("isolated transcription worker returned too many log lines")
+
+    async def _transcribe_external(self, audio_path: Path, python: str) -> str:
+        async with self._lock:
+            process = await self._ensure_external_process(python)
+            self._external_request_sequence += 1
+            request_id = str(self._external_request_sequence)
+            request = {
+                "version": voice_transcription_worker.PROTOCOL_VERSION,
+                "id": request_id,
+                "audio_path": str(audio_path.resolve()),
+                "model_size": self.model_size,
+                "language": self.language,
+            }
+            try:
+                process.stdin.write(
+                    (json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8")
+                )
+                await process.stdin.drain()
+                payload = await asyncio.wait_for(
+                    self._read_external_result(process, request_id),
+                    timeout=EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                await self.aclose()
+                raise
+        if not payload.get("ok"):
+            raise RuntimeError(
+                str(payload.get("error") or "isolated transcription worker failed")[:500]
+            )
+        self._device = str(payload.get("device") or "") or None
+        self._compute_type = str(payload.get("compute_type") or "") or None
+        logger.info(
+            "Isolated transcription complete: device=%s language=%s duration=%.1fs",
+            self._device or "unknown",
+            str(payload.get("language") or "unknown"),
+            float(payload.get("duration") or 0.0),
+        )
+        return str(payload.get("text") or "").strip()
+
+    def _transcribe_sync(self, audio_path: str) -> str:
+        """Synchronous transcription (runs in executor thread)."""
+        segments, info = self._model.transcribe(
+            audio_path,
+            language=self.language,
+            beam_size=5,
+            vad_filter=True,  # skip silence for faster processing
+        )
+        detected_lang = info.language
+        lang_prob = info.language_probability
+        logger.info(
+            f"Transcribing {audio_path}: detected_language={detected_lang} "
+            f"(probability={lang_prob:.2f}), duration={info.duration:.1f}s"
+        )
+
+        parts = []
+        for segment in segments:
+            parts.append(segment.text.strip())
+
+        text = " ".join(parts).strip()
+        logger.info(f"Transcription complete: {len(text)} chars")
+        return text
 
 
+# Module-level singleton — shared by all agents
 _instance: VoiceTranscriber | None = None
 
 
-def get_transcriber(
-    model_size: str = DEFAULT_MODEL_SIZE,
-    language: str | None = DEFAULT_LANGUAGE,
-) -> VoiceTranscriber:
-    """Get or create the shared isolated-runtime client."""
-
+def get_transcriber(model_size: str = DEFAULT_MODEL_SIZE, language: str | None = DEFAULT_LANGUAGE) -> VoiceTranscriber:
+    """Get or create the shared VoiceTranscriber instance."""
     global _instance
     if _instance is None:
         _instance = VoiceTranscriber(model_size=model_size, language=language)

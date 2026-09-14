@@ -1,129 +1,209 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from orchestrator import voice_transcriber
+from orchestrator import voice_transcriber, voice_transcription_worker
 
 
-def _fake_python(path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"isolated-python")
-    return path
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+
+    def write(self, value: bytes) -> None:
+        self.writes.append(value)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
 
 
-def test_transcription_runtime_prefers_environment_override(tmp_path, monkeypatch):
-    isolated_python = _fake_python(tmp_path / "speech runtime" / "python")
-    monkeypatch.setenv("HASHI_TRANSCRIPTION_PYTHON", str(isolated_python))
-    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path / "instance"))
+class _FakeStdout:
+    def __init__(self, lines: list[bytes]) -> None:
+        self.lines = list(lines)
 
-    resolved = voice_transcriber.resolve_transcription_python()
-
-    assert resolved == isolated_python.resolve()
+    async def readline(self) -> bytes:
+        return self.lines.pop(0) if self.lines else b""
 
 
-def test_transcription_runtime_uses_instance_platform_config(tmp_path, monkeypatch):
-    isolated_python = _fake_python(tmp_path / "speech runtime" / "python")
-    config = tmp_path / "state" / "platform" / "transcription.json"
-    config.parent.mkdir(parents=True)
-    config.write_text(
-        json.dumps({"schema_version": 1, "python": str(isolated_python)}),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("HASHI_TRANSCRIPTION_PYTHON", raising=False)
-    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+class _FakeProcess:
+    def __init__(self, lines: list[bytes]) -> None:
+        self.stdin = _FakeStdin()
+        self.stdout = _FakeStdout(lines)
+        self.returncode = None
 
-    resolved = voice_transcriber.resolve_transcription_python()
+    def terminate(self) -> None:
+        self.returncode = 1
 
-    assert resolved == isolated_python.resolve()
-
-
-def test_transcription_runtime_refuses_the_active_hashi_interpreter(monkeypatch):
-    monkeypatch.setenv("HASHI_TRANSCRIPTION_PYTHON", sys.executable)
-
-    with pytest.raises(voice_transcriber.TranscriptionRuntimeError, match="isolated"):
-        voice_transcriber.resolve_transcription_python()
+    async def wait(self) -> int:
+        self.returncode = 0
+        return 0
 
 
 @pytest.mark.asyncio
-async def test_transcription_runs_only_in_the_isolated_runtime(tmp_path, monkeypatch):
-    isolated_python = _fake_python(tmp_path / "speech runtime" / "python")
-    audio = tmp_path / "voice.ogg"
+async def test_platform_transcription_runtime_keeps_native_dependencies_out_of_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_home = tmp_path / "instance"
+    config_path = bridge_home / "state" / "platform" / "transcription.json"
+    config_path.parent.mkdir(parents=True)
+    external_python = tmp_path / "transcription runtime" / "python"
+    config_path.write_text(
+        json.dumps({"python": str(external_python)}),
+        encoding="utf-8",
+    )
+    audio = tmp_path / "voice.wav"
     audio.write_bytes(b"audio")
-    captured: dict[str, object] = {}
-    payload = {
-        "status": "ok",
-        "text": "hello from speech",
-        "device": "cpu",
-        "compute_type": "int8",
-    }
+    monkeypatch.setenv("BRIDGE_HOME", str(bridge_home))
+    monkeypatch.delenv("HASHI_TRANSCRIPTION_PYTHON", raising=False)
+
+    result_line = (
+        "HASHI_VOICE_TRANSCRIPTION_RESULT="
+        + json.dumps(
+            {
+                "version": 1,
+                "id": "1",
+                "ok": True,
+                "text": "isolated transcript",
+                "device": "cpu",
+                "compute_type": "int8",
+                "language": "en",
+                "language_probability": 0.99,
+                "duration": 1.25,
+            }
+        )
+        + "\n"
+    ).encode()
+    process = _FakeProcess([result_line])
+    spawn_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def create_subprocess_exec(*args, **kwargs):
+        spawn_calls.append((args, kwargs))
+        return process
 
     monkeypatch.setattr(
-        voice_transcriber,
-        "resolve_transcription_python",
-        lambda: isolated_python,
+        voice_transcriber.asyncio,
+        "create_subprocess_exec",
+        create_subprocess_exec,
     )
-
-    def run(command, **kwargs):
-        captured["command"] = list(command)
-        captured["kwargs"] = kwargs
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=(
-                "worker log\n"
-                + voice_transcriber.TRANSCRIPTION_RESULT_PREFIX
-                + json.dumps(payload)
-                + "\n"
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(voice_transcriber.subprocess, "run", run)
-    transcriber = voice_transcriber.VoiceTranscriber(
-        model_size="small",
-        language="en",
+    transcriber = voice_transcriber.VoiceTranscriber()
+    monkeypatch.setattr(
+        transcriber,
+        "_load_model",
+        lambda: pytest.fail("native model must stay outside the Function Worker"),
     )
 
     result = await transcriber.transcribe(audio)
 
-    assert result == "hello from speech"
-    command = captured["command"]
-    assert command[0] == str(isolated_python)
+    assert result == "isolated transcript"
+    assert len(spawn_calls) == 1
+    command = spawn_calls[0][0]
+    assert command[0] == str(external_python)
     assert command[1] == "-I"
-    assert command[2].endswith("voice_transcription_worker.py")
-    assert command[command.index("--audio") + 1] == str(audio.resolve())
-    assert command[command.index("--model-size") + 1] == "small"
-    assert command[command.index("--language") + 1] == "en"
-    assert captured["kwargs"]["check"] is False
-    assert transcriber._device == "cpu"
-    assert transcriber._compute_type == "int8"
+    assert Path(str(command[2])).name == "voice_transcription_worker.py"
+    assert command[3] == "--serve"
+    request = json.loads(process.stdin.writes[0])
+    assert request == {
+        "version": 1,
+        "id": "1",
+        "audio_path": str(audio.resolve()),
+        "model_size": "small",
+        "language": None,
+    }
+    assert transcriber._model is None
+    await transcriber.aclose()
 
 
-@pytest.mark.asyncio
-async def test_missing_isolated_runtime_fails_closed(tmp_path, monkeypatch):
-    audio = tmp_path / "voice.ogg"
+def test_transcription_python_environment_override_precedes_instance_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_home = tmp_path / "instance"
+    config_path = bridge_home / "state" / "platform" / "transcription.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"python": "configured-python"}), encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_HOME", str(bridge_home))
+    monkeypatch.setenv("HASHI_TRANSCRIPTION_PYTHON", "environment-python")
+
+    assert voice_transcriber._external_python() == "environment-python"
+
+
+def test_no_external_runtime_preserves_direct_transcription_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+    monkeypatch.delenv("HASHI_TRANSCRIPTION_PYTHON", raising=False)
+
+    assert voice_transcriber._external_python() == ""
+
+
+def test_isolated_worker_returns_bounded_typed_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio = tmp_path / "voice.wav"
     audio.write_bytes(b"audio")
-    monkeypatch.setattr(voice_transcriber, "resolve_transcription_python", lambda: None)
+    runtime = voice_transcription_worker._ModelRuntime()
+    calls = []
 
-    result = await voice_transcriber.VoiceTranscriber().transcribe(audio)
+    class _Model:
+        def transcribe(self, path, **kwargs):
+            calls.append((path, kwargs))
+            return (
+                [SimpleNamespace(text="  hello "), SimpleNamespace(text="world\x00 ")],
+                SimpleNamespace(
+                    language="en",
+                    language_probability=0.98,
+                    duration=2.5,
+                ),
+            )
 
-    assert result == (
-        "[Transcription error] Isolated transcription runtime is unavailable"
+    monkeypatch.setattr(
+        runtime,
+        "_model",
+        lambda _model_size, _language: (_Model(), "cpu", "int8"),
     )
 
+    result = runtime.transcribe(audio, model_size="small", language=None)
 
-def test_voice_worker_is_part_of_the_function_generation_manifest():
-    from orchestrator.function_generation import build_source_manifest
+    assert result == {
+        "text": "hello world",
+        "device": "cpu",
+        "compute_type": "int8",
+        "language": "en",
+        "language_probability": 0.98,
+        "duration": 2.5,
+    }
+    assert calls == [
+        (
+            str(audio),
+            {"language": None, "beam_size": 5, "vad_filter": True},
+        )
+    ]
 
-    root = Path(__file__).resolve().parents[1]
-    manifest = build_source_manifest(
-        ("orchestrator.voice_transcriber",),
-        code_root=root,
-    )
 
-    assert "orchestrator.voice_transcription_worker" in manifest.module_names
+def test_isolated_worker_rejects_missing_audio_before_model_load(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="audio file is unavailable"):
+        voice_transcription_worker._request_payload(
+            json.dumps(
+                {
+                    "version": 1,
+                    "id": "request-1",
+                    "audio_path": str(tmp_path / "missing.wav"),
+                    "model_size": "small",
+                    "language": None,
+                }
+            )
+        )
