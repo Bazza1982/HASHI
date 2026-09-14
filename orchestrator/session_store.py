@@ -3730,6 +3730,52 @@ class SessionStore:
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
 
+    def visible_message_attachment(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        message_id: str,
+        attachment_id: str,
+        context_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one canonical attachment after Session ownership checks.
+
+        This lookup deliberately returns the stored canonical part only to an
+        in-process caller.  Connector projections continue to omit local paths
+        and digests.
+        """
+
+        session = self.get_session(session_id, owner_id=owner_id)
+        generation = int(
+            context_generation
+            if context_generation is not None
+            else session["context_generation"]
+        )
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT content_json FROM messages
+                WHERE session_id=? AND message_id=? AND context_generation=?
+                  AND visibility='visible'
+                """,
+                (str(session_id), str(message_id), generation),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound("visible message attachment not found")
+        try:
+            content = json.loads(str(row["content_json"] or "[]"))
+        except (TypeError, ValueError):
+            content = []
+        for part in content if isinstance(content, list) else ():
+            if (
+                isinstance(part, Mapping)
+                and str(part.get("type") or "").casefold() in {"media", "audio"}
+                and str(part.get("attachment_id") or "") == str(attachment_id)
+            ):
+                return dict(part)
+        raise SessionNotFound("visible message attachment not found")
+
     def visible_messages_after(
         self,
         session_id: str,

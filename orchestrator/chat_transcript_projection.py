@@ -164,6 +164,7 @@ def _project_message_attachments(message: dict) -> list[dict]:
         projected = {
             key: part[key]
             for key in (
+                "attachment_id",
                 "modality",
                 "kind",
                 "mime_type",
@@ -175,6 +176,11 @@ def _project_message_attachments(message: dict) -> list[dict]:
             )
             if part.get(key) not in (None, "")
         }
+        if projected and projected.get("attachment_id"):
+            # The pair is an opaque lookup identity for the authenticated
+            # Workbench media route.  It never reveals the instance-local
+            # source path or content digest.
+            projected["message_id"] = str(message.get("message_id") or "")
         if projected:
             result.append(projected)
     return result
