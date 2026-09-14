@@ -32,9 +32,15 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12.13'
+      - uses: astral-sh/setup-uv@v6
+      - name: Provision isolated CPython 3.12.13
+        run: |
+          uv venv --seed --python 3.12.13 .venv
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          fi
       - name: Apply the digest-verified sandbox patch
         run: python .github/hcc-patch/apply_patch.py
       - name: Install isolated runner dependencies
