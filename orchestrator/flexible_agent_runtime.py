@@ -5199,7 +5199,7 @@ class FlexibleAgentRuntime:
 
         Notes:
         - This controls **local** transcription of Telegram voice/audio messages.
-        - Changes take effect on next transcription; the model will be (re)loaded lazily.
+        - Changes take effect in the isolated helper on the next transcription.
         """
         if not self._is_authorized_user(update.effective_user.id):
             return

@@ -742,7 +742,30 @@ silently paraphrase or weaken an already verified final answer.
 
 ## 13. Local transcription and Safe Voice
 
-### 13.1 One transcription, multiple uses
+### 13.1 Runtime isolation
+
+Local STT is a Frontend Connector Function, but its native Python packages are
+an instance platform asset. The long-lived Core and Function Workers never
+import or install `faster-whisper`, `ctranslate2`, or `av`. They invoke the
+verified `orchestrator.voice_transcription_worker` with a separately managed
+Python interpreter selected by `HASHI_TRANSCRIPTION_PYTHON` or
+`state/platform/transcription.json`.
+
+The client fails closed when that interpreter is absent, invalid, or points
+inside the active HASHI environment. It never falls back to `sys.executable`.
+The helper source remains part of the immutable Function-generation closure,
+while its pinned native dependencies remain outside the Core runtime
+fingerprint. As a result, adopting a voice Function generation through
+`/reboot min` neither changes nor relaxes the Core dependency contract.
+
+Provisioning uses `scripts/provision_transcription_runtime.py` and
+`constraints/transcription-py312.lock`. The script installs only into an
+instance-owned runtime under `state/runtimes/transcription`, probes all native
+imports under that interpreter, and publishes the platform selector
+atomically only after the probe passes. Installing those dependencies directly
+into a running Core environment is an invalid deployment operation.
+
+### 13.2 One transcription, multiple uses
 
 Local STT runs once per input audio asset and produces a typed transcript
 record:
@@ -770,7 +793,7 @@ The same record supplies:
 It is not used as the semantic input to a successfully routed Audio Direct or
 Audio Immediate call.
 
-### 13.2 Safe Voice off
+### 13.3 Safe Voice off
 
 When Safe Voice is off:
 
@@ -779,7 +802,7 @@ When Safe Voice is off:
 - it enters future PCM with local-transcription provenance; and
 - the UI need not show a confirmation prompt.
 
-### 13.3 Safe Voice on
+### 13.4 Safe Voice on
 
 Safe Voice governs only transcript-first voice routes, where local STT becomes
 the authoritative input to an ordinary text model. This includes the text
@@ -815,7 +838,7 @@ before ordinary Session admission. With Safe Voice disabled it admits that
 transcript automatically. Expiry, terminal navigation, Session/context change,
 or disabling Safe Voice cannot release an already pending Workbench transcript.
 
-### 13.4 Transcript persistence
+### 13.5 Transcript persistence
 
 The original audio Message remains immutable. Input transcription is a derived,
 provenance-bearing record associated with that Message and attachment.
