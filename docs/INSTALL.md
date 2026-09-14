@@ -348,6 +348,21 @@ python -m pip install -e ".[all]"
 The last command installs every declared optional integration and can be very
 large. See [Dependency profiles](DEPENDENCIES.md) before choosing it.
 
+Local voice transcription is the exception to in-process feature installation:
+its native packages must not enter the Core environment. Provision and verify
+the instance-owned helper instead:
+
+```bash
+python scripts/provision_transcription_runtime.py --bridge-home /path/to/instance
+python scripts/provision_transcription_runtime.py --bridge-home /path/to/instance --check
+```
+
+The command uses `constraints/transcription-py312.lock`, creates a separate
+runtime under the instance's `state/runtimes/transcription` directory, and
+publishes `state/platform/transcription.json` only after native import and
+version checks pass. Running the provisioner with the Core Python is safe; the
+installation subprocess always targets the separate helper interpreter.
+
 ---
 
 ## Multi-instance ports

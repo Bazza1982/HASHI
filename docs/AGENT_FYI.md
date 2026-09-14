@@ -178,6 +178,8 @@ Session/context change, or disabling it sends nothing. The reserved transport
 derives authority/current primary Session inside the Worker; its envelope never
 carries transcript, owner, Session, or delivery policy.
 
+STT dependencies never enter Core; use its provisioner.
+
 ## Move, Clone, jobs, and tools
 
 `/move` migrates; `/clone` clones. Both use the same authenticated package,
