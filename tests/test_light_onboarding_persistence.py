@@ -142,6 +142,19 @@ def test_legacy_onboarding_new_instance_defaults_tools_open(tmp_path):
     assert saved_agents["global"]["default_tools"] == {"allowed": ["*"]}
 
 
+def test_legacy_onboarding_uses_current_shared_model_defaults(tmp_path):
+    write_config(tmp_path, "codex-cli", {"welcomePrompt": "Welcome"}, "en")
+
+    agent = read_config_json(tmp_path / "agents.json")["agents"][0]
+    backends = {row["engine"]: row for row in agent["allowed_backends"]}
+    assert backends["codex-cli"] == {
+        "engine": "codex-cli",
+        "model": "gpt-5.6-sol",
+        "effort": "medium",
+    }
+    assert backends["openrouter-api"]["model"] == "deepseek/deepseek-v4-pro"
+
+
 def test_legacy_onboarding_preflights_all_config_before_side_effects(tmp_path):
     agents = tmp_path / "agents.json"
     secrets = tmp_path / "secrets.json"

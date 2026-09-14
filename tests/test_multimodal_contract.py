@@ -50,7 +50,7 @@ def _write_png(path) -> None:
 
 def test_capability_is_resolved_by_provider_model_and_modality():
     gemini = resolve_input_capability(
-        "openrouter-api", "google/gemini-2.5-pro"
+        "openrouter-api", "google/gemini-3.8-flash"
     )
     text_model = resolve_input_capability(
         "openrouter-api", "deepseek/deepseek-chat"
@@ -59,6 +59,12 @@ def test_capability_is_resolved_by_provider_model_and_modality():
     assert gemini.supports("image", "data_url") is True
     assert gemini.supports("audio", "data_url") is False
     assert text_model.supports("image", "data_url") is False
+
+
+def test_current_codex_catalog_models_include_astra_image_support():
+    capability = resolve_input_capability("codex-cli", "gpt-6-astra")
+
+    assert capability.supports("image", "local_path") is True
 
 
 def test_unknown_model_fails_closed_to_local_fallback(tmp_path):

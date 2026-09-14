@@ -443,7 +443,7 @@ Examples:
 ```text
 /core
 /core model=gpt-5.5 backend=codex-cli
-/core model=gpt-5.4 backend=codex-cli effort=medium
+/core model=gpt-5.6-sol backend=codex-cli effort=medium
 ```
 
 Default:
@@ -487,7 +487,8 @@ For fixed/flex agents:
 
 Current Telegram controls:
 
-- `/core` shows core model buttons such as `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.3-codex-spark`, `gpt-5.4`, and `gpt-5.3-codex`.
+- `/core` shows the supported Codex model buttons: `gpt-5.6-sol`,
+  `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, and `gpt-6-astra`.
 - `/wrap` groups wrapper choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Pro, and OpenRouter DeepSeek Flash/Gemini.
 - Context buttons adjust only the wrapper's recent visible context window.
 - `/wrapper` summarizes the active core/wrapper pair and persona/style slots, with navigation buttons to `/core` and `/wrap`.

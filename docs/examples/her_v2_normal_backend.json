@@ -18,27 +18,27 @@
         "profiles": {
           "lightweight": {
             "engine": "openrouter-api",
-            "model": "google/gemini-3.1-flash-lite-preview",
+            "model": "google/gemini-3.8-flash",
             "reasoning": "low"
           },
           "triage": {
             "engine": "openrouter-api",
-            "model": "google/gemini-3.1-flash-lite-preview",
+            "model": "deepseek/deepseek-v3.2-exp",
             "reasoning": "high"
           },
           "premium": {
             "engine": "openrouter-api",
-            "model": "anthropic/claude-sonnet-4.6",
+            "model": "deepseek/deepseek-v4-flash",
             "reasoning": "high"
           },
           "reviewer": {
             "engine": "openrouter-api",
-            "model": "anthropic/claude-opus-4.6",
+            "model": "deepseek/deepseek-v4-pro",
             "reasoning": "xhigh"
           },
           "orchestrator": {
             "engine": "openrouter-api",
-            "model": "anthropic/claude-sonnet-4.6",
+            "model": "deepseek/deepseek-v4-pro",
             "reasoning": "high"
           }
         }
@@ -46,15 +46,13 @@
     },
     {
       "engine": "openrouter-api",
-      "model": "google/gemini-3.1-flash-lite-preview"
-    },
-    {
-      "engine": "openrouter-api",
-      "model": "anthropic/claude-sonnet-4.6"
-    },
-    {
-      "engine": "openrouter-api",
-      "model": "anthropic/claude-opus-4.6"
+      "model": "deepseek/deepseek-v4-pro",
+      "models": [
+        "deepseek/deepseek-v3.2-exp",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+        "google/gemini-3.8-flash"
+      ]
     }
   ]
 }

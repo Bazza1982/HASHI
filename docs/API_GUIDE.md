@@ -118,7 +118,7 @@ backend becomes available.
 ### Instance-configured models
 
 An active Agent's `allowed_backends` can opt this instance into additional
-Gateway models, such as `gpt-6-astra` on `codex-cli`. The backend must support
+Gateway models beyond the shared catalogue. The backend must support
 Gateway requests. Its `model`, `default_model`, `fast_model`, `pro_model` and
 `models` entries supply the model names; `model_efforts` supplies permitted
 request-level reasoning choices, including `max` when explicitly configured.
@@ -147,37 +147,51 @@ user changes their model.
 
 `grok-4.5` is also available through the API Gateway's `xai-api` backend. It
 uses xAI's Responses API route with the credential source configured for that
-backend. The three Codex API Gateway variants `gpt-5.6-sol`,
-`gpt-5.6-terra`, and `gpt-5.6-luna` remain the tested GPT-5.6 choices.
+backend. The Codex API Gateway catalogue exposes `gpt-5.5`,
+`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-6-astra`.
 
 The separate HASHI-native device-login utility is documented in
 [HASHI_XAI_OAUTH.md](HASHI_XAI_OAUTH.md). Its token store is not implicitly
 injected into an active backend.
 
-For an instance opting into GPT-6 Astra, the Codex CLI adapter also declares its
+For GPT-6 Astra, the Codex CLI adapter also declares its
 context capacity to the compaction resolver: a 1,050,000-token window with
 128,000 tokens of response headroom. Explicit instance/profile capacity settings
 retain precedence. This capacity declaration neither enables the model nor
 changes the compaction trigger policy.
 
-### GPT-5.6 through Codex CLI
+### Codex CLI models
 
-HASHI supports the smoke-tested Codex CLI variants below. The bare `gpt-5.6`
-alias is deliberately not advertised because it was rejected by the configured
-ChatGPT-account Codex access path.
+HASHI advertises only the smoke-tested Codex CLI models below. The bare
+`gpt-5.6` alias is deliberately omitted in favor of the explicit Sol model ID.
+The default is `gpt-5.6-sol` at explicit `medium` effort.
 
 | Model | HASHI use | `/effort` choices |
 |---|---|---|
+| `gpt-5.5` | Previous flagship retained for compatibility | `low`, `medium`, `high`, `xhigh` |
 | `gpt-5.6-sol` | Highest-capability tier for difficult, long-horizon work | `low`, `medium`, `high`, `xhigh`, `max` |
 | `gpt-5.6-terra` | Balanced daily-use tier | `low`, `medium`, `high`, `xhigh` |
-| `gpt-5.6-luna` | Fast, cost-efficient tier | `low`, `medium`, `high`, `xhigh` |
+| `gpt-5.6-luna` | Fast, cost-efficient tier | `low`, `medium`, `high`, `xhigh`, `max` |
+| `gpt-6-astra` | Hardest quality-first work | `low`, `medium`, `high`, `xhigh`, `max` |
 
 The Telegram `/effort` command follows the currently selected model rather
-than exposing one unsafe backend-wide list. If an agent switches from Sol with
-`max` selected to Terra or Luna, HASHI automatically normalizes effort to
-`medium` before the next Codex invocation. See OpenAI's
-[GPT-5.6 preview announcement](https://openai.com/index/previewing-gpt-5-6-sol/)
-for the model-family positioning.
+than exposing one unsafe backend-wide list. If an agent switches from a model
+with `max` selected to Terra or GPT-5.5, HASHI automatically normalizes effort
+to `medium` before the next Codex invocation.
+
+### HER v2 provider models
+
+HASHI1 uses OpenRouter as a HER v2 Model Provider. Its shared catalogue
+contains only `deepseek/deepseek-v3.2-exp`,
+`deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`, and
+`google/gemini-3.8-flash`.
+
+The official DeepSeek provider advertises `deepseek-flash` and
+`deepseek-v4-pro`. `deepseek-flash` is V4.1 Flash and accepts image input, so a
+separate current vision model ID is unnecessary. The adapter still recognizes
+the temporary `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` aliases for
+legacy configuration, but menus do not present retired aliases as current
+models.
 
 ### Claw execution effort
 
@@ -631,7 +645,7 @@ The model `id` in `openclaw.json` must match **exactly** what HASHI serves in `G
 ```
 "id": "gemini-2.5-flash"
 "id": "claude-opus-4-6"
-"id": "gpt-5.4"
+"id": "gpt-5.6-sol"
 "id": "grok-4.3"
 ```
 
@@ -639,7 +653,7 @@ The model `id` in `openclaw.json` must match **exactly** what HASHI serves in `G
 ```
 "id": "gemini/gemini-2.5-flash"   ← prefix breaks routing
 "id": "claude/claude-opus-4-6"    ← prefix breaks routing
-"id": "codex/gpt-5.4"             ← prefix breaks routing
+"id": "codex/gpt-5.6-sol"         ← prefix breaks routing
 ```
 
 OpenClaw sends the model `id` as-is to the API — it does not strip any prefix. The `vllm/` part in the full model selector (e.g. `vllm/gemini-2.5-flash`) is the OpenClaw provider prefix and is stripped by OpenClaw itself; everything after `vllm/` is what gets sent to HASHI.
@@ -649,7 +663,7 @@ OpenClaw sends the model `id` as-is to the API — it does not strip any prefix.
 ```json
 "model": "vllm/gemini-2.5-flash"
 "model": "vllm/claude-opus-4-6"
-"model": "vllm/gpt-5.4"
+"model": "vllm/gpt-5.6-sol"
 "model": "vllm/grok-4.3"
 ```
 

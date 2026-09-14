@@ -136,12 +136,11 @@ def test_her_v2_provider_options_are_concrete_call_providers(tmp_path):
         "engine": "deepseek-api",
         "label": "deepseek",
         "status": "stable",
-            "models": [
-                "deepseek-v4-flash",
-                "deepseek-v4-pro",
-                "deepseek-flash",
-                "deepseek-v4-flash-vision-exp",
-            ],
+        "models": [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-flash",
+        ],
         "fast_model": "deepseek-v4-flash",
         "pro_model": "deepseek-v4-pro",
         "available": True,

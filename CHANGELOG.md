@@ -163,6 +163,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **HASHI1 model catalogue cleanup** — made `codex-cli / gpt-5.6-sol /
+  medium` the explicit default; limited Codex to GPT-5.5, the GPT-5.6
+  Sol/Terra/Luna family, and GPT-6 Astra; limited OpenRouter to the approved
+  DeepSeek V3.2 Exp, V4 Flash, V4 Pro, and Gemini 3.8 Flash models; and exposed
+  only the current official DeepSeek V4.1 Flash and V4 Pro IDs while retaining
+  adapter compatibility for temporary legacy aliases.
+
 - **Unified release identity** — made HASHI `v4.0.0-alpha.2` the single current
   repository, Python package (`4.0.0a2`), root Node package, and Helm
   application line. Enterprise AAI `v0.1.0-alpha.1` remains an immutable

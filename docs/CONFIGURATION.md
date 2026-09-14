@@ -48,6 +48,15 @@ supported model_efforts fields. Effective options resolve through the
 runtime's existing capability resolver. Adding an instance model does not
 require changing the shared catalogue.
 
+The shipped Codex CLI default is `gpt-5.6-sol` with explicit `medium`
+reasoning. Its shared catalogue contains only `gpt-5.5`, the Sol/Terra/Luna
+GPT-5.6 family, and `gpt-6-astra`. OpenRouter is available only as a HER v2
+Model Provider and exposes the approved DeepSeek V3.2 Exp, V4 Flash, V4 Pro,
+and Gemini 3.8 Flash models. The official DeepSeek API exposes
+`deepseek-flash` (V4.1 Flash with native vision) and `deepseek-v4-pro`;
+temporary retired Flash aliases are accepted by the adapter but are not shown
+as current model choices.
+
 The HER execution modes are Direct, Strategic, and Planned, stored as zero,
 low, and medium respectively. Older high/xhigh/max HER execution values are
 migration inputs, not current selectable modes. Provider reasoning effort

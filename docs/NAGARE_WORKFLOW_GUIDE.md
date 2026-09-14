@@ -240,12 +240,12 @@ Invokes the Codex CLI (`codex`) as a subprocess. Best for code-heavy steps with 
 ```yaml
 - id: coder_01
   backend: codex-cli
-  model: gpt-5.4
+  model: gpt-5.6-sol
 ```
 
 **How it works:**
 ```
-subprocess: codex exec --model gpt-5.4 --full-auto
+subprocess: codex exec --model gpt-5.6-sol -c model_reasoning_effort='medium' --full-auto
 ```
 
 Use when the step needs to read/write files, run shell commands, or do code execution rather than just text generation.
@@ -291,7 +291,7 @@ workers:
   # Separately configured review context → Codex CLI
   - id: evaluator_01
     backend: codex-cli
-    model: gpt-5.4
+    model: gpt-5.6-sol
 
   # Debug recovery → Sonnet (fast and capable enough)
   - id: debug_01
@@ -1069,7 +1069,7 @@ agents:
       role: "Translation Reviewer"
       agent_md: "flow/agents/analyst/AGENT.md"
       backend: codex-cli               # Separately configured review context
-      model: gpt-5.4
+      model: gpt-5.6-sol
 
     - id: debug_01
       role: "Debug Agent"

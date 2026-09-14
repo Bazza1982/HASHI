@@ -233,10 +233,10 @@ def test_agent_specific_openrouter_models_extend_shared_catalog(tmp_path):
     manager.config.allowed_backends.append(
         {
             "engine": "openrouter-api",
-            "model": "anthropic/claude-sonnet-4.6",
+            "model": "agent/private-preview",
             "models": [
                 "deepseek/deepseek-v4-flash",
-                "deepseek/deepseek-v3.2-exp",
+                "agent/private-preview",
             ],
         }
     )
@@ -245,11 +245,11 @@ def test_agent_specific_openrouter_models_extend_shared_catalog(tmp_path):
 
     assert FlexibleAgentRuntime._get_available_models_for(
         runtime, "openrouter-api"
-    ) == [*shared_models, "deepseek/deepseek-v3.2-exp"]
+    ) == [*shared_models, "agent/private-preview"]
     assert get_available_models("openrouter-api") == shared_models
     assert (
         FlexibleAgentRuntime._get_configured_model_for(runtime, "openrouter-api")
-        == "anthropic/claude-sonnet-4.6"
+        == "agent/private-preview"
     )
 
     manager.config.allowed_backends[-1]["model"] = "deepseek/deepseek-v3.2-exp"
@@ -2738,23 +2738,23 @@ def test_set_backend_model_persists_new_active_model_over_existing_override(tmp_
     assert state["active_model"] == "gpt-5.5"
 
 
-def _astra_runtime(workspace):
+def _instance_preview_runtime(workspace):
     manager = _make_manager(workspace)
     manager.config.allowed_backends[0].update(
-        model="gpt-6-astra",
-        models=["gpt-6-astra"],
-        model_efforts={"gpt-6-astra": ["low", "medium", "high", "xhigh", "max"]},
+        model="instance-preview",
+        models=["instance-preview"],
+        model_efforts={"instance-preview": ["low", "medium", "high", "xhigh", "max"]},
     )
-    manager._active_model_override = "gpt-6-astra"
+    manager._active_model_override = "instance-preview"
     manager.current_backend = SimpleNamespace(
-        config=SimpleNamespace(model="gpt-6-astra"), effort="high"
+        config=SimpleNamespace(model="instance-preview"), effort="high"
     )
     runtime, _ = _make_runtime(manager)
     return runtime, manager
 
 
 def test_instance_effort_menu_selection_and_restore(tmp_path):
-    runtime, manager = _astra_runtime(tmp_path / "agent")
+    runtime, manager = _instance_preview_runtime(tmp_path / "agent")
     assert "effort:max" in str(runtime._effort_keyboard())
     runtime._set_active_effort("max")
     assert manager.current_backend.effort == "max"
@@ -2762,33 +2762,33 @@ def test_instance_effort_menu_selection_and_restore(tmp_path):
     restored = FlexibleBackendManager(manager.config, manager.global_config, secrets={})
     assert restored.config.allowed_backends[0]["effort"] == "max"
     ordinary, _ = _make_runtime(_make_manager(tmp_path / "ordinary"))
-    ordinary.get_current_model = lambda: "gpt-6-astra"
+    ordinary.get_current_model = lambda: "instance-preview"
     assert "max" not in ordinary._get_available_efforts()
 
 
 def test_instance_model_reselection_preserves_model_and_effort(tmp_path):
-    runtime, manager = _astra_runtime(tmp_path / "agent")
+    runtime, manager = _instance_preview_runtime(tmp_path / "agent")
     manager.current_backend.effort = "max"
-    assert "gpt-6-astra" in runtime._get_available_models()
-    runtime._set_backend_model("codex-cli", "gpt-6-astra")
-    assert manager.current_backend.config.model == "gpt-6-astra"
+    assert "instance-preview" in runtime._get_available_models()
+    runtime._set_backend_model("codex-cli", "instance-preview")
+    assert manager.current_backend.config.model == "instance-preview"
     assert manager.current_backend.effort == "max"
-    assert _read_state(manager.config.workspace_dir)["active_model"] == "gpt-6-astra"
+    assert _read_state(manager.config.workspace_dir)["active_model"] == "instance-preview"
     runtime._set_backend_model("codex-cli", "gpt-5.6-terra")
     assert manager.current_backend.effort == "medium"
-    assert "gpt-6-astra" in runtime._get_available_models()
-    runtime._set_backend_model("codex-cli", "gpt-6-astra")
-    assert manager.current_backend.config.model == "gpt-6-astra"
+    assert "instance-preview" in runtime._get_available_models()
+    runtime._set_backend_model("codex-cli", "instance-preview")
+    assert manager.current_backend.config.model == "instance-preview"
 
 
 def test_her_provider_reasoning_uses_instance_gateway_efforts(tmp_path):
-    runtime, manager = _astra_runtime(tmp_path / "agent")
+    runtime, manager = _instance_preview_runtime(tmp_path / "agent")
     manager.config.active_backend = "her-v2"
     manager.config.allowed_backends.append({
         "engine": "her-v2", "model": "role-configured",
         "model_efforts": {"role-configured": ["max"]},
     })
-    target = SimpleNamespace(provider="hashi-api", model="gpt-6-astra")
+    target = SimpleNamespace(provider="hashi-api", model="instance-preview")
     selected = SimpleNamespace(
         target_for_route=lambda route: target,
         reasoning_for_route=lambda route: "high",
@@ -2867,7 +2867,7 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     assert "wcfg:wrapid:claude_haiku" in wrap_markup
     assert "wcfg:wrapid:gemini_flash" in wrap_markup
     assert "wcfg:wrapid:deepseek_pro" in wrap_markup
-    assert "wcfg:wrapid:or_deepseek" in wrap_markup
+    assert "wcfg:wrapid:or_v4_pro" in wrap_markup
     assert "wcfg:wrapctx:3" in wrap_markup
 
     await FlexibleAgentRuntime.cmd_wrapper(runtime, update, context)
@@ -2887,7 +2887,7 @@ async def test_wrapper_config_buttons_update_core_model(tmp_path):
 
     query = SimpleNamespace(
         from_user=SimpleNamespace(id=1),
-        data="wcfg:core:codex-cli:gpt-5.4",
+        data="wcfg:core:codex-cli:gpt-5.6-sol",
         message=SimpleNamespace(chat_id=123),
     )
 
@@ -2906,9 +2906,9 @@ async def test_wrapper_config_buttons_update_core_model(tmp_path):
     )
 
     state = _read_state(tmp_path / "agent")
-    assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.4"}
+    assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.6-sol"}
     assert state["active_backend"] == "codex-cli"
-    assert state["active_model"] == "gpt-5.4"
+    assert state["active_model"] == "gpt-5.6-sol"
     assert "Wrapper core updated" in edits[-1]["text"]
     assert edits[-1]["reply_markup"] is not None
     assert answers[-1]["text"] is None
@@ -3034,8 +3034,10 @@ def test_audit_model_choice_labels_include_versions():
         assert "Claude Opus 4.7" in labels
         assert "Claude Opus 4.6" in labels
         assert "Claude Sonnet 4.6" in labels
-        assert "OR Sonnet 4.6" in labels
-        assert "OR Opus 4.6" in labels
+        assert "OR DeepSeek V3.2 Exp" in labels
+        assert "OR DeepSeek V4 Flash" in labels
+        assert "OR DeepSeek V4 Pro" in labels
+        assert "OR Gemini 3.8 Flash" in labels
 
 
 @pytest.mark.asyncio
@@ -3184,7 +3186,7 @@ async def test_wrapper_config_buttons_update_wrapper_model_across_backends(tmp_p
 
     query = SimpleNamespace(
         from_user=SimpleNamespace(id=1),
-        data="wcfg:wrapid:or_deepseek:3",
+        data="wcfg:wrapid:or_v4_flash:3",
         message=SimpleNamespace(chat_id=123),
     )
 

@@ -41,7 +41,9 @@ Read identities, Agents, ports, workspaces, endpoints, and model opt-ins from
 their authoritative configuration; never infer them from a folder name or old
 memory. Local identity and credentials stay in ignored instance stores.
 Model/effort opt-ins belong in `allowed_backends`; shared compatibility belongs
-to the Function-owned backend registry.
+to the Function-owned backend registry. The shipped Codex CLI default is
+`gpt-5.6-sol` at explicit `medium` effort; an explicit Agent selection remains
+authoritative until that model is retired.
 
 Personal instances and new Agents default to the open HASHI Tool wildcard when
 no instance override is declared. Explicit instance restrictions and backend

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 from orchestrator.config import default_global_tools_config
+from orchestrator.flexible_backend_registry import get_default_model
 
 
 def load_languages(bridge_home: Path) -> list[dict]:
@@ -112,18 +113,22 @@ def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key
     }
     display = display_names.get(l_code, "Hashiko")
 
+    default_engines = (
+        "gemini-cli",
+        "claude-cli",
+        "codex-cli",
+        "openrouter-api",
+    )
     default_models = {
-        "gemini-cli": "gemini-3.1-pro-preview",
-        "claude-cli": "claude-sonnet-4-6",
-        "codex-cli": "gpt-5.4",
-        "openrouter-api": "anthropic/claude-sonnet-4.6",
+        backend: get_default_model(backend) or "" for backend in default_engines
     }
-
     all_backends = [
-        {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"},
-        {"engine": "claude-cli", "model": "claude-sonnet-4-6"},
-        {"engine": "codex-cli", "model": "gpt-5.4"},
-        {"engine": "openrouter-api", "model": "anthropic/claude-sonnet-4.6"},
+        {
+            "engine": backend,
+            "model": default_models[backend],
+            **({"effort": "medium"} if backend == "codex-cli" else {}),
+        }
+        for backend in default_engines
     ]
 
     agent_cfg = {
