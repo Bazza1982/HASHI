@@ -917,16 +917,19 @@ def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
     assert adapter._session_id is None
 
 
-def test_codex_command_reasoning_effort_is_request_scoped(tmp_path):
+@pytest.mark.parametrize("reasoning_effort", ["max", "ultra"])
+def test_codex_command_reasoning_effort_is_request_scoped(
+    tmp_path, reasoning_effort
+):
     adapter = _build_adapter(tmp_path)
 
     cmd = adapter._build_cmd(
         "hello",
         tmp_path / "out.txt",
-        reasoning_effort="max",
+        reasoning_effort=reasoning_effort,
     )
 
-    assert 'model_reasoning_effort="max"' in cmd
+    assert f'model_reasoning_effort="{reasoning_effort}"' in cmd
     assert 'model_reasoning_effort="medium"' not in cmd
     assert adapter.effort == "medium"
 
@@ -938,7 +941,7 @@ def test_codex_command_rejects_unknown_request_reasoning_effort(tmp_path):
         adapter._build_cmd(
             "hello",
             tmp_path / "out.txt",
-            reasoning_effort="ultra",
+            reasoning_effort="extreme",
         )
 
 
