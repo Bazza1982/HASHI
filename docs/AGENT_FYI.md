@@ -150,6 +150,12 @@ connection generation, Agent directory/target, capabilities, logs, and sends.
 Commands use only that instance; errors are not empty results. Submission
 freezes instance, Agent set, Session, and connection generation.
 
+For cross-instance TUI access, a completed authenticated Remote handshake is
+the sole registry admission gate. Cached liveness and advertised capabilities
+are diagnostic and negotiation metadata, not authorization. The receiving
+Remote trusts the per-request shared-token HMAC and verifies target identity;
+stale or empty capability metadata must never block a valid TUI request.
+
 Local preferences may remember UI choices and last Agent per instance; startup
 still uses the mother instance. Persist only success without overwriting other
 settings. Saved state never authorizes/starts an Agent or replays a draft.

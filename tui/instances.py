@@ -23,7 +23,6 @@ from orchestrator.runtime_defaults import (
 from remote.live_endpoints import live_endpoints_path
 
 logger = logging.getLogger(__name__)
-TUI_PROXY_CAPABILITY = "tui_proxy_v1"
 LOCAL_ENDPOINT_PRODUCT = "HASHI Portable Local Endpoint"
 
 
@@ -237,19 +236,10 @@ class InstanceResolver:
             properties = peer.get("properties") if isinstance(peer.get("properties"), dict) else {}
             handshake = str(properties.get("handshake_state") or peer.get("handshake_state") or "").lower()
             live_status = str(properties.get("live_status") or peer.get("live_status") or "unknown").lower()
-            capabilities = {
-                str(item).strip() for item in (peer.get("capabilities") or []) if str(item).strip()
-            }
             handshake_ok = handshake == "handshake_accepted"
-            live_ok = live_status not in {"offline", "unknown"}
-            proxy_ok = TUI_PROXY_CAPABILITY in capabilities
-            available = handshake_ok and live_ok and proxy_ok
+            available = handshake_ok
             if not handshake_ok:
                 reason = "handshake required"
-            elif not live_ok:
-                reason = f"Remote {live_status}"
-            elif not proxy_ok:
-                reason = "peer needs TUI proxy upgrade/restart"
             else:
                 reason = ""
             targets.append(
