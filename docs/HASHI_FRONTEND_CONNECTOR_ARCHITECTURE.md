@@ -241,6 +241,39 @@ declared sender into a uniquely authenticated Agent. PCM and external clients
 receive only sanitized verification results, never shared secrets or raw
 proofs.
 
+### 6.2 Standard multi-attachment message admission
+
+Persistent Session API v1 is the standard external-frontend boundary for a
+message containing one or more attachments. This contract is client-neutral;
+it must never contain product-specific frontend names or layout policy. The
+built-in TUI may continue to use its deeper HASHI binding, and existing
+Telegram intake keeps its transport-specific grouping behaviour.
+
+A conforming external frontend must:
+
+1. read `/api/v1/capabilities` and require the advertised
+   `frontend_connector.multi_attachment` contract;
+2. stage each attachment with
+   `POST /api/v1/sessions/{session_id}/attachments`;
+3. upload the exact bytes with `PUT .../{attachment_id}/content` and commit
+   them with `POST .../{attachment_id}/commit`; and
+4. create exactly one Run with one
+   `POST /api/v1/sessions/{session_id}/runs` request.
+
+The Run's ordered `message.content` array uses `text` parts and generic
+`attachment` parts containing opaque `attachment_id` references. The legacy
+`audio` part remains accepted for native voice compatibility. HASHI resolves
+the committed metadata into its existing canonical multimodal request content;
+no client path or inline bytes enter durable Message state.
+
+One Run admission is atomic: every referenced attachment must belong to the
+same owner and Session, be uploaded, committed, within advertised count and
+size limits, and retain its array order. Any invalid reference rejects the
+whole Run before an Agent Turn is enqueued. A frontend must never turn a failed
+capability check into multiple legacy chat submissions, because that would
+change one user action into multiple Messages and Turns. Upload staging is not
+a Run and may be cleaned up later by retention policy.
+
 ## 7. Retired Workbench boundary
 
 Workbench is retired. A successor frontend is maintained separately and is not

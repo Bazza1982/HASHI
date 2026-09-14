@@ -63,6 +63,13 @@ Qualify the word Session:
 - Provider contexts are rebuildable transport state, not HASHI authority.
 - Frontend history is a disposable projection, not another archive.
 
+External frontends send multiple attachments through the advertised Persistent
+Session Frontend Connector contract: stage, upload and commit every opaque
+attachment, then create one ordered Message and one Run. Missing or invalid
+attachments reject the entire Run; never split one frontend submission into
+legacy per-file Turns. Telegram keeps its own Connector intake, and the deeply
+bound built-in TUI is separate.
+
 Complete `agent@instance.username` targets use only optional Exchange, never LAN
 or the retired proxy. Trust PAO's signed principal, not text headers; v1 refuses
 private/resource proofs. It is instance-configured, explicitly published, and

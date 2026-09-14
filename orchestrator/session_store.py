@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
@@ -21,7 +22,10 @@ from orchestrator.audio_assets import (
     AudioAssetStore,
     normalize_audio_format,
 )
-from orchestrator.multimodal_contract import contains_persistent_inline_media
+from orchestrator.multimodal_contract import (
+    contains_persistent_inline_media,
+    modality_for_attachment,
+)
 from orchestrator.storage_profile import removable_storage_profile
 
 TERMINAL_RUN_STATES = frozenset(
@@ -34,6 +38,9 @@ MAX_CONTINUITY_SESSIONS = 500
 MAX_CONTINUITY_MESSAGES = 100_000
 PRIMARY_CONVERSATION_SURFACE = "conversation"
 PRIMARY_CONVERSATION_CHANNEL = "main"
+MAX_SESSION_ATTACHMENTS_PER_MESSAGE = 16
+MAX_SESSION_ATTACHMENT_BYTES = 64 * 1024 * 1024
+MAX_SESSION_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 def _utc_now() -> str:
@@ -312,7 +319,13 @@ class SessionStore:
 
     SCHEMA_VERSION = 7
 
-    def __init__(self, db_path: str | Path, *, instance_id: str = "HASHI"):
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        instance_id: str = "HASHI",
+        attachment_root: str | Path | None = None,
+    ):
         self.db_path = Path(db_path)
         self.instance_id = str(instance_id or "HASHI").upper()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,6 +334,14 @@ class SessionStore:
         self.audio_assets = AudioAssetStore(
             self.db_path.parent / "native_audio_assets"
         )
+        self.attachment_files_root = Path(
+            attachment_root or self.db_path.parent / "session_attachments"
+        ).expanduser().resolve()
+        self.attachment_files_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(self.attachment_files_root, 0o700)
+        except OSError:
+            pass
         self._lock = threading.RLock()
         self._initialize()
 
@@ -331,9 +352,16 @@ class SessionStore:
             or getattr(global_config, "project_root", None)
             or "."
         )
+        base_media_dir = getattr(global_config, "base_media_dir", None)
+        attachment_root = (
+            Path(base_media_dir) / "session_attachments"
+            if base_media_dir
+            else bridge_home / "media" / "session_attachments"
+        )
         return cls(
             bridge_home / "state" / "sessions.sqlite3",
             instance_id=str(getattr(global_config, "instance_id", "HASHI") or "HASHI"),
+            attachment_root=attachment_root,
         )
 
     def _connect(self) -> sqlite3.Connection:
@@ -1380,25 +1408,30 @@ class SessionStore:
             if expected_context_generation is not None and int(session["context_generation"]) != int(expected_context_generation):
                 raise SessionConflict("session_context_generation_changed")
             audio_rows: list[sqlite3.Row] = []
+            attachment_rows: list[sqlite3.Row] = []
             attachment_fingerprints: list[dict[str, Any]] = []
             normalized_blocks: list[dict[str, Any]] = []
+            attachment_ids: set[str] = set()
+            total_attachment_bytes = 0
             for raw_block in blocks:
                 block = dict(raw_block)
                 block_type = str(block.get("type") or "").strip().casefold()
                 if block_type == "text":
                     if not isinstance(block.get("text"), str):
                         raise ValueError("text content parts require text")
-                elif block_type == "audio":
+                elif block_type in {"attachment", "audio"}:
                     attachment_id = str(block.get("attachment_id") or "").strip()
-                    semantic_role = str(
-                        block.get("semantic_role") or "audio_attachment"
-                    ).strip().casefold()
                     if not attachment_id:
                         raise SessionConflict(
-                            "audio content requires a committed attachment"
+                            "attachment content requires a committed attachment"
                         )
-                    if semantic_role not in {"voice_message", "audio_attachment"}:
-                        raise SessionConflict("invalid audio semantic role")
+                    if attachment_id in attachment_ids:
+                        raise SessionConflict("attachment cannot be repeated in one message")
+                    attachment_ids.add(attachment_id)
+                    if len(attachment_ids) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+                        raise SessionConflict(
+                            "message exceeds the configured attachment count limit"
+                        )
                     attachment = connection.execute(
                         """SELECT * FROM session_attachments
                            WHERE attachment_id=? AND session_id=? AND owner_id=?""",
@@ -1406,42 +1439,73 @@ class SessionStore:
                     ).fetchone()
                     if attachment is None:
                         raise SessionConflict(
-                            "audio attachment is not authorized for this Session"
+                            "attachment is not authorized for this Session"
                         )
                     if str(attachment["state"]) != "committed":
-                        raise SessionConflict("audio attachment is not committed")
-                    if not str(attachment["media_type"]).casefold().startswith(
-                        "audio/"
-                    ):
-                        raise SessionConflict("attachment is not audio")
+                        raise SessionConflict("attachment is not committed")
                     asset_id = str(attachment["asset_id"] or "")
                     if not asset_id:
-                        raise SessionConflict("audio attachment bytes are unavailable")
+                        raise SessionConflict("attachment bytes are unavailable")
+                    is_audio = str(attachment["media_type"]).casefold().startswith(
+                        "audio/"
+                    )
+                    if block_type == "audio" and not is_audio:
+                        raise SessionConflict("attachment is not audio")
+                    semantic_role = str(
+                        block.get("semantic_role")
+                        or ("audio_attachment" if is_audio else "")
+                    ).strip().casefold()
+                    if is_audio and semantic_role not in {
+                        "voice_message",
+                        "audio_attachment",
+                    }:
+                        raise SessionConflict("invalid audio semantic role")
+                    if not is_audio and semantic_role:
+                        raise SessionConflict(
+                            "semantic_role is only supported for audio attachments"
+                        )
                     declared_mime = str(block.get("mime_type") or "").casefold()
                     if declared_mime and declared_mime != str(
                         attachment["media_type"]
                     ).casefold():
-                        raise SessionConflict("audio MIME does not match committed metadata")
-                    self.audio_assets.describe(
-                        asset_id, owner_id=owner_id, session_id=session_id
-                    )
-                    block["semantic_role"] = semantic_role
+                        raise SessionConflict(
+                            "attachment MIME does not match committed metadata"
+                        )
+                    if is_audio:
+                        self.audio_assets.describe(
+                            asset_id, owner_id=owner_id, session_id=session_id
+                        )
+                        block["semantic_role"] = semantic_role
+                        audio_rows.append(attachment)
+                    else:
+                        self._validated_attachment_file(dict(attachment))
                     block.setdefault("mime_type", str(attachment["media_type"]))
-                    audio_rows.append(attachment)
+                    attachment_rows.append(attachment)
+                    total_attachment_bytes += int(attachment["size_bytes"])
+                    if total_attachment_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
+                        raise SessionConflict(
+                            "message exceeds the configured total attachment size limit"
+                        )
                     attachment_fingerprints.append(
                         {
                             "attachment_id": attachment_id,
                             "sha256": str(attachment["sha256"]),
                             "size_bytes": int(attachment["size_bytes"]),
-                            "semantic_role": semantic_role,
+                            **(
+                                {"semantic_role": semantic_role}
+                                if semantic_role
+                                else {}
+                            ),
                         }
                     )
                 elif not block_type:
                     raise ValueError("message content parts require a type")
+                else:
+                    raise ValueError(f"unsupported message content type {block_type!r}")
                 normalized_blocks.append(block)
             blocks = normalized_blocks
-            if not clean and not audio_rows:
-                raise ValueError("message requires text or a committed audio attachment")
+            if not clean and not attachment_rows:
+                raise ValueError("message requires text or a committed attachment")
             digest_payload = {
                 "content": blocks,
                 "attachments": attachment_fingerprints,
@@ -2270,6 +2334,13 @@ class SessionStore:
         normalized_media_type = (
             str(media_type or "").split(";", 1)[0].strip().casefold()
         )
+        if not normalized_media_type or "/" not in normalized_media_type:
+            raise ValueError("media_type must be a MIME type")
+        declared_size = int(size_bytes)
+        if declared_size < 0:
+            raise ValueError("attachment size must be non-negative")
+        if declared_size > MAX_SESSION_ATTACHMENT_BYTES:
+            raise ValueError("attachment exceeds the configured size limit")
         is_audio = normalized_media_type.startswith("audio/")
         normalized_role = str(semantic_role or "").strip().casefold()
         if is_audio:
@@ -2284,7 +2355,7 @@ class SessionStore:
                 raise ValueError("audio retention must be at least 60 seconds")
         elif normalized_role:
             raise ValueError("semantic_role is only supported for audio attachments")
-        requires_upload = is_audio if upload_required is None else bool(upload_required)
+        requires_upload = True if upload_required is None else bool(upload_required)
         attachment_id, now = _new_id("att"), _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute(
@@ -2298,7 +2369,7 @@ class SessionStore:
                     str(owner_id),
                     str(filename),
                     normalized_media_type,
-                    max(0, int(size_bytes)),
+                    declared_size,
                     digest,
                     normalized_role,
                     int(duration_ms) if duration_ms is not None else None,
@@ -2317,6 +2388,52 @@ class SessionStore:
         result["upload_required"] = bool(result["upload_required"])
         return result
 
+    @staticmethod
+    def _safe_attachment_id(attachment_id: str) -> str:
+        value = str(attachment_id or "").strip()
+        if not value or any(
+            character
+            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            for character in value
+        ):
+            raise ValueError("invalid attachment id")
+        return value
+
+    def _attachment_file_path(self, attachment_id: str, filename: str) -> Path:
+        safe_id = self._safe_attachment_id(attachment_id)
+        suffix = Path(str(filename or "")).suffix.casefold()
+        if (
+            not suffix.startswith(".")
+            or len(suffix) > 16
+            or not suffix[1:].isalnum()
+        ):
+            suffix = ""
+        return self.attachment_files_root / f"{safe_id}{suffix}"
+
+    def _validated_attachment_file(self, attachment: Mapping[str, Any]) -> Path:
+        path = self._attachment_file_path(
+            str(attachment["attachment_id"]), str(attachment["filename"])
+        )
+        try:
+            observed_size = path.stat().st_size
+        except OSError as exc:
+            raise SessionConflict("uploaded attachment is unavailable") from exc
+        if observed_size != int(attachment["size_bytes"]):
+            raise SessionConflict("uploaded attachment size changed after intake")
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+        except OSError as exc:
+            raise SessionConflict("uploaded attachment is unavailable") from exc
+        if digest.hexdigest() != str(attachment["sha256"]):
+            raise SessionConflict("uploaded attachment digest changed after intake")
+        return path
+
     def upload_attachment_bytes(
         self,
         *,
@@ -2325,7 +2442,7 @@ class SessionStore:
         attachment_id: str,
         payload: bytes,
     ) -> dict[str, Any]:
-        """Validate and atomically materialize one staged audio attachment."""
+        """Validate and atomically materialize one staged Session attachment."""
 
         if not isinstance(payload, bytes):
             raise ValueError("attachment payload must be bytes")
@@ -2345,39 +2462,60 @@ class SessionStore:
             raise SessionConflict("attachment size does not match staged metadata")
         if actual_digest != str(attachment["sha256"]):
             raise SessionConflict("attachment digest does not match staged metadata")
-        if not str(attachment["media_type"]).casefold().startswith("audio/"):
-            raise SessionConflict("native audio upload requires an audio attachment")
 
         existing_asset = str(attachment.get("asset_id") or "")
         if existing_asset:
-            try:
-                self.audio_assets.describe(
-                    existing_asset, owner_id=owner_id, session_id=session_id
-                )
-            except AudioAssetError as exc:
-                raise SessionConflict("staged audio asset is unavailable") from exc
+            if str(attachment["media_type"]).casefold().startswith("audio/"):
+                try:
+                    self.audio_assets.describe(
+                        existing_asset, owner_id=owner_id, session_id=session_id
+                    )
+                except AudioAssetError as exc:
+                    raise SessionConflict("staged audio asset is unavailable") from exc
+            else:
+                self._validated_attachment_file(attachment)
             return attachment
 
-        audio_format = normalize_audio_format(
-            Path(str(attachment["filename"])).suffix,
-            mime_type=str(attachment["media_type"]),
-        )
-        asset = self.audio_assets.create(
-            payload,
-            owner_id=owner_id,
-            session_id=session_id,
-            direction="input",
-            mime_type=str(attachment["media_type"]),
-            audio_format=audio_format,
-            asset_id=str(attachment_id),
-            filename=str(attachment["filename"]),
-            duration_ms=attachment.get("duration_ms"),
-            retention_seconds=int(
-                attachment.get("retention_seconds") or DEFAULT_RETENTION_SECONDS
-            ),
-            retention_indefinite=bool(attachment.get("retention_indefinite")),
-            correlation={"attachment_id": str(attachment_id)},
-        )
+        if str(attachment["media_type"]).casefold().startswith("audio/"):
+            audio_format = normalize_audio_format(
+                Path(str(attachment["filename"])).suffix,
+                mime_type=str(attachment["media_type"]),
+            )
+            asset = self.audio_assets.create(
+                payload,
+                owner_id=owner_id,
+                session_id=session_id,
+                direction="input",
+                mime_type=str(attachment["media_type"]),
+                audio_format=audio_format,
+                asset_id=str(attachment_id),
+                filename=str(attachment["filename"]),
+                duration_ms=attachment.get("duration_ms"),
+                retention_seconds=int(
+                    attachment.get("retention_seconds") or DEFAULT_RETENTION_SECONDS
+                ),
+                retention_indefinite=bool(attachment.get("retention_indefinite")),
+                correlation={"attachment_id": str(attachment_id)},
+            )
+            stored_asset_id = str(asset["asset_id"])
+            observed_duration_ms = asset.get("duration_ms")
+        else:
+            target = self._attachment_file_path(
+                str(attachment_id), str(attachment["filename"])
+            )
+            partial = target.with_suffix(f"{target.suffix}.{uuid4().hex}.partial")
+            try:
+                partial.write_bytes(payload)
+                try:
+                    os.chmod(partial, 0o600)
+                except OSError:
+                    pass
+                partial.replace(target)
+            except OSError as exc:
+                partial.unlink(missing_ok=True)
+                raise SessionConflict("attachment bytes could not be stored") from exc
+            stored_asset_id = str(attachment_id)
+            observed_duration_ms = None
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute(
@@ -2385,9 +2523,9 @@ class SessionStore:
                        duration_ms=COALESCE(duration_ms, ?)
                    WHERE attachment_id=? AND state='staged'""",
                 (
-                    asset["asset_id"],
+                    stored_asset_id,
                     now,
-                    asset.get("duration_ms"),
+                    observed_duration_ms,
                     str(attachment_id),
                 ),
             )
@@ -2412,14 +2550,17 @@ class SessionStore:
             if bool(row["upload_required"]) and not str(row["asset_id"] or ""):
                 raise SessionConflict("attachment bytes must be uploaded before commit")
             if str(row["asset_id"] or ""):
-                try:
-                    self.audio_assets.describe(
-                        str(row["asset_id"]),
-                        owner_id=owner_id,
-                        session_id=session_id,
-                    )
-                except AudioAssetError as exc:
-                    raise SessionConflict("uploaded attachment is unavailable") from exc
+                if str(row["media_type"]).casefold().startswith("audio/"):
+                    try:
+                        self.audio_assets.describe(
+                            str(row["asset_id"]),
+                            owner_id=owner_id,
+                            session_id=session_id,
+                        )
+                    except AudioAssetError as exc:
+                        raise SessionConflict("uploaded attachment is unavailable") from exc
+                else:
+                    self._validated_attachment_file(dict(row))
             connection.execute(
                 "UPDATE session_attachments SET state='committed', committed_at=COALESCE(committed_at,?) WHERE attachment_id=?",
                 (now, str(attachment_id)),
@@ -2445,9 +2586,13 @@ class SessionStore:
             ).fetchone()
         if row is None or not str(row["asset_id"] or ""):
             raise SessionNotFound("attachment not found")
-        return self.audio_assets.read_bytes(
-            str(row["asset_id"]), owner_id=owner_id, session_id=session_id
-        )
+        attachment = dict(row)
+        if str(attachment["media_type"]).casefold().startswith("audio/"):
+            return self.audio_assets.read_bytes(
+                str(attachment["asset_id"]), owner_id=owner_id, session_id=session_id
+            )
+        path = self._validated_attachment_file(attachment)
+        return attachment, path.read_bytes()
 
     def attachment_canonical_part(
         self,
@@ -2457,6 +2602,8 @@ class SessionStore:
         attachment_id: str,
         item_index: int,
         semantic_role: str | None = None,
+        caption: str = "",
+        detail: str = "",
     ) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
             row = connection.execute(
@@ -2467,26 +2614,43 @@ class SessionStore:
             ).fetchone()
         if row is None or not str(row["asset_id"] or ""):
             raise SessionNotFound("attachment not found")
-        metadata, local_path = self.audio_assets.authorized_path(
-            str(row["asset_id"]), owner_id=owner_id, session_id=session_id
+        attachment = dict(row)
+        media_type = str(attachment["media_type"])
+        modality = modality_for_attachment(
+            "", mime_type=media_type, filename=str(attachment["filename"])
         )
-        role = str(semantic_role or row["semantic_role"] or "audio_attachment")
-        return {
+        if modality == "audio":
+            metadata, local_path = self.audio_assets.authorized_path(
+                str(attachment["asset_id"]),
+                owner_id=owner_id,
+                session_id=session_id,
+            )
+        else:
+            local_path = self._validated_attachment_file(attachment)
+            metadata = attachment
+        role = str(
+            semantic_role or attachment["semantic_role"] or "audio_attachment"
+        )
+        part = {
             "type": "media",
             "item_index": int(item_index),
             "attachment_id": str(attachment_id),
-            "modality": "audio",
-            "kind": "voice" if role == "voice_message" else "audio",
-            "semantic_role": role,
-            "mime_type": str(row["media_type"]),
-            "filename": str(row["filename"]),
-            "caption": "",
-            "duration_ms": row["duration_ms"],
+            "modality": modality,
+            "kind": "voice" if modality == "audio" and role == "voice_message" else modality,
+            "mime_type": media_type,
+            "filename": str(attachment["filename"]),
+            "caption": str(caption or ""),
             "local_ref": str(local_path),
             "size_bytes": int(metadata["size_bytes"]),
             "sha256": str(metadata["sha256"]),
             "transport": {},
         }
+        if modality == "audio":
+            part["semantic_role"] = role
+            part["duration_ms"] = attachment["duration_ms"]
+        if detail:
+            part["detail"] = str(detail)
+        return part
 
     def audio_asset_bytes(
         self, *, session_id: str, owner_id: str, asset_id: str

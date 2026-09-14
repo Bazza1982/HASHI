@@ -586,7 +586,7 @@ async def test_nac_013_027_032_session_capability_publication_is_complete_or_abs
 
     capabilities = json.loads((await server.handle_v1_capabilities(_Request())).text)
 
-    assert capabilities["message_content_schema_version"] == "1.1"
+    assert capabilities["message_content_schema_version"] == "1.2"
     assert capabilities["audio_turn_schema_version"] == "1.0"
     assert capabilities["media_output_schema_version"] == "1.0"
     assert capabilities["voice_control_schema_version"] == "1.0"

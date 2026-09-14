@@ -104,6 +104,9 @@ from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.pathing import resolve_path_value
 from orchestrator.service_endpoints import ServiceEndpointError, select_service_bind_host
 from orchestrator.session_store import (
+    MAX_SESSION_ATTACHMENT_BYTES,
+    MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
+    MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
     TERMINAL_RUN_STATES,
     IdempotencyConflict,
     SessionConflict,
@@ -4435,7 +4438,11 @@ class WorkbenchApiServer:
                     "session_api_version": "1.0",
                     "event_schema_version": "1.0",
                     "control_schema_version": "1.0",
-                    "attachment_schema_version": "1.0",
+                    "attachment_schema_version": "1.1",
+                    "message_content_schema_version": "1.2",
+                    "attachment_upload_transport": (
+                        "direct-multipart-or-octet-stream"
+                    ),
                     "approval_schema_version": "1.0",
                     "fencing_schema_version": "1.0",
                     "compatibility_policy": "capabilities-and-advertised-limits",
@@ -4455,20 +4462,38 @@ class WorkbenchApiServer:
                     "max_message_chars": 200000,
                     "limits": {
                         "max_message_chars": 200000,
+                        "max_attachments_per_message": MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
+                        "max_attachment_bytes": MAX_SESSION_ATTACHMENT_BYTES,
+                        "max_total_attachment_bytes_per_message": MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
                         "max_sessions_page_size": 100,
                         "max_messages_page_size": 200,
                         "max_events_page_size": 2000,
+                    },
+                    "frontend_connector": {
+                        "version": "1.0",
+                        "message_content_schema_version": "1.2",
+                        "multi_attachment": True,
+                        "atomic_run_admission": True,
+                        "preserves_attachment_order": True,
+                        "content_types": ["text", "attachment", "audio"],
+                        "attachment_modalities": [
+                            "image",
+                            "audio",
+                            "video",
+                            "document",
+                        ],
+                        "attachment_upload_transport": (
+                            "direct-multipart-or-octet-stream"
+                        ),
                     },
                 }
             )
             if self._native_audio_chat_v1_ready():
                 capabilities.update(
                     {
-                        "message_content_schema_version": "1.1",
                         "audio_turn_schema_version": "1.0",
                         "media_output_schema_version": "1.0",
                         "voice_control_schema_version": "1.0",
-                        "attachment_upload_transport": "direct-multipart-or-octet-stream",
                         "audio": {
                             "input": True,
                             "output": True,
@@ -4873,6 +4898,13 @@ class WorkbenchApiServer:
                 for block in content
                 if isinstance(block, dict) and block.get("type") == "audio"
             ]
+            attachment_blocks = [
+                dict(block)
+                for block in content
+                if isinstance(block, dict)
+                and str(block.get("type") or "").strip().casefold()
+                in {"attachment", "audio"}
+            ]
             surface = str(payload.get("surface") or "session-api").strip().lower()
             if (
                 not surface
@@ -4891,9 +4923,11 @@ class WorkbenchApiServer:
                 raise SessionConflict(
                     "native audio is not enabled or qualified for this Agent"
                 )
-            if not text and not audio_blocks:
+            if len(attachment_blocks) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+                raise ValueError("message exceeds the configured attachment count limit")
+            if not text and not attachment_blocks:
                 raise ValueError(
-                    "message requires text or a committed audio content part"
+                    "message requires text or a committed attachment content part"
                 )
             idempotency_key = str(
                 payload.get("idempotency_key")
@@ -4908,6 +4942,7 @@ class WorkbenchApiServer:
                 or "default"
             )
             canonical_parts: list[dict[str, Any]] = []
+            total_attachment_bytes = 0
             for item_index, block in enumerate(content, start=1):
                 if not isinstance(block, dict):
                     raise ValueError("message content parts must be objects")
@@ -4920,18 +4955,34 @@ class WorkbenchApiServer:
                             "text": str(block.get("text") or ""),
                         }
                     )
-                elif block_type == "audio":
-                    canonical_parts.append(
-                        self.session_store.attachment_canonical_part(
-                            session_id=session["session_id"],
-                            owner_id=owner,
-                            attachment_id=str(block.get("attachment_id") or ""),
-                            item_index=item_index,
-                            semantic_role=str(
-                                block.get("semantic_role") or "audio_attachment"
-                            ),
-                        )
+                elif block_type in {"attachment", "audio"}:
+                    canonical_part = self.session_store.attachment_canonical_part(
+                        session_id=session["session_id"],
+                        owner_id=owner,
+                        attachment_id=str(block.get("attachment_id") or ""),
+                        item_index=item_index,
+                        semantic_role=(
+                            str(block.get("semantic_role") or "audio_attachment")
+                            if block_type == "audio"
+                            else str(block.get("semantic_role") or "") or None
+                        ),
+                        caption=str(block.get("caption") or ""),
+                        detail=str(block.get("detail") or ""),
                     )
+                    if block_type == "audio" and canonical_part["modality"] != "audio":
+                        raise ValueError("audio content requires an audio attachment")
+                    if (
+                        canonical_part["modality"] == "audio"
+                        and canonical_part.get("semantic_role") == "voice_message"
+                        and not self._native_audio_chat_v1_ready()
+                    ):
+                        raise SessionConflict("native voice Session Turns are not enabled")
+                    total_attachment_bytes += int(canonical_part["size_bytes"])
+                    if total_attachment_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
+                        raise ValueError(
+                            "message exceeds the configured total attachment size limit"
+                        )
+                    canonical_parts.append(canonical_part)
                 else:
                     raise ValueError(f"unsupported message content type {block_type!r}")
             canonical_content = canonical_request_content(canonical_parts)
@@ -4974,6 +5025,9 @@ class WorkbenchApiServer:
                         "parent_run_id": payload.get("parent_run_id"),
                         "session_message_text": text,
                         "session_message_content": content,
+                        "session_context_generation": payload.get(
+                            "session_context_generation"
+                        ),
                         "response_preferences": dict(
                             payload.get("response_preferences") or {}
                         ),
@@ -5145,8 +5199,6 @@ class WorkbenchApiServer:
             media_type = str(
                 payload.get("media_type") or "application/octet-stream"
             )
-            if media_type.casefold().startswith("audio/") and not self._native_audio_chat_v1_ready():
-                raise SessionConflict("native audio attachment upload is not enabled")
             session = self.session_store.get_session(
                 request.match_info["session_id"],
                 owner_id=owner,
@@ -5213,7 +5265,7 @@ class WorkbenchApiServer:
         except Exception as exc:
             return self._v1_error(exc)
 
-    async def _v1_audio_upload_payload(self, request) -> bytes:
+    async def _v1_attachment_upload_payload(self, request) -> bytes:
         content_type = str(getattr(request, "headers", {}).get("Content-Type") or "")
         if content_type.casefold().startswith("multipart/"):
             reader = await request.multipart()
@@ -5227,7 +5279,7 @@ class WorkbenchApiServer:
                     "file",
                 }:
                     return bytes(await part.read(decode=False))
-            raise ValueError("multipart upload requires an audio file field")
+            raise ValueError("multipart upload requires a file or content field")
         read = getattr(request, "read", None)
         if not callable(read):
             raise ValueError("request body is unavailable")
@@ -5237,17 +5289,12 @@ class WorkbenchApiServer:
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
-        if not self._native_audio_chat_v1_ready():
-            return self._v1_error(
-                SessionConflict("native audio attachment upload is not enabled"),
-                status=503,
-            )
         try:
             attachment = self.session_store.upload_attachment_bytes(
                 session_id=request.match_info["session_id"],
                 owner_id=owner,
                 attachment_id=request.match_info["attachment_id"],
-                payload=await self._v1_audio_upload_payload(request),
+                payload=await self._v1_attachment_upload_payload(request),
             )
             return web.json_response({"ok": True, "attachment": attachment})
         except Exception as exc:

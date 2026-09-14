@@ -73,6 +73,8 @@ class _Runtime:
     def __init__(self):
         self.server = None
         self.last_request_metadata = None
+        self.last_request_content = None
+        self.enqueue_request_calls = 0
         self.api_request_metadata = []
         self.api_delivery_flags = []
         self.media_dir = None
@@ -112,7 +114,9 @@ class _Runtime:
         request_metadata,
         **_kwargs,
     ):
+        self.enqueue_request_calls += 1
         self.last_request_metadata = dict(request_metadata)
+        self.last_request_content = _kwargs.get("request_content")
         request_id = "req-api"
         accepted = self.server.session_store.accept_run(
             session_id=request_metadata["session_id"],
@@ -261,6 +265,9 @@ async def test_qualified_capability_is_client_neutral_and_limit_driven(
     assert capabilities["compatibility_policy"] == "capabilities-and-advertised-limits"
     assert capabilities["limits"] == {
         "max_message_chars": 200000,
+        "max_attachments_per_message": 16,
+        "max_attachment_bytes": 64 * 1024 * 1024,
+        "max_total_attachment_bytes_per_message": 64 * 1024 * 1024,
         "max_sessions_page_size": 100,
         "max_messages_page_size": 200,
         "max_events_page_size": 2000,
@@ -269,6 +276,152 @@ async def test_qualified_capability_is_client_neutral_and_limit_driven(
         "client" in str(value).lower() and "specific" in str(value).lower()
         for value in capabilities.values()
     )
+
+
+@pytest.mark.asyncio
+async def test_frontend_connector_admits_ordered_multi_attachment_as_one_run(
+    tmp_path, monkeypatch
+):
+    from orchestrator import workbench_api
+
+    server, runtime = _server(tmp_path)
+    monkeypatch.setattr(workbench_api, "PERSISTENT_SESSION_V1_QUALIFIED", True)
+    server.global_config.persistent_session_v1 = True
+    server.global_config.native_audio_chat_v1 = False
+
+    capabilities = json.loads((await server.handle_v1_capabilities(_Request())).text)
+    connector = capabilities["frontend_connector"]
+    assert connector["multi_attachment"] is True
+    assert connector["atomic_run_admission"] is True
+    assert connector["content_types"] == ["text", "attachment", "audio"]
+    assert connector["attachment_modalities"] == [
+        "image",
+        "audio",
+        "video",
+        "document",
+    ]
+
+    created = json.loads(
+        (
+            await server.handle_v1_sessions_create(
+                _Request({"agent_id": "lily", "title": "Multi attachment"})
+            )
+        ).text
+    )
+    session_id = created["session"]["session_id"]
+    fixtures = [
+        ("first.png", "image/png", b"\x89PNG\r\n\x1a\nfirst"),
+        ("notes.txt", "text/plain", b"second"),
+        ("clip.webm", "video/webm", bytes.fromhex("1a45dfa3") + b"third"),
+    ]
+    attachment_ids = []
+    for filename, media_type, body in fixtures:
+        staged_response = await server.handle_v1_attachment_stage(
+            _Request(
+                {
+                    "filename": filename,
+                    "media_type": media_type,
+                    "size_bytes": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                },
+                match_info={"session_id": session_id},
+            )
+        )
+        assert staged_response.status == 201
+        staged = json.loads(staged_response.text)["attachment"]
+        assert staged["upload_required"] is True
+        attachment_id = staged["attachment_id"]
+        attachment_ids.append(attachment_id)
+
+        uploaded_response = await server.handle_v1_attachment_upload(
+            _Request(
+                match_info={
+                    "session_id": session_id,
+                    "attachment_id": attachment_id,
+                },
+                headers={"Content-Type": media_type},
+                body=body,
+            )
+        )
+        assert uploaded_response.status == 200
+        committed_response = await server.handle_v1_attachment_commit(
+            _Request(
+                match_info={
+                    "session_id": session_id,
+                    "attachment_id": attachment_id,
+                }
+            )
+        )
+        assert committed_response.status == 200
+
+    run_response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "multi-attachment-one-turn",
+                "surface": "generic-frontend-test",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "inspect these in order"},
+                        *[
+                            {"type": "attachment", "attachment_id": attachment_id}
+                            for attachment_id in attachment_ids
+                        ],
+                    ]
+                },
+            },
+            match_info={"session_id": session_id},
+            headers={"X-Client-Id": "connector-contract-test"},
+        )
+    )
+    payload = json.loads(run_response.text)
+
+    assert run_response.status == 202, payload
+    assert payload["request_id"] == "req-api"
+    assert runtime.enqueue_request_calls == 1
+    assert [
+        part.get("attachment_id")
+        for part in runtime.last_request_content["parts"]
+        if part["type"] == "media"
+    ] == attachment_ids
+    messages = server.session_store.messages(session_id, owner_id="user:7")
+    assert len(messages) == 1
+    assert [part["type"] for part in messages[0]["content"]] == [
+        "text",
+        "attachment",
+        "attachment",
+        "attachment",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_frontend_connector_rejects_multi_attachment_atomically(tmp_path):
+    server, runtime = _server(tmp_path)
+    created = json.loads(
+        (
+            await server.handle_v1_sessions_create(_Request({"agent_id": "lily"}))
+        ).text
+    )
+    session_id = created["session"]["session_id"]
+
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "invalid-multi-attachment",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "do not partially admit"},
+                        {"type": "attachment", "attachment_id": "att_missing_one"},
+                        {"type": "attachment", "attachment_id": "att_missing_two"},
+                    ]
+                },
+            },
+            match_info={"session_id": session_id},
+        )
+    )
+
+    assert response.status == 404
+    assert runtime.enqueue_request_calls == 0
+    assert server.session_store.messages(session_id, owner_id="user:7") == []
 
 
 @pytest.mark.asyncio
@@ -765,6 +918,7 @@ async def test_session_api_cancel_and_attachment_controls(tmp_path):
     )
     assert cancelled["run"]["state"] == "stopped"
 
+    body = b"proof"
     staged = json.loads(
         (
             await server.handle_v1_attachment_stage(
@@ -772,14 +926,25 @@ async def test_session_api_cancel_and_attachment_controls(tmp_path):
                     {
                         "filename": "proof.txt",
                         "media_type": "text/plain",
-                        "size_bytes": 5,
-                        "sha256": "e" * 64,
+                        "size_bytes": len(body),
+                        "sha256": hashlib.sha256(body).hexdigest(),
                     },
                     match_info={"session_id": session_id},
                 )
             )
         ).text
     )["attachment"]
+    uploaded = await server.handle_v1_attachment_upload(
+        _Request(
+            match_info={
+                "session_id": session_id,
+                "attachment_id": staged["attachment_id"],
+            },
+            headers={"Content-Type": "text/plain"},
+            body=body,
+        )
+    )
+    assert uploaded.status == 200
     committed = json.loads(
         (
             await server.handle_v1_attachment_commit(
