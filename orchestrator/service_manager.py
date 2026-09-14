@@ -393,6 +393,7 @@ class ServiceManager:
             global_cfg.authorized_id,
             self.kernel.skill_manager,
             orchestrator=self.kernel,
+            timezone_name=getattr(global_cfg, "timezone", None),
             **self._scheduler_enterprise_lease_kwargs(global_cfg),
         )
         self.kernel.scheduler_task = asyncio.create_task(self.kernel.scheduler.run(), name="scheduler")

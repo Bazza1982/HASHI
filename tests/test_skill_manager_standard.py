@@ -426,9 +426,11 @@ def test_retired_cron_effort_is_discarded_on_upsert_transfer_and_import(
         enabled=True,
         note="Nightly report",
         her_v2_effort="HIGH",
+        timezone_name="Australia/Sydney",
     )
 
     assert "her_v2_effort" not in created
+    assert created["timezone"] == "Australia/Sydney"
     transferred, _message, transferred_job = manager.transfer_job(
         "cron",
         "nightly-report",
@@ -437,6 +439,7 @@ def test_retired_cron_effort_is_discarded_on_upsert_transfer_and_import(
     assert transferred is True
     assert transferred_job is not None
     assert "her_v2_effort" not in transferred_job
+    assert transferred_job["timezone"] == "Australia/Sydney"
 
     remote_root = tmp_path / "remote"
     remote_manager = SkillManager(remote_root, remote_root / "tasks.json")
@@ -448,6 +451,10 @@ def test_retired_cron_effort_is_discarded_on_upsert_transfer_and_import(
     assert imported is True, import_message
     assert "her_v2_effort" not in remote_manager.get_job(
         "cron", transferred_job["id"]
+    )
+    assert (
+        remote_manager.get_job("cron", transferred_job["id"])["timezone"]
+        == "Australia/Sydney"
     )
 
 

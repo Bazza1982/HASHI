@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import replace
@@ -188,6 +189,32 @@ class HERv2Adapter(BaseBackend):
     def _runtime_context(self) -> Any:
         return getattr(self.config, "_hashi_runtime", None)
 
+    def _execution_owner(self) -> dict[str, Any]:
+        runtime = self._runtime_context()
+        metadata = dict(getattr(runtime, "_worker_version_metadata", None) or {})
+        pid = max(1, int(metadata.get("pid") or os.getpid()))
+        started_at = str(metadata.get("started_at") or time.time_ns())
+        facts = {
+            "instance_id": str(getattr(self.global_config, "instance_id", "") or ""),
+            "agent": str(getattr(self.config, "name", "") or ""),
+            "pid": pid,
+            "generation_id": str(metadata.get("generation_id") or "direct"),
+            "started_at": started_at,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                facts,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "owner_id": f"hashi-function-worker:{digest}",
+            "pid": pid,
+            "started_at": started_at,
+        }
+
     def _backend_manager(self) -> Any:
         runtime = self._runtime_context()
         return getattr(runtime, "backend_manager", None)
@@ -207,11 +234,7 @@ class HERv2Adapter(BaseBackend):
             # Maintenance jobs and legacy non-fixed requests have no fixed
             # Session authority to project into.
             return
-        self._session_coordinator.store.record_runtime_event(
-            session_id=accepted.session_id,
-            turn_id=accepted.turn_id,
-            record=record,
-        )
+        self._session_coordinator.record_runtime_event(accepted, record)
 
     def _wip_journal_for_request(
         self,
@@ -847,8 +870,14 @@ class HERv2Adapter(BaseBackend):
                         )
 
             state_root = Path(self.config.workspace_dir) / "backend_state" / "her_v2"
-            self._session_coordinator = HerBackendSessionCoordinator(state_root)
-            reconciled_sessions = self._session_coordinator.store.reconcile_interrupted()
+            self._session_coordinator = HerBackendSessionCoordinator(
+                state_root,
+                execution_owner=self._execution_owner(),
+            )
+            reconciled_turns = (
+                self._session_coordinator.reconcile_interrupted_turns()
+            )
+            reconciled_sessions = len(reconciled_turns)
             if reconciled_sessions:
                 self.logger.warning(
                     "HER v2 retained %s session(s) while failing interrupted turns safely.",
@@ -870,7 +899,17 @@ class HERv2Adapter(BaseBackend):
                 canonical_observer=self._observe_canonical_audit,
             )
             self._audit_log.replay_fallback()
-            reconciled = self._ledger_store.reconcile_interrupted()
+            # The ledger is a shadow of the canonical Turn owner.  Reconcile
+            # only request refs whose canonical owner was confirmed dead;
+            # another live Worker's ledgers remain immutable to this candidate.
+            reconciled_request_refs = {
+                f"hashi-request:{row['request_id']}"
+                for row in reconciled_turns
+                if str(row.get("request_id") or "")
+            }
+            reconciled = self._ledger_store.reconcile_interrupted(
+                request_refs=reconciled_request_refs,
+            )
             for ledger in reconciled:
                 self._audit_log.append(
                     event_id=f"{ledger.turn_id}:restart-reconciliation",
@@ -2110,7 +2149,13 @@ class HERv2Adapter(BaseBackend):
             recovery_disposition = str(
                 recovery_state.get("recovery_disposition") or ""
             )
-            if recovery_disposition == "UNKNOWN_SIDE_EFFECT":
+            unresolved_side_effects = (
+                self._session_coordinator.store.unresolved_side_effects_for_turn(
+                    fixed_turn.session_id,
+                    fixed_turn.turn_id,
+                )
+            )
+            if unresolved_side_effects:
                 technical_error = True
                 terminal_error_code = "UNKNOWN_SIDE_EFFECT"
                 error = (
@@ -2122,6 +2167,7 @@ class HERv2Adapter(BaseBackend):
                     "code": terminal_error_code,
                     "description": error[error.index("]") + 1 :].strip(),
                 }
+                recovery_disposition = "UNKNOWN_SIDE_EFFECT"
             durable = self._session_coordinator.store.session(
                 fixed_turn.session_id
             ) or {}

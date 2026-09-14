@@ -78,6 +78,52 @@ def _write_base_files(tmp_path, agent):
     return config_path, secrets_path
 
 
+def _minimal_flex_agent():
+    return {
+        "name": "flexy",
+        "type": "flex",
+        "workspace_dir": "workspaces/flexy",
+        "system_md": "workspaces/flexy/agent.md",
+        "allowed_backends": ["gemini-cli"],
+        "active_backend": "gemini-cli",
+    }
+
+
+def test_global_timezone_uses_explicit_iana_name(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        _minimal_flex_agent(),
+    )
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["global"]["timezone"] = "Australia/Sydney"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    global_cfg, _, _ = ConfigManager(
+        config_path,
+        secrets_path,
+        bridge_home=tmp_path,
+    ).load()
+
+    assert global_cfg.timezone == "Australia/Sydney"
+
+
+def test_invalid_global_timezone_is_rejected(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        _minimal_flex_agent(),
+    )
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["global"]["timezone"] = "Sydney-local-time"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unknown IANA timezone"):
+        ConfigManager(
+            config_path,
+            secrets_path,
+            bridge_home=tmp_path,
+        ).load()
+
+
 def test_missing_agent_type_is_rejected(tmp_path):
     config_path, secrets_path = _write_base_files(
         tmp_path,

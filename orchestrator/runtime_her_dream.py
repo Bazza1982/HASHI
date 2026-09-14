@@ -7,7 +7,6 @@ import json
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +16,10 @@ from adapters import her_dream, her_habits, her_persona
 from orchestrator import runtime_her_habits, ui_language
 from orchestrator.command_ui import card_title, refresh_label, status_label
 from orchestrator.scheduler import next_cron_occurrence, validate_cron_schedule
+from orchestrator.timezone_policy import (
+    UTC_TIMEZONE_NAME,
+    canonical_timezone_name,
+)
 
 DREAM_JOB_ACTION = "her:dream"
 DREAM_DEFAULT_SCHEDULE = "30 2 * * *"
@@ -78,6 +81,7 @@ def migrate_legacy_schedule(runtime: Any) -> dict[str, Any]:
         agent_name=runtime.name,
         new_task_id=_job_id(runtime),
         backend_is_her=adapter is not None,
+        default_timezone_name=_runtime_timezone_name(runtime),
     )
     if result.get("changed"):
         _journal(runtime, adapter).append_audit(
@@ -99,19 +103,31 @@ def _legacy_migration_notice(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _timezone_label() -> str:
-    local = datetime.now().astimezone()
-    offset = local.strftime("%z")
-    formatted_offset = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
-    return f"{local.tzname() or 'local'} (UTC{formatted_offset})"
+def _runtime_timezone_name(runtime: Any, job: dict[str, Any] | None = None) -> str:
+    return canonical_timezone_name(
+        (job or {}).get("timezone")
+        or getattr(getattr(runtime, "global_config", None), "timezone", None)
+        or UTC_TIMEZONE_NAME
+    )
 
 
-def _next_run_text(job: dict[str, Any] | None) -> str:
+def _timezone_label(timezone_name: str) -> str:
+    return canonical_timezone_name(timezone_name)
+
+
+def _next_run_text(
+    job: dict[str, Any] | None,
+    *,
+    timezone_name: str,
+) -> str:
     if not job or not job.get("enabled"):
         return ui_language.tr("common.disabled_state")
     schedule = str(job.get("schedule") or job.get("time") or "").strip()
     try:
-        return next_cron_occurrence(schedule).astimezone().isoformat(timespec="minutes")
+        return next_cron_occurrence(
+            schedule,
+            timezone_name=timezone_name,
+        ).isoformat(timespec="minutes")
     except ValueError as exc:
         return ui_language.tr("dream.next_unsupported", reason=str(exc))
 
@@ -138,6 +154,7 @@ def _status_view(
         _latest_undo_choices(journal) if adapter is not None else ("none", [])
     )
     enabled = bool(job and job.get("enabled"))
+    timezone_name = _runtime_timezone_name(runtime, job)
     schedule = str(
         (job or {}).get("schedule")
         or (job or {}).get("time")
@@ -150,8 +167,8 @@ def _status_view(
         f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
         f"<code>{html.escape(_active_engine(runtime) or ui_language.tr('common.unknown'))}</code>",
         f"<b>{html.escape(ui_language.tr('common.schedule'))}</b> · <code>{html.escape(schedule)}</code>",
-        f"<b>{html.escape(ui_language.tr('dream.timezone'))}</b> · <code>{html.escape(_timezone_label())}</code>",
-        f"<b>{html.escape(ui_language.tr('dream.next_run'))}</b> · <code>{html.escape(_next_run_text(job))}</code>",
+        f"<b>{html.escape(ui_language.tr('dream.timezone'))}</b> · <code>{html.escape(_timezone_label(timezone_name))}</code>",
+        f"<b>{html.escape(ui_language.tr('dream.next_run'))}</b> · <code>{html.escape(_next_run_text(job, timezone_name=timezone_name))}</code>",
         (
             f"<b>{html.escape(ui_language.tr('dream.latest_run'))}</b> · "
             f"<code>{html.escape(str((latest or {}).get('run_id') or ui_language.tr('dream.none')))}</code> · "
@@ -283,6 +300,7 @@ def _upsert_schedule(
         action=DREAM_JOB_ACTION,
         enabled=enabled,
         note=f"[HER Dream] Habit maintenance for {runtime.name}",
+        timezone_name=_runtime_timezone_name(runtime),
     )
 
 

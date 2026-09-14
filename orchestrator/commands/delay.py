@@ -3,13 +3,17 @@ from __future__ import annotations
 import html
 import re
 import time
-from datetime import datetime
 from typing import Any
 
 from orchestrator import runtime_pending, runtime_session, ui_language
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator.command_ui import card_title
 from orchestrator.scheduler import MAX_DELAY_MINUTES
+from orchestrator.timezone_policy import (
+    UTC_TIMEZONE_NAME,
+    canonical_timezone_name,
+    format_epoch,
+)
 
 _DELAY_COMMAND_RE = re.compile(
     r"^/delay(?:@\w+)?(?:\s+(.*))?$",
@@ -91,11 +95,20 @@ def _format_remaining(due_at: float, *, now_ts: float | None = None) -> str:
     return f"{hours}h {minutes}m" if minutes else f"{hours}h"
 
 
-def _format_due(due_at: float) -> str:
-    return (
-        datetime.fromtimestamp(float(due_at))
-        .astimezone()
-        .strftime("%Y-%m-%d %H:%M:%S %Z")
+def _runtime_timezone_name(runtime: Any) -> str:
+    scheduler = runtime_pending.scheduler_for(runtime)
+    return canonical_timezone_name(
+        getattr(scheduler, "timezone_name", None)
+        or getattr(getattr(runtime, "global_config", None), "timezone", None)
+        or UTC_TIMEZONE_NAME
+    )
+
+
+def _format_due(due_at: float, *, timezone_name: str) -> str:
+    return format_epoch(
+        due_at,
+        timezone_name=timezone_name,
+        timespec="seconds",
     )
 
 
@@ -105,6 +118,7 @@ def _excerpt(text: str, limit: int = 140) -> str:
 
 
 def _list_text(runtime: Any, records: list[dict[str, Any]]) -> str:
+    timezone_name = _runtime_timezone_name(runtime)
     lines = [
         card_title("⏳", "Delayed messages"),
         "",
@@ -128,7 +142,7 @@ def _list_text(runtime: Any, records: list[dict[str, Any]]) -> str:
                         "delay.in",
                         remaining=f"<code>{_format_remaining(due_at)}</code>",
                     ),
-                    f"   <code>{html.escape(_format_due(due_at))}</code> · {prompt}",
+                    f"   <code>{html.escape(_format_due(due_at, timezone_name=timezone_name))}</code> · {prompt}",
                 ]
             )
     lines.extend(
@@ -292,7 +306,7 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
         update,
         ui_language.tr("delay.scheduled") + f"{duplicate}\n"
         f"<b>{html.escape(ui_language.tr('common.id'))}</b> · <code>{html.escape(str(record['id']))}</code>\n"
-        f"<b>{html.escape(ui_language.tr('common.due'))}</b> · <code>{html.escape(_format_due(float(record['due_at'])))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.due'))}</b> · <code>{html.escape(_format_due(float(record['due_at']), timezone_name=_runtime_timezone_name(runtime)))}</code>\n"
         f"{ui_language.tr('delay.effect')}",
     )
 
