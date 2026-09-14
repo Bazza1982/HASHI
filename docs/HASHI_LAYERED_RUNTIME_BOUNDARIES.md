@@ -200,6 +200,11 @@ Rules:
   Agent. `/reboot max` may also adopt it, but must never be a prerequisite.
 - A function change without a verified targeted adoption path is incomplete
   and must not be promoted.
+- Optional or native Function dependencies must run in a replaceable sidecar
+  or another explicitly isolated Function environment. Installing them into a
+  running Core interpreter is forbidden: it invalidates hot adoption and must
+  be rectified by restoring the Core environment, not normalized with a cold
+  restart.
 - A targeted reboot must never be widened or rejected because class members,
   signatures, fields, or other valid Python interfaces changed. Only an
   explicit `same` or `max` request may select multiple Agents.
@@ -337,9 +342,10 @@ Unexpected Worker failure is recovered from its last immutable generation and
 never by reloading Core.
 
 The exact Python and generation rules are normative in
-`docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`. A Python, dependency, platform-ABI,
-protected-Core source, Core API, or Function API change is a planned Core
-migration and is rejected by `/reboot` before lifecycle cutover.
+`docs/HASHI_PYTHON_RUNTIME_COMPATIBILITY.md`. A Core Python, Core dependency
+baseline, platform-ABI, protected-Core source, Core API, or Function API change
+is a planned Core migration and is rejected by `/reboot` before lifecycle
+cutover. A feature must not turn its optional dependencies into such a change.
 
 Function discovery is rooted to the checked-out project. A third-party module
 whose name happens to start with `tools.` or `orchestrator.` must never enter a

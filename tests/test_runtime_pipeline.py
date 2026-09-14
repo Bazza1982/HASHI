@@ -3245,11 +3245,15 @@ async def test_prepare_successful_response_does_not_mark_hidden_only_text_succes
 
 
 @pytest.mark.asyncio
-async def test_prepare_successful_response_blocks_dangling_tool_markup_globally():
+async def test_prepare_successful_response_delivers_tool_protocol_discussion_as_text():
     runtime = _runtime()
     item = _item(prompt="请汇报执行结果")
+    report = (
+        "Protocol review: inline `<｜DSML｜tool_calls><｜DSML｜invoke name=\"bash\">` "
+        "and `<tool_call>` examples are documentation, not executable authority."
+    )
     response = SimpleNamespace(
-        text='<｜DSML｜tool_calls><｜DSML｜invoke name="bash">',
+        text=report,
         stop_reason="end_turn",
         stream_metadata={"completion_status": "completed"},
     )
@@ -3261,13 +3265,17 @@ async def test_prepare_successful_response_blocks_dangling_tool_markup_globally(
         completion_path="foreground",
     )
 
-    assert "DSML" not in result.visible_text
-    assert "No related action is considered executed or complete" in result.visible_text
-    assert response.stop_reason == "no_final_text"
-    assert response.stream_metadata["completion_status"] == "incomplete"
-    assert response.stream_metadata["dangling_tool_markup_blocked"] is True
-    assert "DSML" not in runtime.transcripts[0]["core_raw"]
-    assert "DSML" not in runtime.listener_payloads[0]["text"]
+    expected_visible = f"wrapped:{report}"
+    assert result.display_text == report
+    assert result.visible_text == expected_visible
+    assert response.text == report
+    assert response.stop_reason == "end_turn"
+    assert response.stream_metadata == {"completion_status": "completed"}
+    assert runtime.success_marked is True
+    assert runtime.transcripts[0]["core_raw"] == report
+    assert runtime.transcripts[0]["visible_text"] == expected_visible
+    assert runtime.listener_payloads[0]["text"] == expected_visible
+    assert runtime.logger.messages == []
 
 
 def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):

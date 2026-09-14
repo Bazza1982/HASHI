@@ -266,9 +266,11 @@ stable process core
 ```
 
 Changes should be local, derived from a single fact owner, and replaceable with
-`/reboot` when they are functional. Python, dependencies, Core sources and
-protocol/API versions require a planned Core migration. In-process module
-reload is forbidden. Contributor workflow and required checks are in
+`/reboot` when they are functional. The Core Python/runtime baseline, protected
+Core sources and Core protocol/API versions require a planned Core migration.
+Optional Function dependencies remain outside that baseline in replaceable
+sidecars, so feature work never acquires a cold-restart requirement. In-process
+module reload is forbidden. Contributor workflow and required checks are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Shared Frontend Function ingress for Telegram and the Backend API sends slash control through the

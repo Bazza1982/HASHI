@@ -16,10 +16,11 @@ compatibility shim.
 
 ## Feature extras
 
-These commands assume a source checkout and an environment being prepared
-for that feature profile. The published Python artifact contains the extracted
+These commands assume a source checkout and a disposable environment being
+prepared for that feature profile. They must not target the interpreter of a
+running HASHI instance. The published Python artifact contains the extracted
 Nagare/Flow packages, not the full HASHI application. The runtime contract
-still applies; do not modify dependencies in a running instance's environment.
+still applies; native Function profiles use their owning isolated sidecar.
 See [installation](INSTALL.md) and [distribution scope](RELEASES.md).
 
 Install one or combine several extras in one command, for example:
@@ -47,3 +48,21 @@ python -m pip install -e ".[media,remote]"
 System executables and model files remain separate from Python packages. For
 example, FFmpeg, browser binaries, local TTS models, and vector model weights
 must still be installed or supplied when their selected feature requires them.
+
+### Isolated transcription runtime
+
+Local transcription may be added or upgraded while HASHI is online only in a
+separate Python environment. Point the Function layer at that interpreter with
+`HASHI_TRANSCRIPTION_PYTHON` or the instance-private file
+`state/platform/transcription.json`:
+
+```json
+{
+  "python": "C:\\path\\to\\transcription-runtime\\Scripts\\python.exe"
+}
+```
+
+Prepare that environment from `constraints/transcription-py312.lock`; never
+install the lock into the running Core environment. `VoiceTranscriber` starts
+the generation-pinned helper lazily and exchanges only versioned JSON over
+stdio. Closing the Function Worker closes the pipe and retires the helper.

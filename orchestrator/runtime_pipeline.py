@@ -85,19 +85,6 @@ def observe_terminal_response(runtime, item, response) -> None:
     )
 
 
-_DANGLING_TOOL_MARKERS = (
-    "<｜dsml｜tool_calls",
-    "<｜｜dsml｜｜tool_calls",
-    "<｜dsml｜invoke",
-    "<｜｜dsml｜｜invoke",
-    "<|dsml|tool_calls",
-    "<||dsml||tool_calls",
-    "<|dsml|invoke",
-    "<||dsml||invoke",
-    "<tool_call>",
-)
-
-
 def _canonical_record(
     runtime,
     event_type: str,
@@ -369,20 +356,6 @@ def _her_event_suppression_reason(event) -> str:
         if separator and key == "suppressed_reason":
             return value.strip()
     return ""
-
-
-def _contains_dangling_tool_markup(text: Any) -> bool:
-    normalized = str(text or "").lower()
-    visible = "\n".join(normalized.split("```")[::2])
-    return any(marker in visible for marker in _DANGLING_TOOL_MARKERS)
-
-
-def _safe_blocked_tool_markup_final(runtime, item) -> str:
-    locale = ui_language.preferred_locale(
-        runtime,
-        actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),
-    )
-    return ui_language.tr("safety.dangling_tool", locale=locale)
 
 
 def queued_elapsed_s(item) -> float:
@@ -3047,27 +3020,6 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             item,
             display_text or response.text,
         )
-        if _contains_dangling_tool_markup(response.text) or _contains_dangling_tool_markup(
-            visible_text
-        ):
-            fallback = _safe_blocked_tool_markup_final(runtime, item)
-            runtime.logger.error(
-                f"Blocked dangling tool markup at the final delivery boundary: request={item.request_id}"
-            )
-            response.text = fallback
-            response.stop_reason = "no_final_text"
-            metadata = getattr(response, "stream_metadata", None)
-            metadata = dict(metadata) if isinstance(metadata, dict) else {}
-            metadata.update(
-                {
-                    "completion_status": "incomplete",
-                    "completion_stop_reason": "no_final_text",
-                    "dangling_tool_markup_blocked": True,
-                }
-            )
-            response.stream_metadata = metadata
-            display_text = fallback
-            visible_text = fallback
         visible_text = normalize_user_visible_paths(visible_text)
     has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
     if not visible_text.strip() and not has_typed_audio:

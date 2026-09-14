@@ -187,6 +187,11 @@ The Engine returns typed activity, capability, evidence, usage, pending-input,
 failure, and terminal events. Unstructured provider-specific state must not
 cross this boundary as authority.
 
+Terminal reply text is inert data at the PAO delivery boundary. PAO must not
+scan it for provider Tool syntax or reinterpret it as an invocation; only typed
+Engine events can carry Tool control. Provider-specific protocol validation
+stays inside the Engine or its Adapter before a terminal result is returned.
+
 ### 6.3 PAO to Frontend Connectors
 
 PAO exposes authenticated discovery, Conversation Sessions, Messages, Runs,
