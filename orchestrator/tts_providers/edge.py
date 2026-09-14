@@ -1,10 +1,32 @@
 from __future__ import annotations
+import asyncio
 from pathlib import Path
 
-import edge_tts
-
 from orchestrator.tts_providers.base import BaseTTSProvider
+from orchestrator.voice_synthesis_runtime import (
+    resolve_tts_python,
+    synthesize_edge_to_mp3,
+)
 from orchestrator.voice_synthesizer import VoiceAsset, convert_audio_to_ogg
+
+
+async def _synthesize_in_process(
+    text: str,
+    *,
+    voice: str,
+    rate: str,
+    output_path: Path,
+) -> None:
+    """Compatibility path for installations that keep Edge TTS in Functions."""
+
+    try:
+        import edge_tts
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Edge TTS is unavailable: configure an isolated TTS runtime"
+        ) from exc
+    communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+    await communicate.save(str(output_path))
 
 
 class EdgeTTSProvider(BaseTTSProvider):
@@ -32,12 +54,22 @@ class EdgeTTSProvider(BaseTTSProvider):
 
         rate_percent = int(provider_options.get("rate_percent", int(rate) * 10))
         rate_sign = "+" if rate_percent >= 0 else ""
-        communicate = edge_tts.Communicate(
-            text=spoken_text,
-            voice=voice,
-            rate=f"{rate_sign}{rate_percent}%",
-        )
-        await communicate.save(str(mp3_path))
+        rate_value = f"{rate_sign}{rate_percent}%"
+        if resolve_tts_python() is not None:
+            await asyncio.to_thread(
+                synthesize_edge_to_mp3,
+                spoken_text,
+                output_path=mp3_path,
+                voice=voice,
+                rate=rate_value,
+            )
+        else:
+            await _synthesize_in_process(
+                spoken_text,
+                voice=voice,
+                rate=rate_value,
+                output_path=mp3_path,
+            )
         if not mp3_path.exists():
             raise RuntimeError("Edge TTS did not produce an audio file.")
 

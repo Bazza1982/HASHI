@@ -31,6 +31,7 @@ from remote.exchange_outbox import (
     OutboxRecord,
 )
 from remote.exchange_protocol import (
+    AUTHORIZED_ROUTES_CAPABILITY,
     CAPABILITIES,
     MAX_FRAME_BYTES,
     SUBPROTOCOL,
@@ -41,6 +42,7 @@ from remote.exchange_protocol import (
     parse_timestamp,
     publish_frame,
     resolve_frame,
+    routes_frame,
     send_frame,
     utc_timestamp,
     validate_delivery_deadline,
@@ -96,6 +98,13 @@ class ExchangeTransport:
         self._last_error_code: str | None = None
         self._connected_at: float | None = None
         self._last_outbox_purge = 0.0
+        self._negotiated_capabilities: set[str] = set()
+        self._authorized_routes: list[dict[str, Any]] = []
+        self._routes_grant_revision: int | None = None
+        self._routes_refreshed_at: str | None = None
+        self._routes_observed_at: float | None = None
+        self._routes_stale = False
+        self._routes_supported: bool | None = None
 
     @property
     def enabled(self) -> bool:
@@ -136,13 +145,16 @@ class ExchangeTransport:
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
         self._fail_waiters("EXCHANGE_STOPPED")
+        if self._routes_supported:
+            self._routes_stale = True
 
     def status(self) -> dict[str, Any]:
         config = self._config
+        connected = bool(self._ready_event.is_set())
         return {
             "ok": True,
             "enabled": bool(config and config.enabled),
-            "connected": bool(self._ready_event.is_set()),
+            "connected": connected,
             "state": (
                 "ready"
                 if self._ready_event.is_set()
@@ -154,12 +166,32 @@ class ExchangeTransport:
             ),
             "instance_alias": config.instance_alias if config else None,
             "published_agents": sorted(self._published_agents),
+            "endpoint": str(config.url) if config and config.url else None,
+            "instance_address": str(
+                (self._welcome or {}).get("instance_address") or ""
+            ) or None,
             "connection_epoch": (
                 str((self._welcome or {}).get("epoch") or "") or None
             ),
             "connected_at": self._connected_at,
             "last_error_code": self._last_error_code,
-            "capabilities": list(CAPABILITIES),
+            "capabilities": sorted(self._negotiated_capabilities),
+            "client_capabilities": list(CAPABILITIES),
+            "authorized_routes_supported": self._routes_supported,
+            "authorized_routes": [
+                {
+                    "to": dict(item["to"]),
+                    "message_kinds": list(item["message_kinds"]),
+                    "available": bool(item["available"]),
+                }
+                for item in self._authorized_routes
+            ],
+            "routes_grant_revision": self._routes_grant_revision,
+            "routes_refreshed_at": self._routes_refreshed_at,
+            "routes_observed_at": self._routes_observed_at,
+            "routes_stale": bool(self._routes_stale or (
+                not connected and self._authorized_routes
+            )),
         }
 
     async def _run_forever(self) -> None:
@@ -181,6 +213,9 @@ class ExchangeTransport:
                 self._welcome = None
                 self._connected_at = None
                 self._published_agents.clear()
+                self._negotiated_capabilities.clear()
+                if self._routes_supported:
+                    self._routes_stale = True
                 self._fail_waiters("EXCHANGE_RECONNECTING")
             if self._stop_event.is_set():
                 break
@@ -220,6 +255,12 @@ class ExchangeTransport:
 
     async def _connect_once(self) -> None:
         config, credential = self._current_config_and_token()
+        if (
+            self._config is not None
+            and config.connection_fingerprint()
+            != self._config.connection_fingerprint()
+        ):
+            self._clear_authorized_routes()
         self._config = config
         credential_digest = hashlib.sha256(credential.encode("utf-8")).hexdigest()
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
@@ -246,6 +287,15 @@ class ExchangeTransport:
                 if welcome.get("type") != "welcome":
                     raise ExchangeTransportError("WELCOME_REQUIRED")
                 self._validate_welcome(config, welcome)
+                negotiated = {
+                    str(value) for value in welcome.get("capabilities") or []
+                }
+                self._negotiated_capabilities = negotiated
+                if AUTHORIZED_ROUTES_CAPABILITY in negotiated:
+                    self._routes_supported = True
+                    self._routes_stale = True
+                else:
+                    self._clear_authorized_routes(supported=False)
                 records = published_agent_records(self.hashi_root, config)
                 max_agents = int(
                     (welcome.get("limits") or {}).get(
@@ -303,6 +353,11 @@ class ExchangeTransport:
                     name="hashi-exchange-outbox-recovery",
                 )
                 tasks = {reader, worker, watcher, recovery}
+                if AUTHORIZED_ROUTES_CAPABILITY in negotiated:
+                    tasks.add(asyncio.create_task(
+                        self._authorized_routes_loop(ws),
+                        name="hashi-exchange-authorized-routes",
+                    ))
                 try:
                     watched = set(tasks)
                     while watched:
@@ -397,7 +452,7 @@ class ExchangeTransport:
                     await ws.close(code=1013)
                     raise ExchangeTransportError("LOCAL_BACKPRESSURE") from exc
                 continue
-            if kind in {"resolved", "published"}:
+            if kind in {"resolved", "published", "authorized_routes"}:
                 request_id = str(frame.get("request_id") or "")
                 waiter = self._request_waiters.pop(request_id, None)
                 if waiter is not None and not waiter.done():
@@ -633,6 +688,52 @@ class ExchangeTransport:
             self._published_agents = {
                 str(item["agent_id"]) for item in records
             }
+            if AUTHORIZED_ROUTES_CAPABILITY in self._negotiated_capabilities:
+                await self._refresh_authorized_routes(ws)
+
+    def _clear_authorized_routes(self, *, supported: bool | None = None) -> None:
+        self._authorized_routes = []
+        self._routes_grant_revision = None
+        self._routes_refreshed_at = None
+        self._routes_observed_at = None
+        self._routes_stale = False
+        self._routes_supported = supported
+
+    async def _refresh_authorized_routes(
+        self, ws: aiohttp.ClientWebSocketResponse
+    ) -> None:
+        if AUTHORIZED_ROUTES_CAPABILITY not in self._negotiated_capabilities:
+            return
+        request_id = self._new_id("routes")
+        waiter = self._new_request_waiter(request_id)
+        try:
+            await self._send_frame(ws, routes_frame(request_id=request_id))
+            response = await asyncio.wait_for(waiter, timeout=5)
+        finally:
+            if self._request_waiters.get(request_id) is waiter:
+                self._request_waiters.pop(request_id, None)
+        if response.get("type") != "authorized_routes":
+            raise ExchangeTransportError("AUTHORIZED_ROUTES_REJECTED")
+        self._authorized_routes = [
+            {
+                "to": dict(item["to"]),
+                "message_kinds": list(item["message_kinds"]),
+                "available": bool(item["available"]),
+            }
+            for item in response["routes"]
+        ]
+        self._routes_grant_revision = int(response["grant_revision"])
+        self._routes_refreshed_at = str(response["refreshed_at"])
+        self._routes_observed_at = self.clock()
+        self._routes_stale = False
+        self._routes_supported = True
+
+    async def _authorized_routes_loop(
+        self, ws: aiohttp.ClientWebSocketResponse
+    ) -> None:
+        while not ws.closed:
+            await self._refresh_authorized_routes(ws)
+            await asyncio.sleep(5)
 
     def _new_request_waiter(self, request_id: str) -> asyncio.Future:
         if request_id in self._request_waiters:

@@ -36,12 +36,13 @@ active generation before claiming adoption. See
 
 ## State, configuration, and identity
 
-Read identity, Agents, ports, workspaces, endpoints, and model opt-ins from
-authoritative configuration, never folder names or memory. Keep local identity
-and credentials ignored. Model/effort opt-ins belong in `allowed_backends`;
-shared compatibility belongs in the Function-owned registry. The shipped
-Codex CLI default is `gpt-5.6-sol` at explicit `medium` effort; an explicit
-Agent selection remains authoritative until that model is retired.
+Read identities, Agents, ports, workspaces, endpoints, and model opt-ins from
+their authoritative configuration; never infer them from folder names or old
+memory. Keep local identity and credentials in ignored instance stores.
+Model/effort opt-ins belong in `allowed_backends`; shared compatibility belongs
+in the Function-owned registry. The shipped Codex CLI default is `gpt-5.6-sol`
+at explicit `medium` effort; an explicit Agent selection remains authoritative
+until that model is retired.
 
 Personal instances/new Agents default to the open Tool wildcard unless an
 instance override or backend `tools.enabled=false` applies. It is permission,
@@ -119,13 +120,13 @@ estimate, and cache/reasoning/reported zero remain distinct. Never render
 partial or unknown cost as complete `$0.0000`. See
 [metering](METER_COST_DISPLAY_PLAN.md).
 
-Provider adapters validate a complete tool-call batch before side effects.
-Malformed arguments remain within the current unfinished interaction for its
-bounded recovery policy; malformed tools execute zero times and completed
-tools are never replayed. Preserve provider-native required assistant fields,
-the original finish/error signal, request identity, and actual retry count.
-Normal tool continuation is not a retry, and a model sentence saying “stop” is
-not a structured stop signal.
+Adapters validate a tool batch before effects; malformed calls execute
+zero times and completed calls never replay. Bounded repair preserves
+Provider fields, finish/error, identity and retry count. DeepSeek uses native
+calls; only complete official V3.2/V4/V4.1 DSML with advertised,
+schema-valid tools may be recovered. Degraded intent is hidden and
+must obtain native repair; prose cannot complete it. Continuation is not retry,
+and model text saying “stop” is not a structured stop.
 
 Capture provider evidence at real I/O before parsing: request, response prefix,
 parse, tool effect, recovery, terminal state, and receipt share one correlation
@@ -181,6 +182,8 @@ Session/context change, or disabling it sends nothing. The reserved transport
 derives authority/current primary Session inside the Worker; its envelope never
 carries transcript, owner, Session, or delivery policy.
 
+STT dependencies never enter Core; use its provisioner.
+
 ## Move, Clone, jobs, and tools
 
 `/move` migrates; `/clone` clones. Both use the same authenticated package,
@@ -198,9 +201,9 @@ operator chooses an archived read-only view or independent context copy; both
 use new IDs and provenance. On `history_generation` change, replace the
 projection—never substitute a legacy workspace transcript.
 
-Remote discovery supplies bounded route hints, not trust; full data needs a
-mutual handshake. Distinguish `ready_empty`, `ready`, `starting`, `degraded`,
-and static fallback. Token changes require re-handshake; never expose tokens.
+`/remote` separates Direct/LAN from Exchange; discovery is not trust.
+Connected Exchange shows only granted routes. Never merge transports/hidden
+policy; local status remains HMAC-protected.
 
 Telegram recovery binds the exact instance, Agent lifecycle, and fingerprinted
 Bot—not a reusable name or token label. Quarantine mismatches without sending.

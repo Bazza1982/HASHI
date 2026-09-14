@@ -35,7 +35,7 @@ EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS = 900.0
 def _external_python() -> str:
     """Resolve an optional isolated transcription interpreter.
 
-    Native transcription packages are Function dependencies.  Instances that
+    Native transcription packages are Function dependencies. Instances that
     keep them outside the stable HASHI runtime point at that environment here;
     no package from it is imported into the Function Worker.
     """
@@ -217,9 +217,13 @@ class VoiceTranscriber:
             if not line.startswith(voice_transcription_worker.RESULT_PREFIX):
                 continue
             try:
-                payload = json.loads(line[len(voice_transcription_worker.RESULT_PREFIX) :])
+                payload = json.loads(
+                    line[len(voice_transcription_worker.RESULT_PREFIX) :]
+                )
             except json.JSONDecodeError as exc:
-                raise RuntimeError("isolated transcription worker returned invalid JSON") from exc
+                raise RuntimeError(
+                    "isolated transcription worker returned invalid JSON"
+                ) from exc
             if not isinstance(payload, dict):
                 raise RuntimeError("isolated transcription worker returned an invalid result")
             if payload.get("version") != voice_transcription_worker.PROTOCOL_VERSION:

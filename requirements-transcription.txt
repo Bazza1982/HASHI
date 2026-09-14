@@ -1,0 +1,5 @@
+# Isolated local speech-to-text helper. Never install this file into the
+# long-lived HASHI Core environment.
+faster-whisper==1.2.1
+ctranslate2==4.7.1
+av==17.0.0

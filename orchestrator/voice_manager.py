@@ -12,6 +12,7 @@ from typing import Callable
 from orchestrator import ui_language
 from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.tts_providers import build_provider, list_provider_names
+from orchestrator.voice_synthesis_runtime import isolated_tts_configured
 from orchestrator.voice_synthesizer import VoiceAsset
 from orchestrator.command_ui import setting_card
 
@@ -266,7 +267,11 @@ class VoiceManager:
         if name == "windows":
             return "installed"
         if name == "edge":
-            return "installed" if importlib.util.find_spec("edge_tts") else "not installed"
+            return (
+                "installed"
+                if isolated_tts_configured() or importlib.util.find_spec("edge_tts")
+                else "not installed"
+            )
         if name == "piper":
             exe = self._default_piper_exe()
             executable_available = Path(exe).is_file() or shutil.which(exe) is not None

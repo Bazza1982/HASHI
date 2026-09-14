@@ -565,6 +565,29 @@ def _format_provider_names(
     return " + ".join(names)
 
 
+def _format_model_names(
+    receipt: UsageReceipt,
+    *,
+    locale: str | None,
+) -> str:
+    """Render every observed model once, preserving physical call order."""
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in receipt.line_items:
+        model = str(getattr(item, "model", "") or "").strip()
+        if not model:
+            continue
+        dedupe_key = model.casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        names.append(model)
+    if not names:
+        return _translate("meter.tail.model.unknown", locale=locale)
+    return " + ".join(names)
+
+
 def _format_receipt_lines(
     receipt: UsageReceipt,
     *,
@@ -631,6 +654,11 @@ def _format_receipt_lines(
         "meter.tail.provider",
         locale=locale,
         providers=_format_provider_names(receipt, locale=locale),
+    )
+    cost_line += _translate(
+        "meter.tail.model",
+        locale=locale,
+        models=_format_model_names(receipt, locale=locale),
     )
 
     cache_hit = receipt.prompt_cache_hit_tokens

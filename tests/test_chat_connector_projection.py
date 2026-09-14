@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -63,7 +64,8 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     workspace.mkdir(parents=True, exist_ok=True)
     path = workspace / "transcript.jsonl"
     first = json.dumps({"role": "user", "text": "重复", "ts": "2026-09-12T09:00:00.123456+00:00"}, ensure_ascii=False) + "\n"
-    path.write_text(first + first, encoding="utf-8")
+    encoded_first = first.encode("utf-8")
+    path.write_bytes(encoded_first + encoded_first)
     request = SimpleNamespace(match_info={"name": "a"}, query={})
     payload = json.loads((await server.handle_transcript_recent(request)).text)
     assert payload["session_id"] == session["session_id"]
@@ -72,8 +74,15 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     assert len(set(refs)) == 3
     assert payload["messages"][0]["text"] == "hello"
     assert payload["messages"][0]["canonical"] is True
-    poll = SimpleNamespace(match_info={"name": "a"}, query={"offset": str(len(first.encode()))})
+    # Exercise recovery from an explicitly invalid byte cursor on every OS.
+    # Path.write_text() newline translation previously made this invalid only
+    # on Windows and a valid record boundary on Linux.
+    poll = SimpleNamespace(
+        match_info={"name": "a"},
+        query={"offset": str(len(encoded_first) - 1)},
+    )
     increment = json.loads((await server.handle_transcript_poll(poll)).text)
+    assert increment["cursor_reset"] is True
     assert increment["messages"][0]["message_ref"] == refs[1]
     assert payload["requests"][0]["request_id"] == accepted.request_id
     assert payload["requests"][0]["session_id"] == session["session_id"]
@@ -261,6 +270,7 @@ def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_p
             },
             {
                 "type": "media",
+                "attachment_id": "attachment-photo",
                 "modality": "image",
                 "kind": "photo",
                 "mime_type": "image/jpeg",
@@ -290,12 +300,14 @@ def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_p
     assert user["text"] == "look here"
     assert user["attachments"] == [
         {
+            "attachment_id": "attachment-photo",
             "modality": "image",
             "kind": "photo",
             "mime_type": "image/jpeg",
             "filename": "photo.jpg",
             "caption": "look here",
             "size_bytes": 123,
+            "message_id": accepted.message_id,
         }
     ]
     assert "local_ref" not in user["attachments"][0]
@@ -304,6 +316,102 @@ def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_p
     assert answer["run_id"] == accepted.run_id
     assert answer["kind"] == "final"
     assert answer["created_at"] == answer["ts"]
+
+
+@pytest.mark.asyncio
+async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
+    tmp_path: Path,
+):
+    server = _server(tmp_path)
+    media_root = tmp_path / "media"
+    agent_media = media_root / "a"
+    agent_media.mkdir(parents=True)
+    payload = b"\x89PNG\r\n\x1a\nworkbench-preview"
+    image = agent_media / "photo.png"
+    image.write_bytes(payload)
+    server.global_config.base_media_dir = media_root
+    server._runtime_map = lambda: {"a": SimpleNamespace(media_dir=agent_media)}
+    session = server.session_store.ensure_default_session(
+        owner_id="user:7", agent_id="a"
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="image-preview",
+        text="photo",
+        source="photo",
+        idempotency_key="image-preview",
+        content=[
+            {
+                "type": "media",
+                "attachment_id": "attachment-image",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": "photo.png",
+                "local_ref": str(image),
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        ],
+    )
+    request = SimpleNamespace(
+        match_info={
+            "name": "a",
+            "message_id": accepted.message_id,
+            "attachment_id": "attachment-image",
+        },
+        headers={},
+    )
+
+    response = await server.handle_transcript_attachment(request)
+
+    assert response.status == 200
+    assert response.body == payload
+    assert response.content_type == "image/png"
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert "local_ref" not in response.headers
+
+    image.rename(tmp_path / "escaped.png")
+    missing = await server.handle_transcript_attachment(request)
+    assert missing.status == 404
+
+    escaped_image = tmp_path / "escaped.png"
+    escaped_payload = escaped_image.read_bytes()
+    escaped_run = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="escaped-preview",
+        text="outside photo",
+        source="photo",
+        idempotency_key="escaped-preview",
+        content=[
+            {
+                "type": "media",
+                "attachment_id": "attachment-escaped",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": "escaped.png",
+                "local_ref": str(escaped_image),
+                "size_bytes": len(escaped_payload),
+                "sha256": hashlib.sha256(escaped_payload).hexdigest(),
+            }
+        ],
+    )
+    escaped_request = SimpleNamespace(
+        match_info={
+            "name": "a",
+            "message_id": escaped_run.message_id,
+            "attachment_id": "attachment-escaped",
+        },
+        headers={},
+    )
+    escaped = await server.handle_transcript_attachment(escaped_request)
+    assert escaped.status == 409
+    assert str(escaped_image) not in escaped.text
 
 
 def test_projection_message_cursor_streams_presentation_only_messages(tmp_path: Path):

@@ -130,3 +130,26 @@ import orchestrator.scheduler
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_transcription_native_packages_have_a_separate_pinned_runtime():
+    helper_input = _keys(
+        _requirements_file(ROOT / "requirements-transcription.txt")
+    )
+    helper_lock = _keys(
+        _requirements_file(ROOT / "constraints" / "transcription-py312.lock")
+    )
+    standard_input = _keys(_requirements_file(ROOT / "requirements.txt"))
+    standard_lock = _keys(
+        _requirements_file(ROOT / "constraints" / "standard-py312.lock")
+    )
+
+    required = {
+        _requirement_key("faster-whisper==1.2.1"),
+        _requirement_key("ctranslate2==4.7.1"),
+        _requirement_key("av==17.0.0"),
+    }
+    assert helper_input == required
+    assert required <= helper_lock
+    assert not {key[0] for key in required} & {key[0] for key in standard_input}
+    assert not {key[0] for key in required} & {key[0] for key in standard_lock}

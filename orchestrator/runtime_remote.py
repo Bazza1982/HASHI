@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+import aiohttp
 
 from orchestrator import remote_lifecycle, runtime_pending, ui_language
 from orchestrator.agent_move.manager import record_agent_move_admin_outcome
@@ -25,9 +26,58 @@ from orchestrator.agent_move.coordinator import (
 from orchestrator.agent_move.package import AgentMoveError
 from orchestrator.agent_move.source_guard import source_move_guard_state
 from orchestrator.command_ui import back_label, card_title, status_label
+from remote.peer.base import normalize_instance_id
+from remote.security.client_auth import build_client_auth_headers
+from remote.security.shared_token import load_shared_token
 
 _TELEGRAM_CALLBACK_DATA_BYTES = 64
 _MOVE_CALLBACK_CONTEXT_LIMIT = 128
+
+
+async def fetch_exchange_status(
+    runtime: Any,
+    cfg: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Read the protected loopback projection; never expose its shared token."""
+
+    try:
+        shared_token = load_shared_token(cfg["root"])
+    except (OSError, ValueError):
+        shared_token = None
+    instance_id = normalize_instance_id(
+        getattr(getattr(runtime, "global_config", None), "instance_id", None)
+    )
+    remote_urls = getattr(runtime, "_remote_urls", None)
+    if not shared_token or not instance_id or not callable(remote_urls):
+        return None, None
+    timeout = aiohttp.ClientTimeout(total=4)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for url in remote_urls("/exchange/status"):
+            try:
+                headers = build_client_auth_headers(
+                    url=url,
+                    method="GET",
+                    data=b"",
+                    token=None,
+                    shared_token=shared_token,
+                    from_instance=instance_id,
+                    normalize_instance=normalize_instance_id,
+                )
+                # This is an HMAC-authenticated hop to the instance's own
+                # loopback Remote sidecar. Its optional TLS cert may be local.
+                async with session.get(url, headers=headers, ssl=False) as response:
+                    value = await response.json(content_type=None)
+                    if isinstance(value, dict):
+                        if response.status in {401, 403}:
+                            value = {
+                                "ok": False,
+                                "state": "unavailable",
+                                "last_error_code": "LOCAL_STATUS_AUTH_FAILED",
+                            }
+                        return value, url
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                continue
+    return None, None
 
 
 def _move_callback_data(runtime: Any, raw: str) -> str:
@@ -994,6 +1044,146 @@ def _render_move_complete(result: dict[str, Any]) -> str:
     return "\n".join([body, *_render_move_review_notes(result)])
 
 
+def _route_instance_address(route: dict[str, Any]) -> str:
+    target = route.get("to") or {}
+    address = str(target.get("address") or "")
+    return address.split("@", 1)[1] if address.count("@") == 1 else "unknown"
+
+
+def render_exchange_status_lines(
+    status: dict[str, Any] | None,
+    *,
+    include_title: bool = True,
+) -> list[str]:
+    lines = [card_title("🌐", "Hashi exchange"), ""] if include_title else []
+    if not isinstance(status, dict):
+        lines.extend([
+            f"<b>{html.escape(ui_language.tr('common.status'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('remote.exchange.unavailable'))}</code>",
+            ui_language.tr("remote.exchange.local_status_unavailable"),
+        ])
+        return lines
+
+    enabled = bool(status.get("enabled"))
+    connected = bool(status.get("connected"))
+    error = str(status.get("last_error_code") or "").strip()
+    auth_errors = {
+        "AUTH_FAILED",
+        "PERMISSION_DENIED",
+        "WELCOME_IDENTITY_MISMATCH",
+        "LOCAL_STATUS_AUTH_FAILED",
+        "LOCAL_INGRESS_AUTH_UNAVAILABLE",
+    }
+    if connected:
+        marker = "🟢"
+        state = ui_language.tr("remote.exchange.connected_authorized")
+    elif not enabled or status.get("state") == "disabled":
+        marker = "⚪"
+        state = ui_language.tr("common.off")
+    elif error in auth_errors:
+        marker = "🔴"
+        state = ui_language.tr("remote.exchange.auth_error")
+    else:
+        marker = "🟡"
+        state = ui_language.tr("remote.exchange.reconnecting")
+    lines.append(
+        f"<b>{html.escape(ui_language.tr('common.status'))}</b> · {marker} "
+        f"<code>{html.escape(state)}</code>"
+    )
+    endpoint = str(status.get("endpoint") or "").strip()
+    if endpoint:
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('remote.exchange.endpoint'))}</b> · "
+            f"<code>{html.escape(endpoint)}</code>"
+        )
+    authority = str(status.get("authority_id") or "").strip()
+    identity = str(status.get("instance_address") or "").strip()
+    if authority:
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('remote.exchange.authority'))}</b> · "
+            f"<code>{html.escape(authority)}</code>"
+        )
+    if identity:
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('remote.exchange.identity'))}</b> · "
+            f"<code>{html.escape(identity)}</code>"
+        )
+    published = sorted({
+        str(value).strip() for value in status.get("published_agents") or []
+        if str(value).strip()
+    })
+    lines.append(
+        f"<b>{html.escape(ui_language.tr('remote.exchange.published'))}</b> · "
+        f"<code>{html.escape(', '.join(published) if published else 'none')}</code>"
+    )
+    if error and not connected:
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('remote.exchange.error'))}</b> · "
+            f"<code>{html.escape(error)}</code>"
+        )
+
+    supported = status.get("authorized_routes_supported")
+    routes = [
+        item for item in status.get("authorized_routes") or []
+        if isinstance(item, dict) and isinstance(item.get("to"), dict)
+    ][:100]
+    stale = bool(status.get("routes_stale"))
+    if supported is False:
+        lines.extend(["", ui_language.tr("remote.exchange.routes_unsupported")])
+        return lines
+    if supported is None and not routes:
+        if connected:
+            lines.extend(["", ui_language.tr("remote.exchange.routes_loading")])
+        return lines
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for route in routes:
+        grouped.setdefault(_route_instance_address(route), []).append(route)
+    available = sum(
+        1 for values in grouped.values()
+        if any(bool(item.get("available")) for item in values)
+    )
+    unavailable = len(grouped) - available
+    lines.extend([
+        "",
+        f"<b>{html.escape(ui_language.tr('remote.exchange.authorized_routes'))}</b>",
+        ui_language.tr(
+            "remote.exchange.route_counts",
+            available=f"<code>{available}</code>",
+            unavailable=f"<code>{unavailable}</code>",
+        ),
+    ])
+    if stale:
+        lines.append(ui_language.tr("remote.exchange.routes_stale"))
+    if not grouped:
+        lines.append(ui_language.tr("remote.exchange.routes_none"))
+    for instance_address in sorted(grouped):
+        values = grouped[instance_address]
+        is_available = any(bool(item.get("available")) for item in values)
+        marker = "🟢" if is_available and not stale else "⚪"
+        label = (
+            ui_language.tr("remote.exchange.available")
+            if is_available and not stale
+            else ui_language.tr("remote.exchange.unavailable")
+        )
+        lines.append(
+            f"{marker} {html.escape(label)} "
+            f"<code>{html.escape(instance_address)}</code>"
+        )
+        for route in sorted(
+            values,
+            key=lambda item: str((item.get("to") or {}).get("agent_id") or ""),
+        ):
+            target = route.get("to") or {}
+            agent = str(target.get("agent_id") or "unknown")
+            kinds = [str(value) for value in route.get("message_kinds") or []]
+            lines.append(
+                f"  • <code>{html.escape(agent)}</code> · "
+                f"<code>{html.escape(', '.join(kinds))}</code>"
+            )
+    return lines
+
+
 def render_remote_peer_lines(
     runtime: Any,
     peers: list[dict[str, Any]],
@@ -1008,23 +1198,23 @@ def render_remote_peer_lines(
             str(peer.get("instance_id") or ""),
         ),
     )
-    counts = {"online": 0, "attention": 0, "offline": 0}
+    counts = {"online": 0, "attention": 0, "unavailable": 0}
     for peer in peers:
-        rank, _presence, _state = runtime._remote_peer_presence(peer)
+        rank, _presence, state = runtime._remote_peer_presence(peer)
         if rank == 0:
             counts["online"] += 1
-        elif rank in {1, 2}:
+        elif rank in {1, 2} or state == "handshake_rejected":
             counts["attention"] += 1
         else:
-            counts["offline"] += 1
+            counts["unavailable"] += 1
     online_count = f"<code>{counts['online']}</code>"
-    lines = [card_title("📡", "Remote instances"), ""] if include_title else []
+    lines = [card_title("📡", "Direct / lan"), ""] if include_title else []
     lines.extend(
         [
             f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
             f"{ui_language.tr('remote.peers.online', count=online_count)}",
             f"<b>{html.escape(ui_language.tr('remote.peers.attention'))}</b> · <code>{counts['attention']}</code>",
-            f"<b>{html.escape(ui_language.tr('remote.peers.offline'))}</b> · <code>{counts['offline']}</code>",
+            f"<b>{html.escape(ui_language.tr('remote.direct.unavailable'))}</b> · <code>{counts['unavailable']}</code>",
         ]
     )
     if include_refreshed_at:
@@ -1034,9 +1224,23 @@ def render_remote_peer_lines(
         )
     lines.append("")
     if not peers:
-        lines.append(ui_language.tr("remote.peers.none"))
+        lines.append(ui_language.tr("remote.direct.none"))
     for idx, peer in enumerate(peers):
-        lines.extend(runtime._render_remote_peer_block(peer))
+        rank, _presence, state = runtime._remote_peer_presence(peer)
+        block = list(runtime._render_remote_peer_block(peer))
+        if block and rank >= 3:
+            instance_id = html.escape(str(peer.get("instance_id") or "unknown"))
+            if state == "handshake_rejected":
+                block[0] = (
+                    f"🔴 {html.escape(ui_language.tr('remote.direct.configuration_error'))} "
+                    f"<b>{instance_id}</b>"
+                )
+            else:
+                block[0] = (
+                    f"⚪ {html.escape(ui_language.tr('remote.exchange.unavailable'))} "
+                    f"<b>{instance_id}</b>"
+                )
+        lines.extend(block)
         if idx != len(peers) - 1:
             lines.append("")
     return lines
@@ -1446,10 +1650,18 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
     disabled = remote_lifecycle.read_disabled_state(cfg["root"])
     alive = runtime._remote_process is not None and runtime._remote_process.returncode is None
 
-    if arg == "status" or not arg:
+    if arg in {"", "status", "list", "refresh", "exchange", "direct"}:
         health, health_url = await runtime._fetch_remote_json("/health")
-        status, _status_url = await runtime._fetch_remote_json("/protocol/status")
+        direct_status, _status_url = await runtime._fetch_remote_json(
+            "/protocol/status"
+        )
         if not health:
+            if arg == "list":
+                await runtime._reply_text(
+                    update,
+                    ui_language.tr("remote.status.unavailable"),
+                )
+                return
             if alive:
                 await runtime._reply_text(
                     update,
@@ -1490,7 +1702,29 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
                 await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
         instance = health.get("instance") or {}
-        peers = list((health.get("peers") or []))
+        peer_data = health
+        if arg in {"list", "refresh", "direct"}:
+            refreshed, _peer_url = await runtime._fetch_remote_json("/peers")
+            if isinstance(refreshed, dict):
+                peer_data = refreshed
+        peers = list((peer_data.get("peers") or []))
+        exchange_status, _exchange_url = await fetch_exchange_status(runtime, cfg)
+        if arg == "exchange":
+            lines = render_exchange_status_lines(exchange_status)
+            lines.extend(["", ui_language.tr("remote.status.control_help")])
+            await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
+        if arg == "direct":
+            lines = render_remote_peer_lines(
+                runtime,
+                peers,
+                include_refreshed_at=True,
+            )
+            if peer_data.get("trusted_view") is False:
+                lines.extend(["", ui_language.tr("remote.status.untrusted")])
+            lines.extend(["", ui_language.tr("remote.status.control_help")])
+            await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
+            return
         lines = [
             card_title("📡", "Hashi remote"),
             "",
@@ -1506,9 +1740,9 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
                 f"{ui_language.tr('remote.status.disabled_reason')}: "
                 f"<code>{html.escape(str(disabled.get('reason') or ui_language.tr('common.unknown')))}</code>"
             )
-        if status:
-            shared_token = bool(status.get("shared_token_configured") or health.get("shared_token_configured"))
-            lan_mode = bool(status.get("lan_mode") if "lan_mode" in status else health.get("lan_mode"))
+        if direct_status:
+            shared_token = bool(direct_status.get("shared_token_configured") or health.get("shared_token_configured"))
+            lan_mode = bool(direct_status.get("lan_mode") if "lan_mode" in direct_status else health.get("lan_mode"))
             if not shared_token:
                 lines.append(
                     f"{ui_language.tr('remote.status.security')}: <code>discovery-only</code> — "
@@ -1519,7 +1753,7 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
                     f"{ui_language.tr('remote.status.security')}: <code>token ok</code>  ·  "
                     f"{ui_language.tr('remote.status.lan_relaxed')}: <code>on</code>"
                 )
-            route_diagnostics = status.get("route_diagnostics") or {}
+            route_diagnostics = direct_status.get("route_diagnostics") or {}
             conflicts = list(route_diagnostics.get("port_conflicts") or [])
             if conflicts:
                 lines.append(
@@ -1529,18 +1763,17 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
                         count=f"<code>{len(conflicts)}</code>",
                     )
                 )
-        if peers:
-            lines.extend(
-                [
-                    "",
-                    *render_remote_peer_lines(
-                        runtime,
-                        peers,
-                        include_refreshed_at=False,
-                        include_title=False,
-                    ),
-                ]
-            )
+        lines.extend(["", *render_exchange_status_lines(exchange_status)])
+        lines.extend([
+            "",
+            *render_remote_peer_lines(
+                runtime,
+                peers,
+                include_refreshed_at=arg in {"list", "refresh"},
+            ),
+        ])
+        if peer_data.get("trusted_view") is False:
+            lines.append(ui_language.tr("remote.status.untrusted"))
         lines.extend(
             [
                 "",
@@ -1548,28 +1781,6 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             ]
         )
         await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
-        return
-
-    if arg == "list":
-        data, _url = await runtime._fetch_remote_json("/peers")
-        if data is None:
-            await runtime._reply_text(
-                update,
-                ui_language.tr("remote.status.unavailable"),
-            )
-            return
-        peers = list((data or {}).get("peers") or [])
-        if not peers:
-            if data and data.get("trusted_view") is False:
-                await runtime._reply_text(update, ui_language.tr("remote.status.untrusted"))
-            else:
-                await runtime._reply_text(update, ui_language.tr("remote.status.none"))
-            return
-        await runtime._reply_text(
-            update,
-            "\n".join(render_remote_peer_lines(runtime, peers, include_refreshed_at=True)),
-            parse_mode="HTML",
-        )
         return
 
     if arg == "off":

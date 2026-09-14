@@ -163,7 +163,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Model catalogue cleanup** — made `codex-cli / gpt-5.6-sol /
+- **HASHI1 model catalogue cleanup** — made `codex-cli / gpt-5.6-sol /
   medium` the explicit default; limited Codex to GPT-5.5, the GPT-5.6
   Sol/Terra/Luna family, and GPT-6 Astra; limited OpenRouter to the approved
   DeepSeek V3.2 Exp, V4 Flash, V4 Pro, and Gemini 3.8 Flash models; and exposed

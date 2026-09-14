@@ -99,7 +99,7 @@ def test_xai_api_models_are_available_to_gateway_catalog():
     assert "grok-4.3" in get_available_models("xai-api")
 
 
-def test_provider_catalogs_expose_only_the_supported_models():
+def test_provider_catalogs_expose_only_the_hashi1_supported_models():
     direct_models = get_available_models("deepseek-api")
     openrouter_models = get_available_models("openrouter-api")
 

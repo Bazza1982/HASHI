@@ -1,6 +1,6 @@
 # HASHI independent Exchange integration
 
-Status: accepted local integration decision
+Status: accepted closed-Pilot integration decision
 
 Date: 2026-09-13 (Australia/Sydney)
 
@@ -52,10 +52,18 @@ state. TLS verification remains enabled for WSS, plain WS is accepted only on
 loopback for the local lab, and WebSocket redirects are rejected before a
 credential can be followed to another request target.
 
-The local `hchat_send` hop reaches HASHI Remote on loopback and requires the
-existing shared-token HMAC. It exposes only Exchange status and HChat message
-submission. It cannot proxy terminal, files, rescue, TUI, Workbench, or
-arbitrary HTTP operations.
+When both sides negotiate `authorized_routes_v1`, the client periodically
+requests the bounded, grant-scoped route projection. It caches only the exact
+target addresses and message kinds returned for its currently published sender
+agents, plus a generic availability bit and revision/timestamp. The cache is
+marked stale on disconnect and cleared if the configured identity changes.
+This projection is not merged with Direct/LAN identities and never makes an
+ungranted Exchange member visible.
+
+The local `hchat_send` and `/remote` status hops reach HASHI Remote on loopback
+and require the existing shared-token HMAC. They expose only Exchange status
+and HChat message submission. They cannot proxy terminal, files, rescue, TUI,
+Workbench, or arbitrary HTTP operations.
 
 ## Configuration and publication
 
@@ -132,10 +140,22 @@ is rejected as `UNSUPPORTED_CAPABILITY`; it is never dropped or downgraded to
 an ordinary public request. A future proof version requires a separately
 reviewed full-tuple binding and capability negotiation.
 
+## Status projection
+
+`/remote` presents transport truth without flattening identity or authority.
+The local Remote process is shown first; the Exchange section separately shows
+the authenticated WSS state, own public identity, explicit published agents and
+only the authorized route snapshot. Direct/LAN peers remain a separate section.
+An expected off-LAN direct peer is generic `unavailable`; a verified handshake
+rejection is a configuration error. `/remote exchange` and `/remote direct`
+select one view, while `/remote refresh` (and the compatibility `/remote list`
+alias) refresh both. `/remote off` explicitly states that stopping the Remote
+sidecar also stops its Exchange transport.
+
 ## Deployment boundary
 
-This decision covers offline/local-lab integration only. It does not authorize
-or implement public Exchange composition, operator authority, Hub identity,
-DNS, Cloudflare, Tunnel, production TLS, service installation, or restart of a
-running HASHI instance. Those remain separate C/D-stage decisions and live
-adoption gates.
+Public Pilot composition, Cloudflare, identity administration and service
+operation remain owned outside HASHI. A HASHI source change, a qualified
+Functions artifact, adoption by one running instance and live public-WSS
+verification are separate evidence and must be recorded separately. Formal Hub
+identity remains a future D-stage boundary.

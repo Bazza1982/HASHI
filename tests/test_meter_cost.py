@@ -377,7 +377,7 @@ def test_formatter_pricing_table_has_approx():
     assert len(tail.splitlines()) == 3
 
 
-def test_formatter_labels_cross_channel_openrouter_reference():
+def test_formatter_labels_cross_channel_cost_as_approximation_and_lists_model():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(
             engine="codex-cli",
@@ -390,8 +390,9 @@ def test_formatter_labels_cross_channel_openrouter_reference():
         ),
     ])
     tail = format_cost_tail(receipt, locale="zh-CN")
-    assert "OpenRouter 参考估价" in tail.splitlines()[0]
+    assert "OpenRouter 参考估价" not in tail.splitlines()[0]
     assert "≈" in tail.splitlines()[0]
+    assert "服务模型：gpt-brand-new" in tail.splitlines()[0]
 
 
 def test_formatter_provider_no_approx():
@@ -492,7 +493,7 @@ def test_formatter_matches_compact_cent_layout():
     ])
 
     assert format_cost_tail(receipt, locale="zh-CN").splitlines() == [
-        "💰 本回合：≈ 0.94 美分 · 服务提供方：DeepSeek",
+        "💰 本回合：≈ 0.94 美分 · 服务提供方：DeepSeek · 服务模型：deepseek-v4-flash",
         "📥 输入 66.6K · 缓存命中 0（0.0%） 📤 输出 154",
         "🔁 无缓存约 0.94 美分 · 缓存节省约 0 美分（0.0%）",
     ]
@@ -528,9 +529,9 @@ def test_formatter_marks_missing_provider_telemetry_as_unknown():
         PerCallUsageLineItem(cost_usd=None, cost_source="unknown"),
     ])
 
-    assert "服务提供方：未知" in format_cost_tail(
-        receipt, locale="zh-CN"
-    ).splitlines()[0]
+    first_line = format_cost_tail(receipt, locale="zh-CN").splitlines()[0]
+    assert "服务提供方：未知" in first_line
+    assert "服务模型：未知" in first_line
 
 
 def test_formatter_task_total():
@@ -589,13 +590,15 @@ def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages
 
     chinese = format_cost_tail(receipt, locale="zh-CN")
     assert chinese.splitlines() == [
-        "💰 本回合：≈ 10.61 美分 · 服务提供方：DeepSeek",
+        "💰 本回合：≈ 10.61 美分 · 服务提供方：DeepSeek "
+        "· 服务模型：deepseek-v4-pro + deepseek-v4-flash",
         "📥 输入 2.916M · 缓存命中 2.683M（92.0%） 📤 输出 52.2K（其中推理 38.1K）",
         "🔁 无缓存约 US$1.0965 · 缓存节省约 99.04 美分（90.3%）",
     ]
     english = format_cost_tail(receipt, locale="en")
     assert english.splitlines()[0].startswith("💰 This turn: ≈ 10.61 cents")
     assert "Provider: DeepSeek" in english.splitlines()[0]
+    assert "Models: deepseek-v4-pro + deepseek-v4-flash" in english.splitlines()[0]
     assert "cache hit 2.683M (92.0%)" in english
     assert "including 38.1K reasoning" in english
 

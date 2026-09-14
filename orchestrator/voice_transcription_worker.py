@@ -1,6 +1,6 @@
 """Isolated native-dependency worker for local voice transcription.
 
-The parent Function Worker sends versioned JSON lines over stdio.  This helper
+The parent Function Worker sends versioned JSON lines over stdio. This helper
 runs in a separately prepared Python environment, loads faster-whisper lazily,
 and never grants Tool or HASHI runtime authority to that environment.
 """
@@ -37,7 +37,7 @@ def _detect_device() -> tuple[str, str]:
         if "cuda" in ctranslate2.get_supported_compute_types("cuda"):
             return "cuda", "float16"
     except Exception:
-        pass
+        logger.debug("CTranslate2 CUDA detection failed", exc_info=True)
     return "cpu", "int8"
 
 
@@ -138,6 +138,7 @@ def _serve() -> int:
                 **result,
             }
         except Exception as exc:
+            logger.exception("Isolated transcription request failed")
             payload = {
                 "version": PROTOCOL_VERSION,
                 "id": request_id,
