@@ -109,6 +109,7 @@ def test_current_deepseek_models_replace_retired_and_experimental_ids():
 
     assert direct_models == [
         "deepseek-v4-pro",
+        "deepseek-flash",
         "deepseek-v4-flash",
         "deepseek-v4-flash-vision-exp",
     ]
@@ -122,6 +123,7 @@ def test_current_deepseek_models_replace_retired_and_experimental_ids():
 def test_deepseek_exposes_only_distinct_provider_reasoning_states():
     for model in (
         "deepseek-v4-pro",
+        "deepseek-flash",
         "deepseek-v4-flash",
         "deepseek-v4-flash-vision-exp",
     ):

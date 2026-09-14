@@ -110,6 +110,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "privacy_levels": [0, 1, 2],
         "models": [
             "deepseek-v4-pro",
+            "deepseek-flash",
             "deepseek-v4-flash",
             "deepseek-v4-flash-vision-exp",
         ],

@@ -10,6 +10,10 @@ import pytest
 
 from adapters import deepseek_api
 from adapters.deepseek_api import DeepSeekAdapter
+from adapters.deepseek_tool_protocol import (
+    DeepSeekToolMarkupStreamGate,
+    inspect_deepseek_text_tool_calls,
+)
 from adapters.openrouter_api import (
     _APIResult,
     _backend_failure_response,
@@ -92,7 +96,11 @@ def _adapter(tmp_path, *, global_config=None, model="deepseek-v4-pro"):
 
 
 @pytest.mark.asyncio
-async def test_deepseek_vision_model_receives_native_image_content(tmp_path):
+@pytest.mark.parametrize(
+    "model",
+    ["deepseek-flash", "deepseek-v4-flash-vision-exp"],
+)
+async def test_deepseek_vision_model_receives_native_image_content(tmp_path, model):
     image = tmp_path / "vision.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\nvision")
     payload = image.read_bytes()
@@ -115,7 +123,7 @@ async def test_deepseek_vision_model_receives_native_image_content(tmp_path):
             },
         ]
     )
-    adapter = _adapter(tmp_path, model="deepseek-v4-flash-vision-exp")
+    adapter = _adapter(tmp_path, model=model)
     adapter._call_api_once = AsyncMock(
         return_value=_APIResult("seen", None, "stop", 10, 2)
     )
@@ -514,6 +522,133 @@ def test_deepseek_v4_payload_maps_provider_reasoning(configured, thinking, effor
     assert payload.get("reasoning_effort") == effort
 
 
+@pytest.mark.parametrize(
+    ("dialect", "calls_tag", "invoke_tag", "parameter_tag"),
+    [
+        (
+            "v3.2",
+            "｜DSML｜function_calls",
+            "｜DSML｜invoke",
+            "｜DSML｜parameter",
+        ),
+        ("v4", "｜DSML｜tool_calls", "｜DSML｜invoke", "｜DSML｜parameter"),
+        ("v4.1", "｜DSML｜ calls", "｜DSML｜ invoke", "｜DSML｜ parameter"),
+    ],
+)
+def test_official_deepseek_dsml_dialects_parse_to_one_bounded_tool_call(
+    tmp_path,
+    dialect,
+    calls_tag,
+    invoke_tag,
+    parameter_tag,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    tools = adapter._build_payload([{"role": "user", "content": "inspect"}])[
+        "tools"
+    ]
+    text = (
+        f"<{calls_tag}>\n"
+        f'<{invoke_tag} name="file_list">\n'
+        f'<{parameter_tag} name="path" string="true">/tmp'
+        f"</{parameter_tag}>\n"
+        f"</{invoke_tag}>\n"
+        f"</{calls_tag}>"
+    )
+
+    inspected = inspect_deepseek_text_tool_calls(
+        text,
+        tools,
+        response_id=f"response-{dialect}",
+    )
+
+    assert inspected.status == "recovered"
+    assert inspected.dialect == dialect
+    assert len(inspected.tool_calls) == 1
+    call = inspected.tool_calls[0]
+    assert call["id"].startswith("call_dsml_")
+    assert call["function"] == {
+        "name": "file_list",
+        "arguments": '{"path":"/tmp"}',
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "<｜DSML｜ calls>"
+            '<｜DSML｜ invoke name="unknown_tool">'
+            "</｜DSML｜ invoke>"
+            "</｜DSML｜ calls>"
+        ),
+        (
+            "<｜DSML｜ calls>"
+            '<｜DSML｜ invoke name="file_list">'
+            '<｜DSML｜ parameter name="path" string="false">42'
+            "</｜DSML｜ parameter>"
+            "</｜DSML｜ invoke>"
+            "</｜DSML｜ calls>"
+        ),
+        "<\uff5cDSML\uff5c malformed>",
+    ],
+)
+def test_invalid_dsml_requires_repair(tmp_path, text):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    tools = adapter._build_payload([{"role": "user", "content": "inspect"}])[
+        "tools"
+    ]
+
+    inspected = inspect_deepseek_text_tool_calls(
+        text,
+        tools,
+        response_id="response-invalid",
+    )
+
+    assert inspected.status == "repair_required"
+    assert inspected.tool_calls == ()
+
+
+def test_code_fenced_dsml_example_is_not_treated_as_tool_intent(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    tools = adapter._build_payload([{"role": "user", "content": "explain"}])[
+        "tools"
+    ]
+    example = (
+        "Example only:\n```xml\n"
+        "<｜DSML｜ calls></｜DSML｜ calls>\n"
+        "```"
+    )
+
+    inspected = inspect_deepseek_text_tool_calls(
+        example,
+        tools,
+        response_id="response-example",
+    )
+
+    assert inspected.status == "none"
+
+
+def test_incomplete_streamed_dsml_prefix_is_held_and_requires_repair(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    tools = adapter._build_payload([{"role": "user", "content": "inspect"}])[
+        "tools"
+    ]
+    incomplete = "<｜DSML｜ calls>"
+    gate = DeepSeekToolMarkupStreamGate(enabled=True)
+
+    assert gate.feed(incomplete) == ""
+    assert gate.finish() == ""
+    assert gate.blocked is True
+
+    inspected = inspect_deepseek_text_tool_calls(
+        incomplete,
+        tools,
+        response_id="response-incomplete",
+    )
+    assert inspected.status == "repair_required"
+    assert inspected.issue == "unexpected_opening_tag"
+
+
 @pytest.mark.asyncio
 async def test_tool_cleanup_details_are_forwarded_in_the_tool_end_event(tmp_path):
     adapter = _adapter(tmp_path)
@@ -658,9 +793,10 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
                 thinking_tokens=3,
                 prompt_cache_hit_tokens=6,
                 prompt_cache_miss_tokens=4,
-            )
+        )
         assistant_msg = payload["messages"][2]
         assert assistant_msg["reasoning_content"] == "Need to inspect the directory."
+        assert assistant_msg["content"] == ""
         return _APIResult(
             text="done",
             tool_calls=None,
@@ -730,6 +866,315 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
         "completed",
     ]
     assert len({call["provider_request_id"] for call in provider_calls}) == 2
+
+
+@pytest.mark.asyncio
+async def test_deepseek_v41_dsml_tool_call_is_recovered_once_and_audited(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    leaked_call = (
+        "<｜DSML｜ calls>\n"
+        '<｜DSML｜ invoke name="file_list">\n'
+        '<｜DSML｜ parameter name="path" string="true">/tmp'
+        "</｜DSML｜ parameter>\n"
+        "</｜DSML｜ invoke>\n"
+        "</｜DSML｜ calls>"
+    )
+
+    class _Response:
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    responses = [
+        _Response(
+            {
+                "id": "deepseek-v41-leak",
+                "model": "deepseek-flash",
+                "system_fingerprint": "fp-v41",
+                "choices": [
+                    {
+                        "message": {
+                            "content": leaked_call,
+                            "reasoning_content": "I need to inspect the directory.",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ),
+        _Response(
+            {
+                "id": "deepseek-v41-final",
+                "model": "deepseek-flash",
+                "system_fingerprint": "fp-v41",
+                "choices": [
+                    {
+                        "message": {"content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ),
+    ]
+    adapter.client = SimpleNamespace(post=AsyncMock(side_effect=responses))
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+
+    response = await adapter.generate_response("inspect", "req-v41-dsml")
+
+    assert response.is_success is True
+    assert response.text == "done"
+    assert response.tool_call_count == 1
+    recovered = adapter.tool_registry.calls[0]
+    assert recovered[:2] == ("file_list", {"path": "/tmp"})
+    assert recovered[2].startswith("call_dsml_")
+    assert len(recovered[2]) == len("call_dsml_") + 24
+    second_payload = adapter.client.post.call_args_list[1].kwargs["json"]
+    assistant = second_payload["messages"][2]
+    assert assistant["content"] == ""
+    assert assistant["reasoning_content"] == "I need to inspect the directory."
+    assert leaked_call not in repr(second_payload["messages"])
+    assert observed[0]["raw_finish_reason"] == "stop"
+    assert observed[0]["decision"] == "execute_tools"
+    assert observed[0]["decision_reason"] == "deepseek_dsml_recovered"
+    assert observed[0]["provider_compatibility"] == {
+        "actual_model": "deepseek-flash",
+        "dialect": "v4.1",
+        "status": "recovered",
+        "system_fingerprint": "fp-v41",
+        "text_length": len(leaked_call),
+        "text_sha256": hashlib.sha256(leaked_call.encode("utf-8")).hexdigest(),
+        "tool_call_count": 1,
+        "transport": "dsml_text",
+    }
+
+
+@pytest.mark.asyncio
+async def test_degraded_v32_tool_intent_requires_native_repair_before_execution(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    degraded = (
+        '<function_calls><invoke name="file_list">'
+        '<parameter name="path" string="true">/tmp</parameter>'
+        "</invoke></function_calls>"
+    )
+    repaired_call = {
+        "id": "call-native-repair",
+        "type": "function",
+        "function": {"name": "file_list", "arguments": '{"path":"/tmp"}'},
+    }
+
+    class _Response:
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    responses = [
+        _Response(
+            {
+                "id": "deepseek-degraded",
+                "model": "deepseek-flash",
+                "choices": [
+                    {
+                        "message": {"content": degraded},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ),
+        _Response(
+            {
+                "id": "deepseek-native-repair",
+                "model": "deepseek-flash",
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [repaired_call],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+        ),
+        _Response(
+            {
+                "id": "deepseek-final",
+                "model": "deepseek-flash",
+                "choices": [
+                    {
+                        "message": {"content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ),
+    ]
+    adapter.client = SimpleNamespace(post=AsyncMock(side_effect=responses))
+
+    response = await adapter.generate_response("inspect", "req-degraded-dsml")
+
+    assert response.is_success is True
+    assert response.text == "done"
+    assert response.tool_call_count == 1
+    assert response.stream_metadata["provider_tool_repair_count"] == 1
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/tmp"}, "call-native-repair")
+    ]
+    repair_payload = adapter.client.post.call_args_list[1].kwargs["json"]
+    assert any(
+        "native tool_calls channel" in message.get("content", "")
+        for message in repair_payload["messages"]
+        if message.get("role") == "system"
+    )
+    rejected_record = next(
+        json.loads(message["content"])
+        for message in repair_payload["messages"]
+        if message.get("role") == "assistant"
+        and "hashi_rejected_tool_call_batch" in message.get("content", "")
+    )
+    rejected_arguments = rejected_record["hashi_rejected_tool_call_batch"][0][
+        "function"
+    ]["arguments"]
+    assert rejected_arguments.startswith(
+        "HASHI rejected DeepSeek textual tool intent:\n"
+    )
+    assert degraded in rejected_arguments
+
+
+@pytest.mark.asyncio
+async def test_degraded_tool_intent_cannot_be_repaired_by_plain_success_text(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    degraded = (
+        '<function_calls><invoke name="file_list">'
+        '<parameter name="path" string="true">/tmp</parameter>'
+        "</invoke></function_calls>"
+    )
+
+    class _Response:
+        headers = {}
+
+        def __init__(self, response_id, content):
+            self._response_id = response_id
+            self._content = content
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "id": self._response_id,
+                "model": "deepseek-flash",
+                "choices": [
+                    {
+                        "message": {"content": self._content},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+
+    adapter.client = SimpleNamespace(
+        post=AsyncMock(
+            side_effect=[
+                _Response("deepseek-degraded", degraded),
+                _Response("deepseek-plain-1", '{"path":"/tmp"}'),
+                _Response("deepseek-plain-2", "Done."),
+                _Response("deepseek-plain-3", "Finished."),
+            ]
+        )
+    )
+
+    response = await adapter.generate_response("inspect", "req-degraded-plain")
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_INVALID_TOOL_CALLS"
+    assert response.text == ""
+    assert response.tool_call_count == 0
+    assert response.stream_metadata["provider_tool_repair_count"] == 3
+    assert adapter.client.post.await_count == 4
+    assert adapter.tool_registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_streamed_v41_dsml_is_recovered_without_streaming_control_text(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    leaked_call = (
+        "<｜DSML｜ calls>\n"
+        '<｜DSML｜ invoke name="file_list">\n'
+        '<｜DSML｜ parameter name="path" string="true">/tmp'
+        "</｜DSML｜ parameter>\n"
+        "</｜DSML｜ invoke>\n"
+        "</｜DSML｜ calls>"
+    )
+    chunks = [leaked_call[:1], leaked_call[1:12], leaked_call[12:47], leaked_call[47:]]
+
+    class _StreamResponse:
+        headers = {"x-request-id": "stream-wire-v41"}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            for index, chunk in enumerate(chunks):
+                choice = {"delta": {"content": chunk}}
+                if index == len(chunks) - 1:
+                    choice["finish_reason"] = "stop"
+                yield "data: " + json.dumps(
+                    {
+                        "id": "stream-v41",
+                        "model": "deepseek-flash",
+                        "system_fingerprint": "fp-stream-v41",
+                        "choices": [choice],
+                    },
+                    ensure_ascii=False,
+                )
+            yield "data: [DONE]"
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *args, **kwargs: _StreamContext())
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    payload = adapter._build_payload(
+        [{"role": "user", "content": "inspect"}],
+        use_streaming=True,
+    )
+    result = await adapter._stream_api_once(payload, {}, capture)
+
+    assert result.text == ""
+    assert result.finish_reason == "tool_calls"
+    assert result.raw_finish_reason == "stop"
+    assert len(result.tool_calls) == 1
+    assert result.provider_compatibility["dialect"] == "v4.1"
+    assert result.provider_compatibility["status"] == "recovered"
+    assert not any(event.kind == KIND_TEXT_DELTA for event in events)
 
 
 @pytest.mark.asyncio

@@ -185,11 +185,16 @@ def test_hashi_api_path_accepts_one_50_mib_original_image():
     assert "total_bytes" not in capability.limits
 
 
-def test_deepseek_vision_capability_is_exact_and_size_bounded():
-    vision = resolve_input_capability(
-        "deepseek-api", "deepseek-v4-flash-vision-exp"
-    )
-    text_only = resolve_input_capability("deepseek-api", "deepseek-v4-flash")
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    ],
+)
+def test_deepseek_v41_vision_capability_is_exact_and_size_bounded(model):
+    vision = resolve_input_capability("deepseek-api", model)
 
     assert vision.supports("image", "data_url") is True
     assert vision.supports("image", "remote_url") is False
@@ -198,7 +203,6 @@ def test_deepseek_vision_capability_is_exact_and_size_bounded():
         "item_bytes": 32 * 1024 * 1024,
         "total_bytes": 32 * 1024 * 1024,
     }
-    assert text_only.supports("image") is False
 
 
 def test_mixed_modalities_are_routed_per_attachment(tmp_path):

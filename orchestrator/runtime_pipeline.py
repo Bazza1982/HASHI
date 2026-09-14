@@ -86,14 +86,29 @@ def observe_terminal_response(runtime, item, response) -> None:
 
 
 _DANGLING_TOOL_MARKERS = (
+    "<｜dsml｜",
+    "<｜｜dsml｜｜",
+    "<|dsml|",
+    "<||dsml||",
     "<｜dsml｜tool_calls",
     "<｜｜dsml｜｜tool_calls",
+    "<｜dsml｜ calls",
+    "<｜｜dsml｜｜ calls",
+    "<｜dsml｜function_calls",
     "<｜dsml｜invoke",
     "<｜｜dsml｜｜invoke",
+    "<｜dsml｜ invoke",
+    "<｜｜dsml｜｜ invoke",
     "<|dsml|tool_calls",
     "<||dsml||tool_calls",
+    "<|dsml| calls",
+    "<||dsml|| calls",
     "<|dsml|invoke",
     "<||dsml||invoke",
+    "<|dsml| invoke",
+    "<||dsml|| invoke",
+    "<function_calls",
+    "<tool_calls",
     "<tool_call>",
 )
 

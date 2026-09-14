@@ -263,6 +263,9 @@ class _APIResult:
     stream_eof: bool = False
     stream_truncated: bool = False
     reasoning_state: str = ""
+    # Provider adapters may attach bounded, non-secret compatibility evidence.
+    # Raw request/response bodies remain in the private wire evidence store.
+    provider_compatibility: dict[str, Any] = field(default_factory=dict)
     # Complete request/response evidence is retained only long enough to write
     # a private local forensic record when the Provider tool protocol is bad.
     # It must never be copied into ordinary audit, stream, or user metadata.
@@ -805,7 +808,7 @@ def _response_protocol_record(
     result: _APIResult,
     decision: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return {
+    record = {
         "raw_finish_reason_present": bool(result.finish_reason_present),
         "raw_finish_reason": result.raw_finish_reason,
         "normalized_finish_reason": decision.get("normalized_finish_reason"),
@@ -831,6 +834,9 @@ def _response_protocol_record(
         "decision_reason": str(decision.get("decision_reason") or ""),
         "decision_success": bool(decision.get("success")),
     }
+    if result.provider_compatibility:
+        record["provider_compatibility"] = dict(result.provider_compatibility)
+    return record
 
 
 _PROVIDER_PROTOCOL_ERROR_MESSAGES = {
@@ -1996,6 +2002,25 @@ class OpenRouterAdapter(BaseBackend):
         result: _APIResult,
     ) -> None:
         del assistant_msg, result
+
+    def _classify_provider_response(
+        self,
+        result: _APIResult,
+        *,
+        tool_registry_available: bool,
+    ) -> dict[str, Any]:
+        return _provider_response_decision(
+            result,
+            tool_registry_available=tool_registry_available,
+        )
+
+    def _provider_tool_repair_prompt(
+        self,
+        prompt: str,
+        result: _APIResult,
+    ) -> str:
+        del result
+        return prompt
 
     def _media_fallback_modalities(self) -> frozenset[str]:
         registry = getattr(self, "tool_registry", None)
@@ -3460,7 +3485,7 @@ class OpenRouterAdapter(BaseBackend):
                 total_completion += result.completion_tokens
                 total_thinking += result.thinking_tokens
                 provider_call_count += 1
-                decision = _provider_response_decision(
+                decision = self._classify_provider_response(
                     result,
                     tool_registry_available=self.tool_registry is not None,
                 )
@@ -3593,10 +3618,13 @@ class OpenRouterAdapter(BaseBackend):
                         messages.append(
                             {
                                 "role": "system",
-                                "content": _invalid_tool_repair_prompt(
-                                    tool_details,
-                                    repair_number=next_repair_number,
-                                    completed_tool_calls=completed_tool_calls,
+                                "content": self._provider_tool_repair_prompt(
+                                    _invalid_tool_repair_prompt(
+                                        tool_details,
+                                        repair_number=next_repair_number,
+                                        completed_tool_calls=completed_tool_calls,
+                                    ),
+                                    result,
                                 ),
                             }
                         )

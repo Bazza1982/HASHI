@@ -5,17 +5,23 @@ Differences from OpenRouter:
   - Endpoint: https://api.deepseek.com/v1/chat/completions
   - No OpenRouter-specific headers (HTTP-Referer, X-Title)
   - Reasoning content field: "reasoning_content" (not "reasoning")
-  - Current model IDs include deepseek-v4-flash, deepseek-v4-pro, and the
-    exact vision-capable deepseek-v4-flash-vision-exp model
+  - Current model IDs include deepseek-flash (V4.1 Flash), deepseek-v4-pro,
+    and temporary previous-generation aliases
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 
 import httpx
 
+from adapters.deepseek_tool_protocol import (
+    DeepSeekTextToolInspection,
+    DeepSeekToolMarkupStreamGate,
+    inspect_deepseek_text_tool_calls,
+)
 from adapters.openrouter_api import (
     OpenRouterAdapter,
     _APIResult,
@@ -30,7 +36,7 @@ from adapters.openrouter_api import (
     _stream_error_exception,
     _tool_call_protocol_summary,
 )
-from adapters.stream_events import KIND_THINKING, StreamEvent
+from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
 
 _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
@@ -41,6 +47,10 @@ HASHI_COMPACTION_CAPABILITIES = {
     "local_or_slow": False,
 }
 HASHI_MODEL_CAPACITY_PROFILES = {
+    "deepseek-flash": {
+        "context_window_tokens": 1_000_000,
+        "capacity_provenance": "official_deepseek_api_docs_2026-09-10",
+    },
     "deepseek-v4-flash-vision-exp": {
         "context_window_tokens": 1_000_000,
         "capacity_provenance": "official_deepseek_api_docs_2026-08-21",
@@ -54,6 +64,9 @@ HASHI_MODEL_CAPACITY_PROFILES = {
         "capacity_provenance": "official_deepseek_api_docs_2026-08-22",
     },
 }
+
+_TEXT_TOOL_REPAIR_MARKER = "HASHI_DEEPSEEK_TEXT_TOOL_REPAIR"
+_TEXT_TOOL_REPAIR_CONTEXT_CHARACTERS = 16 * 1024
 
 
 def _with_reasoning_content(result: _APIResult, reasoning_content: str) -> _APIResult:
@@ -104,9 +117,207 @@ class DeepSeekAdapter(OpenRouterAdapter):
         assistant_msg: dict,
         result: _APIResult,
     ) -> None:
+        # DeepSeek thinking-mode tool histories require non-null assistant
+        # content even when the Provider returned no visible text.
+        assistant_msg.setdefault("content", "")
         reasoning_content = getattr(result, "reasoning_content", "")
         if reasoning_content:
             assistant_msg["reasoning_content"] = reasoning_content
+
+    @staticmethod
+    def _pending_text_tool_repair(messages: list[dict]) -> bool:
+        marker_index = -1
+        for index, message in enumerate(messages):
+            if (
+                message.get("role") == "system"
+                and _TEXT_TOOL_REPAIR_MARKER in str(message.get("content") or "")
+            ):
+                marker_index = index
+        if marker_index < 0:
+            return False
+        return not any(
+            message.get("role") == "assistant" and message.get("tool_calls")
+            for message in messages[marker_index + 1 :]
+        )
+
+    def _text_tool_metadata(
+        self,
+        inspection: DeepSeekTextToolInspection,
+        text: str,
+        *,
+        actual_model: str,
+        system_fingerprint: str,
+        tool_call_count: int,
+        status: str | None = None,
+    ) -> dict:
+        metadata = {
+            "actual_model": actual_model or str(self.config.model),
+            "dialect": inspection.dialect,
+            "status": status or inspection.status,
+            "system_fingerprint": system_fingerprint,
+            "text_length": len(text),
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "tool_call_count": tool_call_count,
+            "transport": "dsml_text",
+        }
+        if inspection.issue:
+            metadata["issue"] = inspection.issue
+        return metadata
+
+    def _apply_text_tool_compatibility(
+        self,
+        result: _APIResult,
+        payload: Mapping[str, object],
+        *,
+        actual_model: str,
+        system_fingerprint: str,
+    ) -> _APIResult:
+        pending_repair = self._pending_text_tool_repair(
+            list(payload.get("messages") or [])
+        )
+        if result.tool_calls:
+            if pending_repair:
+                result.provider_compatibility = {
+                    "actual_model": actual_model or str(self.config.model),
+                    "dialect": "openai-native",
+                    "status": "native_repaired",
+                    "system_fingerprint": system_fingerprint,
+                    "text_length": len(str(result.text or "")),
+                    "text_sha256": hashlib.sha256(
+                        str(result.text or "").encode("utf-8")
+                    ).hexdigest(),
+                    "tool_call_count": len(result.tool_calls),
+                    "transport": "native_tool_calls",
+                }
+            return result
+
+        raw_text = str(result.text or "")
+        tools = [
+            item
+            for item in (payload.get("tools") or [])
+            if isinstance(item, Mapping)
+        ]
+        inspection = inspect_deepseek_text_tool_calls(
+            raw_text,
+            tools,
+            response_id=str(
+                result.provider_response_id or result.transport_request_id or ""
+            ),
+        )
+        if inspection.status == "none" and pending_repair:
+            inspection = DeepSeekTextToolInspection(
+                "repair_required",
+                dialect="native-repair",
+                issue="native_tool_calls_missing_after_repair",
+            )
+        if inspection.status == "none":
+            return result
+
+        result.text = ""
+        result.finish_reason = "tool_calls"
+        if inspection.status == "recovered":
+            result.tool_calls = list(inspection.tool_calls)
+            result.provider_compatibility = self._text_tool_metadata(
+                inspection,
+                raw_text,
+                actual_model=actual_model,
+                system_fingerprint=system_fingerprint,
+                tool_call_count=len(inspection.tool_calls),
+            )
+            return result
+
+        digest = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+        result.tool_calls = [
+            {
+                "id": f"call_dsml_invalid_{digest[:16]}",
+                "type": "function",
+                "function": {
+                    "name": (
+                        inspection.candidate_tool_name
+                        or "deepseek_textual_tool_call"
+                    ),
+                    # Deliberately invalid: this enters the existing all-batch
+                    # repair path and cannot cross the execution boundary. A
+                    # bounded copy gives DeepSeek enough private conversation
+                    # context to reproduce arguments it derived itself; the
+                    # fixed non-JSON prefix keeps even JSON-looking prose from
+                    # becoming executable.
+                    "arguments": (
+                        "HASHI rejected DeepSeek textual tool intent:\n"
+                        + raw_text[:_TEXT_TOOL_REPAIR_CONTEXT_CHARACTERS]
+                    ),
+                },
+            }
+        ]
+        result.provider_compatibility = self._text_tool_metadata(
+            inspection,
+            raw_text,
+            actual_model=actual_model,
+            system_fingerprint=system_fingerprint,
+            tool_call_count=0,
+        )
+        return result
+
+    def _classify_provider_response(
+        self,
+        result: _APIResult,
+        *,
+        tool_registry_available: bool,
+    ) -> dict:
+        decision = super()._classify_provider_response(
+            result,
+            tool_registry_available=tool_registry_available,
+        )
+        compatibility = dict(result.provider_compatibility or {})
+        if compatibility.get("status") != "recovered":
+            return decision
+        raw_finish = str(result.raw_finish_reason or "").strip().casefold()
+        if (
+            not result.transport_complete
+            or not result.finish_reason_present
+            or raw_finish
+            not in {"stop", "completed", "tool_calls", "function_call"}
+            or not decision.get("tool_calls_complete")
+        ):
+            return decision
+        if not tool_registry_available:
+            return {
+                **decision,
+                "normalized_finish_reason": "tool_calls",
+                "decision": "reject_tools_unavailable",
+                "decision_reason": "tool_registry_unavailable",
+                "execute_tools": False,
+                "success": False,
+                "error_code": "PROVIDER_TOOL_EXECUTION_UNAVAILABLE",
+            }
+        return {
+            **decision,
+            "normalized_finish_reason": "tool_calls",
+            "decision": "execute_tools",
+            "decision_reason": "deepseek_dsml_recovered",
+            "execute_tools": True,
+            "success": False,
+            "error_code": "",
+            "error_retryable": False,
+        }
+
+    def _provider_tool_repair_prompt(
+        self,
+        prompt: str,
+        result: _APIResult,
+    ) -> str:
+        if (
+            dict(result.provider_compatibility or {}).get("status")
+            != "repair_required"
+        ):
+            return prompt
+        return (
+            f"[{_TEXT_TOOL_REPAIR_MARKER}] DeepSeek emitted explicit tool intent "
+            "as malformed or noncanonical text. Re-emit the same intended call "
+            "through the native tool_calls channel. Do not answer as if the tool "
+            "ran, and do not repeat any completed tool. "
+            + prompt
+        )
 
     def _build_payload(
         self,
@@ -231,7 +442,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
         comp_details = usage.get("completion_tokens_details") or {}
         thinking_tokens = comp_details.get("reasoning_tokens", 0)
 
-        return _with_deepseek_cache_usage(
+        result = _with_deepseek_cache_usage(
             _with_reasoning_content(
                 _APIResult(
                     text=ai_text,
@@ -261,6 +472,12 @@ class DeepSeekAdapter(OpenRouterAdapter):
             ),
             usage,
         )
+        return self._apply_text_tool_compatibility(
+            result,
+            payload,
+            actual_model=str(data.get("model") or ""),
+            system_fingerprint=str(data.get("system_fingerprint") or ""),
+        )
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         text_chunks: list[str] = []
@@ -274,6 +491,11 @@ class DeepSeekAdapter(OpenRouterAdapter):
         saw_done = False
         provider_response_id = ""
         transport_request_id = ""
+        actual_model = ""
+        system_fingerprint = ""
+        content_gate = DeepSeekToolMarkupStreamGate(
+            enabled=bool(payload.get("tools"))
+        )
         wire_evidence = {
             "transport": "sse",
             "request": _request_wire_evidence(payload),
@@ -334,6 +556,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 if data.get("id"):
                     provider_response_id = str(data.get("id"))
                     protocol_state["provider_response_id"] = provider_response_id
+                if data.get("model"):
+                    actual_model = str(data.get("model"))
+                if data.get("system_fingerprint"):
+                    system_fingerprint = str(data.get("system_fingerprint"))
 
                 stream_error = _stream_error_exception(
                     data,
@@ -402,15 +628,18 @@ class DeepSeekAdapter(OpenRouterAdapter):
                         )
                     )
 
-                content = delta.get("content", "")
+                content = str(delta.get("content") or "")
                 if content:
                     text_chunks.append(content)
                     protocol_state["text_provided"] = True
                     protocol_state["text_length"] += len(str(content))
-                    if on_stream_event:
-                        from adapters.stream_events import KIND_TEXT_DELTA
+                    visible_content = content_gate.feed(content)
+                    if visible_content and on_stream_event:
                         await on_stream_event(
-                            StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
+                            StreamEvent(
+                                kind=KIND_TEXT_DELTA,
+                                summary=visible_content,
+                            )
                         )
 
                 for tc_delta in (delta.get("tool_calls") or []):
@@ -460,11 +689,19 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 "provider stream ended without a completion marker"
             )
             raise _annotate_stream_exception(error, protocol_state)
+        pending_visible_content = content_gate.finish()
+        if pending_visible_content and on_stream_event:
+            await on_stream_event(
+                StreamEvent(
+                    kind=KIND_TEXT_DELTA,
+                    summary=pending_visible_content,
+                )
+            )
         full_text = "".join(text_chunks)
         reasoning_content = "".join(reasoning_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
         comp_details = stream_usage.get("completion_tokens_details") or {}
-        return _with_deepseek_cache_usage(
+        result = _with_deepseek_cache_usage(
             _with_reasoning_content(
                 _APIResult(
                     text=full_text,
@@ -502,6 +739,12 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 reasoning_content,
             ),
             stream_usage,
+        )
+        return self._apply_text_tool_compatibility(
+            result,
+            payload,
+            actual_model=actual_model,
+            system_fingerprint=system_fingerprint,
         )
 
     async def generate_response(

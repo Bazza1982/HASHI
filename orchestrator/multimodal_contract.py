@@ -48,6 +48,8 @@ _PERSISTENT_TRANSPORT_FIELDS = frozenset(
 _VERIFIED_NATIVE_IMAGE_MODELS: Mapping[str, frozenset[str]] = {
     "deepseek-api": frozenset(
         {
+            "deepseek-flash",
+            "deepseek-v4-flash",
             "deepseek-v4-flash-vision-exp",
         }
     ),

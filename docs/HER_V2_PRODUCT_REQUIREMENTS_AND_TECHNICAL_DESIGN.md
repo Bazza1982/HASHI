@@ -1438,6 +1438,32 @@ Provider-specific augmentation used by a valid tool turn. DeepSeek thinking
 therefore retains the exact Provider-supplied `reasoning_content`; HASHI neither
 drops nor invents it.
 
+DeepSeek's public API structured `message.tool_calls` channel remains the
+primary contract. As a Provider-boundary compatibility measure, the DeepSeek
+Adapter may also recover a complete, exact model-native DSML tool batch in the
+documented V3.2, V4, or V4.1 dialect. Recovery is bounded by input, call,
+parameter, and tag-header limits; accepts only tools advertised on that exact
+request; validates every argument against the advertised schema; and converts
+the whole batch before any effect. The converted calls then traverse the normal
+Tool Registry, Agent permission, governance, Smart Tool admission, audit, and
+continuation path. The Adapter records the dialect and conversion decision,
+preserves the Provider's original finish reason and system fingerprint, gives
+each converted call a stable synthetic ID, and supplies the non-null assistant
+`content` required when replaying a DeepSeek tool-call message.
+
+Partial, malformed, unknown-tool, schema-invalid, or merely DSML-like text is
+never executed. When a response starts with explicit DeepSeek tool intent but
+cannot be converted safely, the Adapter suppresses that control text and asks
+the Provider to reissue the batch through native structured `tool_calls`. A
+plain-language claim of success cannot satisfy this repair. Streaming content
+is prefix-gated so a possible tool-control envelope is not delivered before it
+is classified, and the final runtime dangling-tool guard remains a last-line
+delivery defence rather than an execution parser. All repair attempts share the
+existing bounded recovery budget described below. The rejected assistant turn
+may retain a bounded private copy of its own text so DeepSeek can reproduce
+arguments derived during reasoning; a fixed invalid prefix prevents that copy
+from becoming executable, and it is never delivered as user-visible text.
+
 The initial malformed response may consume the shared recovery budget, recorded
 as `1/3`, `2/3` and `3/3` with physical-call and evidence references. A
 transport retry between format repairs consumes its own position rather than

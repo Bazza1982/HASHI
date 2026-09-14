@@ -3245,11 +3245,22 @@ async def test_prepare_successful_response_does_not_mark_hidden_only_text_succes
 
 
 @pytest.mark.asyncio
-async def test_prepare_successful_response_blocks_dangling_tool_markup_globally():
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<｜DSML｜tool_calls><｜DSML｜invoke name="bash">',
+        '<｜DSML｜ calls><｜DSML｜ invoke name="shell">',
+        '<｜DSML｜ malformed name="shell">',
+        '<function_calls><invoke name="shell">',
+    ],
+)
+async def test_prepare_successful_response_blocks_dangling_tool_markup_globally(
+    markup,
+):
     runtime = _runtime()
     item = _item(prompt="请汇报执行结果")
     response = SimpleNamespace(
-        text='<｜DSML｜tool_calls><｜DSML｜invoke name="bash">',
+        text=markup,
         stop_reason="end_turn",
         stream_metadata={"completion_status": "completed"},
     )
@@ -3261,13 +3272,13 @@ async def test_prepare_successful_response_blocks_dangling_tool_markup_globally(
         completion_path="foreground",
     )
 
-    assert "DSML" not in result.visible_text
+    assert markup not in result.visible_text
     assert "No related action is considered executed or complete" in result.visible_text
     assert response.stop_reason == "no_final_text"
     assert response.stream_metadata["completion_status"] == "incomplete"
     assert response.stream_metadata["dangling_tool_markup_blocked"] is True
-    assert "DSML" not in runtime.transcripts[0]["core_raw"]
-    assert "DSML" not in runtime.listener_payloads[0]["text"]
+    assert markup not in runtime.transcripts[0]["core_raw"]
+    assert markup not in runtime.listener_payloads[0]["text"]
 
 
 def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):

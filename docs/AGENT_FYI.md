@@ -132,13 +132,13 @@ not a billed amount. Cache read/write usage, reasoning usage, and a reported
 zero remain distinct. Never turn partial or unknown cost into a complete
 `$0.0000` total. See [metering](METER_COST_DISPLAY_PLAN.md).
 
-Provider adapters validate a complete tool-call batch before side effects.
-Malformed arguments remain within the current unfinished interaction for its
-bounded recovery policy; malformed tools execute zero times and completed
-tools are never replayed. Preserve provider-native required assistant fields,
-the original finish/error signal, request identity, and actual retry count.
-Normal tool continuation is not a retry, and a model sentence saying “stop” is
-not a structured stop signal.
+Adapters validate a tool batch before effects; malformed calls execute
+zero times and completed calls never replay. Bounded repair preserves
+Provider fields, finish/error, identity and retry count. DeepSeek uses native
+calls; only complete official V3.2/V4/V4.1 DSML with advertised,
+schema-valid tools may be recovered. Degraded intent is hidden and
+must obtain native repair; prose cannot complete it. Continuation is not retry,
+and model text saying “stop” is not a structured stop.
 
 Capture provider evidence at real I/O before parsing/raising: physical request,
 response/stream prefix, parse decision, tool effect, recovery, terminal state,
