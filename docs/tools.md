@@ -71,7 +71,11 @@ configuration, transition, migration, and regression contract.
 - `/browser [status|examples|1-4 task]` — route an internet task through HASHI headless browser, CLI-native browsing, Brave search, or the logged-in browser extension
 - `/exp <task>` — run a task after consulting text-first EXP guidebooks under `exp/`; large training/evidence assets restore from checksum-pinned packs only when needed
 - `/status` — agent state, workspace, last activity
-- `/debug [on <agent@instance> <journal>|off|<request>]` — configure one-way automatic terminal-error reporting for this instance, show its status, or run one strict-debug Skill task
+- `/debug` — show this instance's automatic terminal-error reporting status
+  - `/debug on <agent@instance> <journal>` — send each future terminal error once to the diagnosis Agent, which diagnoses it and de-duplicates the journal entry; the source does not wait, retry, track resolution, or fix
+  - `/debug off` — stop reporting future errors
+  - `/debug <request>` — run one strict-debug Skill task
+  - The diagnosis Agent and journal may be outside the source instance
 - `/start` — inline keyboard to start a stopped agent
 - `/terminate` — shut down this agent
 - `/stop` — cancel current processing

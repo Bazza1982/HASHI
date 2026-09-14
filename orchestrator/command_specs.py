@@ -213,7 +213,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "debug",
         "cmd_debug",
-        "Configure automatic error reporting or run a strict debug task",
+        "Configure automatic error reporting or run one strict debug task",
         "tools",
         guide=CommandGuide(
             "/debug [on <agent@instance> <journal>|off|<request>]",

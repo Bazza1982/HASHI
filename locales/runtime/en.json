@@ -2375,7 +2375,7 @@
     "whisper": "Choose the Whisper model size",
     "active": "Toggle proactive heartbeat",
     "fyi": "Refresh bridge environment awareness",
-    "debug": "Configure error reporting or run strict debugging",
+    "debug": "Configure automatic error reporting or run one strict debug task",
     "skill": "Browse, run, and manage skills",
     "exp": "Run a task with the EXP guidebook",
     "backend": "View or switch backend",
