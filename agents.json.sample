@@ -9,7 +9,7 @@
         "provider": "openrouter",
         "endpoint": "https://openrouter.ai/api/v1",
         "allowed_hosts": ["openrouter.ai"],
-        "model": "anthropic/claude-sonnet-4.6",
+        "model": "google/gemini-3.8-flash",
         "api_key_secret": "openrouter-api_key",
         "idle_timeout_seconds": 90
       }
@@ -69,20 +69,20 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude-sonnet-4.6"
+          "model": "deepseek/deepseek-v4-pro"
         },
         {
           "engine": "deepseek-api",
           "models": [
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash-vision-exp"
+            "deepseek-flash",
+            "deepseek-v4-pro"
           ],
-          "default_model": "deepseek-v4-flash"
+          "default_model": "deepseek-flash"
         },
         {
           "engine": "hashi-api",
@@ -108,12 +108,12 @@
             "profiles": {
               "lightweight": {
                 "engine": "deepseek-api",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "reasoning": "high"
               },
               "triage": {
                 "engine": "deepseek-api",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "reasoning": "high"
               },
               "premium": {
@@ -159,11 +159,12 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude_sonnet-4.6"
+          "model": "deepseek/deepseek-v4-pro"
         }
       ],
       "active_backend": "claude-cli"
@@ -190,11 +191,12 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude_sonnet-4.6"
+          "model": "deepseek/deepseek-v4-pro"
         }
       ],
       "active_backend": "claude-cli"
@@ -221,11 +223,12 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude_sonnet-4.6"
+          "model": "deepseek/deepseek-v4-pro"
         }
       ],
       "active_backend": "claude-cli"
@@ -252,11 +255,12 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude_sonnet-4.6"
+          "model": "deepseek/deepseek-v4-pro"
         }
       ],
       "active_backend": "claude-cli"
@@ -283,11 +287,12 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude_sonnet-4.6"
+          "model": "deepseek/deepseek-v4-pro"
         }
       ],
       "active_backend": "claude-cli"
@@ -314,11 +319,12 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude_sonnet-4.6"
+          "model": "deepseek/deepseek-v4-pro"
         }
       ],
       "extra": {
@@ -351,11 +357,12 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude_sonnet-4.6"
+          "model": "deepseek/deepseek-v4-pro"
         }
       ],
       "active_backend": "claude-cli"
@@ -371,7 +378,7 @@
       "workspace_dir": "workspaces/kasumi",
       "telegram_token_key": "kasumi",
       "is_active": true,
-      "model": "moonshotai/kimi-k2",
+      "model": "deepseek/deepseek-v4-pro",
       "allowed_backends": [
         {
           "engine": "gemini-cli",
@@ -383,11 +390,12 @@
         },
         {
           "engine": "codex-cli",
-          "model": "gpt-5.4"
+          "model": "gpt-5.6-sol",
+          "effort": "medium"
         },
         {
           "engine": "openrouter-api",
-          "model": "moonshotai/kimi-k2",
+          "model": "deepseek/deepseek-v4-pro",
           "image_input": "tool",
           "tools": {
             "allowed": ["shell", "file_read", "file_write", "web_search", "web_fetch", "vision_inspect"],
@@ -412,11 +420,11 @@
       "workspace_dir": "workspaces/xiao_tian",
       "telegram_token_key": "xiao_tian",
       "is_active": true,
-      "model": "openrouter/auto",
+      "model": "deepseek/deepseek-v4-pro",
       "allowed_backends": [
         {
           "engine": "openrouter-api",
-          "model": "openrouter/auto"
+          "model": "deepseek/deepseek-v4-pro"
         }
       ],
       "active_backend": "openrouter-api",

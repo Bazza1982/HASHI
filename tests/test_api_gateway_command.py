@@ -40,7 +40,7 @@ def test_api_gateway_config_defaults_and_persistence(tmp_path):
     loaded = load_api_gateway_config(cfg)
 
     assert loaded["enabled"] is False
-    assert loaded["default_model"] == "gpt-5.4"
+    assert loaded["default_model"] == "gpt-5.6-sol"
 
     saved = save_api_gateway_config(
         cfg,
@@ -171,7 +171,7 @@ class _FakeRuntime:
         return self._authorized
 
 
-def _write_instance_models(cfg, *, model="gpt-6-astra"):
+def _write_instance_models(cfg, *, model="instance-preview"):
     cfg.bridge_home.mkdir(parents=True, exist_ok=True)
     (cfg.bridge_home / "agents.json").write_text(json.dumps({"agents": [
         {"allowed_backends": [{"engine": "codex-cli", "models": [model],
@@ -189,28 +189,28 @@ async def test_instance_models_survive_shared_service_restart_and_route_http(tmp
     kernel = SimpleNamespace(paths=cfg, global_cfg=cfg, secrets={},
                              enable_api_gateway=True, api_gateway=None)
     manager = ServiceManager(kernel)
-    assert "gpt-6-astra" in manager.api_gateway_state_snapshot()["available_models"]
+    assert "instance-preview" in manager.api_gateway_state_snapshot()["available_models"]
     assert "inactive-model" not in available_api_models(cfg)
-    assert manager.set_api_gateway_default_model("gpt-6-astra")[0]
+    assert manager.set_api_gateway_default_model("instance-preview")[0]
     for _ in range(2):
         await manager.start_api_gateway(cfg, {})
         server = kernel.api_gateway
         assert server is not None
         try:
-            assert server.default_model == "gpt-6-astra"
+            assert server.default_model == "instance-preview"
             server._engine_status["codex-cli"] = {"available": True}
             server._pool = pool = _FakePool()
             async with ClientSession(base_url=f"http://127.0.0.1:{server.bound_port}") as client:
                 response = await client.get("/v1/models")
                 assert response.status == 200
-                assert "gpt-6-astra" in [m["id"] for m in (await response.json())["data"]]
+                assert "instance-preview" in [m["id"] for m in (await response.json())["data"]]
                 response = await client.post("/v1/chat/completions", json={
                     "messages": [{"role": "user", "content": "hello"}],
                     "reasoning_effort": "max",
                 })
                 assert response.status == 200, await response.text()
-                assert (await response.json())["model"] == "gpt-6-astra"
-                assert pool.models == [("codex-cli", "gpt-6-astra")]
+                assert (await response.json())["model"] == "instance-preview"
+                assert pool.models == [("codex-cli", "instance-preview")]
                 assert pool.reasoning_efforts == ["max"]
                 response = await client.post("/v1/chat/completions", json={
                     "messages": [{"role": "user", "content": "hello"}],
@@ -220,8 +220,8 @@ async def test_instance_models_survive_shared_service_restart_and_route_http(tmp
                 assert pool.reasoning_efforts == ["max"]
         finally:
             assert await manager.stop_api_gateway()
-    assert load_api_gateway_config(cfg)["default_model"] == "gpt-6-astra"
-    assert "gpt-6-astra" not in available_api_models(_global_config(tmp_path / "other"))
+    assert load_api_gateway_config(cfg)["default_model"] == "instance-preview"
+    assert "instance-preview" not in available_api_models(_global_config(tmp_path / "other"))
     assert not cfg.project_root.exists()
 
 
@@ -262,7 +262,7 @@ def test_newly_configured_model_cannot_partially_change_running_gateway_default(
     before = load_api_gateway_config(cfg)
     _write_instance_models(cfg)
     manager = ServiceManager(SimpleNamespace(paths=cfg, global_cfg=cfg, api_gateway=server))
-    success, message = manager.set_api_gateway_default_model("gpt-6-astra")
+    success, message = manager.set_api_gateway_default_model("instance-preview")
     assert success is False
     assert "restart" in message.lower()
     assert load_api_gateway_config(cfg) == before
@@ -335,9 +335,9 @@ async def test_api_gateway_routes_instance_configured_model_with_configured_effo
         _global_config(tmp_path),
         secrets={},
         workspace_root=tmp_path / "workspaces",
-        configured_model_engines={"gpt-6-astra": "codex-cli"},
+        configured_model_engines={"instance-preview": "codex-cli"},
         configured_model_efforts={
-            "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"]
+            "instance-preview": ["low", "medium", "high", "xhigh", "max"]
         },
     )
     server._engine_status["codex-cli"] = {"available": True, "reason": "test"}
@@ -346,13 +346,13 @@ async def test_api_gateway_routes_instance_configured_model_with_configured_effo
 
     models_response = await server.handle_models(_FakeRequest({}))
     model_rows = json.loads(models_response.text)["data"]
-    astra = next(row for row in model_rows if row["id"] == "gpt-6-astra")
-    assert astra["owned_by"] == "codex"
+    preview = next(row for row in model_rows if row["id"] == "instance-preview")
+    assert preview["owned_by"] == "codex"
 
     response = await server.handle_chat_completions(
         _FakeRequest(
             {
-                "model": "gpt-6-astra",
+                "model": "instance-preview",
                 "messages": [{"role": "user", "content": "hello"}],
                 "reasoning_effort": "max",
             }
@@ -360,7 +360,7 @@ async def test_api_gateway_routes_instance_configured_model_with_configured_effo
     )
 
     assert response.status == 200
-    assert fake_pool.models[0] == ("codex-cli", "gpt-6-astra")
+    assert fake_pool.models[0] == ("codex-cli", "instance-preview")
     assert fake_pool.reasoning_efforts == ["max"]
 
 
@@ -369,7 +369,7 @@ def test_instance_configured_model_does_not_mutate_process_catalogue(tmp_path):
         _global_config(tmp_path),
         secrets={},
         workspace_root=tmp_path / "configured",
-        configured_model_engines={"gpt-6-astra": "codex-cli"},
+        configured_model_engines={"instance-preview": "codex-cli"},
     )
     ordinary = APIGatewayServer(
         _global_config(tmp_path),
@@ -377,8 +377,8 @@ def test_instance_configured_model_does_not_mutate_process_catalogue(tmp_path):
         workspace_root=tmp_path / "ordinary",
     )
 
-    assert "gpt-6-astra" in configured.configured_models()
-    assert "gpt-6-astra" not in ordinary.configured_models()
+    assert "instance-preview" in configured.configured_models()
+    assert "instance-preview" not in ordinary.configured_models()
 
 
 @pytest.mark.asyncio

@@ -39,7 +39,9 @@ active generation before claiming adoption. See
 Read identity, Agents, ports, workspaces, endpoints, and model opt-ins from
 authoritative configuration, never folder names or memory. Keep local identity
 and credentials ignored. Model/effort opt-ins belong in `allowed_backends`;
-shared compatibility belongs in the Function-owned registry.
+shared compatibility belongs in the Function-owned registry. The shipped
+Codex CLI default is `gpt-5.6-sol` at explicit `medium` effort; an explicit
+Agent selection remains authoritative until that model is retired.
 
 Personal instances/new Agents default to the open Tool wildcard unless an
 instance override or backend `tools.enabled=false` applies. It is permission,

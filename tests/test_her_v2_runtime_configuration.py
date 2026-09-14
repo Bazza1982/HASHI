@@ -139,7 +139,7 @@ def test_her_v2_provider_options_are_concrete_call_providers(tmp_path):
         "models": [
             "deepseek-v4-flash",
             "deepseek-v4-pro",
-            "deepseek-v4-flash-vision-exp",
+            "deepseek-flash",
         ],
         "fast_model": "deepseek-v4-flash",
         "pro_model": "deepseek-v4-pro",

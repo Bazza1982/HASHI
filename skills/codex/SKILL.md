@@ -10,7 +10,7 @@ You are delegating a coding task to OpenAI Codex CLI. You are the project manage
 Run Codex in the background using this pattern:
 
 ```
-codex exec -q "TASK_DESCRIPTION" --model gpt-5.4 --full-auto --no-persist > WORKDIR/codex_YYYYMMDD_HHMMSS.log 2>&1
+codex exec -q "TASK_DESCRIPTION" --model gpt-5.6-sol -c model_reasoning_effort='medium' --full-auto --no-persist > WORKDIR/codex_YYYYMMDD_HHMMSS.log 2>&1
 ```
 
 Always use a **timestamped log filename** (e.g. `codex_20260311_143022.log`) so multiple delegations don't overwrite each other.
@@ -20,7 +20,8 @@ Replace TASK_DESCRIPTION with a clear, self-contained prompt describing the full
 Important flags:
 - `--full-auto` — no human approval needed for tool use
 - `--no-persist` — stateless, no session persistence
-- `--model gpt-5.4` — default model (change if needed)
+- `--model gpt-5.6-sol` — default model (change if needed)
+- `-c model_reasoning_effort='medium'` — explicit default reasoning effort
 - `-q` — quiet mode, takes a prompt string
 
 ## Writing a good delegation prompt

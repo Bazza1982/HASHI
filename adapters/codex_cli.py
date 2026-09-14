@@ -40,7 +40,7 @@ from orchestrator.process_execution import (
 from adapters.hashi_mcp import prepare_hashi_mcp
 
 _CODEX_REQUEST_REASONING_EFFORTS = frozenset(
-    {"none", "low", "medium", "high", "xhigh", "max"}
+    {"none", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
 # OpenAI's GPT-6 Astra model page documents a 1,050,000-token context
 # window, a 922,000-token maximum input, and 128,000 maximum output tokens.

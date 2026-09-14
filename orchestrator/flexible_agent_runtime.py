@@ -7534,15 +7534,7 @@ class FlexibleAgentRuntime:
         )
 
     def _wrapper_core_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        models = [
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
-            "gpt-5.5",
-            "gpt-5.3-codex-spark",
-            "gpt-5.4",
-            "gpt-5.3-codex",
-        ]
+        models = get_available_models("codex-cli")
         rows: list[list[InlineKeyboardButton]] = []
         for model in models:
             label = selected_label(
@@ -7565,10 +7557,12 @@ class FlexibleAgentRuntime:
             ("claude_sonnet", "Claude Sonnet", "claude-cli", "claude-sonnet-4-6"),
             ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
             ("gemini_lite", "Gemini Lite", "gemini-cli", "gemini-2.5-flash-lite"),
-            ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-v4-flash"),
+            ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-flash"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
-            ("or_deepseek", "OR DeepSeek Flash", "openrouter-api", "deepseek/deepseek-v4-flash"),
-            ("or_gemini", "OR Gemini", "openrouter-api", "google/gemini-3.1-flash-lite-preview"),
+            ("or_v32", "OR DeepSeek V3.2 Exp", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
+            ("or_v4_flash", "OR DeepSeek V4 Flash", "openrouter-api", "deepseek/deepseek-v4-flash"),
+            ("or_v4_pro", "OR DeepSeek V4 Pro", "openrouter-api", "deepseek/deepseek-v4-pro"),
+            ("or_gemini", "OR Gemini 3.8 Flash", "openrouter-api", "google/gemini-3.8-flash"),
         ]
 
     def _wrapper_model_choice(self, choice_id: str) -> tuple[str, str, str, str] | None:
@@ -7581,7 +7575,8 @@ class FlexibleAgentRuntime:
             ["claude_haiku", "claude_sonnet"],
             ["gemini_flash", "gemini_lite"],
             ["deepseek_flash", "deepseek_pro"],
-            ["or_deepseek", "or_gemini"],
+            ["or_v32", "or_v4_flash"],
+            ["or_v4_pro", "or_gemini"],
         ]
         for group in grouped_rows:
             row: list[InlineKeyboardButton] = []

@@ -15,27 +15,16 @@ from orchestrator.model_catalog import (
 )
 
 
-def test_codex_spark_model_is_available_to_gateway_catalog():
-    assert "gpt-5.3-codex-spark" in AVAILABLE_CODEX_MODELS
-
-
-def test_codex_spark_model_is_available_to_flex_backend_registry():
-    assert "gpt-5.3-codex-spark" in get_available_models("codex-cli")
-
-
-def test_codex_gpt56_variants_are_available_in_gateway_catalog():
-    expected = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
-    assert expected.issubset(set(AVAILABLE_CODEX_MODELS))
-    assert "gpt-5.6" not in AVAILABLE_CODEX_MODELS
-
-
-def test_codex_gpt56_variants_are_available_in_flex_backend_registry():
-    models = get_available_models("codex-cli")
-    assert "gpt-5.6-sol" in models
-    assert "gpt-5.6-terra" in models
-    assert "gpt-5.6-luna" in models
-    assert "gpt-5.5" in models
-    assert "gpt-5.6" not in models
+def test_codex_catalog_exposes_only_the_supported_hashi_models():
+    expected = [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-6-astra",
+    ]
+    assert AVAILABLE_CODEX_MODELS == expected
+    assert get_available_models("codex-cli") == expected
 
 
 def test_codex_gateway_models_expose_live_probed_reasoning_efforts():
@@ -52,6 +41,13 @@ def test_codex_gateway_models_expose_live_probed_reasoning_efforts():
     assert normalize_effort("codex-cli", "max", "gpt-5.6-luna") == "max"
     assert normalize_effort("codex-cli", "max", "gpt-5.6-sol") == "max"
     assert normalize_effort("codex-cli", "max", "gpt-5.6-terra") == "medium"
+    assert get_available_efforts("codex-cli", "gpt-6-astra") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
 
 
 def test_hashi_api_declares_reasoning_efforts_for_both_gateway_models():
@@ -103,27 +99,26 @@ def test_xai_api_models_are_available_to_gateway_catalog():
     assert "grok-4.3" in get_available_models("xai-api")
 
 
-def test_current_deepseek_models_replace_retired_and_experimental_ids():
+def test_provider_catalogs_expose_only_the_supported_models():
     direct_models = get_available_models("deepseek-api")
     openrouter_models = get_available_models("openrouter-api")
 
     assert direct_models == [
+        "deepseek-flash",
         "deepseek-v4-pro",
-        "deepseek-v4-flash",
-        "deepseek-v4-flash-vision-exp",
     ]
-    assert "deepseek-chat" not in direct_models
-    assert "deepseek-reasoner" not in direct_models
-    assert "deepseek/deepseek-v4-pro" in openrouter_models
-    assert "deepseek/deepseek-v4-flash" in openrouter_models
-    assert "deepseek/deepseek-v3.2-exp" not in openrouter_models
+    assert openrouter_models == [
+        "deepseek/deepseek-v3.2-exp",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+        "google/gemini-3.8-flash",
+    ]
 
 
 def test_deepseek_exposes_only_distinct_provider_reasoning_states():
     for model in (
+        "deepseek-flash",
         "deepseek-v4-pro",
-        "deepseek-v4-flash",
-        "deepseek-v4-flash-vision-exp",
     ):
         assert get_available_efforts("deepseek-api", model) == []
         assert get_provider_reasoning_efforts("deepseek-api", model) == [
@@ -136,6 +131,11 @@ def test_deepseek_exposes_only_distinct_provider_reasoning_states():
 
 def test_compatibility_catalog_is_derived_from_backend_registry():
     assert available_gateway_models() == get_all_gateway_models()
-    assert default_gateway_model() == "gpt-5.4"
-    assert "anthropic/claude-sonnet-4.6" in AVAILABLE_OPENROUTER_MODELS
+    assert default_gateway_model() == "gpt-5.6-sol"
+    assert AVAILABLE_OPENROUTER_MODELS == [
+        "deepseek/deepseek-v3.2-exp",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+        "google/gemini-3.8-flash",
+    ]
     assert "grok-imagine-video-1.5-preview" in AVAILABLE_XAI_API_MODELS

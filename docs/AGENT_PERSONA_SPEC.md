@@ -68,7 +68,9 @@ The PCM file is derived from `workspace_dir`:
   "display_name": "Research Assistant",
   "type": "flex",
   "workspace_dir": "workspaces/researcher",
-  "allowed_backends": [{"engine": "codex-cli", "model": "gpt-5.4"}],
+  "allowed_backends": [
+    {"engine": "codex-cli", "model": "gpt-5.6-sol", "effort": "medium"}
+  ],
   "active_backend": "codex-cli"
 }
 ```

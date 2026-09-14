@@ -5,8 +5,8 @@ Differences from OpenRouter:
   - Endpoint: https://api.deepseek.com/v1/chat/completions
   - No OpenRouter-specific headers (HTTP-Referer, X-Title)
   - Reasoning content field: "reasoning_content" (not "reasoning")
-  - Current model IDs include deepseek-v4-flash, deepseek-v4-pro, and the
-    exact vision-capable deepseek-v4-flash-vision-exp model
+  - Current model IDs include deepseek-flash (V4.1 Flash), deepseek-v4-pro,
+    and temporary previous-generation aliases
 """
 
 from __future__ import annotations
@@ -41,6 +41,10 @@ HASHI_COMPACTION_CAPABILITIES = {
     "local_or_slow": False,
 }
 HASHI_MODEL_CAPACITY_PROFILES = {
+    "deepseek-flash": {
+        "context_window_tokens": 1_000_000,
+        "capacity_provenance": "official_deepseek_api_docs_2026-09-10",
+    },
     "deepseek-v4-flash-vision-exp": {
         "context_window_tokens": 1_000_000,
         "capacity_provenance": "official_deepseek_api_docs_2026-08-21",

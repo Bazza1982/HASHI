@@ -45,7 +45,7 @@ Normal Agent configuration keeps `type: "flex"` and may set `default_mode`:
   "type": "flex",
   "workspace_dir": "workspaces/zelda",
   "allowed_backends": [
-    {"engine": "codex-cli", "model": "gpt-5.4"}
+    {"engine": "codex-cli", "model": "gpt-5.6-sol", "effort": "medium"}
   ],
   "active_backend": "codex-cli",
   "default_mode": "fixed"
