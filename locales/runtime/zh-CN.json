@@ -359,7 +359,6 @@
     "lifecycle.shutting_down": "正在关闭此代理。",
     "lifecycle.control_unavailable": "动态生命周期控制目前不可用。",
     "loop.setting_up": "🔄 收到。HASHI 正在理解任务并设置循环……",
-    "safety.dangling_tool": "本轮回复包含未完成的工具控制标记，HASHI 已阻止其发送。相关操作不视为已执行或已完成；任务仍未完成，应从已保存的任务检查点继续。",
     "wip.title": "未完成的工作",
     "wip.status_label": "状态",
     "wip.status_ready": "可以恢复",

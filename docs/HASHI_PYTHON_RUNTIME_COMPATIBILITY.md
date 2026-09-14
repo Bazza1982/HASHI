@@ -15,8 +15,10 @@ Earlier API 2 implementation and verification status is recorded in
 
 HASHI Core owns one mandatory runtime. Functional code runs in replaceable,
 shared Function and per-Agent Worker processes supervised by that Core. Functional code may use the
-Core contract; it may not choose a Python version, mutate Core, or share Python
-objects across the process boundary.
+Core contract; it may not choose the Core Python version, mutate Core, or share Python
+objects across the process boundary. Optional/native Function dependencies run
+in isolated sidecars over typed data protocols and are never installed into the
+interpreter of a running Core.
 
 The machine-readable authority is `[tool.hashi.runtime]` in `pyproject.toml`:
 
@@ -82,10 +84,12 @@ Worker model, protocol and generation schema
 project imports in `main.py`. Every probe and Worker recomputes the fingerprint
 with the same executable and must exactly match Core.
 
-The standard lock defines required production packages. Extra packages may be
-installed for an approved optional profile, but the effective installed set is
-part of `dependency_digest`; Core and every Worker must therefore see the same
-environment.
+The standard lock defines the Core runtime's required production packages. Its
+complete installed set is part of `dependency_digest`; Core and every Worker
+must therefore see the same stable environment. An optional Function profile
+does not extend that environment. Native or conflicting packages live in an
+isolated sidecar selected by platform/instance configuration and communicate
+with a Function Worker through a bounded, versioned data protocol.
 
 The repository-local virtual environment may belong to a running Core, so the
 project declares `[tool.uv] managed = false`. Project-aware `uv run`, `uv lock`,
@@ -185,8 +189,9 @@ that aggregate state as `mixed`.
 - Unexpected active Worker exit: close only that Agent route, start the same
   immutable generation up to three times, then either restore it or leave the
   route explicitly failed.
-- Core/Python/dependency/ABI change: reject `/reboot`; use a planned Core
-  migration.
+- Core/Python/Core-dependency/ABI change: reject `/reboot`; use a planned Core
+  migration. Optional Function dependencies are not permitted to create this
+  condition.
 
 No failure silently expands a target set, changes another Agent, or turns an
 unknown state into a claimed rollback.
@@ -196,7 +201,7 @@ unknown state into a claimed rollback.
 These require a new Core rather than `/reboot`:
 
 - Python patch/minor or interpreter implementation;
-- virtual environment, dependency lock or native ABI;
+- Core virtual environment, Core dependency lock or native ABI;
 - any protected Core source;
 - Core API, Function API, Worker protocol or generation schema.
 

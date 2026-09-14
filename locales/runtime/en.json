@@ -359,7 +359,6 @@
     "lifecycle.shutting_down": "Shutting down.",
     "lifecycle.control_unavailable": "Dynamic lifecycle control is unavailable.",
     "loop.setting_up": "🔄 Got it. HASHI is interpreting the task and setting up the loop…",
-    "safety.dangling_tool": "HASHI blocked an unfinished tool-control envelope from the final response. No related action is considered executed or complete; the task remains incomplete and should resume from its preserved checkpoint.",
     "wip.title": "Unfinished work",
     "wip.status_label": "Status",
     "wip.status_ready": "RECOVERY READY",

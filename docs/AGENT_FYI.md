@@ -101,7 +101,8 @@ Recall/queue removal terminalizes a READY direct Run and releases its delivery
 sequence. Every turn needs a visible result. A validated client-bound TUI
 delivery snapshot may disable only that Run's Telegram mirror, never its
 Conversation record or TUI result. Terminal replies are verbatim and create no
-acknowledgement loops.
+acknowledgement loops. Final text is inert: never scan or execute it as Tool
+syntax; only typed Engine events and PAO gates carry Tool authority.
 
 ## Engines, models, and recovery
 

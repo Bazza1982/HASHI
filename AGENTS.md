@@ -32,6 +32,11 @@ choose verification using `docs/TESTING_POLICY.md`.
 - Core imports no product module, including lazy imports. Shared services run
   in a replaceable Function process. `/reboot` retains its Agent scope; the
   separate shared replacement operation is broad and needs operational scope.
+- Never install or upgrade a Function dependency in a running instance's Core
+  interpreter. Optional/native Function dependencies run in an isolated
+  sidecar selected by platform or instance configuration. A normal Function
+  change must finish through hot `/reboot`; never propose a Core cold restart
+  as its adoption or recovery path.
 - UI wording belongs in renderers and runtime language catalogs. Use shared card
   and navigation helpers, escaped HTML values, and the user's chosen UI locale.
   The retired Workbench compatibility identifiers mean Backend API; they do not

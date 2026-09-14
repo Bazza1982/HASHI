@@ -16,10 +16,11 @@ compatibility shim.
 
 ## Feature extras
 
-These commands assume a source checkout and an environment being prepared
-for that feature profile. The published Python artifact contains the extracted
+These commands assume a source checkout and a disposable environment being
+prepared for that feature profile. They must not target the interpreter of a
+running HASHI instance. The published Python artifact contains the extracted
 Nagare/Flow packages, not the full HASHI application. The runtime contract
-still applies; do not modify dependencies in a running instance's environment.
+still applies; native Function profiles use their owning isolated sidecar.
 See [installation](INSTALL.md) and [distribution scope](RELEASES.md).
 
 Install one or combine several extras in one command, for example:
@@ -73,4 +74,5 @@ The provisioner creates a separate Python 3.12.13 environment from
 `state/platform/transcription.json`. It refuses any target overlapping the
 active Core environment. The model cache remains a separate user/platform
 asset and is populated by faster-whisper when the selected model is first
-used.
+used. `VoiceTranscriber` communicates with the generation-pinned helper over
+versioned JSON and retires its pipe when the Function Worker closes.
