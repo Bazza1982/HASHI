@@ -92,7 +92,15 @@ async def test_command_reads_real_session_history_without_audit_chat_or_model_si
     assert payload["request_discovery_complete"] is True
     assert payload["activity_replay_durable"] is False
 
-    polled = await entry(runtime, _wire(op="poll", offset=len(duplicate)), source_channel="workbench_api")
+    polled = await entry(
+        runtime,
+        _wire(
+            op="poll",
+            offset=len(duplicate),
+            message_cursor=payload["message_cursor"],
+        ),
+        source_channel="workbench_api",
+    )
     assert polled["projection"]["messages"] == payload["messages"][2:]
     assert _database_snapshot(tmp_path) == before
     assert path.read_bytes() == duplicate + duplicate
@@ -176,6 +184,10 @@ async def test_projection_poll_preserves_half_record_then_acknowledges_completio
     {"limit": True}, {"limit": "2"}, {"limit": 1.5}, {"limit": 0}, {"limit": 201},
     {"op": "poll"}, {"op": "poll", "offset": -1}, {"op": "poll", "offset": True},
     {"op": "poll", "offset": "0"}, {"op": "poll", "offset": 9007199254740992},
+    {"op": "poll", "offset": 0, "message_cursor": -1},
+    {"op": "poll", "offset": 0, "message_cursor": True},
+    {"op": "poll", "offset": 0, "message_cursor": 9007199254740992},
+    {"message_cursor": 0},
     {"offset": 0}, {"op": "poll", "offset": 0, "limit": 2},
     {"owner_id": "user:999"}, {"session_id": "foreign"}, {"path": "/private"},
 ])

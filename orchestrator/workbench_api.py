@@ -1167,12 +1167,18 @@ class WorkbenchApiServer:
         # they will keep polling the obsolete Agent-level transcript forever.
         if surface:
             resolved_owner = owner_id or SessionStore.owner_id_for(self.global_config)
-            session = self.session_store.resolve_session(
-                owner_id=resolved_owner,
-                agent_id=agent_row["name"],
-                surface=surface,
-                channel_key=channel_key,
-            )
+            if str(surface).strip().casefold() in {"telegram", "workbench"}:
+                session = self.session_store.resolve_primary_session(
+                    owner_id=resolved_owner,
+                    agent_id=agent_row["name"],
+                )
+            else:
+                session = self.session_store.resolve_session(
+                    owner_id=resolved_owner,
+                    agent_id=agent_row["name"],
+                    surface=surface,
+                    channel_key=channel_key,
+                )
             workspace = self.session_store.session_workspace(
                 session["session_id"], int(session["context_generation"])
             )
@@ -4032,6 +4038,29 @@ class WorkbenchApiServer:
                 },
                 status=400,
             )
+        raw_message_cursor = request.query.get("message_cursor")
+        try:
+            message_cursor = (
+                int(raw_message_cursor) if raw_message_cursor is not None else None
+            )
+        except (TypeError, ValueError):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "message_cursor must be a non-negative integer",
+                    "error_code": "invalid_message_cursor",
+                },
+                status=400,
+            )
+        if message_cursor is not None and message_cursor < 0:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "message_cursor must be a non-negative integer",
+                    "error_code": "invalid_message_cursor",
+                },
+                status=400,
+            )
         agent_row = next(
             (row for row in self._load_agent_rows() if row["name"] == name), None
         )
@@ -4042,6 +4071,7 @@ class WorkbenchApiServer:
             name,
             offset=offset,
             known_history_generation=history_generation,
+            after_message_ordinal=message_cursor,
         )
 
     def _chat_transcript_response(
@@ -4052,6 +4082,7 @@ class WorkbenchApiServer:
         limit=200,
         offset=None,
         known_history_generation=None,
+        after_message_ordinal=None,
     ):
         owner_id = self._v1_owner_id(request)
         if owner_id is None:
@@ -4059,8 +4090,10 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "not authenticated", "error_code": "not_authenticated"},
                 status=401,
             )
-        session = self.session_store.resolve_session(owner_id=owner_id, agent_id=name,
-                                                     surface="workbench", channel_key="default")
+        session = self.session_store.resolve_primary_session(
+            owner_id=owner_id,
+            agent_id=name,
+        )
         payload = build_chat_projection(
             self.session_store,
             session=session,
@@ -4068,6 +4101,7 @@ class WorkbenchApiServer:
             offset=offset,
             limit=limit,
             known_history_generation=known_history_generation,
+            after_message_ordinal=after_message_ordinal,
         )
         return web.json_response(payload)
 

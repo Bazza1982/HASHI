@@ -23,7 +23,7 @@ MAX_TRANSPORT_LENGTH = 1024
 MAX_SAFE_OFFSET = 9007199254740991
 _FIELDS = {
     "recent": frozenset({"version", "op", "limit"}),
-    "poll": frozenset({"version", "op", "offset"}),
+    "poll": frozenset({"version", "op", "offset", "message_cursor"}),
 }
 
 
@@ -58,6 +58,12 @@ def _decode_transport(text: str) -> dict[str, Any]:
         offset = value.get("offset")
         if type(offset) is not int or not 0 <= offset <= MAX_SAFE_OFFSET:
             raise ValueError("invalid projection offset")
+        message_cursor = value.get("message_cursor")
+        if message_cursor is not None and (
+            type(message_cursor) is not int
+            or not 0 <= message_cursor <= MAX_SAFE_OFFSET
+        ):
+            raise ValueError("invalid projection message cursor")
     return value
 
 
@@ -100,6 +106,7 @@ async def try_dispatch_chat_projection_transport(
             owner_id=owner_id,
             limit=payload.get("limit", 200),
             offset=payload.get("offset"),
+            after_message_ordinal=payload.get("message_cursor"),
         )
     except Exception:
         # Neither the envelope nor transcript text belongs in the command audit
