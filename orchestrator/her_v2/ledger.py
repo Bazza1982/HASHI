@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Collection, Iterable, Mapping
 
 from .lifecycle import LifecycleMachine, LifecycleViolation
 from .models import (
@@ -246,10 +246,19 @@ class LedgerStore:
                 continue
         return tuple(ledgers)
 
-    def reconcile_interrupted(self) -> tuple[ExecutionLedger, ...]:
+    def reconcile_interrupted(
+        self,
+        *,
+        request_refs: Collection[str] | None = None,
+    ) -> tuple[ExecutionLedger, ...]:
+        allowed = (
+            None if request_refs is None else {str(value) for value in request_refs}
+        )
         reconciled: list[ExecutionLedger] = []
         for ledger in self.all_ledgers():
             if ledger.is_terminal:
+                continue
+            if allowed is not None and ledger.request_ref not in allowed:
                 continue
             ledger.transition(
                 LifecycleState.ERROR,

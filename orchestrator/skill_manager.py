@@ -28,6 +28,10 @@ from orchestrator.her_v2.request_policy import (
     job_effort_policy,
 )
 from orchestrator.job_ownership import ownership_mismatch_label
+from orchestrator.timezone_policy import (
+    UTC_TIMEZONE_NAME,
+    canonical_timezone_name,
+)
 
 
 @dataclass
@@ -280,7 +284,9 @@ class SkillManager:
 
     def _load_json(self, path: Path, default: Any, *, strict: bool = False) -> Any:
         if not path.exists():
-            return new_config_json(path, default) if isinstance(default, dict) else default
+            return (
+                new_config_json(path, default) if isinstance(default, dict) else default
+            )
         try:
             return read_managed_json(path)
         except Exception:
@@ -586,7 +592,10 @@ class SkillManager:
                             linked_invocation = str(
                                 record.get("skill_usage_event_id") or ""
                             )
-                            if linked_invocation and linked_invocation in invocation_ids:
+                            if (
+                                linked_invocation
+                                and linked_invocation in invocation_ids
+                            ):
                                 continue
                             explicit_id = self._canonical_skill_id(
                                 str(record.get("skill_id") or "")
@@ -1025,6 +1034,7 @@ class SkillManager:
         enabled: bool,
         note: str,
         her_v2_effort: str | None = None,
+        timezone_name: str | None = None,
     ) -> dict[str, Any]:
         """Create or update one owned fixed-wall-clock cron definition.
 
@@ -1039,11 +1049,15 @@ class SkillManager:
         if existing is not None and existing.get("agent") != agent_name:
             raise ValueError(f"Cron task {task_id} belongs to another agent")
         job = existing if existing is not None else {"id": task_id}
+        selected_timezone = canonical_timezone_name(
+            timezone_name or (existing or {}).get("timezone") or UTC_TIMEZONE_NAME
+        )
         job.update(
             {
                 "agent": agent_name,
                 "enabled": bool(enabled),
                 "schedule": str(schedule).strip(),
+                "timezone": selected_timezone,
                 "action": str(action).strip(),
                 "note": str(note).strip(),
                 "updated_at": self._now(),
@@ -1063,6 +1077,7 @@ class SkillManager:
         agent_name: str,
         new_task_id: str,
         backend_is_her: bool,
+        default_timezone_name: str = UTC_TIMEZONE_NAME,
     ) -> dict[str, Any]:
         """Retire enabled generic Dream jobs without touching legacy data."""
 
@@ -1096,6 +1111,9 @@ class SkillManager:
                 "agent": agent_name,
                 "enabled": True,
                 "schedule": schedule,
+                "timezone": canonical_timezone_name(
+                    source.get("timezone") or default_timezone_name
+                ),
                 "action": "her:dream",
                 "note": f"[HER Dream] Habit maintenance for {agent_name}",
                 "created_at": now,

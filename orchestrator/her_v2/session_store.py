@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Iterator, Mapping
@@ -210,6 +211,10 @@ class HerSessionStore:
                     capability_revision INTEGER NOT NULL DEFAULT 0,
                     pricing_revision TEXT NOT NULL DEFAULT '',
                     route_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    execution_owner_id TEXT NOT NULL DEFAULT '',
+                    execution_owner_pid INTEGER NOT NULL DEFAULT 0,
+                    execution_owner_started_at TEXT NOT NULL DEFAULT '',
+                    execution_lease_updated_at TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(session_id, turn_id),
                     UNIQUE(session_id, message_id),
                     UNIQUE(session_id, idempotency_key),
@@ -345,6 +350,10 @@ class HerSessionStore:
                     "capability_revision": "INTEGER NOT NULL DEFAULT 0",
                     "pricing_revision": "TEXT NOT NULL DEFAULT ''",
                     "route_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "execution_owner_id": "TEXT NOT NULL DEFAULT ''",
+                    "execution_owner_pid": "INTEGER NOT NULL DEFAULT 0",
+                    "execution_owner_started_at": "TEXT NOT NULL DEFAULT ''",
+                    "execution_lease_updated_at": "TEXT NOT NULL DEFAULT ''",
                 },
                 "her_session_events": {
                     "state_version": "INTEGER NOT NULL DEFAULT 0",
@@ -410,6 +419,74 @@ class HerSessionStore:
             result.pop("route_snapshot_json", "{}")
         )
         return result
+
+    @staticmethod
+    def _assert_execution_owner(
+        turn: Mapping[str, Any],
+        execution_owner_id: str,
+    ) -> None:
+        recorded = str(turn.get("execution_owner_id") or "")
+        supplied = str(execution_owner_id or "")
+        if recorded and supplied != recorded:
+            raise HerSessionStoreError(
+                "execution_owner_conflict",
+                "HER Turn belongs to a different Function Worker execution.",
+            )
+
+    @staticmethod
+    def _process_is_alive(pid: int) -> bool:
+        """Return conservative process liveness for a same-host Worker owner."""
+
+        if int(pid or 0) <= 0:
+            return True
+        if os.name == "nt":
+            # ``os.kill(pid, 0)`` is not a harmless probe on native Windows.
+            # Query the process handle without acquiring terminate rights.
+            import ctypes
+
+            process_query_limited_information = 0x1000
+            still_active = 259
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+            open_process.restype = ctypes.c_void_p
+            get_exit_code = kernel32.GetExitCodeProcess
+            get_exit_code.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_ulong),
+            ]
+            get_exit_code.restype = ctypes.c_int
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            handle = open_process(
+                process_query_limited_information,
+                False,
+                int(pid),
+            )
+            if not handle:
+                # Access denied proves that a process owns the PID; every
+                # other failure is conservatively treated as terminated.
+                return ctypes.get_last_error() == 5
+            try:
+                exit_code = ctypes.c_ulong()
+                if not get_exit_code(
+                    handle,
+                    ctypes.byref(exit_code),
+                ):
+                    return True
+                return int(exit_code.value) == still_active
+            finally:
+                close_handle(handle)
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return True
+        return True
 
     def session(self, session_id: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:
@@ -671,6 +748,9 @@ class HerSessionStore:
         message_id: str,
         idempotency_key: str,
         user_message: str,
+        execution_owner_id: str = "",
+        execution_owner_pid: int = 0,
+        execution_owner_started_at: str = "",
     ) -> dict[str, Any]:
         now = _utc_now()
         pcm_state = dict(pcm)
@@ -799,8 +879,10 @@ class HerSessionStore:
                 INSERT INTO her_turns(
                     session_id, turn_id, request_id, message_id,
                     idempotency_key, sequence, pcm_revision, resource_revision,
-                    authority_digest, user_message, status, accepted_at
-                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'active', ?)
+                    authority_digest, user_message, execution_owner_id,
+                    execution_owner_pid, execution_owner_started_at,
+                    execution_lease_updated_at, status, accepted_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
                 """,
                 (
                     session_id,
@@ -812,6 +894,10 @@ class HerSessionStore:
                     int(resource_revision),
                     authority_digest,
                     user_message,
+                    str(execution_owner_id),
+                    max(0, int(execution_owner_pid or 0)),
+                    str(execution_owner_started_at),
+                    now,
                     now,
                 ),
             )
@@ -897,6 +983,14 @@ class HerSessionStore:
         with self._lock, self._connect() as connection:
             row = connection.execute(query, arguments).fetchone()
         return self._recovery_dict(row)
+
+    def unresolved_side_effects_for_turn(
+        self,
+        session_id: str,
+        turn_id: str,
+    ) -> list[dict[str, Any]]:
+        recovery = self.active_turn_recovery(session_id, turn_id) or {}
+        return self._unresolved_side_effects(list(recovery.get("side_effects") or []))
 
     def settled_checkpoint(self, session_id: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:
@@ -1475,11 +1569,30 @@ class HerSessionStore:
                 disposition = target.casefold()
                 remaining["status"] = "terminated"
 
-        pending_effect = any(
-            item.get("state") in {"pending", "unknown"} for item in effects
-        )
         effects = cls._bounded_side_effects(effects)
-        safe = not pending_effect
+        unresolved = cls._unresolved_side_effects(effects)
+        safe = not unresolved
+        remaining["unresolved_side_effects"] = unresolved
+        if (
+            event == "tool_receipt"
+            and safe
+            and disposition
+            in {
+                "UNKNOWN_SIDE_EFFECT",
+                "FAILED_SAFE_REPLAY_REQUIRED",
+            }
+        ):
+            # A terminal receipt is newer authority than the historical
+            # interruption projection.  It does not replay the operation; it
+            # removes the ambiguity for the original execution chain.
+            disposition = ""
+            status = "active"
+            remaining["status"] = "in_progress"
+            remaining.pop("reason", None)
+            remaining.pop("error", None)
+        elif event == "transition" and status == "settled" and safe:
+            disposition = "settled"
+            remaining.pop("reason", None)
         return {
             "status": status,
             "current_stage": current_stage,
@@ -1498,6 +1611,7 @@ class HerSessionStore:
         session_id: str,
         turn_id: str,
         record: Mapping[str, Any],
+        execution_owner_id: str = "",
     ) -> int:
         """Append one canonical runtime event and update recovery projection."""
 
@@ -1521,6 +1635,14 @@ class HerSessionStore:
             "facts": payload,
         }
         with self._transaction() as connection:
+            now = _utc_now()
+            turn = connection.execute(
+                "SELECT * FROM her_turns WHERE session_id = ? AND turn_id = ?",
+                (session_id, turn_id),
+            ).fetchone()
+            if turn is None:
+                raise HerSessionStoreError("unknown_turn", "HER turn is unknown.")
+            self._assert_execution_owner(dict(turn), execution_owner_id)
             existing = connection.execute(
                 """
                 SELECT canonical_sequence, kind, payload_json
@@ -1537,6 +1659,15 @@ class HerSessionStore:
                     raise HerSessionStoreError(
                         "event_id_conflict",
                         "Runtime event ID was reused with different immutable facts.",
+                    )
+                if execution_owner_id:
+                    connection.execute(
+                        """
+                        UPDATE her_turns SET execution_lease_updated_at = ?
+                        WHERE session_id = ? AND turn_id = ?
+                          AND execution_owner_id = ?
+                        """,
+                        (now, session_id, turn_id, execution_owner_id),
                     )
                 return int(existing["canonical_sequence"])
             recovery = connection.execute(
@@ -1580,11 +1711,40 @@ class HerSessionStore:
                     projection["safe_to_resume"],
                     projection["recovery_disposition"],
                     sequence,
-                    _utc_now(),
+                    now,
                     session_id,
                     turn_id,
                 ),
             )
+            recorded_owner = str(turn["execution_owner_id"] or "")
+            repaired = bool(
+                str(turn["status"]) == "failed"
+                and recorded_owner
+                and recorded_owner == str(execution_owner_id or "")
+                and str(recovery["recovery_disposition"] or "")
+                in {"UNKNOWN_SIDE_EFFECT", "FAILED_SAFE_REPLAY_REQUIRED"}
+                and bool(projection["safe_to_resume"])
+            )
+            if repaired:
+                connection.execute(
+                    """
+                    UPDATE her_turns
+                    SET status = 'active', error_text = NULL, completed_at = NULL,
+                        execution_lease_updated_at = ?
+                    WHERE session_id = ? AND turn_id = ?
+                      AND status = 'failed' AND execution_owner_id = ?
+                    """,
+                    (now, session_id, turn_id, recorded_owner),
+                )
+            elif execution_owner_id:
+                connection.execute(
+                    """
+                    UPDATE her_turns SET execution_lease_updated_at = ?
+                    WHERE session_id = ? AND turn_id = ?
+                      AND execution_owner_id = ?
+                    """,
+                    (now, session_id, turn_id, execution_owner_id),
+                )
             return sequence
 
     def record_provider_requests(
@@ -2066,6 +2226,9 @@ class HerSessionStore:
         message_id: str,
         idempotency_key: str,
         user_message: str,
+        execution_owner_id: str = "",
+        execution_owner_pid: int = 0,
+        execution_owner_started_at: str = "",
     ) -> dict[str, Any]:
         now = _utc_now()
         with self._transaction() as connection:
@@ -2204,8 +2367,10 @@ class HerSessionStore:
                 INSERT INTO her_turns(
                     session_id, turn_id, request_id, message_id,
                     idempotency_key, sequence, pcm_revision, resource_revision,
-                    authority_digest, user_message, status, accepted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                    authority_digest, user_message, execution_owner_id,
+                    execution_owner_pid, execution_owner_started_at,
+                    execution_lease_updated_at, status, accepted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
                 """,
                 (
                     session_id,
@@ -2218,6 +2383,10 @@ class HerSessionStore:
                     int(resource_target_revision),
                     authority_digest,
                     user_message,
+                    str(execution_owner_id),
+                    max(0, int(execution_owner_pid or 0)),
+                    str(execution_owner_started_at),
+                    now,
                     now,
                 ),
             )
@@ -2297,6 +2466,7 @@ class HerSessionStore:
         turn_id: str,
         assistant_text: str,
         error_text: str = "",
+        execution_owner_id: str = "",
     ) -> dict[str, Any]:
         now = _utc_now()
         with self._transaction() as connection:
@@ -2306,8 +2476,7 @@ class HerSessionStore:
             ).fetchone()
             if turn is None:
                 raise HerSessionStoreError("unknown_turn", "HER turn is unknown.")
-            if str(turn["status"]) in {"completed", "failed", "cancelled"}:
-                return self._turn_dict(turn) or {}
+            self._assert_execution_owner(dict(turn), execution_owner_id)
             recovery = connection.execute(
                 """
                 SELECT * FROM her_active_turn_recovery
@@ -2317,6 +2486,21 @@ class HerSessionStore:
             ).fetchone()
             effects = _array(recovery["side_effects_json"]) if recovery else []
             unresolved = self._unresolved_side_effects(effects)
+            turn_status = str(turn["status"])
+            if turn_status in {"completed", "cancelled"}:
+                return self._turn_dict(turn) or {}
+            if turn_status == "failed":
+                same_execution_repair = bool(
+                    str(turn["execution_owner_id"] or "")
+                    and str(turn["execution_owner_id"] or "")
+                    == str(execution_owner_id or "")
+                    and recovery is not None
+                    and str(recovery["recovery_disposition"] or "")
+                    in {"UNKNOWN_SIDE_EFFECT", "FAILED_SAFE_REPLAY_REQUIRED", ""}
+                    and not unresolved
+                )
+                if not same_execution_repair:
+                    return self._turn_dict(turn) or {}
             current_unresolved = [
                 item
                 for item in unresolved
@@ -2430,6 +2614,7 @@ class HerSessionStore:
         session_id: str,
         turn_id: str,
         reason: str,
+        execution_owner_id: str = "",
     ) -> dict[str, Any]:
         """Cancel one active turn without closing its durable session."""
 
@@ -2441,6 +2626,7 @@ class HerSessionStore:
             ).fetchone()
             if turn is None:
                 raise HerSessionStoreError("unknown_turn", "HER turn is unknown.")
+            self._assert_execution_owner(dict(turn), execution_owner_id)
             if str(turn["status"]) in {"completed", "failed", "cancelled"}:
                 return self._turn_dict(turn) or {}
             clean_reason = str(reason or "HER turn was cancelled.")
@@ -2523,16 +2709,39 @@ class HerSessionStore:
             ).fetchone()
             return self._turn_dict(updated) or {}
 
-    def reconcile_interrupted(self) -> int:
-        """Fail unfinished process-local turns while preserving their sessions."""
+    def reconcile_interrupted_turns(
+        self,
+        *,
+        claimant_owner_id: str = "",
+        process_is_alive: Any | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        """Fail and return turns whose recorded Worker is confirmed terminated.
+
+        A caller without ``claimant_owner_id`` is an explicit offline/legacy
+        reconciliation and retains the historical force behavior.  Runtime
+        candidates always supply their owner and therefore fail closed for
+        legacy or indeterminate ownership.
+        """
 
         with self._transaction() as connection:
             rows = connection.execute(
-                "SELECT session_id, turn_id FROM her_turns WHERE status = 'active'"
+                """
+                SELECT session_id, turn_id, request_id, execution_owner_id,
+                       execution_owner_pid, execution_lease_updated_at
+                FROM her_turns WHERE status = 'active'
+                """
             ).fetchall()
+            reconciled: list[dict[str, Any]] = []
             for row in rows:
                 session_id = str(row["session_id"])
                 turn_id = str(row["turn_id"])
+                recorded_owner = str(row["execution_owner_id"] or "")
+                if claimant_owner_id:
+                    if not recorded_owner or recorded_owner == claimant_owner_id:
+                        continue
+                    checker = process_is_alive or self._process_is_alive
+                    if checker(int(row["execution_owner_pid"] or 0)):
+                        continue
                 now = _utc_now()
                 recovery = connection.execute(
                     """
@@ -2627,6 +2836,8 @@ class HerSessionStore:
                     payload={
                         "turn_id": turn_id,
                         "state_version": state_version,
+                        "execution_owner_id": recorded_owner,
+                        "reconciled_by_owner_id": str(claimant_owner_id or ""),
                         "recovery_disposition": disposition,
                         "unresolved_side_effect_count": len(unresolved),
                         "session_retained": True,
@@ -2654,7 +2865,30 @@ class HerSessionStore:
                         turn_id,
                     ),
                 )
-            return len(rows)
+                reconciled.append(
+                    {
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "request_id": str(row["request_id"] or ""),
+                        "execution_owner_id": recorded_owner,
+                    }
+                )
+            return tuple(reconciled)
+
+    def reconcile_interrupted(
+        self,
+        *,
+        claimant_owner_id: str = "",
+        process_is_alive: Any | None = None,
+    ) -> int:
+        """Return the count of unfinished turns reconciled as interrupted."""
+
+        return len(
+            self.reconcile_interrupted_turns(
+                claimant_owner_id=claimant_owner_id,
+                process_is_alive=process_is_alive,
+            )
+        )
 
     def close_session(self, session_id: str) -> bool:
         with self._transaction() as connection:

@@ -30,6 +30,7 @@ from orchestrator.runtime_defaults import (
     DEFAULT_HASHI_REMOTE_PORT,
     DEFAULT_WORKBENCH_PORT,
 )
+from orchestrator.timezone_policy import canonical_timezone_name
 
 # Valid access_scope values:
 #   "workspace" - only the agent's workspace_dir (most restrictive)
@@ -125,6 +126,7 @@ class GlobalConfig:
     instance_id: str = "HASHI"
     display_name: str = "HASHI Instance"
     ui_language: str = "en"
+    timezone: str | None = None
     api_host: str = "127.0.0.1"
     remote_port: int = DEFAULT_HASHI_REMOTE_PORT
     project_root: Path = None
@@ -640,6 +642,10 @@ class ConfigManager:
                 )
             )
 
+        configured_timezone = str(g_raw.get("timezone") or "").strip()
+        if configured_timezone:
+            configured_timezone = canonical_timezone_name(configured_timezone)
+
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
             deployment_profile=profile_ctx.profile.value,
@@ -657,6 +663,7 @@ class ConfigManager:
             instance_id=g_raw.get("instance_id", "HASHI"),
             display_name=g_raw.get("display_name", "HASHI Instance"),
             ui_language=str(g_raw.get("ui_language", "en") or "en"),
+            timezone=configured_timezone or None,
             api_host=g_raw.get("api_host", "127.0.0.1"),
             remote_port=int(g_raw.get("remote_port", DEFAULT_HASHI_REMOTE_PORT)),
             project_root=code_root,

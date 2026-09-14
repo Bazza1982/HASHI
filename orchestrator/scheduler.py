@@ -3,7 +3,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -19,6 +19,15 @@ from orchestrator.her_v2.request_policy import build_scheduler_request_context
 from orchestrator.job_ownership import ownership_mismatch_label
 from orchestrator.runtime_common import _safe_excerpt
 from orchestrator.superloop_scheduler import advance_superloops_once
+from orchestrator.timezone_policy import (
+    UTC_TIMEZONE_NAME,
+    aware_in_timezone,
+    canonical_timezone_name,
+    format_epoch,
+    resolve_local_wall_time,
+    timezone_for_name,
+    utc_datetime_from_epoch,
+)
 
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
 
@@ -77,7 +86,11 @@ def _fallback_supports_schedule(schedule: str) -> bool:
         return False
 
 
-def validate_cron_schedule(schedule: str) -> tuple[bool, str | None]:
+def validate_cron_schedule(
+    schedule: str,
+    *,
+    timezone_name: str = UTC_TIMEZONE_NAME,
+) -> tuple[bool, str | None]:
     """Validate one five-field schedule against the active scheduler capability."""
 
     value = str(schedule or "").strip()
@@ -85,7 +98,11 @@ def validate_cron_schedule(schedule: str) -> tuple[bool, str | None]:
         return False, "Cron schedule must contain exactly five fields."
     if HAS_CRONITER:
         try:
-            croniter(value, datetime.now().astimezone()).get_next(datetime)
+            zone_name = canonical_timezone_name(timezone_name)
+            base = datetime.now(timezone.utc).astimezone(timezone_for_name(zone_name))
+            wall_base = base.replace(tzinfo=None)
+            candidate = croniter(value, wall_base).get_next(datetime)
+            resolve_local_wall_time(candidate, zone_name)
             return True, None
         except (ValueError, KeyError) as exc:
             return False, f"Invalid cron schedule: {exc}"
@@ -101,15 +118,32 @@ def next_cron_occurrence(
     schedule: str,
     *,
     now: datetime | None = None,
+    timezone_name: str = UTC_TIMEZONE_NAME,
 ) -> datetime:
-    """Return the next local occurrence or raise for an unsupported schedule."""
+    """Return the next occurrence in one explicit recurring wall-clock zone."""
 
-    current = now or datetime.now().astimezone()
-    valid, error = validate_cron_schedule(schedule)
+    zone_name = canonical_timezone_name(timezone_name)
+    current = aware_in_timezone(
+        now or datetime.now(timezone.utc),
+        zone_name,
+    )
+    valid, error = validate_cron_schedule(
+        schedule,
+        timezone_name=zone_name,
+    )
     if not valid:
         raise ValueError(error or "unsupported cron schedule")
     if HAS_CRONITER:
-        return croniter(schedule, current).get_next(datetime)
+        iterator = croniter(schedule, current.replace(tzinfo=None))
+        current_utc = current.astimezone(timezone.utc)
+        for _ in range(3):
+            wall_candidate = iterator.get_next(datetime)
+            candidate = resolve_local_wall_time(wall_candidate, zone_name)
+            # During a DST fold, fold=0 may already be behind a fold=1
+            # current instant even when its wall clock appears later.
+            if candidate.astimezone(timezone.utc) > current_utc:
+                return candidate
+        raise ValueError("cron schedule did not yield a future occurrence")
     minute_text, hour_text, *_rest = schedule.split()
     candidate = current.replace(
         hour=int(hour_text),
@@ -120,7 +154,11 @@ def next_cron_occurrence(
     return candidate if candidate > current else candidate + timedelta(days=1)
 
 
-def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> float | None:
+def _should_fire(
+    schedule: str,
+    last_run_ts: float,
+    now_dt: datetime,
+) -> float | None:
     """Check whether *schedule* has a fire time between *last_run_ts* (exclusive) and *now_dt* (inclusive).
 
     Return the number of seconds the task is late when a fire time is due.
@@ -129,6 +167,10 @@ def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> float |
     Uses croniter to iterate forward from last_run. If any scheduled time falls within
     (last_run, now], the task should fire.
     """
+    zone_name = canonical_timezone_name(
+        getattr(now_dt.tzinfo, "key", None) or UTC_TIMEZONE_NAME
+    )
+    current = aware_in_timezone(now_dt, zone_name)
     if not HAS_CRONITER:
         # Graceful fallback: match HH:MM only (legacy behaviour).
         # This handles simple "M H * * *" patterns.
@@ -137,15 +179,21 @@ def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> float |
             try:
                 minute = int(parts[0])
                 hour = int(parts[1])
-                current_hm = now_dt.strftime("%H:%M")
+                current_hm = current.strftime("%H:%M")
                 target_hm = f"{hour:02d}:{minute:02d}"
                 if current_hm != target_hm:
                     return None
                 # Ensure not already fired today.
                 # If never run (last_run_ts=0), use today's date so it does NOT
                 # fire immediately — it waits for the next scheduled occurrence.
-                last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else now_dt
-                if last_dt.date() < now_dt.date():
+                last_dt = (
+                    utc_datetime_from_epoch(last_run_ts).astimezone(
+                        timezone_for_name(zone_name)
+                    )
+                    if last_run_ts
+                    else current
+                )
+                if last_dt.date() < current.date():
                     return 0.0
                 return None
             except (ValueError, TypeError):
@@ -156,11 +204,20 @@ def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> float |
         # If last_run_ts is 0 (never run), use now_dt as the base so the next
         # scheduled time is calculated forward from *now*, not from year 2000.
         # This prevents new cron jobs from firing immediately on first scheduler tick.
-        last_dt = datetime.fromtimestamp(last_run_ts) if last_run_ts else now_dt
-        cron = croniter(schedule, last_dt)
-        next_fire = cron.get_next(datetime)
-        if next_fire <= now_dt:
-            return (now_dt - next_fire).total_seconds()
+        last_dt = (
+            utc_datetime_from_epoch(last_run_ts).astimezone(
+                timezone_for_name(zone_name)
+            )
+            if last_run_ts
+            else current
+        )
+        wall_next = croniter(
+            schedule,
+            last_dt.replace(tzinfo=None),
+        ).get_next(datetime)
+        next_fire = resolve_local_wall_time(wall_next, zone_name)
+        if next_fire <= current:
+            return (current - next_fire).total_seconds()
         return None
     except (ValueError, KeyError) as e:
         scheduler_logger.error(f"Invalid cron expression '{schedule}': {e}")
@@ -192,6 +249,7 @@ class TaskScheduler:
         enterprise_lease_name: str = "superloop-scheduler",
         enterprise_lease_holder: str = "local",
         enterprise_lease_ttl_seconds: int = 60,
+        timezone_name: str | None = None,
     ):
         self.tasks_path = tasks_path
         self.state_path = state_path
@@ -204,6 +262,10 @@ class TaskScheduler:
         self.enterprise_lease_name = enterprise_lease_name
         self.enterprise_lease_holder = enterprise_lease_holder
         self.enterprise_lease_ttl_seconds = enterprise_lease_ttl_seconds
+        self.configured_timezone_name = (
+            canonical_timezone_name(timezone_name) if timezone_name else None
+        )
+        self.timezone_name = self.configured_timezone_name or UTC_TIMEZONE_NAME
         self.state = self._load_state()
         self.state.setdefault("heartbeats", {})
         self.state.setdefault("crons", {})
@@ -222,6 +284,26 @@ class TaskScheduler:
         # ticks must keep normal due jobs independent, even when several share
         # the same interval or cron boundary.
         self._startup_recovery_pending = True
+
+    def _job_timezone_name(self, job: Mapping[str, Any]) -> str:
+        return canonical_timezone_name(job.get("timezone") or self.timezone_name)
+
+    def _format_job_instant(
+        self,
+        value: datetime,
+        job: Mapping[str, Any],
+        *,
+        include_iana: bool = True,
+    ) -> str:
+        aware = (
+            value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        )
+        return format_epoch(
+            aware.timestamp(),
+            timezone_name=self._job_timezone_name(job),
+            timespec="minutes",
+            include_iana=include_iana,
+        )
 
     def _runtime_map(self):
         if self.orchestrator is not None:
@@ -367,6 +449,11 @@ class TaskScheduler:
                 "summary": _safe_excerpt(message),
                 "created_at": current,
                 "due_at": current + minutes * 60,
+                "created_at_utc": utc_datetime_from_epoch(current).isoformat(),
+                "due_at_utc": utc_datetime_from_epoch(
+                    current + minutes * 60
+                ).isoformat(),
+                "source_timezone": self.timezone_name,
                 "delay_minutes": minutes,
                 "attempts": 0,
                 "deliver_to_telegram": bool(deliver_to_telegram),
@@ -602,9 +689,12 @@ class TaskScheduler:
                     occurrences = scheduler_recovery.collect_cron_occurrences(
                         schedule,
                         first_due - 1.0,
-                        datetime.fromtimestamp(noticed_at),
+                        utc_datetime_from_epoch(noticed_at).astimezone(
+                            timezone_for_name(self._job_timezone_name(job))
+                        ),
                         croniter_cls=croniter if HAS_CRONITER else None,
                         fallback_missed_by_seconds=missed_by,
+                        timezone_name=self._job_timezone_name(job),
                     )
                 else:
                     interval = int(record.get("interval_seconds") or job.get("interval_seconds") or 1)
@@ -668,6 +758,7 @@ class TaskScheduler:
                 limit=800,
             ),
             "replay_limit": scheduler_recovery.recovery_limit(job, kind),
+            "timezone": self._job_timezone_name(job),
             **occurrence_fields,
         }
         if kind == "cron":
@@ -708,6 +799,16 @@ class TaskScheduler:
 
         valid_crons = []
         for job in tasks.get("crons", []):
+            try:
+                job["timezone"] = self._job_timezone_name(job)
+            except ValueError as exc:
+                scheduler_logger.error(
+                    "Rejecting cron %s for agent %s: %s",
+                    job.get("id", "<unknown>"),
+                    job.get("agent", "<unknown>"),
+                    exc,
+                )
+                continue
             schedule = _resolve_schedule(job)
             if not schedule:
                 valid_crons.append(job)
@@ -756,7 +857,12 @@ class TaskScheduler:
             scheduler_logger.error(f"Failed to save tasks: {e}")
             return False
 
-    def _get_cron_last_run(self, task_id: str) -> float:
+    def _get_cron_last_run(
+        self,
+        task_id: str,
+        *,
+        timezone_name: str,
+    ) -> float:
         """Get last run timestamp for a cron task, handling both old date-string and new timestamp formats."""
         raw = self.state["crons"].get(task_id)
         if raw is None:
@@ -767,7 +873,11 @@ class TaskScheduler:
         if isinstance(raw, str):
             try:
                 dt = datetime.strptime(raw, "%Y-%m-%d")
-                return dt.timestamp()
+                return (
+                    resolve_local_wall_time(dt, timezone_name)
+                    .astimezone(timezone.utc)
+                    .timestamp()
+                )
             except ValueError:
                 return 0.0
         return 0.0
@@ -1073,7 +1183,7 @@ class TaskScheduler:
                 if not due_at:
                     due_at = [float(item.get("last_due_at") or time.time())] * requested
                 for due_ts in due_at:
-                    scheduled_for = datetime.fromtimestamp(float(due_ts))
+                    scheduled_for = utc_datetime_from_epoch(float(due_ts))
                     if item.get("kind") == "heartbeat":
                         ok = await self._fire_heartbeat_job(
                             job,
@@ -1203,7 +1313,8 @@ class TaskScheduler:
         if scheduled_for is not None:
             recovery_header = (
                 "[HASHI scheduler recovery]\n"
-                f"This is a missed occurrence originally due at {scheduled_for.astimezone().isoformat(timespec='minutes')}.\n"
+                "This is a missed occurrence originally due at "
+                f"{self._format_job_instant(scheduled_for, hb)}.\n"
                 f"Recovery batch: {recovery_batch_id or 'unknown'}\n\n"
             )
         if action.startswith("automation:"):
@@ -1298,7 +1409,8 @@ class TaskScheduler:
         if scheduled_for is not None:
             recovery_header = (
                 "[HASHI scheduler recovery]\n"
-                f"This is a missed occurrence originally due at {scheduled_for.astimezone().isoformat(timespec='minutes')}.\n"
+                "This is a missed occurrence originally due at "
+                f"{self._format_job_instant(scheduled_for, cron)}.\n"
                 f"Recovery batch: {recovery_batch_id or 'unknown'}\n\n"
             )
         if action == "export_transcript":
@@ -1311,7 +1423,9 @@ class TaskScheduler:
                 rt.invoke_her_dream(
                     task_id=task_id,
                     scheduled_for=(
-                        scheduled_for.astimezone().isoformat(timespec="minutes")
+                        scheduled_for.astimezone(timezone.utc).isoformat(
+                            timespec="minutes"
+                        )
                         if scheduled_for is not None
                         else None
                     ),
@@ -1405,7 +1519,7 @@ class TaskScheduler:
 
                 tasks = self._load_tasks()
                 now = time.time()
-                now_dt = datetime.now()
+                now_dt = datetime.now(timezone.utc)
 
                 state_changed = False
 
@@ -1539,7 +1653,11 @@ class TaskScheduler:
                         scheduler_logger.error(f"Cron {task_id} has no 'schedule' or 'time' field. Skipping.")
                         continue
 
-                    last_run_ts = self._get_cron_last_run(task_id)
+                    timezone_name = self._job_timezone_name(cron)
+                    last_run_ts = self._get_cron_last_run(
+                        task_id,
+                        timezone_name=timezone_name,
+                    )
 
                     # Seed new cron jobs: record current time so they fire at the
                     # next scheduled boundary instead of never (see _should_fire
@@ -1551,7 +1669,8 @@ class TaskScheduler:
                         state_changed = True
                         continue
 
-                    missed_by = _should_fire(schedule, last_run_ts, now_dt)
+                    cron_now = now_dt.astimezone(timezone_for_name(timezone_name))
+                    missed_by = _should_fire(schedule, last_run_ts, cron_now)
                     if missed_by is None:
                         continue
                     if self._job_owner_mismatch(cron, task_kind="Cron", task_id=task_id, agent_name=agent_name):
@@ -1564,9 +1683,10 @@ class TaskScheduler:
                         occurrences = scheduler_recovery.collect_cron_occurrences(
                             schedule,
                             last_run_ts,
-                            now_dt,
+                            cron_now,
                             croniter_cls=croniter if HAS_CRONITER else None,
                             fallback_missed_by_seconds=missed_by,
+                            timezone_name=timezone_name,
                         )
                         scheduler_logger.info(
                             "Cron %s for %s is a recovery candidate (%s missed occurrence(s), first missed by %sm).",
@@ -1591,7 +1711,7 @@ class TaskScheduler:
                         cron,
                         runtime_map=runtime_map,
                         tasks=tasks,
-                        now_dt=now_dt,
+                        now_dt=cron_now,
                     )
                     # Cron state advances even when execution fails so the next
                     # tick does not repeatedly fire the same scheduled boundary.

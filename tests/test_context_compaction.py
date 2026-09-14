@@ -31,6 +31,7 @@ from orchestrator.context_compaction import (
     ContextCapacityError,
     ContextCompactionCoordinator,
     ResolvedCompactRoute,
+    _timeline_epoch,
     cancel_runtime_compaction,
     capacity_error_text,
     compact_status_text,
@@ -145,7 +146,11 @@ class _Runtime:
             capacity=capacity,
             headroom=headroom,
         )
-        self.global_config = SimpleNamespace(her_providers={}, authorized_id=1)
+        self.global_config = SimpleNamespace(
+            her_providers={},
+            authorized_id=1,
+            timezone="Australia/Sydney",
+        )
         self.memory_store = SimpleNamespace(
             db_path=workspace / "bridge_memory.sqlite",
             retrieve_memories=lambda *_args, **_kwargs: [],
@@ -235,6 +240,19 @@ def test_recent_history_merges_turns_and_receipts_by_completion_time(tmp_path):
     immediate = rendered.rindex("IMMEDIATE PREVIOUS")
     assert immediate < rendered.rindex("user-1:u")
     assert "CROSS-SESSION TURN RECEIPTS" not in rendered
+
+
+def test_timeline_rejects_naive_absolute_time_without_source_timezone():
+    naive = "2026-08-22T00:00:00"
+
+    assert _timeline_epoch(naive) == 0.0
+    assert (
+        _timeline_epoch(
+            naive,
+            naive_timezone="Australia/Sydney",
+        )
+        == datetime.fromisoformat("2026-08-22T00:00:00+10:00").timestamp()
+    )
 
 
 def test_recent_history_deduplicates_matching_receipt_and_limits_combined_timeline(tmp_path):

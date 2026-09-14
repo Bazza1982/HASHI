@@ -137,6 +137,9 @@ not empty.
 `/resend` only replays output. `/steer` redirects execution while keeping
 verified progress. Recovery does not create a second Cron Run, replay completed
 tools, silently restore revoked authority, or restart an already ended branch.
+Candidate Workers cannot reconcile a live fixed-session owner. Late completed
+receipts re-derive current unresolved effects; only the same owner may repair a
+false interruption, while genuine unknown effects remain fail-closed.
 See [HER v2 design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md).
 
 ## TUI and command presentation
@@ -206,6 +209,11 @@ target publication, never execution or media. Clone starts fresh unless the
 operator chooses an archived read-only view or independent context copy; both
 use new IDs and provenance. On `history_generation` change, replace the
 projection—never substitute a legacy workspace transcript.
+
+Scheduler instants are UTC evidence. Recurring jobs retain wall time plus an
+IANA timezone; displays name that timezone, and unknown legacy zones use UTC.
+PCM likewise orders absolute history in UTC and never guesses from host local
+time.
 
 `/remote` separates Direct/LAN from Exchange; discovery is not trust.
 Connected Exchange shows only granted routes. Never merge transports/hidden

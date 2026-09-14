@@ -3,10 +3,19 @@ from __future__ import annotations
 import re
 import uuid
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from orchestrator import ui_language
+from orchestrator.timezone_policy import (
+    UTC_TIMEZONE_NAME,
+    aware_in_timezone,
+    canonical_timezone_name,
+    format_epoch,
+    resolve_local_wall_time,
+    timezone_for_name,
+    utc_datetime_from_epoch,
+)
 
 
 MAX_OCCURRENCE_SCAN = 10_000
@@ -23,6 +32,7 @@ def collect_cron_occurrences(
     *,
     croniter_cls,
     fallback_missed_by_seconds: float | None = None,
+    timezone_name: str = UTC_TIMEZONE_NAME,
 ) -> dict[str, Any]:
     """Return bounded occurrence evidence for a due cron window.
 
@@ -30,7 +40,9 @@ def collect_cron_occurrences(
     are deliberately bounded independently so a long outage cannot inflate the
     scheduler state or create an unbounded catch-up queue.
     """
-    now_ts = now_dt.timestamp()
+    zone_name = canonical_timezone_name(timezone_name)
+    local_now = aware_in_timezone(now_dt, zone_name)
+    now_ts = local_now.astimezone(timezone.utc).timestamp()
     if croniter_cls is None:
         if fallback_missed_by_seconds is None:
             return {}
@@ -50,20 +62,28 @@ def collect_cron_occurrences(
     count = 0
     capped = False
     try:
-        base_dt = datetime.fromtimestamp(float(last_run_ts))
-        iterator = croniter_cls(schedule, base_dt)
+        base_dt = utc_datetime_from_epoch(float(last_run_ts)).astimezone(
+            timezone_for_name(zone_name)
+        )
+        iterator = croniter_cls(schedule, base_dt.replace(tzinfo=None))
         while count < MAX_OCCURRENCE_SCAN:
-            due_dt = iterator.get_next(datetime)
-            if due_dt > now_dt:
+            wall_due = iterator.get_next(datetime)
+            due_dt = resolve_local_wall_time(wall_due, zone_name)
+            due_ts = due_dt.astimezone(timezone.utc).timestamp()
+            if due_ts <= float(last_run_ts):
+                # A fold=0 wall occurrence can precede a fold=1 base instant.
+                # It is not a new due occurrence for this recovery window.
+                continue
+            if due_dt > local_now:
                 break
-            due_ts = due_dt.timestamp()
             if first_due is None:
                 first_due = due_ts
             last_due = due_ts
             latest.append(due_ts)
             count += 1
         if count == MAX_OCCURRENCE_SCAN:
-            capped = iterator.get_next(datetime) <= now_dt
+            capped_wall = iterator.get_next(datetime)
+            capped = resolve_local_wall_time(capped_wall, zone_name) <= local_now
     except (ValueError, KeyError, TypeError):
         count = 0
 
@@ -83,12 +103,17 @@ def collect_cron_occurrences(
         # bounded timestamps.  Rebuild that tail backwards from now.
         reverse_times: list[float] = []
         try:
-            reverse = croniter_cls(schedule, now_dt)
+            reverse = croniter_cls(
+                schedule,
+                local_now.replace(tzinfo=None),
+            )
             while len(reverse_times) < MAX_STORED_DUE_TIMES:
-                due_dt = reverse.get_prev(datetime)
-                if due_dt.timestamp() < first_due:
+                wall_due = reverse.get_prev(datetime)
+                due_dt = resolve_local_wall_time(wall_due, zone_name)
+                due_ts = due_dt.astimezone(timezone.utc).timestamp()
+                if due_ts < first_due:
                     break
-                reverse_times.append(due_dt.timestamp())
+                reverse_times.append(due_ts)
             latest = deque(reversed(reverse_times), maxlen=MAX_STORED_DUE_TIMES)
             if reverse_times:
                 last_due = reverse_times[0]
@@ -148,15 +173,23 @@ def task_description(job: dict[str, Any], *, limit: int = 240) -> str:
 
 def new_batch_id(agent_name: str, now_ts: float) -> str:
     safe_agent = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(agent_name)).strip("-") or "agent"
-    stamp = datetime.fromtimestamp(now_ts).strftime("%Y%m%d-%H%M%S")
+    stamp = utc_datetime_from_epoch(now_ts).strftime("%Y%m%d-%H%M%S")
     return f"recovery-{stamp}-{safe_agent}-{uuid.uuid4().hex[:6]}"
 
 
-def format_local_time(timestamp: float | int | None) -> str:
+def format_local_time(
+    timestamp: float | int | None,
+    *,
+    timezone_name: str = UTC_TIMEZONE_NAME,
+) -> str:
     if timestamp is None:
         return "unknown"
     try:
-        return datetime.fromtimestamp(float(timestamp)).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        return format_epoch(
+            float(timestamp),
+            timezone_name=timezone_name,
+            timespec="minutes",
+        )
     except (TypeError, ValueError, OSError):
         return "unknown"
 
@@ -206,6 +239,9 @@ def render_notice(
     for item in items:
         task_id = item.get("task_id", "?")
         kind = item.get("kind", "job")
+        timezone_name = canonical_timezone_name(
+            item.get("timezone") or UTC_TIMEZONE_NAME
+        )
         if kind == "cron":
             schedule_text = f"cron {item.get('schedule', '?')}"
         else:
@@ -219,8 +255,12 @@ def render_notice(
             "scheduler.missed_value",
             locale=selected,
             count=_count_label(item),
-            first=format_local_time(item.get("first_due_at")),
-            last=format_local_time(item.get("last_due_at")),
+            first=format_local_time(
+                item.get("first_due_at"), timezone_name=timezone_name
+            ),
+            last=format_local_time(
+                item.get("last_due_at"), timezone_name=timezone_name
+            ),
         )
         lines.extend(
             [
@@ -283,7 +323,13 @@ def render_context(batches: list[dict[str, Any]], *, now_ts: float) -> str:
                 f"- Batch {batch.get('batch_id')} · status={batch.get('status')} · notice already sent={batch.get('notice_status') == 'sent'}"
             )
             for item in batch.get("items") or []:
-                due_times = ", ".join(format_local_time(value) for value in (item.get("due_at") or []))
+                timezone_name = canonical_timezone_name(
+                    item.get("timezone") or UTC_TIMEZONE_NAME
+                )
+                due_times = ", ".join(
+                    format_local_time(value, timezone_name=timezone_name)
+                    for value in (item.get("due_at") or [])
+                )
                 description = str(item.get("description") or item.get("task_id"))
                 item_lines = [
                     f"  - task_id={item.get('task_id')} kind={item.get('kind')} missed_count={_count_label(item)} replayable_count={replayable_count(item)}",
@@ -294,7 +340,7 @@ def render_context(batches: list[dict[str, Any]], *, now_ts: float) -> str:
                     item_lines.append(f"    task_prompt={prompt_excerpt}")
                 item_lines.extend(
                     [
-                        f"    first_due={format_local_time(item.get('first_due_at'))}; last_due={format_local_time(item.get('last_due_at'))}",
+                        f"    first_due={format_local_time(item.get('first_due_at'), timezone_name=timezone_name)}; last_due={format_local_time(item.get('last_due_at'), timezone_name=timezone_name)}",
                         f"    stored_due_times={due_times or 'none'}",
                     ]
                 )
