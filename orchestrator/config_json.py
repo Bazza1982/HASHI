@@ -157,6 +157,14 @@ def _write_lock(path: Path, timeout: float) -> Iterator[None]:
             local.release()
 
 
+@contextmanager
+def managed_file_write_lock(path: str | Path, timeout: float = 5.0) -> Iterator[None]:
+    """Serialize a cooperating read/modify/write transaction for one managed file."""
+    target = Path(path).expanduser().resolve()
+    with _write_lock(target, timeout):
+        yield
+
+
 def _protect_candidate(
     path: Path,
     *,

@@ -462,6 +462,15 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        "hcc",
+        "cmd_hcc",
+        "Control HASHI Context Cache",
+        "session",
+        guide=CommandGuide(
+            "/hcc [on|off]", ("on", "off"), example="/hcc on"
+        ),
+    ),
+    CommandSpec(
         "memory",
         "cmd_memory",
         "Control memory and Memory+ continuity",

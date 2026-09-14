@@ -43,6 +43,7 @@ from orchestrator.command_ui import (
 from orchestrator import runtime_audit, runtime_common, runtime_pending, terminal_console
 from orchestrator import ui_language
 from orchestrator import runtime_background_status
+from orchestrator import runtime_hcc
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
     get_browser_examples_text,
@@ -183,6 +184,8 @@ def _parse_key_values(args: list[str]) -> dict[str, str]:
 
 
 class FlexibleAgentRuntime:
+
+    cmd_hcc = runtime_hcc.cmd_hcc
 
     CODEX_CHUNK_LIMIT_ERROR = "Separator is not found, and chunk exceed the limit"
     CODEX_SCHEDULER_RETRY_DELAY_S = 120

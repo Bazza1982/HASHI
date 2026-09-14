@@ -1001,6 +1001,9 @@ class HERv2Adapter(BaseBackend):
             raise HerFixedProtocolError(
                 "invalid_pcm_snapshot", "HASHI PCM snapshot sections are missing."
             )
+        removed_section_keys = snapshot.get("removed_section_keys")
+        if not isinstance(removed_section_keys, (list, tuple, set, frozenset)):
+            removed_section_keys = ()
         manifest = request_meta.get("attachment_manifest")
         resources = manifest if isinstance(manifest, list) else []
         revoked_resources = request_meta.get("revoked_attachment_ids")
@@ -1015,6 +1018,7 @@ class HERv2Adapter(BaseBackend):
             request_id=str(request_id),
             message_id=str(request_meta.get("hashi_message_id") or request_id),
             **binding,
+            removed_section_keys=[str(item) for item in removed_section_keys],
             revoked_resource_ids=[str(item) for item in revoked_resources],
         )
         self._fixed_transport_audit[str(request_id)] = dict(audit)

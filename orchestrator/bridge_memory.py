@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from orchestrator.path_presentation import path_presentation_policy
+from orchestrator.hcc import HCC_SYSTEM_GUIDANCE, is_hcc_enabled
 from orchestrator.pcm import PCMDocument, load_pcm_document
 from orchestrator.process_resources import path_lock as process_path_lock
 from tools.token_tracker import estimate_tokens as _estimate_tokens
@@ -1368,6 +1369,7 @@ class BridgeContextAssembler:
         "relevant_long_term_memory": 2,
         "time": 1,
         "active_runtime_instructions": 2,
+        "hcc": 3,
         "skills_catalogue": 4,
         "tools_catalogue": 5,
         "persona": 1,
@@ -1847,6 +1849,17 @@ class BridgeContextAssembler:
             protected=True,
         )
 
+        hcc_enabled = bool(document and self.system_md and is_hcc_enabled(self.system_md.parent))
+        if hcc_enabled and document and document.hcc:
+            add_section(
+                "hcc",
+                "HASHI CONTEXT CACHE (HCC)",
+                HCC_SYSTEM_GUIDANCE + "\n\n" + document.hcc,
+                "runtime_context",
+                protected=True,
+                metadata={"source": "agent.md", "cache": True},
+            )
+
         active_runtime = []
         if callable(self.active_skill_provider):
             try:
@@ -2061,6 +2074,7 @@ class BridgeContextAssembler:
             "transport_snapshot": {
                 "version": 1,
                 "sections": transport_sections,
+                "removed_section_keys": [] if hcc_enabled and document and document.hcc else ["hcc"],
             },
             "audit": {
                 "incremental": incremental,

@@ -19,7 +19,7 @@ from orchestrator.file_permissions import tighten_fd_permissions
 
 
 PCM_FILENAME: Final = "agent.md"
-PCM_BLOCKS: Final[tuple[str, ...]] = ("persona", "sys", "memory")
+PCM_BLOCKS: Final[tuple[str, ...]] = ("persona", "sys", "memory", "hcc")
 PCM_REQUIRED_BLOCKS: Final[frozenset[str]] = frozenset({"persona", "sys"})
 LEGACY_DEFAULT_SYS: Final = (
     "Follow the configured Persona while obeying HASHI infrastructure policy, "
@@ -44,6 +44,7 @@ class PCMDocument:
     persona: str
     system: str
     memory: str
+    hcc: str
     content_sha256: str
 
     def block(self, name: str) -> str:
@@ -53,6 +54,8 @@ class PCMDocument:
             return self.system
         if name == "memory":
             return self.memory
+        if name == "hcc":
+            return self.hcc
         raise KeyError(name)
 
     def audit_fields(self) -> dict[str, object]:
@@ -62,6 +65,7 @@ class PCMDocument:
             "pcm_persona_chars": len(self.persona),
             "pcm_system_chars": len(self.system),
             "pcm_memory_chars": len(self.memory),
+            "pcm_hcc_chars": len(self.hcc),
         }
 
 
@@ -149,6 +153,8 @@ def parse_pcm_text(text: str, *, path: Path | None = None) -> PCMDocument:
         name: "\n".join(lines).strip() for name, lines in blocks.items()
     }
     for name, value in normalized.items():
+        if name == "hcc":
+            continue
         if not value:
             raise PCMValidationError(
                 "pcm_empty_block",
@@ -162,6 +168,7 @@ def parse_pcm_text(text: str, *, path: Path | None = None) -> PCMDocument:
         persona=normalized["persona"],
         system=normalized["sys"],
         memory=normalized.get("memory", ""),
+        hcc=normalized.get("hcc", ""),
         content_sha256=digest,
     )
 
@@ -220,15 +227,17 @@ def load_pcm_document(
         persona=document.persona,
         system=document.system,
         memory=document.memory,
+        hcc=document.hcc,
         content_sha256=hashlib.sha256(raw).hexdigest(),
     )
 
 
-def render_pcm_document(*, persona: str, system: str, memory: str = "") -> str:
+def render_pcm_document(*, persona: str, system: str, memory: str = "", hcc: str | None = None) -> str:
     values = {
         "persona": str(persona or "").strip(),
         "sys": str(system or "").strip(),
         "memory": str(memory or "").strip(),
+        "hcc": None if hcc is None else str(hcc or "").strip(),
     }
     if not values["persona"] or not values["sys"]:
         raise PCMValidationError(
@@ -241,6 +250,8 @@ def render_pcm_document(*, persona: str, system: str, memory: str = "") -> str:
     ]
     if values["memory"]:
         parts.append(f"[memory]\n{values['memory']}\n[memory_end]")
+    if values["hcc"] is not None:
+        parts.append(f"[hcc]\n{values['hcc']}\n[hcc_end]")
     rendered = "\n\n".join(parts) + "\n"
     parse_pcm_text(rendered)
     return rendered
@@ -317,11 +328,12 @@ def convert_legacy_pcm_text(text: str) -> str:
         if remainder and extracted.get("persona") and extracted.get("sys"):
             system = system + "\n\nLegacy unmarked guidance preserved during migration:\n" + remainder
     memory = extracted.get("memory", "")
+    hcc = extracted.get("hcc")
     if not persona:
         raise PCMValidationError(
             "pcm_legacy_empty", "legacy PCM source contains no usable content"
         )
-    return render_pcm_document(persona=persona, system=system, memory=memory)
+    return render_pcm_document(persona=persona, system=system, memory=memory, hcc=hcc)
 
 
 def atomic_write_pcm(path: str | Path, content: str) -> Path:
