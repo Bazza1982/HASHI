@@ -38,7 +38,13 @@ path = Path(os.environ['RUNNER_TEMP']) / 'hcc-implementation.patch'
 path.write_bytes(patch)
 subprocess.run(['git', 'apply', '--check', '--whitespace=error', str(path)], check=True)
 subprocess.run(['git', 'apply', '--whitespace=error', str(path)], check=True)
-supplement = root / 'reconciliation.patch'
+# Git for Windows converts unclassified .patch files to CRLF on checkout.
+# Normalize the delivery envelope only; the expected source bytes stay exact.
+supplement_bytes = (root / 'reconciliation.patch').read_bytes().replace(b'\r\n', b'\n')
+if hashlib.sha256(supplement_bytes).hexdigest() != '1e0b56b23765e0922e1eae65aeda333c4a4ef9199c39746c09b811cc0e0a89a9':
+    raise SystemExit('Reconciliation patch digest mismatch')
+supplement = Path(os.environ['RUNNER_TEMP']) / 'hcc-reconciliation-lf.patch'
+supplement.write_bytes(supplement_bytes)
 subprocess.run(['git', 'apply', '--check', '--whitespace=error', str(supplement)], check=True)
 subprocess.run(['git', 'apply', '--whitespace=error', str(supplement)], check=True)
 expected_files = json.loads((root / 'expected-files.json').read_text(encoding='utf-8'))
