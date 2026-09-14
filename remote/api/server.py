@@ -597,8 +597,13 @@ def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout:
         return result
 
 
-def _peer_is_tui_trusted(instance_id: str) -> tuple[bool, str, Any]:
-    """Require a live, mutually handshaken peer with TUI proxy support."""
+def _peer_has_completed_handshake(instance_id: str) -> tuple[bool, str, Any]:
+    """Require a target whose Remote handshake has completed.
+
+    Liveness and advertised capabilities are discovery hints, not additional
+    authority. The actual authenticated request and response determine
+    whether the target operation is currently available.
+    """
     peer = (
         _peer_registry.get_peer(str(instance_id or "").upper())
         if _peer_registry
@@ -610,15 +615,6 @@ def _peer_is_tui_trusted(instance_id: str) -> tuple[bool, str, Any]:
     handshake_state = str(properties.get("handshake_state") or "").strip().lower()
     if handshake_state != "handshake_accepted":
         return False, "handshake_required", peer
-    live_status = str(properties.get("live_status") or "unknown").strip().lower()
-    if live_status in {"offline", "unknown"}:
-        return False, f"peer_{live_status}", peer
-    capabilities = {
-        str(item).strip()
-        for item in (getattr(peer, "capabilities", None) or [])
-    }
-    if "tui_proxy_v1" not in capabilities:
-        return False, "tui_proxy_unsupported", peer
     return True, "ok", peer
 
 
@@ -1684,8 +1680,8 @@ def create_app(
         local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
         if not target_instance or target_instance == local_instance:
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_remote_target"})
-        trusted, reason, _peer = _peer_is_tui_trusted(target_instance)
-        if not trusted:
+        handshaken, reason, _peer = _peer_has_completed_handshake(target_instance)
+        if not handshaken:
             logger.warning("TUI proxy target rejected: target=%s reason=%s", target_instance, reason)
             return JSONResponse(status_code=409, content={"ok": False, "error": reason})
 
@@ -1779,11 +1775,9 @@ def create_app(
             logger.warning("Protocol TUI request rejected: from=%s reason=%s", payload.from_instance, auth_reason)
             return JSONResponse(status_code=401, content={"ok": False, "error": auth_reason})
 
-        source_instance = str(authenticated_instance or payload.from_instance or "").strip().upper()
-        trusted, trust_reason, _peer = _peer_is_tui_trusted(source_instance)
-        if not trusted:
-            logger.warning("Protocol TUI peer rejected: from=%s reason=%s", source_instance, trust_reason)
-            return JSONResponse(status_code=409, content={"ok": False, "error": trust_reason})
+        source_instance = str(
+            authenticated_instance or payload.from_instance or ""
+        ).strip().upper()
         valid, validation_error = _validate_tui_proxy_payload(payload)
         if not valid:
             return JSONResponse(status_code=400, content={"ok": False, "error": validation_error})

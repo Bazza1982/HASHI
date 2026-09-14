@@ -70,7 +70,7 @@ def test_portable_local_endpoint_requires_matching_identity_and_loopback(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_instance_discovery_requires_handshake_liveness_and_proxy_capability(tmp_path):
+async def test_instance_discovery_uses_completed_handshake_as_the_only_peer_gate(tmp_path):
     (tmp_path / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "HASHI1", "workbench_port": 18800, "remote_port": 8766}}),
         encoding="utf-8",
@@ -93,7 +93,7 @@ async def test_instance_discovery_requires_handshake_liveness_and_proxy_capabili
             "instance_id": "HASHI4",
             "display_name": "HASHI4",
             "capabilities": ["handshake_v2"],
-            "properties": {"handshake_state": "handshake_accepted", "live_status": "online"},
+            "properties": {"handshake_state": "handshake_accepted", "live_status": "offline"},
         },
     ]
 
@@ -124,8 +124,8 @@ async def test_instance_discovery_requires_handshake_liveness_and_proxy_capabili
     assert by_id["HASHI2"].transport == "remote"
     assert by_id["HASHI3"].available is False
     assert by_id["HASHI3"].reason == "handshake required"
-    assert by_id["HASHI4"].available is False
-    assert "upgrade/restart" in by_id["HASHI4"].reason
+    assert by_id["HASHI4"].available is True
+    assert by_id["HASHI4"].reason == ""
 
 
 @pytest.mark.asyncio
