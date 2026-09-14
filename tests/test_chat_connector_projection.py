@@ -63,7 +63,8 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     workspace.mkdir(parents=True, exist_ok=True)
     path = workspace / "transcript.jsonl"
     first = json.dumps({"role": "user", "text": "重复", "ts": "2026-09-12T09:00:00.123456+00:00"}, ensure_ascii=False) + "\n"
-    path.write_text(first + first, encoding="utf-8")
+    encoded_first = first.encode("utf-8")
+    path.write_bytes(encoded_first + encoded_first)
     request = SimpleNamespace(match_info={"name": "a"}, query={})
     payload = json.loads((await server.handle_transcript_recent(request)).text)
     assert payload["session_id"] == session["session_id"]
@@ -72,8 +73,15 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     assert len(set(refs)) == 3
     assert payload["messages"][0]["text"] == "hello"
     assert payload["messages"][0]["canonical"] is True
-    poll = SimpleNamespace(match_info={"name": "a"}, query={"offset": str(len(first.encode()))})
+    # Exercise recovery from an explicitly invalid byte cursor on every OS.
+    # Path.write_text() newline translation previously made this invalid only
+    # on Windows and a valid record boundary on Linux.
+    poll = SimpleNamespace(
+        match_info={"name": "a"},
+        query={"offset": str(len(encoded_first) - 1)},
+    )
     increment = json.loads((await server.handle_transcript_poll(poll)).text)
+    assert increment["cursor_reset"] is True
     assert increment["messages"][0]["message_ref"] == refs[1]
     assert payload["requests"][0]["request_id"] == accepted.request_id
     assert payload["requests"][0]["session_id"] == session["session_id"]
