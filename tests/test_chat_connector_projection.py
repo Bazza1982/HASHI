@@ -243,6 +243,103 @@ def test_canonical_snapshot_keeps_transcript_only_thinking_between_run_messages(
     ]
 
 
+def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_path: Path):
+    store = SessionStore(tmp_path / "media.sqlite", instance_id="HASHI2")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="a")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="media-request",
+        text="User sent a photo saved at C:\\private\\photo.jpg",
+        source="photo",
+        idempotency_key="media-request",
+        content=[
+            {
+                "type": "text",
+                "text": "User sent a photo saved at C:\\private\\photo.jpg",
+            },
+            {
+                "type": "media",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/jpeg",
+                "filename": "photo.jpg",
+                "caption": "look here",
+                "local_ref": "C:\\private\\photo.jpg",
+                "sha256": "secret-digest",
+                "size_bytes": 123,
+            },
+        ],
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="image answer",
+        assistant_source="fixture",
+    )
+
+    payload = build_chat_projection(
+        store,
+        session=store.get_session(session["session_id"]),
+        owner_id="user:7",
+    )
+    user, answer = payload["messages"]
+
+    assert user["text"] == "look here"
+    assert user["attachments"] == [
+        {
+            "modality": "image",
+            "kind": "photo",
+            "mime_type": "image/jpeg",
+            "filename": "photo.jpg",
+            "caption": "look here",
+            "size_bytes": 123,
+        }
+    ]
+    assert "local_ref" not in user["attachments"][0]
+    assert "sha256" not in user["attachments"][0]
+    assert answer["request_id"] == accepted.request_id
+    assert answer["run_id"] == accepted.run_id
+    assert answer["kind"] == "final"
+    assert answer["created_at"] == answer["ts"]
+
+
+def test_projection_message_cursor_streams_presentation_only_messages(tmp_path: Path):
+    store = SessionStore(tmp_path / "presentation.sqlite", instance_id="HASHI2")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="a")
+    snapshot = build_chat_projection(
+        store,
+        session=session,
+        owner_id="user:7",
+    )
+    store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        role="assistant",
+        text="✅ restart completed",
+        source="telegram.runtime_notice",
+        idempotency_key="reboot:one:final",
+        content_format="telegram-html",
+    )
+
+    polled = build_chat_projection(
+        store,
+        session=store.get_session(session["session_id"]),
+        owner_id="user:7",
+        offset=snapshot["offset"],
+        after_message_ordinal=snapshot["message_cursor"],
+    )
+
+    assert [message["text"] for message in polled["messages"]] == [
+        "✅ restart completed"
+    ]
+    assert polled["messages"][0]["history_eligible"] is False
+    assert polled["message_cursor"] > snapshot["message_cursor"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["bad", "0", "-1"])
 async def test_transcript_poll_rejects_invalid_history_generation(
@@ -259,6 +356,24 @@ async def test_transcript_poll_rejects_invalid_history_generation(
 
     assert response.status == 400
     assert json.loads(response.text)["error_code"] == "invalid_history_generation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["bad", "-1", "1.2"])
+async def test_transcript_poll_rejects_invalid_message_cursor(
+    tmp_path: Path,
+    value: str,
+):
+    server = _server(tmp_path)
+    response = await server.handle_transcript_poll(
+        SimpleNamespace(
+            match_info={"name": "a"},
+            query={"offset": "0", "message_cursor": value},
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text)["error_code"] == "invalid_message_cursor"
 
 
 def _server(tmp_path: Path):
@@ -299,17 +414,20 @@ async def test_transcript_path_rows_and_discovery_share_one_binding_snapshot(tmp
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "transcript.jsonl").write_text(json.dumps({"role": "assistant", "text": request_id}) + "\n")
 
-    original_resolve = store.resolve_session
+    original_resolve = store.resolve_primary_session
     resolutions = []
 
     def resolve_then_switch(**kwargs):
         captured = original_resolve(**kwargs)
         resolutions.append(captured["session_id"])
-        store.bind_channel(owner_id="user:7", agent_id="a", surface="workbench", channel_key="default",
-                           session_id=second["session_id"])
+        store.bind_primary_session(
+            owner_id="user:7",
+            agent_id="a",
+            session_id=second["session_id"],
+        )
         return captured
 
-    monkeypatch.setattr(store, "resolve_session", resolve_then_switch)
+    monkeypatch.setattr(store, "resolve_primary_session", resolve_then_switch)
     response = await server.handle_transcript_recent(SimpleNamespace(match_info={"name": "a"}, query={}))
     payload = json.loads(response.text)
 

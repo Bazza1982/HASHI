@@ -326,12 +326,17 @@ async def test_failed_restore_is_reported_as_unavailable_not_restored(
 ):
     kernel, manager, request = _notice_manager(tmp_path)
     notices = []
+    mirrored = []
 
     async def send(_kernel, **kwargs):
         notices.append(kwargs["render_text"]("zelda", "Zelda"))
         return {"sent": True, "sender": "zelda", "message_id": len(notices)}
 
     monkeypatch.setattr("orchestrator.reboot_manager.send_runtime_notice", send)
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.runtime_session.record_kernel_presentation_notice",
+        lambda _kernel, **kwargs: mirrored.append(kwargs),
+    )
     kernel.queue_generation("a", names=("zelda",), activation_error_for="zelda")
     kernel._runtime_map()["zelda"].client.resume_error = RuntimeError("cannot resume")
     manager.submit(request)
@@ -341,6 +346,9 @@ async def test_failed_restore_is_reported_as_unavailable_not_restored(
     assert record["online"] == {"zelda": False}
     assert "暂未恢复在线" in notices[-1]
     assert "已恢复原状态" not in notices[-1]
+    assert mirrored[-1]["agent_id"] == "zelda"
+    assert mirrored[-1]["text"] == notices[-1]
+    assert mirrored[-1]["idempotency_key"].endswith(":final")
 
 
 @pytest.mark.asyncio

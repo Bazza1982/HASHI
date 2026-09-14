@@ -8,7 +8,7 @@ from typing import Any
 
 from orchestrator.reboot_receipts import RebootReceipts, ACTIVE, MAX_DELIVERY_ATTEMPTS
 from orchestrator.reboot_ui import render_notice
-from orchestrator import ui_language
+from orchestrator import runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
 
 from orchestrator.function_worker_supervisor import (
@@ -170,15 +170,32 @@ class RebootManager:
         origin = record.get("origin", {})
         if not origin.get("chat_id") or record["delivery"]["status"] == "not_requested":
             return {"sent": False}
-        return await send_runtime_notice(
+        rendered = {}
+
+        def render(sender, display):
+            text = render_notice(
+                record, starting=starting, sender=sender, sender_display=display
+            )
+            rendered["text"] = text
+            return text
+
+        result = await send_runtime_notice(
             self.kernel,
             source_agent=record["source_agent"],
             chat_id=origin["chat_id"],
             thread_id=origin.get("thread_id"),
-            render_text=lambda sender, display: render_notice(
-                record, starting=starting, sender=sender, sender_display=display
-            ),
+            render_text=render,
         )
+        if result.get("sent") and rendered.get("text"):
+            runtime_session.record_kernel_presentation_notice(
+                self.kernel,
+                agent_id=record["source_agent"],
+                text=rendered["text"],
+                idempotency_key=(
+                    f"reboot:{record['id']}:{'starting' if starting else 'final'}"
+                ),
+            )
+        return result
 
     async def send_pending(self, *, now=None):
         if getattr(self.kernel, "_handoff_draining", False) or getattr(
