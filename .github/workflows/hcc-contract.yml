@@ -1,0 +1,85 @@
+name: HCC contract
+
+on:
+  push:
+    branches: [feature-hcc]
+  pull_request:
+    paths:
+      - 'orchestrator/**'
+      - 'adapters/her_v2.py'
+      - 'skills/hcc-refresh/**'
+      - 'tests/**'
+      - 'locales/runtime/**'
+      - 'constraints/standard-py312.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/hcc-contract.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hcc-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Provision isolated CPython 3.12.13
+        run: |
+          uv venv --seed --python 3.12.13 .venv
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "$GITHUB_WORKSPACE/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install isolated runner dependencies
+        run: python -m pip install -r constraints/standard-py312.lock '.[test]' ruff
+      - name: Protected Core and whitespace guards
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -n "$base" ] && [ "$base" != 0000000000000000000000000000000000000000 ]; then
+            python scripts/check_protected_core_changes.py --base "$base"
+            git diff --check "$base" HEAD
+          else
+            python scripts/check_protected_core_changes.py
+            git diff --check
+          fi
+      - name: Lint executable changes
+        run: >-
+          python -m ruff check orchestrator/hcc.py orchestrator/runtime_hcc.py
+          orchestrator/pcm.py orchestrator/config_json.py orchestrator/bridge_memory.py
+          adapters/her_v2.py orchestrator/command_specs.py orchestrator/flexible_agent_runtime.py
+          tests/test_hcc.py tests/test_hcc_integration.py tests/test_runtime_pipeline.py
+          tests/test_agent_move_package.py skills/hcc-refresh/scripts/hcc_update.py
+      - name: HCC and related component contracts
+        run: >-
+          python -m pytest -q --junitxml=hcc-results.xml
+          tests/test_hcc.py tests/test_hcc_integration.py
+          tests/test_pcm_upgrade_contract.py tests/test_pcm_fixed_gateway.py tests/test_pcm_transfer.py
+          tests/test_her_v2_fixed_backend.py tests/test_config_json.py tests/test_workspace_state.py
+          tests/test_command_registry.py tests/test_ui_language.py tests/test_runtime_command_binding.py
+          tests/test_runtime_pipeline.py tests/test_scheduler_backend_inheritance.py
+          tests/test_scheduler_persistence.py tests/test_skill_manager_standard.py
+          tests/test_runtime_skill_commands.py tests/test_runtime_skill_callbacks.py tests/test_agent_move_package.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hcc-contract-${{ matrix.os }}
+          path: hcc-results.xml
+          if-no-files-found: warn
+          retention-days: 7
