@@ -54,9 +54,57 @@ class AcceptedHerTurn:
 class HerBackendSessionCoordinator:
     """Own HER's logical thread independently from internal providers."""
 
-    def __init__(self, state_root: Path, *, history_limit: int = 8):
+    def __init__(
+        self,
+        state_root: Path,
+        *,
+        history_limit: int = 8,
+        execution_owner: Mapping[str, Any] | None = None,
+    ):
         self.store = HerSessionStore(Path(state_root) / "fixed_sessions.sqlite3")
         self.history_limit = max(1, int(history_limit))
+        raw_owner = dict(execution_owner or {})
+        self.execution_owner = {
+            "owner_id": str(raw_owner.get("owner_id") or ""),
+            "pid": max(0, int(raw_owner.get("pid") or 0)),
+            "started_at": str(raw_owner.get("started_at") or ""),
+        }
+
+    def _execution_owner_fields(self) -> dict[str, Any]:
+        return {
+            "execution_owner_id": self.execution_owner["owner_id"],
+            "execution_owner_pid": self.execution_owner["pid"],
+            "execution_owner_started_at": self.execution_owner["started_at"],
+        }
+
+    def reconcile_interrupted_turns(
+        self,
+        *,
+        process_is_alive: Any | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        return self.store.reconcile_interrupted_turns(
+            claimant_owner_id=self.execution_owner["owner_id"],
+            process_is_alive=process_is_alive,
+        )
+
+    def reconcile_interrupted(self, *, process_is_alive: Any | None = None) -> int:
+        return len(
+            self.reconcile_interrupted_turns(
+                process_is_alive=process_is_alive,
+            )
+        )
+
+    def record_runtime_event(
+        self,
+        accepted: AcceptedHerTurn,
+        record: Mapping[str, Any],
+    ) -> int:
+        return self.store.record_runtime_event(
+            session_id=accepted.session_id,
+            turn_id=accepted.turn_id,
+            record=record,
+            execution_owner_id=self.execution_owner["owner_id"],
+        )
 
     @staticmethod
     def encode(payload: Mapping[str, Any]) -> str:
@@ -411,6 +459,7 @@ class HerBackendSessionCoordinator:
                     idempotency_key=str(turn.get("idempotency_key") or ""),
                     user_message=str(turn.get("user_message") or ""),
                     **binding,
+                    **self._execution_owner_fields(),
                 )
             elif operation == "append_turn":
                 pcm_delta = payload.get("pcm_delta")
@@ -466,6 +515,7 @@ class HerBackendSessionCoordinator:
                     idempotency_key=str(turn.get("idempotency_key") or ""),
                     user_message=str(turn.get("user_message") or ""),
                     **binding,
+                    **self._execution_owner_fields(),
                 )
             else:
                 raise HerFixedProtocolError(
@@ -597,6 +647,7 @@ class HerBackendSessionCoordinator:
                 turn_id=accepted.turn_id,
                 assistant_text=str(assistant_text or ""),
                 error_text=str(error_text or ""),
+                execution_owner_id=self.execution_owner["owner_id"],
             )
         except HerSessionStoreError as exc:
             raise HerFixedProtocolError(exc.code, str(exc)) from exc
@@ -607,6 +658,7 @@ class HerBackendSessionCoordinator:
                 session_id=accepted.session_id,
                 turn_id=accepted.turn_id,
                 reason=str(reason or "HER turn was cancelled."),
+                execution_owner_id=self.execution_owner["owner_id"],
             )
         except HerSessionStoreError as exc:
             raise HerFixedProtocolError(exc.code, str(exc)) from exc

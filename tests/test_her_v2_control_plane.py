@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from types import SimpleNamespace
 
@@ -9,7 +10,12 @@ import pytest
 from adapters.her_v2 import HERv2Adapter
 from adapters.her_v2_provider import HashiStageProvider
 from orchestrator.her_v2.audit import DurableAuditLog
-from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+from orchestrator.her_v2.backend_session import (
+    HerBackendSessionCoordinator,
+    HerFixedProtocolError,
+)
+from orchestrator.her_v2.ledger import ExecutionLedger, LedgerStore
+from orchestrator.her_v2.models import LifecycleState
 from orchestrator.her_v2.session_store import HerSessionStore, HerSessionStoreError
 
 
@@ -307,6 +313,197 @@ def test_interrupted_unreceipted_side_effect_is_truthfully_unknown(tmp_path):
     assert coordinator.store.active_turn_recovery(
         next_turn.session_id, next_turn.turn_id
     )["status"] == "archived"
+
+
+def test_candidate_worker_does_not_reconcile_a_live_owner_turn(tmp_path):
+    root = tmp_path / "state"
+    production = HerBackendSessionCoordinator(
+        root,
+        execution_owner={
+            "owner_id": "worker-production",
+            "pid": os.getpid(),
+            "started_at": "2026-09-14T12:00:00+00:00",
+        },
+    )
+    turn = _accept(production, "turn-live", "Keep working")
+    candidate = HerBackendSessionCoordinator(
+        root,
+        execution_owner={
+            "owner_id": "worker-candidate",
+            "pid": os.getpid(),
+            "started_at": "2026-09-14T12:01:00+00:00",
+        },
+    )
+
+    assert candidate.reconcile_interrupted() == 0
+    with sqlite3.connect(production.store.path) as connection:
+        status = connection.execute(
+            "SELECT status FROM her_turns WHERE session_id = ? AND turn_id = ?",
+            (turn.session_id, turn.turn_id),
+        ).fetchone()[0]
+    assert status == "active"
+
+
+def test_candidate_reconciles_only_after_the_recorded_owner_is_dead(tmp_path):
+    root = tmp_path / "state"
+    production = HerBackendSessionCoordinator(
+        root,
+        execution_owner={
+            "owner_id": "worker-dead",
+            "pid": 404404,
+            "started_at": "2026-09-14T12:00:00+00:00",
+        },
+    )
+    turn = _accept(production, "turn-dead", "Recover after a crash")
+    candidate = HerBackendSessionCoordinator(
+        root,
+        execution_owner={
+            "owner_id": "worker-takeover",
+            "pid": os.getpid(),
+            "started_at": "2026-09-14T12:01:00+00:00",
+        },
+    )
+
+    reconciled = candidate.reconcile_interrupted_turns(
+        process_is_alive=lambda _pid: False
+    )
+    assert [row["request_id"] for row in reconciled] == ["turn-dead"]
+    recovery = candidate.store.active_turn_recovery(
+        turn.session_id,
+        turn.turn_id,
+    )
+    assert recovery["status"] == "terminated"
+    assert recovery["recovery_disposition"] == "FAILED_SAFE_REPLAY_REQUIRED"
+
+
+def test_different_execution_owner_cannot_close_an_active_turn(tmp_path):
+    root = tmp_path / "state"
+    production = HerBackendSessionCoordinator(
+        root,
+        execution_owner={
+            "owner_id": "worker-production",
+            "pid": os.getpid(),
+            "started_at": "2026-09-14T12:00:00+00:00",
+        },
+    )
+    turn = _accept(production, "turn-owned", "Keep ownership")
+    candidate = HerBackendSessionCoordinator(
+        root,
+        execution_owner={
+            "owner_id": "worker-candidate",
+            "pid": os.getpid(),
+            "started_at": "2026-09-14T12:01:00+00:00",
+        },
+    )
+
+    with pytest.raises(HerFixedProtocolError) as caught:
+        candidate.complete(turn, assistant_text="Wrong owner")
+    assert caught.value.code == "execution_owner_conflict"
+    with pytest.raises(HerFixedProtocolError) as caught:
+        candidate.cancel(turn, reason="Wrong owner")
+    assert caught.value.code == "execution_owner_conflict"
+
+
+@pytest.mark.parametrize(
+    ("receipt_status", "effect_state"),
+    [("success", "completed"), ("failed", "failed")],
+)
+def test_late_completed_receipt_repairs_same_owner_false_reconciliation(
+    tmp_path,
+    receipt_status,
+    effect_state,
+):
+    coordinator = HerBackendSessionCoordinator(
+        tmp_path / "state",
+        execution_owner={
+            "owner_id": "worker-production",
+            "pid": os.getpid(),
+            "started_at": "2026-09-14T12:00:00+00:00",
+        },
+    )
+    turn = _accept(coordinator, "turn-late", "Wait for the command")
+    coordinator.record_runtime_event(
+        turn,
+        _runtime_event(
+            turn.turn_id,
+            "turn-late:tool:wait:intent",
+            "tool_intent",
+            operation_id="turn-late:wait:1",
+            tool_call_id="wait",
+            tool_name="shell",
+            arguments_sha256="sha256:wait",
+            read_only=False,
+        ),
+    )
+
+    # Simulate the pre-fix candidate behavior.  The original owner is still
+    # executing and later records the terminal receipt on the same sequence.
+    assert coordinator.store.reconcile_interrupted() == 1
+    assert (
+        coordinator.store.active_turn_recovery(
+            turn.session_id,
+            turn.turn_id,
+        )["recovery_disposition"]
+        == "UNKNOWN_SIDE_EFFECT"
+    )
+
+    coordinator.record_runtime_event(
+        turn,
+        _runtime_event(
+            turn.turn_id,
+            "turn-late:tool:wait:receipt",
+            "tool_receipt",
+            operation_id="turn-late:wait:1",
+            tool_call_id="wait",
+            receipt={
+                "operation_id": "turn-late:wait:1",
+                "tool_call_id": "wait",
+                "tool_name": "shell",
+                "status": receipt_status,
+                "completed": True,
+                "exit_code": 0,
+            },
+        ),
+    )
+    recovery = coordinator.store.active_turn_recovery(
+        turn.session_id,
+        turn.turn_id,
+    )
+    assert recovery["safe_to_resume"] is True
+    assert recovery["recovery_disposition"] == ""
+    assert recovery["side_effects"][0]["state"] == effect_state
+    assert recovery["remaining_work"]["unresolved_side_effects"] == []
+    assert recovery["remaining_work"]["status"] == "in_progress"
+
+    closed = coordinator.complete(turn, assistant_text="The command completed.")
+    assert closed["status"] == "completed"
+    assert closed["assistant_text"] == "The command completed."
+
+
+def test_shadow_ledger_reconciliation_is_scoped_to_confirmed_dead_requests(
+    tmp_path,
+):
+    store = LedgerStore(tmp_path / "ledgers")
+    live = ExecutionLedger(
+        "ledger-live",
+        "hashi-request:request-live",
+        "sha256:live",
+    )
+    dead = ExecutionLedger(
+        "ledger-dead",
+        "hashi-request:request-dead",
+        "sha256:dead",
+    )
+    store.save(live)
+    store.save(dead)
+
+    reconciled = store.reconcile_interrupted(
+        request_refs={"hashi-request:request-dead"}
+    )
+
+    assert [ledger.turn_id for ledger in reconciled] == ["ledger-dead"]
+    assert store.load("ledger-live").status is LifecycleState.RECEIVED
+    assert store.load("ledger-dead").status is LifecycleState.ERROR
 
 
 def test_runtime_event_projection_is_idempotent(tmp_path):

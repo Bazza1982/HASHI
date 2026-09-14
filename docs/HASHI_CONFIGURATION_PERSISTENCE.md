@@ -176,6 +176,12 @@ assignments. Display paths may retain their safe fallback. A mutation must use a
 strict fresh snapshot, preserve unknown fields it does not own, publish before
 changing the matching runtime flag/view, and surface a conflict without replay.
 
+Scheduler cron mutations persist an IANA `timezone` beside the wall-clock rule.
+Legacy cron rows receive the explicitly configured instance timezone in the
+in-memory view, or UTC when none is known; a read alone never writes that
+migration. The next deliberate revision-aware Scheduler mutation may publish
+the enriched row while retaining its source revision and unrelated fields.
+
 This is deliberately not a universal JSON serializer. Protected Core stays
 unchanged. Provider wire evidence, append-only audit/log streams, generated
 metadata caches, immutable transfer packages, transaction/receipt/lifecycle

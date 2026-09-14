@@ -60,6 +60,8 @@ async def test_delay_persists_and_dispatches_through_normal_text_queue_when_due(
     )
 
     assert record["due_at"] == 1_300
+    assert record["due_at_utc"] == "1970-01-01T00:21:40+00:00"
+    assert record["source_timezone"] == "UTC"
     assert scheduler.count_delayed_messages("zelda") == 1
     saved = json.loads((tmp_path / "scheduler_state.json").read_text(encoding="utf-8"))
     assert (

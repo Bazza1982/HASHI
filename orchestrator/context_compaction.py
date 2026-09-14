@@ -36,6 +36,12 @@ from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
 )
 from orchestrator.process_resources import path_lock as process_path_lock
+from orchestrator.timezone_policy import (
+    UTC_TIMEZONE_NAME,
+    canonical_timezone_name,
+    format_epoch,
+    parse_absolute_timestamp,
+)
 
 STATE_KEY = "context_compaction"
 MANAGED_HISTORY_TITLE = "HASHI MANAGED CONVERSATION HISTORY"
@@ -1191,29 +1197,28 @@ def _raw_fallback_snapshot(memory_store: Any, policy: CompactionPolicy) -> Histo
     )
 
 
-def _timeline_epoch(value: Any) -> float:
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value or "").strip()
-    if not text:
-        return 0.0
-    with contextlib.suppress(ValueError, OSError, OverflowError):
-        return float(text)
-    with contextlib.suppress(ValueError, OSError, OverflowError):
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.astimezone()
-        return parsed.timestamp()
-    return 0.0
+def _timeline_epoch(
+    value: Any,
+    *,
+    naive_timezone: str | None = None,
+) -> float:
+    parsed = parse_absolute_timestamp(value, naive_timezone=naive_timezone)
+    return parsed.timestamp() if parsed is not None else 0.0
 
 
-def _format_timeline_timestamp(epoch: float) -> str:
+def _format_timeline_timestamp(
+    epoch: float,
+    *,
+    display_timezone: str = UTC_TIMEZONE_NAME,
+) -> str:
     if epoch <= 0:
         return "HASHI timestamp unavailable"
     with contextlib.suppress(ValueError, OSError, OverflowError):
-        local = datetime.fromtimestamp(epoch).astimezone()
-        zone = local.tzname() or "local"
-        return f"{local.isoformat(timespec='seconds')} {zone}"
+        return format_epoch(
+            epoch,
+            timezone_name=display_timezone,
+            timespec="seconds",
+        )
     return "HASHI timestamp unavailable"
 
 
@@ -1224,6 +1229,8 @@ def _normalise_exchange_text(value: Any) -> str:
 def _same_exchange(
     left: Mapping[str, Any],
     right: Mapping[str, Any],
+    *,
+    naive_timezone: str | None = None,
 ) -> bool:
     left_turn_ids = {
         int(value) for value in left.get("turn_ids") or [] if int(value or 0)
@@ -1242,8 +1249,12 @@ def _same_exchange(
     )
     if not same_content:
         return False
-    left_completed = _timeline_epoch(left.get("completed_at"))
-    right_completed = _timeline_epoch(right.get("completed_at"))
+    left_completed = _timeline_epoch(
+        left.get("completed_at"), naive_timezone=naive_timezone
+    )
+    right_completed = _timeline_epoch(
+        right.get("completed_at"), naive_timezone=naive_timezone
+    )
     if left_completed > 0 and right_completed > 0:
         return abs(left_completed - right_completed) <= 30
     return True
@@ -1251,6 +1262,8 @@ def _same_exchange(
 
 def _turn_exchange_entries(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    naive_timezone: str | None = None,
 ) -> list[dict[str, Any]]:
     exchanges: list[dict[str, Any]] = []
     current: list[Mapping[str, Any]] = []
@@ -1269,7 +1282,10 @@ def _turn_exchange_entries(
             for row in current
             if str(row.get("role") or "").lower() == "assistant"
         ).strip()
-        completion_epochs = [_timeline_epoch(row.get("ts")) for row in current]
+        completion_epochs = [
+            _timeline_epoch(row.get("ts"), naive_timezone=naive_timezone)
+            for row in current
+        ]
         exchanges.append(
             {
                 "kind": "primary_exchange",
@@ -1295,7 +1311,9 @@ def _turn_exchange_entries(
                     "kind": "recovery_capsule",
                     "turn_ids": (turn_id,) if turn_id else (),
                     "sequence": turn_id,
-                    "completed_at": _timeline_epoch(row.get("ts")),
+                    "completed_at": _timeline_epoch(
+                        row.get("ts"), naive_timezone=naive_timezone
+                    ),
                     "source": str(row.get("source") or "wip-recovery"),
                     "content": str(row.get("text") or ""),
                     "rows": (dict(row),),
@@ -1314,6 +1332,8 @@ def _turn_exchange_entries(
 def _merge_timeline_entries(
     primary_entries: Sequence[dict[str, Any]],
     receipt_entries: Sequence[Mapping[str, Any]],
+    *,
+    naive_timezone: str | None = None,
 ) -> list[dict[str, Any]]:
     merged = [dict(entry) for entry in primary_entries]
     standalone_receipts: list[dict[str, Any]] = []
@@ -1340,13 +1360,13 @@ def _merge_timeline_entries(
         matched["receipt_entries"] = attached
         matched["completed_at"] = max(
             float(matched.get("completed_at") or 0),
-            _timeline_epoch(receipt.get("completed_at")),
+            _timeline_epoch(receipt.get("completed_at"), naive_timezone=naive_timezone),
         )
 
     combined = merged + standalone_receipts
     combined.sort(
         key=lambda entry: (
-            _timeline_epoch(entry.get("completed_at")),
+            _timeline_epoch(entry.get("completed_at"), naive_timezone=naive_timezone),
             int(entry.get("sequence") or 0),
             str(entry.get("receipt_id") or ""),
         )
@@ -1354,9 +1374,16 @@ def _merge_timeline_entries(
     return combined
 
 
-def _render_timeline_entry(entry: Mapping[str, Any], *, immediate: bool) -> str:
+def _render_timeline_entry(
+    entry: Mapping[str, Any],
+    *,
+    immediate: bool,
+    display_timezone: str,
+    naive_timezone: str | None,
+) -> str:
     timestamp = _format_timeline_timestamp(
-        _timeline_epoch(entry.get("completed_at"))
+        _timeline_epoch(entry.get("completed_at"), naive_timezone=naive_timezone),
+        display_timezone=display_timezone,
     )
     marker = " | IMMEDIATE PREVIOUS" if immediate else ""
     if str(entry.get("kind") or "") == "recovery_capsule":
@@ -1408,7 +1435,8 @@ def _render_timeline_entry(entry: Mapping[str, Any], *, immediate: bool) -> str:
         user_text = "\n\n".join(
             (
                 f"[{row_identity(row)} | "
-                f"recorded_at={_format_timeline_timestamp(_timeline_epoch(row.get('ts')))} | "
+                "recorded_at="
+                f"{_format_timeline_timestamp(_timeline_epoch(row.get('ts'), naive_timezone=naive_timezone), display_timezone=display_timezone)} | "
                 f"source={row.get('source') or 'unknown'}]\n"
                 f"{str(row.get('text') or '')}"
             )
@@ -1418,7 +1446,8 @@ def _render_timeline_entry(entry: Mapping[str, Any], *, immediate: bool) -> str:
         assistant_text = "\n\n".join(
             (
                 f"[{row_identity(row)} | "
-                f"recorded_at={_format_timeline_timestamp(_timeline_epoch(row.get('ts')))} | "
+                "recorded_at="
+                f"{_format_timeline_timestamp(_timeline_epoch(row.get('ts'), naive_timezone=naive_timezone), display_timezone=display_timezone)} | "
                 f"source={row.get('source') or 'unknown'}]\n"
                 f"{str(row.get('text') or '')}"
             )
@@ -1463,9 +1492,17 @@ def render_history(
     protected_only: bool = False,
     cross_session_entries: Sequence[Mapping[str, Any]] = (),
     primary_timeline_entries: Sequence[Mapping[str, Any]] = (),
+    display_timezone: str = UTC_TIMEZONE_NAME,
+    naive_timezone: str | None = None,
 ) -> str:
+    display_timezone = canonical_timezone_name(display_timezone)
+    if naive_timezone is not None:
+        naive_timezone = canonical_timezone_name(naive_timezone)
     uncovered_turns = tuple(snapshot.eligible_turns) + tuple(snapshot.recent_turns)
-    snapshot_primary_entries = _turn_exchange_entries(uncovered_turns)
+    snapshot_primary_entries = _turn_exchange_entries(
+        uncovered_turns,
+        naive_timezone=naive_timezone,
+    )
     canonical_primary_entries = [
         dict(entry) for entry in primary_timeline_entries
     ]
@@ -1478,13 +1515,21 @@ def render_history(
             entry
             for entry in snapshot_primary_entries
             if not any(
-                _same_exchange(entry, canonical)
+                _same_exchange(
+                    entry,
+                    canonical,
+                    naive_timezone=naive_timezone,
+                )
                 for canonical in canonical_primary_entries
             )
         ] + canonical_primary_entries
     else:
         primary_entries = snapshot_primary_entries
-    merged_entries = _merge_timeline_entries(primary_entries, cross_session_entries)
+    merged_entries = _merge_timeline_entries(
+        primary_entries,
+        cross_session_entries,
+        naive_timezone=naive_timezone,
+    )
     recent_limit = max(0, int(snapshot.recent_exchanges))
     recent_entries = merged_entries[-recent_limit:] if recent_limit else []
     recent_primary_turn_ids = {
@@ -1506,7 +1551,11 @@ def render_history(
             for turn_id in entry.get("turn_ids") or []
         )
         and not any(
-            _same_exchange(entry, recent_entry)
+            _same_exchange(
+                entry,
+                recent_entry,
+                naive_timezone=naive_timezone,
+            )
             for recent_entry in recent_primary_entries
         )
     ]
@@ -1528,7 +1577,12 @@ def render_history(
             [
                 "--- UNCOMPACTED HISTORICAL DELTA — QUOTED DATA ---",
                 "\n\n".join(
-                    _render_timeline_entry(entry, immediate=False)
+                    _render_timeline_entry(
+                        entry,
+                        immediate=False,
+                        display_timezone=display_timezone,
+                        naive_timezone=naive_timezone,
+                    )
                     for entry in older_primary_entries
                 ),
             ]
@@ -1541,6 +1595,8 @@ def render_history(
                     _render_timeline_entry(
                         entry,
                         immediate=index == len(recent_entries) - 1,
+                        display_timezone=display_timezone,
+                        naive_timezone=naive_timezone,
                     )
                     for index, entry in enumerate(recent_entries)
                 ),
@@ -1573,6 +1629,11 @@ def install_history_section(
         workspace_dir=workspace_dir,
         memory_store=memory_store,
     )
+    configured_timezone = str(
+        getattr(getattr(runtime, "global_config", None), "timezone", "") or ""
+    ).strip()
+    display_timezone = canonical_timezone_name(configured_timezone or UTC_TIMEZONE_NAME)
+    naive_timezone = configured_timezone or None
     try:
         snapshot = coordinator.snapshot()
     except CompactionFailure as exc:
@@ -1616,7 +1677,11 @@ def install_history_section(
                         primary_timeline_entries = [
                             row
                             for row in primary_timeline_entries
-                            if _timeline_epoch(row.get("user_ts")) >= boundary
+                            if _timeline_epoch(
+                                row.get("user_ts"),
+                                naive_timezone=naive_timezone,
+                            )
+                            >= boundary
                         ]
             except Exception as exc:
                 logger.warning(
@@ -1642,6 +1707,8 @@ def install_history_section(
                     protected_only=protected_only,
                     cross_session_entries=cross_session_entries,
                     primary_timeline_entries=primary_timeline_entries,
+                    display_timezone=display_timezone,
+                    naive_timezone=naive_timezone,
                 ),
             )
         )

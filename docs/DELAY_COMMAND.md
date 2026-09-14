@@ -54,6 +54,11 @@ after a record's due time, the exact payload is enqueued into READY with source
 active turn. The owning agent's backend, model, permissions, workzone, and
 context are resolved through the normal request path at processing time.
 
+The persistent record treats `due_at` as an epoch/UTC instant and also records
+an explicit UTC ISO value plus the source IANA timezone for audit. Command cards
+render that instant in the configured instance timezone, or named UTC when no
+instance timezone is configured; they never inherit the machine timezone.
+
 The due time is the earliest dispatch time, not a guaranteed reply time. The
 message can be received later when the agent is busy, has earlier READY work,
 is offline, or reaches the due time between scheduler ticks. HASHI never

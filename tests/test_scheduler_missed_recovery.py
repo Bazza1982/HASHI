@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from orchestrator import scheduler as scheduler_module
 from orchestrator.scheduler import TaskScheduler
+from orchestrator.timezone_policy import resolve_local_wall_time
+
+
+SYDNEY = ZoneInfo("Australia/Sydney")
 
 
 class _HourlyCroniter:
@@ -213,18 +218,24 @@ async def test_single_recent_startup_catchup_is_marked_as_recovery(tmp_path):
 
 
 def test_hourly_cron_occurrence_capture_counts_all_seven_missed_turns():
-    last_run = datetime(2026, 8, 8, 22, 8, 32).timestamp()
-    now_dt = datetime(2026, 8, 9, 5, 45, 40)
+    last_run = datetime(2026, 8, 8, 22, 8, 32, tzinfo=SYDNEY).timestamp()
+    now_dt = datetime(2026, 8, 9, 5, 45, 40, tzinfo=SYDNEY)
 
     captured = scheduler_module.scheduler_recovery.collect_cron_occurrences(
         "8 * * * *",
         last_run,
         now_dt,
         croniter_cls=_HourlyCroniter,
+        timezone_name="Australia/Sydney",
     )
 
     assert captured["missed_count"] == 7
-    assert [datetime.fromtimestamp(value).strftime("%H:%M") for value in captured["due_at"]] == [
+    assert [
+        datetime.fromtimestamp(value, tz=timezone.utc)
+        .astimezone(SYDNEY)
+        .strftime("%H:%M")
+        for value in captured["due_at"]
+    ] == [
         "23:08",
         "00:08",
         "01:08",
@@ -327,6 +338,7 @@ async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_cont
         "note": "Send one short hello",
         "recovery": {"max_replay": 24},
         "her_v2_effort": "high",
+        "timezone": "Australia/Sydney",
     }
     runtime = _FakeRuntime()
     scheduler = TaskScheduler(
@@ -337,14 +349,15 @@ async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_cont
     )
     occurrences = scheduler_module.scheduler_recovery.collect_cron_occurrences(
         cron["schedule"],
-        datetime(2026, 8, 8, 22, 8, 32).timestamp(),
-        datetime(2026, 8, 9, 5, 45, 40),
+        datetime(2026, 8, 8, 22, 8, 32, tzinfo=SYDNEY).timestamp(),
+        datetime(2026, 8, 9, 5, 45, 40, tzinfo=SYDNEY),
         croniter_cls=_HourlyCroniter,
+        timezone_name="Australia/Sydney",
     )
     batch = scheduler._create_recovery_batch(
         agent_name="zelda",
         items=[{"job": cron, "kind": "cron", **occurrences}],
-        now_ts=datetime(2026, 8, 9, 5, 45, 40).timestamp(),
+        now_ts=datetime(2026, 8, 9, 5, 45, 40, tzinfo=SYDNEY).timestamp(),
     )
     batch["notice_status"] = "sent"
 
@@ -360,9 +373,9 @@ async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_cont
         payload["prompt"].split("originally due at ", 1)[1].split(".", 1)[0]
         for _request_id, payload in runtime.enqueued
     ] == [
-        "2026-08-09T03:08+10:00",
-        "2026-08-09T04:08+10:00",
-        "2026-08-09T05:08+10:00",
+        "2026-08-09T03:08+10:00 AEST [Australia/Sydney]",
+        "2026-08-09T04:08+10:00 AEST [Australia/Sydney]",
+        "2026-08-09T05:08+10:00 AEST [Australia/Sydney]",
     ]
     assert [
         payload["scheduler_context"]
@@ -379,6 +392,38 @@ async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_cont
     assert "RECENTLY RESOLVED RECOVERY BATCHES" in context
     assert "executed=3" in context
     assert "missed=7" in context
+
+
+def test_scheduler_wall_time_policy_covers_aest_aedt_fold_and_gap():
+    winter = resolve_local_wall_time(
+        datetime(2026, 8, 9, 9, 0),
+        "Australia/Sydney",
+    )
+    summer = resolve_local_wall_time(
+        datetime(2026, 12, 9, 9, 0),
+        "Australia/Sydney",
+    )
+    fold = resolve_local_wall_time(
+        datetime(2026, 4, 5, 2, 30),
+        "Australia/Sydney",
+    )
+    gap = resolve_local_wall_time(
+        datetime(2026, 10, 4, 2, 30),
+        "Australia/Sydney",
+    )
+    after_second_fold = scheduler_module.next_cron_occurrence(
+        "30 2 * * *",
+        now=datetime(2026, 4, 5, 2, 15, tzinfo=SYDNEY, fold=1),
+        timezone_name="Australia/Sydney",
+    )
+
+    assert winter.utcoffset() == timedelta(hours=10)
+    assert summer.utcoffset() == timedelta(hours=11)
+    assert fold.fold == 0
+    assert fold.utcoffset() == timedelta(hours=11)
+    assert (gap.hour, gap.minute) == (3, 0)
+    assert gap.utcoffset() == timedelta(hours=11)
+    assert after_second_fold == datetime(2026, 4, 6, 2, 30, tzinfo=SYDNEY)
 
 
 @pytest.mark.asyncio

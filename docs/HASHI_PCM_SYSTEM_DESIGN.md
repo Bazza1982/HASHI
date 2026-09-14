@@ -334,6 +334,13 @@ may only say, for example, “go ahead and do it”. PCM provides bounded recent
 Context but does not itself perform task reasoning. The number of exchanges is
 adjustable.
 
+Timeline ordering is host-independent. Absolute timestamps are normalized to
+aware UTC instants before comparison; presentation receives an explicit IANA
+timezone and includes that identity. A legacy naive timestamp is interpreted
+only when the instance has an explicit source timezone, otherwise it is marked
+unavailable. PCM never uses the build or runtime host's implicit local timezone
+to infer historical order.
+
 |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Size management** PCM applies Engine-specific assembled-request limits to non-HER Engines; handoff restoration is also bounded to approximately 6,000 words. The target remains up to ten recent completed exchanges, but limits may reduce that number. Pruning must operate on complete exchanges and remove the oldest exchanges first, preserving newer exchanges, sequence labels and timestamps. The current user request and higher-authority PCM sections are protected. PCM must audit any omitted history instead of silently keeping old exchanges while dropping newer ones. HER v2 uses its own capacity controller and Compact policy. |

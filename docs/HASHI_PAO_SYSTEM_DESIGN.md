@@ -73,6 +73,18 @@ HER v2's Strategy, Planning, Execution, Tool loop, and recovery inside one HER
 Engine Session are **inner orchestration** owned by HER v2. The shared word
 `orchestration` does not transfer that lifecycle to PAO.
 
+#### Scheduler time contract
+
+PAO persists delayed and recovered due instants as UTC evidence. A recurring
+cron definition retains its wall-clock expression plus an IANA `timezone`;
+each occurrence is resolved against that date's zone rules. The documented DST
+default selects the first occurrence in a fold and advances a gap to its first
+valid minute. User-facing due/recovery text uses the job timezone and names it;
+an unknown legacy timezone defaults to UTC, never the scheduler host timezone.
+New and edited declarations use the revision-aware Scheduler writer and retain
+unrelated fields. Merely reading a legacy declaration does not publish a
+migration.
+
 ### 2.4 Skills, Tools, permissions, and execution
 
 PAO owns the HASHI-level capability registry and execution authority:

@@ -1415,9 +1415,24 @@ HER does not reconstruct or resume an in-flight execution stack after process re
 
 If the process stops unexpectedly:
 
-- the old turn becomes `ERROR` during reconciliation;
+- each active fixed-session Turn retains its Function Worker owner incarnation,
+  process identity, start evidence, and latest execution lease update;
+- a candidate Worker may reconcile the old Turn only after the recorded owner
+  process is confirmed terminated; an indeterminate, legacy, same-owner, or
+  still-live owner remains untouched;
+- only the confirmed dead owner's canonical Turn and matching shadow ledger
+  become `ERROR` during reconciliation;
 - its incomplete Ledger and HASHI logs are preserved;
 - no old planner, executor, reviewer, verifier, or sub-agent continuation is restarted automatically.
+
+A completed late Tool receipt is newer evidence than a historical interruption
+projection. The fixed-session store re-derives unresolved effects, remaining
+work, safety, and disposition from the current receipt set. A completed failure
+remains failed audit evidence but is not unknown. The same recorded owner may
+then close a falsely failed Turn with a bounded compare-and-set correction when
+zero unresolved effects remain; another owner cannot complete or cancel it.
+Final delivery tests the current unresolved set rather than treating an old
+`UNKNOWN_SIDE_EFFECT` string as a permanent latch.
 
 A later user request such as “continue” starts a new turn. Its Triage stage may inspect conversation history, the previous Ledger, and HASHI logs to determine remaining work.
 

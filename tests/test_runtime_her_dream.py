@@ -205,6 +205,7 @@ def test_enabled_legacy_schedule_migrates_only_for_her(tmp_path):
     )
     manager = SkillManager(project_root=tmp_path, tasks_path=tasks_path)
     runtime = FakeDreamRuntime(tmp_path / "workspace", skill_manager=manager)
+    runtime.global_config = SimpleNamespace(timezone="Australia/Sydney")
 
     result = runtime_her_dream.migrate_legacy_schedule(runtime)
 
@@ -215,6 +216,7 @@ def test_enabled_legacy_schedule_migrates_only_for_her(tmp_path):
     assert legacy["enabled"] is False
     assert native["enabled"] is True
     assert native["schedule"] == "30 1 * * *"
+    assert native["timezone"] == "Australia/Sydney"
     assert native["action"] == "her:dream"
     assert runtime_her_dream.migrate_legacy_schedule(runtime)["changed"] is False
 
