@@ -44,9 +44,10 @@ Supported targets are:
 - a directly reachable LAN or private-overlay peer.
 
 Every cross-instance target must be discovered by the launch instance's local
-Hashi Remote, must have `handshake_accepted` state on both sides, and must
-advertise `tui_proxy_v1`. There is no manual URL escape hatch and no public
-internet Backend API routing.
+Hashi Remote and have a completed authenticated handshake. Advertised
+capabilities and cached liveness are informational and never independently
+block TUI access. There is no manual URL escape hatch and no public internet
+Backend API routing.
 
 ## Transport and trust contract
 
@@ -107,7 +108,7 @@ surface; it does not claim complete Persistent Session API v1 support.
 `/instance <id>` performs the following transaction:
 
 1. Refresh the local Remote peer registry.
-2. Require a live peer, `handshake_accepted`, and `tui_proxy_v1`.
+2. Require the peer's authenticated handshake to be complete.
 3. Create a candidate API client without changing the active client.
 4. Fetch candidate health and require the returned `instance_id` to match.
 5. Fetch the candidate agent directory.
@@ -139,13 +140,15 @@ following the launch repository instead.
 @relative/path        attach one file from the target Agent's active Workzone
 ```
 
-Remote online and TUI available are distinct states. A peer may be visible but
-unavailable because the handshake is incomplete, it is offline, or its Remote
-has not yet been upgraded/restarted to advertise `tui_proxy_v1`.
+A peer is selectable after its authenticated Remote handshake completes.
+Cached liveness and capability metadata may still be shown for diagnosis, but
+the real proxied request decides current availability. An unreachable or
+incompatible peer therefore returns its concrete transport or endpoint error
+instead of being rejected from stale registry metadata.
 
 ## Rollout compatibility
 
 Existing `python tui.py`, `/to`, `/agents`, `/log`, and `/quit` behavior remains
-available. A Remote process must be restarted after deploying this version so
-its advertisement and routes include `tui_proxy_v1`; the HASHI core process does
-not need to be restarted for this capability update.
+available. Remote processes must adopt this version before they use
+handshake-only TUI admission; cached capability and liveness fields remain
+visible for diagnosis but are no longer access-control inputs.

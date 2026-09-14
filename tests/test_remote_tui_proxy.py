@@ -49,10 +49,19 @@ class _Protocol:
         return [f"http://peer.invalid:8767{path}"] if instance_id == self.peer.instance_id else []
 
 
-def _peer(*, handshake: str = "handshake_accepted", live: str = "online"):
+def _peer(
+    *,
+    handshake: str = "handshake_accepted",
+    live: str = "online",
+    capabilities=None,
+):
     return SimpleNamespace(
         instance_id="HASHI2",
-        capabilities=["handshake_v2", "tui_proxy_v1"],
+        capabilities=(
+            ["handshake_v2", "tui_proxy_v1"]
+            if capabilities is None
+            else capabilities
+        ),
         properties={"handshake_state": handshake, "live_status": live},
     )
 
@@ -78,8 +87,11 @@ def _client(tmp_path, peer=None):
     return TestClient(app, client=("127.0.0.1", 50123)), token
 
 
-def test_protocol_tui_requires_hmac_and_accepted_handshake(tmp_path, monkeypatch):
-    client, token = _client(tmp_path)
+def test_protocol_tui_uses_valid_hmac_even_when_peer_registry_is_stale(tmp_path, monkeypatch):
+    client, token = _client(
+        tmp_path,
+        _peer(handshake="handshake_pending", live="offline", capabilities=[]),
+    )
     monkeypatch.setattr(
         remote_server,
         "_local_workbench_tui_request",
@@ -111,25 +123,42 @@ def test_protocol_tui_requires_hmac_and_accepted_handshake(tmp_path, monkeypatch
     }
 
 
-def test_protocol_tui_rejects_peer_without_completed_handshake(tmp_path):
-    client, token = _client(tmp_path, _peer(handshake="handshake_pending"))
-    payload = {"from_instance": "HASHI2", "operation": "agents"}
-    body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    headers.update(
-        build_auth_headers(
-            shared_token=token,
-            method="POST",
-            path="/protocol/tui",
-            from_instance="HASHI2",
-            body_bytes=body,
-        )
-    )
+def test_loopback_tui_proxy_requires_completed_target_handshake(tmp_path):
+    client, _token = _client(tmp_path, _peer(handshake="handshake_pending"))
 
-    response = client.post("/protocol/tui", content=body, headers=headers)
+    response = client.post(
+        "/tui/proxy",
+        json={"target_instance": "HASHI2", "operation": "agents"},
+    )
 
     assert response.status_code == 409
     assert response.json()["error"] == "handshake_required"
+
+
+def test_loopback_tui_proxy_ignores_stale_liveness_and_capability_metadata(
+    tmp_path, monkeypatch
+):
+    client, _token = _client(
+        tmp_path,
+        _peer(live="offline", capabilities=[]),
+    )
+    monkeypatch.setattr(
+        remote_server,
+        "_post_json_with_optional_hmac",
+        lambda url, payload, timeout=15: {
+            "ok": True,
+            "target_instance": "HASHI2",
+            "result": {"ok": True, "agents": []},
+        },
+    )
+
+    response = client.post(
+        "/tui/proxy",
+        json={"target_instance": "HASHI2", "operation": "agents"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["target_instance"] == "HASHI2"
 
 
 def test_loopback_tui_proxy_forwards_only_to_verified_identity(tmp_path, monkeypatch):
