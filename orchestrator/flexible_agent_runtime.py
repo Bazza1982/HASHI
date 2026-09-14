@@ -669,6 +669,17 @@ class FlexibleAgentRuntime:
                         session.block("channel_denied")
                         return
                     self._record_active_chat(update)
+                    message = getattr(update, "effective_message", None) or getattr(
+                        update, "message", None
+                    )
+                    runtime_session.record_frontend_message_for_update(
+                        self,
+                        update,
+                        role="user",
+                        text=str(getattr(message, "text", "") or ""),
+                        source="telegram.command",
+                        content_format="plain-text",
+                    )
                     if not self._is_command_allowed(cmd):
                         session.block("command_disabled")
                         await self._reply_text(
@@ -1185,6 +1196,14 @@ class FlexibleAgentRuntime:
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "reply")
         delivery_mode = kwargs.pop("_delivery_mode", "normal_reply")
+        parse_mode = str(kwargs.get("parse_mode") or "").strip().casefold()
+        content_format = (
+            "telegram-html"
+            if parse_mode == "html"
+            else "markdown"
+            if parse_mode in {"markdown", "markdownv2"}
+            else "plain-text"
+        )
         chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
         if delivery_mode != "failover_notice":
             if await telegram_delivery_failover.handle_blocked_send(
@@ -1198,7 +1217,17 @@ class FlexibleAgentRuntime:
         last_error = None
         for _ in range(2):
             try:
-                return await update.message.reply_text(text, **kwargs)
+                sent = await update.message.reply_text(text, **kwargs)
+                runtime_session.record_frontend_message_for_update(
+                    self,
+                    update,
+                    role="assistant",
+                    text=text,
+                    source="telegram.reply",
+                    transport_message_id=getattr(sent, "message_id", None),
+                    content_format=content_format,
+                )
+                return sent
             except RetryAfter as exc:
                 last_error = exc
                 await telegram_delivery_failover.handle_retry_after(
@@ -1223,6 +1252,14 @@ class FlexibleAgentRuntime:
         purpose = kwargs.pop("_purpose", "send")
         delivery_mode = kwargs.pop("_delivery_mode", "normal_send")
         raise_delivery_error = bool(kwargs.pop("_raise_delivery_error", False))
+        parse_mode = str(kwargs.get("parse_mode") or "").strip().casefold()
+        content_format = (
+            "telegram-html"
+            if parse_mode == "html"
+            else "markdown"
+            if parse_mode in {"markdown", "markdownv2"}
+            else "plain-text"
+        )
         if delivery_mode != "failover_notice":
             if await telegram_delivery_failover.handle_blocked_send(
                 self,
@@ -1235,7 +1272,22 @@ class FlexibleAgentRuntime:
         last_error = None
         for _ in range(2):
             try:
-                return await self.app.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+                sent = await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    **kwargs,
+                )
+                runtime_session.record_frontend_message(
+                    self,
+                    role="assistant",
+                    text=text,
+                    source="telegram.send",
+                    transport_message_id=getattr(sent, "message_id", None),
+                    surface="telegram",
+                    channel_key=str(chat_id),
+                    content_format=content_format,
+                )
+                return sent
             except RetryAfter as exc:
                 last_error = exc
                 await telegram_delivery_failover.handle_retry_after(
@@ -4458,11 +4510,11 @@ class FlexibleAgentRuntime:
             return
         backend = self.backend_manager.current_backend
         if not backend or not hasattr(backend, "get_key_info"):
-            await update.message.reply_text(ui_language.tr("credit.openrouter_only"))
+            await self._reply_text(update, ui_language.tr("credit.openrouter_only"))
             return
         key_info = await backend.get_key_info()
         if not key_info:
-            await update.message.reply_text(ui_language.tr("credit.fetch_failed"))
+            await self._reply_text(update, ui_language.tr("credit.fetch_failed"))
             return
         data = key_info.get("data", {})
         await self._reply_text(
@@ -5147,7 +5199,7 @@ class FlexibleAgentRuntime:
 
         Notes:
         - This controls **local** transcription of Telegram voice/audio messages.
-        - Changes take effect on next transcription; the model will be (re)loaded lazily.
+        - Changes take effect in the isolated helper on the next transcription.
         """
         if not self._is_authorized_user(update.effective_user.id):
             return

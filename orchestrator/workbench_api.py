@@ -123,6 +123,16 @@ PERSISTENT_SESSION_V1_QUALIFIED = True
 # setting ``native_audio_chat_v1``.  Existing installations therefore retain
 # their current text/STT/TTS behaviour until explicitly enabled.
 NATIVE_AUDIO_CHAT_V1_QUALIFIED = True
+_TRANSCRIPT_IMAGE_PREVIEW_MIME_TYPES = frozenset(
+    {
+        "image/avif",
+        "image/bmp",
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+)
 _CONNECTOR_REQUIRED_SCOPES = {
     "github": frozenset({"repo:read", "repo:write"}),
     "slack": frozenset({"message.send"}),
@@ -612,6 +622,10 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get(
             "/api/transcript/{name}/poll", self.handle_transcript_poll
+        )
+        self.app.router.add_get(
+            "/api/transcript/{name}/attachments/{message_id}/{attachment_id}",
+            self.handle_transcript_attachment,
         )
         self.app.router.add_get(
             "/api/agents/{name}/requests/{request_id}/activity",
@@ -1167,12 +1181,18 @@ class WorkbenchApiServer:
         # they will keep polling the obsolete Agent-level transcript forever.
         if surface:
             resolved_owner = owner_id or SessionStore.owner_id_for(self.global_config)
-            session = self.session_store.resolve_session(
-                owner_id=resolved_owner,
-                agent_id=agent_row["name"],
-                surface=surface,
-                channel_key=channel_key,
-            )
+            if str(surface).strip().casefold() in {"telegram", "workbench"}:
+                session = self.session_store.resolve_primary_session(
+                    owner_id=resolved_owner,
+                    agent_id=agent_row["name"],
+                )
+            else:
+                session = self.session_store.resolve_session(
+                    owner_id=resolved_owner,
+                    agent_id=agent_row["name"],
+                    surface=surface,
+                    channel_key=channel_key,
+                )
             workspace = self.session_store.session_workspace(
                 session["session_id"], int(session["context_generation"])
             )
@@ -4032,6 +4052,29 @@ class WorkbenchApiServer:
                 },
                 status=400,
             )
+        raw_message_cursor = request.query.get("message_cursor")
+        try:
+            message_cursor = (
+                int(raw_message_cursor) if raw_message_cursor is not None else None
+            )
+        except (TypeError, ValueError):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "message_cursor must be a non-negative integer",
+                    "error_code": "invalid_message_cursor",
+                },
+                status=400,
+            )
+        if message_cursor is not None and message_cursor < 0:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "message_cursor must be a non-negative integer",
+                    "error_code": "invalid_message_cursor",
+                },
+                status=400,
+            )
         agent_row = next(
             (row for row in self._load_agent_rows() if row["name"] == name), None
         )
@@ -4042,7 +4085,84 @@ class WorkbenchApiServer:
             name,
             offset=offset,
             known_history_generation=history_generation,
+            after_message_ordinal=message_cursor,
         )
+
+    async def handle_transcript_attachment(self, request):
+        """Serve one image already visible in the shared conversation."""
+
+        name = request.match_info["name"]
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        agent_row = next(
+            (row for row in self._load_agent_rows() if row["name"] == name), None
+        )
+        if agent_row is None:
+            return web.json_response({"error": "agent not found"}, status=404)
+        try:
+            session = self.session_store.resolve_primary_session(
+                owner_id=owner_id,
+                agent_id=name,
+            )
+            attachment = self.session_store.visible_message_attachment(
+                session["session_id"],
+                owner_id=owner_id,
+                message_id=request.match_info["message_id"],
+                attachment_id=request.match_info["attachment_id"],
+                context_generation=int(session["context_generation"]),
+            )
+            mime_type = str(attachment.get("mime_type") or "").strip().casefold()
+            if (
+                str(attachment.get("modality") or "").casefold() != "image"
+                or mime_type not in _TRANSCRIPT_IMAGE_PREVIEW_MIME_TYPES
+            ):
+                raise SessionNotFound("visible image attachment not found")
+            raw_path = str(attachment.get("local_ref") or "").strip()
+            if not raw_path:
+                raise SessionNotFound("visible image attachment is unavailable")
+            candidate = Path(raw_path).resolve(strict=True)
+            runtime = self._runtime_map().get(name)
+            configured_media = getattr(self.global_config, "base_media_dir", None)
+            allowed_roots = {
+                Path(value).resolve()
+                for value in (
+                    getattr(runtime, "media_dir", None),
+                    (Path(configured_media) / name if configured_media else None),
+                )
+                if value
+            }
+            if not allowed_roots or not any(
+                candidate.is_relative_to(root) for root in allowed_roots
+            ):
+                raise SessionConflict(
+                    "visible image attachment is outside the Agent media directory"
+                )
+            expected_size = int(attachment.get("size_bytes") or 0)
+            actual_size = candidate.stat().st_size
+            if actual_size <= 0 or actual_size > 25 * 1024 * 1024:
+                raise SessionConflict("visible image attachment exceeds the preview limit")
+            if expected_size and expected_size != actual_size:
+                raise SessionConflict("visible image attachment size changed")
+            payload = candidate.read_bytes()
+            expected_digest = str(attachment.get("sha256") or "").strip().casefold()
+            if expected_digest and hashlib.sha256(payload).hexdigest() != expected_digest:
+                raise SessionConflict("visible image attachment content changed")
+            return web.Response(
+                body=payload,
+                content_type=mime_type,
+                headers={
+                    "Cache-Control": "private, no-store",
+                    "Content-Disposition": "inline",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+        except FileNotFoundError:
+            return self._v1_error(
+                SessionNotFound("visible image attachment is unavailable")
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
 
     def _chat_transcript_response(
         self,
@@ -4052,6 +4172,7 @@ class WorkbenchApiServer:
         limit=200,
         offset=None,
         known_history_generation=None,
+        after_message_ordinal=None,
     ):
         owner_id = self._v1_owner_id(request)
         if owner_id is None:
@@ -4059,8 +4180,10 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "not authenticated", "error_code": "not_authenticated"},
                 status=401,
             )
-        session = self.session_store.resolve_session(owner_id=owner_id, agent_id=name,
-                                                     surface="workbench", channel_key="default")
+        session = self.session_store.resolve_primary_session(
+            owner_id=owner_id,
+            agent_id=name,
+        )
         payload = build_chat_projection(
             self.session_store,
             session=session,
@@ -4068,6 +4191,7 @@ class WorkbenchApiServer:
             offset=offset,
             limit=limit,
             known_history_generation=known_history_generation,
+            after_message_ordinal=after_message_ordinal,
         )
         return web.json_response(payload)
 

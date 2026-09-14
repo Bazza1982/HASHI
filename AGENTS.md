@@ -4,8 +4,8 @@ Before editing, read `ARCHITECTURE.md` and `docs/HASHI_LAYERED_RUNTIME_BOUNDARIE
 For command/UI changes also read `docs/HASHI_COMMAND_UI_STYLE_GUIDE.md`;
 choose verification using `docs/TESTING_POLICY.md`.
 
-- State the change's functional owner (PCM, PAO, HER v2, or Frontend Connector),
-  engineering layer, and focused validation before editing. One short update is enough.
+- Before editing, state the functional owner (PCM, PAO, HER v2, or Frontend
+  Connector), engineering layer, and focused validation.
 - Normal features belong in Functions or platform/instance configuration.
   Put behavior in the narrowest existing owner; derive views instead of copying
   model/effort lists, command metadata, default ports, or state writers.
@@ -52,6 +52,5 @@ choose verification using `docs/TESTING_POLICY.md`.
 - Update the owning decision and FYI when behavior changes. Record approval,
   implementation and live verification separately, scoped to branch/instance.
 
-Install the lightweight local hook once with
-`python scripts/install_engineering_hooks.py`. It preserves existing custom hooks.
-The hook checks the staged Core diff and whitespace; CI remains the branch check.
+Install the local hook with `python scripts/install_engineering_hooks.py`; it
+keeps custom hooks and checks staged Core changes/whitespace. CI remains final.

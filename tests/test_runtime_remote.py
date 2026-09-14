@@ -3,9 +3,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from aiohttp import web
 
 from orchestrator import runtime_pending, runtime_remote
 from orchestrator.agent_move.package import AgentMoveError
+from remote.security.shared_token import NonceStore, verify_auth_headers
 
 
 class _Query:
@@ -677,12 +679,176 @@ async def test_remote_status_includes_peer_list(tmp_path, monkeypatch):
     assert "Peers:" not in text
     assert "Inflight:" not in text
     assert "Rescue:" not in text
-    assert "📡 <b>REMOTE INSTANCES</b>" not in text
+    assert "📡 <b>DIRECT / LAN</b>" in text
+    assert "🌐 <b>HASHI EXCHANGE</b>" in text
     assert "<b>Current</b> · <code>1</code> online" in text
     assert "<b>Attention</b> · <code>0</code>" in text
-    assert "<b>Offline</b> · <code>1</code>" in text
+    assert "<b>Unavailable</b> · <code>1</code>" in text
     assert "peer:HASHI9" in text
-    assert "peer:MSI" in text
+    assert "⚪ unavailable <b>MSI</b>" in text
+
+
+@pytest.mark.asyncio
+async def test_remote_status_separates_authorized_exchange_from_direct_peers(
+    tmp_path, monkeypatch
+):
+    replies = []
+    exchange = {
+        "ok": True,
+        "enabled": True,
+        "connected": True,
+        "state": "ready",
+        "endpoint": "wss://exchange.example/v1/connect",
+        "authority_id": "authority_example",
+        "instance_address": "node-a.example",
+        "published_agents": ["agent_alpha"],
+        "authorized_routes_supported": True,
+        "authorized_routes": [{
+            "to": {
+                "authority_id": "authority_example",
+                "actor_id": "actor_example",
+                "registered_instance_id": "instance_example",
+                "agent_id": "agent_beta",
+                "address": "agent_beta@node-b.example",
+            },
+            "message_kinds": ["agent_message", "agent_reply"],
+            "available": True,
+        }],
+        "routes_grant_revision": 11,
+        "routes_refreshed_at": "2026-09-14T03:00:00Z",
+        "routes_stale": False,
+    }
+
+    async def _fetch_remote_json(path):
+        if path == "/health":
+            return ({
+                "ok": True,
+                "instance": {"instance_id": "TEST-INSTANCE-A"},
+                "peers": [{
+                    "instance_id": "HASHI3",
+                    "properties": {"handshake_state": "unreachable"},
+                }],
+            }, "http://127.0.0.1:29437/health")
+        if path == "/protocol/status":
+            return ({"ok": True, "shared_token_configured": True}, None)
+        return None, None
+
+    monkeypatch.setattr(
+        runtime_remote.remote_lifecycle,
+        "load_settings",
+        lambda root: SimpleNamespace(
+            enabled=True, supervised=True, disabled_path=root / ".disabled"
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_remote.remote_lifecycle, "read_disabled_state", lambda root: None
+    )
+    monkeypatch.setattr(
+        runtime_remote,
+        "fetch_exchange_status",
+        AsyncMock(return_value=(exchange, "http://127.0.0.1:29437/exchange/status")),
+    )
+    runtime = SimpleNamespace(
+        _is_authorized_user=lambda _user_id: True,
+        _remote_config_snapshot=lambda: {
+            "root": tmp_path,
+            "port": 29437,
+            "use_tls": False,
+            "backend": "lan",
+        },
+        _remote_process=None,
+        _fetch_remote_json=_fetch_remote_json,
+        _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
+        _remote_peer_presence=lambda _peer: (3, "🔴 offline", "unreachable"),
+        _render_remote_peer_block=lambda peer: [
+            f"🔴 offline <b>{peer['instance_id']}</b>", "seen: <code>14m ago</code>"
+        ],
+        global_config=SimpleNamespace(
+            project_root=tmp_path, instance_id="TEST-INSTANCE-A"
+        ),
+    )
+
+    await runtime_remote.cmd_remote(
+        runtime,
+        SimpleNamespace(effective_user=SimpleNamespace(id=1)),
+        SimpleNamespace(args=[]),
+    )
+
+    text = replies[-1]["text"]
+    assert "CONNECTED &amp; AUTHORISED" in text
+    assert "node-a.example" in text
+    assert "agent_alpha" in text
+    assert "node-b.example" in text
+    assert "agent_beta" in text
+    assert "HASHI3" in text
+    assert "⚪ unavailable <b>HASHI3</b>" in text
+    assert "agent1@h3" not in text
+    assert "<b>Unavailable</b> · <code>1</code>" in text
+
+
+def test_exchange_renderer_escapes_all_projected_values():
+    lines = runtime_remote.render_exchange_status_lines({
+        "enabled": True,
+        "connected": True,
+        "endpoint": "wss://example.test/<unsafe>",
+        "authority_id": "authority<&>",
+        "instance_address": "instance<&>",
+        "published_agents": ["agent<&>"],
+        "authorized_routes_supported": True,
+        "authorized_routes": [],
+        "routes_stale": False,
+    })
+    rendered = "\n".join(lines)
+    assert "<unsafe>" not in rendered
+    assert "authority&lt;&amp;&gt;" in rendered
+    assert "agent&lt;&amp;&gt;" in rendered
+
+
+@pytest.mark.asyncio
+async def test_exchange_status_fetch_uses_local_shared_token_hmac(tmp_path):
+    shared_token = "synthetic-local-status-shared-token"
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": shared_token}),
+        encoding="utf-8",
+    )
+    nonce_store = NonceStore()
+
+    async def status_handler(request):
+        body = await request.read()
+        ok, reason, sender = verify_auth_headers(
+            headers=request.headers,
+            shared_token=shared_token,
+            method=request.method,
+            path=request.path,
+            body_bytes=body,
+            nonce_store=nonce_store,
+            expected_from_instance="TEST-INSTANCE-A",
+        )
+        assert (ok, reason, sender) == (
+            True, "ok", "TEST-INSTANCE-A"
+        )
+        return web.json_response({"ok": True, "connected": True})
+
+    app = web.Application()
+    app.router.add_get("/exchange/status", status_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(instance_id="TEST-INSTANCE-A"),
+        _remote_urls=lambda path: [f"http://127.0.0.1:{port}{path}"],
+    )
+    try:
+        value, url = await runtime_remote.fetch_exchange_status(
+            runtime, {"root": tmp_path}
+        )
+    finally:
+        await runner.cleanup()
+
+    assert value == {"ok": True, "connected": True}
+    assert url == f"http://127.0.0.1:{port}/exchange/status"
 
 
 @pytest.mark.asyncio

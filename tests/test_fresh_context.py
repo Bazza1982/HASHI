@@ -29,6 +29,7 @@ from orchestrator.fresh_context import (
 )
 from orchestrator.pcm import render_pcm_document
 from orchestrator.runtime_common import QueuedRequest
+from orchestrator.session_store import SessionConflict
 from orchestrator.workspace_state import WorkspaceStateStore
 
 
@@ -238,6 +239,12 @@ async def test_new_creates_and_binds_a_hashi_session_for_any_backend(tmp_path):
 
     current = runtime_session.current_session_for_update(runtime, update)
     assert current["session_id"] != default["session_id"]
+    workbench = runtime_session.current_session(
+        runtime,
+        surface="workbench",
+        channel_key="default",
+    )
+    assert workbench["session_id"] == current["session_id"]
     assert current["context_generation"] == 1
     assert len(runtime.session_store.list_sessions(
         owner_id="user:123", agent_id="arale"
@@ -352,6 +359,38 @@ async def test_workbench_slash_command_honors_explicit_session(tmp_path):
     assert runtime.session_store.get_session(default["session_id"])[
         "context_generation"
     ] == 1
+
+
+def test_stale_workbench_request_cannot_replace_shared_primary_conversation(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    current = runtime.session_store.create_session(
+        owner_id="user:123",
+        agent_id="arale",
+        title="Current shared conversation",
+    )
+    runtime.session_store.bind_primary_session(
+        owner_id="user:123",
+        agent_id="arale",
+        session_id=current["session_id"],
+    )
+
+    with pytest.raises(SessionConflict, match="shared conversation changed"):
+        runtime_session.resolve_request_session(
+            runtime,
+            source="workbench_ui_chat",
+            chat_id=456,
+            metadata={
+                "owner_id": "user:123",
+                "session_id": default["session_id"],
+                "session_surface": "workbench",
+                "session_channel_key": "default",
+            },
+        )
+
+    assert runtime.session_store.resolve_primary_session(
+        owner_id="user:123",
+        agent_id="arale",
+    )["session_id"] == current["session_id"]
 
 
 @pytest.mark.asyncio

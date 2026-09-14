@@ -64,12 +64,12 @@ def test_instance_settings_round_trip_and_preserve_unknown_fields(tmp_path: Path
     saved = runtime_debug_reporting.enable(
         runtime,
         target="zhaojun@HASHI1",
-        journal=r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md",
+        journal=r"C:\Users\operator\Desktop\HASHI_Nightly_Batch_Inbox.md",
     )
 
     assert saved.enabled is True
     assert saved.target == "zhaojun@HASHI1"
-    assert saved.journal == r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md"
+    assert saved.journal == r"C:\Users\operator\Desktop\HASHI_Nightly_Batch_Inbox.md"
     assert read_config_json(path)["extension"] == {"keep": True}
 
     another_agent = _runtime(tmp_path)
@@ -115,7 +115,7 @@ def test_report_contains_error_provenance_and_receiver_instructions(tmp_path: Pa
     settings = runtime_debug_reporting.DebugReportingSettings(
         enabled=True,
         target="zhaojun@HASHI1",
-        journal=r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md",
+        journal=r"C:\Users\operator\Desktop\HASHI_Nightly_Batch_Inbox.md",
     )
 
     message = runtime_debug_reporting.build_report_message(
@@ -290,7 +290,7 @@ async def test_debug_command_configures_instance_reporting_and_keeps_manual_form
         args=[
             "on",
             "zhaojun@HASHI1",
-            r"C:\Users\thene\Desktop\HASHI",
+            r"C:\Users\operator\Desktop\HASHI",
             "Nightly",
             "Batch.md",
         ]
@@ -301,7 +301,7 @@ async def test_debug_command_configures_instance_reporting_and_keeps_manual_form
     settings = runtime_debug_reporting.load_settings(runtime)
     assert settings.enabled is True
     assert settings.target == "zhaojun@HASHI1"
-    assert settings.journal == r"C:\Users\thene\Desktop\HASHI Nightly Batch.md"
+    assert settings.journal == r"C:\Users\operator\Desktop\HASHI Nightly Batch.md"
     assert "zhaojun@HASHI1" in replies[-1][0]
     assert "HASHI Nightly Batch.md" in replies[-1][0]
     assert replies[-1][1]["parse_mode"] == "HTML"
@@ -346,12 +346,12 @@ async def test_debug_on_requires_target_and_journal(tmp_path: Path):
     ("journal", "journal_arg"),
     [
         (
-            r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md",
-            r"C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md",
+            r"C:\Users\operator\Desktop\HASHI_Nightly_Batch_Inbox.md",
+            r"C:\Users\operator\Desktop\HASHI_Nightly_Batch_Inbox.md",
         ),
         (
-            r"C:\Users\thene\Desktop\HASHI Nightly Batch Inbox.md",
-            r'"C:\Users\thene\Desktop\HASHI Nightly Batch Inbox.md"',
+            r"C:\Users\operator\Desktop\HASHI Nightly Batch Inbox.md",
+            r'"C:\Users\operator\Desktop\HASHI Nightly Batch Inbox.md"',
         ),
     ],
 )

@@ -435,6 +435,8 @@ opt-in required by media and local-vision tools.
 - TTS providers: `windows` (default, no extra install), `edge`, `piper`, `kokoro`, `coqui`.
 - Provider config: `orchestrator/voice_manager.py`.
 - Incoming voice/audio is still transcribed to text via faster-whisper before dispatch.
+  Its native packages run only in the instance's isolated transcription helper,
+  never in the Core or Function Worker environment.
 
 ## Bridge-U-F Task Scheduler (Heartbeat & Cron)
 - Tasks defined in `<project_root>\tasks.json`.

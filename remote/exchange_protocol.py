@@ -21,12 +21,14 @@ from remote.internet_address import (
 SUBPROTOCOL = "hashi-exchange.v1"
 WIRE_VERSION = 1
 REMOTE_PROTOCOL_VERSION = "2.0"
-CAPABILITIES = (
+AUTHORIZED_ROUTES_CAPABILITY = "authorized_routes_v1"
+REQUIRED_CAPABILITIES = (
     "hchat_v1",
     "receipt_v1",
     "agent_reply_v1",
     "public_address_v1",
 )
+CAPABILITIES = REQUIRED_CAPABILITIES + (AUTHORIZED_ROUTES_CAPABILITY,)
 MESSAGE_KINDS = frozenset({"agent_message", "agent_reply"})
 MAX_FRAME_BYTES = 65536
 MAX_JSON_DEPTH = 8
@@ -200,6 +202,7 @@ def decode_server_frame(raw: Any) -> dict[str, Any]:
             "resolved",
             "receipt",
             "delivery",
+            "authorized_routes",
             "error",
         },
         "UNSUPPORTED_CAPABILITY",
@@ -244,7 +247,12 @@ def decode_server_frame(raw: Any) -> dict[str, Any]:
             and len(capabilities) <= 16
             and all(isinstance(item, str) and len(item) <= 64 for item in capabilities)
         )
-        _require(set(CAPABILITIES) <= set(capabilities), "UNSUPPORTED_CAPABILITY")
+        # New relay features are optional.  The original v1 messaging baseline
+        # remains sufficient for compatibility with an older Exchange.
+        _require(
+            set(REQUIRED_CAPABILITIES) <= set(capabilities),
+            "UNSUPPORTED_CAPABILITY",
+        )
         limits = _keys(
             frame["limits"],
             required={"max_message_bytes", "max_published_agents"},
@@ -285,6 +293,51 @@ def decode_server_frame(raw: Any) -> dict[str, Any]:
             type(frame["grant_revision"]) is int
             and 0 <= frame["grant_revision"] <= 2**53
         )
+    elif kind == "authorized_routes":
+        _keys(
+            frame,
+            required={
+                "v",
+                "type",
+                "request_id",
+                "grant_revision",
+                "refreshed_at",
+                "routes",
+            },
+        )
+        frame["request_id"] = _identifier(
+            frame["request_id"], field="request_id"
+        )
+        _require(
+            type(frame["grant_revision"]) is int
+            and 0 <= frame["grant_revision"] <= 2**53
+        )
+        parse_timestamp(frame["refreshed_at"])
+        _require(isinstance(frame["routes"], list) and len(frame["routes"]) <= 100)
+        normalized_routes: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for value in frame["routes"]:
+            route = _keys(
+                value,
+                required={"to", "message_kinds", "available"},
+            )
+            target = _address(route["to"])
+            _require(target["address"] not in seen)
+            seen.add(target["address"])
+            kinds = route["message_kinds"]
+            _require(
+                isinstance(kinds, list)
+                and 0 < len(kinds) <= len(MESSAGE_KINDS)
+                and len(set(kinds)) == len(kinds)
+                and all(kind in MESSAGE_KINDS for kind in kinds)
+            )
+            _require(type(route["available"]) is bool)
+            normalized_routes.append({
+                "to": target,
+                "message_kinds": list(kinds),
+                "available": route["available"],
+            })
+        frame["routes"] = normalized_routes
     elif kind == "receipt":
         _keys(
             frame,
@@ -459,6 +512,14 @@ def resolve_frame(
     }
 
 
+def routes_frame(*, request_id: str) -> dict[str, Any]:
+    return {
+        "v": WIRE_VERSION,
+        "type": "routes",
+        "request_id": _identifier(request_id, field="request_id"),
+    }
+
+
 def send_frame(
     *,
     message_id: str,
@@ -583,6 +644,7 @@ def delivery_payload_digest(delivery: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "AUTHORIZED_ROUTES_CAPABILITY",
     "CAPABILITIES",
     "ExchangeProtocolError",
     "MAX_FRAME_BYTES",
@@ -599,6 +661,7 @@ __all__ = [
     "parse_timestamp",
     "publish_frame",
     "resolve_frame",
+    "routes_frame",
     "send_frame",
     "status_frame",
     "strict_json",

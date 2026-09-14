@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import inspect
+import logging
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,8 @@ from orchestrator import ui_language
 from orchestrator.flexible_backend_registry import is_cli_backend
 from orchestrator.session_store import SessionConflict, SessionNotFound, SessionStore
 
+logger = logging.getLogger("HASHI.RuntimeSession")
+_SHARED_PRIMARY_SURFACES = frozenset({"telegram", "workbench"})
 _INTERNAL_NON_CHAT_SOURCES = frozenset({"startup", "system", "session_reset"})
 _SCHEDULED_SOURCES = frozenset(
     {
@@ -138,14 +141,25 @@ def resolve_request_session(
     surface, channel_key, default_only = _surface_and_channel(
         runtime, source=source, chat_id=chat_id, metadata=metadata
     )
-    session = ensure_store(runtime).resolve_session(
-        owner_id=resolved_owner,
-        agent_id=runtime.name,
-        surface=surface,
-        channel_key=channel_key,
-        explicit_session_id=str(metadata.get("session_id") or "") or None,
-        default_only=default_only,
-    )
+    store = ensure_store(runtime)
+    explicit_session_id = str(metadata.get("session_id") or "") or None
+    if surface in _SHARED_PRIMARY_SURFACES:
+        session = store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            establish=True,
+        )
+        if explicit_session_id is not None and explicit_session_id != session["session_id"]:
+            raise SessionConflict("shared conversation changed during admission")
+    else:
+        session = store.resolve_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            surface=surface,
+            channel_key=channel_key,
+            explicit_session_id=explicit_session_id,
+            default_only=default_only,
+        )
     return session, resolved_owner, surface, channel_key
 
 
@@ -245,8 +259,15 @@ def current_session(
     explicit_owner_id: str | None = None,
     explicit_session_id: str | None = None,
 ) -> dict[str, Any]:
-    return ensure_store(runtime).resolve_session(
-        owner_id=owner_id(runtime, explicit_owner_id),
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    if str(surface or "").strip().casefold() in _SHARED_PRIMARY_SURFACES and not explicit_session_id:
+        return store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+        )
+    return store.resolve_session(
+        owner_id=resolved_owner,
         agent_id=runtime.name,
         surface=surface,
         channel_key=channel_key,
@@ -288,6 +309,161 @@ def current_session_for_update(runtime: Any, update: Any) -> dict[str, Any]:
         explicit_owner_id=resolved_owner,
         explicit_session_id=explicit_session_id,
     )
+
+
+def record_frontend_message_for_update(
+    runtime: Any,
+    update: Any,
+    *,
+    role: str,
+    text: str,
+    source: str,
+    transport_message_id: Any = None,
+    content_format: str = "plain-text",
+    presentation_channel: str = "command",
+) -> dict[str, Any] | None:
+    """Best-effort projection of text already visible on one frontend."""
+
+    message = getattr(update, "effective_message", None) or getattr(
+        update, "message", None
+    )
+    stable_id = transport_message_id or getattr(message, "message_id", None)
+    if stable_id is None:
+        stable_id = getattr(update, "update_id", None)
+    if stable_id is None or not str(text or "").strip():
+        return None
+    try:
+        surface, channel_key, resolved_owner, explicit_session_id = (
+            _update_session_route(runtime, update)
+        )
+        return record_frontend_message(
+            runtime,
+            role=role,
+            text=text,
+            source=source,
+            transport_message_id=stable_id,
+            surface=surface,
+            channel_key=channel_key,
+            explicit_owner_id=resolved_owner,
+            explicit_session_id=explicit_session_id,
+            content_format=content_format,
+            presentation_channel=presentation_channel,
+        )
+    except Exception as exc:  # presentation mirroring must never block delivery
+        target_logger = getattr(runtime, "logger", None) or logger
+        target_logger.warning(
+            "Frontend-visible message projection failed for %s (%s)",
+            getattr(runtime, "name", "unknown"),
+            type(exc).__name__,
+        )
+        return None
+
+
+def record_frontend_message(
+    runtime: Any,
+    *,
+    role: str,
+    text: str,
+    source: str,
+    transport_message_id: Any,
+    surface: str,
+    channel_key: str,
+    explicit_owner_id: str | None = None,
+    explicit_session_id: str | None = None,
+    content_format: str = "plain-text",
+    presentation_channel: str = "command",
+) -> dict[str, Any] | None:
+    """Record successfully delivered semantic text for another frontend."""
+
+    if transport_message_id is None or not str(text or "").strip():
+        return None
+    try:
+        store = ensure_store(runtime)
+        resolved_owner = owner_id(runtime, explicit_owner_id)
+        normalized_surface = str(surface or "").strip().casefold()
+        if normalized_surface in _SHARED_PRIMARY_SURFACES:
+            session = store.resolve_primary_session(
+                owner_id=resolved_owner,
+                agent_id=runtime.name,
+                establish=True,
+            )
+        else:
+            session = store.resolve_session(
+                owner_id=resolved_owner,
+                agent_id=runtime.name,
+                surface=normalized_surface,
+                channel_key=channel_key,
+                explicit_session_id=explicit_session_id,
+            )
+        return store.append_presentation_message(
+            session_id=session["session_id"],
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            role=role,
+            text=text,
+            source=source,
+            idempotency_key=(
+                f"{normalized_surface}:{channel_key}:"
+                f"{str(role).casefold()}:{transport_message_id}"
+            ),
+            content_format=content_format,
+            presentation_channel=presentation_channel,
+            history_eligible=False,
+        )
+    except Exception as exc:  # presentation mirroring must never block delivery
+        target_logger = getattr(runtime, "logger", None) or logger
+        target_logger.warning(
+            "Frontend-visible message projection failed for %s (%s)",
+            getattr(runtime, "name", "unknown"),
+            type(exc).__name__,
+        )
+        return None
+
+
+def record_kernel_presentation_notice(
+    kernel: Any,
+    *,
+    agent_id: str,
+    text: str,
+    idempotency_key: str,
+    content_format: str = "telegram-html",
+) -> dict[str, Any] | None:
+    """Persist a delivered lifecycle notice even while its Worker is replaced."""
+
+    try:
+        config = getattr(kernel, "global_cfg", None) or getattr(
+            kernel, "global_config", None
+        )
+        if config is None:
+            return None
+        store = getattr(kernel, "session_store", None)
+        if not isinstance(store, SessionStore):
+            store = SessionStore.from_global_config(config)
+        resolved_owner = SessionStore.owner_id_for(config)
+        session = store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=agent_id,
+            establish=True,
+        )
+        return store.append_presentation_message(
+            session_id=session["session_id"],
+            owner_id=resolved_owner,
+            agent_id=agent_id,
+            role="assistant",
+            text=text,
+            source="telegram.runtime_notice",
+            idempotency_key=idempotency_key,
+            content_format=content_format,
+            presentation_channel="command",
+            history_eligible=False,
+        )
+    except Exception as exc:  # operational delivery remains authoritative
+        logger.warning(
+            "Runtime notice projection failed for %s (%s)",
+            agent_id,
+            type(exc).__name__,
+        )
+        return None
 
 
 def request_route_for_update(
@@ -841,13 +1017,21 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
     surface, channel_key, resolved_owner, _explicit_session_id = _update_session_route(
         runtime, update
     )
-    ensure_store(runtime).bind_channel(
-        owner_id=resolved_owner,
-        agent_id=runtime.name,
-        surface=surface,
-        channel_key=channel_key,
-        session_id=session_id,
-    )
+    store = ensure_store(runtime)
+    if surface in _SHARED_PRIMARY_SURFACES:
+        store.bind_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            session_id=session_id,
+        )
+    else:
+        store.bind_channel(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            surface=surface,
+            channel_key=channel_key,
+            session_id=session_id,
+        )
     # Telegram Update objects are slotted and cannot carry arbitrary HASHI
     # attributes. The durable channel binding is canonical; callers already
     # hold the selected Session for any remaining work in the same command.

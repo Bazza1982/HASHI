@@ -331,7 +331,7 @@ retains the separate one-shot strict-debug Skill behavior.
   `sha256:c799eabb5dac93097ef0c639b31a43c7c5235663dd76120ccbf508db319515fa`
   remained unchanged.
 - **Activation:** `/debug` is ON for `zhaojun@HASHI1` with journal
-  `C:\Users\thene\Desktop\HASHI_Nightly_Batch_Inbox.md`. Enabling it through
+  `C:\Users\operator\Desktop\HASHI_Nightly_Batch_Inbox.md`. Enabling it through
   `feiyan` and reading it through `lily` verified the shared instance setting
   and its persisted Windows path. Two earlier path-corruption attempts were
   disabled immediately, before any terminal error or debug report occurred.

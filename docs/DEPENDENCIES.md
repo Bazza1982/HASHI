@@ -37,7 +37,7 @@ python -m pip install -e ".[media,remote]"
 | `browser` | Playwright browser automation; Chromium still needs `playwright install chromium` |
 | `whatsapp` | WhatsApp transport and QR linking |
 | `voice` | Edge and Piper text-to-speech providers |
-| `transcription` | Local faster-whisper transcription |
+| `transcription` | Dependency metadata for an explicitly isolated local faster-whisper helper; never install it into Core |
 | `ocr` | Paddle-based local OCR; large platform-sensitive install |
 | `vector` | Semantic vector memory and local encoder runtime |
 | `postgres` | Enterprise PostgreSQL lease store and pooling |
@@ -47,3 +47,30 @@ python -m pip install -e ".[media,remote]"
 System executables and model files remain separate from Python packages. For
 example, FFmpeg, browser binaries, local TTS models, and vector model weights
 must still be installed or supplied when their selected feature requires them.
+
+## Isolated transcription runtime
+
+Speech-to-text native packages are deliberately outside the standard Core
+profile. Never install `requirements-transcription.txt` or the `transcription`
+extra into a running HASHI environment. Prepare the instance-owned helper from
+the source root instead:
+
+```bash
+python scripts/provision_transcription_runtime.py --bridge-home /path/to/instance
+python scripts/provision_transcription_runtime.py --bridge-home /path/to/instance --check
+```
+
+On Windows, pass the instance directory with PowerShell syntax:
+
+```powershell
+python .\scripts\provision_transcription_runtime.py --bridge-home C:\path\to\instance
+python .\scripts\provision_transcription_runtime.py --bridge-home C:\path\to\instance --check
+```
+
+The provisioner creates a separate Python 3.12.13 environment from
+`constraints/transcription-py312.lock`, verifies `faster-whisper`,
+`ctranslate2`, and `av`, then atomically writes
+`state/platform/transcription.json`. It refuses any target overlapping the
+active Core environment. The model cache remains a separate user/platform
+asset and is populated by faster-whisper when the selected model is first
+used.

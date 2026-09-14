@@ -32,6 +32,8 @@ CONVERSATION_CONTINUITY_VERSION = 1
 CONVERSATION_HISTORY_MODES = frozenset({"move", "copy", "inherit_read_only"})
 MAX_CONTINUITY_SESSIONS = 500
 MAX_CONTINUITY_MESSAGES = 100_000
+PRIMARY_CONVERSATION_SURFACE = "conversation"
+PRIMARY_CONVERSATION_CHANNEL = "main"
 
 
 def _utc_now() -> str:
@@ -1153,6 +1155,136 @@ class SessionStore:
             )
         return session
 
+    def bind_primary_session(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Select one shared personal conversation for interactive frontends."""
+
+        return self.bind_channel(
+            owner_id=owner_id,
+            agent_id=agent_id,
+            surface=PRIMARY_CONVERSATION_SURFACE,
+            channel_key=PRIMARY_CONVERSATION_CHANNEL,
+            session_id=session_id,
+        )
+
+    def resolve_primary_session(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        establish: bool = False,
+    ) -> dict[str, Any]:
+        """Resolve the Session shared by Telegram and Workbench.
+
+        Existing installations may have independent legacy bindings.  On the
+        first read, preserve the most recently active one as the shared main
+        conversation instead of silently falling back to an older default.
+        """
+
+        owner = str(owner_id)
+        agent = str(agent_id).lower()
+        default = self.ensure_default_session(owner_id=owner, agent_id=agent)
+        with self._lock, self._connection() as connection:
+            current = connection.execute(
+                """
+                SELECT s.* FROM channel_bindings AS b
+                JOIN sessions AS s ON s.session_id = b.session_id
+                WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
+                  AND b.surface = ? AND b.channel_key = ?
+                  AND s.status = 'active'
+                """,
+                (
+                    self.instance_id,
+                    owner,
+                    agent,
+                    PRIMARY_CONVERSATION_SURFACE,
+                    PRIMARY_CONVERSATION_CHANNEL,
+                ),
+            ).fetchone()
+            if current is not None:
+                return self._session_dict(current)
+            legacy = connection.execute(
+                """
+                SELECT s.* FROM channel_bindings AS b
+                JOIN sessions AS s ON s.session_id = b.session_id
+                WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
+                  AND (
+                    b.surface = 'telegram'
+                    OR (b.surface = 'workbench' AND b.channel_key = 'default')
+                  )
+                  AND s.status = 'active'
+                ORDER BY s.updated_at DESC, b.updated_at DESC, s.session_id ASC
+                LIMIT 1
+                """,
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            selected = self._session_dict(legacy) if legacy is not None else default
+        if not establish:
+            return selected
+
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                """
+                SELECT s.* FROM channel_bindings AS b
+                JOIN sessions AS s ON s.session_id = b.session_id
+                WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
+                  AND b.surface = ? AND b.channel_key = ?
+                  AND s.status = 'active'
+                """,
+                (
+                    self.instance_id,
+                    owner,
+                    agent,
+                    PRIMARY_CONVERSATION_SURFACE,
+                    PRIMARY_CONVERSATION_CHANNEL,
+                ),
+            ).fetchone()
+            if current is not None:
+                return self._session_dict(current)
+            connection.execute(
+                """
+                INSERT INTO channel_bindings(
+                    instance_id, owner_id, agent_id, surface, channel_key,
+                    session_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(instance_id, owner_id, agent_id, surface, channel_key)
+                DO NOTHING
+                """,
+                (
+                    self.instance_id,
+                    owner,
+                    agent,
+                    PRIMARY_CONVERSATION_SURFACE,
+                    PRIMARY_CONVERSATION_CHANNEL,
+                    selected["session_id"],
+                    now,
+                ),
+            )
+            resolved = connection.execute(
+                """
+                SELECT s.* FROM channel_bindings AS b
+                JOIN sessions AS s ON s.session_id = b.session_id
+                WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
+                  AND b.surface = ? AND b.channel_key = ?
+                  AND s.status = 'active'
+                """,
+                (
+                    self.instance_id,
+                    owner,
+                    agent,
+                    PRIMARY_CONVERSATION_SURFACE,
+                    PRIMARY_CONVERSATION_CHANNEL,
+                ),
+            ).fetchone()
+        return self._session_dict(resolved) if resolved is not None else selected
+
     def resolve_session(
         self,
         *,
@@ -1461,6 +1593,136 @@ class SessionStore:
             request_id=request_id,
             context_generation=generation,
         )
+
+    def append_presentation_message(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        agent_id: str,
+        role: str,
+        text: str,
+        source: str,
+        idempotency_key: str,
+        content_format: str = "plain-text",
+        presentation_channel: str = "command",
+        history_eligible: bool = False,
+        message_context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist frontend-visible text without turning it into model input."""
+
+        clean = str(text or "").strip()
+        normalized_role = str(role or "").strip().casefold()
+        normalized_source = str(source or "").strip()
+        stable_key = str(idempotency_key or "").strip()
+        normalized_format = str(content_format or "plain-text").strip().casefold()
+        normalized_channel = str(presentation_channel or "command").strip().casefold()
+        if not clean or not normalized_source or not stable_key:
+            raise ValueError("presentation message text, source and idempotency key are required")
+        if normalized_role not in {"user", "assistant"}:
+            raise ValueError("presentation message role must be user or assistant")
+        if normalized_format not in {"plain-text", "markdown", "telegram-html"}:
+            raise ValueError("unsupported presentation content format")
+        context = dict(message_context or {})
+        context.update(
+            {
+                "content_format": normalized_format,
+                "presentation_channel": normalized_channel,
+                "presentation_only": not bool(history_eligible),
+            }
+        )
+        content = [{"type": "text", "text": clean}]
+        content_json = _json(content)
+        content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
+        identity = "\n".join(
+            (
+                "presentation-message-v1",
+                self.instance_id,
+                str(session_id),
+                stable_key,
+            )
+        )
+        message_id = "msg_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE session_id = ? AND instance_id = ? AND owner_id = ?
+                  AND agent_id = ? AND status = 'active'
+                """,
+                (str(session_id), self.instance_id, str(owner_id), str(agent_id).lower()),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(str(session_id))
+            existing = connection.execute(
+                "SELECT * FROM messages WHERE message_id = ?", (message_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["session_id"]) != str(session_id)
+                    or str(existing["role"]) != normalized_role
+                    or str(existing["source"]) != normalized_source
+                    or str(existing["content_hash"]) != content_hash
+                    or _json_object(existing["message_context_json"]) != context
+                    or bool(existing["history_eligible"]) != bool(history_eligible)
+                ):
+                    raise IdempotencyConflict(
+                        "presentation idempotency key is bound to different content"
+                    )
+                return self._message_dict(existing)
+            ordinal = self._next_ordinal(connection, str(session_id))
+            connection.execute(
+                """
+                INSERT INTO messages(
+                    message_id, session_id, run_id, ordinal,
+                    context_generation, role, author_id, source,
+                    message_context_json, content_json, text, visibility,
+                    history_eligible, content_hash, created_at
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    str(session_id),
+                    ordinal,
+                    int(session["context_generation"]),
+                    normalized_role,
+                    str(owner_id) if normalized_role == "user" else str(agent_id).lower(),
+                    normalized_source,
+                    _json(context),
+                    content_json,
+                    clean,
+                    int(bool(history_eligible)),
+                    content_hash,
+                    now,
+                ),
+            )
+            self._append_event(
+                connection,
+                session_id=str(session_id),
+                run_id=None,
+                kind="frontend.message.recorded",
+                status="recorded",
+                phase="presentation",
+                summary="Frontend-visible message recorded",
+                detail={
+                    "message_id": message_id,
+                    "source": normalized_source,
+                    "presentation_channel": normalized_channel,
+                },
+            )
+            connection.execute(
+                """
+                UPDATE sessions SET updated_at = ?, revision = revision + 1
+                WHERE session_id = ?
+                """,
+                (now, str(session_id)),
+            )
+            inserted = connection.execute(
+                "SELECT * FROM messages WHERE message_id = ?", (message_id,)
+            ).fetchone()
+        return self._message_dict(inserted)
 
     def mark_request_running(
         self,
@@ -3434,6 +3696,119 @@ class SessionStore:
                 (str(session_id), generation, bounded),
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
+
+    def recent_visible_messages(
+        self,
+        session_id: str,
+        *,
+        owner_id: str | None = None,
+        context_generation: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return visible UI history, including presentation-only messages."""
+
+        session = self.get_session(session_id, owner_id=owner_id)
+        generation = int(
+            context_generation
+            if context_generation is not None
+            else session["context_generation"]
+        )
+        bounded = max(1, min(int(limit), 1001))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.*, r.request_id,
+                       r.state AS run_state,
+                       r.final_message_id AS run_final_message_id
+                FROM messages AS m
+                LEFT JOIN runs AS r ON r.run_id = m.run_id
+                WHERE m.session_id=? AND m.context_generation=?
+                  AND m.visibility='visible'
+                ORDER BY m.ordinal DESC LIMIT ?
+                """,
+                (str(session_id), generation, bounded),
+            ).fetchall()
+        return [self._message_dict(row) for row in reversed(rows)]
+
+    def visible_message_attachment(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        message_id: str,
+        attachment_id: str,
+        context_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one canonical attachment after Session ownership checks.
+
+        This lookup deliberately returns the stored canonical part only to an
+        in-process caller.  Connector projections continue to omit local paths
+        and digests.
+        """
+
+        session = self.get_session(session_id, owner_id=owner_id)
+        generation = int(
+            context_generation
+            if context_generation is not None
+            else session["context_generation"]
+        )
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT content_json FROM messages
+                WHERE session_id=? AND message_id=? AND context_generation=?
+                  AND visibility='visible'
+                """,
+                (str(session_id), str(message_id), generation),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound("visible message attachment not found")
+        try:
+            content = json.loads(str(row["content_json"] or "[]"))
+        except (TypeError, ValueError):
+            content = []
+        for part in content if isinstance(content, list) else ():
+            if (
+                isinstance(part, Mapping)
+                and str(part.get("type") or "").casefold() in {"media", "audio"}
+                and str(part.get("attachment_id") or "") == str(attachment_id)
+            ):
+                return dict(part)
+        raise SessionNotFound("visible message attachment not found")
+
+    def visible_messages_after(
+        self,
+        session_id: str,
+        *,
+        owner_id: str | None = None,
+        context_generation: int | None = None,
+        after_ordinal: int = 0,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return the next visible UI messages after one canonical cursor."""
+
+        session = self.get_session(session_id, owner_id=owner_id)
+        generation = int(
+            context_generation
+            if context_generation is not None
+            else session["context_generation"]
+        )
+        bounded = max(1, min(int(limit), 1001))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.*, r.request_id,
+                       r.state AS run_state,
+                       r.final_message_id AS run_final_message_id
+                FROM messages AS m
+                LEFT JOIN runs AS r ON r.run_id = m.run_id
+                WHERE m.session_id=? AND m.context_generation=?
+                  AND m.visibility='visible' AND m.ordinal>?
+                ORDER BY m.ordinal ASC LIMIT ?
+                """,
+                (str(session_id), generation, max(0, int(after_ordinal)), bounded),
+            ).fetchall()
+        return [self._message_dict(row) for row in rows]
 
     def conversation_owner_ids(self, *, agent_id: str) -> list[str]:
         """Return authoritative Session owners observed for one local Agent."""

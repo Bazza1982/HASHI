@@ -16,6 +16,7 @@ __pycache__/
 # Runtime state
 *.lock
 !constraints/standard-py312.lock
+!constraints/transcription-py312.lock
 *.pid
 .claw/
 .bridge_u_f.lock
@@ -118,6 +119,7 @@ Manual_Setup.md.personal
 
 # Windows-only launchers (not needed for Linux)
 onboard.bat
+!bin/onboard.bat
 
 # Ignore entire workspaces directory (agent state is local-only)
 workspaces/

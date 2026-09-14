@@ -945,6 +945,149 @@ def test_default_session_is_permanent_and_channel_bindings_are_isolated(tmp_path
         store.archive_session(default_a["session_id"])
 
 
+def test_primary_conversation_adopts_latest_legacy_binding_once(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    default = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    telegram = store.create_session(owner_id=owner, agent_id="lily", title="Telegram")
+    store.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="workbench",
+        channel_key="default",
+        session_id=default["session_id"],
+    )
+    store.bind_channel(
+        owner_id=owner,
+        agent_id="lily",
+        surface="telegram",
+        channel_key="7",
+        session_id=telegram["session_id"],
+    )
+    store.accept_run(
+        session_id=telegram["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="latest-telegram",
+        text="latest Telegram turn",
+        source="text",
+        idempotency_key="latest-telegram",
+    )
+
+    selected = store.resolve_primary_session(owner_id=owner, agent_id="lily")
+    assert selected["session_id"] == telegram["session_id"]
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM channel_bindings WHERE surface='conversation'"
+        ).fetchone()[0] == 0
+
+    established = store.resolve_primary_session(
+        owner_id=owner,
+        agent_id="lily",
+        establish=True,
+    )
+    assert established["session_id"] == telegram["session_id"]
+    store.accept_run(
+        session_id=default["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="newer-default",
+        text="newer legacy default turn",
+        source="api",
+        idempotency_key="newer-default",
+    )
+    assert store.resolve_primary_session(owner_id=owner, agent_id="lily")[
+        "session_id"
+    ] == telegram["session_id"]
+
+
+def test_presentation_messages_are_visible_but_never_enter_model_history(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+
+    first = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        role="assistant",
+        text="restart completed",
+        source="telegram.runtime_notice",
+        idempotency_key="reboot:one:final",
+        content_format="telegram-html",
+    )
+    replay = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        role="assistant",
+        text="restart completed",
+        source="telegram.runtime_notice",
+        idempotency_key="reboot:one:final",
+        content_format="telegram-html",
+    )
+
+    assert replay["message_id"] == first["message_id"]
+    assert first["history_eligible"] is False
+    assert store.recent_messages(session["session_id"], owner_id=owner) == []
+    visible = store.recent_visible_messages(session["session_id"], owner_id=owner)
+    assert [message["text"] for message in visible] == ["restart completed"]
+    assert visible[0]["message_context"]["presentation_only"] is True
+
+
+def test_delivered_frontend_message_uses_shared_primary_and_is_idempotent(tmp_path):
+    store = _store(tmp_path)
+    runtime = SimpleNamespace(
+        name="lily",
+        session_store=store,
+        global_config=SimpleNamespace(authorized_id=7, instance_id="HASHI1"),
+    )
+    stale = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    session = store.create_session(
+        owner_id="user:7",
+        agent_id="lily",
+        title="Current shared conversation",
+    )
+    store.bind_primary_session(
+        owner_id="user:7",
+        agent_id="lily",
+        session_id=session["session_id"],
+    )
+
+    first = runtime_session.record_frontend_message(
+        runtime,
+        role="assistant",
+        text="handoff prepared",
+        source="telegram.send",
+        transport_message_id=42,
+        surface="telegram",
+        channel_key="7",
+        explicit_session_id=stale["session_id"],
+    )
+    replay = runtime_session.record_frontend_message(
+        runtime,
+        role="assistant",
+        text="handoff prepared",
+        source="telegram.send",
+        transport_message_id=42,
+        surface="telegram",
+        channel_key="7",
+        explicit_session_id=stale["session_id"],
+    )
+
+    assert first is not None and replay is not None
+    assert replay["message_id"] == first["message_id"]
+    assert store.resolve_primary_session(owner_id="user:7", agent_id="lily")[
+        "session_id"
+    ] == session["session_id"]
+    assert [
+        message["text"]
+        for message in store.recent_visible_messages(
+            session["session_id"], owner_id="user:7"
+        )
+    ] == ["handoff prepared"]
+
+
 def test_workzone_slots_are_session_scoped_revisioned_and_snapshot_visible(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"
