@@ -2145,12 +2145,16 @@ class FlexibleAgentRuntime:
     def tui_voice_state(self) -> dict[str, Any]:
         """Return the shared Agent voice identity without Telegram UI state."""
 
+        policy = self.voice_manager.native_policy
         return {
             "profile": self.voice_manager.get_voice_profile_id(),
             "profiles": [
                 {"id": profile_id, "label": str(profile.get("label") or profile_id)}
                 for profile_id, profile in self.voice_manager.get_voice_profiles()
             ],
+            "reply_mode": self.voice_manager.get_reply_mode(),
+            "reply_content": str(policy.get("reply_content") or "audio_and_text"),
+            "voice_reply_enabled": self.voice_manager.get_reply_mode() != "off",
         }
 
     def set_tui_voice_profile(self, profile_id: str) -> dict[str, Any]:

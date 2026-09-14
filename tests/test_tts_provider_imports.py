@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import builtins
 import sys
-
-import pytest
+from pathlib import Path
 
 
 def test_voice_manager_import_does_not_require_edge_tts():
@@ -15,17 +15,31 @@ def test_voice_manager_import_does_not_require_edge_tts():
     assert "edge" in list_provider_names()
 
 
-def test_build_edge_provider_reports_missing_optional_dependency(monkeypatch):
-    from orchestrator import tts_providers
+def test_build_edge_provider_does_not_import_optional_dependency(monkeypatch):
+    from orchestrator.tts_providers import build_provider
 
-    real_import_module = tts_providers.importlib.import_module
+    real_import = builtins.__import__
 
-    def fake_import_module(name):
-        if name == "orchestrator.tts_providers.edge":
+    def guarded_import(name, *args, **kwargs):
+        if name == "edge_tts":
             raise ModuleNotFoundError("No module named 'edge_tts'", name="edge_tts")
-        return real_import_module(name)
+        return real_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(tts_providers.importlib, "import_module", fake_import_module)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    provider = build_provider("edge")
 
-    with pytest.raises(RuntimeError, match="edge_tts"):
-        tts_providers.build_provider("edge")
+    assert provider.provider_name == "edge"
+
+
+def test_voice_generation_contains_edge_provider_and_isolated_worker():
+    from orchestrator.function_generation import build_source_manifest
+
+    root = Path(__file__).resolve().parents[1]
+    manifest = build_source_manifest(
+        ["orchestrator.voice_manager"],
+        code_root=root,
+    )
+
+    assert "orchestrator.tts_providers.edge" in manifest.module_names
+    assert "orchestrator.voice_synthesis_runtime" in manifest.module_names
+    assert "orchestrator.voice_synthesis_worker" in manifest.module_names

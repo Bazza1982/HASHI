@@ -1,0 +1,3 @@
+# Isolated Edge speech helper. Never install this file into the long-lived
+# HASHI Core or Function Worker environment.
+edge-tts==7.2.8
