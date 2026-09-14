@@ -13,7 +13,9 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Callable, Final
+
+from orchestrator.config_json import file_write_lock
 
 from orchestrator.file_permissions import tighten_fd_permissions
 
@@ -44,8 +46,9 @@ class PCMDocument:
     persona: str
     system: str
     memory: str
-    hcc: str
     content_sha256: str
+    # None means absent; an empty string is an explicitly empty cache.
+    hcc: str | None = None
 
     def block(self, name: str) -> str:
         if name == "persona":
@@ -55,7 +58,7 @@ class PCMDocument:
         if name == "memory":
             return self.memory
         if name == "hcc":
-            return self.hcc
+            return self.hcc or ""
         raise KeyError(name)
 
     def audit_fields(self) -> dict[str, object]:
@@ -65,7 +68,8 @@ class PCMDocument:
             "pcm_persona_chars": len(self.persona),
             "pcm_system_chars": len(self.system),
             "pcm_memory_chars": len(self.memory),
-            "pcm_hcc_chars": len(self.hcc),
+            "pcm_hcc_present": self.hcc is not None,
+            "pcm_hcc_chars": len(self.hcc or ""),
         }
 
 
@@ -153,9 +157,7 @@ def parse_pcm_text(text: str, *, path: Path | None = None) -> PCMDocument:
         name: "\n".join(lines).strip() for name, lines in blocks.items()
     }
     for name, value in normalized.items():
-        if name == "hcc":
-            continue
-        if not value:
+        if not value and name != "hcc":
             raise PCMValidationError(
                 "pcm_empty_block",
                 f"[{name}] must not be empty",
@@ -168,8 +170,8 @@ def parse_pcm_text(text: str, *, path: Path | None = None) -> PCMDocument:
         persona=normalized["persona"],
         system=normalized["sys"],
         memory=normalized.get("memory", ""),
-        hcc=normalized.get("hcc", ""),
         content_sha256=digest,
+        hcc=normalized.get("hcc"),
     )
 
 
@@ -227,17 +229,18 @@ def load_pcm_document(
         persona=document.persona,
         system=document.system,
         memory=document.memory,
-        hcc=document.hcc,
         content_sha256=hashlib.sha256(raw).hexdigest(),
+        hcc=document.hcc,
     )
 
 
-def render_pcm_document(*, persona: str, system: str, memory: str = "", hcc: str | None = None) -> str:
+def render_pcm_document(
+    *, persona: str, system: str, memory: str = "", hcc: str | None = None
+) -> str:
     values = {
         "persona": str(persona or "").strip(),
         "sys": str(system or "").strip(),
         "memory": str(memory or "").strip(),
-        "hcc": None if hcc is None else str(hcc or "").strip(),
     }
     if not values["persona"] or not values["sys"]:
         raise PCMValidationError(
@@ -250,8 +253,8 @@ def render_pcm_document(*, persona: str, system: str, memory: str = "", hcc: str
     ]
     if values["memory"]:
         parts.append(f"[memory]\n{values['memory']}\n[memory_end]")
-    if values["hcc"] is not None:
-        parts.append(f"[hcc]\n{values['hcc']}\n[hcc_end]")
+    if hcc is not None:
+        parts.append(f"[hcc]\n{hcc.strip()}\n[hcc_end]")
     rendered = "\n\n".join(parts) + "\n"
     parse_pcm_text(rendered)
     return rendered
@@ -259,10 +262,10 @@ def render_pcm_document(*, persona: str, system: str, memory: str = "", hcc: str
 
 def _legacy_block_span(text: str, name: str) -> tuple[str, tuple[int, int] | None]:
     begin_matches = list(
-        re.finditer(rf"(?m)^[ \t]*\[{re.escape(name)}\][ \t]*$", text)
+        re.finditer(rf"(?m)^[ \t]*\[{re.escape(name)}\][ \t]*\r?$", text)
     )
     end_matches = list(
-        re.finditer(rf"(?m)^[ \t]*\[{re.escape(name)}_end\][ \t]*$", text)
+        re.finditer(rf"(?m)^[ \t]*\[{re.escape(name)}_end\][ \t]*\r?$", text)
     )
     if not begin_matches and not end_matches:
         return "", None
@@ -298,7 +301,7 @@ def convert_legacy_pcm_text(text: str) -> str:
     for name in PCM_BLOCKS:
         value, span = _legacy_block_span(text, name)
         if span is not None:
-            if not value:
+            if not value and name != "hcc":
                 raise PCMValidationError(
                     "pcm_legacy_block_empty", f"legacy [{name}] block is empty"
                 )
@@ -328,12 +331,13 @@ def convert_legacy_pcm_text(text: str) -> str:
         if remainder and extracted.get("persona") and extracted.get("sys"):
             system = system + "\n\nLegacy unmarked guidance preserved during migration:\n" + remainder
     memory = extracted.get("memory", "")
-    hcc = extracted.get("hcc")
     if not persona:
         raise PCMValidationError(
             "pcm_legacy_empty", "legacy PCM source contains no usable content"
         )
-    return render_pcm_document(persona=persona, system=system, memory=memory, hcc=hcc)
+    return render_pcm_document(
+        persona=persona, system=system, memory=memory, hcc=extracted.get("hcc")
+    )
 
 
 def atomic_write_pcm(path: str | Path, content: str) -> Path:
@@ -354,12 +358,13 @@ def atomic_write_pcm(path: str | Path, content: str) -> Path:
     temporary = Path(temporary_name)
     try:
         tighten_fd_permissions(fd)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        # Finish fallible metadata changes before the publication boundary.
+        temporary.chmod(0o600)
         os.replace(temporary, target)
-        target.chmod(0o600)
     except Exception:
         try:
             os.close(fd)
@@ -368,3 +373,49 @@ def atomic_write_pcm(path: str | Path, content: str) -> Path:
         temporary.unlink(missing_ok=True)
         raise
     return target
+
+
+def pcm_block_body_span(text: str, name: str) -> tuple[int, int] | None:
+    """Return body offsets without normalizing bytes outside the selected block."""
+    if name not in PCM_BLOCKS:
+        raise KeyError(name)
+    parse_pcm_text(text)
+    offset = 0
+    begin = None
+    for line in text.splitlines(keepends=True):
+        marker = _marker_kind(line)
+        if marker == (name, True):
+            begin = offset + len(line)
+        elif marker == (name, False):
+            assert begin is not None  # The complete document was validated above.
+            return begin, offset
+        offset += len(line)
+    return None
+
+
+def update_pcm_text(
+    workspace_dir: str | Path,
+    mutator: Callable[[str], str],
+    *,
+    lock_timeout: float = 5.0,
+) -> PCMDocument:
+    """Serialize a short read/modify/publish transaction on an existing agent.md.
+
+    Network/model work must finish before calling this function. Cooperating
+    writers share the stable OS lock; external editors do not. Never replay a
+    failed mutator or publication automatically.
+    """
+    workspace = Path(workspace_dir).expanduser().resolve()
+    target = canonical_agent_md(workspace)
+    with file_write_lock(target, timeout=lock_timeout):
+        document = load_pcm_document(target, workspace_dir=workspace)
+        raw = target.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != document.content_sha256:
+            raise PCMValidationError("pcm_conflict", "PCM changed during read", path=target)
+        candidate = mutator(raw.decode("utf-8"))
+        result = parse_pcm_text(candidate, path=target)
+        if target.is_symlink() or target.read_bytes() != raw:
+            raise PCMValidationError("pcm_conflict", "PCM changed during update", path=target)
+        if candidate.encode("utf-8") != raw:
+            atomic_write_pcm(target, candidate)
+        return result

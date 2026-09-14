@@ -158,9 +158,14 @@ def _write_lock(path: Path, timeout: float) -> Iterator[None]:
 
 
 @contextmanager
-def managed_file_write_lock(path: str | Path, timeout: float = 5.0) -> Iterator[None]:
-    """Serialize a cooperating read/modify/write transaction for one managed file."""
-    target = Path(path).expanduser().resolve()
+def file_write_lock(path: str | Path, *, timeout: float = 5.0) -> Iterator[None]:
+    """Public format-neutral transaction lock; parent directory must exist.
+
+    Resolve the parent, not the destination, so callers can reject destination
+    symlinks themselves. Do not nest this with another lock on the same file.
+    """
+    target = Path(path).expanduser()
+    target = target.parent.resolve() / target.name
     with _write_lock(target, timeout):
         yield
 

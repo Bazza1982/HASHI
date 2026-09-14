@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from orchestrator.path_presentation import path_presentation_policy
-from orchestrator.hcc import HCC_SYSTEM_GUIDANCE, is_hcc_enabled
-from orchestrator.pcm import PCMDocument, load_pcm_document
+from orchestrator.pcm import PCMDocument, PCMValidationError, load_pcm_document
+from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled
 from orchestrator.process_resources import path_lock as process_path_lock
 from tools.token_tracker import estimate_tokens as _estimate_tokens
 
@@ -1364,12 +1364,13 @@ class BridgeContextAssembler:
         "instance_global_sys": 1,
         "instance_path_presentation": 2,
         "agent_local_sys": 1,
+        "hcc_usage": 2,
+        "hcc": 3,
         "current_user_request": 1,
         "permanent_memory": 1,
         "relevant_long_term_memory": 2,
         "time": 1,
         "active_runtime_instructions": 2,
-        "hcc": 3,
         "skills_catalogue": 4,
         "tools_catalogue": 5,
         "persona": 1,
@@ -1650,6 +1651,12 @@ class BridgeContextAssembler:
 
         document = self._load_pcm()
         sections: list[dict[str, Any]] = []
+        hcc_enabled = bool(
+            document and self.system_md and is_hcc_enabled(self.system_md.parent)
+        )
+        hcc_text = (document.hcc or "") if document else ""
+        hcc_included = hcc_enabled and bool(hcc_text.strip())
+        removed_section_keys = [] if hcc_included else ["hcc", "hcc_usage"]
 
         def add_section(
             key: str,
@@ -1732,6 +1739,17 @@ class BridgeContextAssembler:
             "current_user",
             protected=True,
         )
+
+        if hcc_included:
+            add_section(
+                "hcc_usage", "HCC USAGE INSTRUCTIONS", HCC_USAGE_PROMPT,
+                "local_system", protected=True,
+            )
+            add_section(
+                "hcc", "HASHI CONTEXT CACHE", hcc_text,
+                "runtime_context", protected=True,
+                metadata={"source": "agent.md#hcc", "replace_only": True},
+            )
 
         managed_history_title = ""
         managed_history = False
@@ -1848,17 +1866,6 @@ class BridgeContextAssembler:
             "runtime_context",
             protected=True,
         )
-
-        hcc_enabled = bool(document and self.system_md and is_hcc_enabled(self.system_md.parent))
-        if hcc_enabled and document and document.hcc:
-            add_section(
-                "hcc",
-                "HASHI CONTEXT CACHE (HCC)",
-                HCC_SYSTEM_GUIDANCE + "\n\n" + document.hcc,
-                "runtime_context",
-                protected=True,
-                metadata={"source": "agent.md", "cache": True},
-            )
 
         active_runtime = []
         if callable(self.active_skill_provider):
@@ -2010,6 +2017,12 @@ class BridgeContextAssembler:
                 install_capsule()
         final_prompt = self._render_pcm_prompt(sections)
         final_prompt_tokens = _estimate_tokens(final_prompt)
+        if hcc_included and limit is not None and final_prompt_tokens > limit:
+            raise PCMValidationError(
+                "pcm_hcc_capacity_exceeded",
+                f"PCM with HCC exceeds the input budget ({final_prompt_tokens} > {limit} "
+                "estimated tokens). Reduce the configured cache; it was not truncated.",
+            )
         if omitted:
             memory_logger.warning(
                 "PCM history compacted: engine=%s omitted_raw=%s retained_raw=%s "
@@ -2074,9 +2087,19 @@ class BridgeContextAssembler:
             "transport_snapshot": {
                 "version": 1,
                 "sections": transport_sections,
-                "removed_section_keys": [] if hcc_enabled and document and document.hcc else ["hcc"],
+                "removed_section_keys": removed_section_keys,
             },
             "audit": {
+                "hcc": {
+                    "enabled": hcc_enabled,
+                    "included": hcc_included,
+                    "chars": len(hcc_text) if hcc_included else 0,
+                    "tokens_est": _estimate_tokens(hcc_text) if hcc_included else 0,
+                    "content_sha256": (
+                        hashlib.sha256(hcc_text.encode("utf-8")).hexdigest()
+                        if hcc_included else None
+                    ),
+                },
                 "incremental": incremental,
                 "context_profile": context_profile,
                 # Kept as a nullable compatibility field so older audit readers
