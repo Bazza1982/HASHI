@@ -1498,13 +1498,25 @@ class SessionStore:
                             ),
                         }
                     )
+                elif block_type == "media":
+                    # Trusted Connector ingress already supplies a canonical
+                    # media part.  Keep that established internal contract
+                    # while the public Frontend Connector uses staged
+                    # ``attachment`` references.
+                    if not str(block.get("attachment_id") or "").strip():
+                        raise SessionConflict(
+                            "media content requires attachment identity"
+                        )
                 elif not block_type:
                     raise ValueError("message content parts require a type")
                 else:
                     raise ValueError(f"unsupported message content type {block_type!r}")
                 normalized_blocks.append(block)
             blocks = normalized_blocks
-            if not clean and not attachment_rows:
+            if not clean and not attachment_rows and not any(
+                str(block.get("type") or "").casefold() == "media"
+                for block in normalized_blocks
+            ):
                 raise ValueError("message requires text or a committed attachment")
             digest_payload = {
                 "content": blocks,
@@ -3931,13 +3943,26 @@ class SessionStore:
             content = json.loads(str(row["content_json"] or "[]"))
         except (TypeError, ValueError):
             content = []
-        for part in content if isinstance(content, list) else ():
+        for item_index, part in enumerate(
+            content if isinstance(content, list) else (), start=1
+        ):
             if (
                 isinstance(part, Mapping)
-                and str(part.get("type") or "").casefold() in {"media", "audio"}
+                and str(part.get("type") or "").casefold()
+                in {"attachment", "media", "audio"}
                 and str(part.get("attachment_id") or "") == str(attachment_id)
             ):
-                return dict(part)
+                if str(part.get("type") or "").casefold() != "attachment":
+                    return dict(part)
+                return self.attachment_canonical_part(
+                    session_id=str(session_id),
+                    owner_id=str(owner_id),
+                    attachment_id=str(attachment_id),
+                    item_index=int(part.get("item_index") or item_index),
+                    semantic_role=str(part.get("semantic_role") or "") or None,
+                    caption=str(part.get("caption") or ""),
+                    detail=str(part.get("detail") or ""),
+                )
         raise SessionNotFound("visible message attachment not found")
 
     def visible_messages_after(

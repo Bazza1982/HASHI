@@ -4132,6 +4132,7 @@ class WorkbenchApiServer:
                 for value in (
                     getattr(runtime, "media_dir", None),
                     (Path(configured_media) / name if configured_media else None),
+                    getattr(self.session_store, "attachment_files_root", None),
                 )
                 if value
             }
@@ -4139,7 +4140,7 @@ class WorkbenchApiServer:
                 candidate.is_relative_to(root) for root in allowed_roots
             ):
                 raise SessionConflict(
-                    "visible image attachment is outside the Agent media directory"
+                    "visible image attachment is outside an approved media directory"
                 )
             expected_size = int(attachment.get("size_bytes") or 0)
             actual_size = candidate.stat().st_size

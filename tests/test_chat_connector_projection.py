@@ -318,6 +318,88 @@ def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_p
     assert answer["created_at"] == answer["ts"]
 
 
+def test_canonical_projection_groups_staged_attachments_in_message_order(
+    tmp_path: Path,
+):
+    store = SessionStore(tmp_path / "frontend.sqlite", instance_id="HASHI3")
+    owner_id = "user:7"
+    session = store.ensure_default_session(owner_id=owner_id, agent_id="a")
+    fixtures = [
+        ("first.png", "image/png", b"\x89PNG\r\n\x1a\nfirst"),
+        ("notes.txt", "text/plain", b"second"),
+        ("clip.webm", "video/webm", bytes.fromhex("1a45dfa3") + b"third"),
+    ]
+    attachment_ids = []
+    for filename, media_type, body in fixtures:
+        staged = store.stage_attachment(
+            session_id=session["session_id"],
+            owner_id=owner_id,
+            filename=filename,
+            media_type=media_type,
+            size_bytes=len(body),
+            sha256=hashlib.sha256(body).hexdigest(),
+        )
+        store.upload_attachment_bytes(
+            session_id=session["session_id"],
+            owner_id=owner_id,
+            attachment_id=staged["attachment_id"],
+            payload=body,
+        )
+        store.commit_attachment(
+            session_id=session["session_id"],
+            owner_id=owner_id,
+            attachment_id=staged["attachment_id"],
+        )
+        attachment_ids.append(staged["attachment_id"])
+
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        agent_id="a",
+        request_id="frontend-attachments",
+        text="inspect these in order",
+        source="session-api",
+        idempotency_key="frontend-attachments",
+        content=[
+            {"type": "text", "text": "inspect these in order"},
+            *[
+                {"type": "attachment", "attachment_id": attachment_id}
+                for attachment_id in attachment_ids
+            ],
+        ],
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="grouped",
+        assistant_source="fixture",
+    )
+
+    payload = build_chat_projection(
+        store,
+        session=store.get_session(session["session_id"]),
+        owner_id=owner_id,
+    )
+    user = payload["messages"][0]
+
+    assert user["message_id"] == accepted.message_id
+    assert [item["attachment_id"] for item in user["attachments"]] == attachment_ids
+    assert [item["filename"] for item in user["attachments"]] == [
+        item[0] for item in fixtures
+    ]
+    assert [item["modality"] for item in user["attachments"]] == [
+        "image",
+        "document",
+        "video",
+    ]
+    assert all(
+        item["message_id"] == accepted.message_id for item in user["attachments"]
+    )
+    assert all("local_ref" not in item for item in user["attachments"])
+    assert all("sha256" not in item for item in user["attachments"])
+
+
 @pytest.mark.asyncio
 async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
     tmp_path: Path,
@@ -412,6 +494,64 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
     escaped = await server.handle_transcript_attachment(escaped_request)
     assert escaped.status == 409
     assert str(escaped_image) not in escaped.text
+
+
+@pytest.mark.asyncio
+async def test_staged_frontend_image_is_visible_through_transcript_route(
+    tmp_path: Path,
+):
+    server = _server(tmp_path)
+    owner_id = "user:7"
+    payload = b"\x89PNG\r\n\x1a\nfrontend-preview"
+    session = server.session_store.ensure_default_session(
+        owner_id=owner_id, agent_id="a"
+    )
+    staged = server.session_store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        filename="frontend.png",
+        media_type="image/png",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    server.session_store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    server.session_store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        attachment_id=staged["attachment_id"],
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        agent_id="a",
+        request_id="frontend-image-preview",
+        text="frontend photo",
+        source="session-api",
+        idempotency_key="frontend-image-preview",
+        content=[
+            {"type": "text", "text": "frontend photo"},
+            {"type": "attachment", "attachment_id": staged["attachment_id"]},
+        ],
+    )
+    request = SimpleNamespace(
+        match_info={
+            "name": "a",
+            "message_id": accepted.message_id,
+            "attachment_id": staged["attachment_id"],
+        },
+        headers={},
+    )
+
+    response = await server.handle_transcript_attachment(request)
+
+    assert response.status == 200
+    assert response.body == payload
+    assert response.content_type == "image/png"
 
 
 def test_projection_message_cursor_streams_presentation_only_messages(tmp_path: Path):
