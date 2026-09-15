@@ -127,6 +127,9 @@ workspaces/
 # Backup files
 *.bak
 *.bak_*
+# Dated manual backups of local state or source, e.g. *.bak.YYYYMMDDHHMM
+# Instance identity/credential snapshots and stray source copies must not be committed.
+*.bak.*
 
 # Windows interop guide (machine-specific)
 workspaces/WINDOWS.MD
