@@ -222,3 +222,10 @@ exp/barry/aonsw_data_analysis/
 # sanitized examples may be published.
 /exp/*/
 !/exp/examples/
+
+# Local test scratch and transient instance-registry snapshots (never commit)
+.hcc_test_scratch/
+.instances.json.tmp-*
+
+# Local virtualenv symlink used by some checkouts (.venv -> .venv-wsl)
+.venv
