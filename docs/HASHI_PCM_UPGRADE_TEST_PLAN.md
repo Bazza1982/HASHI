@@ -30,7 +30,7 @@ follow the red/green failure-proof rule in [TESTING_POLICY.md](TESTING_POLICY.md
 | Substantive text outside recognised PCM blocks can be silently ignored while a valid `[persona]` block is extracted. | Replace. | Substantive unmarked content invalidates the complete PCM document. |
 | Missing, empty, duplicate or ambiguous persona blocks select a valid minimal runtime fallback. | Replace as a configuration contract. | Invalid PCM fails closed during validation. A renderer fallback may remain only as defence in depth and must not make the Agent configuration valid. |
 | Normal `agents.json` configuration persists a `system_md` field. | Remove from normal fixtures and assertions. | A one-time migration may accept legacy `system_md` as input, then removes it after producing and validating canonical `agent.md`. |
-| HASHI import/export may create an unstructured Markdown identity such as `# Zelda`. | Replace. | HASHI-side import/export produces or consumes valid `[persona]`, `[sys]` and optional `[memory]` blocks. |
+| HASHI import/export may create an unstructured Markdown identity such as `# Zelda`. | Replace. | HASHI-side import/export produces or consumes valid `[persona]`, `[sys]`, optional `[memory]` and optional `[hcc]` blocks. |
 | Recent context is measured as backend-specific counts of individual message rows, such as 4, 8 or 10 messages. | Replace. | Recent history is measured as at most ten completed user-assistant exchanges. |
 | A Fixed incremental request contains only the current user text and no PCM background. | Replace. | Fixed mode omits repeated recent history after bootstrap but sends current delta PCM on every external user turn. |
 | Flat string position alone establishes PCM authority. | Replace. | A typed authority envelope separates system instructions, the current user request, memory, runtime context and persona; adapter rendering must preserve those semantics. |
@@ -85,14 +85,15 @@ audit store must survive that cleanup.
 
 ## 4. Minimum PCM acceptance suite
 
-The minimum new gate is 24 backend-neutral contract-test functions. A function
+The historical PCM upgrade baseline was 24 backend-neutral contract-test functions.
+This count does not cover subsequent HCC additions and is not a product invariant. A function
 may be parameterised across invalid forms, lifecycle operations or backend
 families. Parameterisation must not be replaced by duplicated test bodies.
 
 ### 4.1 PCM document and migration — 4 tests
 
 1. A valid lower-case `agent.md` isolates exactly one `[persona]`, one `[sys]`
-   and zero or one `[memory]` block without cross-contamination.
+   and zero or one `[memory]` and `[hcc]` block each without cross-contamination.
 2. A parameterised invalid-document test rejects missing required blocks,
    duplicate or mismatched markers, empty required blocks, substantive unmarked
    content and invalid UTF-8.
@@ -233,3 +234,25 @@ full repository suite is not the default gate for this upgrade. The final gate
 must report the exact selection and results, including deliberate assertion
 replacements. A live load check may use only an explicitly authorised minimal
 Agent reboot; a hard restart is outside this plan.
+
+
+## HCC acceptance extension — September 2026
+
+The three-block-only format assertion is superseded by optional HCC support.
+Empty HCC is valid; empty Persona/System or an included empty Memory remains invalid.
+Retain all canonical source, authority, history, permission and Fixed omission/delta
+contracts. No existing test module is retired merely because HCC adds a section.
+
+`tests/test_hcc.py` covers round-trip/conversion, exact byte preservation, bounded
+replacement, malformed content, stale writes, independent processes, failure
+atomicity, durable flags, every-turn inclusion and capacity.
+`tests/test_hcc_integration.py` exercises actual local command dispatch, writer
+subprocesses, scheduled SkillManager dispatch, and real PCM -> adapter -> durable
+HER materialization/update/removal/reconstruction. The dedicated additions in
+`tests/test_runtime_pipeline.py` and `tests/test_agent_move_package.py` protect
+actual scheduled assembly and package extraction.
+
+The old empty-Persona test and unchanged-PCM-delta tests remain correct. General
+HER omission still does not mean deletion; the HCC adapter must send explicit
+removals. Fault-injection evidence and unrelated baseline failures are recorded
+in [HCC implementation](HASHI_HCC_IMPLEMENTATION.md).

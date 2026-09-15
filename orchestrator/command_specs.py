@@ -80,6 +80,10 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        "hcc", "cmd_hcc", "Manage context cache injection", "tools",
+        guide=CommandGuide("/hcc [on|off]", ("on", "off"), example="/hcc on"),
+    ),
+    CommandSpec(
         "habit",
         "cmd_habit",
         "View and manage HER habits",

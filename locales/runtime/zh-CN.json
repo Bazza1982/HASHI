@@ -2404,7 +2404,16 @@
     "remote.move.mode.workspace": "搬家 · 工作区上限 1 GB",
     "remote.move.scope": "范围 · {mode}；工作区 · {total} B；不携带文件 · {count} 个。",
     "remote.move.scope_delete": "目标验证成功后，整个来源工作区将被永久删除，包括所有未携带文件。取消可保留来源。",
-    "remote.move.scope_more": "另有 {count} 个未携带文件；完整清单保存在已准备的事务中。"
+    "remote.move.scope_more": "另有 {count} 个未携带文件；完整清单保存在已准备的事务中。",
+    "hcc.usage": "❌ 用法：<code>/hcc [on|off]</code>",
+    "hcc.save_failed": "❌ 无法确认 HCC 设置已保存（{error}）。请检查已保存的状态后再重试。",
+    "hcc.saved": "✅ 已保存；下一轮生效。",
+    "hcc.content": "缓存：约 {tokens} tokens",
+    "hcc.empty": "缓存：暂无内容；不会自动联网补充。",
+    "hcc.unreadable": "⚠️ 缓存不可用（{error}）；请在下一轮前修复 <code>agent.md</code>。",
+    "hcc.status": "状态：<b>{status}</b>",
+    "hcc.scope": "范围：当前代理；开启后每轮读取。",
+    "hcc.cron_independent": "Cron 任务独立运行；关闭不会删除缓存。"
   },
   "commands": {
     "help": "显示帮助菜单",
@@ -2514,7 +2523,8 @@
     "wiki": "搜索已配置的精选知识库",
     "bg": "运行或管理可后台执行的代理任务",
     "oll": "控制 OLL 浏览器网关",
-    "pswd": "私有本地查询"
+    "pswd": "私有本地查询",
+    "hcc": "管理上下文缓存注入"
   },
   "titles": {
     "Hashi command centre": "HASHI 命令中心",
@@ -2642,6 +2652,7 @@
     "Delete system prompt": "删除系统提示词",
     "Delete agent": "删除代理",
     "Clear notepad": "清空记事",
-    "HASHI version": "HASHI 版本"
+    "HASHI version": "HASHI 版本",
+    "HCC CONTEXT CACHE": "HCC 上下文缓存"
   }
 }

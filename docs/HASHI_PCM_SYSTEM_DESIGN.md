@@ -493,7 +493,7 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | **ID** | **Accepted decision** | **Required implementation consequence** |
 | ------ | --------------------- | --------------------------------------- |
 | PCM-DEC-001 | The standard recent-history unit is one completed user-assistant exchange. The default maximum is ten completed exchanges. | The current user request is not counted as a completed historical exchange. Fixed bootstrap, Flex history and handoff use the same exchange unit. Capacity pruning removes the oldest complete exchanges first. |
-| PCM-DEC-002 | HASHI PCM uses exactly the lower-case `agent.md` file in the Agent workspace. The PCM file is strictly structured. | Require exactly one `[persona]` block and one `[sys]` block, allow zero or one `[memory]` block, and reject substantive content outside recognised blocks. Retire arbitrary HASHI `system_md` paths after a one-time validated migration of configured Agents. External systems with their own filename conventions are unaffected. |
+| PCM-DEC-002 | HASHI PCM uses exactly the lower-case `agent.md` file in the Agent workspace. The PCM file is strictly structured. | Require exactly one `[persona]` block and one `[sys]` block, allow zero or one `[memory]` and zero or one `[hcc]` block, and reject substantive content outside recognised blocks. Only optional HCC may be explicitly empty; its body is temporary reference data, not system instructions. Retire arbitrary HASHI `system_md` paths after a one-time validated migration of configured Agents. External systems with their own filename conventions are unaffected. |
 | PCM-DEC-003 | A Skills or Tools catalogue may advertise only capabilities that the Agent can actually invoke in the current request scope. Uniform HASHI Tool access for supported fixed CLI Engines is part of this upgrade. | Resolve availability after Agent, Engine, stage, and permission filtering. Catalogue metadata never grants permission. Connect supported fixed CLI Engines to the PAO-owned HASHI Tool Gateway through MCP or an equivalent native bridge, and do not advertise a capability until that connection is available and authorised. |
 | PCM-DEC-004 | Canonical raw audit evidence has indefinite retention and no automatic expiry. | Preserve complete unredacted audit evidence across `/reset`, `/new`, backend switches, process reloads and ordinary workspace maintenance. Use encryption at rest where supported together with strict least-privilege access controls. Archival or tiered storage may move evidence but may not discard it. Deletion is permitted only through a separately scoped, explicitly confirmed destructive audit-wipe operation; ordinary reset or wipe behaviour must not silently delete it. Backups inherit the same retention and access requirements. |
 | PCM-DEC-005 | Central BGE-M3 raw-memory search is scoped to the current HASHI instance and Agent by default. | `memory_sync` permits ingestion but does not grant cross-Agent read access. Shared knowledge is delivered through the curated Wiki. Searching another Agent’s raw consolidated records requires explicit user authorisation, an auditable purpose and provenance-preserving results. `/wiki` never exposes the underlying raw cross-Agent memory store. |
@@ -509,7 +509,7 @@ inspection boundary.
 ## 11. Upgrade Test Contract
 
 The accepted assertion migration, retained-test boundaries and minimum
-24-function acceptance gate are defined in
+historical 24-function baseline plus HCC acceptance cases are defined in
 [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md). The upgrade is
 not complete merely because existing tests remain green; the Engine-neutral
 PCM contract in that plan must also pass.
@@ -523,3 +523,25 @@ index, notepad and archive paths. Arbitrary Markdown and project directories do
 not become memory by filename resemblance. Missing optional paths are normal;
 links and junctions are never followed by the continuity inventory. PAO consumes
 this scope and owns packaging, checksums, target verification and deletion.
+
+
+## 12. HCC: proactively refreshed temporary context (September 2026)
+
+HCC is an optional `[hcc]` / `[hcc_end]` block in the same canonical `agent.md`.
+`/hcc on|off` persists a current-Agent flag in existing `state.json` (default OFF).
+When ON, PCM reads the entire latest block every external turn, independent of
+Memory flags, incremental mode and request wording. No classifier, TTL eviction,
+query routing or on-demand source lookup is introduced. The model judges relevance.
+
+Trusted `hcc_usage` instructions and reference-data `hcc` have separate typed
+authorities. Stable sections replace rather than accumulate; OFF/empty/absent
+explicitly remove both from active HER Fixed PCM. Unchanged wire deltas may omit
+the bytes without omitting HCC from the model's materialized context. This is not
+retrospective erasure of provider history or raw audit.
+
+Existing user-configured Cron jobs use `skill:hcc-refresh`; the helper updates only
+a named entry under a shared cross-process transaction, rejecting stale entry
+revisions. No new scheduler or cache database exists. Frequency/content length
+remain user-controlled. Protected Core is unchanged. See
+[HCC implementation and verification](HASHI_HCC_IMPLEMENTATION.md) for publication,
+capacity, tests, adoption and rollback boundaries.

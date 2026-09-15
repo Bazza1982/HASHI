@@ -4797,3 +4797,38 @@ async def test_handle_success_delivery_uses_cos_answer_without_hchat_route():
 
     assert runtime.sent_message["text"] == "cos answer"
     assert runtime.hchat_routes == [("req-1", "cos answer")]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_turn_carries_hcc_through_real_pcm_and_fixed_transport(tmp_path):
+    """Memory isolation must not suppress the current Agent's HCC snapshot."""
+    from adapters.her_v2 import HERv2Adapter
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.hcc import set_hcc_enabled
+    from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+    from orchestrator.pcm import render_pcm_document
+
+    runtime = _runtime()
+    runtime.workspace_dir = tmp_path
+    (tmp_path / "agent.md").write_text(
+        render_pcm_document(persona="P", system="S", hcc="SCHEDULED_HCC_SNAPSHOT"),
+        encoding="utf-8",
+    )
+    set_hcc_enabled(tmp_path, True)
+    runtime.context_assembler = BridgeContextAssembler(BridgeMemoryStore(tmp_path), tmp_path / "agent.md")
+    runtime.config.active_backend = "her-v2"
+    adapter = HERv2Adapter.__new__(HERv2Adapter)
+    adapter._session_coordinator = HerBackendSessionCoordinator(tmp_path / "her")
+    adapter._session_id = "hcc-pipeline-test"
+    adapter._fixed_transport_audit = {}
+    adapter.config = SimpleNamespace(name="zelda", workspace_dir=tmp_path, extra={})
+    adapter.global_config = runtime.global_config
+    runtime.backend_manager.current_backend = adapter
+    runtime.backend_manager.agent_mode = "fixed"
+    item = _item(source="scheduler-skill", scheduler_context={"kind": "cron", "task_id": "hcc-news", "trigger": "scheduled"})
+    runtime_pipeline.begin_queue_item(runtime, item)
+    prompt = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    accepted = adapter._session_coordinator.accept(prompt.final_prompt)
+    assert "SCHEDULED_HCC_SNAPSHOT" in accepted.materialized_prompt
+    assert runtime._last_prompt_audit["hcc"]["included"] is True
+    assert runtime.current_request_meta["session_scope"] == runtime_pipeline.SESSION_SCOPE_ISOLATED

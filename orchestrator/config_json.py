@@ -157,6 +157,19 @@ def _write_lock(path: Path, timeout: float) -> Iterator[None]:
             local.release()
 
 
+@contextmanager
+def file_write_lock(path: str | Path, *, timeout: float = 5.0) -> Iterator[None]:
+    """Public format-neutral transaction lock; parent directory must exist.
+
+    Resolve the parent, not the destination, so callers can reject destination
+    symlinks themselves. Do not nest this with another lock on the same file.
+    """
+    target = Path(path).expanduser()
+    target = target.parent.resolve() / target.name
+    with _write_lock(target, timeout):
+        yield
+
+
 def _protect_candidate(
     path: Path,
     *,

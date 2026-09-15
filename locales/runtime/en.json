@@ -2404,7 +2404,16 @@
     "remote.move.mode.workspace": "Full workspace · up to 1 GB",
     "remote.move.scope": "Scope · {mode}; workspace · {total} B; files excluded · {count}.",
     "remote.move.scope_delete": "After the target is verified, the entire source workspace is permanently removed, including every excluded file. Cancel to retain the source.",
-    "remote.move.scope_more": "{count} more excluded files; the complete list is in the prepared transaction."
+    "remote.move.scope_more": "{count} more excluded files; the complete list is in the prepared transaction.",
+    "hcc.usage": "❌ Usage: <code>/hcc [on|off]</code>",
+    "hcc.save_failed": "❌ HCC preference could not be confirmed ({error}). Inspect the saved state before retrying.",
+    "hcc.saved": "✅ Saved; applies to the next turn.",
+    "hcc.content": "Cache: approximately {tokens} tokens",
+    "hcc.empty": "Cache: empty; no automatic lookup will run.",
+    "hcc.unreadable": "⚠️ Cache unavailable ({error}); repair agent.md before the next turn.",
+    "hcc.status": "Status: <b>{status}</b>",
+    "hcc.scope": "Scope: current agent; read on every turn when ON.",
+    "hcc.cron_independent": "Cron jobs run independently; OFF does not delete the cache."
   },
   "commands": {
     "help": "Show help menu",
@@ -2514,7 +2523,8 @@
     "wiki": "Search the configured curated Wiki",
     "bg": "Run or manage background-capable agent tasks",
     "oll": "Control OLL Browser Gateway",
-    "pswd": "Private local lookup"
+    "pswd": "Private local lookup",
+    "hcc": "Manage context cache injection"
   },
   "titles": {
     "Hashi command centre": "Hashi command centre",
@@ -2642,6 +2652,7 @@
     "Delete system prompt": "Delete system prompt",
     "Delete agent": "Delete agent",
     "Clear notepad": "Clear notepad",
-    "HASHI version": "HASHI version"
+    "HASHI version": "HASHI version",
+    "HCC CONTEXT CACHE": "HCC CONTEXT CACHE"
   }
 }

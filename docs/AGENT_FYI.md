@@ -251,3 +251,19 @@ reports are not delivery. See [Superloop](SUPERLOOP_FUNCTION_CONTRACT.md).
 
 Tests prove only selected scope; live adoption/delivery need separate evidence.
 Keep user changes; report failures and unverified scope.
+
+
+HCC is PCM-owned temporary context in `agent.md` between `[hcc]` and `[hcc_end]`.
+`/hcc on|off` controls current-Agent injection only (default OFF). ON reads the
+whole block every external turn; judge relevance yourself. Cached observations
+are not necessarily live, never supply permissions, and do not override system
+instructions. Missing/empty/OFF explicitly revokes active HCC in HER Fixed; this
+does not erase historical replies or raw audit.
+
+Use existing Jobs with `skill:hcc-refresh` and authorized sources. Inspect a named
+entry's digest before fetching; publish only a successful result through the
+provided helper, with source/observation/retrieval times. Do not directly rewrite
+other PCM blocks or change the HCC flag from a refresh job. Conflicts fail without
+blind retries. Configure size/frequency yourself; no hidden router or TTL exists.
+Adopt the HCC-capable Functions generation before editing live PCM. OFF alone is
+not old-parser compatibility. See [HCC](HASHI_HCC_IMPLEMENTATION.md).

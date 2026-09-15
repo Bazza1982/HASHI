@@ -4330,6 +4330,11 @@ class FlexibleAgentRuntime:
 
         await runtime_sys_prompts.callback_sys(self, update, context)
 
+    async def cmd_hcc(self, update, context):
+        from orchestrator import runtime_hcc
+
+        await runtime_hcc.cmd_hcc(self, update, context)
+
     async def cmd_habit(self, update, context):
         # Resolve lazily so /reboot can replace HER command behaviour without
         # leaving a stale module object attached to the runtime class.

@@ -992,3 +992,21 @@ def test_explicit_transfer_modes_preserve_memory_and_preflight_whole_workspace(t
     (workspace / "extra").write_bytes(b"x")
     with pytest.raises(AgentMoveError, match="1 GB"):
         create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
+
+
+def test_package_preserves_hcc_and_injection_preference(tmp_path):
+    from orchestrator.hcc import is_hcc_enabled, set_hcc_enabled
+    from orchestrator.pcm import load_pcm_document
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    (workspace / "agent.md").write_text(
+        render_pcm_document(persona="Zelda", system="Follow policy", memory="Remember Link", hcc="Observed at source; not relabelled after move"),
+        encoding="utf-8",
+    )
+    set_hcc_enabled(workspace, True)
+    package = create_agent_move_package(root, "zelda", tmp_path / "hcc.hashi-agent", source_instance="HASHI1")
+    destination = tmp_path / "target-hcc"
+    extract_agent_workspace(package, destination)
+    assert load_pcm_document(destination / "agent.md").hcc == "Observed at source; not relabelled after move"
+    assert is_hcc_enabled(destination)
