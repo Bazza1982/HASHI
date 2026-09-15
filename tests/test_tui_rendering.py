@@ -1127,3 +1127,50 @@ async def test_fresh_tui_keeps_accepted_chat_when_optional_status_api_is_disable
         assert client.checks==1
         assert 'Run status unavailable' not in '\n'.join(line.text for line in app.query_one(ChatHistory).lines)
         assert app._active_run_ref is None
+
+
+
+async def test_slash_agent_commands_are_forwarded_not_staged_as_paths(tmp_path):
+    """Slash commands (/sys, /workzone, /reboot) are dispatched, never attachment paths."""
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+    sent: list[str] = []
+    app._send_message = lambda text, *_args: sent.append(text)
+    app._play_message_sound = lambda _event: True
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.gateway_ok = True
+        app.current_agent = "rika"
+        app.current_agent_display = "Rika"
+        input_box = app.query_one("#chat-input", ChatInput)
+        input_box.focus()
+
+        for command in ["/sys", "/workzone", "/reboot max"]:
+            input_box.value = command
+            await pilot.press("enter")
+            await pilot.pause()
+
+        assert sent == ["/sys", "/workzone", "/reboot max"]
+        rendered = chr(10).join(line.text for line in app.query_one("#chat-history", ChatHistory).lines)
+        assert "Attachment not staged" not in rendered
+
+
+def test_command_card_keeps_title_fields_and_slots_on_separate_lines():
+    """A workzone-style HTML card keeps title, divider, fields and slots on their own lines."""
+    card = """📁 <b>WORKZONES</b>
+━━━━━━━━━━━━━━━━
+
+<b>当前</b> · <code>2/5</code> 激活中
+<b>Slots</b>
+● <code>main</code> · 主目录
+
+<b>使用</b>
+<code>/workzone &lt;路径&gt;</code> · 设置主目录"""
+    renderable = command_message_renderable({"text": card, "meta": {"parse_mode": "HTML"}})
+    output = _render_plain(renderable)
+    lines = [line for line in output.splitlines() if line.strip()]
+    assert lines[0].startswith("📁 WORKZONES")
+    assert lines[1].startswith("━━")
+    assert any("当前" in line and "2/5" in line for line in lines)
+    assert any("main" in line and "主目录" in line for line in lines)
+    assert any("/workzone" in line for line in lines)

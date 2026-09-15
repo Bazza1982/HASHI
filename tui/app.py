@@ -1794,27 +1794,32 @@ class HASHITuiApp(App):
             return
 
         chat = self.query_one("#chat-history", ChatHistory)
-        workzone_ref, workzone_caption = self._parse_workzone_reference(normalized)
-        if workzone_ref is not None:
-            if not self.current_agent or self.current_agent_display == "ALL":
-                chat.write(markup("[hashi.error]Select one Agent before attaching a Workzone file.[/]"))
+        # Resolved slash commands (e.g. /sys, /workzone, /reboot) are dispatched
+        # to the active agent verbatim and are never attachment paths. Only plain
+        # text (including ~/ ./ ../ UNC and Windows drive paths) may be staged.
+        if not normalized.startswith("/"):
+            workzone_ref, workzone_caption = self._parse_workzone_reference(normalized)
+            if workzone_ref is not None:
+                if not self.current_agent or self.current_agent_display == "ALL":
+                    chat.write(markup("[hashi.error]Select one Agent before attaching a Workzone file.[/]"))
+                    return
+                chat.write(chat_message_renderable("user", "You", workzone_caption or f"Attached: {Path(workzone_ref).name}"))
+                self._send_attachment_message(
+                    workzone_caption,
+                    self.current_agent,
+                    self.api,
+                    self._connection_generation,
+                    self.current_instance_id,
+                    self._telegram_mirror_enabled,
+                    self._ui_language,
+                    attachment=None,
+                    workzone_ref=workzone_ref,
+                )
                 return
-            chat.write(chat_message_renderable("user", "You", workzone_caption or f"Attached: {Path(workzone_ref).name}"))
-            self._send_attachment_message(
-                workzone_caption,
-                self.current_agent,
-                self.api,
-                self._connection_generation,
-                self.current_instance_id,
-                self._telegram_mirror_enabled,
-                self._ui_language,
-                attachment=None,
-                workzone_ref=workzone_ref,
-            )
-            return
-        if self._looks_like_dropped_path(normalized):
-            await self._stage_path_attachment(normalized)
-            return
+            if self._looks_like_dropped_path(normalized):
+                await self._stage_path_attachment(normalized)
+                return
+
         chat.write(chat_message_renderable("user", "You", normalized))
 
         if self.current_agent_display == "ALL":
