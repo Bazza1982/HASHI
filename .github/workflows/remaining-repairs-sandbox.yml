@@ -1,0 +1,53 @@
+name: Remaining repairs sandbox
+on:
+  push:
+    branches: [verify/remaining-repairs-20260915]
+    paths: [.github/workflows/remaining-repairs-sandbox.yml]
+permissions:
+  contents: read
+jobs:
+  sandbox:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 73f706d9d0247316df1f9ab2348708e894357649
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.12.13
+      - name: Verify baseline and protected Core
+        run: |
+          test "$(git rev-parse HEAD)" = 73f706d9d0247316df1f9ab2348708e894357649
+          python scripts/check_protected_core_changes.py
+          mkdir -p "$RUNNER_TEMP/repair-artifacts"
+          tar -czf "$RUNNER_TEMP/repair-artifacts/source.tar.gz" .
+      - name: Prepare isolated offline test interpreter
+        run: |
+          python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
+          tar -czf "$RUNNER_TEMP/repair-artifacts/python.tar.gz" -C "$pythonLocation" .
+          printf '%s\n' 73f706d9d0247316df1f9ab2348708e894357649 > "$RUNNER_TEMP/repair-artifacts/SOURCE_SHA"
+          cd "$RUNNER_TEMP/repair-artifacts"
+          sha256sum source.tar.gz python.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinned-repair-sandbox
+          path: ${{ runner.temp }}/repair-artifacts/
+          retention-days: 3
+          compression-level: 0
+      - name: UTC offline baseline (no live instances or providers)
+        continue-on-error: true
+        env:
+          TZ: UTC
+        run: |
+          python -m pytest -q tests -m "not contract and not live and not platform and not real_wall_clock" --junitxml="$RUNNER_TEMP/repair-baseline.xml" > "$RUNNER_TEMP/repair-baseline.log" 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repair-baseline-evidence
+          path: |
+            ${{ runner.temp }}/repair-baseline.xml
+            ${{ runner.temp }}/repair-baseline.log
+          retention-days: 3
