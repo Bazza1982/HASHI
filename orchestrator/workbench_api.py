@@ -4471,9 +4471,11 @@ class WorkbenchApiServer:
                         "max_events_page_size": 2000,
                     },
                     "frontend_connector": {
-                        "version": "1.0",
+                        "version": "1.1",
                         "message_content_schema_version": "1.2",
                         "multi_attachment": True,
+                        "assistant_multi_attachment": True,
+                        "assistant_attachment_delivery": "terminal-message-projection",
                         "atomic_run_admission": True,
                         "preserves_attachment_order": True,
                         "content_types": ["text", "attachment", "audio"],

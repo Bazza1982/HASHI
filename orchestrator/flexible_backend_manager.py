@@ -1859,6 +1859,35 @@ class FlexibleBackendManager:
                 "request_summary": request_meta.get("summary"),
             }
         )
+        for key in (
+            "hashi_session_id",
+            "hashi_run_id",
+            "owner_id",
+            "session_surface",
+            "session_channel_key",
+            "session_store_descriptor",
+        ):
+            context.pop(key, None)
+        for key in (
+            "hashi_session_id",
+            "hashi_run_id",
+            "owner_id",
+            "session_surface",
+            "session_channel_key",
+        ):
+            value = request_meta.get(key)
+            if value is not None and str(value).strip():
+                context[key] = value
+        session_store = getattr(runtime, "session_store", None)
+        if all(
+            getattr(session_store, key, None) is not None
+            for key in ("db_path", "instance_id", "attachment_files_root")
+        ):
+            context["session_store_descriptor"] = {
+                "db_path": str(session_store.db_path),
+                "instance_id": str(session_store.instance_id),
+                "attachment_root": str(session_store.attachment_files_root),
+            }
         request_metadata = request_meta.get("request_metadata")
         context.pop("memory_search_authorization", None)
         context.pop("request_tool_allowlist", None)

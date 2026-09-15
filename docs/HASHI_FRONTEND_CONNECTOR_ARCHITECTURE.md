@@ -274,6 +274,30 @@ capability check into multiple legacy chat submissions, because that would
 change one user action into multiple Messages and Turns. Upload staging is not
 a Run and may be cleaned up later by retention policy.
 
+### 6.3 Standard assistant attachment output
+
+An Agent responding to a conforming external frontend publishes generated or
+selected files through the frontend-neutral `frontend_send_attachments` tool.
+One call contains an ordered `attachments` array and binds every item to the
+current running Session Run. The terminal assistant Message then contains the
+normal text plus those canonical attachment references, so all compatible
+frontends consume the same projection instead of a product-specific callback.
+
+The output mutation is owner-, Agent-, Session-, Run-, and instance-bound. It
+accepts only files inside the Agent's authorized Workzones, applies the same
+advertised count and byte limits as frontend intake, verifies content hashes,
+and uses the tool-call identity for replay-safe idempotency. A reused identity
+with different bytes is rejected. Multiple tool calls may contribute ordered
+attachments to one reply, but the total limits still apply to the Message.
+
+The public `frontend_connector` capability version 1.1 advertises
+`assistant_multi_attachment=true` and
+`assistant_attachment_delivery=terminal-message-projection`. This is not a
+Workbench contract: any future external frontend must render the canonical
+Message attachment projection. Telegram retains its established
+`telegram_send_file` transport path, and the built-in TUI retains its deeper
+HASHI-owned attachment path; neither is silently redirected through this tool.
+
 ## 7. Retired Workbench boundary
 
 Workbench is retired. A successor frontend is maintained separately and is not

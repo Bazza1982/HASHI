@@ -1418,6 +1418,212 @@ async def execute_telegram_send_file(
         return f"Error sending Telegram file: {e}"
 
 
+async def execute_frontend_send_attachments(
+    args: dict,
+    *,
+    access_root: Path | Sequence[Path],
+    workspace_dir: Path,
+    audit_context: dict | None,
+    tool_call_id: str = "",
+) -> str:
+    """Bind ordered local files to the current canonical assistant Message."""
+
+    import hashlib
+    import mimetypes
+
+    from orchestrator.session_store import (
+        MAX_SESSION_ATTACHMENT_BYTES,
+        MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
+        MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
+        IdempotencyConflict,
+        SessionConflict,
+        SessionNotFound,
+        SessionStore,
+    )
+
+    context = dict(audit_context or {})
+    surface = str(context.get("session_surface") or "").strip().casefold()
+    if surface == "tui":
+        return "Error: the built-in TUI uses its dedicated HASHI attachment path"
+    if surface == "telegram":
+        return "Error: Telegram keeps its existing telegram_send_file delivery path"
+    request_id = str(context.get("request_id") or "").strip()
+    session_id = str(context.get("hashi_session_id") or "").strip()
+    owner_id = str(context.get("owner_id") or "").strip()
+    agent_id = str(context.get("agent_name") or "").strip().casefold()
+    if not all((request_id, session_id, owner_id, agent_id, surface)):
+        return "Error: frontend attachments require a current frontend Session reply"
+
+    runtime = context.get("_runtime")
+    store = getattr(runtime, "session_store", None)
+    if not isinstance(store, SessionStore):
+        descriptor = context.get("session_store_descriptor")
+        if not isinstance(descriptor, Mapping):
+            return "Error: canonical Session attachment storage is unavailable"
+        try:
+            store = SessionStore(
+                str(descriptor["db_path"]),
+                instance_id=str(descriptor["instance_id"]),
+                attachment_root=str(descriptor["attachment_root"]),
+            )
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            return f"Error: canonical Session attachment storage is unavailable: {exc}"
+
+    raw_attachments = args.get("attachments")
+    if not isinstance(raw_attachments, list) or not raw_attachments:
+        return "Error: attachments must be a non-empty array"
+    if len(raw_attachments) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+        return "Error: attachment count exceeds the current Session limit"
+
+    prepared: list[dict[str, Any]] = []
+    total_bytes = 0
+    try:
+        for raw in raw_attachments:
+            if not isinstance(raw, Mapping):
+                raise ValueError("each attachment must be an object")
+            raw_path = str(raw.get("path") or "").strip()
+            if not raw_path:
+                raise ValueError("each attachment requires path")
+            path = _resolve_path(raw_path, access_root, workspace_dir)
+            if not path.exists():
+                raise ValueError(f"file not found: {path}")
+            if not path.is_file():
+                raise ValueError(f"path is not a file: {path}")
+            size_bytes = int(path.stat().st_size)
+            if size_bytes > MAX_SESSION_ATTACHMENT_BYTES:
+                raise ValueError(f"attachment exceeds the Session size limit: {path.name}")
+            total_bytes += size_bytes
+            if total_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
+                raise ValueError("attachments exceed the Session total size limit")
+            payload = path.read_bytes()
+            if len(payload) != size_bytes:
+                raise SessionConflict(f"attachment changed while being read: {path.name}")
+            caption = str(raw.get("caption") or "").strip()
+            if len(caption) > 4096:
+                raise ValueError("attachment caption exceeds 4096 characters")
+            media_type = str(raw.get("media_type") or "").strip().casefold()
+            if not media_type:
+                media_type = (
+                    mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                ).casefold()
+            media_type = media_type.split(";", 1)[0].strip()
+            if "/" not in media_type or len(media_type) > 255:
+                raise ValueError(f"invalid attachment MIME type: {media_type!r}")
+            prepared.append(
+                {
+                    "filename": path.name,
+                    "caption": caption,
+                    "media_type": media_type,
+                    "size_bytes": size_bytes,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "payload": payload,
+                }
+            )
+
+        request_digest = hashlib.sha256(
+            json.dumps(
+                [
+                    {
+                        key: item[key]
+                        for key in (
+                            "filename",
+                            "caption",
+                            "media_type",
+                            "size_bytes",
+                            "sha256",
+                        )
+                    }
+                    for item in prepared
+                ],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        idempotency_key = "frontend-attachments:" + str(
+            tool_call_id or request_digest
+        ).strip()
+        existing = store.run_output_attachment_group(
+            request_id=request_id,
+            session_id=session_id,
+            owner_id=owner_id,
+            agent_id=agent_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            if str(existing["request_digest"]) != request_digest:
+                raise IdempotencyConflict(
+                    "frontend attachment idempotency key is bound to different files"
+                )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "request_id": request_id,
+                    "attachment_count": len(existing["attachments"]),
+                    "attachments": existing["attachments"],
+                    "replayed": True,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+        bindings = []
+        for item in prepared:
+            staged = store.stage_attachment(
+                session_id=session_id,
+                owner_id=owner_id,
+                filename=item["filename"],
+                media_type=item["media_type"],
+                size_bytes=item["size_bytes"],
+                sha256=item["sha256"],
+                semantic_role=(
+                    "audio_attachment"
+                    if item["media_type"].startswith("audio/")
+                    else ""
+                ),
+            )
+            store.upload_attachment_bytes(
+                session_id=session_id,
+                owner_id=owner_id,
+                attachment_id=staged["attachment_id"],
+                payload=item["payload"],
+                audio_direction="output",
+            )
+            store.commit_attachment(
+                session_id=session_id,
+                owner_id=owner_id,
+                attachment_id=staged["attachment_id"],
+            )
+            bindings.append(
+                {
+                    "attachment_id": staged["attachment_id"],
+                    "caption": item["caption"],
+                }
+            )
+        bound = store.bind_run_output_attachments(
+            request_id=request_id,
+            session_id=session_id,
+            owner_id=owner_id,
+            agent_id=agent_id,
+            idempotency_key=idempotency_key,
+            request_digest=request_digest,
+            attachments=bindings,
+        )
+        return json.dumps(
+            {
+                "ok": True,
+                "request_id": request_id,
+                "attachment_count": len(bound["attachments"]),
+                "attachments": bound["attachments"],
+                "replayed": bool(bound["replayed"]),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except (IdempotencyConflict, OSError, SessionConflict, SessionNotFound, ValueError) as exc:
+        return f"Error: {exc}"
+
+
 async def execute_http_request(args: dict) -> str:
     url = str(args.get("url", "")).strip()
     if not url:

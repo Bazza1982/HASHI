@@ -203,12 +203,22 @@ def test_fixed_gateway_context_is_refreshed_with_request_bound_authority(
     manager.current_backend = backend
     manager.runtime = SimpleNamespace(
         name="rika",
+        session_store=SimpleNamespace(
+            db_path=tmp_path / "state" / "sessions.sqlite3",
+            instance_id="HASHI3",
+            attachment_files_root=tmp_path / "media" / "session_attachments",
+        ),
         _request_meta_by_id={
             "req-1": {
                 "request_id": "req-1",
                 "chat_id": 9,
                 "source": "memory:raw-search",
                 "summary": "raw search",
+                "hashi_session_id": "session-1",
+                "hashi_run_id": "run-1",
+                "owner_id": "user:7",
+                "session_surface": "generic-desktop",
+                "session_channel_key": "client-1",
                 "request_metadata": {
                     "tool_allowlist": ["memory_search"],
                     "memory_search_authorization": {
@@ -228,6 +238,16 @@ def test_fixed_gateway_context_is_refreshed_with_request_bound_authority(
     manager._refresh_tool_runtime_context("req-1")
 
     assert registry.audit_context["request_id"] == "req-1"
+    assert registry.audit_context["hashi_session_id"] == "session-1"
+    assert registry.audit_context["hashi_run_id"] == "run-1"
+    assert registry.audit_context["owner_id"] == "user:7"
+    assert registry.audit_context["session_surface"] == "generic-desktop"
+    assert registry.audit_context["session_channel_key"] == "client-1"
+    assert registry.audit_context["session_store_descriptor"] == {
+        "db_path": str(tmp_path / "state" / "sessions.sqlite3"),
+        "instance_id": "HASHI3",
+        "attachment_root": str(tmp_path / "media" / "session_attachments"),
+    }
     assert registry.audit_context["memory_search_authorization"]["agent_id"] == "arale"
     assert registry.audit_context["request_tool_allowlist"] == ["memory_search"]
     refresh.assert_called_once_with(backend, backend="codex-cli")

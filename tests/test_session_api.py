@@ -291,7 +291,10 @@ async def test_frontend_connector_admits_ordered_multi_attachment_as_one_run(
 
     capabilities = json.loads((await server.handle_v1_capabilities(_Request())).text)
     connector = capabilities["frontend_connector"]
+    assert connector["version"] == "1.1"
     assert connector["multi_attachment"] is True
+    assert connector["assistant_multi_attachment"] is True
+    assert connector["assistant_attachment_delivery"] == "terminal-message-projection"
     assert connector["atomic_run_admission"] is True
     assert connector["content_types"] == ["text", "attachment", "audio"]
     assert connector["attachment_modalities"] == [

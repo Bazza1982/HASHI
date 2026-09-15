@@ -553,6 +553,54 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "frontend_send_attachments",
+            "description": (
+                "Publish one or more ordered local files on the current frontend Session reply. "
+                "This is the standard frontend-neutral attachment output contract for images, "
+                "audio, video, and documents. Use one call for all files that belong to one "
+                "reply. Do not use it for Telegram (use telegram_send_file) or the built-in TUI."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "attachments": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "description": "Ordered files to attach to the current assistant reply.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Absolute or workspace-relative local file path.",
+                                },
+                                "caption": {
+                                    "type": "string",
+                                    "maxLength": 4096,
+                                    "description": "Optional user-visible caption for this file.",
+                                },
+                                "media_type": {
+                                    "type": "string",
+                                    "maxLength": 255,
+                                    "description": (
+                                        "Optional MIME type override; otherwise inferred from the filename."
+                                    ),
+                                },
+                            },
+                            "required": ["path"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["attachments"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "http_request",
             "description": (
                 "Make an HTTP request (GET, POST, PUT, DELETE, PATCH) to any URL. "
