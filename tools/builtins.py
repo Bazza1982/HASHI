@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -886,6 +887,340 @@ async def execute_file_list(
         return f"Error listing directory: {e}"
 
 
+# ---------------------------------------------------------------------------
+# apply_patch: cross-platform ``patch`` discovery + git / pure-Python fallbacks
+# ---------------------------------------------------------------------------
+
+
+def _decode_patch_output(data: object) -> str:
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data).decode("utf-8", "replace")
+    return str(data or "")
+
+
+def _windows_patch_candidates(
+    git_exe: str | None, env: Mapping[str, str]
+) -> list[str]:
+    """Absolute ``patch.exe`` candidates shipped with Git for Windows.
+
+    Derives the layout from the ``git`` executable (``<root>\\cmd\\git.exe``
+    implies ``<root>\\usr\\bin\\patch.exe``) and probes the usual install
+    roots, so a fresh Windows install never needs a hand-copied ``patch.exe``.
+    """
+
+    roots: list[Path] = []
+    if git_exe:
+        try:
+            roots.append(Path(git_exe).resolve().parent.parent)
+        except OSError:
+            pass
+    for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = env.get(env_key)
+        if base:
+            roots.append(Path(base) / "Git")
+    local_appdata = env.get("LOCALAPPDATA")
+    if local_appdata:
+        roots.append(Path(local_appdata) / "Programs" / "Git")
+
+    candidates: list[str] = []
+    for root in roots:
+        for relative in (
+            "usr/bin/patch.exe",
+            "mingw64/bin/patch.exe",
+            "bin/patch.exe",
+        ):
+            candidates.append(str(root / relative))
+    return candidates
+
+
+def _candidate_patch_commands() -> list[str]:
+    """Ordered candidate paths to a ``patch`` executable.
+
+    ``PATH`` is consulted first. On Windows the well-known Git-for-Windows
+    locations are probed next. WSL, Linux and macOS need nothing beyond
+    ``PATH``.
+    """
+
+    candidates: list[str] = []
+
+    on_path = shutil.which("patch")
+    if on_path:
+        candidates.append(on_path)
+
+    if os.name == "nt":
+        candidates.extend(_windows_patch_candidates(shutil.which("git"), os.environ))
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        key = candidate.replace("\\", "/").casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _find_patch_command() -> str | None:
+    """Return the first usable ``patch`` executable, or ``None``."""
+
+    for candidate in _candidate_patch_commands():
+        try:
+            if Path(candidate).is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _format_patch_outcome(outcome: tuple[str, str], path: Path) -> str:
+    status, detail = outcome
+    if status == "ok":
+        return f"OK: patch applied to {path}" + (f"\n{detail}" if detail else "")
+    if status == "failed":
+        return f"Error: patch failed:\n{detail}"
+    return f"Error: patch rejected (dry-run):\n{detail}"
+
+
+def _apply_patch_with_patch_command(
+    patch_cmd: str, path: Path, patch_str: str
+) -> tuple[str, str] | None:
+    """Run ``patch`` with the existing dry-run-then-apply contract.
+
+    Returns ``None`` only when the resolved binary cannot be executed, so the
+    caller can fall back; a real rejection is returned verbatim.
+    """
+
+    import subprocess
+
+    payload = patch_str.encode("utf-8", "surrogateescape")
+    try:
+        dry_run = subprocess.run(
+            [patch_cmd, "--dry-run", "-u", str(path)],
+            input=payload,
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    if dry_run.returncode != 0:
+        return ("rejected", _decode_patch_output(dry_run.stderr))
+
+    try:
+        applied = subprocess.run(
+            [patch_cmd, "-u", str(path)],
+            input=payload,
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    if applied.returncode != 0:
+        return ("failed", _decode_patch_output(applied.stderr))
+    return ("ok", _decode_patch_output(applied.stdout).strip())
+
+
+def _retarget_patch_headers(patch_str: str, filename: str) -> str:
+    """Rewrite the first ``---`` / ``+++`` pair to target ``filename``.
+
+    ``patch -u <file>`` ignores the header and patches the named file; the
+    ``git apply`` fallback keys off the header, so normalise it to the single
+    file the caller asked for (``git apply -p1`` from the file's directory).
+    """
+
+    old_rewritten = False
+    new_rewritten = False
+    rewritten: list[str] = []
+    for line in patch_str.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        if not old_rewritten and body.startswith("---"):
+            rewritten.append(f"--- a/{filename}{ending or chr(10)}")
+            old_rewritten = True
+            continue
+        if old_rewritten and not new_rewritten and body.startswith("+++"):
+            rewritten.append(f"+++ b/{filename}{ending or chr(10)}")
+            new_rewritten = True
+            continue
+        rewritten.append(line)
+    return "".join(rewritten)
+
+
+def _apply_patch_with_git(
+    git_path: str, path: Path, patch_str: str
+) -> tuple[str, str] | None:
+    """Apply through ``git apply``; ``None`` when git is unusable here.
+
+    Line-ending conversion is disabled (``core.autocrlf=false``,
+    ``core.eol=lf``) so applying a diff never rewrites an LF file as CRLF, the
+    way a global ``core.autocrlf=true`` otherwise would.
+    """
+
+    import subprocess
+
+    payload = _retarget_patch_headers(patch_str, path.name).encode(
+        "utf-8", "surrogateescape"
+    )
+    cwd = str(path.parent)
+    base_argv = [git_path, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "apply"]
+    try:
+        check = subprocess.run(
+            [*base_argv, "--check", "-"],
+            input=payload,
+            capture_output=True,
+            cwd=cwd,
+        )
+    except OSError:
+        return None
+    if check.returncode != 0:
+        return ("rejected", _decode_patch_output(check.stderr).strip())
+
+    try:
+        applied = subprocess.run(
+            [*base_argv, "-"],
+            input=payload,
+            capture_output=True,
+            cwd=cwd,
+        )
+    except OSError:
+        return None
+    if applied.returncode != 0:
+        return ("failed", _decode_patch_output(applied.stderr).strip())
+    return ("ok", _decode_patch_output(applied.stdout).strip())
+
+
+def _parse_hunk_header(header: str) -> tuple[int, int, int] | None:
+    """Parse ``@@ -old[,len] +new[,len] @@``; ``None`` when not a hunk."""
+
+    if not header.startswith("@@"):
+        return None
+    pieces = header.split("@@")
+    if len(pieces) < 2:
+        return None
+    spec = pieces[1].strip().split()
+    if len(spec) != 2:
+        return None
+    old_spec, new_spec = spec
+    if not old_spec.startswith("-") or not new_spec.startswith("+"):
+        return None
+    try:
+        old_start = int(old_spec[1:].split(",")[0])
+        old_len = int(old_spec.split(",")[1]) if "," in old_spec else 1
+        new_len = int(new_spec.split(",")[1]) if "," in new_spec else 1
+    except (ValueError, IndexError):
+        return None
+    return old_start, old_len, new_len
+
+
+def _apply_unified_diff(text: str, patch_str: str) -> tuple[bool, str]:
+    """Apply a standard unified diff without any external tool.
+
+    Line endings are honoured exactly: a CRLF file stays CRLF, a LF file stays
+    LF. All matching is done on normalised (LF) lines.
+    """
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    source_lines = normalized.split("\n")
+    if source_lines and source_lines[-1] == "":
+        source_lines.pop()
+    trailing_newline = normalized.endswith("\n")
+
+    patch_lines = patch_str.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    hunks: list[tuple[int, int, list[str], list[str]]] = []
+    index = 0
+    total = len(patch_lines)
+    while index < total:
+        parsed = _parse_hunk_header(patch_lines[index])
+        if parsed is None:
+            index += 1
+            continue
+        old_start, old_len, new_len = parsed
+        index += 1
+        old_block: list[str] = []
+        new_block: list[str] = []
+        old_seen = 0
+        new_seen = 0
+        while index < total and (old_seen < old_len or new_seen < new_len):
+            entry = patch_lines[index]
+            if entry.startswith("\\"):
+                index += 1
+                continue
+            if entry.startswith("+"):
+                new_block.append(entry[1:])
+                new_seen += 1
+            elif entry.startswith("-"):
+                old_block.append(entry[1:])
+                old_seen += 1
+            elif entry.startswith(" "):
+                old_block.append(entry[1:])
+                new_block.append(entry[1:])
+                old_seen += 1
+                new_seen += 1
+            elif entry == "":
+                old_block.append("")
+                new_block.append("")
+                old_seen += 1
+                new_seen += 1
+            else:
+                break
+            index += 1
+        hunks.append((old_start, old_len, old_block, new_block))
+
+    if not hunks:
+        return (False, "no unified-diff hunks found in patch")
+
+    result = list(source_lines)
+    offset = 0
+    for old_start, old_len, old_block, new_block in hunks:
+        base = old_start if old_len == 0 else old_start - 1
+        floor = max(base + offset, 0)
+        position = floor
+        if result[position:position + len(old_block)] != old_block:
+            position = -1
+            for candidate in range(floor, len(result) - len(old_block) + 1):
+                if result[candidate:candidate + len(old_block)] == old_block:
+                    position = candidate
+                    break
+            if position < 0:
+                return (
+                    False,
+                    f"hunk at line {old_start} does not match file content",
+                )
+        result[position:position + len(old_block)] = new_block
+        offset += len(new_block) - len(old_block)
+
+    output = "\n".join(result)
+    if trailing_newline:
+        output += "\n"
+    if newline == "\r\n":
+        output = output.replace("\n", "\r\n")
+    return (True, output)
+
+
+def _apply_patch_with_python(path: Path, patch_str: str) -> tuple[str, str]:
+    """Final fallback: apply the diff in-process, no external binary needed.
+
+    The file is read and written with newline translation disabled so the
+    result keeps the file's original line endings even on Windows.
+    """
+
+    try:
+        with path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+            original = handle.read()
+    except (OSError, UnicodeError) as exc:
+        return ("rejected", f"cannot read {path}: {exc}")
+
+    ok, result = _apply_unified_diff(original, patch_str)
+    if not ok:
+        return ("rejected", result)
+
+    try:
+        with path.open("w", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+            handle.write(result)
+    except (OSError, UnicodeError) as exc:
+        return ("failed", f"cannot write {path}: {exc}")
+    return ("ok", "")
+
+
 async def execute_apply_patch(
     args: dict,
     access_root: Path | Sequence[Path],
@@ -908,27 +1243,35 @@ async def execute_apply_patch(
         return f"Error: file not found: {path}"
 
     try:
-        import subprocess
-        result = subprocess.run(
-            ["patch", "--dry-run", "-u", str(path)],
-            input=patch_str.encode(),
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            return f"Error: patch rejected (dry-run):\n{result.stderr.decode()}"
+        patch_cmd = _find_patch_command()
+    except Exception:
+        patch_cmd = None
 
-        result = subprocess.run(
-            ["patch", "-u", str(path)],
-            input=patch_str.encode(),
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            return f"Error: patch failed:\n{result.stderr.decode()}"
+    if patch_cmd is not None:
+        outcome = _apply_patch_with_patch_command(patch_cmd, path, patch_str)
+        if outcome is not None:
+            # A resolved ``patch`` binary is authoritative: honour its verdict,
+            # including a dry-run rejection, and never silently fall through.
+            return _format_patch_outcome(outcome, path)
 
-        out = result.stdout.decode().strip()
-        return f"OK: patch applied to {path}" + (f"\n{out}" if out else "")
-    except FileNotFoundError:
-        return "Error: 'patch' command not found on this system"
+    try:
+        git_path = shutil.which("git")
+        git_detail = ""
+        if git_path:
+            outcome = _apply_patch_with_git(git_path, path, patch_str)
+            if outcome is not None:
+                if outcome[0] == "ok":
+                    return _format_patch_outcome(outcome, path)
+                git_detail = outcome[1]
+
+        outcome = _apply_patch_with_python(path, patch_str)
+        if outcome[0] == "ok":
+            return _format_patch_outcome(outcome, path)
+
+        detail = outcome[1]
+        if git_detail:
+            detail = f"{git_detail}\n{detail}"
+        return f"Error: patch rejected (dry-run):\n{detail}"
     except Exception as e:
         return f"Error applying patch: {e}"
 
