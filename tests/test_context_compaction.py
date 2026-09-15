@@ -2599,7 +2599,10 @@ def test_her_stage_error_preserves_hashi_capacity_code_without_stage_deadline_fi
     assert "deadline_s" not in StageRequest.__dataclass_fields__
 
     unknown = StageInvocationError("unknown", code="VENDOR_UNDOCUMENTED")
-    assert unknown.error_code == "PROVIDER_UNKNOWN"
+    assert unknown.error_code == "VENDOR_UNDOCUMENTED"
+
+    malformed = StageInvocationError("unknown", code="not a valid code")
+    assert malformed.error_code == "PROVIDER_UNKNOWN"
 
 
 def test_status_reports_effective_route_and_pointer(tmp_path):
