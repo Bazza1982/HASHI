@@ -26,7 +26,7 @@ from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 CACHE_SCHEMA_VERSION = 3
-ADAPTER_REVISION = "openrouter-model-api.v3"
+ADAPTER_REVISION = "openrouter-model-api.v4"
 SUCCESS_TTL = timedelta(hours=24)
 NEGATIVE_TTL = timedelta(minutes=15)
 MAX_RESPONSE_BYTES = 64 * 1024
@@ -44,7 +44,9 @@ OPENROUTER_ENGINES = frozenset(
 OPENROUTER_HOST = "openrouter.ai"
 OPENROUTER_UNIT_SOURCE_URL = "https://openrouter.ai/openapi.json"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
-_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*$")
+_MODEL_ID = re.compile(
+    r"^~?[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*$"
+)
 _PLAIN_DECIMAL = re.compile(r"^(?:0|[0-9]+\.[0-9]+)$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SCHEDULE_GUARD = threading.Lock()
@@ -74,7 +76,27 @@ ENGINE_VENDOR_NAMESPACES: dict[str, str] = {
 
 EXACT_OPENROUTER_MODEL_MAPPINGS: dict[
     tuple[str, str], tuple[str, ...]
-] = {}
+] = {
+    # DeepSeek exposes moving native aliases. OpenRouter's price-list aliases
+    # are the durable cross-channel identity for those same current families;
+    # no DeepSeek pricing endpoint or copied provider schedule is consulted.
+    ("deepseek-api", "deepseek-flash"): (
+        "~deepseek/deepseek-flash-latest",
+    ),
+    ("deepseek-api", "deepseek-v4-pro"): (
+        "~deepseek/deepseek-pro-latest",
+    ),
+}
+
+
+def has_exact_openrouter_mapping(engine: str, model: str) -> bool:
+    """Return whether this execution identity is pinned to OpenRouter facts."""
+
+    key = (
+        normalize_engine(engine).replace("_", "-"),
+        str(model or "").strip().casefold(),
+    )
+    return key in EXACT_OPENROUTER_MODEL_MAPPINGS
 
 
 class PricingSourceError(RuntimeError):

@@ -295,6 +295,218 @@ async def test_deepseek_stream_done_does_not_fabricate_missing_finish_reason(tmp
     assert result.stream_eof is False
 
 
+@pytest.mark.asyncio
+async def test_her_v2_stream_guard_ignores_heartbeats_and_returns_typed_timeout(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.set_her_v2_stream_inactivity_timeout(0.02)
+    stream_calls = 0
+
+    class _StreamResponse:
+        headers = {"x-request-id": "wire-silent-1"}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            while True:
+                await asyncio.sleep(0.005)
+                yield ": keep-alive"
+
+    class _StreamContext:
+        async def __aenter__(self):
+            nonlocal stream_calls
+            stream_calls += 1
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *args, **kwargs: _StreamContext())
+
+    async def capture(_event):
+        return None
+
+    response = await asyncio.wait_for(
+        adapter.generate_response(
+            "answer",
+            "req-silent-stream",
+            on_stream_event=capture,
+        ),
+        timeout=1.0,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_RESPONSE_START_TIMEOUT"
+    assert response.error_retryable is True
+    assert response.stream_metadata["provider_transport_retry_count"] == 0
+    assert response.stream_metadata["provider_stream_inactivity"] == {
+        "timeout_s": 0.02,
+        "meaningful_response_started": False,
+        "clock_scope": "provider_stream_read_wait_only",
+    }
+    assert stream_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_her_v2_stream_guard_resets_on_meaningful_output_not_total_duration(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.set_her_v2_stream_inactivity_timeout(0.02)
+
+    class _StreamResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            await asyncio.sleep(0.012)
+            yield 'data: {"choices":[{"delta":{"content":"a"}}]}'
+            await asyncio.sleep(0.012)
+            yield 'data: {"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}'
+            await asyncio.sleep(0.012)
+            yield "data: [DONE]"
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *args, **kwargs: _StreamContext())
+
+    result = await asyncio.wait_for(
+        adapter._stream_api_once({}, {}, None),
+        timeout=1.0,
+    )
+
+    assert result.text == "ab"
+    assert result.finish_reason == "stop"
+    assert result.stream_done is True
+
+
+@pytest.mark.asyncio
+async def test_her_v2_stream_guard_distinguishes_idle_after_output(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.set_her_v2_stream_inactivity_timeout(0.02)
+
+    class _StreamResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"delta":{"content":"partial"}}]}'
+            while True:
+                await asyncio.sleep(0.005)
+                yield ": keep-alive"
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *args, **kwargs: _StreamContext())
+
+    async def capture(_event):
+        return None
+
+    response = await asyncio.wait_for(
+        adapter.generate_response(
+            "answer",
+            "req-idle-stream",
+            on_stream_event=capture,
+        ),
+        timeout=1.0,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
+    assert response.stream_metadata["provider_activity_observed"] is True
+    assert response.stream_metadata["provider_stream_inactivity"][
+        "meaningful_response_started"
+    ] is True
+
+
+@pytest.mark.asyncio
+async def test_her_v2_stream_guard_does_not_count_foreground_tool_execution(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.set_her_v2_stream_inactivity_timeout(0.02)
+    stream_number = 0
+
+    class _StreamResponse:
+        def __init__(self, lines):
+            self.lines = lines
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            for line in self.lines:
+                yield line
+
+    class _StreamContext:
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            return _StreamResponse(self.lines)
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    first_call = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+        '"id":"call-slow","type":"function","function":{"name":'
+        '"file_list","arguments":"{\\"path\\":\\"/tmp\\"}"}}]},'
+        '"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ]
+    second_call = [
+        'data: {"choices":[{"delta":{"content":"finished"},'
+        '"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+
+    def stream(*_args, **_kwargs):
+        nonlocal stream_number
+        stream_number += 1
+        return _StreamContext(first_call if stream_number == 1 else second_call)
+
+    adapter.client = SimpleNamespace(stream=stream)
+    original_execute = adapter.tool_registry.execute
+
+    async def slow_execute(*args, **kwargs):
+        await asyncio.sleep(0.04)
+        return await original_execute(*args, **kwargs)
+
+    adapter.tool_registry.execute = slow_execute
+
+    async def capture(_event):
+        return None
+
+    response = await asyncio.wait_for(
+        adapter.generate_response(
+            "inspect",
+            "req-slow-tool",
+            on_stream_event=capture,
+        ),
+        timeout=1.0,
+    )
+
+    assert response.is_success is True
+    assert response.text == "finished"
+    assert response.tool_call_count == 1
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/tmp"}, "call-slow")
+    ]
+
+
 @pytest.mark.parametrize(
     ("status", "code", "retryable"),
     [

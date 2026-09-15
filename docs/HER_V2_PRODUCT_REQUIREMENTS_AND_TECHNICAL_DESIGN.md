@@ -1409,6 +1409,50 @@ fresh-connection recovery and the existing side-effect checks. Finalisation
 always reuses immutable Execution evidence; the Execution invocation count
 remains one.
 
+#### 18.1.1 Opt-in model fallback transition
+
+HER v2 may opt an Agent into model fallback through its own typed
+configuration. The mechanism observes the real request and never issues a
+separate health-check call. For an OpenAI-compatible streaming transport, the
+Adapter applies a 300-second meaningful-output inactivity guard to each
+physical SSE request. It counts only time awaiting Provider stream lines;
+local parsing, delivery, foreground Tool execution, and later model
+continuations are outside the clock. Text, reasoning, a valid Tool-call delta,
+audio, or a terminal Provider event resets the guard. HTTP headers, connection
+bytes, usage-only chunks, empty choices, comments, and blank heartbeats do not.
+The guard yields `PROVIDER_RESPONSE_START_TIMEOUT` before the first qualifying
+event and `PROVIDER_STREAM_IDLE_TIMEOUT` after one. It is not a
+`provider.invoke()`, stage, or Turn timeout and does not reduce section 19.3.
+
+After the existing conservative same-target fresh-connection recovery is
+consumed, an eligible typed availability failure may select at most one target
+per configured level:
+
+1. Level 1 uses another allowed model from the same Model Provider.
+2. Level 2, when configured, uses an allowed model from another Provider.
+
+Targets remain in their declared Light or Pro class. Light may upgrade to Pro
+when no Light target is available; Pro never falls back to Light. A target may
+not equal the failed or primary route, a route is never revisited, and a
+fallback affects only the current stage attempt. The next Turn starts from the
+saved primary configuration. Once any Tool with possible side effects has
+started, or replay safety is otherwise unproven, HER fails visibly instead of
+switching models and replaying work.
+
+Before every actual switch, HER must deliver one deterministic localized
+warning naming the failed and target Provider/model and the fallback level.
+Failure to deliver that required warning prevents the switch. The transition,
+failure code, warning receipt, route, and replay decision are audited. Every
+physical Primary, retry, Level 1, and Level 2 call is metered separately; an
+unreceipted failed call remains cost-unknown and does not erase the known
+subtotal. Automatic catalogue estimates use only PAO's OpenRouter price-list
+fact; HER does not query official Provider pricing APIs or carry a price table.
+
+`/fallback <provider> <model> <light|pro>` and its localized menu edit this
+HER-owned configuration only after normal allowlist validation. `/fallback`,
+`on`, `off`, and `clear` expose deterministic status and controls without
+changing `/model` or granting a new Provider/model.
+
 ### 18.2 No process-restart resumption
 
 HER does not reconstruct or resume an in-flight execution stack after process restart.

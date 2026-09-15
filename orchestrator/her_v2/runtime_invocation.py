@@ -9,6 +9,7 @@ import json
 import re
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
@@ -44,6 +45,13 @@ from .models import (
     ToolEvidenceReceipt,
 )
 from .progress import ProviderActivityTracker
+from .provider_fallback import (
+    FALLBACK_MEANINGFUL_OUTPUT_TIMEOUT_S,
+    fallback_failure_eligible,
+    fallback_model_class,
+    fallback_warning_text,
+    next_fallback_profile,
+)
 from .prompts import json_repair_schema_for_stage
 from .runtime_support import _payload_hash
 from .structured import resolve_stage_response
@@ -190,6 +198,13 @@ class RuntimeInvocationMixin:
                 "a compulsory Replan coordinator may be attached only to Execution"
             )
         selected = profile or self.config.profile_for(stage)
+        primary_selected = selected
+        selected_model_class = fallback_model_class(self.config, selected)
+        provider_stream_inactivity_timeout_s = (
+            FALLBACK_MEANINGFUL_OUTPUT_TIMEOUT_S
+            if self.config.fallback_enabled and self.config.fallback_targets
+            else None
+        )
         invocation_plan_id = (
             str(bound_plan_id) if bound_plan_id is not None else state.ledger.plan_id
         )
@@ -337,6 +352,9 @@ class RuntimeInvocationMixin:
                 if checkpoint_coordinator is not None
                 else None
             ),
+            "provider_stream_inactivity_timeout_s": (
+                provider_stream_inactivity_timeout_s
+            ),
         }
         retry_invariant_hash = _payload_hash(invariant_payload)
         repair_schema = json_repair_schema_for_stage(stage, role=role)
@@ -349,6 +367,7 @@ class RuntimeInvocationMixin:
         if stage is Stage.EXECUTION and not role.startswith("sub_agent:"):
             state.last_execution_invocation_id = invocation_id
         provider_retry_count = 0
+        fallback_level = 0
         media_fallback_consumed = False
         attempt = 0
         while True:
@@ -377,6 +396,12 @@ class RuntimeInvocationMixin:
                 allow_side_effects=allow_side_effects,
                 invocation_id=invocation_id,
                 retry_invariant_hash=retry_invariant_hash,
+                fallback_level=fallback_level,
+                fallback_model_class=selected_model_class,
+                request_started_at=datetime.now(timezone.utc).isoformat(),
+                provider_stream_inactivity_timeout_s=(
+                    provider_stream_inactivity_timeout_s
+                ),
                 progress_callback=self._progress_callback(state),
                 provider_activity_callback=self._provider_activity_callback(
                     state, provider_activity
@@ -409,8 +434,15 @@ class RuntimeInvocationMixin:
                     "provider_reasoning": selected.reasoning,
                     "allow_tools": allow_tools,
                     "allow_side_effects": allow_side_effects,
-                    "fresh_connection": attempt > 1,
+                    "fresh_connection": (
+                        fallback_level == 0 and provider_retry_count > 0
+                    ),
                     "provider_retry_count": provider_retry_count,
+                    "fallback_level": fallback_level,
+                    "fallback_model_class": selected_model_class,
+                    "provider_stream_inactivity_timeout_s": (
+                        provider_stream_inactivity_timeout_s
+                    ),
                     "retry_invariant_hash": retry_invariant_hash,
                     "retry_invariants": invariant_payload,
                     "context_summary": _audit_context_summary(attempt_context),
@@ -749,15 +781,35 @@ class RuntimeInvocationMixin:
             )
             retry_kind = "provider_recovery"
             retry_reason = "eligible"
+            fallback_choice: tuple[int, ProviderProfile] | None = None
             if not retry_on_failure:
                 retry_reason = "retry_disabled_for_call"
             elif not last_error.retryable:
                 retry_reason = "failure_non_retryable"
             elif not replay_safe:
                 retry_reason = "side_effect_replay_blocked"
-            elif provider_retry_count >= self.retry_policy.max_provider_retries:
-                retry_reason = "provider_recovery_already_used"
-            will_retry = retry_reason == "eligible"
+            elif (
+                fallback_level == 0
+                and provider_retry_count < self.retry_policy.max_provider_retries
+            ):
+                retry_reason = "eligible"
+            elif not fallback_failure_eligible(last_error):
+                retry_reason = "fallback_failure_ineligible"
+            else:
+                fallback_choice = next_fallback_profile(
+                    self.config,
+                    primary=primary_selected,
+                    current=selected,
+                    current_level=fallback_level,
+                    model_class=selected_model_class,
+                )
+                if fallback_choice is None:
+                    retry_reason = "fallback_unavailable_or_exhausted"
+                else:
+                    retry_kind = f"model_fallback_l{fallback_choice[0]}"
+                    retry_reason = "fallback_eligible"
+            same_target_retry = retry_reason == "eligible"
+            will_retry = same_target_retry or fallback_choice is not None
             possible_side_effects = bool(
                 provider_activity.side_effects_possible or unobserved_side_effects
             )
@@ -782,7 +834,7 @@ class RuntimeInvocationMixin:
                     "automatic_replay_attempted": False,
                 }
             retry_delay = 0.0
-            if will_retry:
+            if same_target_retry:
                 retry_delay = (
                     last_error.retry_after_s
                     if last_error.retry_after_s is not None
@@ -808,7 +860,18 @@ class RuntimeInvocationMixin:
                         "retry_kind": retry_kind,
                         "retry_reason": retry_reason,
                         "retry_delay_s": retry_delay if will_retry else None,
-                        "fresh_connection_on_retry": will_retry,
+                        "fresh_connection_on_retry": same_target_retry,
+                        "fallback_level": fallback_level,
+                        "fallback_target": (
+                            {
+                                "level": fallback_choice[0],
+                                "provider": fallback_choice[1].engine,
+                                "model": fallback_choice[1].model,
+                                "model_class": selected_model_class,
+                            }
+                            if fallback_choice is not None
+                            else None
+                        ),
                         "retry_invariant_hash": retry_invariant_hash,
                         "provider_response_received": response is not None,
                         "provider_activity": provider_activity.snapshot(),
@@ -840,6 +903,76 @@ class RuntimeInvocationMixin:
                     attempts=attempt,
                     details={"retry_reason": retry_reason},
                 ) from last_error
+            if fallback_choice is not None:
+                next_level, next_selected = fallback_choice
+                failed_selected = selected
+                warning_event_id = (
+                    f"{attempt_prefix}:provider-fallback:l{next_level}:warning"
+                )
+                warning_delivered = await self._deliver(
+                    state,
+                    kind="fallback_warning",
+                    text=fallback_warning_text(
+                        failed=failed_selected,
+                        target=next_selected,
+                        level=next_level,
+                    ),
+                    event_id=warning_event_id,
+                    required=True,
+                    phase=stage.value,
+                    provenance="her_v2_provider_fallback",
+                    detail=(
+                        f"failure_code={last_error.error_code}; "
+                        "physical_calls_metered=true; "
+                        "unreceipted_attempt_cost=unknown"
+                    ),
+                )
+                if not warning_delivered:
+                    raise last_error.terminal_copy(
+                        f"{stage.value} fallback was not attempted because the "
+                        "required user warning could not be delivered",
+                        attempts=attempt,
+                        details={
+                            "retry_reason": "fallback_warning_delivery_failed",
+                            "fallback_level": next_level,
+                        },
+                    ) from last_error
+                self._audit(
+                    state,
+                    stage=stage.value,
+                    role=role,
+                    event="provider_fallback_selected",
+                    event_id=f"{attempt_prefix}:provider-fallback:l{next_level}",
+                    provider=next_selected.engine,
+                    model=next_selected.model,
+                    attempt=attempt,
+                    plan_id=invocation_plan_id,
+                    payload={
+                        "fallback_level": next_level,
+                        "model_class": selected_model_class,
+                        "failed_provider": failed_selected.engine,
+                        "failed_model": failed_selected.model,
+                        "target_provider": next_selected.engine,
+                        "target_model": next_selected.model,
+                        "failure_code": last_error.error_code,
+                        "warning_event_id": warning_event_id,
+                        "warning_delivered": True,
+                        "physical_calls_metered": True,
+                        "unreceipted_attempt_cost": "unknown",
+                    },
+                )
+                selected = next_selected
+                fallback_level = next_level
+                invariant_payload = {
+                    **invariant_payload,
+                    "provider": selected.engine,
+                    "model": selected.model,
+                    "provider_reasoning": selected.reasoning,
+                    "fallback_level": fallback_level,
+                    "fallback_model_class": selected_model_class,
+                }
+                retry_invariant_hash = _payload_hash(invariant_payload)
+                continue
             provider_retry_count += 1
             await self._wait_for_stage_retry(
                 state,

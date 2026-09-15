@@ -53,6 +53,7 @@ class PerCallUsageLineItem:
     cost_source: str = "unknown"
     prompt_cache_hit_tokens: int | None = None
     prompt_cache_miss_tokens: int | None = None
+    request_started_at: str = ""
     provider_call_latency_ms: float | None = None
     provider_request_id: str = ""
     attempt: int = 1
@@ -85,6 +86,7 @@ class PerCallUsageLineItem:
             "cost_source": self.cost_source,
             "prompt_cache_hit_tokens": self.prompt_cache_hit_tokens,
             "prompt_cache_miss_tokens": self.prompt_cache_miss_tokens,
+            "request_started_at": self.request_started_at,
             "provider_call_latency_ms": self.provider_call_latency_ms,
             "provider_request_id": self.provider_request_id,
             "attempt": self.attempt,
@@ -143,6 +145,7 @@ def line_item_from_dict(data: dict[str, Any]) -> PerCallUsageLineItem:
         prompt_cache_miss_tokens=_optional_nonnegative_int(
             data.get("prompt_cache_miss_tokens")
         ),
+        request_started_at=str(data.get("request_started_at") or ""),
         provider_call_latency_ms=_optional_nonnegative_float(
             data.get("provider_call_latency_ms")
         ),
@@ -346,6 +349,21 @@ class UsageReceipt:
                 return None
             known.append(float(li.cost_usd))
         return round(sum(known), 6)
+
+    @property
+    def known_cost_usd(self) -> float:
+        """Known subtotal without pretending unreceipted calls were free."""
+
+        return round(
+            sum(float(li.cost_usd) for li in self.line_items if li.cost_usd is not None),
+            6,
+        )
+
+    @property
+    def unknown_cost_requests(self) -> int:
+        """Physical calls whose provider cost cannot yet be established."""
+
+        return sum(1 for li in self.line_items if li.cost_usd is None)
 
     @property
     def has_local_only(self) -> bool:
@@ -601,7 +619,21 @@ def _format_receipt_lines(
 ) -> str:
     cost = receipt.cost_usd
     resolved_label = label or _translate(label_key, locale=locale)
-    if cost is None:
+    if cost is None and receipt.known_cost_usd > 0:
+        unknown = receipt.unknown_cost_requests
+        cost_line = _translate(
+            (
+                "meter.tail.cost.partial.one"
+                if unknown == 1
+                else "meter.tail.cost.partial.many"
+            ),
+            locale=locale,
+            icon=icon,
+            label=resolved_label,
+            cost=_fmt_cost(receipt.known_cost_usd, locale=locale),
+            unknown=unknown,
+        )
+    elif cost is None:
         cost_line = _translate(
             "meter.tail.cost.unknown",
             locale=locale,

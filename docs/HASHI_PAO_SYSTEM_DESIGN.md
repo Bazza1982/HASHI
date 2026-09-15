@@ -150,6 +150,17 @@ reported cost is actual, while a catalogue valuation for another channel is
 an explicitly labelled OpenRouter reference estimate. Every usage row freezes
 the price revision and observed cache dimensions used at completion.
 
+OpenRouter's public model price list is the permanent, sole automatic source
+of network-model price schedules, including estimates for models executed
+through native Provider adapters such as DeepSeek. PAO does not query an
+execution Provider's official pricing API, copy a Provider's peak/off-peak
+schedule, or silently substitute a local price when the exact OpenRouter fact
+is unavailable. A native moving alias may be bound explicitly to an exact
+OpenRouter-managed `~provider/...-latest` price-list identity. A missing,
+ambiguous, stale, or incomplete fact remains unknown. An amount reported on
+the actual execution receipt remains observed billing evidence and takes
+precedence over any catalogue estimate; it is not a second schedule source.
+
 ## 5. State model
 
 ```text

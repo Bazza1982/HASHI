@@ -65,6 +65,76 @@ class ProviderProtocolForensicError(RuntimeError):
     """A mandatory private Provider-protocol record could not be persisted."""
 
 
+class _ProviderStreamInactivityTimeout(httpx.ReadTimeout):
+    """Typed HER v2 timeout for one unfinished SSE provider call."""
+
+    def __init__(
+        self,
+        *,
+        timeout_s: float,
+        meaningful_response_started: bool,
+        request: httpx.Request | None = None,
+    ) -> None:
+        code = (
+            "PROVIDER_STREAM_IDLE_TIMEOUT"
+            if meaningful_response_started
+            else "PROVIDER_RESPONSE_START_TIMEOUT"
+        )
+        phase = "became idle" if meaningful_response_started else "did not start"
+        kwargs = {"request": request} if request is not None else {}
+        super().__init__(
+            f"provider SSE response {phase} within {timeout_s:g}s of read time",
+            **kwargs,
+        )
+        self.hashi_error_code = code
+        self.hashi_disable_inplace_retry = True
+        self.provider_activity_observed = meaningful_response_started
+        self.hashi_stream_inactivity = {
+            "timeout_s": float(timeout_s),
+            "meaningful_response_started": meaningful_response_started,
+            "clock_scope": "provider_stream_read_wait_only",
+        }
+
+
+@dataclass
+class _ProviderStreamInactivityGuard:
+    """Count only time awaiting SSE lines; local processing is excluded."""
+
+    timeout_s: float
+    clock: Callable[[], float] = time.monotonic
+    waited_without_meaningful_s: float = 0.0
+    meaningful_response_started: bool = False
+
+    def mark_meaningful(self) -> None:
+        self.meaningful_response_started = True
+        self.waited_without_meaningful_s = 0.0
+
+    def _timeout_error(self, response: Any) -> _ProviderStreamInactivityTimeout:
+        try:
+            request = response.request
+        except (AttributeError, RuntimeError):
+            request = None
+        return _ProviderStreamInactivityTimeout(
+            timeout_s=self.timeout_s,
+            meaningful_response_started=self.meaningful_response_started,
+            request=request if isinstance(request, httpx.Request) else None,
+        )
+
+    async def next_line(self, iterator: Any, response: Any) -> str:
+        remaining = self.timeout_s - self.waited_without_meaningful_s
+        if remaining <= 0:
+            raise self._timeout_error(response)
+        started = float(self.clock())
+        try:
+            return await asyncio.wait_for(anext(iterator), timeout=remaining)
+        except TimeoutError as exc:
+            raise self._timeout_error(response) from exc
+        finally:
+            self.waited_without_meaningful_s += max(
+                0.0, float(self.clock()) - started
+            )
+
+
 HASHI_COMPACTION_CAPABILITIES = {
     "prompt_isolation": True,
     "tool_disablement": True,
@@ -902,11 +972,22 @@ def _annotate_stream_exception(
 async def _iter_provider_stream_lines(
     response: Any,
     state: Mapping[str, Any],
+    *,
+    inactivity_guard: _ProviderStreamInactivityGuard | None = None,
 ):
     """Attach already observed protocol facts if the wire iterator aborts."""
 
     try:
-        async for line in response.aiter_lines():
+        iterator = response.aiter_lines().__aiter__()
+        while True:
+            try:
+                line = (
+                    await inactivity_guard.next_line(iterator, response)
+                    if inactivity_guard is not None
+                    else await anext(iterator)
+                )
+            except StopAsyncIteration:
+                return
             yield line
     except BaseException as exc:
         _annotate_stream_exception(exc, state)
@@ -1159,12 +1240,24 @@ def _backend_failure_response(
     retryable = False
     code = "PROVIDER_UNKNOWN"
     description = "The provider request failed for an unknown technical reason."
+    explicit_code = str(getattr(error, "hashi_error_code", "") or "")
 
     if isinstance(error, ProviderProtocolForensicError):
         code = "AUDIT_PERSISTENCE_FAILURE"
         description = (
             "HASHI stopped because the mandatory private Provider protocol "
             "forensic record could not be persisted."
+        )
+    elif explicit_code in {
+        "PROVIDER_RESPONSE_START_TIMEOUT",
+        "PROVIDER_STREAM_IDLE_TIMEOUT",
+    }:
+        code = explicit_code
+        retryable = True
+        description = (
+            "The provider stream stopped producing meaningful output."
+            if explicit_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
+            else "The provider stream produced no meaningful output."
         )
     elif isinstance(error, MultimodalContractError):
         code = error.code
@@ -1259,6 +1352,9 @@ def _backend_failure_response(
                 getattr(error, "provider_activity_observed", False)
             ),
             "provider_http_failure": _provider_http_failure_diagnostics(error),
+            "provider_stream_inactivity": dict(
+                getattr(error, "hashi_stream_inactivity", {}) or {}
+            ),
         },
     )
 
@@ -1266,6 +1362,8 @@ def _backend_failure_response(
 def _transient_provider_call_error(error: Exception) -> bool:
     """Return whether one unfinished provider HTTP call may be retried in place."""
 
+    if bool(getattr(error, "hashi_disable_inplace_retry", False)):
+        return False
     response = getattr(error, "response", None)
     status = (
         int(response.status_code)
@@ -1441,6 +1539,30 @@ class OpenRouterAdapter(BaseBackend):
         self._provider_call_observer: ProviderCallObserver | None = None
         self._provider_invocation_context: dict[str, Any] = {}
         self._active_provider_wire_context: dict[str, Any] = {}
+        self._her_v2_stream_inactivity_timeout_s: float | None = None
+
+    def set_her_v2_stream_inactivity_timeout(
+        self, timeout_s: float | None
+    ) -> None:
+        """Enable the narrow SSE read guard for an opted-in HER v2 request."""
+
+        if timeout_s is None:
+            self._her_v2_stream_inactivity_timeout_s = None
+            return
+        timeout = float(timeout_s)
+        if timeout <= 0:
+            raise ValueError("HER v2 stream inactivity timeout must be positive")
+        self._her_v2_stream_inactivity_timeout_s = timeout
+
+    def _new_her_v2_stream_inactivity_guard(
+        self,
+    ) -> _ProviderStreamInactivityGuard | None:
+        timeout = getattr(self, "_her_v2_stream_inactivity_timeout_s", None)
+        return (
+            _ProviderStreamInactivityGuard(float(timeout))
+            if timeout is not None
+            else None
+        )
 
     def _provider_evidence_url(self) -> str:
         """Return the effective non-secret HTTP endpoint for wire evidence."""
@@ -2770,6 +2892,7 @@ class OpenRouterAdapter(BaseBackend):
             "tool_calls": [],
         }
         protocol_state["wire_evidence"] = wire_evidence
+        inactivity_guard = self._new_her_v2_stream_inactivity_guard()
 
         async with self.client.stream(
             "POST",
@@ -2794,7 +2917,11 @@ class OpenRouterAdapter(BaseBackend):
                 payload, stream_request
             )
 
-            async for line in _iter_provider_stream_lines(response, protocol_state):
+            async for line in _iter_provider_stream_lines(
+                response,
+                protocol_state,
+                inactivity_guard=inactivity_guard,
+            ):
                 self._touch_activity()
                 event_arrival = len(wire_evidence["sse_events"]) + 1
                 wire_evidence["sse_events"].append(
@@ -2805,6 +2932,8 @@ class OpenRouterAdapter(BaseBackend):
                     continue
                 data_str = line[6:].strip()
                 if data_str == "[DONE]":
+                    if inactivity_guard is not None:
+                        inactivity_guard.mark_meaningful()
                     saw_done = True
                     break
 
@@ -2888,6 +3017,8 @@ class OpenRouterAdapter(BaseBackend):
                     or finish_reason
                 ):
                     provider_activity_observed = True
+                    if inactivity_guard is not None:
+                        inactivity_guard.mark_meaningful()
 
                 if reasoning_text and on_stream_event:
                     reasoning_chunks.append(reasoning_text)

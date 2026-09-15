@@ -325,6 +325,17 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        "fallback",
+        "cmd_fallback",
+        "Configure HER v2 provider fallback",
+        "models",
+        guide=CommandGuide(
+            "/fallback [on|off|clear|[l1|l2] <provider> <model> <light|pro>]",
+            ("on", "off", "clear", "l1", "l2"),
+            example="/fallback openrouter-api deepseek/deepseek-v4-flash light",
+        ),
+    ),
+    CommandSpec(
         "model",
         "cmd_model",
         "View or change model configuration",

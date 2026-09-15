@@ -134,6 +134,16 @@ def _optional_nonnegative_float(value: Any) -> float | None:
         return None
 
 
+def _request_recovery_kind(request: StageRequest) -> str:
+    if request.stage is Stage.JSON_REPAIR:
+        return "json_repair"
+    if int(getattr(request, "fallback_level", 0) or 0) in {1, 2}:
+        return f"model_fallback_l{int(request.fallback_level)}"
+    if request.attempt > 1:
+        return "fresh_connection_retry"
+    return "none"
+
+
 def _persona_commentary_agent_failure(text: str) -> tuple[bool, str]:
     """Recognise only the Persona commentary agent's explicit JSON failure."""
 
@@ -341,6 +351,8 @@ def _retryable_for_provider_code(code: ProviderFailureCode | str) -> bool:
         ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT.value,
         ProviderFailureCode.PROVIDER_RATE_LIMITED.value,
         ProviderFailureCode.PROVIDER_CAPACITY_UNAVAILABLE.value,
+        ProviderFailureCode.PROVIDER_QUOTA_EXHAUSTED.value,
+        ProviderFailureCode.PROVIDER_MODEL_UNAVAILABLE.value,
         ProviderFailureCode.PROVIDER_SERVER_ERROR.value,
         ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value,
         ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT.value,
@@ -2075,7 +2087,10 @@ class _AdapterDelivery(DeliveryPort):
                 delivered=False,
                 disposition="early_delivery_disabled",
             )
-        if kind in {"acknowledgement", "immediate"}:
+        if kind == "fallback_warning":
+            event_kind = "fallback_warning"
+            delivery_class = DELIVERY_USER_COMMENTARY
+        elif kind in {"acknowledgement", "immediate"}:
             event_kind = KIND_ACKNOWLEDGEMENT
             delivery_class = DELIVERY_USER_COMMENTARY
         else:
@@ -2719,6 +2734,9 @@ class HashiStageProvider(StageProvider):
             prompt_cache_miss_tokens = _optional_nonnegative_int(
                 call.get("prompt_cache_miss_tokens")
             )
+            request_started_at = str(
+                call.get("request_started_at") or ""
+            ).strip()
             provider_call_latency_ms = _optional_nonnegative_float(
                 call.get("provider_call_latency_ms")
             )
@@ -2806,11 +2824,7 @@ class HashiStageProvider(StageProvider):
                     0,
                     int(call.get("retry_count") or max(0, int(attempt) - 1)),
                 ),
-                recovery_kind=(
-                    "fresh_connection_retry"
-                    if int(attempt) > 1
-                    else resolved_recovery_kind
-                ),
+                recovery_kind=resolved_recovery_kind,
                 compact=bool(call.get("compact", False)),
                 status=status,
                 pricing_revision=pricing_revision,
@@ -2819,6 +2833,7 @@ class HashiStageProvider(StageProvider):
             # Dynamic attachment keeps mixed old/new module shapes safe.
             line_item.prompt_cache_hit_tokens = prompt_cache_hit_tokens
             line_item.prompt_cache_miss_tokens = prompt_cache_miss_tokens
+            line_item.request_started_at = request_started_at
             line_item.provider_call_latency_ms = provider_call_latency_ms
             observed_provider_request_ids.add(provider_request_id)
             self.usage_line_items.append(line_item)
@@ -3010,13 +3025,14 @@ class HashiStageProvider(StageProvider):
             token_source="unknown",
             cost_usd=None,
             cost_source="unknown",
+            request_started_at=str(getattr(request, "request_started_at", "") or ""),
             provider_request_id="hashi-provider:"
             + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
             attempt=max(1, int(request.attempt)),
             retry_count=max(0, int(request.attempt) - 1),
             recovery_kind=(
-                "fresh_connection_retry"
-                if request.attempt > 1
+                _request_recovery_kind(request)
+                if _request_recovery_kind(request) != "none"
                 else (
                     str(getattr(self, "default_recovery_kind", "none") or "none")
                     if str(getattr(self, "default_recovery_kind", "none") or "none")
@@ -3203,6 +3219,13 @@ class HashiStageProvider(StageProvider):
             normalized = str(profile.reasoning or "").strip().casefold()
             backend.set_reasoning_enabled(
                 normalized not in {"", "none", "off", "false", "0", "disabled"}
+            )
+        set_stream_inactivity_timeout = getattr(
+            backend, "set_her_v2_stream_inactivity_timeout", None
+        )
+        if callable(set_stream_inactivity_timeout):
+            set_stream_inactivity_timeout(
+                request.provider_stream_inactivity_timeout_s
             )
 
         supports_tools, controls_tools = _backend_tool_control(backend)
@@ -3718,11 +3741,7 @@ class HashiStageProvider(StageProvider):
                 model=profile.model,
                 invocation_id=request.invocation_id,
                 attempt=request.attempt,
-                recovery_kind=(
-                    "json_repair"
-                    if request.stage is Stage.JSON_REPAIR
-                    else ("fresh_connection_retry" if request.attempt > 1 else "none")
-                ),
+                recovery_kind=_request_recovery_kind(request),
                 turn_id=request.turn_id,
                 request_ref=request.request_ref,
                 role=request.role,
@@ -4116,11 +4135,7 @@ class HashiStageProvider(StageProvider):
                 response=response,
                 invocation_id=request.invocation_id,
                 attempt=request.attempt,
-                recovery_kind=(
-                    "json_repair"
-                    if request.stage is Stage.JSON_REPAIR
-                    else ("fresh_connection_retry" if request.attempt > 1 else "none")
-                ),
+                recovery_kind=_request_recovery_kind(request),
             )
             native_fallback_attempted = False
             if (

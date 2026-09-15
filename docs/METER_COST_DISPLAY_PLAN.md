@@ -167,6 +167,16 @@ PAO Functions 现在通过 `tools/pricing_sources.py` 提供唯一的派生价�
 
 OpenRouter 的公开模型接口是价格与能力共用的自动元数据来源：
 
+- 这是长期且唯一的网络模型自动价目来源，包括经 DeepSeek 等原生 Provider
+  Adapter 执行的模型估值。实现不得改查供应商官方定价 API，不得复制峰谷时段
+  价表，也不得在 OpenRouter 精确事实缺失时悄悄使用本地替代价；此时必须保持
+  `cost_usd: null`。供应商在真实调用回执中实报的金额仍是实际观测证据，优先于
+  目录估值，但不构成第二套价目来源。
+- 原生 Provider 的移动 alias 可以显式绑定到 OpenRouter 自己维护的
+  `~provider/...-latest` 精确 price-list identity。当前 `deepseek-flash` 与
+  `deepseek-v4-pro` 分别绑定 `~deepseek/deepseek-flash-latest` 与
+  `~deepseek/deepseek-pro-latest`；价格与能力共用该映射，不做模糊猜测。
+
 - 缓存键严格区分实际执行 Engine、配置模型和来源模型。已限定 ID 直接使用；
   公共 Engine 通过 Provider namespace 自动构造精确 ID；其他 Engine 只接受
   完整目录中的唯一 exact ID／canonical ID／basename／声明 alias。响应
@@ -204,9 +214,15 @@ OpenRouter 的公开模型接口是价格与能力共用的自动元数据来源
 旧账。Codex CLI／app-server 的 cache hit 与可精确导出的 miss 从原始 usage
 贯通到 HER、前后台账本和 meter；字段缺失与 Provider 报告零保持不同。
 
-本节已完成离线回归和一次有界真实 OpenRouter 单模型 GET（价格与能力共享
-同一证据 revision）；三实例 Functions
-采用与真实“选择模型 → 查价 → 用量展示”终端验收仍须在最终部署阶段完成。
+HER v2 fallback 的 Primary、同 Provider Level 1、跨 Provider Level 2 以及内部
+重试均按真实物理调用分别落账，使用各自的实际 Engine／model 与冻结 revision。
+已取消或失败且没有 usage receipt 的调用成本保持未知，不能写成零；同一回合仍
+展示其余已知小计和未知调用数，不能因一个未知项吞掉已知金额。
+
+本节已完成离线回归和有界真实 OpenRouter 查询（价格与能力共享同一证据
+revision）。2026-09-15，HASHI1 的 Lily 已通过 `/reboot min` 单独采用并完成
+真实“请求 → 查价 → 用量展示”验收；HASHI1 其余 Agent 与其他实例没有在该次
+授权范围内采用，不能据此宣称全局部署完成。
 
 ---
-_更新时间：2026-09-14 · v2.4 紧凑尾部模型展示与估价文案_
+_更新时间：2026-09-15 · v2.5 OpenRouter-only 价目来源与 fallback 分调用计价_

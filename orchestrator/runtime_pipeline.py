@@ -2163,6 +2163,10 @@ def wrap_her_persona_stream(
             return await _send_event(
                 event, purpose="native_audio_fallback_warning", commentary=False
             )
+        if getattr(event, "kind", None) == "fallback_warning":
+            return await _send_event(
+                event, purpose="provider_fallback_warning", commentary=False
+            )
         purpose = (
             "task_acknowledgement"
             if getattr(event, "kind", None) == KIND_ACKNOWLEDGEMENT

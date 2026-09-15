@@ -7,6 +7,7 @@ import pytest
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.models import Route, Stage, TriageClassification
 from orchestrator.her_v2.runtime_configuration import (
     HER_V2_CAPABILITY_REVISION,
@@ -97,6 +98,76 @@ def _manager(tmp_path, *, state: dict | None = None) -> FlexibleBackendManager:
         },
     )
     return FlexibleBackendManager(config, global_config, secrets={})
+
+
+def test_provider_fallback_policy_parses_level_and_model_class_targets():
+    raw = _her_v2_config()
+    raw["fallback"] = {
+        "enabled": True,
+        "level1": {
+            "pro": {"provider": "deepseek-api", "model": "deepseek-v4-pro"}
+        },
+        "level2": {
+            "light": {
+                "provider": "openrouter-api",
+                "model": "deepseek/deepseek-v4-flash",
+            }
+        },
+    }
+
+    parsed = HERv2Config.from_mapping(raw)
+
+    assert parsed.fallback_enabled is True
+    assert parsed.fallback_target(1, "light").model == "deepseek-v4-pro"
+    assert parsed.fallback_target(1, "pro").model == "deepseek-v4-pro"
+    assert parsed.fallback_target(2, "light").engine == "openrouter-api"
+    assert parsed.fallback_target(2, "pro") is None
+
+
+def test_fallback_configuration_persists_and_validates_allowed_models(tmp_path):
+    manager = _manager(tmp_path)
+    current = manager.get_her_v2_configuration()
+    selected = manager.prepare_her_v2_fallback(
+        enabled=True,
+        level=2,
+        model_class="light",
+        provider="openrouter-api",
+        model="deepseek/deepseek-v4-flash",
+        current=current,
+    )
+
+    manager.apply_her_v2_configuration(selected)
+    restored = manager.get_her_v2_configuration()
+
+    target = restored.fallback_target(2, "light")
+    assert restored.fallback_enabled is True
+    assert target is not None
+    assert target.provider == "openrouter-api"
+    assert target.model == "deepseek/deepseek-v4-flash"
+    persisted = json.loads((tmp_path / "agent" / "state.json").read_text())
+    assert persisted["her_v2_configuration"]["fallback"] == {
+        "enabled": True,
+        "level2": {
+            "light": {
+                "provider": "openrouter-api",
+                "model": "deepseek/deepseek-v4-flash",
+            }
+        },
+    }
+
+
+def test_pro_route_never_selects_a_light_only_fallback():
+    raw = _her_v2_config()
+    raw["fallback"] = {
+        "enabled": True,
+        "level1": {
+            "light": {"provider": "deepseek-api", "model": "deepseek-v4-flash"}
+        },
+    }
+
+    parsed = HERv2Config.from_mapping(raw)
+
+    assert parsed.fallback_target(1, "pro") is None
 
 
 def test_retired_configured_her_mode_normalizes_to_planned(tmp_path):

@@ -174,6 +174,17 @@ def _her_v2_targets(selected) -> tuple[tuple[str, str], ...]:
             model = getattr(target, "model", "")
         if provider and model:
             targets.append((str(provider), str(model)))
+    for level_targets in (
+        getattr(selected, "fallback_targets", None) or {}
+    ).values():
+        for target in level_targets.values():
+            if isinstance(target, dict):
+                provider, model = target.get("provider"), target.get("model")
+            else:
+                provider = getattr(target, "provider", "")
+                model = getattr(target, "model", "")
+            if provider and model:
+                targets.append((str(provider), str(model)))
     return tuple(dict.fromkeys(targets))
 
 

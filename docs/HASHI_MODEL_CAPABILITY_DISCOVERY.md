@@ -63,6 +63,12 @@ basename, or declared alias. Ambiguity fails closed. There is no prefix,
 family, similarity, or fuzzy-name matching; genuinely private aliases require
 an explicit reviewed override.
 
+A native Provider's documented moving model alias may use one explicit shared
+mapping to the corresponding OpenRouter-managed `~provider/...-latest`
+identity. The same mapping serves capability and price consumers so the two
+facts cannot drift. It does not authorize fuzzy matching, an official Provider
+pricing API, or a copied Provider price schedule.
+
 Price and capability consumers share this identity resolver and raw evidence.
 For a direct or CLI Engine, OpenRouter pricing is labelled a cross-channel
 reference estimate; it is never evidence that the request used OpenRouter or

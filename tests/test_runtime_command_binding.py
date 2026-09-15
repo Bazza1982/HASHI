@@ -275,6 +275,27 @@ def test_her_v2_callbacks_are_bound_to_exactly_one_runtime_handler(
     assert matches == [method_name]
 
 
+@pytest.mark.parametrize(
+    "callback_data",
+    [
+        "fallback:refresh",
+        "fallback:toggle",
+        "fallback:slot:1:light",
+        "fallback:provider:1:light:0:abcdef",
+        "fallback:model:2:pro:0:abcdef:1:abcdef",
+        "fallback:clear:all",
+    ],
+)
+def test_fallback_callbacks_are_bound_to_exactly_one_runtime_handler(callback_data):
+    matches = [
+        binding.method_name
+        for binding in runtime_command_binding.CALLBACK_BINDINGS
+        if re.match(binding.pattern, callback_data)
+    ]
+
+    assert matches == ["callback_fallback"]
+
+
 def test_bind_flexible_runtime_handlers_preserves_static_binding_count(monkeypatch):
     added_handlers = []
     added_errors = []

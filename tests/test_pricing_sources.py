@@ -243,6 +243,52 @@ def test_direct_engine_gets_explicit_openrouter_reference_price(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    ("model", "source_model"),
+    [
+        ("deepseek-flash", "~deepseek/deepseek-flash-latest"),
+        ("deepseek-v4-pro", "~deepseek/deepseek-pro-latest"),
+    ],
+)
+def test_current_deepseek_aliases_use_openrouter_price_list_identity(
+    model,
+    source_model,
+):
+    assert pricing_sources.resolve_source_model_id("deepseek-api", model) == source_model
+
+
+def test_direct_deepseek_price_fact_comes_from_openrouter_only(tmp_path):
+    source_model = "~deepseek/deepseek-flash-latest"
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        return _openrouter_response(
+            source_model,
+            prompt="0.00000015",
+            completion="0.0000006",
+            cache_read="0.000000003",
+            cache_write=None,
+            request=None,
+        )
+
+    fact = pricing_sources.refresh_pricing_fact(
+        "deepseek-api",
+        "deepseek-flash",
+        cache_path=tmp_path / "pricing.json",
+        fetcher=fetch,
+        now=NOW,
+    )
+
+    assert fact.status == "known"
+    assert fact.scope == "openrouter_reference"
+    assert fact.source_engine == "openrouter-api"
+    assert fact.source_model_id == source_model
+    assert seen == [
+        "https://openrouter.ai/api/v1/model/~deepseek/deepseek-flash-latest"
+    ]
+
+
 def test_broker_engine_uses_only_unique_exact_catalogue_basename(tmp_path):
     catalog = pricing_sources.HttpEvidence(
         status=200,
@@ -614,6 +660,14 @@ def test_successful_model_configuration_schedules_prewarm_without_owning_price(
         pro_provider="openrouter-api",
         pro_model="vendor/pro",
         route_targets={},
+        fallback_targets={
+            1: {
+                "light": SimpleNamespace(
+                    provider="deepseek-api",
+                    model="deepseek-flash",
+                )
+            }
+        },
     )
     manager = SimpleNamespace(
         apply_her_v2_configuration=lambda value: None,
@@ -628,6 +682,7 @@ def test_successful_model_configuration_schedules_prewarm_without_owning_price(
     assert calls == [
         ("openrouter-api", "vendor/fast", tmp_path / "tmp" / "pricing-facts-v1.json"),
         ("openrouter-api", "vendor/pro", tmp_path / "tmp" / "pricing-facts-v1.json"),
+        ("deepseek-api", "deepseek-flash", tmp_path / "tmp" / "pricing-facts-v1.json"),
     ]
 
 

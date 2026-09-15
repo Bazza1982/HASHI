@@ -120,6 +120,20 @@ estimate, and cache/reasoning/reported zero remain distinct. Never render
 partial or unknown cost as complete `$0.0000`. See
 [metering](METER_COST_DISPLAY_PLAN.md).
 
+OpenRouter's public price list is the sole automatic network-model schedule,
+including reference estimates for native DeepSeek and other direct Providers.
+Never add an official Provider pricing API or copy a time-band price table;
+missing exact OpenRouter evidence stays unknown. Native moving aliases use an
+explicit shared `~provider/...-latest` identity for price and capability.
+
+HER v2 model fallback is opt-in and request-observed: one safe same-target
+recovery, then same-Provider Level 1 and configured cross-Provider Level 2.
+Light may upgrade to Pro; Pro never downgrades. A narrow per-SSE-call
+meaningful-output read guard ignores heartbeats and excludes Tool execution;
+never wrap `provider.invoke()`, a stage, or a Turn in that timeout. Warn the
+user before every switch, block replay after uncertain effects, and meter each
+physical call independently.
+
 Adapters validate a tool batch before effects; malformed calls execute
 zero times and completed calls never replay. Bounded repair preserves
 Provider fields, finish/error, identity and retry count. DeepSeek uses native

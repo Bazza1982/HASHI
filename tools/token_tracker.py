@@ -37,7 +37,7 @@ PRICING: dict[str, dict[str, float]] = {
     "gemini-2.0-flash":         {"input": 0.10,  "output": 0.40},
     "gemini-3.1-pro-preview":   {"input": 2.00,  "output": 12.00, "thinking": 12.00},
     "gemini-2.5-flash-preview": {"input": 0.15,  "output": 0.60},
-    # DeepSeek
+    # DeepSeek (historical OpenRouter catalogue snapshots)
     "deepseek-v4-flash":        {"input": 0.14,  "cached": 0.0028,   "output": 0.28},
     "deepseek-v4-flash-vision-exp": {"input": 0.14, "cached": 0.0028, "output": 0.28},
     "deepseek-v4-pro":          {"input": 0.435, "cached": 0.003625, "output": 0.87},
@@ -310,6 +310,18 @@ def resolve_usage_cost(
             schedule_prewarm(engine, model)
         except Exception:
             pass
+
+    if fact is not None and fact.status == "unknown":
+        try:
+            from tools.pricing_sources import has_exact_openrouter_mapping
+
+            if has_exact_openrouter_mapping(engine, model):
+                # An explicit moving-alias binding is authoritative. Missing
+                # OpenRouter evidence remains unknown instead of regressing to
+                # a historical local snapshot for a similarly named model.
+                return None, "unknown", "unknown"
+        except Exception:
+            return None, "unknown", "unknown"
 
     if _static_model_has_pricing(model):
         return (
