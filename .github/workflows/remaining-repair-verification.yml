@@ -11,7 +11,6 @@ jobs:
     env:
       TZ: UTC
       PYTHONUTF8: '1'
-      HASHI_TEST_NETWORK: '0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,16 +22,18 @@ jobs:
           uv python install 3.12.13 --install-dir "$RUNNER_TEMP/repair-python"
           PY=$(find "$RUNNER_TEMP/repair-python" -path '*/bin/python3.12' -type f | head -1)
           test -n "$PY"
-          "$PY" -m ensurepip
+          uv venv --python "$PY" --seed "$RUNNER_TEMP/repair-python/venv"
+          PY="$RUNNER_TEMP/repair-python/venv/bin/python"
           "$PY" -m pip install -q -r constraints/standard-py312.lock '.[test]' ruff
           echo "REPAIR_PYTHON=$PY" >> "$GITHUB_ENV"
       - name: Archive clean source and isolated interpreter
         run: |
           mkdir -p repair-transfer
           git archive --format=tar 73f706d9d0247316df1f9ab2348708e894357649 > repair-transfer/source.tar
+          git bundle create repair-transfer/source.bundle refs/remotes/origin/main
           tar -czf repair-transfer/python.tar.gz -C "$RUNNER_TEMP/repair-python" .
           printf '%s\n' '73f706d9d0247316df1f9ab2348708e894357649' > repair-transfer/SOURCE_SHA
-          sha256sum repair-transfer/source.tar repair-transfer/python.tar.gz > repair-transfer/SHA256SUMS
+          sha256sum repair-transfer/source.tar repair-transfer/python.tar.gz repair-transfer/source.bundle > repair-transfer/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: isolated-repair-checkout
