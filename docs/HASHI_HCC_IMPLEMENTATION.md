@@ -198,12 +198,17 @@ interpreter, not in a running HASHI Core. Source baseline as recorded above.
   removals, missing revision checks, missing process lock, ignored flag writes,
   and permission failure after publication all made their focused test fail.
   All mutations were restored; the acceptance tests then passed again.
-- Bare core gate was attempted, not declared green. It exposed
-  `test_adapter_reconciles_old_inflight_ledger_without_resuming_it`; the identical
-  failure was reproduced on an untouched baseline worktree. The full run later
-  exceeded the sandbox bound at `test_default_hot_probe_does_not_seed_from_core_loaded_modules`;
-  a baseline-only probe also remained in source-manifest construction at its
-  smaller time bound. Neither test was deleted, reclassified or weakened.
+- Bare core gate was attempted, not declared green. The reconcile case it first
+  exposed was later confirmed as a stale expectation of the deferred-
+  reconciliation semantics rather than an HCC regression: when the inflight
+  owner is not confirmed dead, reconciliation is deferred and the Turn is not
+  resumed. The test is now
+  `test_adapter_defers_reconciliation_when_inflight_owner_is_not_confirmed_dead_without_resuming_it`
+  and is no longer a known failure. The full run still exceeded the sandbox
+  bound at `test_default_hot_probe_does_not_seed_from_core_loaded_modules`; a
+  baseline-only probe also remained in source-manifest construction at its
+  smaller time bound. That boundary test was not deleted, reclassified or
+  weakened.
 - Protected-Core guard, executable lint and whitespace checks passed in sandbox.
   CI runner results and exact final counts belong in the branch's verification
   report, not an assertion that sandbox success proves deployment success.

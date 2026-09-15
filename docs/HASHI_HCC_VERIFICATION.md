@@ -39,10 +39,11 @@ Windows 的 11 个跳过均来自已有测试的平台条件：POSIX 权限位/�
 
 曾运行更广的 core gate，**不能宣称其全部通过**：
 
-1. `tests/test_her_v2_adapter.py::test_adapter_reconciles_old_inflight_ledger_without_resuming_it`：预期 ERROR、实际 EXECUTING。同样的失败已在未修改的 `79a204a` 基线工作树独立复现，不由 HCC 引入。
-2. 扩大运行在 `tests/test_function_generation.py::test_default_hot_probe_does_not_seed_from_core_loaded_modules` 附近达到沙盒时间上限。基线单独探测在较短的时间界限内也停留在 source-manifest 构建；这只能证明本次未完成该验证，不能证明该测试必然失败。
+1. 扩大运行在 `tests/test_function_generation.py::test_default_hot_probe_does_not_seed_from_core_loaded_modules` 附近达到沙盒时间上限。基线单独探测在较短的时间界限内也停留在 source-manifest 构建；这只能证明本次未完成该验证，不能证明该测试必然失败。
 
-这两项测试没有删除、放宽、重分类或加入跳过。它们不包含在上述 446 项组件回归中。本地验收应分别复核，不要把已知基线问题伪装成 HCC 的测试通过。
+该测试没有删除、放宽、重分类或加入跳过。它不包含在上述 446 项组件回归中。本地验收应分别复核，不要把已知基线问题伪装成 HCC 的测试通过。
+
+对账相关用例已从已知失败边界移除：`tests/test_her_v2_adapter.py::test_adapter_defers_reconciliation_when_inflight_owner_is_not_confirmed_dead_without_resuming_it` 现在断言 owner 未被确认死亡时对账暂缓、不恢复执行，与修复后的实际行为一致。
 
 没有调用真实模型、天气/新闻/交通 API；没有测量生产延迟，也没有验证所有 provider 的远端历史擦除。HCC OFF 撤销的是活动 PCM 区块，不承诺擦除历史回答、原始审计或 provider 保留的旧对话。
 
