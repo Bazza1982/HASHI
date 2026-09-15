@@ -60,6 +60,7 @@ from orchestrator import runtime_long
 from orchestrator import runtime_media
 from orchestrator import runtime_menu_views
 from orchestrator import runtime_model_selection
+from orchestrator import runtime_her_fallback
 from orchestrator import runtime_command_binding
 from orchestrator import runtime_mode
 from orchestrator import runtime_privacy
@@ -6654,6 +6655,7 @@ class FlexibleAgentRuntime:
         )
 
     cmd_provider = runtime_model_selection.cmd_provider
+    cmd_fallback = runtime_her_fallback.cmd_fallback
 
     async def cmd_handoff(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -8891,6 +8893,9 @@ class FlexibleAgentRuntime:
 
     async def callback_model(self, update: Update, context: Any):
         await runtime_model_selection.callback_model(self, update, context)
+
+    async def callback_fallback(self, update: Update, context: Any):
+        await runtime_her_fallback.callback_fallback(self, update, context)
 
     async def cmd_mode(self, update: Update, context: Any):
         await runtime_mode.cmd_mode(self, update, context)

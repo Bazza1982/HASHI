@@ -51,6 +51,7 @@ from orchestrator.her_v2.runtime_configuration import (
     resolve_her_v2_configuration,
     select_her_v2_hybrid,
     select_her_v2_provider,
+    set_her_v2_fallback,
     set_her_v2_route_model_slot,
     set_her_v2_route_reasoning,
     set_her_v2_route_target,
@@ -678,6 +679,13 @@ class FlexibleBackendManager:
             route: normalize(target)
             for route, target in selected.route_targets.items()
         }
+        fallbacks = {
+            int(level): {
+                model_class: normalize(target)
+                for model_class, target in targets.items()
+            }
+            for level, targets in selected.fallback_targets.items()
+        }
         return replace(
             selected,
             fast_provider=fast.provider,
@@ -685,6 +693,7 @@ class FlexibleBackendManager:
             pro_provider=pro.provider,
             pro_model=pro.model,
             route_targets=routes,
+            fallback_targets=fallbacks,
         )
 
     def _validate_her_v2_selection(
@@ -810,6 +819,52 @@ class FlexibleBackendManager:
             allowed_models=option["models"],
         )
 
+    def prepare_her_v2_fallback(
+        self,
+        *,
+        enabled: bool | None = None,
+        level: int | None = None,
+        model_class: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        clear: bool = False,
+        current: HERv2RuntimeConfiguration | None = None,
+    ) -> HERv2RuntimeConfiguration:
+        selected = current or self.get_her_v2_configuration()
+        target = None
+        if level is not None and not clear:
+            option = self._her_v2_provider_option(str(provider or ""))
+            if option is None or not option.get("available"):
+                raise ValueError(
+                    f"HER v2 provider {provider!r} is not configured on this instance"
+                )
+            requested_model = str(model or "").strip()
+            if requested_model not in option["models"]:
+                raise ValueError(
+                    f"model {requested_model!r} is not allowed by configured "
+                    f"provider {option['engine']!r}"
+                )
+            normalized_class = str(model_class or "").strip().casefold()
+            slot = "fast" if normalized_class in {"light", "fast", "quick"} else "pro"
+            primary = selected.target_for_slot(slot)
+            selected_provider = str(option["engine"])
+            if int(level) == 1 and selected_provider != primary.provider:
+                raise ValueError("level 1 fallback must use the primary provider")
+            if int(level) == 2 and selected_provider == primary.provider:
+                raise ValueError("level 2 fallback must use another provider")
+            target = ProviderModelTarget(selected_provider, requested_model)
+        candidate = set_her_v2_fallback(
+            selected,
+            enabled=enabled,
+            level=level,
+            model_class=model_class,
+            target=target,
+            clear=clear,
+        )
+        candidate = self._normalise_her_v2_target_providers(candidate)
+        self._validate_her_v2_selection(candidate)
+        return candidate
+
     def _effective_her_v2_config(
         self,
         selected: HERv2RuntimeConfiguration | None = None,
@@ -850,6 +905,12 @@ class FlexibleBackendManager:
             old_target = current.target_for_route(route)
             new_target = selected.target_for_route(route)
             if new_target != old_target and new_target not in changed_targets:
+                changed_targets.append(new_target)
+        for new_target in selected.all_targets():
+            if (
+                new_target not in current.all_targets()
+                and new_target not in changed_targets
+            ):
                 changed_targets.append(new_target)
 
         preflight: dict[str, Any] = {

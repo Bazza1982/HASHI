@@ -110,6 +110,26 @@ def test_new_codex_model_uses_provider_namespace_without_per_model_mapping(
     assert fact.input_status("image") == "supported"
 
 
+def test_deepseek_moving_alias_uses_shared_openrouter_latest_identity(tmp_path):
+    source_model = "~deepseek/deepseek-flash-latest"
+    fact = model_capability_sources.refresh_capability_fact(
+        "deepseek-api",
+        "deepseek-flash",
+        cache_path=tmp_path / "capabilities.json",
+        fetcher=lambda _url: _evidence(
+            source_model,
+            inputs=["text", "image"],
+        ),
+        now=NOW,
+    )
+
+    assert fact.status == "known"
+    assert fact.source_engine == "openrouter-api"
+    assert fact.source_model_id == source_model
+    assert fact.input_status("image") == "supported"
+    assert fact.source_url.endswith("/~deepseek/deepseek-flash-latest")
+
+
 def test_confirmed_text_only_model_is_unsupported_not_unknown(tmp_path):
     cache = tmp_path / "capabilities.json"
     model_capability_sources.refresh_capability_fact(

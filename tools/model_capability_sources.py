@@ -22,7 +22,6 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from tools.pricing_sources import (
-    EXACT_OPENROUTER_MODEL_MAPPINGS,
     HttpEvidence,
     MAX_RESPONSE_BYTES,
     OPENROUTER_MODELS_URL,
@@ -33,7 +32,7 @@ from tools.pricing_sources import (
 
 
 CACHE_SCHEMA_VERSION = 2
-ADAPTER_REVISION = "openrouter-model-capability.v2"
+ADAPTER_REVISION = "openrouter-model-capability.v3"
 SUCCESS_TTL = timedelta(hours=24)
 NEGATIVE_TTL = timedelta(minutes=15)
 LOCK_WAIT_SECONDS = 20.0
@@ -46,7 +45,7 @@ MODALITY_STATES = frozenset({"supported", "unsupported", "unknown"})
 INPUT_MODALITIES = ("text", "image", "audio", "video", "file", "document")
 OUTPUT_MODALITIES = ("text", "image", "audio", "video", "file")
 _MODEL_ID = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*$"
+    r"^~?[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*$"
 )
 _MODALITY_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")

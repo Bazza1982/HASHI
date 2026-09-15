@@ -4401,6 +4401,165 @@ async def test_nonretryable_auth_failure_keeps_typed_code_and_single_attempt(tmp
     assert failure["payload"]["retry_reason"] == "failure_non_retryable"
 
 
+def _fallback_config():
+    return _config(
+        fallback={
+            "enabled": True,
+            "level1": {
+                "light": {"provider": "fake-api", "model": "model-light-fallback"},
+                "pro": {"provider": "fake-api", "model": "model-pro-fallback"},
+            },
+            "level2": {
+                "light": {"provider": "other-api", "model": "model-light-fallback-2"},
+                "pro": {"provider": "other-api", "model": "model-pro-fallback-2"},
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_fallback_runs_after_same_target_recovery_and_warns_user(
+    tmp_path,
+):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [{"message": "Recovered."}],
+        Stage.TRIAGE: [
+            StageInvocationError(
+                "connection reset",
+                code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+            ),
+            StageInvocationError(
+                "connection reset again",
+                code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+            ),
+            _triage("DIRECT_RESPONSE", real_goal="Reply"),
+        ],
+    }
+    provider = ScriptedProvider(scripts)
+    delivery = RecordingDelivery()
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_fallback_config(),
+        delivery=delivery,
+    ).run_turn("Reply", "request-l1-fallback", effort="low")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    triage = [
+        (profile.engine, profile.model, request.fallback_level)
+        for profile, request in provider.requests
+        if request.stage is Stage.TRIAGE
+    ]
+    assert triage == [
+        ("fake-api", "model-triage", 0),
+        ("fake-api", "model-triage", 0),
+        ("fake-api", "model-light-fallback", 1),
+    ]
+    warnings = [row for row in delivery.records if row.kind == "fallback_warning"]
+    assert len(warnings) == 1
+    assert "model-triage" in warnings[0].text
+    assert "model-light-fallback" in warnings[0].text
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    selected = [row for row in rows if row["event"] == "provider_fallback_selected"]
+    assert selected[-1]["payload"]["fallback_level"] == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_fallback_advances_once_from_level_one_to_level_two(tmp_path):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [{"message": "Recovered."}],
+        Stage.TRIAGE: [
+            StageInvocationError(
+                "primary down",
+                code=ProviderFailureCode.PROVIDER_SERVER_ERROR,
+            ),
+            StageInvocationError(
+                "primary still down",
+                code=ProviderFailureCode.PROVIDER_SERVER_ERROR,
+            ),
+            StageInvocationError(
+                "level one down",
+                code=ProviderFailureCode.PROVIDER_MODEL_UNAVAILABLE,
+            ),
+            _triage("DIRECT_RESPONSE", real_goal="Reply"),
+        ],
+    }
+    provider = ScriptedProvider(scripts)
+    delivery = RecordingDelivery()
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_fallback_config(),
+        delivery=delivery,
+    ).run_turn("Reply", "request-l2-fallback", effort="low")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    triage = [
+        (profile.engine, profile.model, request.fallback_level)
+        for profile, request in provider.requests
+        if request.stage is Stage.TRIAGE
+    ]
+    assert triage == [
+        ("fake-api", "model-triage", 0),
+        ("fake-api", "model-triage", 0),
+        ("fake-api", "model-light-fallback", 1),
+        ("other-api", "model-light-fallback-2", 2),
+    ]
+    assert [row.kind for row in delivery.records].count("fallback_warning") == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_response_start_timeout_uses_her_stream_guard_then_fallback(
+    tmp_path,
+):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [{"message": "Recovered."}],
+        Stage.TRIAGE: [
+            StageInvocationError(
+                "provider produced no meaningful output",
+                code=ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT,
+            ),
+            StageInvocationError(
+                "provider still produced no meaningful output",
+                code=ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT,
+            ),
+            _triage("DIRECT_RESPONSE", real_goal="Reply"),
+        ],
+    }
+    provider = ScriptedProvider(scripts)
+    delivery = RecordingDelivery()
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_fallback_config(),
+        delivery=delivery,
+    ).run_turn("Reply", "request-timeout-fallback", effort="low")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    triage = [
+        (
+            profile.engine,
+            profile.model,
+            request.fallback_level,
+            request.provider_stream_inactivity_timeout_s,
+        )
+        for profile, request in provider.requests
+        if request.stage is Stage.TRIAGE
+    ]
+    assert triage == [
+        ("fake-api", "model-triage", 0, 300.0),
+        ("fake-api", "model-triage", 0, 300.0),
+        ("fake-api", "model-light-fallback", 1, 300.0),
+    ]
+    assert [row.kind for row in delivery.records].count("fallback_warning") == 1
+
+
 @pytest.mark.asyncio
 async def test_rate_limit_retry_honours_retry_after_and_preserves_route(tmp_path):
     scripts = {
@@ -4576,8 +4735,14 @@ async def test_execution_never_replays_after_side_effect_tool_starts(tmp_path):
         }
     )
     provider = ScriptedProvider(scripts)
+    delivery = RecordingDelivery()
 
-    result = await _runtime(tmp_path, provider).run_turn(
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_fallback_config(),
+        delivery=delivery,
+    ).run_turn(
         "Write once", "request-execution-write-no-retry", effort="low"
     )
 
@@ -4601,6 +4766,7 @@ async def test_execution_never_replays_after_side_effect_tool_starts(tmp_path):
         sum(request.stage is Stage.EXECUTION for _profile, request in provider.requests)
         == 1
     )
+    assert all(row.kind != "fallback_warning" for row in delivery.records)
     rows = [
         json.loads(line)
         for line in (tmp_path / "her-v2" / "audit.jsonl").read_text(encoding="utf-8").splitlines()

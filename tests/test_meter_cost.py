@@ -510,6 +510,47 @@ def test_formatter_unknown_cost():
     assert "服务提供方：HASHI API" in tail.splitlines()[0]
 
 
+def test_formatter_preserves_known_subtotal_when_one_attempt_has_no_receipt():
+    receipt = UsageReceipt(
+        line_items=[
+            PerCallUsageLineItem(
+                engine="deepseek-api",
+                model="deepseek-flash",
+                cost_usd=None,
+                cost_source="unknown",
+                status="failed_without_receipt",
+            ),
+            PerCallUsageLineItem(
+                engine="openrouter-api",
+                model="deepseek/deepseek-v4-flash",
+                cost_usd=0.012,
+                cost_source="provider",
+            ),
+        ]
+    )
+
+    assert receipt.cost_usd is None
+    assert receipt.known_cost_usd == pytest.approx(0.012)
+    assert receipt.unknown_cost_requests == 1
+    first_line = format_cost_tail(receipt, locale="en").splitlines()[0]
+    assert "known subtotal" in first_line.casefold()
+    assert "1 request cost pending" in first_line.casefold()
+    assert "DeepSeek + OpenRouter" in first_line
+
+
+def test_line_item_roundtrip_preserves_request_timestamp_and_fallback_kind():
+    item = PerCallUsageLineItem(
+        request_id="physical-1",
+        request_started_at="2026-09-14T02:00:00+00:00",
+        recovery_kind="model_fallback_l2",
+    )
+
+    restored = line_item_from_dict(item.to_dict())
+
+    assert restored.request_started_at == "2026-09-14T02:00:00+00:00"
+    assert restored.recovery_kind == "model_fallback_l2"
+
+
 def test_formatter_lists_each_provider_once_in_first_use_order():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(engine="deepseek-api", cost_usd=None),
@@ -544,7 +585,7 @@ def test_formatter_task_total():
     assert "任务累计 ≈" in tail
 
 
-def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages():
+def test_formatter_does_not_reprice_historical_cache_savings_without_source_fact():
     line_items = [
         PerCallUsageLineItem(
             engine="deepseek-api",
@@ -593,7 +634,7 @@ def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages
         "💰 本回合：≈ 10.61 美分 · 服务提供方：DeepSeek "
         "· 服务模型：deepseek-v4-pro + deepseek-v4-flash",
         "📥 输入 2.916M · 缓存命中 2.683M（92.0%） 📤 输出 52.2K（其中推理 38.1K）",
-        "🔁 无缓存约 US$1.0965 · 缓存节省约 99.04 美分（90.3%）",
+        "🔁 无缓存估算不可用",
     ]
     english = format_cost_tail(receipt, locale="en")
     assert english.splitlines()[0].startswith("💰 This turn: ≈ 10.61 cents")
@@ -601,6 +642,7 @@ def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages
     assert "Models: deepseek-v4-pro + deepseek-v4-flash" in english.splitlines()[0]
     assert "cache hit 2.683M (92.0%)" in english
     assert "including 38.1K reasoning" in english
+    assert "no-cache estimate unavailable" in english.casefold()
 
 
 # ── Command registration ─────────────────────────────────────────────────────

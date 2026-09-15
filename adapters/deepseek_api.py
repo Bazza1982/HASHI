@@ -517,6 +517,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
             "tool_calls": [],
         }
         protocol_state["wire_evidence"] = wire_evidence
+        inactivity_guard = self._new_her_v2_stream_inactivity_guard()
 
         async with self.client.stream("POST", _DEEPSEEK_URL, json=payload, headers=headers) as response:
             await _read_http_error_body(response)
@@ -531,7 +532,11 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 payload, stream_request
             )
 
-            async for line in _iter_provider_stream_lines(response, protocol_state):
+            async for line in _iter_provider_stream_lines(
+                response,
+                protocol_state,
+                inactivity_guard=inactivity_guard,
+            ):
                 self._touch_activity()
                 event_arrival = len(wire_evidence["sse_events"]) + 1
                 wire_evidence["sse_events"].append(
@@ -541,6 +546,8 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     continue
                 data_str = line[6:].strip()
                 if data_str == "[DONE]":
+                    if inactivity_guard is not None:
+                        inactivity_guard.mark_meaningful()
                     saw_done = True
                     break
 
@@ -615,6 +622,15 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
                 # DeepSeek streams thinking in "reasoning_content"
                 reasoning_delta = str(delta.get("reasoning_content") or "")
+                content = str(delta.get("content") or "")
+                tool_call_deltas = delta.get("tool_calls") or []
+                if (
+                    reasoning_delta
+                    or content
+                    or tool_call_deltas
+                    or finish_reason
+                ) and inactivity_guard is not None:
+                    inactivity_guard.mark_meaningful()
                 if reasoning_delta:
                     reasoning_chunks.append(reasoning_delta)
                     protocol_state["reasoning_availability"] = "available"
@@ -628,7 +644,6 @@ class DeepSeekAdapter(OpenRouterAdapter):
                         )
                     )
 
-                content = str(delta.get("content") or "")
                 if content:
                     text_chunks.append(content)
                     protocol_state["text_provided"] = True
@@ -642,7 +657,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
                             )
                         )
 
-                for tc_delta in (delta.get("tool_calls") or []):
+                for tc_delta in tool_call_deltas:
                     idx = tc_delta.get("index", 0)
                     if idx not in tool_calls_acc:
                         tool_calls_acc[idx] = {

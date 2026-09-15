@@ -212,6 +212,49 @@ def _target(
     return ProviderModelTarget(fallback_provider, fallback_model)
 
 
+def _fallback_configuration(
+    raw: Any,
+) -> tuple[bool, dict[int, dict[str, ProviderModelTarget]]]:
+    if raw is None:
+        return False, {}
+    if not isinstance(raw, Mapping):
+        raise ValueError("HER v2 fallback configuration must be an object")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("HER v2 fallback enabled must be a JSON boolean")
+    levels: dict[int, dict[str, ProviderModelTarget]] = {}
+    for level, key in ((1, "level1"), (2, "level2")):
+        value = raw.get(key) or {}
+        if not isinstance(value, Mapping):
+            raise ValueError(f"HER v2 fallback {key} must be an object")
+        targets: dict[str, ProviderModelTarget] = {}
+        for raw_class, target in value.items():
+            model_class = str(raw_class).strip().casefold()
+            if model_class in {"fast", "quick"}:
+                model_class = "light"
+            if model_class not in {"light", "pro"}:
+                raise ValueError(f"invalid fallback model class: {raw_class!r}")
+            targets[model_class] = _target(target)
+        if targets:
+            levels[level] = targets
+    return enabled, levels
+
+
+def _fallback_dict(
+    enabled: bool,
+    levels: Mapping[int, Mapping[str, ProviderModelTarget]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"enabled": bool(enabled)}
+    for level in (1, 2):
+        targets = levels.get(level, {})
+        if targets:
+            result[f"level{level}"] = {
+                model_class: target.to_dict()
+                for model_class, target in targets.items()
+            }
+    return result
+
+
 @dataclass(frozen=True)
 class HERv2RuntimeConfiguration:
     routing_mode: str
@@ -225,6 +268,10 @@ class HERv2RuntimeConfiguration:
     route_model_slots: Mapping[str, str]
     route_reasoning: Mapping[str, str]
     route_targets: Mapping[str, ProviderModelTarget] = field(default_factory=dict)
+    fallback_enabled: bool = False
+    fallback_targets: Mapping[int, Mapping[str, ProviderModelTarget]] = field(
+        default_factory=dict
+    )
     routing_revision: int = 1
     capability_revision: int = HER_V2_CAPABILITY_REVISION
     pricing_revision: str = HER_V2_PRICING_REVISION
@@ -243,6 +290,13 @@ class HERv2RuntimeConfiguration:
             _route(name).value: _target(value)
             for name, value in self.route_targets.items()
         }
+        parsed_fallbacks = {
+            int(level): {
+                str(model_class): _target(target)
+                for model_class, target in targets.items()
+            }
+            for level, targets in self.fallback_targets.items()
+        }
         if self.route_model_slots.get(Route.DIRECT.value, "fast") != "fast":
             raise ValueError("the Direct route always uses the Quick model slot")
         if Route.DIRECT.value in parsed_routes:
@@ -257,6 +311,8 @@ class HERv2RuntimeConfiguration:
         object.__setattr__(self, "pro_provider", pro.provider)
         object.__setattr__(self, "pro_model", pro.model)
         object.__setattr__(self, "route_targets", parsed_routes)
+        object.__setattr__(self, "fallback_enabled", bool(self.fallback_enabled))
+        object.__setattr__(self, "fallback_targets", parsed_fallbacks)
         object.__setattr__(self, "routing_revision", max(1, int(self.routing_revision)))
         object.__setattr__(
             self, "capability_revision", max(1, int(self.capability_revision))
@@ -280,6 +336,10 @@ class HERv2RuntimeConfiguration:
             "route_targets": {
                 route: target.to_dict() for route, target in self.route_targets.items()
             },
+            "fallback": _fallback_dict(
+                self.fallback_enabled,
+                self.fallback_targets,
+            ),
             "routing_revision": self.routing_revision,
             "capability_revision": self.capability_revision,
             "pricing_revision": self.pricing_revision,
@@ -323,11 +383,28 @@ class HERv2RuntimeConfiguration:
     def all_targets(self) -> tuple[ProviderModelTarget, ...]:
         values = [self.target_for_slot("fast"), self.target_for_slot("pro")]
         values.extend(self.route_targets.values())
+        for targets in self.fallback_targets.values():
+            values.extend(targets.values())
         result: list[ProviderModelTarget] = []
         for target in values:
             if target not in result:
                 result.append(target)
         return tuple(result)
+
+    def fallback_target(
+        self,
+        level: int,
+        model_class: str,
+    ) -> ProviderModelTarget | None:
+        if not self.fallback_enabled:
+            return None
+        normalized = str(model_class or "").strip().casefold()
+        targets = self.fallback_targets.get(int(level), {})
+        if normalized == "pro":
+            return targets.get("pro")
+        if normalized == "light":
+            return targets.get("light") or targets.get("pro")
+        return None
 
     def reasoning_for_route(self, raw: Mapping[str, Any], route: Route | str) -> str:
         parsed = _route(route)
@@ -457,6 +534,9 @@ def resolve_her_v2_configuration(
     if isinstance(configured_route_targets, Mapping):
         for name, value in configured_route_targets.items():
             route_targets[_route(str(name)).value] = _target(value)
+    fallback_enabled, fallback_targets = _fallback_configuration(
+        raw.get("fallback")
+    )
 
     if isinstance(override, Mapping):
         selected_provider = str(override.get("provider") or "").strip()
@@ -525,6 +605,10 @@ def resolve_her_v2_configuration(
                 _route(str(name)).value: _target(value)
                 for name, value in selected_route_targets.items()
             }
+        if "fallback" in override:
+            fallback_enabled, fallback_targets = _fallback_configuration(
+                override.get("fallback")
+            )
 
     revision_source = override if isinstance(override, Mapping) else raw
     routing_revision = max(1, int(revision_source.get("routing_revision") or 1))
@@ -554,6 +638,8 @@ def resolve_her_v2_configuration(
         route_model_slots=route_model_slots,
         route_reasoning=route_reasoning,
         route_targets=route_targets,
+        fallback_enabled=fallback_enabled,
+        fallback_targets=fallback_targets,
         routing_revision=routing_revision,
         capability_revision=capability_revision,
         pricing_revision=pricing_revision,
@@ -820,6 +906,43 @@ def set_her_v2_route_reasoning(
     return replace(current, route_reasoning=updated)
 
 
+def set_her_v2_fallback(
+    current: HERv2RuntimeConfiguration,
+    *,
+    enabled: bool | None = None,
+    level: int | None = None,
+    model_class: str | None = None,
+    target: ProviderModelTarget | None = None,
+    clear: bool = False,
+) -> HERv2RuntimeConfiguration:
+    levels = {
+        int(raw_level): dict(targets)
+        for raw_level, targets in current.fallback_targets.items()
+    }
+    if level is not None:
+        if int(level) not in {1, 2}:
+            raise ValueError("fallback level must be 1 or 2")
+        normalized = str(model_class or "").strip().casefold()
+        if normalized in {"fast", "quick"}:
+            normalized = "light"
+        if normalized not in {"light", "pro"}:
+            raise ValueError("fallback model class must be light or pro")
+        rows = levels.setdefault(int(level), {})
+        if clear:
+            rows.pop(normalized, None)
+            if not rows:
+                levels.pop(int(level), None)
+        elif target is None:
+            raise ValueError("fallback target is required")
+        else:
+            rows[normalized] = target
+    return replace(
+        current,
+        fallback_enabled=(current.fallback_enabled if enabled is None else enabled),
+        fallback_targets=levels,
+    )
+
+
 def apply_her_v2_runtime_configuration(
     raw: Mapping[str, Any],
     selected: HERv2RuntimeConfiguration,
@@ -862,6 +985,10 @@ def apply_her_v2_runtime_configuration(
     result["routing_revision"] = selected.routing_revision
     result["capability_revision"] = selected.capability_revision
     result["pricing_revision"] = selected.pricing_revision
+    result["fallback"] = _fallback_dict(
+        selected.fallback_enabled,
+        selected.fallback_targets,
+    )
     if selected.route_targets:
         result["route_targets"] = {
             route: target.to_dict() for route, target in selected.route_targets.items()

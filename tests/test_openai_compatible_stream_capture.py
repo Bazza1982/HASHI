@@ -55,6 +55,7 @@ async def test_openai_compatible_stream_waits_for_capture_callbacks(
     )
     global_config = SimpleNamespace(openrouter_url="https://example.invalid")
     adapter = adapter_type(config, global_config, api_key="test")
+    adapter.set_her_v2_stream_inactivity_timeout(0.005)
     adapter.client = SimpleNamespace(stream=lambda *_args, **_kwargs: _StreamContext())
     events = []
 

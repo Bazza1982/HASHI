@@ -2064,6 +2064,7 @@ class _FakeBackend:
         self.tool_registry = "not-set"
         self.privacy_level = None
         self.reasoning_enabled = None
+        self.her_v2_stream_inactivity_timeout_s = None
         self.shutdown_called = False
         self.prompt = ""
         self.sys_prompt = "configured agent persona"
@@ -2071,6 +2072,9 @@ class _FakeBackend:
 
     def set_reasoning_enabled(self, enabled):
         self.reasoning_enabled = enabled
+
+    def set_her_v2_stream_inactivity_timeout(self, timeout_s):
+        self.her_v2_stream_inactivity_timeout_s = timeout_s
 
     async def initialize(self):
         if self.config.system_md:
@@ -2111,6 +2115,34 @@ class _FakeManager:
         backend = _FakeBackend(self.system_md)
         self.backends.append(backend)
         return backend
+
+
+@pytest.mark.asyncio
+async def test_stage_provider_passes_only_the_typed_her_stream_guard():
+    manager = _FakeManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "provider_stream_inactivity_timeout_s": 300.0,
+        }
+    )
+
+    await provider.invoke(
+        ProviderProfile(
+            "execution",
+            "openrouter-api",
+            "configured/model",
+        ),
+        request,
+    )
+
+    assert manager.backends[0].her_v2_stream_inactivity_timeout_s == 300.0
 
 
 class _ControlledForegroundToolBackend(_FakeBackend):

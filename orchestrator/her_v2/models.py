@@ -229,6 +229,10 @@ class StageRequest:
     allow_side_effects: bool = False
     invocation_id: str = ""
     retry_invariant_hash: str = ""
+    fallback_level: int = 0
+    fallback_model_class: str = ""
+    request_started_at: str = ""
+    provider_stream_inactivity_timeout_s: float | None = None
     progress_callback: Callable[[str, str, bool], None] | None = field(
         default=None, compare=False, repr=False
     )

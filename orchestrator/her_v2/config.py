@@ -189,6 +189,10 @@ class HERv2Config:
     route_model_slots: Mapping[Route, str] = field(default_factory=dict)
     route_targets: Mapping[Route, ProviderTarget] = field(default_factory=dict)
     route_reasoning: Mapping[Route, str] = field(default_factory=dict)
+    fallback_enabled: bool = False
+    fallback_targets: Mapping[int, Mapping[str, ProviderTarget]] = field(
+        default_factory=dict
+    )
     # Voice-origin routing is an overlay, never a replacement for the normal
     # Quick/Pro and task-route choices.  ``voice_origin_active`` is a
     # request-local snapshot set by the outer HASHI adapter.
@@ -241,6 +245,17 @@ class HERv2Config:
         if self.routing_mode != "hybrid" and self.route_targets:
             raise HERv2ConfigurationError(
                 "custom task-route targets require Hybrid mode"
+            )
+        invalid_fallback_levels = set(self.fallback_targets).difference({1, 2})
+        invalid_fallback_classes = {
+            model_class
+            for targets in self.fallback_targets.values()
+            for model_class in targets
+            if model_class not in {"light", "pro"}
+        }
+        if invalid_fallback_levels or invalid_fallback_classes:
+            raise HERv2ConfigurationError(
+                "provider fallback targets support only level1/level2 and light/pro"
             )
         if self.route_model_slots.get(Route.DIRECT, "fast") != "fast":
             raise HERv2ConfigurationError(
@@ -544,6 +559,42 @@ class HERv2Config:
                 )
             route_reasoning[route] = reasoning
 
+        fallback_raw = raw.get("fallback") or {}
+        if not isinstance(fallback_raw, Mapping):
+            raise HERv2ConfigurationError("her_v2.fallback must be an object")
+        fallback_enabled = _strict_bool(
+            fallback_raw.get("enabled", False),
+            "fallback.enabled",
+        )
+        fallback_targets: dict[int, dict[str, ProviderTarget]] = {}
+        for level, key in ((1, "level1"), (2, "level2")):
+            level_raw = fallback_raw.get(key) or {}
+            if not isinstance(level_raw, Mapping):
+                raise HERv2ConfigurationError(
+                    f"her_v2.fallback.{key} must be an object"
+                )
+            parsed_targets: dict[str, ProviderTarget] = {}
+            for raw_class, value in level_raw.items():
+                model_class = str(raw_class).strip().casefold()
+                if model_class in {"fast", "quick"}:
+                    model_class = "light"
+                if model_class not in {"light", "pro"}:
+                    raise HERv2ConfigurationError(
+                        f"unknown fallback model class: {raw_class!r}"
+                    )
+                if not isinstance(value, Mapping):
+                    raise HERv2ConfigurationError(
+                        f"fallback {key}.{model_class} must be an object"
+                    )
+                parsed_targets[model_class] = ProviderTarget(
+                    engine=str(
+                        value.get("provider") or value.get("engine") or ""
+                    ).strip(),
+                    model=str(value.get("model") or "").strip(),
+                )
+            if parsed_targets:
+                fallback_targets[level] = parsed_targets
+
         voice_routes_raw = raw.get("voice_routes") or {}
         if not isinstance(voice_routes_raw, Mapping):
             raise HERv2ConfigurationError("her_v2.voice_routes must be an object")
@@ -620,6 +671,8 @@ class HERv2Config:
             route_model_slots=route_model_slots,
             route_targets=route_targets,
             route_reasoning=route_reasoning,
+            fallback_enabled=fallback_enabled,
+            fallback_targets=fallback_targets,
             voice_route_targets=voice_route_targets,
             voice_fallback_text_target=voice_fallback_text_target,
             voice_triage_input_policy=voice_triage_input_policy,
@@ -660,7 +713,14 @@ class HERv2Config:
         engine = profile.engine
         model = profile.model
         custom_target = self.route_targets.get(route)
-        slot = "fast" if route is Route.DIRECT else self.route_model_slots.get(route)
+        slot = (
+            "fast"
+            if route is Route.DIRECT
+            else self.route_model_slots.get(
+                route,
+                self.profile_model_slots.get(profile.name, "pro"),
+            )
+        )
         slot_target = self.targets.get(slot) if slot in {"fast", "pro"} else None
         if custom_target is not None:
             engine = custom_target.engine
@@ -672,6 +732,7 @@ class HERv2Config:
             model = self.slot_models[slot]
         ordinary_target = ProviderTarget(engine=engine, model=model)
         options = dict(profile.options)
+        options["_her_model_class"] = "light" if slot == "fast" else "pro"
         if self.voice_origin_active and route in {
             Route.DIRECT,
             Route.IMMEDIATE_RESPONSE,
@@ -761,6 +822,23 @@ class HERv2Config:
             return replace(profile, model=model)
         return replace(profile, engine=target.engine, model=target.model)
 
+    def fallback_target(
+        self,
+        level: int,
+        model_class: str,
+    ) -> ProviderTarget | None:
+        """Return the next configured target without allowing Pro to downgrade."""
+
+        if not self.fallback_enabled:
+            return None
+        normalized = str(model_class or "").strip().casefold()
+        targets = self.fallback_targets.get(int(level), {})
+        if normalized == "pro":
+            return targets.get("pro")
+        if normalized == "light":
+            return targets.get("light") or targets.get("pro")
+        return None
+
     def sub_agent_execution_profile_names(self) -> tuple[str, ...]:
         """Return the configured profiles that may execute delegated work.
 
@@ -804,6 +882,12 @@ class HERv2Config:
                     model=self.voice_fallback_text_target.model,
                 )
             )
+        for targets in self.fallback_targets.values():
+            for target in targets.values():
+                base = self.profile_for(Stage.DIRECT)
+                candidates.append(
+                    replace(base, engine=target.engine, model=target.model)
+                )
         result: list[ProviderProfile] = []
         seen: set[tuple[str, str]] = set()
         for profile in candidates:

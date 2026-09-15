@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 import pytest
 
 from tools import pricing_sources
-from tools.token_tracker import PRICING, calc_cost, get_price, record_usage
+from tools.token_tracker import (
+    PRICING,
+    calc_cost,
+    get_price,
+    record_usage,
+)
 
 
 def test_qwen37_flash_uses_exact_openrouter_slug_and_base_price():
@@ -146,6 +151,68 @@ def _dynamic_evidence(model="vendor/new-model", *, cache_read="0.0000002"):
         fetched_at=datetime.now(timezone.utc),
         url=f"https://openrouter.ai/api/v1/model/{model}",
     )
+
+
+def test_direct_deepseek_usage_uses_cached_openrouter_reference(
+    tmp_path,
+    monkeypatch,
+):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    source_model = "~deepseek/deepseek-flash-latest"
+    fact = pricing_sources.refresh_pricing_fact(
+        "deepseek-api",
+        "deepseek-flash",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence(source_model),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="deepseek-flash",
+        backend="deepseek-api",
+        engine="deepseek-api",
+        input_tokens=2_000,
+        output_tokens=1_000,
+        prompt_cache_hit_tokens=1_000,
+        prompt_cache_miss_tokens=1_000,
+        token_source="provider",
+    )
+
+    assert fact.status == "known"
+    assert receipt.cost_usd == pytest.approx(0.0082)
+    assert receipt.dominant_cost_source() == "openrouter_reference"
+    assert receipt.pricing_revisions == (fact.source_revision,)
+
+
+def test_direct_deepseek_alias_never_falls_back_to_historical_static_price(
+    tmp_path,
+    monkeypatch,
+):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    scheduled = []
+    monkeypatch.setattr(
+        pricing_sources,
+        "schedule_prewarm",
+        lambda engine, model, *, cache_path=None: scheduled.append(
+            (engine, model, cache_path)
+        ),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="deepseek-v4-pro",
+        backend="deepseek-api",
+        engine="deepseek-api",
+        input_tokens=2_000,
+        output_tokens=1_000,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd is None
+    assert receipt.dominant_cost_source() == "unknown"
+    assert scheduled == [("deepseek-api", "deepseek-v4-pro", None)]
 
 
 def test_record_usage_reads_dynamic_price_cache_and_links_exact_revision(
