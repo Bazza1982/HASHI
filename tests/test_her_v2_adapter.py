@@ -2021,7 +2021,7 @@ async def test_adapter_accepts_exact_profile_grants_from_models_lists(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_adapter_reconciles_old_inflight_ledger_without_resuming_it(tmp_path):
+async def test_adapter_defers_reconciliation_when_inflight_owner_is_not_confirmed_dead_without_resuming_it(tmp_path):
     config = _agent_config(tmp_path)
     provider = _DirectProvider()
     setattr(config, "_her_v2_stage_provider", provider)
@@ -2034,24 +2034,31 @@ async def test_adapter_reconciles_old_inflight_ledger_without_resuming_it(tmp_pa
 
     assert await adapter.initialize() is True
 
+    # The ledger is a shadow of the canonical Turn owner: the adapter
+    # reconciles it only for request refs whose owner was confirmed dead.
+    # This ledger has no canonical Turn behind it, so reconciliation stays
+    # deferred and the interrupted Turn is never resumed or re-executed.
     recovered = store.load("interrupted")
-    assert recovered.status is LifecycleState.ERROR
-    assert recovered.terminal_reason == "unexpected_process_interruption"
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "agent" / "her_v2_audit.jsonl")
-        .read_text()
-        .splitlines()
-    ]
-    assert rows[-1]["event"] == "interrupted_turn_reconciled"
-    assert rows[-1]["payload"]["execution_resumed"] is False
+    assert recovered.status is LifecycleState.EXECUTING
+    assert recovered.terminal_reason is None
+    audit_path = tmp_path / "logs" / "agent" / "her_v2_audit.jsonl"
+    audit_rows = (
+        [json.loads(line) for line in audit_path.read_text().splitlines()]
+        if audit_path.exists()
+        else []
+    )
+    assert [
+        row for row in audit_rows if row["event"] == "interrupted_turn_reconciled"
+    ] == []
     assert provider.requests == []
 
     continued = await adapter.generate_response("Continue safely", "request-new")
 
     assert continued.is_success is True
     assert continued.stream_metadata["her_v2"]["turn_id"] != "interrupted"
-    assert store.load("interrupted").status is LifecycleState.ERROR
+    untouched = store.load("interrupted")
+    assert untouched.status is LifecycleState.EXECUTING
+    assert (untouched.request_ref, untouched.goal_ref) == ("request:old", "goal:old")
 
 
 class _FakeBackend:

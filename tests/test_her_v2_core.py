@@ -499,7 +499,7 @@ def test_effective_routes_choose_model_slot_and_reasoning_independently():
     assert simple.name == "lightweight"
     assert simple.model == "pro-model"
     assert simple.reasoning == "max"
-    assert complex_task.model == "model-premium"
+    assert complex_task.model == "pro-model"
     assert high_volume.model == "quick-model"
 
     with pytest.raises(HERv2ConfigurationError, match="invalid model slot"):
