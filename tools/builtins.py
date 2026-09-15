@@ -1426,7 +1426,12 @@ async def execute_frontend_send_attachments(
     audit_context: dict | None,
     tool_call_id: str = "",
 ) -> str:
-    """Bind ordered local files to the current canonical assistant Message."""
+    """Bind ordered local files to the current canonical assistant Message.
+
+    ``access_root`` is accepted for dispatch compatibility but is deliberately
+    not enforced here: the agent chooses which readable local files to attach,
+    and frontend attachment paths may reference any location.
+    """
 
     import hashlib
     import mimetypes
@@ -1484,7 +1489,13 @@ async def execute_frontend_send_attachments(
             raw_path = str(raw.get("path") or "").strip()
             if not raw_path:
                 raise ValueError("each attachment requires path")
-            path = _resolve_path(raw_path, access_root, workspace_dir)
+            # No access-scope enforcement for frontend attachments: resolve the
+            # path (relative to workspace_dir when relative) without checking it
+            # against the tool access roots.
+            path = Path(raw_path)
+            if not path.is_absolute():
+                path = workspace_dir / path
+            path = path.resolve()
             if not path.exists():
                 raise ValueError(f"file not found: {path}")
             if not path.is_file():
