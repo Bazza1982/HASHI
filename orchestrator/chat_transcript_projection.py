@@ -51,7 +51,10 @@ def build_chat_projection(
         canonical_overflow = len(canonical) > limit
         if canonical_overflow:
             canonical = canonical[-limit:]
-        canonical_rows = [_canonical_projection_row(item) for item in canonical]
+        canonical_rows = [
+            _canonical_projection_row(store, item, owner_id=owner_id)
+            for item in canonical
+        ]
         payload["messages"] = _merge_snapshot_rows(
             canonical_rows,
             payload["messages"],
@@ -73,7 +76,10 @@ def build_chat_projection(
         canonical_overflow = len(canonical) > limit
         if canonical_overflow:
             canonical = canonical[:limit]
-        canonical_rows = [_canonical_projection_row(item) for item in canonical]
+        canonical_rows = [
+            _canonical_projection_row(store, item, owner_id=owner_id)
+            for item in canonical
+        ]
         payload["messages"] = _merge_snapshot_rows(
             canonical_rows,
             payload["messages"],
@@ -96,14 +102,16 @@ def build_chat_projection(
     return payload
 
 
-def _canonical_projection_row(message: dict) -> dict:
+def _canonical_projection_row(
+    store: SessionStore, message: dict, *, owner_id: str
+) -> dict:
     run_id = str(message.get("run_id") or "")
     role = str(message.get("role") or "")
     message_id = str(message.get("message_id") or "")
     request_id = str(message.get("request_id") or "")
     context = message.get("message_context")
     context = dict(context) if isinstance(context, dict) else {}
-    attachments = _project_message_attachments(message)
+    attachments = _project_message_attachments(store, message, owner_id=owner_id)
     text = str(message.get("text") or "")
     if attachments and str(message.get("source") or "").strip().casefold() in {
         "photo",
@@ -151,18 +159,31 @@ def _canonical_projection_row(message: dict) -> dict:
     return {key: value for key, value in row.items() if value not in (None, [], "")}
 
 
-def _project_message_attachments(message: dict) -> list[dict]:
+def _project_message_attachments(
+    store: SessionStore, message: dict, *, owner_id: str
+) -> list[dict]:
     """Expose display metadata, never instance-local paths or asset secrets."""
 
     result: list[dict] = []
     for part in message.get("content") or ():
-        if not isinstance(part, dict) or str(part.get("type") or "").casefold() not in {
-            "media",
-            "audio",
-        }:
+        if (
+            not isinstance(part, dict)
+            or str(part.get("type") or "").casefold()
+            not in {"attachment", "media", "audio"}
+        ):
             continue
+        attachment_id = str(part.get("attachment_id") or "").strip()
+        if not attachment_id:
+            continue
+        canonical = store.visible_message_attachment(
+            str(message.get("session_id") or ""),
+            owner_id=owner_id,
+            message_id=str(message.get("message_id") or ""),
+            attachment_id=attachment_id,
+            context_generation=int(message.get("context_generation") or 1),
+        )
         projected = {
-            key: part[key]
+            key: canonical[key]
             for key in (
                 "attachment_id",
                 "modality",
@@ -174,7 +195,7 @@ def _project_message_attachments(message: dict) -> list[dict]:
                 "duration_ms",
                 "semantic_role",
             )
-            if part.get(key) not in (None, "")
+            if canonical.get(key) not in (None, "")
         }
         if projected and projected.get("attachment_id"):
             # The pair is an opaque lookup identity for the authenticated

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from types import SimpleNamespace
 
@@ -1460,13 +1461,20 @@ def test_attachment_owner_binding_and_approval_origin_fencing(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"
     session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    body = b"abc"
     staged = store.stage_attachment(
         session_id=session["session_id"],
         owner_id=owner,
         filename="a.txt",
         media_type="text/plain",
         size_bytes=3,
-        sha256="a" * 64,
+        sha256=hashlib.sha256(body).hexdigest(),
+    )
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        payload=body,
     )
     assert (
         store.commit_attachment(

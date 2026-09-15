@@ -34,7 +34,7 @@ TOOL_TIERS: dict[str, list[str]] = {
         "background_job_cancel", "background_job_list",
     ],
     "web": ["web_search", "web_fetch", "http_request", "xai_imagine"],
-    "communication": ["telegram_send"],
+    "communication": ["telegram_send", "frontend_send_attachments"],
     "memory": ["memory_search", "wiki_search"],
     "scheduler": [
         "hashi_scheduler_list",
@@ -1163,6 +1163,7 @@ class ToolRegistry:
             execute_background_job_list,
             execute_telegram_send,
             execute_telegram_send_file,
+            execute_frontend_send_attachments,
             execute_http_request,
             execute_web_search,
             execute_web_fetch,
@@ -1315,6 +1316,15 @@ class ToolRegistry:
             return await execute_telegram_send_file(
                 arguments,
                 secrets=self.secrets,
+            )
+
+        if tool_name == "frontend_send_attachments":
+            return await execute_frontend_send_attachments(
+                arguments,
+                access_root=self.access_roots,
+                workspace_dir=self.workspace_dir,
+                audit_context=self._effective_audit_context(),
+                tool_call_id=tool_call_id,
             )
 
         if tool_name == "http_request":
