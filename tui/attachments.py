@@ -42,7 +42,18 @@ def _native_path(value: str) -> Path:
     raw = str(value or "").strip().strip('"')
     if not raw:
         raise TuiAttachmentError("a file path is required")
-    if os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", raw):
+    if os.name == "nt":
+        native_unc = raw.startswith("\\\\")
+        native_drive = re.match(r"^[A-Za-z]:[\\/]", raw)
+        wsl_like = (
+            raw == "~"
+            or raw.startswith("~/")
+            or raw.startswith("~\\")
+            or (raw.startswith("/") and not raw.startswith("//"))
+        )
+        if not native_unc and not native_drive and wsl_like:
+            raw = _windows_wsl_path(raw)
+    elif re.match(r"^[A-Za-z]:[\\/]", raw):
         try:
             converted = subprocess.run(
                 ["wslpath", "-u", raw],
@@ -58,6 +69,66 @@ def _native_path(value: str) -> Path:
     return Path(raw).expanduser()
 
 
+def _run_wslpath(args: list[str], timeout: int = 5) -> str | None:
+    """Run ``wsl.exe wslpath`` and return the first non-empty output line."""
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-e", "wslpath", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    converted = (result.stdout or "").strip()
+    return converted or None
+
+
+def _wsl_home_windows() -> str | None:
+    """Resolve the default WSL distro's home directory to a Windows path."""
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-e", "bash", "-lc", "wslpath -w \"$HOME\""],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
+def _windows_wsl_path(raw: str) -> str:
+    """Map a POSIX/WSL path to a Windows-accessible path on native Windows."""
+    # A leading tilde means the default WSL distro's home, not the Windows home.
+    if raw == "~" or raw.startswith("~/") or raw.startswith("~\\"):
+        home = _wsl_home_windows()
+        if not home:
+            raise TuiAttachmentError(
+                "the WSL home directory could not be resolved; provide an absolute WSL path instead"
+            )
+        remainder = raw[1:].lstrip("/\\")
+        return f"{home}\\{remainder}" if remainder else home
+
+    converted = _run_wslpath(["-w", raw])
+    if converted:
+        return converted
+
+    # Fallback when wslpath is unavailable: /mnt/<drive>/... maps deterministically.
+    match = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", raw)
+    if match:
+        drive = match.group(1).upper() + ":"
+        rest = (match.group(2) or "").replace("/", "\\")
+        return f"{drive}\\{rest}" if rest else drive + "\\"
+
+    raise TuiAttachmentError(
+        "the WSL/POSIX path could not be resolved on this Windows host"
+    )
+
+
 def snapshot_path(
     value: str,
     *,
@@ -68,7 +139,7 @@ def snapshot_path(
 ) -> PendingAttachment:
     path = _native_path(value)
     if path.is_dir():
-        raise TuiAttachmentError("directories are not attached recursively")
+        raise TuiAttachmentError("the attachment is a directory; select a file inside it to attach")
     if not path.is_file():
         raise TuiAttachmentError("the attachment is not a readable file")
     try:
