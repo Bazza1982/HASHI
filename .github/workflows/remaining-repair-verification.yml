@@ -1,0 +1,54 @@
+name: Remaining defect verification
+on:
+  push:
+    branches: ['verify/remaining-20260915']
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      TZ: UTC
+      PYTHONUTF8: '1'
+      HASHI_TEST_NETWORK: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare isolated Python and dependencies
+        run: |
+          uv python install 3.12.13 --install-dir "$RUNNER_TEMP/repair-python"
+          PY=$(find "$RUNNER_TEMP/repair-python" -path '*/bin/python3.12' -type f | head -1)
+          test -n "$PY"
+          "$PY" -m ensurepip
+          "$PY" -m pip install -q -r constraints/standard-py312.lock '.[test]' ruff
+          echo "REPAIR_PYTHON=$PY" >> "$GITHUB_ENV"
+      - name: Archive clean source and isolated interpreter
+        run: |
+          mkdir -p repair-transfer
+          git archive --format=tar 73f706d9d0247316df1f9ab2348708e894357649 > repair-transfer/source.tar
+          tar -czf repair-transfer/python.tar.gz -C "$RUNNER_TEMP/repair-python" .
+          printf '%s\n' '73f706d9d0247316df1f9ab2348708e894357649' > repair-transfer/SOURCE_SHA
+          sha256sum repair-transfer/source.tar repair-transfer/python.tar.gz > repair-transfer/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: isolated-repair-checkout
+          path: repair-transfer/
+          retention-days: 2
+      - name: Protected Core preflight
+        run: "$REPAIR_PYTHON scripts/check_protected_core_changes.py --base 73f706d9d0247316df1f9ab2348708e894357649"
+      - name: Baseline offline suite
+        run: |
+          set -o pipefail
+          "$REPAIR_PYTHON" -m pytest -q tests -m 'not contract and not live and not platform and not real_wall_clock' --junitxml=baseline.xml 2>&1 | tee baseline.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: baseline-results
+          path: |
+            baseline.xml
+            baseline.log
+          retention-days: 7
