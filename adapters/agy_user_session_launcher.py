@@ -24,6 +24,14 @@ Contract
 * The launcher waits for the child and exits with the child's exit code.
 * Diagnostics go to stderr only (stdout belongs to the child).
 
+Implementation notes
+--------------------
+* The worker process that hosts this launcher may not have valid standard
+  handles (Windows multiprocessing spawn inherits only an explicit handle
+  list).  Invalid std handles are replaced with ``NUL`` handles before the
+  CreateProcessAsUserW call; passing an invalid handle in
+  STARTF_USESTDHANDLES makes the call fail with ERROR_ACCESS_DENIED.
+
 Exit codes
 ----------
     0   child's exit code (propagated)
@@ -65,6 +73,12 @@ STD_ERROR_HANDLE = -12
 HANDLE_FLAG_INHERIT = 0x00000001
 ERROR_NOT_ALL_ASSIGNED = 1300
 INVALID_SESSION = 0xFFFFFFFF
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+OPEN_EXISTING = 3
+FILE_ATTRIBUTE_NORMAL = 0x00000080
 
 DESKTOP_WINSTA_DEFAULT = "winsta0\\default"
 
@@ -149,10 +163,19 @@ def _bind():
     userenv.DestroyEnvironmentBlock.restype = wintypes.BOOL
     kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
     kernel32.GetStdHandle.restype = wintypes.HANDLE
+    kernel32.GetHandleInformation.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)
+    ]
+    kernel32.GetHandleInformation.restype = wintypes.BOOL
     kernel32.SetHandleInformation.argtypes = [
         wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD
     ]
     kernel32.SetHandleInformation.restype = wintypes.BOOL
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
     kernel32.CreateProcessAsUserW.argtypes = [
         wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR,
         ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD,
@@ -204,6 +227,49 @@ def _enable_tcb_privilege(advapi32, kernel32) -> bool:
         kernel32.CloseHandle(token)
 
 
+def _sanitize_std_handles(kernel32) -> tuple:
+    """Return (stdin, stdout, stderr, extra_handles_to_close).
+
+    A worker host may not have valid standard handles (multiprocessing
+    spawn inherits only an explicit handle list).  Passing an invalid handle
+    in STARTF_USESTDHANDLES makes CreateProcessAsUserW fail with
+    ERROR_ACCESS_DENIED, so replace invalid handles with inheritable NUL
+    handles.
+    """
+    handles = []
+    extras = []
+    for std_id in (STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE):
+        handle = kernel32.GetStdHandle(std_id)
+        flags = wintypes.DWORD()
+        valid = bool(handle) and bool(
+            kernel32.GetHandleInformation(handle, ctypes.byref(flags))
+        )
+        if not valid:
+            nul = kernel32.CreateFileW(
+                "NUL",
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            if not nul:
+                nul = None
+            else:
+                kernel32.SetHandleInformation(
+                    nul, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT
+                )
+                extras.append(nul)
+            handle = nul
+        else:
+            kernel32.SetHandleInformation(
+                handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT
+            )
+        handles.append(handle)
+    return handles[0], handles[1], handles[2], extras
+
+
 def _spawn_as_user(kernel32, userenv, user_token, exe, cmdline, cwd):
     env_block = ctypes.c_void_p()
     if not userenv.CreateEnvironmentBlock(ctypes.byref(env_block), user_token, False):
@@ -211,16 +277,15 @@ def _spawn_as_user(kernel32, userenv, user_token, exe, cmdline, cwd):
     if not env_block.value:
         return None, EXIT_ENV_BLOCK_FAILED, ctypes.get_last_error()
 
+    h_stdin, h_stdout, h_stderr, extras = _sanitize_std_handles(kernel32)
+
     si = STARTUPINFOW()
     si.cb = ctypes.sizeof(STARTUPINFOW)
     si.dwFlags = STARTF_USESTDHANDLES
     si.lpDesktop = DESKTOP_WINSTA_DEFAULT
-    si.hStdInput = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-    si.hStdOutput = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-    si.hStdError = kernel32.GetStdHandle(STD_ERROR_HANDLE)
-    kernel32.SetHandleInformation(si.hStdInput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-    kernel32.SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-    kernel32.SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+    si.hStdInput = h_stdin or None
+    si.hStdOutput = h_stdout or None
+    si.hStdError = h_stderr or None
 
     pi = PROCESS_INFORMATION()
     created = kernel32.CreateProcessAsUserW(
@@ -237,12 +302,6 @@ def _spawn_as_user(kernel32, userenv, user_token, exe, cmdline, cwd):
         ctypes.byref(pi),
     )
     winerror = ctypes.get_last_error()
-    print(
-        f"agy-launcher: attempt1 desktop={si.lpDesktop!r} created={bool(created)} "
-        f"winerror={winerror}",
-        file=sys.stderr,
-        flush=True,
-    )
     if not created:
         # The interactive desktop may be unavailable; retry without an
         # explicit desktop (headless console child still gets our pipes).
@@ -261,13 +320,9 @@ def _spawn_as_user(kernel32, userenv, user_token, exe, cmdline, cwd):
             ctypes.byref(pi),
         )
         winerror = ctypes.get_last_error()
-        print(
-            f"agy-launcher: attempt2 desktop=None created={bool(created)} "
-            f"winerror={winerror}",
-            file=sys.stderr,
-            flush=True,
-        )
     userenv.DestroyEnvironmentBlock(env_block)
+    for extra in extras:
+        kernel32.CloseHandle(extra)
     if not created:
         return None, EXIT_CREATE_PROCESS_FAILED, winerror
     return pi, 0, 0
@@ -309,79 +364,6 @@ def main(argv: list[str]) -> int:
             f"WTSQueryUserToken failed for session {session_id}",
             EXIT_QUERY_TOKEN_FAILED,
         )
-
-    try:
-        kernel32.OpenProcessToken.argtypes = [
-            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
-        ]
-        kernel32.OpenProcessToken.restype = wintypes.BOOL
-        advapi32.DuplicateToken.argtypes = [
-            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
-        ]
-        advapi32.DuplicateToken.restype = wintypes.BOOL
-        userenv.GetUserProfileDirectoryW.argtypes = None  # unused, keep types simple
-        kernel32.IsProcessInJob.argtypes = [
-            wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)
-        ]
-        kernel32.IsProcessInJob.restype = wintypes.BOOL
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        user32.GetProcessWindowStation.restype = ctypes.c_void_p
-        user32.GetUserObjectInformationW.argtypes = [
-            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        user32.GetUserObjectInformationW.restype = wintypes.BOOL
-        _me = wintypes.HANDLE()
-        advapi32.OpenProcessToken(
-            kernel32.GetCurrentProcess(),
-            TOKEN_QUERY,
-            ctypes.byref(_me),
-        )
-        _in_job = wintypes.BOOL()
-        kernel32.IsProcessInJob(None, None, ctypes.byref(_in_job))
-        _ws_handle = user32.GetProcessWindowStation()
-        _ws_name = ""
-        if _ws_handle:
-            _need = wintypes.DWORD()
-            user32.GetUserObjectInformationW(_ws_handle, 2, None, 0, ctypes.byref(_need))
-            _buf = ctypes.create_string_buffer(_need.value)
-            if user32.GetUserObjectInformationW(_ws_handle, 2, _buf, _need.value, ctypes.byref(_need)):
-                _ws_name = _buf.value.decode("utf-16-le", errors="replace").split("\x00")[0]
-        _sids = {}
-        for _label, _tok in (("caller", _me), ("user_token", user_token)):
-            try:
-                advapi32.GetTokenInformation.argtypes = [
-                    wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
-                    ctypes.POINTER(wintypes.DWORD),
-                ]
-                advapi32.GetTokenInformation.restype = wintypes.BOOL
-                _need = wintypes.DWORD()
-                advapi32.GetTokenInformation(_tok, 1, None, 0, ctypes.byref(_need))
-                _buf = ctypes.create_string_buffer(_need.value)
-                if advapi32.GetTokenInformation(_tok, 1, _buf, _need.value, ctypes.byref(_need)):
-                    import ctypes.wintypes as _wt
-                    class _TS(ctypes.Structure):
-                        _fields_ = [("User", ctypes.c_void_p)]
-                    _ts = ctypes.cast(_buf, ctypes.POINTER(_TS)).contents
-                    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
-                    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
-                    _ps = wintypes.LPWSTR()
-                    if advapi32.ConvertSidToStringSidW(_ts.User, ctypes.byref(_ps)):
-                        _sids[_label] = _ps.value
-                    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-                    kernel32.LocalFree(_ps)
-            except Exception as _e:
-                _sids[_label] = f"err:{_e}"
-        if _me:
-            kernel32.CloseHandle(_me)
-        print(
-            "agy-launcher: diag in_job=%s winstation=%r sids=%r"
-            % (bool(_in_job.value), _ws_name, _sids),
-            file=sys.stderr,
-            flush=True,
-        )
-    except Exception as _e:
-        print("agy-launcher: diag failed: %r" % (_e,), file=sys.stderr, flush=True)
 
     pi, exit_code, winerror = _spawn_as_user(
         kernel32, userenv, user_token, exe, cmdline, cwd
