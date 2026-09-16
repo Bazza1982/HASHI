@@ -201,7 +201,7 @@ def _fail(message: str, exit_code: int, winerror: int | None = None) -> int:
     return exit_code
 
 
-def _enable_tcb_privilege(advapi32, kernel32) -> bool:
+def _adjust_privileges(advapi32, kernel32, names: tuple) -> bool:
     token = wintypes.HANDLE()
     ok = advapi32.OpenProcessToken(
         kernel32.GetCurrentProcess(),
@@ -211,20 +211,32 @@ def _enable_tcb_privilege(advapi32, kernel32) -> bool:
     if not ok:
         return False
     try:
-        luid = LUID()
-        if not advapi32.LookupPrivilegeValueW(None, "SeTcbPrivilege", ctypes.byref(luid)):
-            return False
-        tp = TOKEN_PRIVILEGES()
-        tp.PrivilegeCount = 1
-        tp.Privileges[0].Luid = luid
-        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
-        if not advapi32.AdjustTokenPrivileges(
-            token, False, ctypes.byref(tp), 0, None, None
-        ):
-            return False
-        return ctypes.get_last_error() != ERROR_NOT_ALL_ASSIGNED
+        for name in names:
+            luid = LUID()
+            if not advapi32.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+                return False
+            tp = TOKEN_PRIVILEGES()
+            tp.PrivilegeCount = 1
+            tp.Privileges[0].Luid = luid
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+            if not advapi32.AdjustTokenPrivileges(
+                token, False, ctypes.byref(tp), 0, None, None
+            ):
+                return False
+            if ctypes.get_last_error() == ERROR_NOT_ALL_ASSIGNED:
+                print(
+                    f"agy-launcher: privilege {name} not held by caller token",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+        return True
     finally:
         kernel32.CloseHandle(token)
+
+
+def _enable_tcb_privilege(advapi32, kernel32) -> bool:
+    return _adjust_privileges(advapi32, kernel32, ("SeTcbPrivilege",))
 
 
 def _sanitize_std_handles(kernel32) -> tuple:
@@ -352,6 +364,11 @@ def main(argv: list[str]) -> int:
 
     if not _enable_tcb_privilege(advapi32, kernel32):
         return _fail("could not enable SeTcbPrivilege", EXIT_QUERY_TOKEN_FAILED)
+    _adjust_privileges(
+        advapi32,
+        kernel32,
+        ("SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"),
+    )
 
     session_id = kernel32.WTSGetActiveConsoleSessionId()
     if session_id == INVALID_SESSION:
