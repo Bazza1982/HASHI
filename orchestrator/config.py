@@ -38,7 +38,7 @@ from orchestrator.timezone_policy import canonical_timezone_name
 #   "drive"     - full drive root e.g. C:\ (least restrictive)
 VALID_ACCESS_SCOPES = {"workspace", "project", "drive"}
 SESSION_MODE_BACKENDS = frozenset(
-    {"claude-cli", "codex-cli", "grok-cli", "her-v2"}
+    {"claude-cli", "codex-cli", "grok-cli", "her-v2", "antigravity-cli"}
 )
 DEFAULT_AGENT_MODE = "fixed"
 SUPPORTED_AGENT_MODES = frozenset({"fixed", "flex"})
