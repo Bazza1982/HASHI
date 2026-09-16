@@ -14,6 +14,10 @@ TOOL_SCHEMAS = [
                 "to Bash. Set shell='cmd' only for CMD/.bat/.cmd syntax. Output is UTF-8. "
                 "Use background_job_start for managed jobs and verification_run for "
                 "correctness checks."
+                " Do not run unbounded or full-filesystem recursive scans, and do not "
+                "run long-blocking foreground commands; keep commands scoped and "
+                "targeted. Prefer file_list for directory listings and log_query for "
+                "literal searches; use background_job_start for long or outliving work."
                 " Prefer log_query over grep, ripgrep, or shell pipelines for literal "
                 "searches in logs, JSONL, or other files that may contain very long "
                 "records. Smart Tool admission may return needs_replan instead of "
@@ -42,8 +46,8 @@ TOOL_SCHEMAS = [
                         "exclusiveMinimum": 0,
                         "description": (
                             "Optional timeout in seconds for this command only. "
-                            "When omitted, an explicitly configured instance safety deadline "
-                            "may apply; otherwise there is no default deadline."
+                            "When omitted, the instance safety default applies (600 s); "
+                            "values above the hard cap (1800 s) are reduced to the cap."
                         ),
                     },
                 },
@@ -60,6 +64,9 @@ TOOL_SCHEMAS = [
                 "Deprecated compatibility alias that always invokes a real Bash "
                 "executable. New calls must use shell, whose native Windows default is "
                 "PowerShell. This alias never means CMD."
+                " Same safety rules as shell: no unbounded/full-filesystem recursive "
+                "scans and no long-blocking foreground commands; prefer file_list, "
+                "log_query, and background_job_start instead."
             ),
             "parameters": {
                 "type": "object",
@@ -73,8 +80,8 @@ TOOL_SCHEMAS = [
                         "exclusiveMinimum": 0,
                         "description": (
                             "Optional timeout in seconds for this command only. "
-                            "When omitted, an explicitly configured instance safety deadline "
-                            "may apply; otherwise there is no default deadline."
+                            "When omitted, the instance safety default applies (600 s); "
+                            "values above the hard cap (1800 s) are reduced to the cap."
                         ),
                     },
                 },
