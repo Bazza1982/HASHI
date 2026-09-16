@@ -315,6 +315,32 @@ async def _shield_bash_cleanup(cleanup) -> dict[str, Any]:
 def _seconds_label(value: float) -> str:
     return f"{value:g}"
 
+_PARTIAL_OUTPUT_TAIL_CHARS = 4000
+
+
+def _bounded_partial_tail(stdout: bytes | None, stderr: bytes | None, encoding) -> str:
+    parts = []
+    if stdout:
+        parts.append(decode_process_output(stdout, encoding=encoding))
+    if stderr:
+        parts.append("[stderr]\n" + decode_process_output(stderr, encoding=encoding))
+    text = "\n".join(parts).strip()
+    if not text:
+        return ""
+    if len(text) > _PARTIAL_OUTPUT_TAIL_CHARS:
+        return text[-_PARTIAL_OUTPUT_TAIL_CHARS:] + "\n...[partial output truncated]"
+    return text
+
+
+def _communicate_partial_tail(communicate_task, encoding) -> str:
+    if communicate_task is None or not communicate_task.done():
+        return ""
+    if communicate_task.cancelled() or communicate_task.exception() is not None:
+        return ""
+    stdout, stderr = communicate_task.result()
+    return _bounded_partial_tail(stdout, stderr, encoding)
+
+
 async def execute_shell(
     args: dict,
     workspace_dir: Path,
@@ -368,8 +394,14 @@ async def execute_shell(
                         pgid=pgid,
                     )
                 )
+                partial_tail = _communicate_partial_tail(
+                    communicate_task, invocation.encoding
+                )
+                message = f"Error: command timed out after {_seconds_label(timeout)}s"
+                if partial_tail:
+                    message += f"\n[partial output]\n{partial_tail}"
                 return BuiltinExecutionResult(
-                    f"Error: command timed out after {_seconds_label(timeout)}s",
+                    message,
                     {
                         **timeout_details,
                         "shell": invocation.shell,
@@ -379,6 +411,7 @@ async def execute_shell(
                         "cwd": str(Path(workspace_dir).resolve()),
                         "encoding": invocation.encoding,
                         "exit_code": proc.returncode,
+                        "partial_output": partial_tail or None,
                         "foreground_cleanup": cleanup,
                     },
                 )
@@ -442,6 +475,10 @@ async def execute_shell(
             cleanup = await _shield_bash_cleanup(
                 _cleanup_bash_process(proc, communicate_task, pgid=pgid)
             )
+        partial_tail = _communicate_partial_tail(
+            communicate_task,
+            invocation.encoding if invocation is not None else None,
+        )
         details = {
             **timeout_details,
             "shell": invocation.shell if invocation is not None else None,
@@ -455,6 +492,7 @@ async def execute_shell(
             "cwd": str(Path(workspace_dir).resolve()),
             "encoding": invocation.encoding if invocation is not None else None,
             "exit_code": proc.returncode if proc is not None else None,
+            "partial_output": partial_tail or None,
             "foreground_cleanup": cleanup or {
                 "status": "not_started",
                 "process_reaped": True,

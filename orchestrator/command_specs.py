@@ -644,6 +644,17 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         alias_of="meter",
     ),
     CommandSpec(
+        "herv2",
+        "cmd_herv2",
+        "Toggle per-turn HER v2 routing card",
+        "session",
+        guide=CommandGuide(
+            "/herv2 [on|off|status]",
+            ("on", "off", "status"),
+            example="/herv2 on",
+        ),
+    ),
+    CommandSpec(
         "stream",
         "cmd_stream",
         "Moved to /typing, /verbose and /think",

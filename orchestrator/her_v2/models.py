@@ -408,6 +408,7 @@ class TurnResult:
     task_state: Mapping[str, Any] = field(default_factory=dict)
     content: tuple[Mapping[str, Any], ...] = ()
     stage_timings_s: Mapping[str, float] = field(default_factory=dict)
+    strategy_handoff: Mapping[str, Any] = field(default_factory=dict)
 
 
 def terminal_lifecycle(state: TerminalState) -> LifecycleState:

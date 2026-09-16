@@ -744,6 +744,11 @@ class RuntimeSupportMixin:
             ),
             content=content,
             stage_timings_s=_merged_stage_timings_s(state),
+            strategy_handoff=(
+                dict(state.strategy_handoff)
+                if isinstance(state.strategy_handoff, Mapping)
+                else {}
+            ),
         )
 
 

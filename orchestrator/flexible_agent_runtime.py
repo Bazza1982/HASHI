@@ -305,6 +305,9 @@ class FlexibleAgentRuntime:
             self, "meter", default=False
         )
         self._meter_receipt_by_id: dict[str, Any] = {}
+        self._herv2 = telegram_stream_policy.get_display_preference(
+            self, "herv2", default=False
+        )
         # Load persisted Telegram notification preference, including final-only Quiet mode.
         self._notify_mode = notification_mode(self)
         self._notify_enabled = self._notify_mode == "on"
@@ -3640,6 +3643,21 @@ class FlexibleAgentRuntime:
                 )
             )
 
+        elif target == "herv2":
+            enabled = value == "on"
+            telegram_stream_policy.set_display_preference(self, "herv2", enabled)
+            self._herv2 = enabled
+            await query.edit_message_text(
+                self._herv2_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._herv2_keyboard(),
+            )
+            await query.answer(
+                ui_language.tr(
+                    "menu.herv2.changed", state=status_label(enabled)
+                )
+            )
+
         elif target == "stream":
             await query.answer(
                 ui_language.tr("menu.stream.moved"),
@@ -6136,6 +6154,44 @@ class FlexibleAgentRuntime:
             action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
         )
 
+    def _herv2_enabled(self) -> bool:
+        return bool(
+            telegram_stream_policy.get_display_preference(self, "herv2", default=False)
+        )
+
+    def _herv2_keyboard(self) -> InlineKeyboardMarkup:
+        enabled = self._herv2_enabled()
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.on"), enabled),
+                callback_data="tgl:herv2:on",
+            ),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.off"), not enabled),
+                callback_data="tgl:herv2:off",
+            ),
+        ]])
+
+    def _herv2_menu_text(self) -> str:
+        enabled = self._herv2_enabled()
+        return setting_card(
+            "🧭",
+            "HER v2 routing card",
+            current=f"<b>{status_label(enabled)}</b>",
+            facts=[
+                f"<b>{html.escape(ui_language.tr('common.default'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('common.off'))}</code>",
+                f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.herv2.scope'))}",
+                f"<b>{html.escape(ui_language.tr('common.saved'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.setting.workspace'))}",
+            ],
+            consequence=ui_language.tr(
+                "menu.herv2.enabled" if enabled else "menu.herv2.disabled"
+            ),
+            action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
+        )
+
     async def cmd_meter(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
@@ -6223,6 +6279,34 @@ class FlexibleAgentRuntime:
             self._meter_menu_text(),
             parse_mode="HTML",
             reply_markup=self._meter_keyboard(),
+        )
+
+    async def cmd_herv2(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        current = self._herv2_enabled()
+        if len(args) > 1 or (args and args[0] not in {"on", "off", "status"}):
+            await self._reply_text(
+                update,
+                ui_language.tr("menu.herv2.usage"),
+                parse_mode="HTML",
+            )
+            return
+        if args and args[0] == "on":
+            enabled = True
+        elif args and args[0] == "off":
+            enabled = False
+        else:
+            enabled = current
+        if args and args[0] in {"on", "off"}:
+            telegram_stream_policy.set_display_preference(self, "herv2", enabled)
+            self._herv2 = enabled
+        await self._reply_text(
+            update,
+            self._herv2_menu_text(),
+            parse_mode="HTML",
+            reply_markup=self._herv2_keyboard(),
         )
 
     async def cmd_stream(self, update: Update, context: Any):
@@ -10712,6 +10796,91 @@ class FlexibleAgentRuntime:
             # A failed cost tail must never break the turn.
             self.logger.exception("meter cost tail delivery failed")
 
+    async def _send_herv2_card(
+        self,
+        item: QueuedRequest,
+        *,
+        response: Any = None,
+        stage_timings_s: Mapping[str, float] | None = None,
+    ) -> None:
+        """Send the per-turn HER v2 routing card after the answer is delivered.
+
+        Uses request-local ``herv2_at_start`` so a mid-flight toggle never changes
+        an in-progress turn.  Never writes to LLM prompt/memory history
+        (history_eligible=False) and is skipped for silent, non-Telegram,
+        transfer-buffered, or non-HER turns.
+        """
+        request_meta = runtime_pipeline.request_meta_for(self, item.request_id)
+        if request_meta.get("herv2_at_start") is not True:
+            return
+        if getattr(item, "silent", False) or not getattr(item, "deliver_to_telegram", True):
+            return
+        if self._should_buffer_during_transfer(item.request_id):
+            return
+
+        stream_metadata = getattr(response, "stream_metadata", None)
+        if not isinstance(stream_metadata, Mapping):
+            return
+        her_v2_meta = stream_metadata.get("her_v2")
+        if not isinstance(her_v2_meta, Mapping):
+            return
+
+        try:
+            from tools.herv2_card import format_herv2_card, herv2_card_data_from_metadata
+
+            locale = str(
+                request_meta.get("ui_locale_at_start")
+                or ui_language.preferred_locale(
+                    self,
+                    actor_id=getattr(item, "owner_id", None)
+                    or getattr(item, "chat_id", None),
+                )
+            )
+            meter_meta = stream_metadata.get("meter")
+            card_data = herv2_card_data_from_metadata(
+                her_v2_meta,
+                meter=meter_meta if isinstance(meter_meta, Mapping) else None,
+                stage_timings_s=stage_timings_s,
+            )
+            if card_data is None:
+                return
+
+            html_text = format_herv2_card(card_data, locale=locale, surface="telegram")
+            plain_text = format_herv2_card(card_data, locale=locale, surface="plain")
+        except Exception:
+            self.logger.exception("herv2 routing card formatting failed")
+            return
+
+        try:
+            await self.send_long_message(
+                chat_id=item.chat_id,
+                text=html_text,
+                request_id=item.request_id,
+                purpose="herv2-card",
+                parse_mode="HTML",
+            )
+        except Exception:
+            self.logger.exception("herv2 routing card delivery failed")
+
+        try:
+            from orchestrator import runtime_session
+
+            runtime_session.record_frontend_message(
+                self,
+                role="assistant",
+                text=plain_text,
+                source="herv2-card",
+                transport_message_id=f"herv2_card:{item.request_id}",
+                surface=str(getattr(item, "session_surface", "") or "telegram"),
+                channel_key=str(getattr(item, "session_channel_key", "") or str(item.chat_id)),
+                explicit_owner_id=getattr(item, "owner_id", None),
+                explicit_session_id=getattr(item, "session_id", None),
+                content_format="plain-text",
+                presentation_channel="herv2",
+            )
+        except Exception:
+            self.logger.debug("herv2 routing card session recording failed", exc_info=True)
+
     async def _send_meditation_cost_tail(
         self, job: dict[str, Any]
     ) -> bool | None:
@@ -11278,6 +11447,13 @@ class FlexibleAgentRuntime:
                     await self._send_meter_cost_tail(
                         item,
                         total_elapsed_s=runtime_pipeline.queued_elapsed_s(item),
+                        stage_timings_s=runtime_pipeline._her_v2_stage_timings_s(
+                            response
+                        ),
+                    )
+                    await self._send_herv2_card(
+                        item,
+                        response=response,
                         stage_timings_s=runtime_pipeline._her_v2_stage_timings_s(
                             response
                         ),
