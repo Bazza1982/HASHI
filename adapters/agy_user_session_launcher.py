@@ -237,6 +237,12 @@ def _spawn_as_user(kernel32, userenv, user_token, exe, cmdline, cwd):
         ctypes.byref(pi),
     )
     winerror = ctypes.get_last_error()
+    print(
+        f"agy-launcher: attempt1 desktop={si.lpDesktop!r} created={bool(created)} "
+        f"winerror={winerror}",
+        file=sys.stderr,
+        flush=True,
+    )
     if not created:
         # The interactive desktop may be unavailable; retry without an
         # explicit desktop (headless console child still gets our pipes).
@@ -255,6 +261,12 @@ def _spawn_as_user(kernel32, userenv, user_token, exe, cmdline, cwd):
             ctypes.byref(pi),
         )
         winerror = ctypes.get_last_error()
+        print(
+            f"agy-launcher: attempt2 desktop=None created={bool(created)} "
+            f"winerror={winerror}",
+            file=sys.stderr,
+            flush=True,
+        )
     userenv.DestroyEnvironmentBlock(env_block)
     if not created:
         return None, EXIT_CREATE_PROCESS_FAILED, winerror
