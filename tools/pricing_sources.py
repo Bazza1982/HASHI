@@ -86,6 +86,49 @@ EXACT_OPENROUTER_MODEL_MAPPINGS: dict[
     ("deepseek-api", "deepseek-v4-pro"): (
         "~deepseek/deepseek-pro-latest",
     ),
+    # Antigravity CLI (agy) models mapped to OpenRouter price references.
+    ("antigravity-cli", "gemini-3.8-flash-high"): (
+        "google/gemini-3.8-flash",
+    ),
+    ("antigravity-cli", "gemini-3.8-flash-medium"): (
+        "google/gemini-3.8-flash",
+    ),
+    ("antigravity-cli", "gemini-3.8-flash-low"): (
+        "google/gemini-3.8-flash",
+    ),
+    ("antigravity-cli", "gemini-3.7-flash-high"): (
+        "google/gemini-3.7-flash",
+    ),
+    ("antigravity-cli", "gemini-3.7-flash-medium"): (
+        "google/gemini-3.7-flash",
+    ),
+    ("antigravity-cli", "gemini-3.7-flash-low"): (
+        "google/gemini-3.7-flash",
+    ),
+    ("antigravity-cli", "gemini-3.6-flash-high"): (
+        "google/gemini-3.6-flash",
+    ),
+    ("antigravity-cli", "gemini-3.6-flash-medium"): (
+        "google/gemini-3.6-flash",
+    ),
+    ("antigravity-cli", "gemini-3.6-flash-low"): (
+        "google/gemini-3.6-flash",
+    ),
+    ("antigravity-cli", "gemini-3.1-pro-high"): (
+        "google/gemini-3.1-pro-preview",
+    ),
+    ("antigravity-cli", "gemini-3.1-pro-low"): (
+        "google/gemini-3.1-pro-preview",
+    ),
+    ("antigravity-cli", "claude-sonnet-4-6"): (
+        "anthropic/claude-sonnet-4.6",
+    ),
+    ("antigravity-cli", "claude-opus-4-6-thinking"): (
+        "anthropic/claude-opus-4.6",
+    ),
+    ("antigravity-cli", "gpt-oss-120b-medium"): (
+        "openai/gpt-oss-120b",
+    ),
 }
 
 
