@@ -16,7 +16,7 @@ from orchestrator.config_json import (
     read_config_json,
     write_config_json,
 )
-from orchestrator.pathing import resolve_command_value, resolve_path_value
+from orchestrator.pathing import resolve_agy_executable, resolve_command_value, resolve_path_value
 from orchestrator.pcm import (
     PCMValidationError,
     atomic_write_pcm,
@@ -138,6 +138,7 @@ class GlobalConfig:
     gemini_cmd: str = "gemini"
     claude_cmd: str = "claude"
     codex_cmd: str = "codex"
+    agy_cmd: str = "agy"
     grok_cmd: str = "grok"
     gh_copilot_cmd: str = "gh copilot"
     hermes_home: str | None = None
@@ -689,6 +690,11 @@ class ConfigManager:
             ),
             grok_cmd=resolve_command_value(
                 g_raw.get("grok_cmd", "grok"),
+                config_dir=config_dir,
+                bridge_home=bridge_home,
+            ),
+            agy_cmd=resolve_command_value(
+                resolve_agy_executable(g_raw.get("agy_cmd")),
                 config_dir=config_dir,
                 bridge_home=bridge_home,
             ),

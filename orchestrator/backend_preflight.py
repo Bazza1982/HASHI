@@ -7,6 +7,7 @@ from adapters.xai_oauth_credentials import (
     find_hermes_auth_path,
     xai_api_credentials_available,
 )
+from orchestrator.pathing import resolve_agy_executable
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
@@ -52,6 +53,9 @@ class BackendPreflight:
             "gemini-cli": global_cfg.gemini_cmd,
             "claude-cli": global_cfg.claude_cmd,
             "codex-cli": global_cfg.codex_cmd,
+            "antigravity-cli": resolve_agy_executable(
+                getattr(global_cfg, "agy_cmd", "agy")
+            ),
             "grok-cli": getattr(global_cfg, "grok_cmd", "grok"),
         }
         for engine in engines:

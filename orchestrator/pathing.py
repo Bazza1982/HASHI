@@ -170,6 +170,37 @@ def resolve_command_value(
     return raw
 
 
+def resolve_agy_executable(value: str | None) -> str:
+    """Resolve the ``agy`` command for the Antigravity CLI backend.
+
+    Candidates, in order:
+
+    1. an explicitly configured value (a filesystem path wins when it exists),
+    2. ``%LOCALAPPDATA%\agy\bin\agy.exe`` (official installer location),
+    3. the bare command name ``agy`` on PATH.
+    """
+
+    raw = str(value or "").strip()
+    candidates: list[str] = []
+    if raw:
+        candidates.append(raw)
+    local_app_data = os.environ.get("LOCALAPPDATA") or ""
+    if local_app_data:
+        candidates.append(str(Path(local_app_data) / "agy" / "bin" / "agy.exe"))
+    candidates.append("agy")
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if ("/" in candidate or "\\" in candidate or Path(candidate).is_absolute()) and Path(
+            candidate
+        ).is_file():
+            return candidate
+        found = shutil.which(candidate)
+        if found:
+            return found
+    return raw or "agy"
+
+
 def to_home_relative(path: str | Path, *, bridge_home: Path) -> str:
     candidate = Path(path).resolve()
     try:

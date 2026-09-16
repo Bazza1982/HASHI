@@ -12,6 +12,7 @@ HER_V2_DEFAULT_ALLOWED_TOOLS = ("*",)
 CLI_ENGINES = frozenset(
     {
         "gemini-cli",
+        "antigravity-cli",
         "claude-cli",
         "codex-cli",
         "grok-cli",
@@ -34,6 +35,34 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "efforts": [],
         "default_effort": None,
         "secret_keys": ["gemini-cli_key"],
+    },
+    "antigravity-cli": {
+        "label": "antigravity",
+        "gateway_enabled": True,
+        "privacy_levels": [0, 1],
+        # agy 1.2.3 `agy models` output captured 2026-09-16 (see
+        # exp/antigravity-cli-hashi1/agy-models-2026-09-16.txt).
+        "models": [
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+            "gemini-3.7-flash-high",
+            "gemini-3.7-flash-medium",
+            "gemini-3.7-flash-low",
+            "gemini-3.6-flash-high",
+            "gemini-3.6-flash-medium",
+            "gemini-3.6-flash-low",
+            "gemini-3.1-pro-high",
+            "gemini-3.1-pro-low",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+        ],
+        "default_model": "gemini-3.8-flash-high",
+        "efforts": [],
+        "default_effort": None,
+        # agy authenticates through the system keyring; no secret keys.
+        "secret_keys": [],
     },
     "claude-cli": {
         "label": "claude",
