@@ -320,6 +320,33 @@ class AntigravityCLIAdapter(BaseBackend):
             cmd.extend(["--add-dir", str(directory)])
         return cmd
 
+    def _fit_prompt_for_argv(self, prompt: str) -> str:
+        """Fit the prompt to the verified agy ``-p`` argv transport limit.
+
+        HASHI materialises a full turn prompt (system instructions plus
+        compacted history) that can exceed the Windows-safe argv budget.
+        agy stdin transport is unverified (an empty ``-p`` yields an "empty
+        prompt" error), so oversized prompts keep their most recent tail
+        (which contains the user's latest request and recent context) and
+        the oldest head is replaced by an explicit truncation marker so the
+        trim stays observable instead of silently dropping content.
+        """
+        if len(prompt) <= self.MAX_PROMPT_ARG_CHARS:
+            return prompt
+        marker = (
+            "[Note: earlier system instructions and conversation history were "
+            "truncated by the antigravity-cli adapter to fit the verified agy "
+            "argument transport limit.]\n"
+        )
+        keep = max(0, self.MAX_PROMPT_ARG_CHARS - len(marker))
+        fitted = marker + prompt[-keep:]
+        self.logger.warning(
+            "Prompt fitted for agy argv transport: %d -> %d chars",
+            len(prompt),
+            len(fitted),
+        )
+        return fitted
+
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
@@ -331,17 +358,7 @@ class AntigravityCLIAdapter(BaseBackend):
                 error="Empty prompt. Request was not sent to Antigravity CLI.",
                 is_success=False,
             )
-        if len(prompt) > self.MAX_PROMPT_ARG_CHARS:
-            return BackendResponse(
-                text="",
-                duration_ms=0,
-                error=(
-                    f"Prompt too long for agy argument transport "
-                    f"({len(prompt)} > {self.MAX_PROMPT_ARG_CHARS} chars). "
-                    f"stdin transport is not verified for agy 1.2.3."
-                ),
-                is_success=False,
-            )
+        prompt = self._fit_prompt_for_argv(prompt)
 
         cmd = self._build_cmd(prompt)
         self._result_payload = {}

@@ -243,11 +243,15 @@ def test_empty_prompt_rejected(tmp_path):
     assert "Empty prompt" in (resp.error or "")
 
 
-def test_overlong_prompt_rejected(tmp_path):
+def test_overlong_prompt_fits_argv_limit(tmp_path):
     adapter = make_adapter(tmp_path)
+    fitted = adapter._fit_prompt_for_argv("x" * 25000)
+    assert len(fitted) <= AntigravityCLIAdapter.MAX_PROMPT_ARG_CHARS
+    assert "truncated by the antigravity-cli adapter" in fitted
+    assert fitted.endswith("x" * 200)
     resp = run(adapter.generate_response("x" * 25000, "req-1"))
-    assert resp.is_success is False
-    assert "too long" in (resp.error or "")
+    assert resp.is_success is True
+    assert resp.text == "PONG"
 
 
 def test_idle_timeout_kills_process(tmp_path, monkeypatch):
