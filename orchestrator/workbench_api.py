@@ -4115,24 +4115,38 @@ class WorkbenchApiServer:
                 attachment_id=request.match_info["attachment_id"],
                 context_generation=int(session["context_generation"]),
             )
-            mime_type = str(attachment.get("mime_type") or "").strip().casefold()
-            if (
-                str(attachment.get("modality") or "").casefold() != "image"
-                or mime_type not in _TRANSCRIPT_IMAGE_PREVIEW_MIME_TYPES
-            ):
-                raise SessionNotFound("visible image attachment not found")
             raw_path = str(attachment.get("local_ref") or "").strip()
             if not raw_path:
-                raise SessionNotFound("visible image attachment is unavailable")
+                raise SessionNotFound("visible attachment is unavailable")
             candidate = Path(raw_path).resolve(strict=True)
+
+            mime_type = str(attachment.get("mime_type") or "").strip().casefold()
+            if not mime_type or mime_type == "application/octet-stream":
+                guessed, _ = mimetypes.guess_type(candidate.name)
+                if guessed:
+                    mime_type = guessed.casefold()
+            if not mime_type:
+                mime_type = "application/octet-stream"
+
             runtime = self._runtime_map().get(name)
             configured_media = getattr(self.global_config, "base_media_dir", None)
+            bridge_home = Path(
+                getattr(self.global_config, "bridge_home", None)
+                or getattr(self.global_config, "project_root", None)
+                or self.config_path.parent
+            ).resolve()
             allowed_roots = {
                 Path(value).resolve()
                 for value in (
                     getattr(runtime, "media_dir", None),
+                    getattr(runtime, "workspace_dir", None),
                     (Path(configured_media) / name if configured_media else None),
+                    (Path(configured_media) / "session_attachments" if configured_media else None),
+                    (Path(configured_media) if configured_media else None),
                     getattr(self.session_store, "attachment_files_root", None),
+                    bridge_home / "media" / name,
+                    bridge_home / "media" / "session_attachments",
+                    bridge_home / "media",
                 )
                 if value
             }
@@ -4140,30 +4154,43 @@ class WorkbenchApiServer:
                 candidate.is_relative_to(root) for root in allowed_roots
             ):
                 raise SessionConflict(
-                    "visible image attachment is outside an approved media directory"
+                    "visible attachment is outside an approved media directory"
                 )
             expected_size = int(attachment.get("size_bytes") or 0)
             actual_size = candidate.stat().st_size
-            if actual_size <= 0 or actual_size > 25 * 1024 * 1024:
-                raise SessionConflict("visible image attachment exceeds the preview limit")
+            if actual_size <= 0 or actual_size > 100 * 1024 * 1024:
+                raise SessionConflict("visible attachment exceeds the download limit")
             if expected_size and expected_size != actual_size:
-                raise SessionConflict("visible image attachment size changed")
+                raise SessionConflict("visible attachment size changed")
             payload = candidate.read_bytes()
             expected_digest = str(attachment.get("sha256") or "").strip().casefold()
             if expected_digest and hashlib.sha256(payload).hexdigest() != expected_digest:
-                raise SessionConflict("visible image attachment content changed")
+                raise SessionConflict("visible attachment content changed")
+
+            is_download = str(request.query.get("download") or "").strip().casefold() in {"1", "true", "yes"}
+            disposition_type = "attachment" if is_download else "inline"
+            filename = str(attachment.get("filename") or candidate.name).strip()
+            from urllib.parse import quote
+            try:
+                filename.encode("ascii")
+                clean_name = filename.replace('"', '\\"')
+                content_disposition = f'{disposition_type}; filename="{clean_name}"'
+            except UnicodeEncodeError:
+                encoded_name = quote(filename)
+                content_disposition = f"{disposition_type}; filename*=UTF-8''{encoded_name}"
+
             return web.Response(
                 body=payload,
                 content_type=mime_type,
                 headers={
                     "Cache-Control": "private, no-store",
-                    "Content-Disposition": "inline",
+                    "Content-Disposition": content_disposition,
                     "X-Content-Type-Options": "nosniff",
                 },
             )
         except FileNotFoundError:
             return self._v1_error(
-                SessionNotFound("visible image attachment is unavailable")
+                SessionNotFound("visible attachment is unavailable")
             )
         except Exception as exc:
             return self._v1_error(exc)
