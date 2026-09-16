@@ -310,6 +310,79 @@ def main(argv: list[str]) -> int:
             EXIT_QUERY_TOKEN_FAILED,
         )
 
+    try:
+        kernel32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+        ]
+        kernel32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.DuplicateToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+        ]
+        advapi32.DuplicateToken.restype = wintypes.BOOL
+        userenv.GetUserProfileDirectoryW.argtypes = None  # unused, keep types simple
+        kernel32.IsProcessInJob.argtypes = [
+            wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)
+        ]
+        kernel32.IsProcessInJob.restype = wintypes.BOOL
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetProcessWindowStation.restype = ctypes.c_void_p
+        user32.GetUserObjectInformationW.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetUserObjectInformationW.restype = wintypes.BOOL
+        _me = wintypes.HANDLE()
+        advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(),
+            TOKEN_QUERY,
+            ctypes.byref(_me),
+        )
+        _in_job = wintypes.BOOL()
+        kernel32.IsProcessInJob(None, None, ctypes.byref(_in_job))
+        _ws_handle = user32.GetProcessWindowStation()
+        _ws_name = ""
+        if _ws_handle:
+            _need = wintypes.DWORD()
+            user32.GetUserObjectInformationW(_ws_handle, 2, None, 0, ctypes.byref(_need))
+            _buf = ctypes.create_string_buffer(_need.value)
+            if user32.GetUserObjectInformationW(_ws_handle, 2, _buf, _need.value, ctypes.byref(_need)):
+                _ws_name = _buf.value.decode("utf-16-le", errors="replace").split("\x00")[0]
+        _sids = {}
+        for _label, _tok in (("caller", _me), ("user_token", user_token)):
+            try:
+                advapi32.GetTokenInformation.argtypes = [
+                    wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                    ctypes.POINTER(wintypes.DWORD),
+                ]
+                advapi32.GetTokenInformation.restype = wintypes.BOOL
+                _need = wintypes.DWORD()
+                advapi32.GetTokenInformation(_tok, 1, None, 0, ctypes.byref(_need))
+                _buf = ctypes.create_string_buffer(_need.value)
+                if advapi32.GetTokenInformation(_tok, 1, _buf, _need.value, ctypes.byref(_need)):
+                    import ctypes.wintypes as _wt
+                    class _TS(ctypes.Structure):
+                        _fields_ = [("User", ctypes.c_void_p)]
+                    _ts = ctypes.cast(_buf, ctypes.POINTER(_TS)).contents
+                    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+                    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+                    _ps = wintypes.LPWSTR()
+                    if advapi32.ConvertSidToStringSidW(_ts.User, ctypes.byref(_ps)):
+                        _sids[_label] = _ps.value
+                    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+                    kernel32.LocalFree(_ps)
+            except Exception as _e:
+                _sids[_label] = f"err:{_e}"
+        if _me:
+            kernel32.CloseHandle(_me)
+        print(
+            "agy-launcher: diag in_job=%s winstation=%r sids=%r"
+            % (bool(_in_job.value), _ws_name, _sids),
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception as _e:
+        print("agy-launcher: diag failed: %r" % (_e,), file=sys.stderr, flush=True)
+
     pi, exit_code, winerror = _spawn_as_user(
         kernel32, userenv, user_token, exe, cmdline, cwd
     )
