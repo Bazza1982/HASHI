@@ -313,3 +313,47 @@ def test_backend_preflight_antigravity_available(tmp_path, monkeypatch):
     agent = SimpleNamespace(engine="antigravity-cli")
     status = preflight.check_backend_availability(global_cfg, [agent], {})
     assert status["antigravity-cli"][0] is True
+
+
+# ------------------------------------------------------------ plan A launcher
+
+
+def test_launch_mode_defaults_to_direct(tmp_path):
+    adapter = make_adapter(tmp_path)
+    assert adapter._launch_mode == "direct"
+
+
+def test_launcher_argv_direct_mode_keeps_command_unchanged(tmp_path):
+    adapter = make_adapter(tmp_path)
+    cmd = [str(MOCK_AGY), "-p", "hello", "--output-format", "json"]
+    assert adapter._launcher_argv(cmd) == tuple(cmd)
+
+
+def test_launcher_argv_user_session_prefixes_launcher(tmp_path):
+    global_cfg = SimpleNamespace(
+        agy_cmd=str(MOCK_AGY), agy_launch_mode="user-session"
+    )
+    adapter = AntigravityCLIAdapter(make_config(tmp_path), global_cfg)
+    assert adapter._launch_mode == "user-session"
+    cmd = [str(MOCK_AGY), "-p", "hello"]
+    argv = adapter._launcher_argv(cmd)
+    assert argv[0] == sys.executable
+    assert argv[1].replace("\\", "/").endswith(
+        "adapters/agy_user_session_launcher.py"
+    )
+    assert Path(argv[1]).is_file()
+    assert argv[2] == "--"
+    assert tuple(argv[3:]) == tuple(cmd)
+
+
+def test_launch_mode_unknown_falls_back_to_direct(tmp_path):
+    global_cfg = SimpleNamespace(agy_cmd=str(MOCK_AGY), agy_launch_mode="nonsense")
+    adapter = AntigravityCLIAdapter(make_config(tmp_path), global_cfg)
+    assert adapter._launch_mode == "direct"
+
+
+def test_global_config_exposes_agy_launch_mode_field():
+    from orchestrator.config import GlobalConfig
+
+    names = {f.name for f in fields(GlobalConfig)}
+    assert "agy_launch_mode" in names

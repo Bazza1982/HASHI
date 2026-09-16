@@ -36,6 +36,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sys
 import time
 from pathlib import Path
 
@@ -85,6 +87,19 @@ class AntigravityCLIAdapter(BaseBackend):
         self.cmd_base = resolve_agy_executable(
             getattr(self.global_config, "agy_cmd", "agy")
         )
+        self._launch_mode = str(
+            getattr(self.global_config, "agy_launch_mode", "direct") or "direct"
+        ).strip().casefold()
+        if self._launch_mode not in {"direct", "user-session"}:
+            self.logger.warning(
+                "Unknown agy_launch_mode %r; falling back to 'direct'.",
+                self._launch_mode,
+            )
+            self._launch_mode = "direct"
+        self._launcher_script = (
+            Path(__file__).resolve().parent / "agy_user_session_launcher.py"
+        )
+        self.logger.info("agy launch mode: %s", self._launch_mode)
         self._conversation_id: str | None = None
         extra = dict(getattr(self.config, "extra", {}) or {})
         self._session_mode: bool = bool(extra.get("session_mode", True))
@@ -131,7 +146,9 @@ class AntigravityCLIAdapter(BaseBackend):
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         self._load_session_state()
         try:
-            invocation = resolve_argv_invocation((self.cmd_base, "--version"))
+            invocation = resolve_argv_invocation(
+                self._launcher_argv([self.cmd_base, "--version"])
+            )
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
                 stdout=asyncio.subprocess.PIPE,
@@ -320,6 +337,19 @@ class AntigravityCLIAdapter(BaseBackend):
             cmd.extend(["--add-dir", str(directory)])
         return cmd
 
+    def _launcher_argv(self, cmd: list[str]) -> tuple[str, ...]:
+        '''Prefix the user-session launcher when launch mode requires it.
+
+        In ``user-session`` mode the service (LocalSystem) never executes
+        agy directly; it runs the launcher, which borrows the active console
+        session user token (Plan A, DPAPI boundary untouched).  ``direct``
+        mode keeps the original direct-execution behaviour as a configurable
+        fallback.
+        '''
+        if self._launch_mode != "user-session" or os.name != "nt":
+            return tuple(cmd)
+        return (sys.executable, str(self._launcher_script), "--", *tuple(cmd))
+
     def _fit_prompt_for_argv(self, prompt: str) -> str:
         """Fit the prompt to the verified agy ``-p`` argv transport limit.
 
@@ -369,7 +399,7 @@ class AntigravityCLIAdapter(BaseBackend):
             f"output_format={self._output_format}, prompt_len={len(prompt)})"
         )
         try:
-            invocation = resolve_argv_invocation(cmd)
+            invocation = resolve_argv_invocation(self._launcher_argv(cmd))
             self.current_proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
                 stdin=asyncio.subprocess.DEVNULL,

@@ -139,6 +139,7 @@ class GlobalConfig:
     claude_cmd: str = "claude"
     codex_cmd: str = "codex"
     agy_cmd: str = "agy"
+    agy_launch_mode: str = "direct"
     grok_cmd: str = "grok"
     gh_copilot_cmd: str = "gh copilot"
     hermes_home: str | None = None
@@ -698,6 +699,7 @@ class ConfigManager:
                 config_dir=config_dir,
                 bridge_home=bridge_home,
             ),
+            agy_launch_mode=g_raw.get("agy_launch_mode", "direct"),
             gh_copilot_cmd=resolve_command_value(
                 g_raw.get("gh_copilot_cmd", "gh copilot"),
                 config_dir=config_dir,
