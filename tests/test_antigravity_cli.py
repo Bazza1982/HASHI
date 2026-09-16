@@ -402,6 +402,7 @@ def test_launcher_argv_direct_mode_keeps_command_unchanged(tmp_path):
     assert adapter._launcher_argv(cmd) == tuple(cmd)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="user-session launcher is Windows-only")
 def test_launcher_argv_user_session_prefixes_launcher(tmp_path):
     global_cfg = SimpleNamespace(
         agy_cmd=str(MOCK_AGY), agy_launch_mode="user-session"
