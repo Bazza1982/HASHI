@@ -239,15 +239,12 @@ def looks_like_slash_command(text: str) -> bool:
 
 
 def split_slash_command_words(body: str) -> list[str]:
-    """Split command words while preserving /debug's opaque journal path."""
+    """Split command words while preserving Windows path separators."""
 
     raw = (body or "").strip()
     if not raw:
         return []
     try:
-        command_token = raw.split(maxsplit=1)[0].split("@", 1)[0].casefold()
-        if command_token != "debug":
-            return shlex.split(raw)
         # Non-POSIX parsing preserves Windows separators while grouping quoted
         # paths.  Strip only the quotes used for that grouping.
         return [
