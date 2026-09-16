@@ -7,6 +7,9 @@ json whole-response mode, exit-0-with-ERROR payloads, --conversation resume).
 
 from __future__ import annotations
 
+import os
+import sys
+import tempfile
 import asyncio
 from dataclasses import fields
 from pathlib import Path
@@ -21,7 +24,22 @@ from orchestrator.backend_preflight import BackendPreflight
 from orchestrator.flexible_backend_registry import BACKEND_REGISTRY, CLI_ENGINES
 from orchestrator.pathing import resolve_agy_executable
 
-MOCK_AGY = Path(__file__).resolve().parent / "mocks" / "bin" / "agy"
+_MOCK_BIN = Path(__file__).resolve().parent / "mocks" / "bin"
+if os.name == "nt":
+    # The POSIX shell mock cannot be executed by native Windows CreateProcess
+    # (WinError 193). Generate an agy.cmd wrapper that runs the cross-platform
+    # Python mock through the adapter's own COMSPEC invocation path.
+    _win_mock_home = Path(tempfile.gettempdir()) / "hashi-antigravity-mock"
+    _win_mock_home.mkdir(parents=True, exist_ok=True)
+    MOCK_AGY = _win_mock_home / "agy.cmd"
+    _mock_py = Path(__file__).resolve().parent / "mocks" / "agy_mock.py"
+    MOCK_AGY.write_text(
+        "@echo off\r\n"
+        f'"{sys.executable}" "{_mock_py}" %*\r\n',
+        encoding="utf-8",
+    )
+else:
+    MOCK_AGY = _MOCK_BIN / "agy"
 MOCK_CID = "11111111-2222-3333-4444-555555555555"
 
 
@@ -113,7 +131,9 @@ def test_initialize_ok_with_mock(tmp_path):
     assert run(adapter.initialize()) is True
 
 
-def test_initialize_missing_binary_fails(tmp_path):
+def test_initialize_missing_binary_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "no-such-dir"))
+    monkeypatch.setenv("PATH", str(tmp_path))
     adapter = AntigravityCLIAdapter(
         make_config(tmp_path),
         SimpleNamespace(agy_cmd=str(tmp_path / "no-such-agy")),
