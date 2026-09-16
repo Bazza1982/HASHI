@@ -156,16 +156,6 @@ class AntigravityCLIAdapter(BaseBackend):
                 **process_group_kwargs(),
             )
             stdout, stderr = await proc.communicate()
-            try:
-                with open(r"C:\ProgramData\HASHI\HASHI3\tmp\rika-plana-20260916\probes\worker-init-trace.log", "a", encoding="utf-8") as _fh:
-                    _fh.write(
-                        "version check: rc=%s out=%r err=%r\n"
-                        % (proc.returncode,
-                            stdout.decode(errors="replace")[:200],
-                            stderr.decode(errors="replace")[:800])
-                    )
-            except Exception:
-                pass
             if proc.returncode != 0:
                 err = stderr.decode(errors="replace").strip()
                 self.logger.error(f"Antigravity CLI version check failed: {err}")

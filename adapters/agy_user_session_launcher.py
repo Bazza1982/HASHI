@@ -11,26 +11,31 @@ models" while the same call as the logged-on user succeeds).
 
 This launcher does NOT copy, decrypt, export, or re-home any credential.  It
 borrows the primary token of the user logged on to the active console
-session (WTSGetActiveConsoleSessionId + WTSQueryUserToken) and starts the
-target executable with CreateProcessAsUser, together with that user's
-environment block.  The DPAPI boundary is untouched.
+session and starts the target executable in that user's context, either:
+
+  1. directly with ``WTSGetActiveConsoleSessionId`` + ``WTSQueryUserToken``
+     + ``CreateProcessAsUser`` (primary path), or
+  2. when CreateProcessAsUser is rejected by the hosting context, via a
+     one-shot Windows scheduled task with the interactive-token logon type
+     (``schtasks /RU <user> /IT``).  The Task Scheduler service starts the
+     child with the user's live logon token; no password is ever involved.
 
 Contract
 --------
     python agy_user_session_launcher.py [--cwd DIR] -- EXE [ARG ...]
 
-* EXE is started under the console-session user token with that user's
-  environment, std handles connected to the launcher's own std handles.
 * The launcher waits for the child and exits with the child's exit code.
 * Diagnostics go to stderr only (stdout belongs to the child).
 
 Implementation notes
 --------------------
-* The worker process that hosts this launcher may not have valid standard
-  handles (Windows multiprocessing spawn inherits only an explicit handle
-  list).  Invalid std handles are replaced with ``NUL`` handles before the
-  CreateProcessAsUserW call; passing an invalid handle in
-  STARTF_USESTDHANDLES makes the call fail with ERROR_ACCESS_DENIED.
+* Worker hosts may lack valid standard handles (multiprocessing spawn
+  inherits only an explicit handle list); invalid handles are replaced with
+  inheritable NUL handles before CreateProcessAsUserW.
+* The scheduled-task fallback writes argv to an args.json file and executes
+  a small runner.py under the user token, relaying stdout/stderr through
+  files back to this process.  If this launcher is killed before the task
+  finishes, the task keeps running until agy's own --print-timeout.
 
 Exit codes
 ----------
@@ -38,7 +43,9 @@ Exit codes
     2   no active console session (user is logged off / no interactive logon)
     3   WTSQueryUserToken failed
     4   CreateEnvironmentBlock failed
-    5   CreateProcessAsUser failed
+    5   CreateProcessAsUser failed (and interactive-task fallback failed)
+    6   interactive-task fallback timed out
+    7   interactive-task fallback failed to start
     10  unsupported platform (requires Windows)
     11  usage error
 """
@@ -46,9 +53,12 @@ Exit codes
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import subprocess
 import sys
+import time
+import uuid
 from ctypes import wintypes
 from pathlib import Path
 
@@ -58,6 +68,8 @@ EXIT_NO_CONSOLE_SESSION = 2
 EXIT_QUERY_TOKEN_FAILED = 3
 EXIT_ENV_BLOCK_FAILED = 4
 EXIT_CREATE_PROCESS_FAILED = 5
+EXIT_TASK_TIMEOUT = 6
+EXIT_TASK_START_FAILED = 7
 EXIT_NOT_WINDOWS = 10
 EXIT_USAGE = 11
 
@@ -81,6 +93,10 @@ OPEN_EXISTING = 3
 FILE_ATTRIBUTE_NORMAL = 0x00000080
 
 DESKTOP_WINSTA_DEFAULT = "winsta0\\default"
+
+TASK_POLL_TIMEOUT_SEC = 7200.0
+TASK_POLL_INTERVAL_SEC = 1.0
+TASK_NAME_PREFIX = "RikaAgy-"
 
 
 class STARTUPINFOW(ctypes.Structure):
@@ -128,6 +144,10 @@ class TOKEN_PRIVILEGES(ctypes.Structure):
         ("PrivilegeCount", wintypes.DWORD),
         ("Privileges", LUID_AND_ATTRIBUTES * 1),
     ]
+
+
+class TOKEN_USER(ctypes.Structure):
+    _fields_ = [("User", ctypes.c_void_p)]  # SID_AND_ATTRIBUTES*
 
 
 def _bind():
@@ -191,6 +211,19 @@ def _bind():
     kernel32.GetExitCodeProcess.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.LookupAccountSidW.argtypes = [
+        wintypes.LPCWSTR, ctypes.c_void_p, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.LookupAccountSidW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
     return kernel32, advapi32, wtsapi32, userenv
 
 
@@ -235,19 +268,32 @@ def _adjust_privileges(advapi32, kernel32, names: tuple) -> bool:
         kernel32.CloseHandle(token)
 
 
-def _enable_tcb_privilege(advapi32, kernel32) -> bool:
-    return _adjust_privileges(advapi32, kernel32, ("SeTcbPrivilege",))
+def _token_user_name(advapi32, kernel32, user_token) -> str:
+    """Resolve the user token's account name as 'domain\\user'."""
+    need = wintypes.DWORD()
+    advapi32.GetTokenInformation(user_token, 1, None, 0, ctypes.byref(need))
+    if not need.value:
+        return ""
+    buf = ctypes.create_string_buffer(need.value)
+    if not advapi32.GetTokenInformation(user_token, 1, buf, need.value, ctypes.byref(need)):
+        return ""
+    tu = ctypes.cast(buf, ctypes.POINTER(TOKEN_USER)).contents
+    name_len = wintypes.DWORD(256)
+    domain_len = wintypes.DWORD(256)
+    name_buf = ctypes.create_unicode_buffer(name_len.value)
+    domain_buf = ctypes.create_unicode_buffer(domain_len.value)
+    use = wintypes.DWORD()
+    if not advapi32.LookupAccountSidW(
+        None, tu.User, name_buf, ctypes.byref(name_len),
+        domain_buf, ctypes.byref(domain_len), ctypes.byref(use),
+    ):
+        return ""
+    if domain_buf.value:
+        return f"{domain_buf.value}\\{name_buf.value}"
+    return name_buf.value
 
 
 def _sanitize_std_handles(kernel32) -> tuple:
-    """Return (stdin, stdout, stderr, extra_handles_to_close).
-
-    A worker host may not have valid standard handles (multiprocessing
-    spawn inherits only an explicit handle list).  Passing an invalid handle
-    in STARTF_USESTDHANDLES makes CreateProcessAsUserW fail with
-    ERROR_ACCESS_DENIED, so replace invalid handles with inheritable NUL
-    handles.
-    """
     handles = []
     extras = []
     for std_id in (STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE):
@@ -315,8 +361,6 @@ def _spawn_as_user(kernel32, userenv, user_token, exe, cmdline, cwd):
     )
     winerror = ctypes.get_last_error()
     if not created:
-        # The interactive desktop may be unavailable; retry without an
-        # explicit desktop (headless console child still gets our pipes).
         si.lpDesktop = None
         created = kernel32.CreateProcessAsUserW(
             user_token,
@@ -338,6 +382,115 @@ def _spawn_as_user(kernel32, userenv, user_token, exe, cmdline, cwd):
     if not created:
         return None, EXIT_CREATE_PROCESS_FAILED, winerror
     return pi, 0, 0
+
+
+RUNNER_TEMPLATE = '''\
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+work_dir = Path(sys.argv[1])
+args = json.loads((work_dir / "args.json").read_text(encoding="utf-8"))
+with open(work_dir / "out.txt", "wb") as out:
+    proc = subprocess.run(
+        args,
+        stdout=out,
+        stderr=subprocess.STDOUT,
+    )
+(work_dir / "code.txt").write_text(str(proc.returncode), encoding="utf-8")
+'''
+
+
+def _spawn_via_interactive_task(user_name: str, exe: str, args: list, cwd: str | None) -> int:
+    """Fallback: run the command through a one-shot interactive-token task."""
+    task_name = TASK_NAME_PREFIX + uuid.uuid4().hex[:16]
+    tmp = Path(os.environ.get("TEMP", "C:\\Windows\\Temp")) / task_name
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        (tmp / "args.json").write_text(
+            json.dumps([exe, *args]), encoding="utf-8"
+        )
+        runner = tmp / "runner.py"
+        runner.write_text(RUNNER_TEMPLATE, encoding="utf-8")
+        task_cmd = (
+            f'"{sys.executable}" "{runner}" "{tmp}"'
+        )
+        create = subprocess.run(
+            [
+                "schtasks", "/Create", "/F", "/TN", task_name,
+                "/SC", "ONCE", "/ST", "23:59", "/RU", user_name, "/IT",
+                "/TR", task_cmd,
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if create.returncode != 0:
+            print(
+                "agy-launcher: schtasks /Create failed: "
+                + create.stderr.decode(errors="replace")[:400],
+                file=sys.stderr,
+                flush=True,
+            )
+            return EXIT_TASK_START_FAILED
+        run = subprocess.run(
+            ["schtasks", "/Run", "/TN", task_name],
+            capture_output=True,
+            timeout=120,
+        )
+        if run.returncode != 0:
+            print(
+                "agy-launcher: schtasks /Run failed: "
+                + run.stderr.decode(errors="replace")[:400],
+                file=sys.stderr,
+                flush=True,
+            )
+            subprocess.run(
+                ["schtasks", "/Delete", "/F", "/TN", task_name],
+                capture_output=True,
+                timeout=120,
+            )
+            return EXIT_TASK_START_FAILED
+        print(
+            f"agy-launcher: interactive-token task {task_name} started "
+            f"for user {user_name}",
+            file=sys.stderr,
+            flush=True,
+        )
+        deadline = time.monotonic() + TASK_POLL_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            code_file = tmp / "code.txt"
+            if code_file.exists():
+                time.sleep(0.2)  # let the output file flush settle
+                break
+            time.sleep(TASK_POLL_INTERVAL_SEC)
+        if not code_file.exists():
+            print(
+                "agy-launcher: interactive-token task did not finish in time",
+                file=sys.stderr,
+                flush=True,
+            )
+            return EXIT_TASK_TIMEOUT
+        out_file = tmp / "out.txt"
+        if out_file.exists():
+            data = out_file.read_bytes()
+            if data:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+        try:
+            exit_code = int(code_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            exit_code = 0
+        return exit_code
+    finally:
+        subprocess.run(
+            ["schtasks", "/Delete", "/F", "/TN", task_name],
+            capture_output=True,
+            timeout=120,
+        )
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main(argv: list[str]) -> int:
@@ -362,7 +515,7 @@ def main(argv: list[str]) -> int:
     cmdline = subprocess.list2cmdline(args)
     kernel32, advapi32, wtsapi32, userenv = _bind()
 
-    if not _enable_tcb_privilege(advapi32, kernel32):
+    if not _adjust_privileges(advapi32, kernel32, ("SeTcbPrivilege",)):
         return _fail("could not enable SeTcbPrivilege", EXIT_QUERY_TOKEN_FAILED)
     _adjust_privileges(
         advapi32,
@@ -381,26 +534,42 @@ def main(argv: list[str]) -> int:
             f"WTSQueryUserToken failed for session {session_id}",
             EXIT_QUERY_TOKEN_FAILED,
         )
+    user_name = _token_user_name(advapi32, kernel32, user_token)
 
     pi, exit_code, winerror = _spawn_as_user(
         kernel32, userenv, user_token, exe, cmdline, cwd
     )
     kernel32.CloseHandle(user_token)
-    if pi is None:
-        return _fail(f"CreateProcessAsUserW failed for {exe}", exit_code, winerror)
+    if pi is not None:
+        print(
+            f"agy-launcher: spawned pid={pi.dwProcessId} under console session user token",
+            file=sys.stderr,
+            flush=True,
+        )
+        kernel32.CloseHandle(pi.hThread)
+        kernel32.WaitForSingleObject(pi.hProcess, INFINITE)
+        child_exit = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(pi.hProcess, ctypes.byref(child_exit)):
+            child_exit.value = EXIT_CREATE_PROCESS_FAILED
+        kernel32.CloseHandle(pi.hProcess)
+        return int(child_exit.value)
 
+    # Fallback: interactive-token scheduled task (Plan A equivalent).
     print(
-        f"agy-launcher: spawned pid={pi.dwProcessId} under console session user token",
+        f"agy-launcher: CreateProcessAsUserW failed (winerror={winerror}); "
+        "falling back to interactive-token scheduled task",
         file=sys.stderr,
         flush=True,
     )
-    kernel32.CloseHandle(pi.hThread)
-    kernel32.WaitForSingleObject(pi.hProcess, INFINITE)
-    child_exit = wintypes.DWORD()
-    if not kernel32.GetExitCodeProcess(pi.hProcess, ctypes.byref(child_exit)):
-        child_exit.value = EXIT_CREATE_PROCESS_FAILED
-    kernel32.CloseHandle(pi.hProcess)
-    return int(child_exit.value)
+    if not user_name:
+        print(
+            "agy-launcher: could not resolve the session user account name; "
+            "interactive-token fallback unavailable",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _fail(f"CreateProcessAsUserW failed for {exe}", exit_code, winerror)
+    return _spawn_via_interactive_task(user_name, exe, args, cwd)
 
 
 if __name__ == "__main__":
