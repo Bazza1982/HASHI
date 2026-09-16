@@ -368,6 +368,7 @@ def test_gateway_preflight_antigravity_available(tmp_path, monkeypatch):
 
 def test_gateway_preflight_antigravity_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "no-such-dir"))
+    monkeypatch.setenv("PATH", "")
     cfg = SimpleNamespace(agy_cmd=str(tmp_path / "no-such-agy"))
     status = check_gateway_engine(cfg, {}, "antigravity-cli")
     assert status["available"] is False
