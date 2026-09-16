@@ -246,16 +246,89 @@ def test_empty_prompt_rejected(tmp_path):
 def test_overlong_prompt_fits_argv_limit(tmp_path, monkeypatch):
     adapter = make_adapter(tmp_path)
     fitted = adapter._fit_prompt_for_argv("x" * 25000)
-    assert len(fitted) <= AntigravityCLIAdapter.MAX_PROMPT_ARG_CHARS
+    assert len(fitted.encode("utf-8")) <= AntigravityCLIAdapter.MAX_PROMPT_BYTES
     assert "truncated by the antigravity-cli adapter" in fitted
     assert fitted.endswith("x" * 200)
     # The .cmd mock travels through cmd.exe, whose command line is limited
     # to 8191 chars, so exercise the fitting path end-to-end with a smaller
     # cap. Production agy.exe is a direct CreateProcess (32767 limit).
-    monkeypatch.setattr(AntigravityCLIAdapter, "MAX_PROMPT_ARG_CHARS", 7000)
+    monkeypatch.setattr(AntigravityCLIAdapter, "MAX_PROMPT_BYTES", 7000)
     resp = run(adapter.generate_response("x" * 8000, "req-1"))
     assert resp.is_success is True
     assert resp.text == "PONG"
+
+
+def test_fit_prompt_cjk_bytes_under_limit(tmp_path):
+    adapter = make_adapter(tmp_path)
+    prompt = ("汉" * 20000) + "\n请回复：pong"
+    fitted = adapter._fit_prompt_for_argv(prompt)
+    assert len(fitted.encode("utf-8")) <= AntigravityCLIAdapter.MAX_PROMPT_BYTES
+    assert "Truncation marker" in fitted
+    assert fitted.endswith("请回复：pong")
+
+
+def test_fit_prompt_keeps_head_and_tail(tmp_path):
+    adapter = make_adapter(tmp_path)
+    prompt = (
+        "HEAD:SYSTEM INSTRUCTIONS START\n"
+        + ("m" * 30000)
+        + "\nTAIL:latest user request END"
+    )
+    fitted = adapter._fit_prompt_for_argv(prompt)
+    assert fitted.startswith("HEAD:SYSTEM INSTRUCTIONS START")
+    assert fitted.endswith("TAIL:latest user request END")
+    assert "Truncation marker" in fitted
+
+
+def test_fit_prompt_short_unchanged(tmp_path):
+    adapter = make_adapter(tmp_path)
+    prompt = "short prompt"
+    assert adapter._fit_prompt_for_argv(prompt) == prompt
+
+
+def test_hollow_success_detected_in_json_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGY_MOCK_HOLLOW", "1")
+    adapter = make_adapter(tmp_path, extra={"output_format": "json"})
+    assert run(adapter.initialize()) is True
+    resp = run(adapter.generate_response("hollow me", "req-1"))
+    assert resp.is_success is False
+    assert "empty result" in (resp.error or "")
+
+
+def test_hollow_success_detected_in_stream_json_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGY_MOCK_HOLLOW", "1")
+    adapter = make_adapter(tmp_path)
+    assert run(adapter.initialize()) is True
+    resp = run(adapter.generate_response("hollow me", "req-1"))
+    assert resp.is_success is False
+    assert "empty result" in (resp.error or "")
+
+
+def test_stale_conversation_rebuild_retry(tmp_path, monkeypatch):
+    marker = tmp_path / "stale-once"
+    monkeypatch.setenv("AGY_MOCK_STALE_ONCE", str(marker))
+    log = tmp_path / "argv.log"
+    monkeypatch.setenv("AGY_MOCK_LOG", str(log))
+    adapter = make_adapter(tmp_path)
+    assert run(adapter.initialize()) is True
+    resp0 = run(adapter.generate_response("prime", "req-0"))
+    assert resp0.is_success is True
+    resp1 = run(adapter.generate_response("stale please", "req-1"))
+    assert resp1.is_success is True
+    lines = log.read_text(encoding="utf-8").strip().splitlines()
+    assert any("stale please" in l and "--conversation" in l for l in lines)
+    assert any("stale please" in l and "--conversation" not in l for l in lines)
+
+
+def test_stale_conversation_marker_matching(tmp_path):
+    adapter = make_adapter(tmp_path)
+    assert adapter._stale_conversation_error("Error: conversation not found") is True
+    assert (
+        adapter._stale_conversation_error(
+            "Please sign in to view available models."
+        )
+        is False
+    )
 
 
 def test_idle_timeout_kills_process(tmp_path, monkeypatch):
@@ -342,8 +415,13 @@ def test_launcher_argv_user_session_prefixes_launcher(tmp_path):
         "adapters/agy_user_session_launcher.py"
     )
     assert Path(argv[1]).is_file()
-    assert argv[2] == "--"
-    assert tuple(argv[3:]) == tuple(cmd)
+    if argv[2] == "--cwd":
+        assert argv[3] == str(tmp_path)
+        assert argv[4] == "--"
+        assert tuple(argv[5:]) == tuple(cmd)
+    else:
+        assert argv[2] == "--"
+        assert tuple(argv[3:]) == tuple(cmd)
 
 
 def test_launch_mode_unknown_falls_back_to_direct(tmp_path):

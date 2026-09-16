@@ -391,12 +391,19 @@ import sys
 from pathlib import Path
 
 work_dir = Path(sys.argv[1])
-args = json.loads((work_dir / "args.json").read_text(encoding="utf-8"))
+payload = json.loads((work_dir / "args.json").read_text(encoding="utf-8"))
+if isinstance(payload, dict):
+    args = payload.get("args") or []
+    cwd = payload.get("cwd") or None
+else:
+    args = payload
+    cwd = None
 with open(work_dir / "out.txt", "wb") as out:
     proc = subprocess.run(
         args,
         stdout=out,
         stderr=subprocess.STDOUT,
+        cwd=cwd,
     )
 (work_dir / "code.txt").write_text(str(proc.returncode), encoding="utf-8")
 '''
@@ -409,7 +416,10 @@ def _spawn_via_interactive_task(user_name: str, exe: str, args: list, cwd: str |
     tmp.mkdir(parents=True, exist_ok=True)
     try:
         (tmp / "args.json").write_text(
-            json.dumps([exe, *args]), encoding="utf-8"
+            json.dumps(
+                {"args": [exe, *args], "cwd": str(cwd) if cwd else None}
+            ),
+            encoding="utf-8",
         )
         runner = tmp / "runner.py"
         runner.write_text(RUNNER_TEMPLATE, encoding="utf-8")
@@ -481,6 +491,18 @@ def _spawn_via_interactive_task(user_name: str, exe: str, args: list, cwd: str |
             exit_code = int(code_file.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             exit_code = 0
+        if exit_code != 0:
+            try:
+                tail = out_file.read_bytes()[-2000:]
+                if tail:
+                    print(
+                        "agy-launcher: task child failed; output tail:\n"
+                        + tail.decode(errors="replace"),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except OSError:
+                pass
         return exit_code
     finally:
         subprocess.run(
@@ -498,7 +520,11 @@ def main(argv: list[str]) -> int:
         return _fail("requires native Windows", EXIT_NOT_WINDOWS)
 
     cwd = None
+    force_task = False
     args = list(argv)
+    if args and args[0] == "--force-task":
+        force_task = True
+        args = args[1:]
     if args and args[0] == "--cwd":
         if len(args) < 3 or args[2] != "--":
             return _fail("usage: [--cwd DIR] -- EXE [ARG ...]", EXIT_USAGE)
@@ -536,9 +562,17 @@ def main(argv: list[str]) -> int:
         )
     user_name = _token_user_name(advapi32, kernel32, user_token)
 
-    pi, exit_code, winerror = _spawn_as_user(
-        kernel32, userenv, user_token, exe, cmdline, cwd
-    )
+    pi, exit_code, winerror = (None, 0, 0)
+    if force_task:
+        print(
+            "agy-launcher: --force-task requested; skipping CreateProcessAsUser",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        pi, exit_code, winerror = _spawn_as_user(
+            kernel32, userenv, user_token, exe, cmdline, cwd
+        )
     kernel32.CloseHandle(user_token)
     if pi is not None:
         print(
@@ -555,12 +589,20 @@ def main(argv: list[str]) -> int:
         return int(child_exit.value)
 
     # Fallback: interactive-token scheduled task (Plan A equivalent).
-    print(
-        f"agy-launcher: CreateProcessAsUserW failed (winerror={winerror}); "
-        "falling back to interactive-token scheduled task",
-        file=sys.stderr,
-        flush=True,
-    )
+    if force_task:
+        print(
+            "agy-launcher: falling back to interactive-token scheduled task "
+            "(--force-task)",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            f"agy-launcher: CreateProcessAsUserW failed (winerror={winerror}); "
+            "falling back to interactive-token scheduled task",
+            file=sys.stderr,
+            flush=True,
+        )
     if not user_name:
         print(
             "agy-launcher: could not resolve the session user account name; "
@@ -569,7 +611,7 @@ def main(argv: list[str]) -> int:
             flush=True,
         )
         return _fail(f"CreateProcessAsUserW failed for {exe}", exit_code, winerror)
-    return _spawn_via_interactive_task(user_name, exe, args, cwd)
+    return _spawn_via_interactive_task(user_name, exe, args[1:], cwd)
 
 
 if __name__ == "__main__":

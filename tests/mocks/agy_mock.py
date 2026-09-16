@@ -71,6 +71,53 @@ def main() -> int:
     if os.environ.get("AGY_MOCK_NOISE_STDOUT"):
         print("warning: mock noise line (not JSON)")
 
+    hollow = os.environ.get("AGY_MOCK_HOLLOW")
+    if hollow and "hollow" in prompt:
+        if output_format == "json":
+            print(
+                '{"conversation_id":"%s","status":"SUCCESS","response":"",'
+                '"duration_seconds":0,"num_turns":1,'
+                '"usage":{"input_tokens":0,"output_tokens":0,'
+                '"thinking_tokens":0,"total_tokens":0}}' % conversation_id
+            )
+        else:
+            print(
+                '{"event":"init","conversation_id":"%s",'
+                '"init":{"permission_mode":"always-proceed"}}' % conversation_id
+            )
+            print(
+                '{"event":"result","result":{"conversation_id":"%s",'
+                '"status":"SUCCESS","response":"","duration_seconds":0,'
+                '"num_turns":1,"usage":{"input_tokens":0,"output_tokens":0,'
+                '"thinking_tokens":0,"total_tokens":0}}}' % conversation_id
+            )
+        return 0
+
+    stale_once = os.environ.get("AGY_MOCK_STALE_ONCE")
+    if stale_once and "stale" in prompt and not os.path.exists(stale_once):
+        with open(stale_once, "w", encoding="utf-8") as _fh:
+            _fh.write("1")
+        if output_format == "json":
+            print(
+                '{"conversation_id":"%s","status":"ERROR","response":"",'
+                '"error":"Error: conversation not found",'
+                '"duration_seconds":0,"num_turns":0,"usage":{}}'
+                % conversation_id
+            )
+        else:
+            print(
+                '{"event":"init","conversation_id":"%s",'
+                '"init":{"permission_mode":"always-proceed"}}' % conversation_id
+            )
+            print(
+                '{"event":"result","result":{"conversation_id":"%s",'
+                '"status":"ERROR","response":"",'
+                '"error":"Error: conversation not found",'
+                '"duration_seconds":0,"num_turns":0,"usage":{}}}'
+                % conversation_id
+            )
+        return 0
+
     if "error" in prompt:
         # agy 1.2.3 exits 0 while reporting status=ERROR in the payload.
         if output_format == "json":

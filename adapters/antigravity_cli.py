@@ -25,10 +25,11 @@ exp/antigravity-cli-hashi1/):
 * IMPORTANT: agy can exit 0 while reporting ``status:"ERROR"`` inside the JSON
   payload (captured 2026-09-16, f3-stdin.txt), so the parser treats the
   payload status as authoritative, not just the exit code.
-* stdin transport (``--input-format text``) is NOT verified: piping with an
-  empty ``-p`` yields "empty prompt". Prompts therefore travel as the ``-p``
-  argument only; prompts above MAX_PROMPT_ARG_CHARS are rejected with a
-  clear error instead of risking silent data loss.
+* Prompt transport: prompts travel as the ``-p`` argument only.  agy 1.2.4
+  silently drops prompts above ~24 KiB of UTF-8 BYTES (empty SUCCESS payload
+  with zero usage, rc=0), so the adapter fits prompts to ``MAX_PROMPT_BYTES``
+  (head+tail keep with an explicit truncation marker) and treats hollow
+  results as errors.
 """
 
 from __future__ import annotations
@@ -62,8 +63,46 @@ from orchestrator.process_execution import (
 class AntigravityCLIAdapter(BaseBackend):
     """Headless Antigravity CLI backend with cross-process conversation resume."""
 
+    # Verified agy 1.2.4 ``-p`` acceptance ceiling (probes, 2026-09-16):
+    # 24060 UTF-8 bytes -> real response; 24560 bytes -> hollow success
+    # (rc=0, status SUCCESS, empty response, zero usage) in json mode and the
+    # same silent drop at 28060 bytes in stream-json mode.  24000 bytes keeps
+    # a safety margin below every observed failure.  The legacy char-based
+    # name is retained for compatibility; fitting now uses MAX_PROMPT_BYTES.
     MAX_PROMPT_ARG_CHARS = 24000
+    MAX_PROMPT_BYTES = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+
+    HOLLOW_RESULT_ERROR = (
+        "Antigravity CLI returned an empty result with zero token usage "
+        "(prompt likely exceeded agy's -p byte limit or was silently dropped)."
+    )
+
+    _STALE_CONVERSATION_MARKERS = (
+        "conversation not found",
+        "no such conversation",
+        "invalid conversation",
+        "unknown conversation",
+        "conversation is invalid",
+        "conversation expired",
+    )
+
+    @staticmethod
+    def _is_hollow_result(payload) -> bool:
+        """True when agy reports SUCCESS but never called the model."""
+        response = str(payload.get("response") or "").strip()
+        usage = payload.get("usage") or {}
+        total = 0
+        for key in ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens"):
+            try:
+                total += int(usage.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+        return not response and total == 0
+
+    def _stale_conversation_error(self, error: str) -> bool:
+        lowered = str(error or "").casefold()
+        return any(marker in lowered for marker in self._STALE_CONVERSATION_MARKERS)
 
     _SESSION_STATE_FILE = ".hashi-antigravity-session.json"
 
@@ -279,6 +318,8 @@ class AntigravityCLIAdapter(BaseBackend):
                     on_stream_event,
                 )
                 return True, err
+            if self._is_hollow_result(result):
+                return True, self.HOLLOW_RESULT_ERROR
             return True, ""
 
         return False, ""
@@ -306,6 +347,8 @@ class AntigravityCLIAdapter(BaseBackend):
         if status == "ERROR":
             err = str(payload.get("error") or "Antigravity CLI reported an error.")
             return True, err
+        if self._is_hollow_result(payload):
+            return True, self.HOLLOW_RESULT_ERROR
         return True, ""
 
     @staticmethod
@@ -358,32 +401,63 @@ class AntigravityCLIAdapter(BaseBackend):
         '''
         if self._launch_mode != "user-session" or os.name != "nt":
             return tuple(cmd)
+        try:
+            workdir = str(self.effective_workdir)
+        except Exception:
+            workdir = ""
+        if workdir:
+            return (
+                sys.executable,
+                str(self._launcher_script),
+                "--cwd",
+                workdir,
+                "--",
+                *tuple(cmd),
+            )
         return (sys.executable, str(self._launcher_script), "--", *tuple(cmd))
 
-    def _fit_prompt_for_argv(self, prompt: str) -> str:
-        """Fit the prompt to the verified agy ``-p`` argv transport limit.
+    @staticmethod
+    def _cut_bytes(text: str, max_bytes: int, from_end: bool = False) -> str:
+        """Cut ``text`` to at most ``max_bytes`` UTF-8 bytes."""
+        raw = text.encode("utf-8", errors="replace")
+        if len(raw) <= max_bytes:
+            return text
+        cut = raw[-max_bytes:] if from_end else raw[:max_bytes]
+        return cut.decode("utf-8", errors="ignore")
 
-        HASHI materialises a full turn prompt (system instructions plus
-        compacted history) that can exceed the Windows-safe argv budget.
-        agy stdin transport is unverified (an empty ``-p`` yields an "empty
-        prompt" error), so oversized prompts keep their most recent tail
-        (which contains the user's latest request and recent context) and
-        the oldest head is replaced by an explicit truncation marker so the
-        trim stays observable instead of silently dropping content.
+    def _fit_prompt_for_argv(self, prompt: str) -> str:
+        """Fit the prompt to the measured agy ``-p`` transport ceiling.
+
+        agy 1.2.4 accepts up to ~24 KiB measured in UTF-8 BYTES and silently
+        drops oversized prompts (empty success, zero usage) instead of
+        erroring; the Windows CreateProcess command line additionally caps
+        argv at 32767 chars.  Oversized prompts keep the HEAD (system
+        instructions / role framing) and the TAIL (recent context and the
+        latest user request) and replace the excised middle with an explicit
+        marker, so content is never dropped silently.
         """
-        if len(prompt) <= self.MAX_PROMPT_ARG_CHARS:
+        if len(prompt.encode("utf-8", errors="replace")) <= self.MAX_PROMPT_BYTES:
             return prompt
         marker = (
-            "[Note: earlier system instructions and conversation history were "
-            "truncated by the antigravity-cli adapter to fit the verified agy "
-            "argument transport limit.]\n"
+            "\n[Truncation marker: earlier context was truncated by the "
+            "antigravity-cli adapter (the middle of this prompt, i.e. older "
+            "conversation history / intermediate context) to fit agy's "
+            "verified -p byte limit. Head instructions and the latest "
+            "request were kept.]\n"
         )
-        keep = max(0, self.MAX_PROMPT_ARG_CHARS - len(marker))
-        fitted = marker + prompt[-keep:]
+        remaining = max(1, self.MAX_PROMPT_BYTES - len(marker.encode("utf-8")))
+        head_budget = remaining * 40 // 100
+        tail_budget = remaining - head_budget
+        head = self._cut_bytes(prompt, head_budget)
+        tail = self._cut_bytes(prompt, tail_budget, from_end=True)
+        fitted = head + marker + tail
         self.logger.warning(
-            "Prompt fitted for agy argv transport: %d -> %d chars",
+            "Prompt fitted for agy transport: %d chars / %d bytes -> "
+            "%d chars / %d bytes",
             len(prompt),
+            len(prompt.encode("utf-8", errors="replace")),
             len(fitted),
+            len(fitted.encode("utf-8", errors="replace")),
         )
         return fitted
 
@@ -433,7 +507,7 @@ class AntigravityCLIAdapter(BaseBackend):
             )
 
         try:
-            return await self._read_streaming(
+            response = await self._read_streaming(
                 request_id, started, cmd, on_stream_event,
             )
         except asyncio.CancelledError:
@@ -447,6 +521,28 @@ class AntigravityCLIAdapter(BaseBackend):
             raise
         except Exception as exc:
             return BackendResponse(text="", duration_ms=0, error=str(exc), is_success=False)
+        if (
+            response.error
+            and self._conversation_id
+            and not is_retry
+            and self._stale_conversation_error(response.error)
+        ):
+            stale = self._conversation_id
+            self._conversation_id = None
+            self._persist_session_state()
+            self.logger.warning(
+                "Dropping stale agy conversation %s and retrying once: %s",
+                stale,
+                response.error[:160],
+            )
+            return await self.generate_response(
+                prompt,
+                request_id,
+                is_retry=True,
+                silent=silent,
+                on_stream_event=on_stream_event,
+            )
+        return response
 
     async def _read_streaming(
         self,
@@ -458,6 +554,7 @@ class AntigravityCLIAdapter(BaseBackend):
         proc = self.current_proc  # local ref — shutdown() may null self.current_proc
         text_fragments: list[str] = []
         stdout_line_count = 0
+        stdout_tail: list[str] = []
         stderr_lines: list[str] = []
         done_with_error: str | None = None
         timeout_kind: str | None = None
@@ -485,7 +582,11 @@ class AntigravityCLIAdapter(BaseBackend):
             async for line in iter_stream_lines(proc.stdout):
                 self._touch_activity()
                 stdout_line_count += 1
-                _handle_line(line.decode(errors="replace"))
+                decoded = line.decode(errors="replace")
+                stdout_tail.append(decoded.strip())
+                if len(stdout_tail) > 20:
+                    stdout_tail.pop(0)
+                _handle_line(decoded)
 
         stdout_task = asyncio.create_task(_read_stdout())
         self._active_read_tasks = [stdout_task, stderr_task]
@@ -559,10 +660,26 @@ class AntigravityCLIAdapter(BaseBackend):
         if not payload:
             err_msg = "".join(stderr_lines).strip()
             if returncode != 0:
+                details = err_msg
+                if stdout_tail:
+                    details = (
+                        (details + "\nstdout tail:\n" if details else "stdout tail:\n")
+                        + "\n".join(stdout_tail[-5:])
+                    ).strip()
                 return BackendResponse(
                     text="",
                     duration_ms=duration_ms,
-                    error=err_msg or "Antigravity CLI failed.",
+                    error=details or "Antigravity CLI failed.",
+                    is_success=False,
+                )
+            if "run ended with no output" in "".join(stderr_lines):
+                return BackendResponse(
+                    text="",
+                    duration_ms=duration_ms,
+                    error=(
+                        "Antigravity CLI ended with no output and no recorded "
+                        "error (prompt may have been silently dropped)."
+                    ),
                     is_success=False,
                 )
             if not response_text:
