@@ -143,12 +143,26 @@ class AntigravityCLIAdapter(BaseBackend):
 
     async def initialize(self) -> bool:
         self.logger.info("Initializing Antigravity CLI backend...")
+        try:
+            with open(r"C:\ProgramData\HASHI\HASHI3\tmp\rika-plana-20260916\probes\worker-init-trace.log", "a", encoding="utf-8") as _fh:
+                _fh.write(
+                    "initialize start: cmd_base=%s launch_mode=%s launcher=%s sys_exec=%s\n"
+                    % (self.cmd_base, self._launch_mode, self._launcher_script,
+                        __import__("sys").executable)
+                )
+        except Exception:
+            pass
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         self._load_session_state()
         try:
             invocation = resolve_argv_invocation(
                 self._launcher_argv([self.cmd_base, "--version"])
             )
+            try:
+                with open(r"C:\ProgramData\HASHI\HASHI3\tmp\rika-plana-20260916\probes\worker-init-trace.log", "a", encoding="utf-8") as _fh:
+                    _fh.write("initialize invocation: %r\n" % (invocation.argv,))
+            except Exception:
+                pass
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
                 stdout=asyncio.subprocess.PIPE,
@@ -156,6 +170,16 @@ class AntigravityCLIAdapter(BaseBackend):
                 **process_group_kwargs(),
             )
             stdout, stderr = await proc.communicate()
+            try:
+                with open(r"C:\ProgramData\HASHI\HASHI3\tmp\rika-plana-20260916\probes\worker-init-trace.log", "a", encoding="utf-8") as _fh:
+                    _fh.write(
+                        "version check: rc=%s out=%r err=%r\n"
+                        % (proc.returncode,
+                            stdout.decode(errors="replace")[:200],
+                            stderr.decode(errors="replace")[:500])
+                    )
+            except Exception:
+                pass
             if proc.returncode != 0:
                 err = stderr.decode(errors="replace").strip()
                 self.logger.error(f"Antigravity CLI version check failed: {err}")
@@ -164,6 +188,11 @@ class AntigravityCLIAdapter(BaseBackend):
             self.logger.info(f"Antigravity CLI version: {version}")
         except Exception as exc:
             self.logger.error(f"Antigravity CLI not accessible: {exc}")
+            try:
+                with open(r"C:\ProgramData\HASHI\HASHI3\tmp\rika-plana-20260916\probes\worker-init-trace.log", "a", encoding="utf-8") as _fh:
+                    _fh.write("initialize EXCEPTION: %r\n" % (exc,))
+            except Exception:
+                pass
             return False
         return True
 
