@@ -1051,6 +1051,7 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         # notification policy for this already-started task.
         "verbose_at_start": bool(getattr(runtime, "_verbose", False)),
         "meter_at_start": bool(getattr(runtime, "_meter", False)),
+        "herv2_at_start": bool(getattr(runtime, "_herv2", False)),
         "ui_locale_at_start": ui_language.preferred_locale(
             runtime,
             actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),
@@ -4213,6 +4214,12 @@ async def handle_success_delivery(
         await runtime._send_meter_cost_tail(
             item,
             total_elapsed_s=meter_elapsed_s,
+            stage_timings_s=_her_v2_stage_timings_s(response),
+        )
+    if final_delivered and callable(getattr(runtime, "_send_herv2_card", None)):
+        await runtime._send_herv2_card(
+            item,
+            response=response,
             stage_timings_s=_her_v2_stage_timings_s(response),
         )
     runtime._schedule_audit_followup(

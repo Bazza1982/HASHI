@@ -2059,6 +2059,52 @@ class HERv2Adapter(BaseBackend):
                         getattr(result, "stage_timings_s", {}) or {}
                     ).items()
                 },
+                "strategy_cards": [
+                    str(card.get("id") or card.get("title") or "")
+                    for card in (
+                        (
+                            result.strategy_handoff.get("selected_strategy_cards")
+                            if isinstance(getattr(result, "strategy_handoff", None), Mapping)
+                            else []
+                        )
+                        or []
+                    )
+                    if isinstance(card, Mapping)
+                ],
+                "strategy_card_details": [
+                    {
+                        "id": str(card.get("id") or ""),
+                        "title": str(card.get("title") or ""),
+                    }
+                    for card in (
+                        (
+                            result.strategy_handoff.get("selected_strategy_cards")
+                            if isinstance(getattr(result, "strategy_handoff", None), Mapping)
+                            else []
+                        )
+                        or []
+                    )
+                    if isinstance(card, Mapping)
+                ],
+                "strategy_brief": (
+                    dict(result.strategy_handoff.get("execution_brief"))
+                    if isinstance(getattr(result, "strategy_handoff", None), Mapping)
+                    and isinstance(result.strategy_handoff.get("execution_brief"), Mapping)
+                    else {}
+                ),
+                "slot_models": (
+                    dict(self._v2_config.slot_models)
+                    if hasattr(self, "_v2_config") and hasattr(self._v2_config, "slot_models")
+                    else {}
+                ),
+                "route_model_slots": (
+                    {
+                        (r.value if hasattr(r, "value") else str(r)): str(s)
+                        for r, s in self._v2_config.route_model_slots.items()
+                    }
+                    if hasattr(self, "_v2_config") and hasattr(self._v2_config, "route_model_slots")
+                    else {}
+                ),
                 "shadow_mode": self._v2_config.shadow_mode,
                 "effort": effort_resolution.metadata(),
             }

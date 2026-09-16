@@ -25,7 +25,7 @@ DEFAULT_EDIT_INTERVAL_S = 10.0
 DEFAULT_HEARTBEAT_INTERVAL_S = 60.0
 DEFAULT_MAX_EDITS_PER_REQUEST = 20
 COMPONENT_NAMES = frozenset(DEFAULT_COMPONENTS)
-DISPLAY_PREFERENCE_NAMES = frozenset({"verbose", "think", "typing", "commentary", "meter"})
+DISPLAY_PREFERENCE_NAMES = frozenset({"verbose", "think", "typing", "commentary", "meter", "herv2"})
 
 
 @dataclass(frozen=True)
