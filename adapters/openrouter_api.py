@@ -22,6 +22,7 @@ import httpx
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
 from adapters.stream_events import (
     DELIVERY_USER_COMMENTARY,
+    KIND_COMMENTARY,
     KIND_FILE_EDIT,
     KIND_FILE_READ,
     KIND_SHELL_EXEC,
@@ -3812,6 +3813,34 @@ class OpenRouterAdapter(BaseBackend):
                 self._augment_assistant_tool_message(assistant_msg, result)
                 assistant_msg["tool_calls"] = result.tool_calls
                 messages.append(assistant_msg)
+
+                if (
+                    result.text
+                    and str(result.text).strip()
+                    and on_stream_event is not None
+                ):
+                    interim_text = str(result.text).strip()
+                    is_json = False
+                    if (
+                        interim_text.startswith("{") and interim_text.endswith("}")
+                    ) or (
+                        interim_text.startswith("[") and interim_text.endswith("]")
+                    ):
+                        try:
+                            json.loads(interim_text)
+                            is_json = True
+                        except Exception:
+                            is_json = False
+                    if not is_json:
+                        await on_stream_event(
+                            StreamEvent(
+                                kind=KIND_COMMENTARY,
+                                summary=interim_text,
+                                delivery_class=DELIVERY_USER_COMMENTARY,
+                                origin=f"openrouter-api:{self.config.model}",
+                                event_id=f"{request_id}:commentary:{loop_idx + 1}",
+                            )
+                        )
 
                 # Execute tools, append results
                 await self._run_tool_calls(

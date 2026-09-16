@@ -57,7 +57,9 @@ from adapters.openrouter_api import (
 )
 from adapters.stream_events import (
     DELIVERY_INTERNAL,
+    DELIVERY_USER_COMMENTARY,
     HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+    KIND_COMMENTARY,
     KIND_PROVIDER_ACTIVITY,
     KIND_TEXT_DELTA,
     KIND_THINKING,
@@ -1387,6 +1389,34 @@ class HashiApiAdapter(OpenRouterAdapter):
                 assistant_msg["tool_calls"] = result.tool_calls
                 messages.append(assistant_msg)
                 tool_result_start = len(messages)
+
+                if (
+                    result.text
+                    and str(result.text).strip()
+                    and on_stream_event is not None
+                ):
+                    interim_text = str(result.text).strip()
+                    is_json = False
+                    if (
+                        interim_text.startswith("{") and interim_text.endswith("}")
+                    ) or (
+                        interim_text.startswith("[") and interim_text.endswith("]")
+                    ):
+                        try:
+                            json.loads(interim_text)
+                            is_json = True
+                        except Exception:
+                            is_json = False
+                    if not is_json:
+                        await on_stream_event(
+                            StreamEvent(
+                                kind=KIND_COMMENTARY,
+                                summary=interim_text,
+                                delivery_class=DELIVERY_USER_COMMENTARY,
+                                origin=f"hashi-api:{self.config.model}",
+                                event_id=f"{request_id}:commentary:{tool_loop_count}",
+                            )
+                        )
 
                 await self._run_tool_calls(
                     result.tool_calls,

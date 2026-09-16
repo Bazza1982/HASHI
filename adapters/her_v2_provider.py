@@ -3702,7 +3702,7 @@ class HashiStageProvider(StageProvider):
             # invalid envelope retries are not meaningful execution progress.
             if event.kind in {KIND_TEXT_DELTA, KIND_PROVIDER_ACTIVITY}:
                 return
-            if event.kind == KIND_TOOL_END and request.progress_callback is not None:
+            if event.kind in {KIND_TOOL_END, KIND_COMMENTARY} and request.progress_callback is not None:
                 request.progress_callback(event.kind, event.summary, True)
             # Reasoning and execution activity retain their normal HASHI
             # presentation owners.
@@ -3710,12 +3710,11 @@ class HashiStageProvider(StageProvider):
                 return
             if not event.delivery_class:
                 event.delivery_class = owner
-            # Provider-native progress is not the HER v2 commentary contract.
-            # Only a validated structured ``commentary`` field may enter the
-            # separate Persona packaging pipeline.
+            # Provider-native progress is not the HER v2 commentary contract,
+            # except for model-authored interim commentary emitted during execution.
             if (
                 event.delivery_class == DELIVERY_USER_COMMENTARY
-                and event.kind != "voice_warning"
+                and event.kind not in {KIND_COMMENTARY, "voice_warning"}
             ):
                 event.delivery_class = DELIVERY_INTERNAL
             event.origin = event.origin or f"her_v2:{profile.engine}"
