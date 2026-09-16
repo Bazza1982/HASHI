@@ -10,6 +10,7 @@ from adapters.xai_oauth_credentials import (
     secrets_oauth_refresh_available,
     xai_api_credentials_available,
 )
+from orchestrator.pathing import resolve_agy_executable
 
 
 def _cli_command(global_config: Any, engine: str) -> str:
@@ -17,6 +18,7 @@ def _cli_command(global_config: Any, engine: str) -> str:
         "gemini-cli": getattr(global_config, "gemini_cmd", "gemini"),
         "claude-cli": getattr(global_config, "claude_cmd", "claude"),
         "codex-cli": getattr(global_config, "codex_cmd", "codex"),
+        "antigravity-cli": getattr(global_config, "agy_cmd", "agy"),
         "grok-cli": getattr(global_config, "grok_cmd", "grok"),
     }
     return str(mapping.get(engine, "") or "").strip()
@@ -27,8 +29,10 @@ def _has_secrets_xai_credentials(secrets: dict) -> bool:
 
 
 def check_gateway_engine(global_config: Any, secrets: dict, engine: str) -> dict[str, Any]:
-    if engine in {"gemini-cli", "claude-cli", "codex-cli", "grok-cli"}:
+    if engine in {"gemini-cli", "claude-cli", "codex-cli", "grok-cli", "antigravity-cli"}:
         cmd = _cli_command(global_config, engine)
+        if engine == "antigravity-cli":
+            cmd = resolve_agy_executable(cmd)
         found = shutil.which(cmd) if cmd else None
         if found:
             return {"available": True, "reason": found}

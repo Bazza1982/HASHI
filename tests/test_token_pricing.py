@@ -380,3 +380,31 @@ def test_first_unknown_openrouter_usage_schedules_nonblocking_price_supplement(
     assert receipt.cost_usd is None
     assert receipt.dominant_cost_source() == "unknown"
     assert scheduled == [("openrouter-api", "vendor/brand-new-model", None)]
+
+
+def test_antigravity_cli_exact_mapping_and_cost_estimation(tmp_path, monkeypatch):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    fact = pricing_sources.refresh_pricing_fact(
+        "antigravity-cli",
+        "gemini-3.8-flash-high",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence("google/gemini-3.8-flash"),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="gemini-3.8-flash-high",
+        backend="antigravity-cli",
+        engine="antigravity-cli",
+        input_tokens=10_000,
+        output_tokens=1_000,
+        thinking_tokens=500,
+        prompt_cache_hit_tokens=2_000,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd is not None
+    assert receipt.dominant_cost_source() == "openrouter_reference"
+    assert receipt.cost_usd > 0
+    assert receipt.pricing_revisions == (fact.source_revision,)

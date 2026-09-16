@@ -7,6 +7,7 @@ from adapters.xai_oauth_credentials import (
     find_hermes_auth_path,
     xai_api_credentials_available,
 )
+from orchestrator.pathing import resolve_agy_executable
 from orchestrator.flexible_backend_registry import get_secret_lookup_order
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
@@ -52,16 +53,38 @@ class BackendPreflight:
             "gemini-cli": global_cfg.gemini_cmd,
             "claude-cli": global_cfg.claude_cmd,
             "codex-cli": global_cfg.codex_cmd,
+            "antigravity-cli": resolve_agy_executable(
+                getattr(global_cfg, "agy_cmd", "agy")
+            ),
             "grok-cli": getattr(global_cfg, "grok_cmd", "grok"),
         }
+        agy_launch_mode = str(
+            getattr(global_cfg, "agy_launch_mode", "direct") or "direct"
+        ).strip().casefold()
         for engine in engines:
             if engine in cli_map:
                 cmd = cli_map[engine]
                 found = shutil.which(cmd)
-                if found:
-                    result[engine] = (True, found)
-                else:
+                if not found:
                     result[engine] = (False, f"'{cmd}' not found on PATH")
+                elif engine == "antigravity-cli" and agy_launch_mode == "user-session":
+                    from adapters.agy_user_session_launcher import (
+                        LAUNCHER_SCRIPT_PATH,
+                    )
+
+                    if not LAUNCHER_SCRIPT_PATH.is_file():
+                        result[engine] = (
+                            False,
+                            "user-session launcher script missing "
+                            f"({LAUNCHER_SCRIPT_PATH})",
+                        )
+                    else:
+                        result[engine] = (
+                            True,
+                            f"{found} via user-session launcher",
+                        )
+                else:
+                    result[engine] = (True, found)
             elif engine == "xai-api":
                 if self.has_xai_api_credentials(global_cfg, agent_configs, secrets):
                     auth_path = find_hermes_auth_path(

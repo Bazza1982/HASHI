@@ -10,6 +10,7 @@ from orchestrator.flexible_backend_registry import canonical_backend_engine
 
 _BACKEND_ADAPTER_TARGETS: dict[str, tuple[str, str]] = {
     "gemini-cli": ("adapters.gemini_cli", "GeminiCLIAdapter"),
+    "antigravity-cli": ("adapters.antigravity_cli", "AntigravityCLIAdapter"),
     "openrouter-api": ("adapters.openrouter_api", "OpenRouterAdapter"),
     "deepseek-api": ("adapters.deepseek_api", "DeepSeekAdapter"),
     "openai-compatible-api": (

@@ -1,0 +1,36 @@
+{
+  "initialize": true,
+  "turn1": {
+    "success": true,
+    "text": "PONG",
+    "error": null,
+    "duration_ms": 9528.44,
+    "metadata": {
+      "conversation_id": "1cf716d0-e635-46bc-8bf2-5d772dade9c9",
+      "num_turns": 1,
+      "duration_seconds": 2.8315926,
+      "status": "SUCCESS"
+    },
+    "usage_input": 15974,
+    "usage_output": 131
+  },
+  "conversation_id_turn1": "1cf716d0-e635-46bc-8bf2-5d772dade9c9",
+  "initialize2": true,
+  "turn2": {
+    "success": true,
+    "text": "PONG",
+    "error": null,
+    "duration_ms": 9006.12,
+    "metadata": {
+      "conversation_id": "1cf716d0-e635-46bc-8bf2-5d772dade9c9",
+      "num_turns": 2,
+      "duration_seconds": 11.8557376,
+      "status": "SUCCESS"
+    },
+    "usage_input": 32301,
+    "usage_output": 200
+  },
+  "conversation_id_turn2": "1cf716d0-e635-46bc-8bf2-5d772dade9c9",
+  "session_file": "C:\\home\\lily\\projects\\hashi\\antigravity-cli-hashi1\\exp\\antigravity-cli-hashi1\\smoke-workspace\\.hashi-antigravity-session.json",
+  "elapsed_s": 18.78
+}

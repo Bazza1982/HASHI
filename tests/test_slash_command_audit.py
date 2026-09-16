@@ -21,6 +21,7 @@ from orchestrator.slash_command_audit import (
     parse_inline_callback_command,
     parse_slash_command_text,
     redact_args,
+    split_slash_command_words,
 )
 
 
@@ -266,6 +267,32 @@ def test_looks_like_and_parse_slash_command_text():
     assert looks_like_slash_command("/") is False
     assert parse_slash_command_text("/status full") == ("status", ["full"])
     assert parse_slash_command_text("/help@botname") == ("help", [])
+
+
+def test_parse_slash_command_text_preserves_windows_paths():
+    assert parse_slash_command_text(
+        "/workzone 2 C:\\Users\\thene\\projects\\HASHI4"
+    ) == ("workzone", ["2", "C:\\Users\\thene\\projects\\HASHI4"])
+    assert parse_slash_command_text(
+        "/worzone 2 C:\\Users\\thene\\projects\\HASHI4"
+    ) == ("worzone", ["2", "C:\\Users\\thene\\projects\\HASHI4"])
+
+
+def test_split_slash_command_words_unified_non_posix():
+    assert split_slash_command_words(
+        "workzone 2 C:\\Users\\thene\\projects\\HASHI4"
+    ) == ["workzone", "2", "C:\\Users\\thene\\projects\\HASHI4"]
+    assert split_slash_command_words(
+        "workzone 2 C:\\Users\\thene\\projects\\HASHI4" + "\\"
+    ) == ["workzone", "2", "C:\\Users\\thene\\projects\\HASHI4\\"]
+    assert split_slash_command_words('say "hello world"') == ["say", "hello world"]
+    assert split_slash_command_words("say 'hello world'") == ["say", "hello world"]
+    assert split_slash_command_words("say hello world") == ["say", "hello", "world"]
+    assert split_slash_command_words("status") == ["status"]
+    assert split_slash_command_words("") == []
+    assert split_slash_command_words(
+        "debug C:\\Users\\thene\\projects\\HASHI3\\logs\\audit.jsonl"
+    ) == ["debug", "C:\\Users\\thene\\projects\\HASHI3\\logs\\audit.jsonl"]
 
 
 def test_parse_inline_callback_command():
