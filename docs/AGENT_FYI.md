@@ -32,7 +32,9 @@ Source, artifacts, clients, Workers, and delivery are separate facts.
 adoption only after the active generation is verified. Locked runtime packages
 must match exactly; unrelated extra packages alone must not block `/reboot`.
 The Function manifest must be clean in a recorded local Git commit; unrelated
-dirty files outside that manifest do not block it. See
+dirty files outside that manifest do not block it. Reboot receipts distinguish
+accepted, candidate rejected, committed, rolled back, online, and unconfirmed;
+only PID, identity, generation, and health evidence permits `online`. See
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
 [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
