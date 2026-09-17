@@ -146,6 +146,55 @@ def test_report_contains_error_provenance_and_receiver_instructions(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_automatic_debug_report_completion_is_not_replied_to_source(
+    tmp_path: Path,
+):
+    from tools.hchat_send import format_hchat_message
+
+    receiver = object.__new__(FlexibleAgentRuntime)
+    receiver.name = "zhaojun"
+    receiver.logger = _Logger()
+    replies: list[str] = []
+
+    async def enqueue_reply(text: str, **_kwargs):
+        replies.append(text)
+        return "unexpected-reply"
+
+    receiver.orchestrator = SimpleNamespace(
+        runtimes=[SimpleNamespace(name="source", enqueue_api_text=enqueue_reply)]
+    )
+    settings = runtime_debug_reporting.DebugReportingSettings(
+        enabled=True,
+        target="zhaojun@HASHI1",
+        journal="journal.md",
+    )
+    report = runtime_debug_reporting.build_report_message(
+        _runtime(tmp_path),
+        "req-source-one-way",
+        {"success": False, "error": "backend failed", "source": "text"},
+        settings,
+    )
+    item = SimpleNamespace(
+        request_id="req-diagnosis",
+        prompt=format_hchat_message("source", "HASHI1", report),
+        request_metadata={},
+    )
+
+    outcome = await FlexibleAgentRuntime._hchat_route_reply(
+        receiver,
+        item,
+        "Diagnosis recorded in the configured journal.",
+    )
+
+    assert outcome is None
+    assert replies == []
+    assert any(
+        "Automatic debug report reply suppressed" in line
+        for line in receiver.logger.messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_forward_failure_uses_existing_hchat_sender_exactly_once(tmp_path: Path):
     runtime = _runtime(tmp_path)
     runtime_debug_reporting.enable(

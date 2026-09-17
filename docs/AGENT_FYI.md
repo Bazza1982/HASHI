@@ -93,7 +93,8 @@ discovery-only, while unreadable or malformed secrets fail closed. See
 HChat keeps sender claim, verified peer, relay, and target separate. Never put
 shared secrets in messages or command arguments. `/debug on` sends one
 best-effort diagnosis for an eligible terminal error; the source does not retry
-or fix it, and HChat errors are excluded to prevent loops.
+or fix it, the diagnosis completion is not returned to the source Agent, and
+HChat errors are excluded to prevent loops.
 
 PAO freezes each Run's primary destination, mirrors, and automatic delivery
 before PCM. Queue acceptance is not delivery; `sent` needs a Connector receipt,
