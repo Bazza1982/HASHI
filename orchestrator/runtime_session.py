@@ -4,7 +4,7 @@ import asyncio
 import html
 import inspect
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -766,6 +766,7 @@ def record_assistant_delivery(
     surface: str | None = None,
     channel_key: str | None = None,
     outcome_state: str | None = None,
+    attachment_receipts: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Record a final delivery outcome without disrupting response flow."""
 
@@ -795,6 +796,7 @@ def record_assistant_delivery(
             completion_path=completion_path,
             disposition=disposition,
             outcome_state=outcome_state,
+            attachment_receipts=attachment_receipts,
         )
     except Exception as exc:
         logger = getattr(runtime, "logger", None)

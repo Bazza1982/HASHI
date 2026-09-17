@@ -221,6 +221,16 @@ PAO exposes authenticated discovery, Conversation Sessions, Messages, Runs,
 Events, controls, attachments, approvals, and operational status. Connectors
 may cache projections but must reconstruct them from PAO-owned state.
 
+Assistant attachment output has one canonical path. The Agent binds ordered
+files from its authorized workspace/workzone roots to the active Run; PAO stores
+managed bytes and returns a durable binding receipt that explicitly makes no
+transport-delivery claim. Workbench projects those attachments from the final
+canonical Message. When Telegram is an admitted destination, its Connector
+sends the same managed bytes and persists per-attachment message identifiers in
+the route-scoped delivery outcome. Missing, expired, cancelled, unavailable, or
+partially delivered attachments fail visible and are never promoted to `sent`.
+There is no automatic resend after a deterministic attachment failure.
+
 PAO also owns the admission-time delivery decision for each Run. A Connector
 may request a projection policy only through a typed, versioned contract. The
 current TUI contract is `hashi.frontend-delivery` version 1, has `scope=run`, is

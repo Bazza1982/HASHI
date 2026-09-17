@@ -1856,9 +1856,9 @@ async def execute_frontend_send_attachments(
 ) -> str:
     """Bind ordered local files to the current canonical assistant Message.
 
-    ``access_root`` is accepted for dispatch compatibility but is deliberately
-    not enforced here: the agent chooses which readable local files to attach,
-    and frontend attachment paths may reference any location.
+    Local source paths remain inside the Agent's configured workspace/workzone
+    roots.  The returned receipt proves durable Session binding only; a
+    Frontend Connector records transport delivery separately.
     """
 
     import hashlib
@@ -1923,6 +1923,21 @@ async def execute_frontend_send_attachments(
         except Exception as exc:
             return f"Error: unable to resolve an active HASHI run for attachment binding: {exc}"
 
+    try:
+        run = store.get_run_by_request(
+            request_id,
+            owner_id=owner_id,
+            agent_id=agent_id,
+        )
+        if str(run.get("session_id") or "") != session_id:
+            raise SessionConflict("frontend attachment Session binding changed")
+        if str(run.get("state") or "") != "running":
+            raise SessionConflict(
+                "frontend attachments require the current running Session Run"
+            )
+    except (SessionConflict, SessionNotFound) as exc:
+        return f"Error: {exc}"
+
     raw_attachments = args.get("attachments")
     if not isinstance(raw_attachments, list) or not raw_attachments:
         return "Error: attachments must be a non-empty array"
@@ -1938,13 +1953,7 @@ async def execute_frontend_send_attachments(
             raw_path = str(raw.get("path") or "").strip()
             if not raw_path:
                 raise ValueError("each attachment requires path")
-            # No access-scope enforcement for frontend attachments: resolve the
-            # path (relative to workspace_dir when relative) without checking it
-            # against the tool access roots.
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = workspace_dir / path
-            path = path.resolve()
+            path = _resolve_path(raw_path, access_root, workspace_dir)
             if not path.exists():
                 raise ValueError(f"file not found: {path}")
             if not path.is_file():
@@ -1959,8 +1968,8 @@ async def execute_frontend_send_attachments(
             if len(payload) != size_bytes:
                 raise SessionConflict(f"attachment changed while being read: {path.name}")
             caption = str(raw.get("caption") or "").strip()
-            if len(caption) > 4096:
-                raise ValueError("attachment caption exceeds 4096 characters")
+            if len(caption) > 1024:
+                raise ValueError("attachment caption exceeds 1024 characters")
             media_type = str(raw.get("media_type") or "").strip().casefold()
             if not media_type:
                 media_type = (
@@ -2023,6 +2032,13 @@ async def execute_frontend_send_attachments(
                     "attachments": existing["attachments"],
                     "bind_only": bool(bind_only),
                     "replayed": True,
+                    "receipt": {
+                        "type": "hashi.managed-attachment-binding",
+                        "version": 1,
+                        "state": "bound_to_run",
+                        "durable": True,
+                        "transport_delivery_state": "not_observed",
+                    },
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -2078,6 +2094,13 @@ async def execute_frontend_send_attachments(
                 "attachments": bound["attachments"],
                 "bind_only": bool(bind_only),
                 "replayed": bool(bound["replayed"]),
+                "receipt": {
+                    "type": "hashi.managed-attachment-binding",
+                    "version": 1,
+                    "state": "bound_to_run",
+                    "durable": True,
+                    "transport_delivery_state": "not_observed",
+                },
             },
             ensure_ascii=False,
             sort_keys=True,

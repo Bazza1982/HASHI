@@ -29,6 +29,7 @@ from adapters.stream_events import (
     StreamEvent,
 )
 from orchestrator import (
+    frontend_attachment_delivery,
     runtime_cross_session,
     runtime_pipeline,
     runtime_retry,
@@ -3716,6 +3717,138 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_requires_managed_attachment_receipts(
+    monkeypatch,
+):
+    runtime = _runtime()
+    item = _item(prompt="user text")
+    response = SimpleNamespace(text="core text")
+    delivery_outcomes = []
+    receipts = [
+        {
+            "attachment_id": "att-one",
+            "state": "delivered",
+            "transport_message_id": "701",
+        },
+        {
+            "attachment_id": "att-two",
+            "state": "delivered",
+            "transport_message_id": "702",
+        },
+    ]
+
+    async def deliver_attachments(_runtime, _item):
+        return {
+            "state": "delivered",
+            "complete": True,
+            "attempted": 2,
+            "delivered": 2,
+            "failed": 0,
+            "receipts": receipts,
+        }
+
+    monkeypatch.setattr(
+        frontend_attachment_delivery,
+        "send_telegram_run_attachments",
+        deliver_attachments,
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda current_runtime, current_item, **fields: delivery_outcomes.append(
+            fields
+        ),
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        response,
+        visible_text="visible text",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert delivery_outcomes == [
+        {
+            "delivered": True,
+            "assistant_text": "visible text",
+            "transport": "telegram",
+            "completion_path": "foreground",
+            "disposition": "transport_delivered_with_attachments",
+            "surface": "telegram",
+            "channel_key": "123",
+            "attachment_receipts": receipts,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_reports_partial_attachment_delivery_as_failed(
+    monkeypatch,
+):
+    runtime = _runtime()
+    item = _item(prompt="user text")
+    receipts = [
+        {
+            "attachment_id": "att-one",
+            "state": "delivered",
+            "transport_message_id": "701",
+        },
+        {
+            "attachment_id": "att-two",
+            "state": "failed",
+            "error_type": "BadRequest",
+        },
+    ]
+
+    async def deliver_attachments(_runtime, _item):
+        return {
+            "state": "partial",
+            "complete": False,
+            "attempted": 2,
+            "delivered": 1,
+            "failed": 1,
+            "receipts": receipts,
+        }
+
+    outcomes = []
+    monkeypatch.setattr(
+        frontend_attachment_delivery,
+        "send_telegram_run_attachments",
+        deliver_attachments,
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "record_assistant_delivery",
+        lambda _runtime, _item, **fields: outcomes.append(fields),
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="core text"),
+        visible_text="visible text",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert outcomes[0]["delivered"] is False
+    assert outcomes[0]["disposition"] == "attachment_delivery_partial"
+    assert outcomes[0]["attachment_receipts"] == receipts
 
 
 @pytest.mark.asyncio

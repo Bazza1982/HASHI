@@ -4224,19 +4224,64 @@ async def handle_success_delivery(
             if native_delivered
             else "native_audio_fallback_failed"
         )
-    final_delivered = bool(
+    body_delivered = bool(
         delivered_at_initial_resolution
         or stream_finalization.final_delivered
         or (stream_finalization.fallback_required and chunk_count > 0)
         or native_delivered
     )
+    from orchestrator import frontend_attachment_delivery
+
+    try:
+        attachment_delivery = (
+            await frontend_attachment_delivery.send_telegram_run_attachments(
+                runtime, item
+            )
+        )
+    except Exception as exc:
+        runtime.logger.warning(
+            "Managed attachment delivery failed safely for %s (%s)",
+            item.request_id,
+            type(exc).__name__,
+        )
+        attachment_delivery = {
+            "state": "unavailable",
+            "complete": False,
+            "attempted": 0,
+            "delivered": 0,
+            "failed": 0,
+            "receipts": [],
+        }
+    attachment_state = str(attachment_delivery.get("state") or "")
+    attachment_receipts = list(attachment_delivery.get("receipts") or ())
+    attachments_required = attachment_state != "not_applicable"
+    body_required = bool(delivery_text or native_delivery_attempted)
+    final_delivered = bool(
+        (not body_required or body_delivered)
+        and (not attachments_required or attachment_delivery.get("complete"))
+        and (
+            body_delivered
+            or int(attachment_delivery.get("delivered") or 0) > 0
+        )
+    )
+    if attachments_required:
+        if final_delivered:
+            receipt_disposition = "transport_delivered_with_attachments"
+        elif body_delivered or int(attachment_delivery.get("delivered") or 0) > 0:
+            receipt_disposition = "attachment_delivery_partial"
+        else:
+            receipt_disposition = "attachment_delivery_failed"
     await record_her_v2_transport_receipt(
         runtime,
         item,
         response,
         delivered=final_delivered,
         disposition=receipt_disposition,
-        chunk_count=chunk_count + int(native_delivered),
+        chunk_count=(
+            chunk_count
+            + int(native_delivered)
+            + int(attachment_delivery.get("delivered") or 0)
+        ),
         error_type=(
             type(native_delivery_error).__name__
             if native_delivery_error is not None
@@ -4253,6 +4298,11 @@ async def handle_success_delivery(
         disposition=receipt_disposition,
         surface="telegram",
         channel_key=str(item.chat_id),
+        **(
+            {"attachment_receipts": attachment_receipts}
+            if attachment_receipts
+            else {}
+        ),
     )
     hchat_delivered = False
     if not cos_handled:
