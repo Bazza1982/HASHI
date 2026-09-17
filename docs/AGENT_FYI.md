@@ -190,7 +190,10 @@ evidence. Preserve user changes and report failures honestly.
 
 Use `request_diagnostics` to query one request's final state, Provider IDs,
 observed writes/effects, Jobs, and retry evidence. It is read-only and never
-authorizes or performs a retry.
+authorizes or performs a retry. Its reconciliation uses current durable Tool
+and Job receipts: complete read-only evidence can establish no observed effect,
+while a completed write, a completed Job, truncated evidence, or a missing
+receipt remains explicit and never becomes an inferred safe retry.
 
 HCC is PCM-owned temporary context in `agent.md` between `[hcc]` and
 `[hcc_end]`. `/hcc on|off` controls current-Agent injection only and defaults
