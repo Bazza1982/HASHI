@@ -30,6 +30,7 @@ from orchestrator.function_generation import (
 )
 from orchestrator.function_worker_bootstrap import run_function_worker_process
 from orchestrator.function_worker_features import WORKER_LOG_RELAY_FEATURE
+from orchestrator.runtime_contract import dependency_digest
 from orchestrator.function_worker_protocol import (
     FUNCTION_WORKER_PROTOCOL_VERSION,
     FunctionWorkerDisconnected,
@@ -1478,7 +1479,10 @@ class FunctionWorkerSupervisor:
             "code_root": str(self.kernel.paths.code_root),
             "bridge_home": str(self.kernel.paths.bridge_home),
             "generation_root": str(artifact),
-            "runtime": self.kernel.runtime_fingerprint.to_dict(),
+            "runtime": {
+                **self.kernel.runtime_fingerprint.to_dict(),
+                "dependency_digest": dependency_digest(),
+            },
             "manifest": generation.manifest.to_dict(),
             "topology": self.topology_snapshot(agent_name=agent_name),
         }
