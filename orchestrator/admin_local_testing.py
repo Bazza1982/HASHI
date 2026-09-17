@@ -18,7 +18,12 @@ from orchestrator.command_interaction_transport import (
 )
 from orchestrator.command_registry import runtime_command_map
 from orchestrator.runtime_command_binding import COMMAND_BINDINGS
-from orchestrator import slash_command_audit, ui_language, workbench_telegram_state
+from orchestrator import (
+    runtime_menu_views,
+    slash_command_audit,
+    ui_language,
+    workbench_telegram_state,
+)
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
     default_audit_path,
@@ -227,14 +232,19 @@ async def try_execute_slash_command_text(
             session_metadata=session_metadata,
         )
     command_name, args = parse_slash_command_text(text)
-    if command_name == "telegram" and str(source_channel or "").strip() == "api_chat":
-        return await _execute_workbench_telegram_command(
-            runtime,
-            args,
-            chat_id=chat_id,
-            source_channel=source_channel,
-            session_metadata=session_metadata,
-        )
+    if command_name == "telegram":
+        # /telegram stays Workbench-only in the slash-command path.  The
+        # command-menu projection (workbench_api transport) is dispatched
+        # before this guard and therefore keeps its interactive buttons.
+        if str(source_channel or "").strip() == "api_chat":
+            return await _execute_workbench_telegram_command(
+                runtime,
+                args,
+                chat_id=chat_id,
+                source_channel=source_channel,
+                session_metadata=session_metadata,
+            )
+        return None
     if not is_supported_slash_command(runtime, command_name):
         return None
 
@@ -334,6 +344,11 @@ async def _execute_workbench_telegram_command(
                 "ok": False,
                 "error": "Session owner is unavailable; cannot resolve Workbench Telegram state.",
             }
+
+        def _telegram_card_text(mirror: bool) -> str:
+            with ui_language.language_scope(runtime, actor_id=owner_id):
+                return runtime_menu_views.telegram_menu_text(enabled=mirror)
+
         try:
             requested = workbench_telegram_state.parse_mirror_arg(args)
         except ValueError as exc:
@@ -358,7 +373,7 @@ async def _execute_workbench_telegram_command(
                 "messages": [
                     {
                         "channel": "reply",
-                        "text": "Workbench Telegram 镜像: " + ("ON" if mirror else "OFF"),
+                        "text": _telegram_card_text(mirror),
                     }
                 ],
             }
@@ -383,7 +398,7 @@ async def _execute_workbench_telegram_command(
             "messages": [
                 {
                     "channel": "reply",
-                    "text": "Workbench Telegram 镜像: " + ("ON" if mirror else "OFF"),
+                    "text": _telegram_card_text(mirror),
                 }
             ],
         }

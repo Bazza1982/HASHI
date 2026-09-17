@@ -166,6 +166,9 @@ one primary personal Conversation Session; semantic messages appear on both,
 while presentation rows never enter model history. Command menus reuse the
 authenticated runtime command path and keep action state server-side.
 
+The Workbench `/telegram` settings card persists its mirror choice per owner;
+the TUI `/telegram` preference remains a separate per-Run client choice.
+
 Workbench press-to-talk is transcript-first. With Safe Voice off, admit text;
 with it on, hold a bounded preview until **Confirm and send**. Discard, expiry,
 Session/context change, or disabling it sends nothing. STT and other optional

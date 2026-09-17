@@ -99,6 +99,12 @@ Transport compatibility does not prove that every existing command has been
 qualified on this surface. Start with the supplied real `/notify` integration
 test and a read-only navigation canary.
 
+`/telegram` is also qualified as a settings card for the Workbench command
+projection. Its registered handler and callback reuse the existing
+server-authoritative per-owner mirror state and the standard localized card
+contract; the compatible `api_chat` text route keeps the same state owner.
+This does not change the TUI's separate per-Run Telegram mirror preference.
+
 ## Source, qualification and live adoption
 
 Approval covers this Functions/client implementation and local package delivery,
