@@ -443,6 +443,87 @@ def test_windows_restart_falls_back_without_explicit_service_target(
     assert "hashi_service_ctl.ps1" not in " ".join(command)
 
 
+def test_windows_service_restart_launcher_avoids_detached_process(
+    tmp_path,
+    monkeypatch,
+):
+    _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    captured = {}
+
+    class FakeProcess:
+        pid = 9191
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(remote_server.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(remote_server.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        remote_server.subprocess,
+        "CREATE_NEW_PROCESS_GROUP",
+        0x00000200,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        remote_server.subprocess,
+        "DETACHED_PROCESS",
+        0x00000008,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        remote_server.subprocess,
+        "CREATE_NO_WINDOW",
+        0x08000000,
+        raising=False,
+    )
+
+    remote_server._launch_hashi_process(
+        ["powershell.exe", "-File", "hashi_service_ctl.ps1"],
+        log_name="service-restart.log",
+        detach_on_windows=False,
+    )
+
+    assert captured["kwargs"]["creationflags"] == 0x08000000
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_detached"),
+    [
+        (
+            ["powershell.exe", "-File", "C:/HASHI/bin/hashi_service_ctl.ps1"],
+            False,
+        ),
+        (
+            ["powershell.exe", "-File", "C:/HASHI/bin/bridge_ctl.ps1"],
+            True,
+        ),
+    ],
+)
+def test_restart_process_selects_launch_mode_for_service_or_development(
+    command,
+    expected_detached,
+    monkeypatch,
+):
+    captured = {}
+    monkeypatch.setattr(remote_server, "_hashi_restart_command", lambda: command)
+
+    def fake_launch(value, *, log_name, detach_on_windows):
+        captured.update(
+            command=value,
+            log_name=log_name,
+            detach_on_windows=detach_on_windows,
+        )
+        return {"pid": 9292}
+
+    monkeypatch.setattr(remote_server, "_launch_hashi_process", fake_launch)
+
+    assert remote_server._restart_hashi_process() == {"pid": 9292}
+    assert captured["command"] == command
+    assert captured["detach_on_windows"] is expected_detached
+
+
 def test_hashi_rescue_restart_rejects_wrong_target_before_launch(tmp_path, monkeypatch):
     client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
     monkeypatch.setattr(

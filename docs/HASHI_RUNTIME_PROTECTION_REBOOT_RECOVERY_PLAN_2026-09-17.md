@@ -230,6 +230,8 @@ ACL 必须只覆盖明确的 live 目标，不能覆盖整个仓库、用户目�
 
 Windows 服务型实例的补充边界：Remote 只读取本地 live-runtime policy 中与受控实例 ID 精确匹配的服务名，并只通过窄范围服务脚本执行停止／启动；部署工具只给 Remote 运行身份授予该服务的 start/stop 权限。没有明确服务目标的开发型实例继续使用非服务 launcher。服务命令返回或服务显示 `Running` 均不构成成功，仍以新 Core PID、健康、身份、版本和 Function 代际的终态回执为准。
 
+H3 实测补充（2026-09-18）：Windows PowerShell 服务脚本若使用 `DETACHED_PROCESS`，可能只留下 launcher PID 而未执行服务控制；服务型路径必须改用无窗口、非 detached 子进程，并给正常的服务停止、启动和产品 readiness 留出独立验证窗口。该窗口只约束一次 restart 的健康确认，不属于 HER v2 的 turn、token、工具或上下文预算。
+
 ### 阶段 5：只增强诊断证据，不大改 HER v2
 
 允许的唯一新增范围是可查询日志：

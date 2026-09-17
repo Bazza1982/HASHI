@@ -155,6 +155,11 @@ must prove that the old Core PID exited, a different Core PID is healthy, the
 instance identity matches, and the runtime version and Function generation are
 the expected values.
 
+The service-control PowerShell child uses the Windows no-window launch mode,
+not `DETACHED_PROCESS`; detached mode can return a launcher PID without
+executing service control. Terminal verification allows normal service
+stop/start and product readiness to complete before it records failure.
+
 ## Operating-system boundary
 
 Tool admission is an early explanation, not a substitute for operating-system
