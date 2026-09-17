@@ -217,10 +217,11 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
         "sounds": True,
         "typing": True,
         "telegram_mirror": True,
-            "sidepanel": False,
-            "sidepanel_auto": False,
-            "last_agent_by_instance": {},
-        }
+        "sidepanel": False,
+        "sidepanel_auto": False,
+        "last_agent_by_instance": {},
+        "voice_auto_by_target": {},
+    }
 
 
 async def test_tui_command_preview_discovers_dynamic_parameters_in_both_languages(tmp_path):

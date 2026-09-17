@@ -13,6 +13,10 @@ from remote.protocol_manager import ProtocolManager
 
 @pytest.fixture
 def receipt_case(tmp_path):
+    (tmp_path / "agents.json").write_text(
+        json.dumps({"global": {}, "agents": [{"name": "manager"}]}),
+        encoding="utf-8",
+    )
     store = SuperloopStore(tmp_path / "superloops")
     store.create_compiled_loop(
         loop_id="sl-review", loop_state={

@@ -1260,6 +1260,11 @@ global defaults
 The most specific valid setting wins. Server policy may narrow, but not expand,
 what a terminal requests.
 
+Terminal overrides are persisted through the revision-aware Voice Manager
+writer and are limited to mode, reply shape, and retention. They cannot replace
+the Agent's provider or model target, and a terminal override cannot re-enable
+native audio after the Agent-level mode is disabled.
+
 The default menu shows only the effective mode, semantic voice, reply shape,
 and the choices above. Detailed provider/model capabilities, formats, fallback,
 retention, terminal overrides, Safe Voice, and tool status remain available in
