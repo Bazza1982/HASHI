@@ -1272,6 +1272,36 @@ def safevoice_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
     )
 
 
+def telegram_menu_text(*, enabled: bool) -> str:
+    return setting_card(
+        "📡",
+        "Workbench Telegram mirror",
+        current=f"<b>{status_label(enabled)}</b>",
+        facts=[_fact("common.scope", html.escape(_tr("menu.telegram.scope")))],
+        consequence=(
+            _tr("menu.telegram.enabled") if enabled else _tr("menu.telegram.disabled")
+        ),
+        action=_tr("menu.telegram.action"),
+    )
+
+
+def telegram_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    selected_label(_tr("common.on"), enabled),
+                    callback_data="telegram:set:on",
+                ),
+                InlineKeyboardButton(
+                    selected_label(_tr("common.off"), not enabled),
+                    callback_data="telegram:set:off",
+                ),
+            ]
+        ]
+    )
+
+
 def timeout_menu_text(
     *,
     agent_name: str,
