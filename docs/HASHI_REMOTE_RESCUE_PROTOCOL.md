@@ -303,6 +303,10 @@ instance-owned `remote_port` from `instances.json` or `agents.json`, and only
 then the YAML compatibility default. A healthy endpoint for another instance
 is rejected; it must never satisfy `start`, `restart`, or `doctor`.
 
+For an existing same-principal installation, `start` and `restart` verify that
+the credential file is readable and preserve its restrictive ACL. ACL mutation
+is reserved for initial provisioning or an intentional principal change.
+
 Set `HASHI_REMOTE_MAX_TERMINAL_LEVEL=L3_RESTART` only on trusted LAN/Tailscale
 machines where remote HASHI rescue is intentionally enabled. Default supervised
 Remote remains `L2_WRITE`.

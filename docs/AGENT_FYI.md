@@ -191,8 +191,8 @@ Prefer `log_query` for literal logs and Jobs for long work. Tests prove only
 scope; live adoption needs separate evidence. Preserve user work; report
 failures honestly.
 
-Remote reload preserves Core. Probe its instance-owned port. `/restart` verifies
-new PID, identity, runtime, generation, and Backend health.
+Remote reload keeps Core and readable secret ACLs; probe its own port.
+`/restart` verifies a new PID, identity, generation, and health.
 
 Use `request_diagnostics` to query one request's final state, Provider IDs,
 observed writes/effects, Jobs, and retry evidence. It is read-only and never
