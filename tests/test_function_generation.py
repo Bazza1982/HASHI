@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.runtime_contract import enforce_runtime_contract
+from orchestrator.runtime_contract import RuntimeContractError, enforce_runtime_contract
 from orchestrator.function_generation import (
     CandidateProbeReceipt,
     FUNCTION_GENERATION_ENTRYPOINTS,
@@ -20,6 +20,7 @@ from orchestrator.function_generation import (
     SourceManifest,
     build_source_manifest,
     candidate_import_guard,
+    compare_runtime_fingerprints_tolerating_dependency_drift,
     probe_function_generation,
     run_candidate_probe,
     verify_source_manifest,
@@ -233,18 +234,50 @@ def test_in_process_generation_commit_api_is_retired():
     assert not hasattr(generation, "prepare_function_generation")
 
 
-def test_isolated_probe_rejects_dependency_environment_drift_before_import():
-    incompatible = dataclasses.replace(
+def test_isolated_probe_tolerates_dependency_environment_drift_before_import():
+    drifted = dataclasses.replace(
         enforce_runtime_contract(ROOT),
         dependency_digest="sha256:" + "0" * 64,
     )
 
-    with pytest.raises(FunctionGenerationError, match="dependency_digest"):
-        run_candidate_probe(
-            code_root=ROOT,
-            module_names=(),
-            expected_runtime=incompatible,
-            timeout_seconds=20,
+    receipt = run_candidate_probe(
+        code_root=ROOT,
+        module_names=(),
+        expected_runtime=drifted,
+        timeout_seconds=20,
+    )
+
+    assert receipt.runtime.dependency_digest != drifted.dependency_digest
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", receipt.runtime.dependency_digest)
+
+
+def test_candidate_verification_tolerates_only_dependency_drift():
+    core = enforce_runtime_contract(ROOT)
+
+    compare_runtime_fingerprints_tolerating_dependency_drift(
+        core,
+        dataclasses.replace(core, dependency_digest="sha256:" + "0" * 64),
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("core_source_digest", "sha256:" + "1" * 64),
+        ("core_api", 99),
+        ("function_api", 99),
+        ("platform_abi", "cpython-312-arm64-linux-gnu"),
+        ("worker_protocol", 99),
+        ("generation_schema", 99),
+    ],
+)
+def test_candidate_verification_still_rejects_hard_fields(field, replacement):
+    core = enforce_runtime_contract(ROOT)
+    incompatible = dataclasses.replace(core, **{field: replacement})
+
+    with pytest.raises(RuntimeContractError, match=field):
+        compare_runtime_fingerprints_tolerating_dependency_drift(
+            core, incompatible
         )
 
 

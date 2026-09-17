@@ -14,13 +14,14 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 import os
 import stat
 import subprocess
 import sys
 import traceback
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
@@ -47,6 +48,31 @@ from orchestrator.runtime_contract import (
     load_runtime_policy,
 )
 from orchestrator.runtime_fingerprint_cache import cached_current_runtime_fingerprint
+
+_logger = logging.getLogger("BridgeU.Orchestrator")
+
+
+def compare_runtime_fingerprints_tolerating_dependency_drift(
+    core: RuntimeFingerprint,
+    candidate: RuntimeFingerprint,
+) -> None:
+    """Compare candidate runtime while tolerating installed-distribution drift.
+
+    ``dependency_digest`` hashes the complete installed distribution set, so a
+    package an Agent installs after Core boot changes it.  That drift must never
+    block a Function Worker /reboot; every other field must still match exactly.
+    """
+    if core.dependency_digest != candidate.dependency_digest:
+        _logger.warning(
+            "Function candidate tolerates installed-distribution drift: "
+            "core=%s candidate=%s",
+            core.dependency_digest,
+            candidate.dependency_digest,
+        )
+    compare_runtime_fingerprints(
+        replace(core, dependency_digest=candidate.dependency_digest),
+        candidate,
+    )
 
 PROBE_RESULT_PREFIX = "HASHI_FUNCTION_PROBE_RESULT="
 DEFAULT_PROBE_TIMEOUT_SECONDS = 180.0
@@ -168,8 +194,12 @@ class VerifiedFunctionGeneration:
     def verify(self, expected_runtime: RuntimeFingerprint) -> None:
         policy = load_runtime_policy(self.code_root)
         live_runtime = cached_current_runtime_fingerprint(policy, code_root=self.code_root)
-        compare_runtime_fingerprints(expected_runtime, live_runtime)
-        compare_runtime_fingerprints(self.receipt.runtime, live_runtime)
+        compare_runtime_fingerprints_tolerating_dependency_drift(
+            expected_runtime, live_runtime
+        )
+        compare_runtime_fingerprints_tolerating_dependency_drift(
+            self.receipt.runtime, live_runtime
+        )
         verify_source_manifest(self.manifest, code_root=self.code_root)
 
     def verify_qualified_source(self, expected_runtime: RuntimeFingerprint) -> None:
@@ -185,8 +215,12 @@ class VerifiedFunctionGeneration:
 
         policy = load_runtime_policy(self.code_root)
         live_runtime = cached_current_runtime_fingerprint(policy, code_root=self.code_root)
-        compare_runtime_fingerprints(expected_runtime, live_runtime)
-        compare_runtime_fingerprints(self.receipt.runtime, live_runtime)
+        compare_runtime_fingerprints_tolerating_dependency_drift(
+            expected_runtime, live_runtime
+        )
+        compare_runtime_fingerprints_tolerating_dependency_drift(
+            self.receipt.runtime, live_runtime
+        )
         verify_qualified_manifest_bytes(self.manifest, code_root=self.code_root)
 
     def to_dict(self) -> dict[str, Any]:
@@ -642,7 +676,7 @@ def run_candidate_probe(
             f"Candidate staging Worker rejected generation: {detail}"
         )
     runtime = RuntimeFingerprint.from_mapping(result["runtime"])
-    compare_runtime_fingerprints(expected_runtime, runtime)
+    compare_runtime_fingerprints_tolerating_dependency_drift(expected_runtime, runtime)
     return CandidateProbeReceipt(
         generation_id=str(result["generation_id"]),
         module_names=tuple(str(name) for name in result["module_names"]),
@@ -714,7 +748,9 @@ def _probe_main() -> int:
         policy = load_runtime_policy(code_root)
         runtime = current_runtime_fingerprint(policy, code_root=code_root)
         expected = RuntimeFingerprint.from_mapping(payload["expected_runtime"])
-        compare_runtime_fingerprints(expected, runtime)
+        compare_runtime_fingerprints_tolerating_dependency_drift(
+            expected, runtime
+        )
         requested = tuple(str(name) for name in payload["module_names"])
         with candidate_import_guard():
             for name in requested:
