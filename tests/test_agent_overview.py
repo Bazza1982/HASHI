@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,9 +65,14 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
 
     canonical = get_summary(workspace_dir, session_id="session-current")
     assert overview["agent"]["status"] == "online"
+    expected_path_kind = "windows_drive" if os.name == "nt" else "posix"
+    expected_platform = "windows" if os.name == "nt" else "linux"
     assert overview["workzone"] == {
         "active": True,
         "path": str(workzone),
+        "path_kind": expected_path_kind,
+        "execution_platform": expected_platform,
+        "host_compatible": True,
         "active_count": 1,
         "configured_count": 1,
         "slots": [
@@ -77,6 +83,9 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
                 "label": workzone.name,
                 "enabled": True,
                 "available": True,
+                "path_kind": expected_path_kind,
+                "execution_platform": expected_platform,
+                "host_compatible": True,
             }
         ],
     }

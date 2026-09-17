@@ -98,6 +98,8 @@ Workzones give an agent access to, and focus on, one or more project folders. Ea
 
   - The HASHI Tool Registry receives the exact active roots. Multiple roots are not widened to their common parent.
 
+  - A Workzone path must be addressable by the instance that executes it. Native Windows accepts drive/UNC paths and rejects POSIX absolute paths such as `/home/...`; a WSL project must be supplied through its `\\wsl.localhost\\<distribution>\\...` UNC path. Read-only projections carry the derived path kind, execution platform and host-compatibility fact. A legacy foreign path is preserved for diagnosis but is unavailable and never silently retargeted to `C:\\home\\...`.
+
   - Slot mutations carry an internal Session revision so stale inline menus and delayed path replies cannot overwrite newer state. This revision is control metadata and is not rendered as user-facing menu or PCM text.
 
 |                                                                                                                                                                                                                                                                                                                                                                                                                                 |
