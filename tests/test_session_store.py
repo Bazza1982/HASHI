@@ -809,6 +809,50 @@ def test_assistant_delivery_receipts_are_route_scoped_and_success_only(tmp_path)
     ) is False
 
 
+def test_assistant_delivery_receipt_persists_safe_managed_attachment_evidence(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    accepted = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-attachment-delivery",
+        key="attachment-delivery",
+        text="send files",
+        answer="files attached",
+        source="text",
+    )
+
+    event = store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=True,
+        surface="telegram",
+        channel_key="chat-1",
+        transport="telegram",
+        completion_path="foreground",
+        disposition="transport_delivered_with_attachments",
+        attachment_receipts=[
+            {
+                "attachment_id": "att-one",
+                "state": "delivered",
+                "transport_message_id": "701",
+                "local_ref": "C:/must/not/persist.txt",
+            }
+        ],
+    )
+
+    assert event["detail"]["attachment_receipts"] == [
+        {
+            "attachment_id": "att-one",
+            "state": "delivered",
+            "transport_message_id": "701",
+        }
+    ]
+
+
 def test_delivery_queue_acknowledgement_is_not_a_delivered_receipt(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"

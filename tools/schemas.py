@@ -567,7 +567,9 @@ TOOL_SCHEMAS = [
                 "Publish one or more ordered local files on the current frontend Session reply. "
                 "This is the standard frontend-neutral attachment output contract for images, "
                 "audio, video, and documents. Use one call for all files that belong to one "
-                "reply. Do not use it for Telegram (use telegram_send_file) or the built-in TUI."
+                "reply. Source files must be inside an authorized workspace/workzone. The "
+                "result confirms durable binding, not transport delivery. Do not use it for "
+                "the built-in TUI."
             ),
             "parameters": {
                 "type": "object",
@@ -586,7 +588,7 @@ TOOL_SCHEMAS = [
                                 },
                                 "caption": {
                                     "type": "string",
-                                    "maxLength": 4096,
+                                    "maxLength": 1024,
                                     "description": "Optional user-visible caption for this file.",
                                 },
                                 "media_type": {

@@ -31,11 +31,20 @@ def _running_session(tmp_path):
     return store, owner, session, accepted
 
 
-def _registry(tmp_path, store, owner, session, *, surface="generic-desktop"):
+def _registry(
+    tmp_path,
+    store,
+    owner,
+    session,
+    *,
+    surface="generic-desktop",
+    access_root=None,
+    workspace_dir=None,
+):
     return ToolRegistry(
         allowed_tools=["frontend_send_attachments"],
-        access_root=tmp_path,
-        workspace_dir=tmp_path,
+        access_root=access_root or tmp_path,
+        workspace_dir=workspace_dir or tmp_path,
         secrets={},
         audit_context={
             "agent_name": "agent1",
@@ -88,6 +97,13 @@ async def test_agent_publishes_ordered_multi_attachment_as_one_assistant_message
     assert published["ok"] is True
     assert published["attachment_count"] == 2
     assert published["replayed"] is False
+    assert published["receipt"] == {
+        "durable": True,
+        "state": "bound_to_run",
+        "transport_delivery_state": "not_observed",
+        "type": "hashi.managed-attachment-binding",
+        "version": 1,
+    }
     assert [part["filename"] for part in published["attachments"]] == [
         "first.png",
         "notes.txt",
@@ -161,3 +177,53 @@ async def test_frontend_attachment_publish_is_idempotent_and_tui_is_separate(tmp
     )
     assert bound.is_error is False
     assert '"ok": true' in bound.output
+
+
+@pytest.mark.asyncio
+async def test_frontend_attachment_publish_rejects_cross_instance_path(tmp_path):
+    authorized_root = tmp_path / "HASHI3"
+    other_instance = tmp_path / "HASHI4"
+    authorized_root.mkdir()
+    other_instance.mkdir()
+    store, owner, session, _accepted = _running_session(authorized_root)
+    foreign_file = other_instance / "private.png"
+    foreign_file.write_bytes(b"\x89PNG\r\n\x1a\nforeign-instance")
+    registry = _registry(
+        authorized_root,
+        store,
+        owner,
+        session,
+        access_root=authorized_root,
+        workspace_dir=authorized_root,
+    )
+
+    result = await registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(foreign_file)}]},
+        tool_call_id="cross-instance-file",
+    )
+
+    assert result.is_error is True
+    assert "outside the allowed access scopes" in result.output
+    assert list(store.attachment_files_root.glob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_frontend_attachment_publish_rejects_cancelled_run_before_staging(
+    tmp_path,
+):
+    store, owner, session, accepted = _running_session(tmp_path)
+    target = tmp_path / "late.png"
+    target.write_bytes(b"\x89PNG\r\n\x1a\nlate")
+    store.cancel_run(accepted.run_id, owner_id=owner)
+    registry = _registry(tmp_path, store, owner, session)
+
+    result = await registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(target)}]},
+        tool_call_id="late-output-call",
+    )
+
+    assert result.is_error is True
+    assert "current running Session Run" in result.output
+    assert list(store.attachment_files_root.glob("*")) == []

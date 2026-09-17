@@ -11130,6 +11130,7 @@ class FlexibleAgentRuntime:
         receipt_disposition = "background_transport_not_attempted"
         receipt_chunk_count = 0
         receipt_error_type = ""
+        receipt_attachment_receipts = []
         try:
             await runtime_delivery_order.wait_for_turn(self, item.request_id)
             await runtime_background_status.wait_for_delivery(item)
@@ -11456,7 +11457,45 @@ class FlexibleAgentRuntime:
                         if receipt_delivered
                         else "transport_returned_no_receipt"
                     )
-                receipt_chunk_count = chunk_count
+                from orchestrator import frontend_attachment_delivery
+
+                try:
+                    attachment_delivery = (
+                        await frontend_attachment_delivery.send_telegram_run_attachments(
+                            self, item
+                        )
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        "Managed background attachment delivery failed safely for %s (%s)",
+                        item.request_id,
+                        type(exc).__name__,
+                    )
+                    attachment_delivery = {
+                        "state": "unavailable",
+                        "complete": False,
+                        "delivered": 0,
+                        "receipts": [],
+                    }
+                attachment_state = str(attachment_delivery.get("state") or "")
+                receipt_attachment_receipts = list(
+                    attachment_delivery.get("receipts") or ()
+                )
+                if attachment_state != "not_applicable":
+                    if receipt_delivered and attachment_delivery.get("complete"):
+                        receipt_disposition = "transport_delivered_with_attachments"
+                    elif receipt_delivered or int(
+                        attachment_delivery.get("delivered") or 0
+                    ) > 0:
+                        receipt_disposition = "attachment_delivery_partial"
+                    else:
+                        receipt_disposition = "attachment_delivery_failed"
+                    receipt_delivered = bool(
+                        receipt_delivered and attachment_delivery.get("complete")
+                    )
+                receipt_chunk_count = chunk_count + int(
+                    attachment_delivery.get("delivered") or 0
+                )
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 if receipt_delivered:
                     await self._send_meter_cost_tail(
@@ -11596,6 +11635,11 @@ class FlexibleAgentRuntime:
                     transport="telegram",
                     completion_path="background",
                     disposition=receipt_disposition,
+                    **(
+                        {"attachment_receipts": receipt_attachment_receipts}
+                        if receipt_attachment_receipts
+                        else {}
+                    ),
                 )
             runtime_cross_session.record_turn_result(
                 self, item, assistant_text=receipt_text, response=receipt_response,

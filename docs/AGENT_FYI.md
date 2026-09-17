@@ -152,7 +152,13 @@ does not disconnect the Bot or change other sources. `/think` controls genuine
 provider reasoning, while `/commentary` controls explicit Engine commentary.
 Attachments bind to one draft, instance, Agent, and submission. Remote sends
 verified managed bytes, never origin paths. Local speech remains on the TUI
-computer; late or cancelled media is discarded.
+computer; late or cancelled media is discarded. Assistant-generated files must
+come from an authorized workspace/workzone and use the canonical managed
+attachment binding. Its durable `bound_to_run` receipt is not proof of delivery:
+Workbench projects the committed Message, while Telegram delivery is confirmed
+only by a Connector receipt containing the transport message identifier. An
+expired, cancelled, unavailable, or partially delivered attachment must not be
+reported as sent, and HASHI does not automatically repeat that failed send.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): one fact owner,
 localization, escaping, accurate state/scope, safe navigation, and actionable

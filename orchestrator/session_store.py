@@ -2161,6 +2161,7 @@ class SessionStore:
         completion_path: str,
         disposition: str = "",
         outcome_state: str | None = None,
+        attachment_receipts: Iterable[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Persist one final-response delivery outcome for a Session Run."""
 
@@ -2168,6 +2169,34 @@ class SessionStore:
         normalized_channel = str(channel_key or "").strip()
         if not normalized_surface or not normalized_channel:
             return None
+        normalized_attachment_receipts: list[dict[str, str]] = []
+        seen_attachment_ids: set[str] = set()
+        for raw in attachment_receipts or ():
+            if not isinstance(raw, Mapping):
+                raise ValueError("attachment delivery receipts must be objects")
+            attachment_id = str(raw.get("attachment_id") or "").strip()
+            state = str(raw.get("state") or "").strip().casefold()
+            if not attachment_id or attachment_id in seen_attachment_ids:
+                raise ValueError("attachment delivery receipts must be distinct")
+            if state not in {"delivered", "failed"}:
+                raise ValueError("unsupported attachment delivery receipt state")
+            seen_attachment_ids.add(attachment_id)
+            receipt = {"attachment_id": attachment_id, "state": state}
+            transport_message_id = str(
+                raw.get("transport_message_id") or ""
+            ).strip()
+            error_type = str(raw.get("error_type") or "").strip()
+            if state == "delivered":
+                if not transport_message_id:
+                    raise ValueError(
+                        "delivered attachment receipt requires transport message id"
+                    )
+                receipt["transport_message_id"] = transport_message_id[:128]
+            elif error_type:
+                receipt["error_type"] = error_type[:128]
+            normalized_attachment_receipts.append(receipt)
+        if len(normalized_attachment_receipts) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+            raise ValueError("attachment delivery receipt count is invalid")
         route_phase = f"transport:{normalized_surface}:{normalized_channel}"
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2193,6 +2222,13 @@ class SessionStore:
             if delivered != (outcome_status == "delivered"):
                 raise ValueError(
                     "assistant delivery outcome state contradicts delivered"
+                )
+            if delivered and any(
+                receipt["state"] != "delivered"
+                for receipt in normalized_attachment_receipts
+            ):
+                raise ValueError(
+                    "delivered assistant outcome contradicts attachment receipt"
                 )
             existing = connection.execute(
                 """
@@ -2224,6 +2260,8 @@ class SessionStore:
             }
             if delivered_text and delivered_text != canonical_text:
                 detail["text_override"] = delivered_text
+            if normalized_attachment_receipts:
+                detail["attachment_receipts"] = normalized_attachment_receipts
             return self._append_event(
                 connection,
                 session_id=str(run["session_id"]),
@@ -2283,6 +2321,38 @@ class SessionStore:
             if text:
                 return text
         return None
+
+    def assistant_delivery_outcome(
+        self,
+        request_id: str,
+        *,
+        surface: str,
+        channel_key: str,
+    ) -> dict[str, Any] | None:
+        """Return the latest durable outcome for one Run and Connector route."""
+
+        normalized_surface = str(surface or "").strip().lower()
+        normalized_channel = str(channel_key or "").strip()
+        if not normalized_surface or not normalized_channel:
+            return None
+        route_phase = f"transport:{normalized_surface}:{normalized_channel}"
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT e.* FROM run_events AS e
+                JOIN runs AS r ON r.run_id=e.run_id
+                JOIN sessions AS s ON s.session_id=e.session_id
+                WHERE r.request_id=? AND s.instance_id=?
+                  AND e.kind='assistant.delivery.outcome' AND e.phase=?
+                ORDER BY e.sequence DESC LIMIT 1
+                """,
+                (str(request_id), self.instance_id, route_phase),
+            ).fetchone()
+        if row is None:
+            return None
+        event = dict(row)
+        event["detail"] = _json_object(event.pop("detail_json", "{}"))
+        return event
 
     def has_assistant_delivery_outcome(
         self,
