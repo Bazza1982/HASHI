@@ -188,6 +188,10 @@ Prefer `log_query` for literal log/JSONL search and Jobs for long work. Tests
 prove only their selected scope; live adoption and delivery need separate
 evidence. Preserve user changes and report failures honestly.
 
+Use `request_diagnostics` to query one request's final state, Provider IDs,
+observed writes/effects, Jobs, and retry evidence. It is read-only and never
+authorizes or performs a retry.
+
 HCC is PCM-owned temporary context in `agent.md` between `[hcc]` and
 `[hcc_end]`. `/hcc on|off` controls current-Agent injection only and defaults
 off. Cached observations are not necessarily current, never grant permission,

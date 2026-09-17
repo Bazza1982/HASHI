@@ -28,7 +28,7 @@ TOOL_TIERS: dict[str, list[str]] = {
     "core": ["shell", "log_query", "file_read", "file_write", "file_list"],
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
-    "verification": ["workspace_inspect", "verification_run"],
+    "verification": ["workspace_inspect", "verification_run", "request_diagnostics"],
     "background": [
         "background_job_start", "background_job_status", "background_job_tail",
         "background_job_cancel", "background_job_list",
@@ -85,6 +85,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "memory_search",
         "log_query",
         "process_list",
+        "request_diagnostics",
         "wiki_search",
         "web_fetch",
         "web_search",
@@ -1210,6 +1211,7 @@ class ToolRegistry:
             execute_background_job_tail,
             execute_background_job_cancel,
             execute_background_job_list,
+            execute_request_diagnostics,
             execute_telegram_send,
             execute_telegram_send_file,
             execute_frontend_send_attachments,
@@ -1318,6 +1320,13 @@ class ToolRegistry:
                 arguments,
                 workspace_dir=self.workspace_dir,
                 options=opts.get("verification_run", {}),
+            )
+
+        if tool_name == "request_diagnostics":
+            return await execute_request_diagnostics(
+                arguments,
+                workspace_dir=self.workspace_dir,
+                audit_context=self._effective_audit_context(),
             )
 
         if tool_name == "process_list":

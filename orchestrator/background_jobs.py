@@ -133,6 +133,38 @@ class BackgroundJobStore:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_background_jobs_state ON background_jobs(state)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_background_jobs_agent ON background_jobs(agent)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS background_job_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    returncode INTEGER,
+                    error TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_background_job_events_job "
+                "ON background_job_events(job_id, sequence)"
+            )
+            # Older databases retain their current receipt as an explicit
+            # migration event. New jobs record every state transition below.
+            conn.execute(
+                """
+                INSERT INTO background_job_events (
+                    job_id, state, recorded_at, returncode, error
+                )
+                SELECT jobs.job_id, jobs.state, jobs.updated_at,
+                       jobs.returncode, jobs.error
+                FROM background_jobs AS jobs
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM background_job_events AS events
+                    WHERE events.job_id = jobs.job_id
+                )
+                """
+            )
 
     def create(self, record: BackgroundJobRecord) -> BackgroundJobRecord:
         with self._connect() as conn:
@@ -146,6 +178,7 @@ class BackgroundJobStore:
                 """,
                 self._record_values(record),
             )
+            self._insert_event(conn, record)
         logger.info("Background job %s created state=%s agent=%s", record.job_id, record.state, record.agent)
         return record
 
@@ -192,6 +225,7 @@ class BackgroundJobStore:
                 """,
                 (*self._record_values(record)[1:], record.job_id),
             )
+            self._insert_event(conn, record)
         logger.info("Background job %s transitioned to %s", job_id, record.state)
         return record
 
@@ -218,6 +252,28 @@ class BackgroundJobStore:
                 params,
             ).fetchall()
         return [self._row_to_record(row) for row in rows]
+
+    def history(self, job_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT sequence, state, recorded_at, returncode, error
+                FROM background_job_events
+                WHERE job_id = ?
+                ORDER BY sequence
+                """,
+                (str(job_id),),
+            ).fetchall()
+        return [
+            {
+                "sequence": int(row["sequence"]),
+                "state": str(row["state"]),
+                "recorded_at": str(row["recorded_at"]),
+                "returncode": row["returncode"],
+                "error": row["error"],
+            }
+            for row in rows
+        ]
 
     def recover_nonterminal(self, *, reason: str = "manager_recovered_without_process_adoption") -> list[BackgroundJobRecord]:
         recovered: list[BackgroundJobRecord] = []
@@ -253,6 +309,23 @@ class BackgroundJobStore:
             record.ended_at,
             record.returncode,
             record.error,
+        )
+
+    @staticmethod
+    def _insert_event(conn: sqlite3.Connection, record: BackgroundJobRecord) -> None:
+        conn.execute(
+            """
+            INSERT INTO background_job_events (
+                job_id, state, recorded_at, returncode, error
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                record.job_id,
+                record.state,
+                record.updated_at,
+                record.returncode,
+                record.error,
+            ),
         )
 
     def _row_to_record(self, row: sqlite3.Row) -> BackgroundJobRecord:
@@ -446,6 +519,9 @@ class BackgroundJobManager:
 
     def list(self, *, agent: str | None = None, states: set[str] | None = None, limit: int = 50) -> list[BackgroundJobRecord]:
         return self.store.list(agent=agent, states=states, limit=limit)
+
+    def history(self, job_id: str) -> list[dict[str, Any]]:
+        return self.store.history(job_id)
 
     def tail(self, job_id: str, *, stream: str = "stdout", lines: int = 80) -> str:
         record = self.store.get(job_id)

@@ -58,6 +58,8 @@ def build_tool_audit_record(
         "kind": "tool_action",
         "tool_name": str(tool_name or ""),
         "tool_call_id": str(tool_call_id or ""),
+        "request_id": context.get("request_id"),
+        "turn_id": context.get("turn_id"),
         "agent": context.get("agent_name"),
         "org_id": context.get("org_id"),
         "project_id": context.get("project_id"),

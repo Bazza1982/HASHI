@@ -244,6 +244,8 @@ ACL 必须只覆盖明确的 live 目标，不能覆盖整个仓库、用户目�
 
 以下提案取消，不进入 backlog：HER token／时间／工具预算、自动 checkpoint、自动压缩、shell 重新分类、工具循环改写和新的自动重试禁令。
 
+实现检查点（2026-09-17）：已增加按 request ID 查询的只读诊断投影，复用现有 Tool audit／Smart Tool ledger 与 BackgroundJob receipt；普通 Tool 审计补齐 request ID，后台任务保留状态变化历史，终态旁路投影记录 Provider request/response ID、wire evidence、已知副作用和“安全重试证据存在／缺失／未知”。投影异步且 fail-open，不改变 HER v2 主循环、预算、压缩、shell 判定、普通失败答复或重试行为。
+
 ### 阶段 6：剩余功能分开处理
 
 在首批重大修复稳定后，剩余项目按 owner 分支和 Issue 处理，不打包进保护／reboot PR：

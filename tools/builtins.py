@@ -1674,6 +1674,53 @@ async def execute_background_job_list(args: dict, audit_context: dict | None = N
     return json.dumps([_job_summary(record) for record in records], ensure_ascii=False, indent=2)
 
 
+async def execute_request_diagnostics(
+    args: dict,
+    workspace_dir: Path,
+    audit_context: dict | None = None,
+) -> str:
+    """Join existing sanitised evidence for one request without changing it."""
+
+    request_id = str(args.get("request_id") or "").strip()
+    if not request_id:
+        return "Error: request_id is required"
+    manager = _background_manager_from_context(audit_context)
+    records: list[Any] = []
+    history: dict[str, list[dict[str, Any]]] = {}
+    if manager is not None:
+        try:
+            records = manager.list(limit=100)
+            if inspect.isawaitable(records):
+                records = await records
+            history_reader = getattr(manager, "history", None)
+            if callable(history_reader):
+                for record in records:
+                    origin = getattr(record, "origin", {})
+                    if not isinstance(origin, Mapping) or str(
+                        origin.get("request_id") or ""
+                    ) != request_id:
+                        continue
+                    job_id = str(getattr(record, "job_id", "") or "")
+                    events = history_reader(job_id)
+                    if inspect.isawaitable(events):
+                        events = await events
+                    history[job_id] = [dict(item) for item in events or ()]
+        except Exception:
+            # Background evidence is optional to the read-only projection.
+            records = []
+            history = {}
+    from orchestrator.request_diagnostics import build_request_diagnostics
+
+    report = await asyncio.to_thread(
+        build_request_diagnostics,
+        workspace_dir=workspace_dir,
+        request_id=request_id,
+        background_jobs=records,
+        background_history=history,
+    )
+    return json.dumps(report, ensure_ascii=False, indent=2)
+
+
 async def execute_telegram_send(
     args: dict,
     secrets: dict,
