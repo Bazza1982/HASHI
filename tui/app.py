@@ -23,6 +23,7 @@ from textual.suggester import SuggestFromList
 from textual.widgets import Input, RichLog, Static
 
 from orchestrator import ui_language
+from orchestrator.command_registry import load_runtime_commands
 from orchestrator.command_specs import COMMAND_SPECS, CommandGuide
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
@@ -797,11 +798,17 @@ class HASHITuiApp(App):
             ),
             default=False,
         )
+        runtime_commands = load_runtime_commands()
+        self._runtime_command_descriptions = {
+            command.name: command.description for command in runtime_commands
+        }
         command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
+        command_names.extend(f"/{command.name}" for command in runtime_commands)
         command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._command_names = list(dict.fromkeys(command_names))
         self._command_specs = {spec.name: spec for spec in COMMAND_SPECS}
         known_command_names = [f"/{spec.name}" for spec in COMMAND_SPECS]
+        known_command_names.extend(f"/{command.name}" for command in runtime_commands)
         known_command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._known_command_names = list(dict.fromkeys(known_command_names))
         self._command_order = {
@@ -2028,10 +2035,15 @@ class HASHITuiApp(App):
         if local:
             return local[0 if self._ui_language == "zh" else 1]
         spec = self._command_specs.get(name)
-        if spec is None:
+        description = (
+            spec.description
+            if spec is not None
+            else self._runtime_command_descriptions.get(name)
+        )
+        if description is None:
             return ""
         locale = "zh-CN" if self._ui_language == "zh" else "en"
-        return ui_language.command_description(name, spec.description, locale=locale)
+        return ui_language.command_description(name, description, locale=locale)
 
     def _command_guide(self, name: str) -> CommandGuide | None:
         local = TUI_COMMAND_GUIDES.get(name)

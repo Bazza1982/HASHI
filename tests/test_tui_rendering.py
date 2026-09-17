@@ -389,6 +389,11 @@ async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_
         await pilot.press("enter")
         assert sent == ["/mode", "/mode flex", "/move"]
 
+        # Registry-owned commands are derived from their canonical owner too.
+        input_box.value = "/restart"
+        await pilot.press("enter")
+        assert sent == ["/mode", "/mode flex", "/move", "/restart"]
+
 
 async def test_tui_sound_setting_is_persisted_and_can_be_previewed(tmp_path):
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
