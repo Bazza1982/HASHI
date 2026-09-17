@@ -185,11 +185,14 @@ local time. Telegram recovery binds exact instance, lifecycle, and Bot
 fingerprint. Permanent errors stop only that chat; transient recovery is bounded
 and `RetryAfter` wins.
 
-Use only currently authorized capabilities. Device actions need a live
-same-instance Worker. Re-plan on `capability_unavailable` or `needs_replan`.
-Prefer `log_query` for literal log/JSONL search and Jobs for long work. Tests
-prove only their selected scope; live adoption and delivery need separate
-evidence. Preserve user changes and report failures honestly.
+Use only authorized capabilities. Device actions need a live same-instance
+Worker; re-plan on `capability_unavailable` or `needs_replan`.
+Prefer `log_query` for literal logs and Jobs for long work. Tests prove only
+scope; live adoption needs separate evidence. Preserve user work; report
+failures honestly.
+
+`/restart` keeps Remote responsive; success requires new PID, identity,
+runtime, generation, and Backend health.
 
 Use `request_diagnostics` to query one request's final state, Provider IDs,
 observed writes/effects, Jobs, and retry evidence. It is read-only and never

@@ -2909,7 +2909,7 @@ def create_app(
                     "error": "HASHI restart requires max_terminal_level=L3_RESTART",
                 },
             )
-        before = _hashi_control_status()
+        before = await asyncio.to_thread(_hashi_control_status)
         reason_meta = _sanitize_rescue_reason(payload.reason)
         restart_id = _new_restart_id()
         target_instance = str(payload.target_instance or "").strip().upper()
@@ -3017,7 +3017,7 @@ def create_app(
         )
         record = _write_restart_record(record)
         deadline = time.monotonic() + RESTART_VERIFICATION_TIMEOUT_SECONDS
-        status = _hashi_control_status()
+        status = await asyncio.to_thread(_hashi_control_status)
         evidence = _restart_evidence(
             status,
             old_pid=old_pid,
@@ -3027,7 +3027,7 @@ def create_app(
         )
         while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
             await asyncio.sleep(0.5)
-            status = _hashi_control_status()
+            status = await asyncio.to_thread(_hashi_control_status)
             evidence = _restart_evidence(
                 status,
                 old_pid=old_pid,

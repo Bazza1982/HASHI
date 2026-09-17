@@ -133,6 +133,12 @@ outcome, status state, and error text when available.
 7. update the restart record to `completed` or a failed phase
 8. append a structured audit event to `logs/remote_rescue_audit.jsonl`
 
+Terminal verification must not monopolize Remote's request loop. Blocking
+Workbench health probes run outside that loop so the newly started Core can
+query Remote `/health` while the original restart request is still waiting.
+This liveness rule does not relax any PID, identity, runtime, generation, or
+Backend health evidence required for a completed receipt.
+
 `/control/hashi/restarts/{restart_id}` returns the durable restart record for a
 single restart id. Restart ids are validated before file lookup to avoid path
 traversal.

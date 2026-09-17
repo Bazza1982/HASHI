@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -401,6 +402,83 @@ def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
     assert record["operation"] == "restart"
     assert record["outcome"] == "completed"
     assert record["restart_id"] == body["restart_id"]
+
+
+def test_hashi_rescue_restart_keeps_remote_health_responsive(
+    tmp_path,
+    monkeypatch,
+):
+    before = {
+        "ok": True,
+        "state": "running",
+        "hashi_running": True,
+        "pid": 4141,
+        "pid_alive": True,
+        "workbench_health": {
+            "ok": True,
+            "ready": True,
+            "instance_id": "HASHI_TEST",
+            "runtime": {"core_api": "4", "function_api": "4"},
+            "shared_functions": {"generation_id": "sha256:abc"},
+        },
+    }
+    after = {
+        **before,
+        "pid": 6161,
+    }
+    poll_started = threading.Event()
+    release_poll = threading.Event()
+    calls = 0
+
+    def blocking_status():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return before
+        poll_started.set()
+        release_poll.wait(timeout=2.0)
+        return after
+
+    monkeypatch.setattr(remote_server, "_hashi_control_status", blocking_status)
+    monkeypatch.setattr(remote_server, "_process_exists", lambda pid: pid == 6161)
+    monkeypatch.setattr(
+        remote_server,
+        "_restart_hashi_process",
+        lambda: {
+            "pid": 5252,
+            "command": ["fixed-launcher", "--force"],
+            "log_path": str(tmp_path / "logs" / "restart.log"),
+            "launcher_kind": "fixed-launcher",
+            "platform": "windows",
+        },
+    )
+    response_holder = {}
+
+    with _client(tmp_path, max_level=AuthLevel.L3_RESTART) as client:
+        restart_thread = threading.Thread(
+            target=lambda: response_holder.setdefault(
+                "response",
+                client.post(
+                    "/control/hashi/restart",
+                    json={"reason": "test", "target_instance": "HASHI_TEST"},
+                ),
+            )
+        )
+        restart_thread.start()
+        assert poll_started.wait(timeout=1.0)
+
+        release_timer = threading.Timer(2.0, release_poll.set)
+        release_timer.start()
+        health_response = client.get("/health")
+        poll_released_before_health = release_poll.is_set()
+        release_poll.set()
+        release_timer.cancel()
+        restart_thread.join(timeout=3.0)
+
+    assert health_response.status_code == 200
+    assert poll_released_before_health is False
+    assert not restart_thread.is_alive()
+    assert response_holder["response"].status_code == 200
 
 
 def test_windows_restart_uses_only_explicit_configured_service_target(
