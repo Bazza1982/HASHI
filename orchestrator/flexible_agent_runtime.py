@@ -2441,6 +2441,11 @@ class FlexibleAgentRuntime:
             if isinstance(getattr(item, "request_metadata", None), Mapping)
             else {}
         )
+        if runtime_debug_reporting.is_automatic_debug_report_message(item.prompt):
+            self.logger.info(
+                "Automatic debug report reply suppressed after one-way diagnosis"
+            )
+            return
         from orchestrator.message_context import MESSAGE_CONTEXT_METADATA_KEY
 
         message_context = metadata.get(MESSAGE_CONTEXT_METADATA_KEY)

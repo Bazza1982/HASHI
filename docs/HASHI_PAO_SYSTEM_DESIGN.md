@@ -329,9 +329,11 @@ best-effort HChat send containing the failure provenance, local diagnostic-log
 location, journal reference, and a diagnose-without-fixing instruction. PAO
 does not validate or write the remote journal, await acknowledgement, retry,
 queue, track resolution, or de-duplicate issues. The receiving Agent owns
-diagnosis and journal de-duplication. HChat-origin failures are excluded so a
-failed diagnostic assignment cannot create a reporting loop. `/debug <request>`
-retains the separate one-shot strict-debug Skill behavior.
+diagnosis and journal de-duplication. Its completion is not routed back to the
+source Agent, so recording the report cannot start another Agent turn.
+HChat-origin failures are excluded so a failed diagnostic assignment cannot
+create a reporting loop. `/debug <request>` retains the separate one-shot
+strict-debug Skill behavior.
 
 `request_diagnostics` is the separate read-only evidence query. It joins one
 request's fail-open terminal projection with the existing Tool audit/Smart Tool
