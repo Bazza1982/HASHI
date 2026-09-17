@@ -156,6 +156,9 @@ function Get-RemotePort {
     if ($Port) {
         return [int]$Port
     }
+    if ($null -ne $SupervisorIdentity.remote_port) {
+        return [int]$SupervisorIdentity.remote_port
+    }
     $ConfigPath = Join-Path $HashiRoot "remote\config.yaml"
     if (Test-Path $ConfigPath) {
         $Match = Select-String -Path $ConfigPath -Pattern '^\s*port:\s*(\d+)' | Select-Object -First 1

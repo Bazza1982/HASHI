@@ -334,7 +334,14 @@ def test_doctor_uses_configured_tls_and_accepts_ready_empty(tmp_path):
     remote = root / "remote"
     remote.mkdir(parents=True)
     (root / "agents.json").write_text(
-        json.dumps({"global": {"instance_id": "SUPERVISOR-TLS"}}),
+        json.dumps(
+            {
+                "global": {
+                    "instance_id": "SUPERVISOR-TLS",
+                    "remote_port": 19002,
+                }
+            }
+        ),
         encoding="utf-8",
     )
     (remote / "config.yaml").write_text(
@@ -366,6 +373,6 @@ function Invoke-RestMethod {{
 """)
 
     assert result.returncode == 0, result.stderr
-    assert observed_uri.read_text(encoding="utf-8-sig").strip() == "https://127.0.0.1:19001/health"
+    assert observed_uri.read_text(encoding="utf-8-sig").strip() == "https://127.0.0.1:19002/health"
     assert "RemoteHealthMode" in result.stdout
     assert "ready_empty" in result.stdout
