@@ -958,9 +958,16 @@ async def test_cancelled_worker_preparation_retires_unready_process(
 ):
     kernel = _Kernel()
     kernel.paths = SimpleNamespace(code_root=tmp_path, bridge_home=tmp_path)
-    kernel.runtime_fingerprint = SimpleNamespace(to_dict=lambda: {})
+    kernel.runtime_fingerprint = SimpleNamespace(
+        to_dict=lambda: {"dependency_digest": "core-full-distribution-set"}
+    )
     supervisor = FunctionWorkerSupervisor(kernel)
     monkeypatch.setattr(supervisor, "topology_snapshot", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.dependency_digest",
+        lambda: "worker-full-distribution-set",
+        raising=False,
+    )
     process = SimpleNamespace(start=lambda: None)
     connection = SimpleNamespace(close=lambda: None)
     process_args = []
@@ -1008,3 +1015,6 @@ async def test_cancelled_worker_preparation_retires_unready_process(
         await task
     assert len(retired) == 1 and not supervisor._candidates
     assert process_args[0][1]["protocol_features"] == [WORKER_LOG_RELAY_FEATURE]
+    assert process_args[0][1]["runtime"]["dependency_digest"] == (
+        "worker-full-distribution-set"
+    )

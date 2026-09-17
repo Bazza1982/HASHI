@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import orchestrator.function_generation as function_generation
 from orchestrator.runtime_contract import enforce_runtime_contract
 from orchestrator.function_generation import (
     CandidateProbeReceipt,
@@ -233,18 +234,51 @@ def test_in_process_generation_commit_api_is_retired():
     assert not hasattr(generation, "prepare_function_generation")
 
 
-def test_isolated_probe_rejects_dependency_environment_drift_before_import():
+def test_isolated_probe_allows_unrelated_dependency_environment_drift():
     incompatible = dataclasses.replace(
         enforce_runtime_contract(ROOT),
         dependency_digest="sha256:" + "0" * 64,
     )
 
-    with pytest.raises(FunctionGenerationError, match="dependency_digest"):
-        run_candidate_probe(
+    receipt = run_candidate_probe(
+        code_root=ROOT,
+        module_names=(),
+        expected_runtime=incompatible,
+        timeout_seconds=20,
+    )
+
+    assert receipt.runtime.dependency_digest != incompatible.dependency_digest
+
+
+def test_candidate_runtime_rejects_locked_dependency_drift(monkeypatch):
+    runtime = enforce_runtime_contract(ROOT)
+
+    def reject_locked_dependencies(*_args, **_kwargs):
+        raise RuntimeError("locked dependency mismatch")
+
+    monkeypatch.setattr(
+        function_generation,
+        "validate_standard_dependencies",
+        reject_locked_dependencies,
+    )
+
+    with pytest.raises(RuntimeError, match="locked dependency mismatch"):
+        function_generation.compare_function_candidate_runtime(
+            runtime,
+            runtime,
             code_root=ROOT,
-            module_names=(),
-            expected_runtime=incompatible,
-            timeout_seconds=20,
+        )
+
+
+def test_candidate_runtime_still_rejects_hard_runtime_drift():
+    runtime = enforce_runtime_contract(ROOT)
+    incompatible = dataclasses.replace(runtime, function_api=runtime.function_api + 1)
+
+    with pytest.raises(Exception, match="function_api"):
+        function_generation.compare_function_candidate_runtime(
+            runtime,
+            incompatible,
+            code_root=ROOT,
         )
 
 

@@ -36,6 +36,7 @@ from orchestrator.function_worker_protocol import (
     FunctionWorkerProtocolError,
     JsonConnectionPeer,
 )
+from orchestrator.runtime_contract import dependency_digest
 from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.telegram_delivery_errors import TelegramDeliveryError
 
@@ -1469,6 +1470,8 @@ class FunctionWorkerSupervisor:
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
         nonce = uuid4().hex
+        worker_runtime = self.kernel.runtime_fingerprint.to_dict()
+        worker_runtime["dependency_digest"] = dependency_digest()
         bootstrap = {
             "entrypoint": "orchestrator.function_worker_host:run_function_worker",
             "protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
@@ -1478,7 +1481,7 @@ class FunctionWorkerSupervisor:
             "code_root": str(self.kernel.paths.code_root),
             "bridge_home": str(self.kernel.paths.bridge_home),
             "generation_root": str(artifact),
-            "runtime": self.kernel.runtime_fingerprint.to_dict(),
+            "runtime": worker_runtime,
             "manifest": generation.manifest.to_dict(),
             "topology": self.topology_snapshot(agent_name=agent_name),
         }
