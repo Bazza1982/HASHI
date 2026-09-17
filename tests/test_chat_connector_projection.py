@@ -497,6 +497,63 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
 
 
 @pytest.mark.asyncio
+async def test_transcript_attachment_in_session_attachments_root_is_served(
+    tmp_path: Path,
+):
+    server = _server(tmp_path)
+    bridge_home = tmp_path / "bridge_home"
+    session_attachments = bridge_home / "media" / "session_attachments"
+    session_attachments.mkdir(parents=True)
+    payload = b"%PDF-1.4 session-attachment"
+    report = session_attachments / "session-report.pdf"
+    report.write_bytes(payload)
+    server.global_config.bridge_home = bridge_home
+    server._runtime_map = lambda: {"a": SimpleNamespace(media_dir=tmp_path / "agent-media")}
+    session = server.session_store.ensure_default_session(
+        owner_id="user:7", agent_id="a"
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="session-attachment-preview",
+        text="session attachment",
+        source="session-api",
+        idempotency_key="session-attachment-preview",
+        content=[
+            {
+                "type": "media",
+                "attachment_id": "attachment-session-pdf",
+                "modality": "file",
+                "kind": "file",
+                "mime_type": "application/pdf",
+                "filename": "session-report.pdf",
+                "local_ref": str(report),
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        ],
+    )
+    request = SimpleNamespace(
+        match_info={
+            "name": "a",
+            "message_id": accepted.message_id,
+            "attachment_id": "attachment-session-pdf",
+        },
+        query={},
+        headers={},
+    )
+
+    response = await server.handle_transcript_attachment(request)
+
+    assert response.status == 200
+    assert response.body == payload
+    assert response.content_type == "application/pdf"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    disposition = str(response.headers.get("Content-Disposition") or "")
+    assert disposition.startswith("inline")
+
+@pytest.mark.asyncio
 async def test_staged_frontend_image_is_visible_through_transcript_route(
     tmp_path: Path,
 ):

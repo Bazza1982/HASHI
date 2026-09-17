@@ -4128,6 +4128,28 @@ class WorkbenchApiServer:
             if not mime_type:
                 mime_type = "application/octet-stream"
 
+            # Unified attachment delivery contract: MIME drives presentation
+            # (inline vs attachment) only, never admission.  The historic
+            # image preview allowlist remains the inline allowlist.
+            inline_ok = (
+                mime_type in _TRANSCRIPT_IMAGE_PREVIEW_MIME_TYPES
+                or mime_type.startswith("audio/")
+                or mime_type.startswith("video/")
+                or mime_type in {"text/plain", "application/pdf"}
+            )
+            dangerous = (
+                mime_type
+                in {
+                    "text/html",
+                    "application/xhtml+xml",
+                    "image/svg+xml",
+                    "application/javascript",
+                    "text/javascript",
+                }
+                or "+xml" in mime_type
+            )
+            disposition_inline = inline_ok and not dangerous
+
             runtime = self._runtime_map().get(name)
             configured_media = getattr(self.global_config, "base_media_dir", None)
             bridge_home = Path(
@@ -4158,8 +4180,9 @@ class WorkbenchApiServer:
                 )
             expected_size = int(attachment.get("size_bytes") or 0)
             actual_size = candidate.stat().st_size
-            if actual_size <= 0 or actual_size > 100 * 1024 * 1024:
-                raise SessionConflict("visible attachment exceeds the download limit")
+            size_limit = 25 * 1024 * 1024 if disposition_inline else MAX_SESSION_ATTACHMENT_BYTES
+            if actual_size <= 0 or actual_size > size_limit:
+                raise SessionConflict("visible attachment exceeds the allowed size limit")
             if expected_size and expected_size != actual_size:
                 raise SessionConflict("visible attachment size changed")
             payload = candidate.read_bytes()
@@ -4168,7 +4191,7 @@ class WorkbenchApiServer:
                 raise SessionConflict("visible attachment content changed")
 
             is_download = str(request.query.get("download") or "").strip().casefold() in {"1", "true", "yes"}
-            disposition_type = "attachment" if is_download else "inline"
+            disposition_type = "attachment" if (is_download or not disposition_inline) else "inline"
             filename = str(attachment.get("filename") or candidate.name).strip()
             from urllib.parse import quote
             try:
