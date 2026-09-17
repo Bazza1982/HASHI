@@ -831,6 +831,9 @@ class FlexibleAgentRuntime:
         telegram_requested = telegram_delivery_for_admission(
             source=source,
             request_metadata=request_metadata,
+            state_root=getattr(
+                getattr(self, "global_config", None), "bridge_home", None
+            ),
         )
         silent = False
         normalized_request_content = None

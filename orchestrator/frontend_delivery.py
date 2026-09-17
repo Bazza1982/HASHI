@@ -294,19 +294,53 @@ def tui_request_metadata(
     }
 
 
+def _workbench_telegram_mirror_for_admission(
+    *,
+    request_metadata: Mapping[str, Any] | None,
+    state_root: Any | None,
+) -> bool:
+    """Resolve server-authoritative Workbench Telegram mirroring.
+
+    Only Runs carrying Workbench session metadata consult the persisted
+    per-owner state.  Every other non-TUI source keeps its historical
+    default (mirror on).  Read failures fail open to that default.
+    """
+
+    if state_root is None:
+        return True
+    metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
+    if str(metadata.get("session_surface") or "").strip() != "workbench":
+        return True
+    owner_id = str(metadata.get("owner_id") or "").strip()
+    if not owner_id:
+        return True
+    try:
+        from orchestrator.workbench_telegram_state import mirror_enabled
+
+        return mirror_enabled(state_root, owner_id, default=True)
+    except Exception:
+        return True
+
+
 def telegram_delivery_for_admission(
     *,
     source: str,
     request_metadata: Mapping[str, Any] | None,
+    state_root: Any | None = None,
 ) -> bool:
     """Resolve Telegram delivery without honoring legacy hidden-turn flags.
 
     Invalid, incomplete, non-TUI, and forged metadata all fail visible.  Only a
-    canonical policy bound to the same TUI client can turn mirroring off.
+    canonical policy bound to the same TUI client can turn mirroring off.  A
+    non-TUI Run carrying Workbench session metadata consults the server-owned
+    per-owner state when a state root is supplied.
     """
 
     if str(source or "").strip().casefold() != TUI_FRONTEND_KIND:
-        return True
+        return _workbench_telegram_mirror_for_admission(
+            request_metadata=request_metadata,
+            state_root=state_root,
+        )
     metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
     frontend = metadata.get(FRONTEND_CLIENT_METADATA_KEY)
     if not isinstance(frontend, Mapping):
