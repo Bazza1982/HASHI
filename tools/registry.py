@@ -206,6 +206,8 @@ class ToolRegistry:
         self.max_loops = None
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
+        self._live_runtime_policy_cache_key: tuple | None = None
+        self._live_runtime_policy_cache = None
         self.canonical_audit = canonical_audit
         self._audit_context_override: ContextVar[dict | None] = ContextVar(
             f"tool_registry_audit_context_{id(self)}",
@@ -574,6 +576,13 @@ class ToolRegistry:
         )
         if denial is not None:
             return denial
+        denial = self._check_live_runtime_gate(
+            tool_name,
+            arguments,
+            tool_call_id=tool_call_id,
+        )
+        if denial is not None:
+            return denial
         denial = self._check_enterprise_path_gate(
             tool_name, arguments, tool_call_id=tool_call_id
         )
@@ -613,6 +622,46 @@ class ToolRegistry:
                 },
             )
         return None
+
+    def _check_live_runtime_gate(
+        self,
+        tool_name: str,
+        arguments: dict,
+        *,
+        tool_call_id: str,
+    ) -> ToolResult | None:
+        context = self._effective_audit_context()
+        global_config = context.get("global_config")
+        if global_config is None:
+            return None
+        from orchestrator.live_runtime_protection import (
+            evaluate_live_runtime_request,
+            load_live_runtime_policy,
+            policy_cache_key,
+        )
+
+        runtime_prefix = context.get("live_runtime_prefix")
+        cache_key = policy_cache_key(global_config, runtime_prefix)
+        if cache_key != self._live_runtime_policy_cache_key:
+            self._live_runtime_policy_cache = load_live_runtime_policy(
+                global_config,
+                runtime_prefix=runtime_prefix,
+            )
+            self._live_runtime_policy_cache_key = cache_key
+        decision = evaluate_live_runtime_request(
+            self._live_runtime_policy_cache,
+            tool_name=tool_name,
+            arguments=arguments,
+            workspace_dir=self.workspace_dir,
+        )
+        if decision is None:
+            return None
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=f"Error: {decision.explanation}",
+            is_error=True,
+            details=decision.details(),
+        )
 
     def _check_system_exchange_loop_gate(
         self,

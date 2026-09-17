@@ -3,6 +3,7 @@ import inspect
 import json
 import logging
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
@@ -1648,6 +1649,7 @@ class FlexibleBackendManager:
                     "agent_name": getattr(adapter_cfg, "name", workspace_dir.name),
                     "workspace_dir": str(workspace_dir),
                     "safety_mode": "read_write",
+                    "live_runtime_prefix": str(Path(sys.prefix).resolve()),
                     "global_config": self.global_config,
                     "_runtime": getattr(self, "runtime", None),
                 },

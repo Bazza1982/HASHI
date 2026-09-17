@@ -38,6 +38,12 @@ only PID, identity, generation, and health evidence permits `online`. See
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
 [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
+Agent tools cannot write authoritative live Core paths, mutate the live Python
+environment, read instance secrets, kill the current Core PID, or raw-control
+the current HASHI service. Workzones and explicitly selected development
+environments remain writable; use supported `/reboot` and `/restart` paths.
+See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
+
 ## Configuration, identity, and persistence
 
 Read Agents, identities, ports, workspaces, endpoints, and model opt-ins from
