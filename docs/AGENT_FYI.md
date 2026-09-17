@@ -42,6 +42,10 @@ Agent tools cannot write authoritative live Core paths, mutate the live Python
 environment, read instance secrets, kill the current Core PID, or raw-control
 the current HASHI service. Workzones and explicitly selected development
 environments remain writable; use supported `/reboot` and `/restart` paths.
+On a Windows service-backed instance, Remote may control only the one service
+explicitly named in local platform policy, with start/stop-only permission.
+Restart success requires a different healthy Core PID plus matching instance,
+runtime, and Function-generation evidence; launch acceptance is not success.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
 ## Configuration, identity, and persistence

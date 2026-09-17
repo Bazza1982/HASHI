@@ -6,6 +6,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+from remote.api import server as remote_server
 from remote.api.server import _request_workbench_reboot, create_app
 from remote.local_http import local_http_url
 from remote.protocol_manager import ProtocolManager, build_default_capabilities
@@ -400,6 +401,46 @@ def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
     assert record["operation"] == "restart"
     assert record["outcome"] == "completed"
     assert record["restart_id"] == body["restart_id"]
+
+
+def test_windows_restart_uses_only_explicit_configured_service_target(
+    tmp_path,
+    monkeypatch,
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "bridge_ctl.ps1").write_text("# fallback\n", encoding="utf-8")
+    (bin_dir / "hashi_service_ctl.ps1").write_text("# service\n", encoding="utf-8")
+    policy = tmp_path / "state" / "platform" / "live-runtime-protection.json"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(
+        json.dumps({"schema": 1, "service_targets": ["HASHI_TEST"]}),
+        encoding="utf-8",
+    )
+    _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(remote_server.platform, "system", lambda: "Windows")
+
+    command = remote_server._hashi_restart_command()
+
+    assert "hashi_service_ctl.ps1" in " ".join(command)
+    assert command[-2:] == ["-ServiceName", "HASHI_TEST"]
+
+
+def test_windows_restart_falls_back_without_explicit_service_target(
+    tmp_path,
+    monkeypatch,
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "bridge_ctl.ps1").write_text("# fallback\n", encoding="utf-8")
+    (bin_dir / "hashi_service_ctl.ps1").write_text("# service\n", encoding="utf-8")
+    _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(remote_server.platform, "system", lambda: "Windows")
+
+    command = remote_server._hashi_restart_command()
+
+    assert "bridge_ctl.ps1" in " ".join(command)
+    assert "hashi_service_ctl.ps1" not in " ".join(command)
 
 
 def test_hashi_rescue_restart_rejects_wrong_target_before_launch(tmp_path, monkeypatch):
