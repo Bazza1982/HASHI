@@ -98,6 +98,7 @@ jobs:
             tests/test_manager_registry.py \
             tests/test_model_catalog.py \
             tests/test_reboot_manager.py \
+            tests/test_restart_provider.py \
             tests/test_runtime_contract.py \
             tests/test_runtime_command_binding.py \
             tests/test_runtime_groups.py \
