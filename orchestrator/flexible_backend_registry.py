@@ -3,6 +3,7 @@ from __future__ import annotations
 HER_V2_ENGINE = "her-v2"
 RETIRED_HER_ENGINE_ALIASES = frozenset({"her"})
 REMOVED_ENGINE_IDS = frozenset({"claw-cli"})
+RETIRED_BACKEND_IDS = frozenset({"gemini-cli"})
 PROVIDER_ONLY_ENGINE_IDS = frozenset(
     {"openrouter-api", "deepseek-api", "openai-compatible-api"}
 )
@@ -337,6 +338,12 @@ def is_cli_backend(engine: str | None) -> bool:
     return canonical_backend_engine(engine) in CLI_ENGINES
 
 
+def is_retired_backend(engine: str | None) -> bool:
+    """Return whether an old Engine ID is retained only for migration reads."""
+
+    return canonical_backend_engine(engine) in RETIRED_BACKEND_IDS
+
+
 def is_selectable_backend(engine: str | None) -> bool:
     """Return whether an engine may be selected as a top-level runtime.
 
@@ -346,7 +353,11 @@ def is_selectable_backend(engine: str | None) -> bool:
     """
 
     canonical = canonical_backend_engine(engine)
-    return bool(canonical and canonical not in PROVIDER_ONLY_ENGINE_IDS)
+    return bool(
+        canonical
+        and canonical not in PROVIDER_ONLY_ENGINE_IDS
+        and canonical not in RETIRED_BACKEND_IDS
+    )
 
 
 def migrate_provider_only_active_backend(
@@ -391,6 +402,8 @@ def get_available_models(engine: str) -> list[str]:
 
 
 def get_gateway_models(engine: str) -> list[str]:
+    if is_retired_backend(engine):
+        return []
     entry = get_backend_entry(engine)
     if not entry.get("gateway_enabled"):
         return []

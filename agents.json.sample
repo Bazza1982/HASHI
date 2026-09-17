@@ -60,10 +60,6 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
-        {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
         },
@@ -150,10 +146,6 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
-        {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
         },
@@ -181,10 +173,6 @@
       "is_active": false,
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -214,10 +202,6 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
-        {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
         },
@@ -245,10 +229,6 @@
       "is_active": false,
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -278,10 +258,6 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
-        {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
         },
@@ -309,10 +285,6 @@
       "is_active": false,
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -348,10 +320,6 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
-        {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
         },
@@ -380,10 +348,6 @@
       "is_active": true,
       "model": "deepseek/deepseek-v4-pro",
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"

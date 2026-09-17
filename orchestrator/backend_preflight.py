@@ -8,7 +8,10 @@ from adapters.xai_oauth_credentials import (
     xai_api_credentials_available,
 )
 from orchestrator.pathing import resolve_agy_executable
-from orchestrator.flexible_backend_registry import get_secret_lookup_order
+from orchestrator.flexible_backend_registry import (
+    get_secret_lookup_order,
+    is_retired_backend,
+)
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 
@@ -62,7 +65,12 @@ class BackendPreflight:
             getattr(global_cfg, "agy_launch_mode", "direct") or "direct"
         ).strip().casefold()
         for engine in engines:
-            if engine in cli_map:
+            if is_retired_backend(engine):
+                result[engine] = (
+                    False,
+                    "retired backend; choose another configured backend",
+                )
+            elif engine in cli_map:
                 cmd = cli_map[engine]
                 found = shutil.which(cmd)
                 if not found:
@@ -122,6 +130,13 @@ class BackendPreflight:
         skipped = []
         for cfg in agent_configs:
             if hasattr(cfg, "allowed_backends"):  # flex
+                if is_retired_backend(cfg.active_backend):
+                    _, reason = engine_status.get(
+                        cfg.active_backend,
+                        (False, "retired backend; choose another configured backend"),
+                    )
+                    skipped.append((cfg.name, f"{cfg.active_backend}: {reason}"))
+                    continue
                 active_ok, _ = engine_status.get(cfg.active_backend, (False, "unknown"))
                 if active_ok:
                     startable.append(cfg)

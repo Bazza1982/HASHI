@@ -355,8 +355,9 @@ Current boundaries:
   smoke-tested `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` variants.
 - Also supported by `xai-api` models using `/chat/completions`, such as
   `grok-4.3`.
-- Gemini CLI, Claude CLI, and Grok CLI models are rejected instead of silently
-  dropping tools.
+- Claude CLI and Grok CLI models are rejected instead of silently dropping
+  tools. Retired Gemini CLI models are absent from the gateway catalogue and
+  cannot be executed.
 - xAI Responses API models, including `grok-4.5` and `grok-build-*`, are rejected
   until their separate function-call protocol is implemented.
 - Gateway `session_id` caching is disabled for external tool turns; clients must

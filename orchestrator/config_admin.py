@@ -7,6 +7,11 @@ from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.pathing import BridgePaths
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
 from orchestrator.config import default_agent_mode_for_backend
+from orchestrator.flexible_backend_registry import (
+    canonical_backend_engine,
+    is_retired_backend,
+    is_selectable_backend,
+)
 from orchestrator.agent_incarnation import (
     AGENT_LIFECYCLE_FIELD,
     new_agent_lifecycle_id,
@@ -116,22 +121,6 @@ class ConfigAdmin:
         if agent_name in existing_names:
             return (False, f"Agent '{agent_name}' already exists.") if wants_message else False
 
-        ws_dir = self.paths.workspaces_root / agent_name
-        ws_dir.mkdir(parents=True, exist_ok=True)
-
-        agent_md = ws_dir / "agent.md"
-        if not agent_md.exists():
-            atomic_write_pcm(
-                agent_md,
-                render_pcm_document(
-                    persona=f"You are {display_name}, a HASHI agent.",
-                    system=(
-                        "Follow HASHI infrastructure policy, active /sys rules, "
-                        "and the authoritative current user request."
-                    ),
-                ),
-            )
-
         if isinstance(agent_cfg, dict):
             new_entry = dict(agent_cfg)
         else:
@@ -156,6 +145,7 @@ class ConfigAdmin:
                     if isinstance(row, dict)
                     and row.get("active_backend")
                     and row.get("allowed_backends")
+                    and is_selectable_backend(row.get("active_backend"))
                 ),
                 None,
             )
@@ -180,10 +170,47 @@ class ConfigAdmin:
             safe_backend["engine"] = active_backend
             new_entry.setdefault("allowed_backends", [safe_backend])
             new_entry.setdefault("active_backend", active_backend)
+
+        configured_engines = {
+            canonical_backend_engine(
+                item if isinstance(item, str) else item.get("engine")
+            )
+            for item in new_entry.get("allowed_backends", [])
+            if isinstance(item, (str, dict))
+        }
+        configured_engines.add(
+            canonical_backend_engine(new_entry.get("active_backend"))
+        )
+        retired = sorted(
+            engine for engine in configured_engines if is_retired_backend(engine)
+        )
+        if retired:
+            message = (
+                "Cannot create an Agent with retired backend(s): "
+                f"{', '.join(retired)}. Choose another configured backend."
+            )
+            return (False, message) if wants_message else False
+
         new_entry.setdefault(
             "default_mode",
             default_agent_mode_for_backend(new_entry.get("active_backend")),
         )
+
+        ws_dir = self.paths.workspaces_root / agent_name
+        ws_dir.mkdir(parents=True, exist_ok=True)
+
+        agent_md = ws_dir / "agent.md"
+        if not agent_md.exists():
+            atomic_write_pcm(
+                agent_md,
+                render_pcm_document(
+                    persona=f"You are {display_name}, a HASHI agent.",
+                    system=(
+                        "Follow HASHI infrastructure policy, active /sys rules, "
+                        "and the authoritative current user request."
+                    ),
+                ),
+            )
 
         raw.setdefault("agents", []).append(new_entry)
         self.write_raw_config(raw)

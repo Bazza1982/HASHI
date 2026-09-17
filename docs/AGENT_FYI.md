@@ -109,6 +109,11 @@ Strategic (`low`), and Planned (`medium`). Fixed/Flex, Memory+, and HER mode are
 independent. `/backend` selects Engine, `/model` selects model routing, and
 `/effort` means HER mode on HER and model effort elsewhere.
 
+Gemini CLI is retired. Keep legacy rows readable for migration, but do not
+offer or execute them and never switch them to another Engine automatically.
+The adapter stays packaged until every instance reference is migrated;
+Antigravity remains an independent supported Engine.
+
 Use current metadata for context, price, effort, and modality. Media support is
 the intersection of model semantics, Adapter transport, and instance policy;
 distinguish unknown, unsupported, unimplemented, blocked, and unavailable.

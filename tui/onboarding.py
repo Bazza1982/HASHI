@@ -9,7 +9,7 @@ from pathlib import Path
 
 from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 from orchestrator.config import default_global_tools_config
-from orchestrator.flexible_backend_registry import get_default_model
+from orchestrator.flexible_backend_registry import get_default_model, is_retired_backend
 
 
 def load_languages(bridge_home: Path) -> list[dict]:
@@ -44,7 +44,6 @@ def lang_code_from_file(filename: str) -> str:
 def audit_environment() -> tuple[str | None, str | None]:
     checks = [
         ("Claude Code", "claude-cli", ["claude", "-v"]),
-        ("Gemini CLI", "gemini-cli", ["gemini", "--version"]),
         ("Codex CLI", "codex-cli", ["codex", "--version"]),
     ]
     for name, engine, cmd in checks:
@@ -70,6 +69,10 @@ def verify_openrouter(key: str) -> bool:
 
 def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key: str | None = None):
     """Create agents.json, secrets.json, and workspace for the onboarding agent."""
+    if is_retired_backend(engine):
+        raise ValueError(
+            f"Backend '{engine}' is retired; choose another configured backend."
+        )
     agents_path = bridge_home / "agents.json"
     secrets_path = bridge_home / "secrets.json"
     # Validate every existing declaration before creating workspace artefacts
@@ -114,7 +117,6 @@ def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key
     display = display_names.get(l_code, "Hashiko")
 
     default_engines = (
-        "gemini-cli",
         "claude-cli",
         "codex-cli",
         "openrouter-api",

@@ -11,6 +11,7 @@ from adapters.xai_oauth_credentials import (
     xai_api_credentials_available,
 )
 from orchestrator.pathing import resolve_agy_executable
+from orchestrator.flexible_backend_registry import is_retired_backend
 
 
 def _cli_command(global_config: Any, engine: str) -> str:
@@ -29,6 +30,11 @@ def _has_secrets_xai_credentials(secrets: dict) -> bool:
 
 
 def check_gateway_engine(global_config: Any, secrets: dict, engine: str) -> dict[str, Any]:
+    if is_retired_backend(engine):
+        return {
+            "available": False,
+            "reason": "retired backend; choose another configured backend",
+        }
     if engine in {"gemini-cli", "claude-cli", "codex-cli", "grok-cli", "antigravity-cli"}:
         cmd = _cli_command(global_config, engine)
         if engine == "antigravity-cli":

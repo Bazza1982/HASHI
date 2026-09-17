@@ -8,8 +8,11 @@ infrastructure you control. Work through a terminal, Telegram, WhatsApp, or
 an authenticated client API.
 
 Use HASHI's native **HER v2** engine or connect engines such as Claude Code,
-Codex CLI, Gemini CLI, and Grok CLI. HER v2 can route work across supported
+Codex CLI, Antigravity, and Grok CLI. HER v2 can route work across supported
 model providers while keeping its own durable session.
+
+Gemini CLI is retired: existing configuration remains readable for migration,
+but new selection and execution are rejected without automatic fallback.
 
 [Get started](docs/INSTALL.md) · [User guide](docs/USER_GUIDE.md) ·
 [Integrations](docs/INTEGRATIONS.md) ·

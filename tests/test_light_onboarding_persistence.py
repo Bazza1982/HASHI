@@ -147,6 +147,7 @@ def test_legacy_onboarding_uses_current_shared_model_defaults(tmp_path):
 
     agent = read_config_json(tmp_path / "agents.json")["agents"][0]
     backends = {row["engine"]: row for row in agent["allowed_backends"]}
+    assert "gemini-cli" not in backends
     assert backends["codex-cli"] == {
         "engine": "codex-cli",
         "model": "gpt-5.6-sol",
