@@ -911,6 +911,28 @@ class FlexibleAgentRuntime:
             metadata=request_metadata,
             prompt=clean_prompt,
         )
+        from orchestrator.agent_stop_fence import current_runtime_epoch
+
+        current_stop_epoch = current_runtime_epoch(self)
+        supplied_stop_epoch = metadata.get("agent_stop_epoch")
+        if supplied_stop_epoch is not None:
+            try:
+                supplied_stop_epoch = int(supplied_stop_epoch)
+            except (TypeError, ValueError):
+                self.error_logger.error(
+                    "Rejected request with invalid Agent stop epoch from %s",
+                    source,
+                )
+                return None
+            if supplied_stop_epoch < current_stop_epoch:
+                self.message_logger.info(
+                    "Rejected stale request from %s at stop epoch %s (current=%s)",
+                    source,
+                    supplied_stop_epoch,
+                    current_stop_epoch,
+                )
+                return None
+        metadata["agent_stop_epoch"] = current_stop_epoch
         if str(source or "").strip().casefold() == "hchat-exchange":
             exchange_context = metadata.get(HCHAT_CONTEXT_METADATA_KEY)
             if not (
@@ -1318,7 +1340,11 @@ class FlexibleAgentRuntime:
         raise last_error
 
     def _backend_busy(self) -> bool:
-        return self.is_generating or (not self.queue.empty())
+        return (
+            self.is_generating
+            or (not self.queue.empty())
+            or bool(getattr(self, "_background_request_ids", set()))
+        )
 
     def _sync_workzone_to_backend_config(self) -> None:
         runtime_workzone.sync_workzone_to_backend_config(self)

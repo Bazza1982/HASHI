@@ -154,7 +154,9 @@ parse, tool effect, recovery, terminal state, and receipt share one correlation
 chain. Separate restricted originals from safe projections; partial/unread is
 not empty.
 
-`/stop` preserves interrupted evidence. `/retry` follows defined recovery;
+`/stop` is Agent-wide across Sessions: it advances a durable stop epoch, cancels
+current/pending work, and rejects older background or nudge callbacks while
+preserving their evidence. Scheduler definitions remain. `/retry` follows defined recovery;
 `/resend` only replays output. `/steer` redirects execution while keeping
 verified progress. Recovery does not create a second Cron Run, replay completed
 tools, silently restore revoked authority, or restart an already ended branch.

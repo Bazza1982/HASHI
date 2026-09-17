@@ -1598,10 +1598,11 @@ Journal snapshot into an idempotent quoted recovery turn in the current Session
 and compare-and-swap clears that Journal only after the Session write is
 durable. This phase runs at any token count. A write or compare-and-swap failure
 preserves the Journal and stops the ordinary conversation compaction phase.
-Every later HER v2 request that sees previous-turn WIP emits a mandatory visible
-warning independently of `/verbose`; only bounded deterministic recovery
-context, never raw Journal JSONL or a recursively assembled provider request,
-may reach the provider.
+Later HER v2 requests keep bounded deterministic WIP recovery context available,
+but ordinary requests do not emit a visible recovery card merely because old
+WIP exists. A visible warning requires an explicit typed recovery request;
+raw Journal JSONL and recursively assembled provider requests never reach the
+provider.
 
 Known and unknown target capacity use the same fixed product window. Below
 64,000 effective tokens, manual `/compact` reports the exact not-needed reason;

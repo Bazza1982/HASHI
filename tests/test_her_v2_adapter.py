@@ -573,10 +573,35 @@ async def test_fixed_route_freeze_failure_closes_turn_before_provider_work(
 
 
 @pytest.mark.asyncio
-async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_path):
+@pytest.mark.parametrize(
+    ("surface_wip_recovery", "expected_warning_count"),
+    [(False, 0), (True, 1)],
+)
+async def test_adapter_injects_prior_wip_and_only_surfaces_when_explicitly_requested(
+    tmp_path,
+    monkeypatch,
+    surface_wip_recovery,
+    expected_warning_count,
+):
+    from orchestrator import runtime_pipeline
+
     config = _agent_config(tmp_path)
     provider = _DirectProvider()
     setattr(config, "_her_v2_stage_provider", provider)
+    request_meta = {"request_id": "req-next"}
+    if surface_wip_recovery:
+        request_meta["surface_wip_recovery"] = True
+    setattr(
+        config,
+        "_hashi_runtime",
+        SimpleNamespace(_request_meta_by_id={"req-next": request_meta}),
+    )
+    surfaced: list[dict] = []
+    monkeypatch.setattr(
+        runtime_pipeline,
+        "surface_wip_recovery_warning",
+        lambda _runtime, _item, **details: surfaced.append(details),
+    )
     journal = WIPJournal(
         config.workspace_dir / "backend_state" / "her_v2" / "wip_journal.jsonl"
     )
@@ -596,6 +621,7 @@ async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_p
     )
 
     assert response.is_success is True
+    assert len(surfaced) == expected_warning_count
     injected_goals = [request.goal for _profile, request in provider.requests]
     assert any(CONTEXT_HEADER in goal for goal in injected_goals)
     assert any("partial observable result" in goal for goal in injected_goals)

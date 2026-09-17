@@ -16,7 +16,7 @@ from orchestrator.runtime_nudge import (
     parse_nudge_create_args,
 )
 from orchestrator import scheduler as scheduler_module
-from orchestrator.scheduler import TaskScheduler, _should_fire
+from orchestrator.scheduler import TaskScheduler, _runtime_busy, _should_fire
 from orchestrator.skill_manager import SkillManager
 from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService
 
@@ -140,6 +140,18 @@ class FakeRuntime:
         self.listeners[request_id] = callback
 
 
+def test_runtime_busy_reads_function_worker_metadata():
+    runtime = SimpleNamespace(
+        get_runtime_metadata=lambda: {
+            "is_generating": True,
+            "queue_depth": 0,
+            "detached_request_count": 0,
+        }
+    )
+
+    assert _runtime_busy(runtime) is True
+
+
 async def _run_one_scheduler_pass(scheduler: TaskScheduler):
     task = asyncio.create_task(scheduler.run())
     await asyncio.sleep(0.05)
@@ -174,6 +186,31 @@ async def test_scheduler_nudge_enqueues_only_when_runtime_idle(tmp_path):
     assert request_id in runtime.listeners
     data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
     assert data["nudges"][0]["nudge_meta"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_nudge_keeps_one_persistent_invocation_lease(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+
+    await _run_one_scheduler_pass(scheduler)
+    scheduler.state["nudges"][job["id"]] = 0
+    await _run_one_scheduler_pass(scheduler)
+
+    assert len(runtime.enqueued) == 1
+    lease = scheduler.state["nudge_leases"][job["id"]]
+    assert lease["request_id"] == runtime.enqueued[0][0]
 
 
 @pytest.mark.asyncio
@@ -367,6 +404,107 @@ async def test_scheduler_nudge_completion_marker_disables_job(tmp_path):
     data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
     assert data["nudges"][0]["enabled"] is False
     assert data["nudges"][0]["nudge_meta"]["stopped_reason"] == "exit_condition_met"
+
+
+@pytest.mark.asyncio
+async def test_stale_nudge_completion_after_stop_does_not_disable_definition(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+
+    await _run_one_scheduler_pass(scheduler)
+    request_id, _ = runtime.enqueued[0]
+    scheduler.stop_fences.advance("zelda")
+    runtime.listeners[request_id](
+        {"success": True, "text": f"done\nNUDGE_COMPLETE:{job['id']}"}
+    )
+
+    data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
+    assert data["nudges"][0]["enabled"] is True
+    assert job["id"] not in scheduler.state["nudge_leases"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovers_orphaned_nudge_lease_after_restart(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+    first_runtime = FakeRuntime(busy=False)
+    first = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[first_runtime],
+        authorized_id=123,
+    )
+    await _run_one_scheduler_pass(first)
+    first.state["nudges"][job["id"]] = 0
+    first._save_state()
+
+    recovered_runtime = FakeRuntime(busy=False)
+    recovered = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[recovered_runtime],
+        authorized_id=123,
+    )
+    await _run_one_scheduler_pass(recovered)
+
+    assert len(recovered_runtime.enqueued) == 1
+    assert recovered.state["nudge_leases"][job["id"]]["request_id"] == (
+        recovered_runtime.enqueued[0][0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovers_pre_enqueue_nudge_lease_after_restart(tmp_path):
+    manager = SkillManager(project_root=tmp_path, tasks_path=tmp_path / "tasks.json")
+    job = manager.create_nudge_job(
+        agent_name="zelda",
+        interval_minutes=1,
+        exit_condition="until complete",
+    )
+    runtime = FakeRuntime(busy=False)
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+    scheduler.state["nudge_leases"][job["id"]] = {
+        "invocation_id": "nudge-crashed-before-enqueue",
+        "agent": "zelda",
+        "request_id": "",
+        "agent_stop_epoch": 0,
+        "acquired_at": 0,
+    }
+    scheduler.state["nudges"][job["id"]] = 0
+    scheduler._save_state()
+
+    recovered = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+    await _run_one_scheduler_pass(recovered)
+
+    assert len(runtime.enqueued) == 1
+    assert recovered.state["nudge_leases"][job["id"]]["request_id"] == (
+        runtime.enqueued[0][0]
+    )
 
 
 @pytest.mark.asyncio
