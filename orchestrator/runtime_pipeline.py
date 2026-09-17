@@ -3398,6 +3398,100 @@ def clear_context_compaction_request_state(runtime, request_id: str) -> None:
         execution_requests.discard(str(request_id))
 
 
+def backend_diagnostic_fields(response: Any) -> dict[str, Any]:
+    """Project provider identifiers and evidence without changing execution."""
+
+    fields: dict[str, Any] = {}
+    for name in (
+        "error_code",
+        "error_retryable",
+        "http_status",
+        "provider_request_id",
+        "retry_after_s",
+    ):
+        value = getattr(response, name, None)
+        if value is not None and value != "":
+            fields[name] = value
+    tool_call_count = int(getattr(response, "tool_call_count", 0) or 0)
+    fields["tool_call_count"] = tool_call_count
+    fields["side_effects_possible"] = bool(
+        getattr(response, "side_effects_possible", False)
+    )
+
+    request_ids: list[str] = []
+    response_ids: list[str] = []
+    wire_refs: list[str] = []
+    evidence_refs: list[str] = []
+
+    def remember(target: list[str], value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in target:
+            target.append(text)
+
+    remember(request_ids, getattr(response, "provider_request_id", None))
+    remember(response_ids, getattr(response, "provider_response_id", None))
+    metadata = getattr(response, "stream_metadata", None)
+    if isinstance(metadata, Mapping):
+        meter = metadata.get("meter")
+        meter_map = dict(meter) if isinstance(meter, Mapping) else {}
+        call_groups = [
+            meter_map.get("provider_calls"),
+            meter_map.get("line_items"),
+        ]
+        for group in call_groups:
+            if not isinstance(group, (list, tuple)):
+                continue
+            for raw_call in group:
+                if not isinstance(raw_call, Mapping):
+                    continue
+                remember(request_ids, raw_call.get("provider_request_id"))
+                remember(request_ids, raw_call.get("transport_request_id"))
+                remember(response_ids, raw_call.get("provider_response_id"))
+                refs = raw_call.get("provider_wire_evidence_refs")
+                if isinstance(refs, (list, tuple)):
+                    for ref in refs:
+                        remember(wire_refs, ref)
+        root_wire_refs = metadata.get("provider_wire_evidence_refs")
+        if isinstance(root_wire_refs, (list, tuple)):
+            for ref in root_wire_refs:
+                remember(wire_refs, ref)
+        forensic_path = metadata.get("provider_protocol_forensic_path")
+        remember(evidence_refs, forensic_path)
+        her = metadata.get("her_v2")
+        if isinstance(her, Mapping):
+            refs = her.get("evidence_refs")
+            if isinstance(refs, (list, tuple)):
+                for ref in refs:
+                    remember(evidence_refs, ref)
+            chain = her.get("failure_chain")
+            primary = (
+                chain.get("primary_failure")
+                if isinstance(chain, Mapping)
+                else None
+            )
+            if isinstance(primary, Mapping):
+                remember(request_ids, primary.get("provider_request_id"))
+                details = primary.get("details")
+                if isinstance(details, Mapping):
+                    remember(response_ids, details.get("provider_response_id"))
+                    refs = details.get("provider_wire_evidence_refs")
+                    if isinstance(refs, (list, tuple)):
+                        for ref in refs:
+                            remember(wire_refs, ref)
+
+    if request_ids:
+        fields["provider_request_ids"] = request_ids
+        fields["provider_request_id"] = request_ids[-1]
+    if response_ids:
+        fields["provider_response_ids"] = response_ids
+        fields["provider_response_id"] = response_ids[-1]
+    if wire_refs:
+        fields["wire_evidence_refs"] = wire_refs
+    if evidence_refs:
+        fields["evidence_refs"] = evidence_refs
+    return fields
+
+
 def backend_failure_fields(response: Any) -> dict[str, Any]:
     """Expose typed provider failure metadata without changing error text."""
 
@@ -3655,6 +3749,7 @@ async def handle_backend_error(
     observe_terminal_response(runtime, item, response)
     err_msg = response.error or "Unknown error"
     failure_fields = backend_failure_fields(response)
+    diagnostic_fields = backend_diagnostic_fields(response)
     # /stop, /steer, and /retry intentionally kill the backend process
     # (e.g. exit -9 / SIGKILL).
     # That is expected course-correction, not a backend failure — never show ❌ Backend error.
@@ -3742,6 +3837,7 @@ async def handle_backend_error(
             "source": item.source,
             "summary": item.summary,
             **failure_fields,
+            **diagnostic_fields,
             **request_context_warning_fields(runtime, item.request_id),
         },
     )

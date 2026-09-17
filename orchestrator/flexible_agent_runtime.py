@@ -1192,6 +1192,16 @@ class FlexibleAgentRuntime:
             error=payload.get("error") or "",
             interrupted=bool(payload.get("interrupted")),
         )
+        try:
+            runtime_debug_reporting.schedule_terminal_diagnostic(
+                self, request_id, payload
+            )
+        except Exception as exc:  # diagnostic projection must never block delivery
+            self.logger.warning(
+                "Request diagnostic scheduling failed safely for %s: %s",
+                request_id,
+                type(exc).__name__,
+            )
         if not bool(payload.get("success")) and not bool(payload.get("interrupted")):
             try:
                 runtime_debug_reporting.schedule_failure_report(
@@ -11268,6 +11278,7 @@ class FlexibleAgentRuntime:
                         **runtime_pipeline.request_context_warning_fields(
                             self, item.request_id
                         ),
+                        **runtime_pipeline.backend_diagnostic_fields(response),
                         **self._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
                     },
                 )
@@ -11548,6 +11559,7 @@ class FlexibleAgentRuntime:
                         "source": item.source,
                         "summary": item.summary,
                         **failure_fields,
+                        **runtime_pipeline.backend_diagnostic_fields(response),
                         **runtime_pipeline.request_context_warning_fields(
                             self, item.request_id
                         ),

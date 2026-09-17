@@ -8,6 +8,7 @@ and never grants Tool or HASHI runtime authority to that environment.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import logging
 import re
@@ -18,9 +19,33 @@ from typing import Any
 PROTOCOL_VERSION = 1
 RESULT_PREFIX = "HASHI_VOICE_TRANSCRIPTION_RESULT="
 MAX_OUTPUT_BYTES = 1_048_576
+REQUIRED_DISTRIBUTIONS = ("faster-whisper", "ctranslate2", "av")
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 logger = logging.getLogger("VoiceTranscriptionWorker")
+
+
+def _package_versions() -> dict[str, str]:
+    """Load every native dependency and return its installed distribution version."""
+
+    import av  # noqa: F401
+    import ctranslate2  # noqa: F401
+    import faster_whisper  # noqa: F401
+
+    return {
+        name: importlib.metadata.version(name)
+        for name in REQUIRED_DISTRIBUTIONS
+    }
+
+
+def probe_runtime() -> dict[str, Any]:
+    """Report the isolated interpreter and exact packages used by this worker."""
+
+    return {
+        "status": "ok",
+        "python": ".".join(str(item) for item in sys.version_info[:3]),
+        "packages": _package_versions(),
+    }
 
 
 def _detect_device() -> tuple[str, str]:
@@ -151,10 +176,22 @@ def _serve() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--serve", action="store_true")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--serve", action="store_true")
+    mode.add_argument("--probe", action="store_true")
     args = parser.parse_args(argv)
-    if not args.serve:
-        parser.error("--serve is required")
+    if args.probe:
+        try:
+            payload = probe_runtime()
+            return_code = 0
+        except Exception as exc:
+            payload = {
+                "status": "error",
+                "error": f"{type(exc).__name__}: {str(exc)[:400]}",
+            }
+            return_code = 1
+        print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+        return return_code
     return _serve()
 
 

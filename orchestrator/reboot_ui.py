@@ -31,9 +31,24 @@ def render_notice(
     target = ", ".join(shown) or escape(
         str(names.get(record.get("source_agent")) or record.get("source_agent") or "")
     )
-    status = "starting" if starting else record["status"]
-    if status == "failed":
-        status = "restored" if record.get("restored") else "unavailable"
+    lifecycle = record.get("lifecycle_state")
+    if starting:
+        status = "starting"
+    elif lifecycle == "unconfirmed" and record.get("status") == "failed":
+        status = "unavailable"
+    elif lifecycle in {
+        "candidate_rejected",
+        "committed",
+        "rolled_back",
+        "online",
+        "rejected",
+        "unconfirmed",
+    }:
+        status = lifecycle
+    else:
+        status = record["status"]
+        if status == "failed":
+            status = "restored" if record.get("restored") else "unavailable"
     key = "reboot.notice." + status
     text = ui_language.tr(key, locale=language, scope=scope, agents=target)
     if recovered_targets:
@@ -66,7 +81,12 @@ def render_status(record, *, locale=None):
     if not record:
         return ui_language.tr("reboot.no_recent", locale=locale)
     text = render_notice(
-        record, starting=record["status"] in {"accepted", "running"}, locale=locale
+        record,
+        starting=(
+            record["status"] in {"accepted", "running"}
+            and record.get("lifecycle_state", "accepted") == "accepted"
+        ),
+        locale=locale,
     )
     text += "\n" + ui_language.tr(
         "reboot.delivery_status",

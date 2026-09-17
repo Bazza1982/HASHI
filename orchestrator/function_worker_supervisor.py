@@ -26,6 +26,7 @@ from orchestrator.function_generation import (
     VerifiedFunctionGeneration,
     probe_function_generation,
     configured_observers_are_qualified,
+    verify_manifest_source_commit,
     verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_bootstrap import run_function_worker_process
@@ -36,6 +37,7 @@ from orchestrator.function_worker_protocol import (
     FunctionWorkerProtocolError,
     JsonConnectionPeer,
 )
+from orchestrator.runtime_contract import dependency_digest
 from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.telegram_delivery_errors import TelegramDeliveryError
 
@@ -65,6 +67,7 @@ def _manifest_receipt_from_dict(value: Mapping[str, Any]) -> CandidateProbeRecei
         module_names=tuple(str(item) for item in value["module_names"]),
         runtime=RuntimeFingerprint.from_mapping(runtime_value),
         probe_pid=int(value["probe_pid"]),
+        source_commit=str(value.get("source_commit") or ""),
     )
 
 
@@ -110,6 +113,13 @@ def verify_generation_artifact(
         raise FunctionWorkerError(
             f"Function generation artifact manifest mismatch: {root}"
         )
+    source_commit = str(stored.get("source_commit") or "")
+    if len(source_commit) not in {40, 64} or any(
+        character not in "0123456789abcdef" for character in source_commit.lower()
+    ):
+        raise FunctionWorkerError(
+            f"Function generation artifact source commit is invalid: {root}"
+        )
     verify_qualified_manifest_bytes(generation.manifest, code_root=root)
 
 
@@ -121,6 +131,14 @@ def materialize_generation_artifact(
 
     state_root = Path(bridge_home).resolve() / "state" / "function_generations"
     state_root.mkdir(parents=True, exist_ok=True)
+    source_commit = verify_manifest_source_commit(
+        generation.manifest,
+        code_root=generation.code_root,
+    )
+    if source_commit != generation.receipt.source_commit:
+        raise FunctionWorkerError(
+            "Function generation source commit changed before artifact build"
+        )
     slug = generation.manifest.generation_id.removeprefix("sha256:")
     destination = state_root / slug
     if destination.exists():
@@ -156,6 +174,7 @@ def materialize_generation_artifact(
         metadata = {
             "schema_version": FUNCTION_GENERATION_SCHEMA_VERSION,
             "generation_id": generation.manifest.generation_id,
+            "source_commit": source_commit,
             "created_at": datetime.now().astimezone().isoformat(),
             "provenance": capture_build_provenance(
                 generation.code_root,
@@ -1469,6 +1488,8 @@ class FunctionWorkerSupervisor:
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
         nonce = uuid4().hex
+        worker_runtime = self.kernel.runtime_fingerprint.to_dict()
+        worker_runtime["dependency_digest"] = dependency_digest()
         bootstrap = {
             "entrypoint": "orchestrator.function_worker_host:run_function_worker",
             "protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
@@ -1478,7 +1499,7 @@ class FunctionWorkerSupervisor:
             "code_root": str(self.kernel.paths.code_root),
             "bridge_home": str(self.kernel.paths.bridge_home),
             "generation_root": str(artifact),
-            "runtime": self.kernel.runtime_fingerprint.to_dict(),
+            "runtime": worker_runtime,
             "manifest": generation.manifest.to_dict(),
             "topology": self.topology_snapshot(agent_name=agent_name),
         }

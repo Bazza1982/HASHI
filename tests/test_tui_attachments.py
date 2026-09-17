@@ -101,15 +101,15 @@ _WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="native-Windows path 
 
 @_WINDOWS_ONLY
 def test_posix_home_file_resolves_via_wslpath(tmp_path, monkeypatch):
-    target = tmp_path / "home" / "lily" / "note.txt"
+    target = tmp_path / "home" / "demo" / "note.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("hello wsl", encoding="utf-8")
     monkeypatch.setattr(
         subprocess,
         "run",
-        _wslpath_fake({"/home/lily/note.txt": str(target)}, str(tmp_path / "home" / "lily")),
+        _wslpath_fake({"/home/demo/note.txt": str(target)}, str(tmp_path / "home" / "demo")),
     )
-    pending = _snapshot(tmp_path, "/home/lily/note.txt")
+    pending = _snapshot(tmp_path, "/home/demo/note.txt")
     assert pending.filename == "note.txt"
     assert pending.content == b"hello wsl"
 
@@ -130,13 +130,13 @@ def test_posix_mnt_drive_file_resolves_via_wslpath(tmp_path, monkeypatch):
 
 @_WINDOWS_ONLY
 def test_tilde_file_resolves_to_wsl_home(tmp_path, monkeypatch):
-    target = tmp_path / "home" / "lily" / "tildetest.txt"
+    target = tmp_path / "home" / "demo" / "tildetest.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("hello tilde", encoding="utf-8")
     monkeypatch.setattr(
         subprocess,
         "run",
-        _wslpath_fake({}, str(tmp_path / "home" / "lily")),
+        _wslpath_fake({}, str(tmp_path / "home" / "demo")),
     )
     pending = _snapshot(tmp_path, "~/tildetest.txt")
     assert pending.filename == "tildetest.txt"
@@ -148,10 +148,10 @@ def test_missing_wsl_file_is_still_reported_not_readable(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess,
         "run",
-        _wslpath_fake({"/home/lily/missing.txt": str(tmp_path / "missing.txt")}, str(tmp_path)),
+        _wslpath_fake({"/home/demo/missing.txt": str(tmp_path / "missing.txt")}, str(tmp_path)),
     )
     with pytest.raises(TuiAttachmentError, match="readable"):
-        _snapshot(tmp_path, "/home/lily/missing.txt")
+        _snapshot(tmp_path, "/home/demo/missing.txt")
 
 
 @_WINDOWS_ONLY
@@ -163,13 +163,13 @@ def test_unc_path_is_not_sent_through_wsl_conversion(monkeypatch):
         return _Completed("")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    raw = r"\\wsl.localhost\Ubuntu-22.04\home\lily\note.txt"
+    raw = r"\\wsl.localhost\Ubuntu-22.04\home\demo\note.txt"
     path = _native_path(raw)
     assert calls == []
     assert str(path).replace("/", "\\").startswith("\\\\wsl.localhost\\")
 
 
-_WSL_UNC_README = r"\\wsl.localhost\Ubuntu-22.04\home\lily\projects\hashi\README.md"
+_WSL_UNC_README = os.getenv("HASHI_TEST_WSL_UNC_FILE", "")
 
 
 @_WINDOWS_ONLY

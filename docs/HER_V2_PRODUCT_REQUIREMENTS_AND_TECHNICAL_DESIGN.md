@@ -351,6 +351,12 @@ When the Persona block is unavailable to Immediate Response, its prompt uses
 the same configured display name and polite form of address `您` as its entire
 fallback Persona guidance; it never falls back to the rest of `system_md`.
 
+During a tool-enabled Primary Execution call, the provider may emit concise
+interim commentary before a tool call. That text may enter the commentary lane
+only because the Execution prompt already contains the validated Persona block.
+Provider commentary from Planning, Replanning, Review, tool-disabled Execution,
+or generic runtime activity remains internal and cannot enter that lane.
+
 This boundary governs interim commentary packaging, Triage clarification
 rendering, and the Persona inputs used by Immediate Response, Primary
 Execution, and Finalisation.

@@ -14,13 +14,15 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 import os
+import re
 import stat
 import subprocess
 import sys
 import traceback
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
@@ -45,12 +47,14 @@ from orchestrator.runtime_contract import (
     compare_runtime_fingerprints,
     current_runtime_fingerprint,
     load_runtime_policy,
+    validate_standard_dependencies,
 )
 
 PROBE_RESULT_PREFIX = "HASHI_FUNCTION_PROBE_RESULT="
 DEFAULT_PROBE_TIMEOUT_SECONDS = 180.0
 FUNCTION_GENERATION_SCHEMA_VERSION = 2
 _ROOT_PACKAGES = tuple(prefix[:-1] for prefix in FUNCTION_MODULE_PREFIXES)
+logger = logging.getLogger("BridgeU.Orchestrator")
 
 # A cold Core deliberately need not import Agent modules. These roots define
 # the operational surface; static closure and the probe expand them.
@@ -71,10 +75,38 @@ _ASSET_EXCLUDED_PREFIXES = ("flow/runs/",)
 _ASSET_EXCLUDED_PARTS = frozenset(
     {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 )
+_GIT_COMMIT = re.compile(r"[0-9a-f]{40,64}")
 
 
 class FunctionGenerationError(FunctionContractError):
     """A candidate function generation cannot safely enter a Worker."""
+
+
+def compare_function_candidate_runtime(
+    expected: RuntimeFingerprint,
+    candidate: RuntimeFingerprint,
+    *,
+    code_root: Path,
+) -> None:
+    """Compare a Function candidate while ignoring only unrelated extras.
+
+    The standard lock remains authoritative and is checked in the process
+    whose fingerprint is being accepted.  The all-distributions digest is
+    deliberately not an equality gate because optional tools may add packages
+    without changing any locked runtime dependency.
+    """
+
+    policy = load_runtime_policy(code_root)
+    validate_standard_dependencies(code_root, policy)
+    if expected.dependency_digest != candidate.dependency_digest:
+        logger.info(
+            "Function candidate has unrelated distribution drift; "
+            "the exact standard lock remains satisfied"
+        )
+    compare_runtime_fingerprints(
+        replace(expected, dependency_digest=candidate.dependency_digest),
+        candidate,
+    )
 
 
 @dataclass(frozen=True)
@@ -154,6 +186,7 @@ class CandidateProbeReceipt:
     module_names: tuple[str, ...]
     runtime: RuntimeFingerprint
     probe_pid: int
+    source_commit: str = ""
 
 
 @dataclass(frozen=True)
@@ -167,9 +200,25 @@ class VerifiedFunctionGeneration:
     def verify(self, expected_runtime: RuntimeFingerprint) -> None:
         policy = load_runtime_policy(self.code_root)
         live_runtime = current_runtime_fingerprint(policy, code_root=self.code_root)
-        compare_runtime_fingerprints(expected_runtime, live_runtime)
-        compare_runtime_fingerprints(self.receipt.runtime, live_runtime)
+        compare_function_candidate_runtime(
+            expected_runtime,
+            live_runtime,
+            code_root=self.code_root,
+        )
+        compare_function_candidate_runtime(
+            self.receipt.runtime,
+            live_runtime,
+            code_root=self.code_root,
+        )
         verify_source_manifest(self.manifest, code_root=self.code_root)
+        source_commit = verify_manifest_source_commit(
+            self.manifest,
+            code_root=self.code_root,
+        )
+        if source_commit != self.receipt.source_commit:
+            raise FunctionGenerationError(
+                "Function generation source commit changed after qualification"
+            )
 
     def verify_qualified_source(self, expected_runtime: RuntimeFingerprint) -> None:
         """Revalidate exact bytes already accepted by the isolated probe.
@@ -184,9 +233,25 @@ class VerifiedFunctionGeneration:
 
         policy = load_runtime_policy(self.code_root)
         live_runtime = current_runtime_fingerprint(policy, code_root=self.code_root)
-        compare_runtime_fingerprints(expected_runtime, live_runtime)
-        compare_runtime_fingerprints(self.receipt.runtime, live_runtime)
+        compare_function_candidate_runtime(
+            expected_runtime,
+            live_runtime,
+            code_root=self.code_root,
+        )
+        compare_function_candidate_runtime(
+            self.receipt.runtime,
+            live_runtime,
+            code_root=self.code_root,
+        )
         verify_qualified_manifest_bytes(self.manifest, code_root=self.code_root)
+        source_commit = verify_manifest_source_commit(
+            self.manifest,
+            code_root=self.code_root,
+        )
+        if source_commit != self.receipt.source_commit:
+            raise FunctionGenerationError(
+                "Function generation source commit changed after qualification"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -197,6 +262,7 @@ class VerifiedFunctionGeneration:
                 "module_names": list(self.receipt.module_names),
                 "runtime": self.receipt.runtime.to_dict(),
                 "probe_pid": self.receipt.probe_pid,
+                "source_commit": self.receipt.source_commit,
             },
         }
 
@@ -518,6 +584,84 @@ def verify_source_manifest(manifest: SourceManifest, *, code_root: Path) -> None
         )
 
 
+def _git_output(code_root: Path, *args: str) -> bytes:
+    root = Path(code_root).resolve()
+    environment = os.environ.copy()
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            env=environment,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FunctionGenerationError(
+            "Function generation source commit could not be verified"
+        ) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise FunctionGenerationError(
+            "Function generation source commit could not be verified"
+            + (f": {detail[-500:]}" if detail else "")
+        )
+    return bytes(completed.stdout)
+
+
+def _nul_paths(payload: bytes) -> set[str]:
+    return {
+        item.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        for item in payload.split(b"\0")
+        if item
+    }
+
+
+def verify_manifest_source_commit(
+    manifest: SourceManifest,
+    *,
+    code_root: Path,
+) -> str:
+    """Require every qualified source/asset byte to belong to clean Git HEAD."""
+
+    root = Path(code_root).resolve()
+    checkout = _git_output(root, "rev-parse", "--show-toplevel").decode(
+        "utf-8", errors="replace"
+    ).strip()
+    if not checkout or Path(checkout).resolve() != root:
+        raise FunctionGenerationError(
+            "Function generation must be qualified from a Git repository root"
+        )
+    commit = _git_output(root, "rev-parse", "--verify", "HEAD").decode(
+        "ascii", errors="replace"
+    ).strip().lower()
+    if _GIT_COMMIT.fullmatch(commit) is None:
+        raise FunctionGenerationError(
+            "Function generation source commit could not be verified"
+        )
+
+    qualified = {
+        item.relative_path for item in (*manifest.entries, *manifest.assets)
+    }
+    tracked = _nul_paths(
+        _git_output(root, "ls-tree", "-r", "--name-only", "-z", "HEAD")
+    )
+    changed = _nul_paths(
+        _git_output(root, "diff", "--name-only", "-z", "HEAD", "--")
+    )
+    untracked = _nul_paths(
+        _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")
+    )
+    invalid = sorted((qualified - tracked) | (qualified & (changed | untracked)))
+    if invalid:
+        raise FunctionGenerationError(
+            "Function generation manifest contains files that are not committed: "
+            + ", ".join(invalid[:20])
+        )
+    return commit
+
+
 def _verified_manifest_path(code_root: Path, relative_path: str) -> Path:
     root = Path(code_root).resolve()
     relative = PurePosixPath(str(relative_path))
@@ -641,12 +785,17 @@ def run_candidate_probe(
             f"Candidate staging Worker rejected generation: {detail}"
         )
     runtime = RuntimeFingerprint.from_mapping(result["runtime"])
-    compare_runtime_fingerprints(expected_runtime, runtime)
+    compare_function_candidate_runtime(
+        expected_runtime,
+        runtime,
+        code_root=code_root,
+    )
     return CandidateProbeReceipt(
         generation_id=str(result["generation_id"]),
         module_names=tuple(str(name) for name in result["module_names"]),
         runtime=runtime,
         probe_pid=int(result["probe_pid"]),
+        source_commit=str(result["source_commit"]),
     )
 
 
@@ -686,6 +835,10 @@ def probe_function_generation(
         tuple(sorted(requested, key=function_module_order_key)),
         code_root=code_root,
     )
+    source_commit = verify_manifest_source_commit(
+        initial_manifest,
+        code_root=code_root,
+    )
     receipt = probe_runner(
         code_root=code_root,
         module_names=initial_manifest.module_names,
@@ -695,6 +848,14 @@ def probe_function_generation(
     if manifest.generation_id != receipt.generation_id:
         raise FunctionGenerationError(
             "Candidate source/assets differ between Core and staging Worker"
+        )
+    if receipt.source_commit != source_commit:
+        raise FunctionGenerationError(
+            "Candidate source commit differs between Core and staging Worker"
+        )
+    if verify_manifest_source_commit(manifest, code_root=code_root) != source_commit:
+        raise FunctionGenerationError(
+            "Candidate source commit changed during Function qualification"
         )
     generation = VerifiedFunctionGeneration(
         code_root=code_root,
@@ -713,7 +874,11 @@ def _probe_main() -> int:
         policy = load_runtime_policy(code_root)
         runtime = current_runtime_fingerprint(policy, code_root=code_root)
         expected = RuntimeFingerprint.from_mapping(payload["expected_runtime"])
-        compare_runtime_fingerprints(expected, runtime)
+        compare_function_candidate_runtime(
+            expected,
+            runtime,
+            code_root=code_root,
+        )
         requested = tuple(str(name) for name in payload["module_names"])
         with candidate_import_guard():
             for name in requested:
@@ -721,12 +886,17 @@ def _probe_main() -> int:
             validate_function_contract()
         expanded = tuple(discover_loaded_function_modules(code_root=code_root))
         manifest = build_source_manifest(expanded, code_root=code_root)
+        source_commit = verify_manifest_source_commit(
+            manifest,
+            code_root=code_root,
+        )
         result = {
             "ok": True,
             "generation_id": manifest.generation_id,
             "module_names": list(manifest.module_names),
             "runtime": runtime.to_dict(),
             "probe_pid": os.getpid(),
+            "source_commit": source_commit,
         }
         print(PROBE_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
         return 0

@@ -7,7 +7,11 @@ agent.  There is deliberately no source-side queue, retry, or receipt state.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +26,9 @@ from orchestrator.hchat_delivery import (
     deliver_hchat_draft,
     validate_hchat_target_format,
 )
+from orchestrator.bootstrap_logging import redact_log_text
+from orchestrator.request_diagnostics import projection_path
+from orchestrator.storage_profile import flush_projection
 
 
 _SETTINGS_VERSION = 1
@@ -167,6 +174,162 @@ def _diagnostic_log(runtime: Any, payload: dict[str, Any]) -> str:
     return str(Path(session_dir) / "errors.log") if session_dir else "unknown"
 
 
+def diagnostic_projection_path(runtime: Any, request_id: str) -> Path:
+    return projection_path(Path(getattr(runtime, "workspace_dir")), request_id)
+
+
+def _string_list(value: Any) -> list[str]:
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else []
+    result: list[str] = []
+    for item in values:
+        text = redact_log_text(item).strip()
+        if text and text not in result:
+            result.append(text[:4096])
+    return result[:64]
+
+
+def safe_retry_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    """Describe evidence only; this never retries or changes retry policy."""
+
+    if bool(payload.get("success")):
+        return {"status": "not_applicable", "reasons": ["request_completed"]}
+    if bool(payload.get("interrupted")):
+        return {"status": "unknown", "reasons": ["request_interrupted"]}
+    side_effects = payload.get("side_effects_possible")
+    tool_count = int(payload.get("tool_call_count") or 0)
+    retryable = payload.get("error_retryable")
+    if side_effects is True or tool_count > 0:
+        return {
+            "status": "absent",
+            "reasons": [
+                "side_effects_possible" if side_effects is True else "tool_activity_observed"
+            ],
+        }
+    if retryable is True and side_effects is False and tool_count == 0:
+        return {
+            "status": "present",
+            "reasons": ["provider_marked_retryable", "no_side_effect_evidence"],
+        }
+    if retryable is False:
+        return {"status": "absent", "reasons": ["provider_marked_nonretryable"]}
+    return {"status": "unknown", "reasons": ["insufficient_evidence"]}
+
+
+def persist_terminal_diagnostic(
+    runtime: Any,
+    request_id: str,
+    payload: dict[str, Any],
+) -> Path | None:
+    """Best-effort durable terminal projection for later read-only queries."""
+
+    try:
+        target = diagnostic_projection_path(runtime, request_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        success = bool(payload.get("success"))
+        interrupted = bool(payload.get("interrupted"))
+        terminal_state = "completed" if success else ("interrupted" if interrupted else "failed")
+        provider_request_ids = _string_list(payload.get("provider_request_ids"))
+        provider_response_ids = _string_list(payload.get("provider_response_ids"))
+        provider_request_id = redact_log_text(
+            payload.get("provider_request_id") or ""
+        ).strip()[:400]
+        provider_response_id = redact_log_text(
+            payload.get("provider_response_id") or ""
+        ).strip()[:400]
+        if provider_request_id and provider_request_id not in provider_request_ids:
+            provider_request_ids.append(provider_request_id)
+        if provider_response_id and provider_response_id not in provider_response_ids:
+            provider_response_ids.append(provider_response_id)
+        evidence_refs = _string_list(payload.get("evidence_refs"))
+        wire_refs = _string_list(payload.get("wire_evidence_refs"))
+        document = {
+            "format": "hashi-request-terminal-v1",
+            "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "instance_id": str(
+                getattr(getattr(runtime, "global_config", None), "instance_id", "")
+                or "unknown"
+            ),
+            "agent": str(getattr(runtime, "name", "") or "unknown"),
+            "request_id": str(request_id),
+            "terminal": {
+                "state": terminal_state,
+                "completed": success,
+                "interrupted": interrupted,
+                "source": redact_log_text(payload.get("source") or "")[:160],
+                "summary": redact_log_text(payload.get("summary") or "")[:2000],
+                "error": redact_log_text(payload.get("error") or "")[:4000],
+                "error_code": redact_log_text(payload.get("error_code") or "")[:160],
+                "error_retryable": payload.get("error_retryable"),
+            },
+            "provider": {
+                "request_id": provider_request_id,
+                "response_id": provider_response_id,
+                "request_ids": provider_request_ids,
+                "response_ids": provider_response_ids,
+                "wire_evidence_refs": wire_refs,
+                "evidence_refs": evidence_refs,
+            },
+            "effects": {
+                "side_effects_possible": payload.get("side_effects_possible"),
+                "tool_call_count": int(payload.get("tool_call_count") or 0),
+            },
+            "safe_retry_evidence": safe_retry_evidence(payload),
+        }
+        content = json.dumps(
+            document, ensure_ascii=False, sort_keys=True, indent=2
+        ) + "\n"
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                descriptor = -1
+                handle.write(content)
+                flush_projection(handle)
+            if os.name != "nt":
+                os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+        return target
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(
+                "Request diagnostic projection failed safely for %s: %s",
+                request_id,
+                type(exc).__name__,
+            )
+        return None
+
+
+def schedule_terminal_diagnostic(
+    runtime: Any,
+    request_id: str,
+    payload: dict[str, Any],
+) -> asyncio.Task[Path | None]:
+    """Schedule projection without making it a request completion condition."""
+
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            persist_terminal_diagnostic,
+            runtime,
+            request_id,
+            dict(payload),
+        )
+    )
+    tasks = getattr(runtime, "_diagnostic_projection_tasks", None)
+    if tasks is None:
+        tasks = set()
+        setattr(runtime, "_diagnostic_projection_tasks", tasks)
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+    return task
+
+
 def build_report_message(
     runtime: Any,
     request_id: str,
@@ -185,9 +348,19 @@ def build_report_message(
         ("Error code", payload.get("error_code") or ""),
         ("HTTP status", payload.get("http_status") if payload.get("http_status") is not None else ""),
         ("Provider request ID", payload.get("provider_request_id") or ""),
+        ("Provider response ID", payload.get("provider_response_id") or ""),
         ("Retryable", payload.get("error_retryable") if payload.get("error_retryable") is not None else ""),
         ("Tool call count", payload.get("tool_call_count") if payload.get("tool_call_count") is not None else ""),
         ("Side effects possible", payload.get("side_effects_possible") if payload.get("side_effects_possible") is not None else ""),
+        (
+            "Safe retry evidence",
+            (
+                payload.get("safe_retry_evidence", {}).get("status")
+                if isinstance(payload.get("safe_retry_evidence"), dict)
+                else safe_retry_evidence(payload)["status"]
+            ),
+        ),
+        ("Diagnostic projection", diagnostic_projection_path(runtime, request_id)),
         ("Diagnostic log (source instance)", _diagnostic_log(runtime, payload)),
     ]
     evidence = "\n".join(f"{label}: {value}" for label, value in fields)
@@ -280,6 +453,10 @@ __all__ = [
     "enable",
     "forward_failure_once",
     "load_settings",
+    "diagnostic_projection_path",
+    "persist_terminal_diagnostic",
+    "safe_retry_evidence",
     "schedule_failure_report",
+    "schedule_terminal_diagnostic",
     "settings_path",
 ]

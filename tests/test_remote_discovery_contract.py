@@ -628,9 +628,10 @@ def test_authenticated_handshake_hydrates_bounded_mdns_metadata_until_digest_cha
     assert "remote_agent_directory" not in downgraded.properties
 
 
-def test_empty_lan_snapshot_prunes_only_lan_observations(tmp_path):
+def test_empty_lan_snapshot_prunes_only_lan_observations(tmp_path, monkeypatch):
     root = tmp_path / "empty-lan-snapshot"
     root.mkdir()
+    monkeypatch.setattr(PeerRegistry, "_load_state", lambda self: None)
     registry = PeerRegistry(root, "HASHI3")
     registry._state_path = tmp_path / "empty-lan-peer-state.json"
     registry.on_peers_changed(

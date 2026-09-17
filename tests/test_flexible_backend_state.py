@@ -530,17 +530,16 @@ async def test_failed_her_alias_switch_never_rolls_back_to_retired_her(tmp_path)
     assert _read_state(workspace) == before
 
 
-def test_save_state_recovers_from_invalid_existing_json(tmp_path):
+def test_save_state_preserves_invalid_existing_json(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
-    (workspace / "state.json").write_text("{invalid json", encoding="utf-8")
+    state_path = workspace / "state.json"
+    state_path.write_text("{invalid json", encoding="utf-8")
     manager = _make_manager(workspace)
 
     manager._save_state()
 
-    state = _read_state(workspace)
-    assert state["active_backend"] == "codex-cli"
-    assert state["agent_mode"] == "flex"
+    assert state_path.read_text(encoding="utf-8") == "{invalid json"
 
 
 def test_update_wrapper_blocks_preserves_managed_state_and_unknown_keys(tmp_path):

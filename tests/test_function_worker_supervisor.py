@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import multiprocessing
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -648,6 +649,30 @@ def _verified_generation(tmp_path: Path) -> VerifiedFunctionGeneration:
         ["orchestrator.worker_demo"],
         code_root=tmp_path,
     )
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "--all"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=HASHI Test",
+            "-c",
+            "user.email=hashi-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "test fixture",
+        ],
+        check=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
     policy = load_runtime_policy(ROOT)
     runtime = current_runtime_fingerprint(policy, code_root=ROOT)
     return VerifiedFunctionGeneration(
@@ -658,6 +683,7 @@ def _verified_generation(tmp_path: Path) -> VerifiedFunctionGeneration:
             module_names=manifest.module_names,
             runtime=runtime,
             probe_pid=1234,
+            source_commit=source_commit,
         ),
     )
 
@@ -684,6 +710,8 @@ def test_generation_artifact_contains_only_verified_immutable_bytes(tmp_path):
     )
     assert metadata["provenance"]["generation_id"] == generation.manifest.generation_id
     assert metadata["provenance"]["artifact_kind"] == "function-generation"
+    assert metadata["source_commit"] == generation.receipt.source_commit
+    assert metadata["provenance"]["commit"] == generation.receipt.source_commit
     assert str(source_root) not in json.dumps(metadata["provenance"])
     assert not (artifact / "flow" / "runs").exists()
 
@@ -777,6 +805,7 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
     assert loaded is not None
     loaded_generation, loaded_artifact = loaded
     assert loaded_generation.manifest == generation.manifest
+    assert loaded_generation.receipt.source_commit == generation.receipt.source_commit
     assert loaded_artifact == artifact
 
     source = artifact / "orchestrator" / "worker_demo.py"
@@ -958,9 +987,16 @@ async def test_cancelled_worker_preparation_retires_unready_process(
 ):
     kernel = _Kernel()
     kernel.paths = SimpleNamespace(code_root=tmp_path, bridge_home=tmp_path)
-    kernel.runtime_fingerprint = SimpleNamespace(to_dict=lambda: {})
+    kernel.runtime_fingerprint = SimpleNamespace(
+        to_dict=lambda: {"dependency_digest": "core-full-distribution-set"}
+    )
     supervisor = FunctionWorkerSupervisor(kernel)
     monkeypatch.setattr(supervisor, "topology_snapshot", lambda **kwargs: {})
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.dependency_digest",
+        lambda: "worker-full-distribution-set",
+        raising=False,
+    )
     process = SimpleNamespace(start=lambda: None)
     connection = SimpleNamespace(close=lambda: None)
     process_args = []
@@ -1008,3 +1044,6 @@ async def test_cancelled_worker_preparation_retires_unready_process(
         await task
     assert len(retired) == 1 and not supervisor._candidates
     assert process_args[0][1]["protocol_features"] == [WORKER_LOG_RELAY_FEATURE]
+    assert process_args[0][1]["runtime"]["dependency_digest"] == (
+        "worker-full-distribution-set"
+    )

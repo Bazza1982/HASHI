@@ -1398,7 +1398,9 @@ Release must not proceed if any of the following is possible:
 - combined Finalisation changes a valid Execution disposition, loses validated
   facts, or changes required-delivery semantics or stable delivery identity;
 - raw provider or runtime commentary can bypass Persona packaging into the
-  Telegram commentary lane;
+  Telegram commentary lane, except for typed commentary emitted by a
+  tool-enabled Primary Execution call whose prompt contains the validated
+  Persona block;
 - duplicate commentary event IDs can produce duplicate user delivery;
 - false progress keeps stalled execution alive indefinitely;
 - `ERROR`, `FAILED`, `STOPPED`, or another terminal state is materially confused;

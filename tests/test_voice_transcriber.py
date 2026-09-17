@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from orchestrator import voice_transcriber, voice_transcription_worker
+
+
+def test_isolated_worker_probe_uses_its_required_distribution_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for module_name in ("av", "ctranslate2", "faster_whisper"):
+        monkeypatch.setitem(sys.modules, module_name, ModuleType(module_name))
+    versions = {
+        "faster-whisper": "1.2.1",
+        "ctranslate2": "4.7.1",
+        "av": "17.0.0",
+    }
+    monkeypatch.setattr(
+        voice_transcription_worker.importlib.metadata,
+        "version",
+        versions.__getitem__,
+    )
+
+    assert voice_transcription_worker.probe_runtime()["packages"] == versions
 
 
 class _FakeStdin:

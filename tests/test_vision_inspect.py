@@ -279,7 +279,11 @@ def _manager(tmp_path: Path) -> FlexibleBackendManager:
         project_root=tmp_path,
         instance_id="HASHI1",
     )
-    return FlexibleBackendManager(config, global_config, {})
+    manager = FlexibleBackendManager(config, global_config, {})
+    # Isolate per-backend merge behavior from the product's wildcard global
+    # default. Dedicated tests below cover wildcard and loaded global defaults.
+    manager._agents_json_global = {"default_tools": {"allowed": []}}
+    return manager
 
 
 def test_backend_manager_keeps_fallback_available_with_native_media(tmp_path):

@@ -3919,7 +3919,7 @@ Please scan Outlook.""",
 
 
 @pytest.mark.asyncio
-async def test_raw_provider_commentary_cannot_bypass_persona_packaging():
+async def test_only_tool_enabled_execution_can_publish_provider_commentary():
     manager = _CommentaryManager()
     events = []
 
@@ -3938,6 +3938,12 @@ async def test_raw_provider_commentary_cannot_bypass_persona_packaging():
     )
     assert events[-1].summary == "Raw provider progress"
     assert events[-1].delivery_class == DELIVERY_INTERNAL
+
+    await provider.invoke(
+        profile,
+        _stage_request(Stage.EXECUTION, allow_tools=True),
+    )
+    assert events[-1].delivery_class == DELIVERY_USER_COMMENTARY
 
     await provider.invoke(
         profile,

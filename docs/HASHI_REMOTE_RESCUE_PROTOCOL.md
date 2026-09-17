@@ -69,7 +69,7 @@ Hashi Remote exposes a fixed control protocol:
 
 ```text
 GET  /control/hashi/status
-GET  /control/hashi/logs?name=start|audit|supervisor&tail=120
+GET  /control/hashi/logs?name=start|restart|audit|supervisor&tail=120
 POST /control/hashi/start
 POST /control/hashi/restart
 POST /control/hashi/reboot
@@ -127,8 +127,11 @@ outcome, status state, and error text when available.
 3. wait for the old process to stop
 4. start HASHI again with the fixed launcher
 5. verify Backend API health
-6. update the restart record to `completed` or a failed phase
-7. append a structured audit event to `logs/remote_rescue_audit.jsonl`
+6. verify the old PID exited, the new PID differs and is alive, Backend API
+   health is ready, instance identity matches, and runtime version plus Function
+   generation match the pre-restart expectation
+7. update the restart record to `completed` or a failed phase
+8. append a structured audit event to `logs/remote_rescue_audit.jsonl`
 
 `/control/hashi/restarts/{restart_id}` returns the durable restart record for a
 single restart id. Restart ids are validated before file lookup to avoid path
@@ -147,32 +150,27 @@ as a failure and is not silently upgraded to a hard restart.
 - truncated to at most `500` characters
 - truncation is recorded in audit metadata when applicable
 
-Human-initiated restart requests must also include a signed proof block:
+Restart requests bind the operation to the controlled instance and identify the
+requesting Agent and supported command source:
 
 ```json
 {
   "reason": "telegram /restart hard restart",
-  "human_source": "telegram",
-  "notify_agent": "hashiko",
-  "notify_via": "telegram",
-  "human_restart_proof": {
-    "timestamp": 1760000000,
-    "nonce": "hex nonce",
-    "digest": "hmac-sha256"
-  }
+  "target_instance": "HASHI3",
+  "request_source": "telegram",
+  "requester_agent": "hashiko"
 }
 ```
 
-The proof is built from a shared human-restart secret and binds together the
-requesting instance, reason, human source, notify agent, timestamp, and nonce.
-The secret can be provided through `HASHI_HUMAN_RESTART_SECRET`,
-`secrets/human_restart_secret.txt`, or `secrets.json` key
-`hashi_human_restart_secret`. The same value must be configured on the
-WatchTower side; HASHI does not silently create this secret during normal
-restart requests because a locally generated unmatched secret would make
-WatchTower reject the restart.
+No separate human HMAC proof, nonce, replay database, or second confirmation is
+required. Authorization remains the existing authenticated Remote control
+protocol plus `L3_RESTART`. The target Remote rejects a request before launch
+unless `target_instance` matches the instance controlled by that Remote. The
+same credential cannot authorize arbitrary shell execution, service-definition
+changes, or secret reads through this endpoint.
 
-After the controlled HASHI process comes back, WatchTower can call:
+After the controlled HASHI process comes back, Remote makes a best-effort call
+when `notify_agent` was supplied:
 
 ```text
 POST /api/admin/notify
@@ -185,7 +183,9 @@ on the controlled Backend API with an admin-authenticated payload such as:
 ```
 
 This endpoint sends a bounded operator notification through the target agent's
-primary chat. It is not a general command execution endpoint.
+primary chat. It is not a general command execution endpoint. Notification
+success or failure is stored in the restart record but never changes the
+already verified restart result.
 
 ## Capability Advertisement
 
@@ -247,13 +247,12 @@ Then poll `/control/hashi/status` until `hashi_running` is true. After HASHI is
 back, normal `/hchat`, Backend API, Telegram, and `/reboot` workflows can
 resume.
 
-When invoked from Telegram, `/restart` first shows WatchTower status and the
-WatchTower API address. The operator must press the hard-restart confirmation
-button before HASHI sends the restart request.
+The Telegram restart menu keeps its existing single dangerous-operation
+confirmation. A directly authorized `/restart` command, including the local
+admin command path used by an Agent, does not add a second confirmation layer.
 
-When invoked from WhatsApp, `/restart` is informational only. The operator must
-send `/restart confirm` before HASHI asks WatchTower to restart. The request
-still requires exactly one routed agent and the same human restart proof.
+Other supported frontends use their existing command authorization. They do not
+create a separate proof or a second remote confirmation.
 
 ## Supervisor Control Scripts
 
@@ -322,7 +321,8 @@ python tools/remote_rescue.py capabilities HASHI1
 python tools/remote_rescue.py status HASHI1
 python tools/remote_rescue.py logs HASHI1 --name start --tail 120
 python tools/remote_rescue.py start HASHI1 --reason "core down"
-python tools/remote_rescue.py restart WATCHTOWER --reason "operator hard restart"
+python tools/remote_rescue.py restart WATCHTOWER --target-instance HASHI3 --reason "operator hard restart"
+python tools/remote_rescue.py restart-status WATCHTOWER <restart-id>
 python tools/remote_rescue.py status HASHI1 --json
 ```
 

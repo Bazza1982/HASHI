@@ -58,6 +58,7 @@ _QUERY_TOOLS = frozenset(
         "web_fetch",
         "file_list",
         "process_list",
+        "request_diagnostics",
         "browser_active_tab",
         "browser_get_media_state",
         "browser_screenshot",
@@ -854,6 +855,7 @@ class SmartToolRuntime:
         ).strip() or "unscoped"
         stage = str(context.get("stage") or context.get("her_stage") or "tool")
         model = str(context.get("model") or "")
+        request_id = str(context.get("request_id") or "").strip()
         args_hash = _sha256(dict(arguments or {}))
         result_hash = _sha256(
             {
@@ -932,6 +934,7 @@ class SmartToolRuntime:
                 .isoformat(timespec="milliseconds")
                 .replace("+00:00", "Z"),
                 "task_id": task_id,
+                "request_id": request_id,
                 "call_id": call_id,
                 "stage": stage,
                 "model": model,
@@ -945,6 +948,8 @@ class SmartToolRuntime:
                 "result_hash": result_hash,
                 "repeat_count": repeat_count,
             }
+            if tool_name in {"file_write", "apply_patch"}:
+                record["target"] = str(arguments.get("path") or "")[:4096]
             self._append_record(record)
 
         return outcome, spec, record

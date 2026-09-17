@@ -36,11 +36,18 @@ from an Agent-only reboot. The planned operator cold start adopts both together.
 
 | Outcome | Required evidence | User meaning |
 |---|---|---|
-| Rejected | Invalid scope or candidate preparation rejected before cutover | Reboot was not performed |
-| Succeeded | Routes committed; exact new Worker PID/generation reports ACTIVE, accepting, backend ready and startup successful | Selected Agents recovered online |
-| Failed, restored | Cutover failed; previous Workers resumed and passed readiness checks | Original state restored |
-| Failed, unavailable | At least one previous Worker did not recover | Name the unavailable targets; list restored targets separately |
-| Unconfirmed | Interrupted transaction or committed switch without verified readiness | Result has not been confirmed |
+| `accepted` | Request and exact target set persisted | Work has not switched yet |
+| `candidate_rejected` | Qualification, committed-source, dependency, probe or READY preparation failed before cutover | Reboot was not performed |
+| `committed` | Atomic route-pointer exchange completed | New route exists, final health is still pending |
+| `rolled_back` | Cutover failed; every previous Worker resumed and passed readiness | Original state restored |
+| `online` | Old PID exited; new PID differs; exact Agent/runtime/generation reports ACTIVE, accepting, backend ready and startup successful | Selected Agents are verified online |
+| `unconfirmed` | Observation was interrupted, a rollback was incomplete, or a committed switch lacks verified readiness | Result must not be claimed as success or rollback |
+
+The compatibility `status` field remains for existing clients, while
+`lifecycle_state` carries the precise state above. Each committed/final receipt
+also stores per-target old/new and observed PID, Agent identity, runtime ID,
+generation ID, source commit and health booleans. Raw exceptions remain in logs,
+not in the bounded user-queryable receipt.
 
 Readiness is a Worker lifecycle check, not a provider/model conversation probe.
 A failure publishing diagnostics after route commit must not destroy the new
@@ -126,6 +133,16 @@ The lifecycle/Worker minimum, direct UI/transport consumers, curated Core gate,
 and isolated shared Functions/minimal-Core tests are required by
 [Testing Policy](TESTING_POLICY.md). Verification counts are recorded in the
 implementation commit. These checks are not live acceptance evidence.
+
+## Receipt precision hardening (2026-09-17)
+
+PAO and Frontend Connector Functions now persist and render the explicit
+`accepted`, `candidate_rejected`, `committed`, `rolled_back`, `online` and
+`unconfirmed` lifecycle. Final success requires a different new PID, confirmed
+old-process exit, exact Agent/runtime/generation identity, ACTIVE/accepting and
+backend/startup readiness. Schema-1 records are read compatibly and normalized;
+new writes use schema 2. This change does not add a retry, timeout, Core restart
+or notification dependency to the transaction.
 
 
 ## Interactive recovery feedback (2026-09-08)

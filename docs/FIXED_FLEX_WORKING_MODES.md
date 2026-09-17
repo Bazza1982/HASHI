@@ -31,9 +31,10 @@ session-preserving working mode inside `FlexibleAgentRuntime`.
 
 The session-capable backend set is owned by
 `orchestrator.config.SESSION_MODE_BACKENDS`. It currently contains
-`claude-cli`, `codex-cli`, `grok-cli`, and `her-v2`. Backend capability checks
-still run when a user selects Fixed; a backend whose runtime capabilities
-report no session support is rejected without changing state.
+`claude-cli`, `codex-cli`, `grok-cli`, `her-v2`, and `antigravity-cli`.
+Backend capability checks still run when a user selects Fixed; a backend whose
+runtime capabilities report no session support is rejected without changing
+state.
 
 ## Configuration
 

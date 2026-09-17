@@ -52,6 +52,7 @@ class _FakeServiceManager:
 class _FakeRuntime:
     def __init__(self):
         self.name = "hashiko"
+        self.global_config = SimpleNamespace(instance_id="HASHI_TEST")
         self.messages = []
         self.sent = []
         self.service_manager = _FakeServiceManager()
@@ -156,7 +157,11 @@ async def test_restart_command_dispatches_background_request(monkeypatch):
     monkeypatch.setattr(
         api_restart,
         "_build_watchtower_restart_payload",
-        lambda *args, **kwargs: {"reason": "telegram /restart hard restart", "human_restart_proof": {"digest": "ok"}},
+        lambda *args, **kwargs: {
+            "reason": "telegram /restart hard restart",
+            "target_instance": "HASHI_TEST",
+            "requester_agent": "hashiko",
+        },
     )
 
     async def fake_dispatch(runtime_arg, chat_id, request_payload):
@@ -171,7 +176,8 @@ async def test_restart_command_dispatches_background_request(monkeypatch):
     text, _kwargs = runtime.messages[-1]
     assert "WatchTower hard restart requested" in text
     assert observed["chat_id"] == 777
-    assert observed["payload"]["human_restart_proof"]["digest"] == "ok"
+    assert observed["payload"]["target_instance"] == "HASHI_TEST"
+    assert "human_restart_proof" not in observed["payload"]
 
 
 @pytest.mark.asyncio
@@ -198,7 +204,11 @@ async def test_restart_confirm_dispatches_background_request(monkeypatch):
     monkeypatch.setattr(
         api_restart,
         "_build_watchtower_restart_payload",
-        lambda *args, **kwargs: {"reason": "telegram /restart hard restart", "human_restart_proof": {"digest": "ok"}},
+        lambda *args, **kwargs: {
+            "reason": "telegram /restart hard restart",
+            "target_instance": "HASHI_TEST",
+            "requester_agent": "hashiko",
+        },
     )
 
     async def fake_dispatch(runtime_arg, chat_id, request_payload):
@@ -215,23 +225,93 @@ async def test_restart_confirm_dispatches_background_request(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_restart_confirm_fails_closed_when_human_proof_missing(monkeypatch):
+async def test_restart_payload_needs_no_second_human_proof(monkeypatch):
     runtime = _FakeRuntime()
-    query = _FakeCallbackQuery("hardrestart:confirm")
-    update = SimpleNamespace(callback_query=query)
+    monkeypatch.delenv("HASHI_HUMAN_RESTART_SECRET", raising=False)
 
-    monkeypatch.setattr(api_restart.remote_rescue, "rescue_status", lambda *args, **kwargs: (0, {"state": "running"}))
-    monkeypatch.setattr(
-        api_restart,
-        "_build_watchtower_restart_payload",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("human restart secret is not configured")),
+    payload = api_restart._build_watchtower_restart_payload(
+        runtime,
+        request_source="telegram",
+        reason="telegram /restart hard restart",
     )
 
-    await api_restart.restart_callback(runtime, update, SimpleNamespace())
+    assert payload["target_instance"] == "HASHI_TEST"
+    assert payload["requester_agent"] == "hashiko"
+    assert payload["request_source"] == "telegram"
+    assert "human_restart_proof" not in payload
 
-    assert "not configured safely" in query.edits[-1][0]
-    assert query.answers[-1] == ("Restart setup incomplete.", True)
-    assert getattr(runtime, "_watchtower_restart_inflight", False) is False
+
+@pytest.mark.asyncio
+async def test_watchtower_dispatch_reports_only_verified_terminal_success(monkeypatch):
+    runtime = _FakeRuntime()
+    monkeypatch.setattr(
+        api_restart.remote_rescue,
+        "rescue_restart",
+        lambda *args, **kwargs: (
+            0,
+            {
+                "ok": True,
+                "state": "completed",
+                "restart_id": "rst_123",
+                "target_instance": "HASHI_TEST",
+                "evidence": {
+                    "old_pid": 100,
+                    "old_pid_exited": True,
+                    "new_pid": 200,
+                    "new_pid_alive": True,
+                    "new_pid_differs": True,
+                    "backend_health_ok": True,
+                    "actual_instance": "HASHI_TEST",
+                    "instance_matches": True,
+                    "runtime_version": {"core_api": "4", "function_api": "4"},
+                    "runtime_version_verified": True,
+                    "generation_id": "sha256:abc",
+                    "generation_verified": True,
+                },
+            },
+        ),
+    )
+
+    await api_restart._dispatch_watchtower_restart(
+        runtime,
+        777,
+        {
+            "reason": "test",
+            "target_instance": "HASHI_TEST",
+            "requester_agent": "hashiko",
+        },
+    )
+
+    assert "HASHI_TEST" in runtime.sent[-1][1]
+    assert "100" in runtime.sent[-1][1]
+    assert "200" in runtime.sent[-1][1]
+    assert "rst_123" in runtime.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_watchtower_dispatch_rejects_unverified_success_shape(monkeypatch):
+    runtime = _FakeRuntime()
+    monkeypatch.setattr(
+        api_restart.remote_rescue,
+        "rescue_restart",
+        lambda *args, **kwargs: (
+            0,
+            {"ok": True, "restart_launched": True, "pid": 200},
+        ),
+    )
+
+    await api_restart._dispatch_watchtower_restart(
+        runtime,
+        777,
+        {
+            "reason": "test",
+            "target_instance": "HASHI_TEST",
+            "requester_agent": "hashiko",
+        },
+    )
+
+    assert "failed" in runtime.sent[-1][1].lower()
+    assert "terminal" in runtime.sent[-1][1].lower()
 
 
 @pytest.mark.asyncio
