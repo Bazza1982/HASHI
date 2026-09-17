@@ -1831,14 +1831,16 @@ async def execute_frontend_send_attachments(
     surface = str(context.get("session_surface") or "").strip().casefold()
     if surface == "tui":
         return "Error: the built-in TUI uses its dedicated HASHI attachment path"
-    if surface == "telegram":
-        return "Error: Telegram keeps its existing telegram_send_file delivery path"
+    # Unified attachment delivery contract: the surface is a rendering hint,
+    # never an admission gate.  Telegram turns may bind to the canonical
+    # Session too; pushing to Telegram remains the caller's concern.
     request_id = str(context.get("request_id") or "").strip()
     session_id = str(context.get("hashi_session_id") or "").strip()
     owner_id = str(context.get("owner_id") or "").strip()
     agent_id = str(context.get("agent_name") or "").strip().casefold()
-    if not all((request_id, session_id, owner_id, agent_id, surface)):
-        return "Error: frontend attachments require a current frontend Session reply"
+    if not all((session_id, owner_id, agent_id, surface)):
+        return "Error: frontend attachments require an active HASHI Session context"
+    bind_only = False
 
     runtime = context.get("_runtime")
     store = getattr(runtime, "session_store", None)
@@ -1854,6 +1856,25 @@ async def execute_frontend_send_attachments(
             )
         except (KeyError, OSError, TypeError, ValueError) as exc:
             return f"Error: canonical Session attachment storage is unavailable: {exc}"
+
+    if not request_id:
+        # Bind-only path: resolve the primary Session and its most recent run
+        # instead of rejecting non-frontend turns outright.
+        try:
+            resolved = store.resolve_primary_session(owner_id=owner_id, agent_id=agent_id)
+            resolved_session = str(resolved.get("session_id") or "").strip()
+            if resolved_session:
+                session_id = resolved_session
+            recent = store.recent_session_runs(
+                session_id=session_id, owner_id=owner_id, limit=1
+            )
+            candidate = str((recent[0] or {}).get("request_id") or "").strip() if recent else ""
+            if not candidate:
+                return "Error: no active HASHI run to bind attachments to"
+            request_id = candidate
+            bind_only = True
+        except Exception as exc:
+            return f"Error: unable to resolve an active HASHI run for attachment binding: {exc}"
 
     raw_attachments = args.get("attachments")
     if not isinstance(raw_attachments, list) or not raw_attachments:
@@ -1953,6 +1974,7 @@ async def execute_frontend_send_attachments(
                     "request_id": request_id,
                     "attachment_count": len(existing["attachments"]),
                     "attachments": existing["attachments"],
+                    "bind_only": bool(bind_only),
                     "replayed": True,
                 },
                 ensure_ascii=False,
@@ -2007,6 +2029,7 @@ async def execute_frontend_send_attachments(
                 "request_id": request_id,
                 "attachment_count": len(bound["attachments"]),
                 "attachments": bound["attachments"],
+                "bind_only": bool(bind_only),
                 "replayed": bool(bound["replayed"]),
             },
             ensure_ascii=False,

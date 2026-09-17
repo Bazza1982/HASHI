@@ -202,6 +202,20 @@ def _project_message_attachments(
             # Workbench media route.  It never reveals the instance-local
             # source path or content digest.
             projected["message_id"] = str(message.get("message_id") or "")
+        if projected and not projected.get("modality"):
+            # Unified attachment delivery contract: derive the presentation
+            # modality from the MIME type when the stored row has none.
+            mime_type = str(projected.get("mime_type") or "").casefold()
+            if mime_type.startswith("image/"):
+                projected["modality"] = "image"
+            elif mime_type.startswith("audio/"):
+                projected["modality"] = "audio"
+            elif mime_type.startswith("video/"):
+                projected["modality"] = "video"
+            elif mime_type.startswith("text/") or mime_type == "application/pdf":
+                projected["modality"] = "document"
+            elif mime_type:
+                projected["modality"] = "file"
         if projected:
             result.append(projected)
     return result

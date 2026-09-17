@@ -19,6 +19,7 @@ Override with --type photo|document|video|audio|voice
 """
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -178,6 +179,111 @@ def send_file(file_path: Path, caption: str | None, file_type: str,
         return False
 
 
+def bind_for_frontend(file_path: Path, caption: str | None, agent_name: str | None) -> str:
+    """Bind the file to the canonical Session message (best effort).
+
+    Telegram push stays the primary delivery; this binding mirrors the file
+    into the shared Session so Workbench can preview/play/download it.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from orchestrator.session_store import (
+            MAX_SESSION_ATTACHMENT_BYTES,
+            SessionStore,
+        )
+
+        owner_id = str(
+            os.environ.get("HASHI_OWNER_ID") or os.environ.get("OWNER_ID") or ""
+        ).strip()
+        request_id = str(os.environ.get("HASHI_REQUEST_ID") or "").strip()
+        session_id = str(os.environ.get("HASHI_SESSION_ID") or "").strip()
+        if not agent_name:
+            return "bind skipped: unknown agent"
+        if not owner_id:
+            return "bind skipped: no owner context"
+        agent_key = str(agent_name).strip().casefold()
+        instance_id = str(os.environ.get("HASHI_INSTANCE_ID") or "HASHI").strip()
+        db_path = Path(
+            os.environ.get("HASHI_SESSION_STORE_DB")
+            or str(ROOT / "state" / "sessions.sqlite3")
+        )
+        attachment_root = Path(
+            os.environ.get("HASHI_SESSION_ATTACHMENT_ROOT")
+            or str(ROOT / "media" / "session_attachments")
+        )
+        store = SessionStore(
+            str(db_path),
+            instance_id=instance_id,
+            attachment_root=str(attachment_root),
+        )
+        if not session_id:
+            resolved = store.resolve_primary_session(owner_id=owner_id, agent_id=agent_key)
+            session_id = str(resolved.get("session_id") or "").strip()
+        if not session_id:
+            return "bind skipped: no primary session"
+        if not request_id:
+            recent = store.recent_session_runs(
+                session_id=session_id, owner_id=owner_id, limit=1
+            )
+            request_id = (
+                str((recent[0] or {}).get("request_id") or "").strip() if recent else ""
+            )
+        if not request_id:
+            return "bind skipped: no active run"
+        size_bytes = int(file_path.stat().st_size)
+        if size_bytes <= 0 or size_bytes > MAX_SESSION_ATTACHMENT_BYTES:
+            return "bind skipped: file exceeds Session size limit"
+        mime_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        mime_type = mime_type.split(";", 1)[0].strip().lower()
+        payload = file_path.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        idempotency_key = f"telegram-cli:{digest}:{size_bytes}"
+        existing = store.run_output_attachment_group(
+            request_id=request_id,
+            session_id=session_id,
+            owner_id=owner_id,
+            agent_id=agent_key,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            count = int(existing.get("attachment_count") or 0)
+            return f"bound (replayed): {count} attachment(s)"
+        staged = store.stage_attachment(
+            session_id=session_id,
+            owner_id=owner_id,
+            filename=file_path.name,
+            media_type=mime_type,
+            size_bytes=size_bytes,
+            sha256=digest,
+            semantic_role="audio_attachment" if mime_type.startswith("audio/") else "",
+        )
+        store.upload_attachment_bytes(
+            session_id=session_id,
+            owner_id=owner_id,
+            attachment_id=staged["attachment_id"],
+            payload=payload,
+            audio_direction="output",
+        )
+        store.commit_attachment(
+            session_id=session_id,
+            owner_id=owner_id,
+            attachment_id=staged["attachment_id"],
+        )
+        bound = store.bind_run_output_attachments(
+            request_id=request_id,
+            session_id=session_id,
+            owner_id=owner_id,
+            agent_id=agent_key,
+            idempotency_key=idempotency_key,
+            request_digest=digest,
+            attachments=[{"attachment_id": staged["attachment_id"], "caption": caption or ""}],
+        )
+        count = len(bound.get("attachments") or [])
+        return f"bound: {count} attachment(s) to canonical Session"
+    except Exception as exc:
+        return f"bind failed: {exc}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Send files via Telegram from any HASHI agent")
     parser.add_argument("--path", required=True, help="Path to the file to send")
@@ -204,7 +310,9 @@ def main():
     token = _resolve_token(secrets, detected_agent)
     chat_id = args.chat_id or _resolve_chat_id(secrets)
 
+    bind_summary = bind_for_frontend(file_path, args.caption, detected_agent)
     success = send_file(file_path, args.caption, file_type, token, chat_id)
+    print(f"[bind] {bind_summary}")
     sys.exit(0 if success else 1)
 
 

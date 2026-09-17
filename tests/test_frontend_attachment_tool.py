@@ -153,9 +153,11 @@ async def test_frontend_attachment_publish_is_idempotent_and_tui_is_separate(tmp
     assert rejected.is_error is True
     assert "built-in tui" in rejected.output.casefold()
 
+    # Unified attachment delivery contract: Telegram turns may bind to the
+    # canonical Session (push stays the caller's concern).
     telegram = _registry(tmp_path, store, owner, session, surface="telegram")
-    rejected = await telegram.execute(
+    bound = await telegram.execute(
         "frontend_send_attachments", arguments, tool_call_id="telegram-output-call"
     )
-    assert rejected.is_error is True
-    assert "telegram_send_file" in rejected.output
+    assert bound.is_error is False
+    assert '"ok": true' in bound.output
