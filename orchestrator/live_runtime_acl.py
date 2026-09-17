@@ -97,17 +97,7 @@ def apply_windows_read_only(
             _require_narrow_existing_target(path, forbidden_roots=())
             applied.append(target)
             inheritance = "(OI)(CI)" if target.recursive else ""
-            commands = [
-                ["icacls.exe", str(path), "/inheritance:r"],
-                [
-                    "icacls.exe",
-                    str(path),
-                    "/grant:r",
-                    f"*{sid}:{inheritance}(RX)",
-                    f"*S-1-5-18:{inheritance}(F)",
-                    f"*S-1-5-32-544:{inheritance}(F)",
-                ],
-            ]
+            commands: list[list[str]] = []
             if lock_owner:
                 owner_command = [
                     "icacls.exe",
@@ -118,6 +108,20 @@ def apply_windows_read_only(
                 if target.recursive:
                     owner_command.extend(["/T", "/C"])
                 commands.append(owner_command)
+            # Install the complete replacement DACL in one icacls operation.
+            # A separate `/inheritance:r` call can remove the caller's only ACE
+            # before the replacement grants run, locking out apply and rollback.
+            commands.append(
+                [
+                    "icacls.exe",
+                    str(path),
+                    "/grant:r",
+                    f"*{sid}:{inheritance}(RX)",
+                    f"*S-1-5-18:{inheritance}(F)",
+                    f"*S-1-5-32-544:{inheritance}(F)",
+                    "/inheritance:r",
+                ]
+            )
             outputs = [_run_windows_acl(command) for command in commands]
             reports.append(
                 {
