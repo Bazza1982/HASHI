@@ -216,7 +216,7 @@ def test_message_path_is_cache_only_when_capability_is_missing(tmp_path, monkeyp
 
     capability = resolve_input_capability(
         "codex-cli",
-        "gpt-6-astra",
+        "gpt-cache-miss-only",
         capability_cache_path=tmp_path / "missing.json",
     )
 
@@ -358,24 +358,28 @@ def test_exact_manual_override_has_priority_over_dynamic_fact(tmp_path):
 
 def test_stale_last_known_fact_is_preserved_but_does_not_grant_media(tmp_path):
     cache = tmp_path / "capabilities.json"
+    model = "gpt-stale-cache-only"
     old_now = datetime.now(timezone.utc) - timedelta(days=2)
     known = model_capability_sources.refresh_capability_fact(
         "codex-cli",
-        "gpt-6-astra",
+        model,
         cache_path=cache,
-        fetcher=lambda _url: _evidence(fetched_at=old_now),
+        fetcher=lambda _url: _evidence(
+            "openai/gpt-stale-cache-only",
+            fetched_at=old_now,
+        ),
         now=old_now,
     )
 
     stale = model_capability_sources.get_cached_capability_fact(
         "codex-cli",
-        "gpt-6-astra",
+        model,
         cache_path=cache,
         now=old_now + timedelta(hours=25),
     )
     capability = resolve_input_capability(
         "codex-cli",
-        "gpt-6-astra",
+        model,
         capability_cache_path=cache,
     )
 

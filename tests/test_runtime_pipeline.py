@@ -508,7 +508,9 @@ async def test_canonical_audit_correlates_complete_foreground_request_chain(tmp_
 async def test_reasoning_stream_audit_batches_without_copying_raw_delta(
     monkeypatch,
 ):
-    monkeypatch.setattr(runtime_pipeline, "CANONICAL_STREAM_BATCH_MAX_AGE_S", 0.01)
+    # Keep content batching independent of host speed. Deadline scheduling is
+    # verified separately with a single event below.
+    monkeypatch.setattr(runtime_pipeline, "CANONICAL_STREAM_BATCH_MAX_AGE_S", 3_600.0)
 
     class BatchStore:
         def __init__(self):
@@ -534,7 +536,7 @@ async def test_reasoning_stream_audit_batches_without_copying_raw_delta(
         )
 
     assert store.commits == []
-    await asyncio.sleep(0.03)
+    batch.flush(reason="test_boundary")
 
     assert len(store.commits) == 1
     records = store.commits[0]
@@ -566,6 +568,40 @@ async def test_reasoning_stream_audit_batches_without_copying_raw_delta(
         "req-reasoning:stream-batch:1"
     }
     assert runtime._canonical_reasoning_seen == {"req-reasoning"}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_stream_audit_flushes_on_deadline(monkeypatch):
+    monkeypatch.setattr(runtime_pipeline, "CANONICAL_STREAM_BATCH_MAX_AGE_S", 0.01)
+
+    class BatchStore:
+        def __init__(self):
+            self.commits: list[list[dict]] = []
+
+        def record_many(self, records):
+            self.commits.append([dict(record) for record in records])
+
+    store = BatchStore()
+    runtime = SimpleNamespace(canonical_audit=store, error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-deadline")
+    batch.capture(
+        StreamEvent(
+            kind=KIND_THINKING,
+            summary="",
+            raw_delta="one",
+            event_id="provider-one",
+            origin="deepseek",
+            provenance="provider_returned",
+        )
+    )
+
+    assert store.commits == []
+    await asyncio.sleep(0.03)
+    assert len(store.commits) == 1
+    assert [item["event_type"] for item in store.commits[0]] == [
+        "provider_stream_event",
+        "provider_reasoning",
+    ]
 
 
 def test_canonical_stream_audit_failure_is_not_silently_ignored():

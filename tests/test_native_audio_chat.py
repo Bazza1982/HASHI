@@ -114,15 +114,19 @@ def test_terminal_and_conversation_native_presentation_precedence(tmp_path):
     manager = VoiceManager(tmp_path / "workspace", tmp_path / "media")
     manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")
     manager.set_native_mode("auto")
-    state = manager.get_state()
-    state["native"]["terminal_overrides"] = {
-        "telegram": {
+    manager.set_native_terminal_override(
+        "telegram",
+        {
             "reply_content": "audio_only",
             "retention_seconds": 120,
         },
-        "workbench": {"mode": "off"},
-    }
-    manager._save(state)
+    )
+    manager.set_native_terminal_override("workbench", {"mode": "off"})
+    with pytest.raises(RuntimeError, match="Unsupported native terminal override"):
+        manager.set_native_terminal_override(
+            "telegram",
+            {"provider": "untrusted-terminal-provider"},
+        )
 
     telegram = manager.native_policy_for_terminal("telegram")
     assert telegram["reply_content"] == "audio_only"
@@ -144,11 +148,7 @@ def test_terminal_and_conversation_native_presentation_precedence(tmp_path):
     assert native_reply_content_policy(runtime, item) == "audio_and_text"
 
     manager.set_native_mode("off")
-    state = manager.get_state()
-    state["native"]["terminal_overrides"] = {
-        "telegram": {"mode": "auto"}
-    }
-    manager._save(state)
+    manager.set_native_terminal_override("telegram", {"mode": "auto"})
     assert manager.native_audio_enabled("telegram") is False
 
 
