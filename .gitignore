@@ -229,3 +229,7 @@ exp/barry/aonsw_data_analysis/
 
 # Local virtualenv symlink used by some checkouts (.venv -> .venv-wsl)
 .venv
+
+# Root-level local credential/state backups (never commit)
+/agents.json.bak-*
+/bridge_memory.sqlite
