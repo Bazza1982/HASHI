@@ -44,6 +44,23 @@ def clean_origin(origin):
     return result
 
 
+def origin_delivery_requested(origin) -> bool:
+    """Whether a reboot receipt should attempt delivery to its origin.
+
+    Telegram receipts need a resolved chat to send to.  Workbench receipts are
+    delivered through the shared primary session that survives Worker cutover,
+    so they are always deliverable.  Unknown frontends remain ``not_requested``
+    (fail closed) instead of inventing a new transport.
+    """
+
+    if not isinstance(origin, dict):
+        return False
+    surface = origin.get("surface", "telegram")
+    if surface == "telegram":
+        return bool(origin.get("chat_id"))
+    return surface == "workbench"
+
+
 def validate_record(record):
     try:
         valid = (
@@ -169,10 +186,9 @@ class RebootReceipts:
             "reason": "",
             "online": {},
             "delivery": {
-                "status": "pending"
-                if origin.get("chat_id")
-                and origin.get("surface", "telegram") == "telegram"
-                else "not_requested",
+                "status": (
+                    "pending" if origin_delivery_requested(origin) else "not_requested"
+                ),
                 "attempts": 0,
                 "next_attempt_at": 0,
             },

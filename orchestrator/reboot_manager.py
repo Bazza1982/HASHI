@@ -168,7 +168,10 @@ class RebootManager:
 
     async def _deliver(self, record, *, starting=False):
         origin = record.get("origin", {})
-        if not origin.get("chat_id") or record["delivery"]["status"] == "not_requested":
+        surface = origin.get("surface", "telegram")
+        if record["delivery"]["status"] == "not_requested":
+            return {"sent": False}
+        if surface == "telegram" and not origin.get("chat_id"):
             return {"sent": False}
         rendered = {}
 
@@ -179,23 +182,41 @@ class RebootManager:
             rendered["text"] = text
             return text
 
-        result = await send_runtime_notice(
-            self.kernel,
-            source_agent=record["source_agent"],
-            chat_id=origin["chat_id"],
-            thread_id=origin.get("thread_id"),
-            render_text=render,
-        )
-        if result.get("sent") and rendered.get("text"):
-            runtime_session.record_kernel_presentation_notice(
+        idempotency_key = f"reboot:{record['id']}:{'starting' if starting else 'final'}"
+
+        if surface == "telegram":
+            result = await send_runtime_notice(
                 self.kernel,
-                agent_id=record["source_agent"],
-                text=rendered["text"],
-                idempotency_key=(
-                    f"reboot:{record['id']}:{'starting' if starting else 'final'}"
-                ),
+                source_agent=record["source_agent"],
+                chat_id=origin["chat_id"],
+                thread_id=origin.get("thread_id"),
+                render_text=render,
             )
-        return result
+            if result.get("sent") and rendered.get("text"):
+                runtime_session.record_kernel_presentation_notice(
+                    self.kernel,
+                    agent_id=record["source_agent"],
+                    text=rendered["text"],
+                    idempotency_key=idempotency_key,
+                )
+            return result
+
+        # Workbench (and other shared-primary frontends) are delivered through
+        # the session store that survives Worker cutover; no Telegram send.
+        text = render(record["source_agent"], None)
+        message = runtime_session.record_kernel_presentation_notice(
+            self.kernel,
+            agent_id=record["source_agent"],
+            text=text,
+            idempotency_key=idempotency_key,
+        )
+        if message:
+            return {
+                "sent": True,
+                "sender": "workbench",
+                "message_id": message.get("message_id"),
+            }
+        return {"sent": False}
 
     async def send_pending(self, *, now=None):
         if getattr(self.kernel, "_handoff_draining", False) or getattr(
@@ -344,9 +365,15 @@ class RebootManager:
         self,
         targets: tuple[str, ...],
     ) -> dict[str, FunctionWorkerClient]:
-        generation = await asyncio.to_thread(
-            self.kernel.function_workers.qualify_generation
+        qualified_generation = getattr(
+            self.kernel.function_workers, "qualified_generation", None
         )
+        if callable(qualified_generation):
+            generation = await qualified_generation()
+        else:
+            generation = await asyncio.to_thread(
+                self.kernel.function_workers.qualify_generation
+            )
         self.kernel.function_workers.remember_generation(generation)
         prepare_generation = getattr(
             self.kernel.function_workers,
