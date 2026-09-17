@@ -86,6 +86,51 @@ the Agent's whole workzone read-only.
 The policy itself is a protected write target. Platform deployment must apply
 native ACLs to it together with the live targets.
 
+## Deployment command
+
+The platform helper is `scripts/protect_live_runtime.py`. All roots are
+required explicitly; it refuses filesystem roots, repository/instance roots as
+protection targets, missing Core files, and runtime roots without
+`pyvenv.cfg`.
+
+Always start with the read-only plan:
+
+```text
+python scripts/protect_live_runtime.py plan \
+  --instance-id HASHIX \
+  --code-root <live-code-root> \
+  --bridge-home <instance-home> \
+  --runtime-root <live-python-environment> \
+  --secrets-path <instance-secrets>
+```
+
+`plan` creates no directory or policy file. `apply` additionally requires the
+exact confirmation `PROTECT LIVE RUNTIME HASHIX`; `restore` requires
+`RESTORE LIVE RUNTIME HASHIX`. Service definitions, restart secrets, and exact
+service names are added with repeatable `--service-config`,
+`--restart-secret`, and `--service-target` arguments.
+
+On POSIX, apply/restore runs as root and names the non-root runtime user and
+group. Targets become root-owned and read/execute-only for that group; the
+top-level target also receives the immutable bit. On Windows, the runtime SID
+receives read/execute, while SYSTEM and Administrators retain full control.
+`--lock-owner` also moves ownership to Administrators and therefore requires an
+elevated deployment process.
+
+The Windows non-elevated mode blocks real file modification and child creation,
+but the same file owner can deliberately replace its ACL. It is a canary and
+compatibility mode, not account isolation. Strong Windows deployment needs an
+Administrator-owned dedicated live parent; a live environment placed beneath
+an Agent-writable repository can still have its top-level directory renamed by
+that owner. The Tool Registry blocks supported Agent routes in both layouts,
+but reports must retain this distinction.
+
+`verify` performs a real runtime-identity write-open/create probe and requires
+read access plus write denial for every exact target. Rollout retains the
+previous immutable source/environment as the authoritative rollback; the
+helper's `restore` operation only removes the applied canary restriction so
+that trusted recovery can proceed.
+
 ## Operating-system boundary
 
 Tool admission is an early explanation, not a substitute for operating-system
