@@ -51,6 +51,7 @@ from remote.peer.lan import LanDiscovery, build_local_network_profile
 from remote.peer.registry import PeerRegistry
 from remote.peer.tailscale import TailscaleDiscovery
 from remote.port_selection import DEFAULT_PORT
+from remote.supervisor_identity import configured_remote_port
 from remote.protocol_manager import (
     PROTOCOL_VERSION,
     ProtocolManager,
@@ -140,23 +141,9 @@ def _load_agents_config(hashi_root: Path) -> dict:
 
 
 def _resolve_configured_remote_port(hashi_root: Path, config: dict | None = None) -> int:
-    cfg = _load_agents_config(hashi_root)
-    global_cfg = cfg.get("global", {}) if isinstance(cfg, dict) else {}
-    instance_id = str(global_cfg.get("instance_id") or "").strip().lower()
-    instances_path = hashi_root / "instances.json"
-    instances = {}
-    if instances_path.exists():
-        try:
-            instances = json.loads(instances_path.read_text(encoding="utf-8")).get("instances", {}) or {}
-        except Exception:
-            instances = {}
-    entry = instances.get(instance_id, {}) if instance_id else {}
-    value = entry.get("remote_port") or global_cfg.get("remote_port")
-    if value:
-        try:
-            return int(value)
-        except Exception:
-            pass
+    value = configured_remote_port(hashi_root)
+    if value is not None:
+        return value
     server = (config or {}).get("server") or {}
     try:
         return int(server.get("port") or DEFAULT_PORT)

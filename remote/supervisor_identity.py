@@ -21,22 +21,56 @@ class RemoteSupervisorIdentity:
     systemd_service_name: str
     windows_task_name: str
     source: str
+    remote_port: int | None
+
+
+def _read_json_object(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _configured_instance_id(root: Path) -> str:
     path = root / "agents.json"
-    if not path.exists():
-        return ""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, TypeError, ValueError):
-        return ""
-    if not isinstance(data, dict):
-        return ""
+    data = _read_json_object(path)
     global_config = data.get("global") or {}
     if not isinstance(global_config, dict):
         return ""
     return str(global_config.get("instance_id") or "").strip()
+
+
+def configured_remote_port(
+    root: Path | str,
+    *,
+    instance_id: str | None = None,
+) -> int | None:
+    """Return the instance-owned Remote port, before YAML compatibility defaults."""
+
+    resolved_root = Path(root).expanduser().resolve()
+    agents = _read_json_object(resolved_root / "agents.json")
+    global_config = agents.get("global") or {}
+    if not isinstance(global_config, dict):
+        global_config = {}
+    effective_id = str(
+        instance_id or global_config.get("instance_id") or ""
+    ).strip()
+    instances_data = _read_json_object(resolved_root / "instances.json")
+    instances = instances_data.get("instances") or {}
+    if not isinstance(instances, dict):
+        instances = {}
+    entry = instances.get(effective_id.casefold(), {}) if effective_id else {}
+    if not isinstance(entry, dict):
+        entry = {}
+    value = entry.get("remote_port") or global_config.get("remote_port")
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
 
 
 def normalise_instance_slug(value: str) -> str:
@@ -77,6 +111,10 @@ def resolve_supervisor_identity(
         systemd_service_name=f"hashi-remote-{slug}.service",
         windows_task_name=f"HashiRemote-{slug}",
         source=source,
+        remote_port=configured_remote_port(
+            resolved_root,
+            instance_id=effective_id,
+        ),
     )
 
 

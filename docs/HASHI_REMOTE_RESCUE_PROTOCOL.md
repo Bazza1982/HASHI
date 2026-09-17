@@ -298,6 +298,11 @@ The supervisor starts Remote with `--supervised`, so `/protocol/status` can
 report `remote_supervisor.mode=supervised`. Legacy `/remote on` still works and
 should report `remote_supervisor.mode=child`.
 
+Supervisor health checks use the explicit command port first, then the
+instance-owned `remote_port` from `instances.json` or `agents.json`, and only
+then the YAML compatibility default. A healthy endpoint for another instance
+is rejected; it must never satisfy `start`, `restart`, or `doctor`.
+
 Set `HASHI_REMOTE_MAX_TERMINAL_LEVEL=L3_RESTART` only on trusted LAN/Tailscale
 machines where remote HASHI rescue is intentionally enabled. Default supervised
 Remote remains `L2_WRITE`.
