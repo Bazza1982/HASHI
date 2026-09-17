@@ -10,6 +10,8 @@ import logging
 import mimetypes
 import os
 import time
+
+logger = logging.getLogger("BridgeU.WorkbenchAPI")
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -767,7 +769,7 @@ class WorkbenchApiServer:
                     info["agent"], inst, host, port, wb_port=wb_port, ttl=ttl
                 )
         except Exception:
-            pass  # non-critical â€” don't break message delivery
+            pass  # non-critical Ã¢â‚¬â€ don't break message delivery
 
     def _runtime_list(self) -> list:
         if self.orchestrator is not None:
@@ -1245,7 +1247,7 @@ class WorkbenchApiServer:
                 "id": agent_row["name"],
                 "name": agent_row["name"],
                 "display_name": agent_row.get("display_name", agent_row["name"]),
-                "emoji": agent_row.get("emoji", "ðŸ¤–"),
+                "emoji": agent_row.get("emoji", "Ã°Å¸Â¤â€“"),
                 "engine": engine,
                 "active_backend": agent_row.get("active_backend", engine),
                 "model": model,
