@@ -9,7 +9,7 @@ from orchestrator.command_ui import card_title
 
 BROWSER_MODE_SOURCE_PREFIX = "browser"
 
-CLI_NATIVE_BROWSER_BACKENDS = frozenset({"codex-cli", "claude-cli", "gemini-cli"})
+CLI_NATIVE_BROWSER_BACKENDS = frozenset({"codex-cli", "claude-cli"})
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,7 @@ BROWSER_ROUTES: dict[str, BrowserRoute] = {
         instruction=(
             "Use the CLI backend's own browsing or search capability when it is available. "
             "This route is instruction-only from HASHI's perspective and is intended for "
-            "Codex CLI, Claude CLI, and Gemini CLI backends."
+            "Codex CLI and Claude CLI backends."
         ),
     ),
     "3": BrowserRoute(

@@ -19,7 +19,8 @@ from orchestrator.config import (
 )
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
-    get_available_models, get_default_model, get_backend_entry, PROVIDER_ONLY_ENGINE_IDS,
+    get_available_models, get_default_model, get_backend_entry, is_retired_backend,
+    PROVIDER_ONLY_ENGINE_IDS,
 )
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
 from onboarding.onboarding_main import _atomic_write_json
@@ -47,6 +48,8 @@ def choices(home):
     overrides = [b for a in config.get('agents', []) for b in a.get('allowed_backends', [])]
     rows = []
     for engine in sorted(packaged_backend_engines()):
+        if is_retired_backend(engine):
+            continue
         if not (engine.endswith('-cli') or engine in PROVIDER_ONLY_ENGINE_IDS):
             continue
         models = list(dict.fromkeys([m for b in overrides if b.get('engine') == engine
@@ -71,6 +74,8 @@ def choices(home):
 
 
 def backend_configuration(engine, model):
+    if is_retired_backend(engine):
+        raise ConnectionError('BACKEND_RETIRED')
     if engine not in packaged_backend_engines():
         raise ConnectionError('ADAPTER_UNSUPPORTED')
     if engine in PROVIDER_ONLY_ENGINE_IDS:

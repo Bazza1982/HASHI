@@ -20,7 +20,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.strip import Strip
 from textual.suggester import SuggestFromList
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Input, Static
 
 from orchestrator import ui_language
 from orchestrator.command_specs import COMMAND_SPECS, CommandGuide
@@ -28,6 +28,7 @@ from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
     get_available_models,
+    is_retired_backend,
     is_selectable_backend,
 )
 from orchestrator.runtime_effort_options import get_available_efforts
@@ -37,7 +38,7 @@ from tui.attachments import PendingAttachment, TuiAttachmentError, snapshot_byte
 from tui.audio import TuiAudioError, decode_tui_audio, play_ogg_bytes
 from tui.clipboard import copy_to_windows_clipboard, read_windows_clipboard_png
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
-from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
+from tui.light_onboarding import LightOnboardingPhase
 from tui.onboarding import (
     audit_environment,
     lang_code_from_file,
@@ -2115,7 +2116,7 @@ class HASHITuiApp(App):
                     for item in backends
                     if is_selectable_backend(item.get("engine"))
                 ]
-                + [engine]
+                + ([engine] if is_selectable_backend(engine) else [])
             )
         if guide.choice_source == "models":
             if engine == HER_V2_ENGINE:
@@ -2129,6 +2130,8 @@ class HASHITuiApp(App):
                     "discard",
                     "compact",
                 ]
+            if is_retired_backend(engine):
+                return []
             choices = [model]
             for item in backends:
                 if canonical_backend_engine(item.get("engine")) != engine:
@@ -2161,6 +2164,7 @@ class HASHITuiApp(App):
                     item.get("engine")
                     for item in backends
                     if not is_selectable_backend(item.get("engine"))
+                    and not is_retired_backend(item.get("engine"))
                 ],
             ]
             her = presentation.get("her_v2")
@@ -2691,7 +2695,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         chat.write(chat_message_renderable("assistant", "HASHI", help_text))
 
     def _refresh_chrome(self):
-        log = self.query_one("#log-panel", LogPanel)
         chat = self.query_one("#chat-history", ChatHistory)
         input_box = self.query_one("#chat-input", ChatInput)
         self.query_one("#typing-indicator", TypingIndicator).refresh_language(

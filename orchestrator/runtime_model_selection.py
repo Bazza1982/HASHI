@@ -13,6 +13,7 @@ from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     HER_V2_ENGINE,
     get_backend_label,
+    is_retired_backend,
     is_selectable_backend,
     normalize_model,
 )
@@ -2380,6 +2381,12 @@ async def callback_model(runtime, update, context: Any) -> None:
                 )
                 return
             _, target_engine, mode = parts
+            if is_retired_backend(target_engine):
+                await query.answer(
+                    ui_language.tr("model.backend_retired"),
+                    show_alert=True,
+                )
+                return
             if not is_selectable_backend(target_engine):
                 await query.answer(
                     ui_language.tr("model.provider_her_only"),

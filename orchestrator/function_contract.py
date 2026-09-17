@@ -235,7 +235,7 @@ def validate_function_contract(
             "Function contract failed: adapters.stream_events does not expose "
             "KIND_ACKNOWLEDGEMENT='acknowledgement'"
         )
-    resolver = getattr(backend_registry, "get_backend_class", None)
+    resolver = getattr(backend_registry, "resolve_backend_class", None)
     registered_engines = getattr(backend_registry, "registered_backend_engines", None)
     packaged_engines = getattr(backend_registry, "packaged_backend_engines", None)
     supported_adapter = getattr(her_v2, "HERv2Adapter", None)

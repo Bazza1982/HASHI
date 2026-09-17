@@ -5,7 +5,7 @@ Exposes:
   POST /v1/chat/completions
   GET  /v1/models
 
-Routes requests to local CLI backends (gemini-cli, claude-cli, codex-cli) and
+Routes requests to supported local CLI backends (claude-cli, codex-cli) and
 xAI HTTP backend (xai-api).
 Runs on its own port (default 18801), independent from Telegram and the Backend API.
 

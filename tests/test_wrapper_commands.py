@@ -2024,6 +2024,9 @@ async def test_backend_her_v2_typed_command_switches_without_role_model(tmp_path
 
 def test_backend_menu_hides_her_v2_provider_only_engines(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
+    manager.config.allowed_backends.append(
+        {"engine": "gemini-cli", "model": "gemini-2.5-flash"}
+    )
     runtime, _messages = _make_runtime(manager)
 
     callbacks = [
@@ -2035,6 +2038,7 @@ def test_backend_menu_hides_her_v2_provider_only_engines(tmp_path):
     assert "backend:her-v2:plain" in callbacks
     assert not any("openrouter-api" in callback for callback in callbacks)
     assert not any("deepseek-api" in callback for callback in callbacks)
+    assert not any("gemini-cli" in callback for callback in callbacks)
 
 
 @pytest.mark.asyncio
@@ -2062,6 +2066,32 @@ async def test_backend_stale_provider_only_callback_is_rejected(tmp_path):
     assert edits == []
     assert answers[-1]["show_alert"] is True
     assert "through HER v2 only" in answers[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_backend_typed_retired_gemini_is_rejected_without_switch(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update(["gemini-cli"])
+
+    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
+
+    assert manager.config.active_backend == "codex-cli"
+    assert "retired" in messages[-1].lower()
+    assert "will not switch automatically" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_backend_stale_retired_gemini_callback_is_rejected(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    update, edits, answers = _callback_update("backend:gemini-cli:plain")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "retired" in answers[-1]["text"].lower()
 
 
 @pytest.mark.asyncio
@@ -2866,7 +2896,7 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
     wrap_markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "wcfg:wrapid:claude_haiku" in wrap_markup
-    assert "wcfg:wrapid:gemini_flash" in wrap_markup
+    assert "wcfg:wrapid:gemini_flash" not in wrap_markup
     assert "wcfg:wrapid:deepseek_pro" in wrap_markup
     assert "wcfg:wrapid:or_v4_pro" in wrap_markup
     assert "wcfg:wrapctx:3" in wrap_markup

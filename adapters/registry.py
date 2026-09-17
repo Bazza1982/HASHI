@@ -5,7 +5,14 @@ from __future__ import annotations
 import importlib
 import importlib.util
 
-from orchestrator.flexible_backend_registry import canonical_backend_engine
+from orchestrator.flexible_backend_registry import (
+    canonical_backend_engine,
+    is_retired_backend,
+)
+
+
+class RetiredBackendError(RuntimeError):
+    """Raised when legacy configuration attempts to execute a retired backend."""
 
 
 _BACKEND_ADAPTER_TARGETS: dict[str, tuple[str, str]] = {
@@ -43,7 +50,9 @@ def packaged_backend_engines() -> frozenset[str]:
     )
 
 
-def get_backend_class(engine_name: str):
+def resolve_backend_class(engine_name: str):
+    """Resolve a packaged adapter class, including migration-only adapters."""
+
     engine = canonical_backend_engine(engine_name)
     try:
         module_name, class_name = _BACKEND_ADAPTER_TARGETS[engine]
@@ -51,3 +60,15 @@ def get_backend_class(engine_name: str):
         raise ValueError(f"Unknown engine: {engine}") from exc
     module = importlib.import_module(module_name)
     return getattr(module, class_name)
+
+
+def get_backend_class(engine_name: str):
+    """Resolve an adapter for execution, rejecting migration-only backends."""
+
+    engine = canonical_backend_engine(engine_name)
+    if is_retired_backend(engine):
+        raise RetiredBackendError(
+            f"Backend '{engine}' is retired; choose another configured backend. "
+            "HASHI will not switch backends automatically."
+        )
+    return resolve_backend_class(engine)

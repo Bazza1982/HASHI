@@ -115,6 +115,7 @@ from orchestrator.flexible_backend_registry import (
     get_available_models,
     allows_custom_models,
     get_backend_label,
+    is_retired_backend,
     is_selectable_backend,
     normalize_model,
 )
@@ -6681,6 +6682,13 @@ class FlexibleAgentRuntime:
             else:
                 requested_model = raw_value
 
+        if is_retired_backend(target_engine):
+            await self._reply_text(
+                update,
+                ui_language.tr("backend.retired", backend=target_engine),
+            )
+            return
+
         if not is_selectable_backend(target_engine):
             await self._reply_text(
                 update,
@@ -7576,7 +7584,9 @@ class FlexibleAgentRuntime:
         return values, positional
 
     def _allowed_wrapper_engine(self, engine: str) -> bool:
-        return any(b.get("engine") == engine for b in self.config.allowed_backends)
+        return not is_retired_backend(engine) and any(
+            b.get("engine") == engine for b in self.config.allowed_backends
+        )
 
     def _normalize_wrapper_model(self, engine: str, model: str) -> str:
         if engine == "claude-cli":
@@ -7664,8 +7674,6 @@ class FlexibleAgentRuntime:
         return [
             ("claude_haiku", "Claude Haiku", "claude-cli", "claude-haiku-4-5"),
             ("claude_sonnet", "Claude Sonnet", "claude-cli", "claude-sonnet-4-6"),
-            ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
-            ("gemini_lite", "Gemini Lite", "gemini-cli", "gemini-2.5-flash-lite"),
             ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-flash"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
             ("or_v32", "OR DeepSeek V3.2 Exp", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
@@ -7682,7 +7690,6 @@ class FlexibleAgentRuntime:
         choices = {choice_id: (label, backend, model) for choice_id, label, backend, model in self._wrapper_model_choices()}
         grouped_rows = [
             ["claude_haiku", "claude_sonnet"],
-            ["gemini_flash", "gemini_lite"],
             ["deepseek_flash", "deepseek_pro"],
             ["or_v32", "or_v4_flash"],
             ["or_v4_pro", "or_gemini"],

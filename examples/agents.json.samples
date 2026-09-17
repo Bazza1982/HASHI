@@ -5,15 +5,11 @@
       "display_name": "春野サクラ (Sakura)",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/sakura",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -23,22 +19,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "pikachu",
       "display_name": "ピカチュウ (Pikachu)",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/pikachu",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -48,22 +40,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "xiao_yao",
       "display_name": "李逍遥 (Li Xiaoyao)",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/xiao_yao",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -73,22 +61,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "levi",
       "display_name": "リヴァイ (Levi)",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/levi",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -98,22 +82,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "jarvis",
       "display_name": "JARVIS",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/jarvis",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -123,22 +103,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "samantha",
       "display_name": "Samantha",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/samantha",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -148,22 +124,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "baymax",
       "display_name": "大白 (Baymax)",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/baymax",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -173,22 +145,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "doraemon",
       "display_name": "哆啦A梦 (Doraemon)",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/doraemon",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -198,22 +166,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "zelda",
       "display_name": "塞尔达 (Zelda)",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/zelda",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -223,22 +187,18 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     },
     {
       "name": "tom_nook",
       "display_name": "狸克 (Tom Nook)",
       "emoji": "🌸",
       "type": "flex",
-      "engine": "gemini-cli",
+      "engine": "claude-cli",
       "workspace_dir": "workspaces/tom_nook",
-      "model": "gemini-2.5-flash",
+      "model": "claude-sonnet-4-6",
       "is_active": false,
       "allowed_backends": [
-        {
-          "engine": "gemini-cli",
-          "model": "gemini-2.5-flash"
-        },
         {
           "engine": "claude-cli",
           "model": "claude-sonnet-4-6"
@@ -248,7 +208,7 @@
           "model": "anthropic/claude-sonnet-4.6"
         }
       ],
-      "active_backend": "gemini-cli"
+      "active_backend": "claude-cli"
     }
   ]
 }

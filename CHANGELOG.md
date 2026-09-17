@@ -163,6 +163,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Gemini CLI progressive retirement** — removed Gemini CLI from new
+  configuration, selection menus, gateway catalogues, and execution. Legacy
+  rows remain readable for migration and fail with an explicit retired error
+  without automatic backend fallback; the adapter remains packaged until all
+  managed instance references are migrated. Antigravity is unchanged.
 - **HASHI1 model catalogue cleanup** — made `codex-cli / gpt-5.6-sol /
   medium` the explicit default; limited Codex to GPT-5.5, the GPT-5.6
   Sol/Terra/Luna family, and GPT-6 Astra; limited OpenRouter to the approved

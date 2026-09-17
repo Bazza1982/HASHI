@@ -15,9 +15,12 @@ HASHI separates these boundaries.
 
 HER v2 is HASHI's native Engine. It owns a durable Engine Session and can use
 configured Model Providers such as OpenRouter or DeepSeek. HASHI also connects
-CLI engines such as Claude Code, Codex CLI, Gemini CLI, and Grok CLI, with
+CLI engines such as Claude Code, Codex CLI, Antigravity, and Grok CLI, with
 their own installation and authentication requirements. Other compatibility
 surfaces, including xAI and Ollama, depend on the installed runtime catalogue.
+
+Gemini CLI is retired. Legacy rows are loaded only so operators can migrate
+them; HASHI does not advertise, start, or automatically replace that Engine.
 
 Use /backend for selectable engines and /provider, /model, and /effort for
 the active route's settings. These menus reflect instance opt-ins and
