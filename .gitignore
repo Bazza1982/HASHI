@@ -17,6 +17,7 @@ __pycache__/
 *.lock
 !constraints/standard-py312.lock
 !constraints/transcription-py312.lock
+!constraints/tts-py312.lock
 *.pid
 .claw/
 .bridge_u_f.lock
