@@ -131,6 +131,30 @@ previous immutable source/environment as the authoritative rollback; the
 helper's `restore` operation only removes the applied canary restriction so
 that trusted recovery can proceed.
 
+## Windows service-backed restart
+
+A Windows instance installed as a service must list that exact service name in
+`service_targets`. Hashi Remote never infers the service from a folder name or
+accepts an arbitrary service argument. When the configured service name exactly
+matches the controlled instance ID, `/restart` uses
+`bin/hashi_service_ctl.ps1`; a development instance without that explicit
+target keeps the existing non-service launcher.
+
+The platform helper `scripts/protect_windows_restart_service.py` grants the
+Remote runtime principal only `SERVICE_START` and `SERVICE_STOP` for that one
+configured service. Start with `plan`; `apply` requires the exact confirmation
+`GRANT RESTART SERVICE HASHIX`, and `restore` requires
+`REVOKE RESTART SERVICE HASHIX`. Applying the service ACL is an elevated
+deployment action. It does not grant configuration, deletion, generic command,
+or access to any other service.
+
+Agent tools remain unable to issue raw service-control commands. An authorized
+Agent may request the supported `/restart` operation through Remote. A returned
+launcher PID or service `Running` state is not success: the terminal receipt
+must prove that the old Core PID exited, a different Core PID is healthy, the
+instance identity matches, and the runtime version and Function generation are
+the expected values.
+
 ## Operating-system boundary
 
 Tool admission is an early explanation, not a substitute for operating-system

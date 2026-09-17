@@ -1207,6 +1207,20 @@ def _hashi_restart_command() -> list[str]:
         raise ValueError("Hashi root is unavailable")
     root = Path(_control_hashi_root)
     if platform.system().lower() == "windows":
+        service_target = _configured_windows_service_target()
+        service_ctl = root / "bin" / "hashi_service_ctl.ps1"
+        if service_target and service_ctl.exists():
+            return [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(service_ctl),
+                "-ServiceName",
+                service_target,
+            ]
         ctl = root / "bin" / "bridge_ctl.ps1"
         if ctl.exists():
             return [
@@ -1229,6 +1243,36 @@ def _hashi_restart_command() -> list[str]:
             "--force",
         ]
     raise FileNotFoundError("No supported HASHI restart launcher found under bin/")
+
+
+def _configured_windows_service_target() -> str | None:
+    """Return only an exact service target published by platform policy."""
+
+    if not _control_hashi_root:
+        return None
+    path = (
+        Path(_control_hashi_root)
+        / "state"
+        / "platform"
+        / "live-runtime-protection.json"
+    )
+    try:
+        if path.stat().st_size > 64 * 1024:
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    values = payload.get("service_targets") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        return None
+    controlled = _controlled_instance_id({})
+    matches = {
+        str(value).strip()
+        for value in values
+        if str(value).strip().upper() == controlled
+        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(value).strip())
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def _restart_hashi_process() -> dict[str, Any]:

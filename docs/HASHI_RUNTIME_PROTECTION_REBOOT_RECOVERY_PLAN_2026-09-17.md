@@ -228,6 +228,8 @@ ACL 必须只覆盖明确的 live 目标，不能覆盖整个仓库、用户目�
 
 实现检查点（2026-09-17）：Functions 源码已移除额外真人 proof／nonce 与“仅真人”硬编码，保留 Remote 网络鉴权、目标绑定和 `L3_RESTART`；已增加持久 restart record、旧／新 PID、Backend API、实例身份、运行时版本与 Function 代际的终态验证。通知为 fail-open 旁路，不改变回执事实。聚焦 Windows 测试已通过；HASHI2／HASHI3 的实际受控重启仍须在候选同步后分别验收，因此尚未宣称 live adoption 完成。
 
+Windows 服务型实例的补充边界：Remote 只读取本地 live-runtime policy 中与受控实例 ID 精确匹配的服务名，并只通过窄范围服务脚本执行停止／启动；部署工具只给 Remote 运行身份授予该服务的 start/stop 权限。没有明确服务目标的开发型实例继续使用非服务 launcher。服务命令返回或服务显示 `Running` 均不构成成功，仍以新 Core PID、健康、身份、版本和 Function 代际的终态回执为准。
+
 ### 阶段 5：只增强诊断证据，不大改 HER v2
 
 允许的唯一新增范围是可查询日志：
