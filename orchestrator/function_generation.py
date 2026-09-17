@@ -470,6 +470,7 @@ def _order_source_entries(
 
 def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
     root = Path(code_root).resolve()
+    ignored = _gitignored_paths(root)
     assets: list[AssetEntry] = []
     for package in (*_ROOT_PACKAGES, "locales"):
         package_root = root / package
@@ -480,6 +481,8 @@ def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
                 continue
             relative = source.relative_to(root)
             relative_text = relative.as_posix()
+            if relative_text in ignored:
+                continue
             if source.suffix in {".py", ".pyc", ".pyo"}:
                 continue
             if any(part in _ASSET_EXCLUDED_PARTS for part in relative.parts):
@@ -616,6 +619,33 @@ def _nul_paths(payload: bytes) -> set[str]:
         for item in payload.split(b"\0")
         if item
     }
+
+
+def _gitignored_paths(code_root: Path) -> set[str]:
+    """Return local files that Git explicitly excludes from publication."""
+
+    try:
+        checkout = _git_output(
+            code_root,
+            "rev-parse",
+            "--show-toplevel",
+        ).decode("utf-8", errors="replace").strip()
+        if not checkout or Path(checkout).resolve() != Path(code_root).resolve():
+            return set()
+        return _nul_paths(
+            _git_output(
+                code_root,
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            )
+        )
+    except FunctionGenerationError:
+        # Non-repository unit fixtures retain the historical asset behavior.
+        # A real qualification still fails closed in the commit gate below.
+        return set()
 
 
 def verify_manifest_source_commit(
