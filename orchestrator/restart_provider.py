@@ -236,6 +236,8 @@ def restart_via_provider(
     provider: dict[str, Any],
     *,
     reason: str,
+    requester_agent: str | None = None,
+    request_source: str | None = None,
     timeout: int = 15,
 ) -> tuple[int, dict[str, Any]]:
     """Revalidate the provider immediately before issuing the destructive request."""
@@ -255,6 +257,12 @@ def restart_via_provider(
     return remote_rescue.rescue_restart(
         target,
         reason=reason,
+        extra_payload={
+            "requester_agent": str(requester_agent or "").strip() or None,
+            "request_source": str(request_source or "").strip() or None,
+            "notify_agent": str(requester_agent or "").strip() or None,
+            "notify_via": str(request_source or "").strip() or None,
+        },
         timeout=timeout,
         **_auth_kwargs(),
     )

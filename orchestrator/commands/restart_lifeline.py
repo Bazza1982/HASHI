@@ -42,6 +42,7 @@ async def _dispatch_remote_restart(
     provider: dict[str, Any],
     *,
     reason: str,
+    request_source: str,
 ) -> None:
     target = str(provider.get("target_instance") or "HASHI").upper()
     try:
@@ -50,7 +51,9 @@ async def _dispatch_remote_restart(
                 restart_via_provider,
                 provider,
                 reason=reason,
-                timeout=15,
+                requester_agent=str(getattr(runtime, "name", "") or ""),
+                request_source=request_source,
+                timeout=25,
             )
         except Exception as exc:
             logger.warning("Trusted Remote restart request for %s failed: %s", target, exc)
@@ -68,11 +71,35 @@ async def _dispatch_remote_restart(
                     chat_id,
                     f"Hard restart was rejected for {target}: {detail}",
                 )
+            return
+        verified, detail = legacy_restart._verified_restart_receipt(
+            payload,
+            expected_target=target,
+        )
+        if not verified:
+            logger.warning(
+                "Trusted Remote returned an unverified restart result for %s: %s",
+                target,
+                detail,
+            )
+            if chat_id is not None:
+                await runtime._send_text(
+                    chat_id,
+                    f"Hard restart failed for {target}: {detail}",
+                )
+            return
+        if chat_id is not None:
+            await runtime._send_text(
+                chat_id,
+                legacy_restart._restart_completed_text(payload),
+            )
     finally:
         setattr(runtime, _REMOTE_RESTART_INFLIGHT_ATTR, False)
 
 
-async def _dispatch_watchtower_fallback(runtime: Any, update: Any) -> None:
+async def _dispatch_watchtower_fallback(
+    runtime: Any, update: Any, *, request_source: str
+) -> None:
     available, error, _payload = await legacy_restart._watchtower_restart_available()
     if not available:
         await runtime._reply_text(
@@ -86,8 +113,8 @@ async def _dispatch_watchtower_fallback(runtime: Any, update: Any) -> None:
     try:
         request_payload = legacy_restart._build_watchtower_restart_payload(
             runtime,
-            human_source="telegram",
-            reason="telegram /restart hard restart (WatchTower fallback)",
+            request_source=request_source,
+            reason=f"{request_source} /restart hard restart (WatchTower fallback)",
         )
     except Exception as exc:
         logger.warning("Failed to build WatchTower fallback restart payload: %s", exc)
@@ -128,6 +155,7 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
     requested_target = _target_argument(context)
     local_instance = _local_instance(runtime)
     target = requested_target or local_instance
+    request_source = legacy_restart._restart_request_source(context)
 
     try:
         if target == local_instance:
@@ -142,7 +170,9 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
             )
             return
         logger.info("Local Remote restart provider unavailable; trying WatchTower: %s", exc)
-        await _dispatch_watchtower_fallback(runtime, update)
+        await _dispatch_watchtower_fallback(
+            runtime, update, request_source=request_source
+        )
         return
     except Exception as exc:
         if target != local_instance:
@@ -152,7 +182,9 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
             )
             return
         logger.info("Local Remote restart probe failed; trying WatchTower: %s", exc)
-        await _dispatch_watchtower_fallback(runtime, update)
+        await _dispatch_watchtower_fallback(
+            runtime, update, request_source=request_source
+        )
         return
 
     setattr(runtime, _REMOTE_RESTART_INFLIGHT_ATTR, True)
@@ -162,13 +194,14 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
         update,
         f"Hard restart requested for {target} via trusted Hashi Remote ({provider_kind}).",
     )
-    reason = f"telegram /restart {target} via trusted Hashi Remote"
+    reason = f"{request_source} /restart {target} via trusted Hashi Remote"
     asyncio.create_task(
         _dispatch_remote_restart(
             runtime,
             chat_id,
             provider,
             reason=reason,
+            request_source=request_source,
         )
     )
 

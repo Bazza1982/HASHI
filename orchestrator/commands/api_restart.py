@@ -12,14 +12,13 @@ from orchestrator.runtime_defaults import DEFAULT_API_GATEWAY_PORT
 from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
-from orchestrator.human_restart import build_human_restart_proof, human_restart_secret_path, load_human_restart_secret
 from tools import remote_rescue
 from remote.security.shared_token import load_shared_token
 
 logger = logging.getLogger("BridgeU.RuntimeCommands.ApiRestart")
 
 WATCHTOWER_INSTANCE = "WATCHTOWER"
-ALLOWED_HUMAN_RESTART_SOURCES = {"telegram", "whatsapp", "tui"}
+ALLOWED_RESTART_SOURCES = {"telegram", "whatsapp", "tui", "agent"}
 
 
 def _instance_id(runtime: Any) -> str:
@@ -45,6 +44,13 @@ def _authorized(runtime: Any, update: Any) -> bool:
     user = getattr(update, "effective_user", None)
     user_id = getattr(user, "id", None)
     return bool(user_id is not None and runtime._is_authorized_user(user_id))
+
+
+def _restart_request_source(context: Any) -> str:
+    source = str(getattr(context, "source_channel", "") or "").strip().lower()
+    if source in {"telegram", "whatsapp", "tui"}:
+        return source
+    return "agent" if source else "telegram"
 
 
 def _gateway_status_text(runtime: Any) -> str:
@@ -185,43 +191,75 @@ def _restart_auth_kwargs() -> dict[str, str | None]:
     }
 
 
-def _restart_bridge_home(runtime: Any):
-    orchestrator = getattr(runtime, "orchestrator", None)
-    paths = getattr(orchestrator, "paths", None)
-    bridge_home = getattr(paths, "bridge_home", None)
-    return bridge_home or remote_rescue.ROOT
-
-
-def _build_watchtower_restart_payload(runtime: Any, *, human_source: str, reason: str) -> dict[str, Any]:
-    source = str(human_source or "").strip().lower()
-    if source not in ALLOWED_HUMAN_RESTART_SOURCES:
-        raise ValueError(f"unsupported human restart source: {human_source}")
-    notify_agent = str(getattr(runtime, "name", "") or "").strip().lower()
-    if not notify_agent:
+def _build_watchtower_restart_payload(
+    runtime: Any, *, request_source: str, reason: str
+) -> dict[str, Any]:
+    source = str(request_source or "").strip().lower()
+    if source not in ALLOWED_RESTART_SOURCES:
+        raise ValueError(f"unsupported restart source: {request_source}")
+    requester_agent = str(getattr(runtime, "name", "") or "").strip().lower()
+    if not requester_agent:
         raise ValueError("runtime name is required for restart notification")
-    bridge_home = _restart_bridge_home(runtime)
-    secret = load_human_restart_secret(bridge_home, remote_rescue.ROOT)
-    if not secret:
-        secret_path = human_restart_secret_path(bridge_home)
-        raise RuntimeError(
-            "human restart secret is not configured; set HASHI_HUMAN_RESTART_SECRET "
-            f"or create {secret_path} with the same value configured in WatchTower"
-        )
-    requester = str(remote_rescue._default_instance_id() or "").strip().upper()
-    proof = build_human_restart_proof(
-        secret,
-        requester=requester,
-        reason=reason,
-        human_source=source,
-        notify_agent=notify_agent,
-    )
+    target_instance = str(_instance_id(runtime) or "").strip().upper()
+    if not target_instance:
+        raise ValueError("target instance is required for restart")
     return {
         "reason": reason,
-        "human_source": source,
-        "notify_agent": notify_agent,
-        "notify_via": "telegram",
-        "human_restart_proof": proof,
+        "target_instance": target_instance,
+        "request_source": source,
+        "requester_agent": requester_agent,
+        "notify_agent": requester_agent,
+        "notify_via": source,
     }
+
+
+def _verified_restart_receipt(
+    payload: dict[str, Any], *, expected_target: str
+) -> tuple[bool, str]:
+    if payload.get("ok") is not True or payload.get("state") != "completed":
+        return False, str(
+            payload.get("error") or "restart did not reach a completed terminal state"
+        )
+    target = str(payload.get("target_instance") or "").strip().upper()
+    if target != str(expected_target or "").strip().upper():
+        return False, "restart terminal receipt target does not match the request"
+    evidence = payload.get("evidence") or {}
+    required = (
+        "old_pid_exited",
+        "new_pid_alive",
+        "new_pid_differs",
+        "backend_health_ok",
+        "instance_matches",
+        "runtime_version_verified",
+        "generation_verified",
+    )
+    missing = [key for key in required if evidence.get(key) is not True]
+    old_pid = evidence.get("old_pid")
+    new_pid = evidence.get("new_pid")
+    if missing or not isinstance(old_pid, int) or not isinstance(new_pid, int):
+        detail = ", ".join(missing) or "PID evidence"
+        return False, f"restart terminal evidence is incomplete: {detail}"
+    if old_pid == new_pid:
+        return False, "restart terminal evidence reused the old PID"
+    if not isinstance(evidence.get("runtime_version"), dict):
+        return False, "restart terminal evidence is missing the runtime version"
+    if not str(evidence.get("generation_id") or "").strip():
+        return False, "restart terminal evidence is missing the Function generation"
+    if str(evidence.get("actual_instance") or "").strip().upper() != target:
+        return False, "restart terminal evidence contains the wrong instance identity"
+    return True, "ok"
+
+
+def _restart_completed_text(payload: dict[str, Any]) -> str:
+    evidence = payload.get("evidence") or {}
+    return ui_language.tr(
+        "api.restart.completed",
+        instance=str(payload.get("target_instance") or "HASHI"),
+        old_pid=str(evidence.get("old_pid") or "?"),
+        new_pid=str(evidence.get("new_pid") or "?"),
+        generation=str(evidence.get("generation_id") or "unknown"),
+        restart_id=str(payload.get("restart_id") or "unknown"),
+    )
 
 
 def _watchtower_address() -> str:
@@ -300,10 +338,11 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
         )
         return
     try:
+        request_source = _restart_request_source(context)
         request_payload = _build_watchtower_restart_payload(
             runtime,
-            human_source="telegram",
-            reason="telegram /restart hard restart",
+            request_source=request_source,
+            reason=f"{request_source} /restart hard restart",
         )
     except Exception as exc:
         logger.warning("Failed to build Telegram restart payload: %s", exc)
@@ -346,7 +385,7 @@ async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, reques
                 WATCHTOWER_INSTANCE,
                 reason=request_payload.get("reason"),
                 extra_payload=request_payload,
-                timeout=15,
+                timeout=25,
                 **_restart_auth_kwargs(),
             )
         except Exception as exc:
@@ -365,6 +404,21 @@ async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, reques
                     chat_id,
                     ui_language.tr("api.restart.failed", reason=str(detail)),
                 )
+            return
+        verified, detail = _verified_restart_receipt(
+            payload,
+            expected_target=str(request_payload.get("target_instance") or ""),
+        )
+        if not verified:
+            logger.warning("WatchTower returned an unverified restart result: %s", detail)
+            if chat_id is not None:
+                await runtime._send_text(
+                    chat_id,
+                    ui_language.tr("api.restart.failed", reason=detail),
+                )
+            return
+        if chat_id is not None:
+            await runtime._send_text(chat_id, _restart_completed_text(payload))
     finally:
         setattr(runtime, "_watchtower_restart_inflight", False)
 
@@ -498,7 +552,7 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
         try:
             request_payload = _build_watchtower_restart_payload(
                 runtime,
-                human_source="telegram",
+                request_source="telegram",
                 reason="telegram /restart hard restart",
             )
         except Exception as exc:
@@ -528,7 +582,9 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
 
 async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /restart hard restart") -> tuple[bool, str]:
     try:
-        request_payload = _build_watchtower_restart_payload(runtime, human_source="whatsapp", reason=reason)
+        request_payload = _build_watchtower_restart_payload(
+            runtime, request_source="whatsapp", reason=reason
+        )
     except Exception as exc:
         logger.warning("Failed to build WhatsApp restart payload: %s", exc)
         return False, str(exc)
@@ -538,7 +594,7 @@ async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /res
             WATCHTOWER_INSTANCE,
             reason=request_payload.get("reason"),
             extra_payload=request_payload,
-            timeout=15,
+            timeout=25,
             **_restart_auth_kwargs(),
         )
     except Exception as exc:
@@ -548,6 +604,12 @@ async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /res
         detail = payload.get("error") or payload.get("detail") or "remote error"
         logger.warning("WatchTower WhatsApp hard restart rejected: %s", detail)
         return False, str(detail)
+    verified, detail = _verified_restart_receipt(
+        payload,
+        expected_target=str(request_payload.get("target_instance") or ""),
+    )
+    if not verified:
+        return False, detail
     return True, str(payload.get("restart_id") or "restart requested")
 
 

@@ -243,13 +243,17 @@ async def test_execute_local_say_audits_voice_side_effect(
 
 
 @pytest.mark.asyncio
-async def test_execute_local_command_writes_blocked_restart_audit(tmp_path):
-    runtime = _Runtime(tmp_path)
+async def test_execute_local_command_writes_authorized_restart_audit(tmp_path):
+    class _RestartRuntime(_Runtime):
+        async def cmd_restart(self, update, context):
+            await update.message.reply_text("restart accepted")
+
+    runtime = _RestartRuntime(tmp_path)
     result = await execute_local_command(runtime, "/restart", chat_id=99)
-    assert result["ok"] is False
+    assert result["ok"] is True
     rows = _read_jsonl(default_audit_path(tmp_path))
-    assert rows[0]["status"] == "blocked"
-    assert rows[0]["blocked_reason"] == "human_only_restart"
+    assert rows[0]["status"] == "success"
+    assert rows[0]["source_channel"] == "workbench_api"
 
 
 @pytest.mark.asyncio

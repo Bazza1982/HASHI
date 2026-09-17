@@ -25,8 +25,7 @@ def _store(runtime):
 
 def _allowed(runtime, command):
     from orchestrator.admin_local_testing import supported_commands
-    # Preserve the existing local-admin boundary; /restart is Telegram human-only.
-    if command == "restart" or command not in supported_commands(runtime):
+    if command not in supported_commands(runtime):
         return False
     check = getattr(runtime, "_is_command_allowed", None)
     return not callable(check) or bool(check(command))

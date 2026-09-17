@@ -6,7 +6,8 @@ Usage:
     python tools/remote_rescue.py capabilities HASHI1
     python tools/remote_rescue.py status HASHI1
     python tools/remote_rescue.py start HASHI1 --reason "core down"
-    python tools/remote_rescue.py restart WATCHTOWER --reason "operator hard restart"
+    python tools/remote_rescue.py restart WATCHTOWER --target-instance HASHI3 --reason "operator hard restart"
+    python tools/remote_rescue.py restart-status WATCHTOWER rst_...
     python tools/remote_rescue.py reboot HASHI1 --agent zhaojun --mode min
 """
 
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -281,6 +283,7 @@ def rescue_restart(
     instance_id: str,
     *,
     reason: str | None = None,
+    target_instance: str | None = None,
     extra_payload: dict | None = None,
     token: str | None = None,
     shared_token: str | None = None,
@@ -288,7 +291,10 @@ def rescue_restart(
     timeout: int = 15,
 ) -> tuple[int, dict]:
     base_url = _reachable_base_url(instance_id, token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
-    payload = {"reason": reason}
+    payload = {
+        "reason": reason,
+        "target_instance": _normalize_instance_id(target_instance or instance_id),
+    }
     if isinstance(extra_payload, dict):
         payload.update(extra_payload)
     result = _request_json_status(
@@ -302,6 +308,44 @@ def rescue_restart(
     )
     if result.status == 404:
         return EXIT_UNSUPPORTED, _unsupported_payload(instance_id, "/control/hashi/restart", base_url)
+    payload = dict(result.body)
+    payload.setdefault("instance", _normalize_instance_id(instance_id))
+    payload.setdefault("base_url", base_url)
+    if result.status in {401, 403}:
+        return EXIT_FORBIDDEN, payload
+    return (0 if result.ok else EXIT_REMOTE_ERROR), payload
+
+
+def rescue_restart_status(
+    instance_id: str,
+    restart_id: str,
+    *,
+    token: str | None = None,
+    shared_token: str | None = None,
+    from_instance: str | None = None,
+    timeout: int = 5,
+) -> tuple[int, dict]:
+    base_url = _reachable_base_url(
+        instance_id,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+    )
+    safe_id = quote(str(restart_id or "").strip(), safe="")
+    result = _request_json_status(
+        f"{base_url}/control/hashi/restarts/{safe_id}",
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+    )
+    if result.status == 404 and result.body.get("error") != "restart record not found":
+        return EXIT_UNSUPPORTED, _unsupported_payload(
+            instance_id,
+            f"/control/hashi/restarts/{safe_id}",
+            base_url,
+        )
     payload = dict(result.body)
     payload.setdefault("instance", _normalize_instance_id(instance_id))
     payload.setdefault("base_url", base_url)
@@ -391,6 +435,15 @@ def main(argv: list[str] | None = None) -> int:
     restart = sub.add_parser("restart")
     restart.add_argument("instance", help="Target instance, e.g. WATCHTOWER")
     restart.add_argument("--reason", default="remote hard restart", help="Audit reason recorded by target Remote")
+    restart.add_argument(
+        "--target-instance",
+        default=None,
+        help="Controlled HASHI identity when the Remote controller has a different id",
+    )
+
+    restart_status = sub.add_parser("restart-status")
+    restart_status.add_argument("instance", help="Remote controller instance")
+    restart_status.add_argument("restart_id", help="Durable restart receipt id")
 
     reboot = sub.add_parser("reboot")
     reboot.add_argument("instance", help="Target instance, e.g. HASHI1")
@@ -423,7 +476,11 @@ def main(argv: list[str] | None = None) -> int:
             _print_result(payload, as_json=args.json)
             return code
         if args.cmd == "restart":
-            code, payload = rescue_restart(args.instance, reason=args.reason, token=args.token, shared_token=None if args.token else args.shared_token, from_instance=args.from_instance, timeout=max(args.timeout, 15))
+            code, payload = rescue_restart(args.instance, reason=args.reason, target_instance=args.target_instance, token=args.token, shared_token=None if args.token else args.shared_token, from_instance=args.from_instance, timeout=max(args.timeout, 25))
+            _print_result(payload, as_json=args.json)
+            return code
+        if args.cmd == "restart-status":
+            code, payload = rescue_restart_status(args.instance, args.restart_id, token=args.token, shared_token=None if args.token else args.shared_token, from_instance=args.from_instance, timeout=args.timeout)
             _print_result(payload, as_json=args.json)
             return code
         if args.cmd == "reboot":
