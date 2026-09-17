@@ -219,6 +219,7 @@ async def test_third_identical_query_warns_and_writes_one_row_per_call(
     assert set(rows[0]) == {
         "timestamp",
         "task_id",
+        "request_id",
         "call_id",
         "stage",
         "model",

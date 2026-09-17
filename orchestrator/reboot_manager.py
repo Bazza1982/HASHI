@@ -302,9 +302,25 @@ class RebootManager:
             self.delivery_task = None
 
     def _finish(self, record, status, **fields):
+        lifecycle_state = fields.pop("lifecycle_state", None)
+        if lifecycle_state is None:
+            if status == "succeeded":
+                lifecycle_state = "online"
+            elif status == "failed" and fields.get("restored"):
+                lifecycle_state = "rolled_back"
+            elif status == "rejected" and fields.get("reason") == "candidate_rejected":
+                lifecycle_state = "candidate_rejected"
+            elif status == "rejected":
+                lifecycle_state = "rejected"
+            else:
+                lifecycle_state = "unconfirmed"
         try:
             self.receipts.update(
-                record["id"], status=status, phase="finished", **fields
+                record["id"],
+                status=status,
+                phase="finished",
+                lifecycle_state=lifecycle_state,
+                **fields,
             )
             bridge_logger.info(
                 "Reboot result: operation=%s status=%s reason=%s",
@@ -319,21 +335,75 @@ class RebootManager:
             )
 
     @staticmethod
-    async def _online(client):
-        if not client.process.is_alive():
-            return False
+    async def _online_evidence(client, *, old_client=None):
+        generation = getattr(client, "generation", None)
+        receipt = getattr(generation, "receipt", None)
+        expected_runtime = str(
+            getattr(getattr(receipt, "runtime", None), "runtime_id", "") or ""
+        )
+        source_commit = str(getattr(receipt, "source_commit", "") or "")
+        old_pid = getattr(old_client, "pid", None)
+        new_pid = getattr(client, "pid", None)
+        process_alive = bool(client.process.is_alive())
+        old_exited = old_client is None or not old_client.process.is_alive()
+        evidence = {
+            "old_pid": old_pid,
+            "new_pid": new_pid,
+            "observed_pid": None,
+            "pid_changed": old_pid is None or new_pid != old_pid,
+            "old_exited": old_exited,
+            "generation_id": str(getattr(client, "generation_id", "") or ""),
+            "observed_generation_id": None,
+            "source_commit": source_commit or None,
+            "runtime_id": expected_runtime or None,
+            "observed_runtime_id": None,
+            "observed_agent": None,
+            "agent_matches": False,
+            "process_alive": process_alive,
+            "active": False,
+            "accepting": False,
+            "backend_ready": False,
+            "startup_success": False,
+            "online": False,
+        }
+        if not process_alive:
+            return evidence
         try:
             metadata = await client.call("worker.metadata", timeout=10)
-            return bool(
-                metadata.get("worker_phase") == "ACTIVE"
-                and metadata.get("worker_accepting")
-                and metadata.get("backend_ready")
-                and metadata.get("startup_success")
-                and metadata.get("worker_pid") == client.pid
-                and metadata.get("generation_id") == client.generation_id
+            evidence.update(
+                observed_pid=metadata.get("worker_pid"),
+                observed_generation_id=metadata.get("generation_id"),
+                observed_runtime_id=metadata.get("runtime_id"),
+                observed_agent=metadata.get("name"),
+                agent_matches=metadata.get("name") == client.agent_name,
+                active=metadata.get("worker_phase") == "ACTIVE",
+                accepting=bool(metadata.get("worker_accepting")),
+                backend_ready=bool(metadata.get("backend_ready")),
+                startup_success=bool(metadata.get("startup_success")),
+            )
+            evidence["online"] = bool(
+                evidence["pid_changed"]
+                and evidence["old_exited"]
+                and evidence["agent_matches"]
+                and evidence["active"]
+                and evidence["accepting"]
+                and evidence["backend_ready"]
+                and evidence["startup_success"]
+                and evidence["observed_pid"] == new_pid
+                and evidence["observed_generation_id"] == evidence["generation_id"]
+                and (
+                    not expected_runtime
+                    or evidence["observed_runtime_id"] == expected_runtime
+                )
             )
         except Exception:
-            return False
+            pass
+        return evidence
+
+    @staticmethod
+    async def _online(client):
+        evidence = await RebootManager._online_evidence(client)
+        return bool(evidence["online"])
 
     def reload_project_modules(self, module_names=None):
         del module_names
@@ -569,7 +639,12 @@ class RebootManager:
                 "failed verification; active Workers were not touched\033[0m\n",
                 flush=True,
             )
-            self._finish(record, "rejected", reason="candidate_rejected")
+            self._finish(
+                record,
+                "rejected",
+                lifecycle_state="candidate_rejected",
+                reason="candidate_rejected",
+            )
             return False
 
         old_clients: dict[str, FunctionWorkerClient] = {}
@@ -672,6 +747,7 @@ class RebootManager:
             self._finish(
                 record,
                 "failed",
+                lifecycle_state="rolled_back" if restored else "unconfirmed",
                 restored=restored,
                 online=restored_states,
                 reason=failure_reason,
@@ -690,9 +766,31 @@ class RebootManager:
             "generations": {
                 name: handles[name].generation_id for name in selected_targets
             },
+            "workers": {
+                name: {
+                    "old_pid": old_clients[name].pid,
+                    "new_pid": handles[name].worker_pid,
+                    "generation_id": handles[name].generation_id,
+                    "source_commit": str(
+                        getattr(
+                            getattr(handles[name].client.generation, "receipt", None),
+                            "source_commit",
+                            "",
+                        )
+                        or ""
+                    )
+                    or None,
+                }
+                for name in selected_targets
+            },
         }
         try:
-            self.receipts.update(record["id"], phase="committed", **committed)
+            self.receipts.update(
+                record["id"],
+                phase="committed",
+                lifecycle_state="committed",
+                **committed,
+            )
         except (OSError, ValueError):
             # Routes have changed. Continue retirement/readiness; this is never
             # a reason to destroy the new Workers or claim a rollback.
@@ -741,18 +839,27 @@ class RebootManager:
             f"{len(selected_targets)} isolated Worker(s) switched\033[0m\n",
             flush=True,
         )
-        states = dict(
+        evidence = dict(
             zip(
                 selected_targets,
                 await asyncio.gather(
-                    *(self._online(handles[name].client) for name in selected_targets)
+                    *(
+                        self._online_evidence(
+                            handles[name].client,
+                            old_client=old_clients[name],
+                        )
+                        for name in selected_targets
+                    )
                 ),
                 strict=True,
             )
         )
+        states = {name: bool(item["online"]) for name, item in evidence.items()}
+        committed["workers"] = evidence
         self._finish(
             record,
             "succeeded" if all(states.values()) else "unconfirmed",
+            lifecycle_state="online" if all(states.values()) else "unconfirmed",
             online=states,
             **committed,
             reason="" if all(states.values()) else "readiness",

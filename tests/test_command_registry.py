@@ -355,11 +355,28 @@ def test_admin_supported_commands_include_runtime_bound_native_commands():
 
 
 @pytest.mark.asyncio
-async def test_admin_local_command_blocks_human_restart_even_when_registered():
+async def test_admin_local_command_allows_supported_restart(monkeypatch):
     runtime = _FakeRuntime()
+    called = []
+
+    async def restart_callback(_runtime, update, context):
+        called.append((list(context.args), context.source_channel))
+        await update.message.reply_text("restart accepted")
+
+    monkeypatch.setattr(
+        "orchestrator.admin_local_testing.runtime_command_map",
+        lambda: {
+            "restart": RuntimeCommand(
+                name="restart",
+                description="Restart through supervised Remote",
+                callback=restart_callback,
+            )
+        },
+    )
 
     result = await execute_local_command(runtime, "/restart", chat_id=123)
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["command"] == "restart"
-    assert "human-only" in result["error"]
+    assert called == [([], "workbench_api")]
+    assert result["messages"][0]["text"] == "restart accepted"

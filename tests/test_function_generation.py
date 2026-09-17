@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import orchestrator.function_generation as function_generation
 from orchestrator.runtime_contract import enforce_runtime_contract
 from orchestrator.function_generation import (
     CandidateProbeReceipt,
@@ -26,6 +27,33 @@ from orchestrator.function_generation import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _git(root: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return completed.stdout.strip()
+
+
+def _commit_all(root: Path) -> str:
+    _git(root, "init", "-q")
+    _git(root, "add", "--all")
+    _git(
+        root,
+        "-c",
+        "user.name=HASHI Test",
+        "-c",
+        "user.email=hashi-test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "test fixture",
+    )
+    return _git(root, "rev-parse", "HEAD")
 
 
 def _source_module(name: str, source: Path) -> types.ModuleType:
@@ -155,6 +183,53 @@ def test_serialized_manifest_requires_current_schema(tmp_path):
         SourceManifest.from_mapping(invalid)
 
 
+def test_manifest_commit_gate_is_scoped_to_qualified_files(tmp_path):
+    package = tmp_path / "orchestrator"
+    package.mkdir()
+    source = package / "generation_demo.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    asset = package / "generation.json"
+    asset.write_text("{}\n", encoding="utf-8")
+    unrelated = tmp_path / "notes.md"
+    unrelated.write_text("first\n", encoding="utf-8")
+    expected_commit = _commit_all(tmp_path)
+    manifest = build_source_manifest(
+        ["orchestrator.generation_demo"],
+        code_root=tmp_path,
+    )
+
+    assert function_generation.verify_manifest_source_commit(
+        manifest,
+        code_root=tmp_path,
+    ) == expected_commit
+
+    unrelated.write_text("uncommitted but unrelated\n", encoding="utf-8")
+    assert function_generation.verify_manifest_source_commit(
+        manifest,
+        code_root=tmp_path,
+    ) == expected_commit
+
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(FunctionGenerationError, match="not committed"):
+        function_generation.verify_manifest_source_commit(
+            manifest,
+            code_root=tmp_path,
+        )
+
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    added_asset = package / "untracked.json"
+    added_asset.write_text("{}\n", encoding="utf-8")
+    expanded = build_source_manifest(
+        ["orchestrator.generation_demo"],
+        code_root=tmp_path,
+    )
+    with pytest.raises(FunctionGenerationError, match="not committed"):
+        function_generation.verify_manifest_source_commit(
+            expanded,
+            code_root=tmp_path,
+        )
+
+
 def test_candidate_import_guard_blocks_probe_side_effects_but_not_live_thread(tmp_path):
     probe_output = tmp_path / "probe.txt"
     live_output = tmp_path / "live.txt"
@@ -214,6 +289,10 @@ def test_default_hot_probe_does_not_seed_from_core_loaded_modules(monkeypatch):
             module_names=manifest.module_names,
             runtime=expected_runtime,
             probe_pid=os.getpid(),
+            source_commit=function_generation.verify_manifest_source_commit(
+                manifest,
+                code_root=code_root,
+            ),
         )
 
     kernel = types.SimpleNamespace(
@@ -233,18 +312,51 @@ def test_in_process_generation_commit_api_is_retired():
     assert not hasattr(generation, "prepare_function_generation")
 
 
-def test_isolated_probe_rejects_dependency_environment_drift_before_import():
+def test_isolated_probe_allows_unrelated_dependency_environment_drift():
     incompatible = dataclasses.replace(
         enforce_runtime_contract(ROOT),
         dependency_digest="sha256:" + "0" * 64,
     )
 
-    with pytest.raises(FunctionGenerationError, match="dependency_digest"):
-        run_candidate_probe(
+    receipt = run_candidate_probe(
+        code_root=ROOT,
+        module_names=(),
+        expected_runtime=incompatible,
+        timeout_seconds=20,
+    )
+
+    assert receipt.runtime.dependency_digest != incompatible.dependency_digest
+
+
+def test_candidate_runtime_rejects_locked_dependency_drift(monkeypatch):
+    runtime = enforce_runtime_contract(ROOT)
+
+    def reject_locked_dependencies(*_args, **_kwargs):
+        raise RuntimeError("locked dependency mismatch")
+
+    monkeypatch.setattr(
+        function_generation,
+        "validate_standard_dependencies",
+        reject_locked_dependencies,
+    )
+
+    with pytest.raises(RuntimeError, match="locked dependency mismatch"):
+        function_generation.compare_function_candidate_runtime(
+            runtime,
+            runtime,
             code_root=ROOT,
-            module_names=(),
-            expected_runtime=incompatible,
-            timeout_seconds=20,
+        )
+
+
+def test_candidate_runtime_still_rejects_hard_runtime_drift():
+    runtime = enforce_runtime_contract(ROOT)
+    incompatible = dataclasses.replace(runtime, function_api=runtime.function_api + 1)
+
+    with pytest.raises(Exception, match="function_api"):
+        function_generation.compare_function_candidate_runtime(
+            runtime,
+            incompatible,
+            code_root=ROOT,
         )
 
 

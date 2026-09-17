@@ -78,6 +78,7 @@ line.
 
 ### Core references
 
+- [HASHI_RUNTIME_PROTECTION_REBOOT_RECOVERY_PLAN_2026-09-17.md](HASHI_RUNTIME_PROTECTION_REBOOT_RECOVERY_PLAN_2026-09-17.md) — 已确认的重大修复边界：实例证据冻结、最小 PR 门禁、精确 live Core 保护、不可变 Function `/reboot`、简化 `/restart`、HER v2 禁改项及分阶段验收
 - [HASHI3_SMART_TOOL_TEXT_QUERY_PILOT_2026-09-13.md](HASHI3_SMART_TOOL_TEXT_QUERY_PILOT_2026-09-13.md) — HASHI3-only Smart Tool admission, bounded `log_query`, foreground safety-fuse implementation and verification record
 - [SMART_TOOL_REGISTRY.md](SMART_TOOL_REGISTRY.md) — HER v2 Smart Tool admission, typed results, specialised safe queries, repeat guidance, and Ledger contract
 - [HASHI_DOCUMENTATION_BETA_READINESS_2026-09-11.md](HASHI_DOCUMENTATION_BETA_READINESS_2026-09-11.md) — public-documentation cleanup, GitHub/npm status, package checks, FYI truncation fix, and remaining baseline test conflicts

@@ -354,18 +354,20 @@ async def test_her_v2_stream_guard_resets_on_meaningful_output_not_total_duratio
     tmp_path,
 ):
     adapter = _adapter(tmp_path, model="deepseek-flash")
-    adapter.set_her_v2_stream_inactivity_timeout(0.02)
+    # Keep a generous scheduler margin on Windows while still making the
+    # aggregate stream duration exceed one inactivity window.
+    adapter.set_her_v2_stream_inactivity_timeout(0.25)
 
     class _StreamResponse:
         def raise_for_status(self):
             return None
 
         async def aiter_lines(self):
-            await asyncio.sleep(0.012)
+            await asyncio.sleep(0.15)
             yield 'data: {"choices":[{"delta":{"content":"a"}}]}'
-            await asyncio.sleep(0.012)
+            await asyncio.sleep(0.15)
             yield 'data: {"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}'
-            await asyncio.sleep(0.012)
+            await asyncio.sleep(0.15)
             yield "data: [DONE]"
 
     class _StreamContext:
@@ -379,7 +381,7 @@ async def test_her_v2_stream_guard_resets_on_meaningful_output_not_total_duratio
 
     result = await asyncio.wait_for(
         adapter._stream_api_once({}, {}, None),
-        timeout=1.0,
+        timeout=2.0,
     )
 
     assert result.text == "ab"

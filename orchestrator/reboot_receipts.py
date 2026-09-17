@@ -16,6 +16,45 @@ MAX_BYTES = 128 * 1024
 MAX_DELIVERY_ATTEMPTS = 4
 ACTIVE = frozenset({"accepted", "running"})
 TERMINAL = frozenset({"succeeded", "failed", "rejected", "unconfirmed"})
+LIFECYCLE_STATES = frozenset(
+    {
+        "accepted",
+        "candidate_rejected",
+        "committed",
+        "rolled_back",
+        "online",
+        "rejected",
+        "unconfirmed",
+    }
+)
+RECEIPT_SCHEMA_VERSION = 2
+
+
+def _lifecycle_for(record):
+    status = record.get("status")
+    if status == "succeeded":
+        return "online"
+    if status == "unconfirmed":
+        return "unconfirmed"
+    if status == "failed":
+        return "rolled_back" if record.get("restored") else "unconfirmed"
+    if status == "rejected":
+        return (
+            "candidate_rejected"
+            if record.get("reason") == "candidate_rejected"
+            else "rejected"
+        )
+    if record.get("committed") or record.get("phase") == "committed":
+        return "committed"
+    return "accepted"
+
+
+def _normalize_record(record):
+    if not isinstance(record, dict):
+        raise ValueError("Invalid reboot receipt record")
+    record.setdefault("lifecycle_state", _lifecycle_for(record))
+    record.setdefault("workers", {})
+    return record
 
 
 def clean_origin(origin):
@@ -73,6 +112,8 @@ def validate_record(record):
             and isinstance(record["display_names"], dict)
             and isinstance(record["mode"], str)
             and record["status"] in ACTIVE | TERMINAL
+            and record["lifecycle_state"] in LIFECYCLE_STATES
+            and isinstance(record["workers"], dict)
             and record["delivery"]["status"]
             in {"pending", "sent", "exhausted", "not_requested"}
             and isinstance(record["delivery"]["attempts"], int)
@@ -101,7 +142,7 @@ class RebootReceipts:
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
                 if (
                     not isinstance(payload, dict)
-                    or payload.get("schema") != 1
+                    or payload.get("schema") not in {1, RECEIPT_SCHEMA_VERSION}
                     or not isinstance(payload.get("records"), list)
                 ):
                     raise ValueError("Invalid reboot receipt storage")
@@ -109,13 +150,17 @@ class RebootReceipts:
                 if len(records) > MAX_RECORDS:
                     raise ValueError("Too many reboot receipts")
                 for record in records:
+                    _normalize_record(record)
                     validate_record(record)
             self._records = records
             self._inherited_ids = {record["id"] for record in records}
         return deepcopy(self._records)
 
     def _save(self, records):
-        payload = {"schema": 1, "records": records}
+        for record in records:
+            _normalize_record(record)
+            validate_record(record)
+        payload = {"schema": RECEIPT_SCHEMA_VERSION, "records": records}
         while (
             len(records) > MAX_RECORDS
             or len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_BYTES
@@ -181,10 +226,12 @@ class RebootReceipts:
             "updated_at": now,
             "status": "accepted",
             "phase": "accepted",
+            "lifecycle_state": "accepted",
             "committed": False,
             "restored": None,
             "reason": "",
             "online": {},
+            "workers": {},
             "delivery": {
                 "status": (
                     "pending" if origin_delivery_requested(origin) else "not_requested"
@@ -199,6 +246,9 @@ class RebootReceipts:
     def update(self, operation_id, **changes):
         records = self.records()
         record = next(r for r in records if r["id"] == operation_id)
+        if "status" in changes and "lifecycle_state" not in changes:
+            projected = {**record, **changes}
+            changes["lifecycle_state"] = _lifecycle_for(projected)
         record.update(deepcopy(changes), updated_at=time.time())
         self._save(records)
         return deepcopy(record)
@@ -212,7 +262,10 @@ class RebootReceipts:
             changes = {}
             if record["status"] in ACTIVE:
                 changes.update(
-                    status="unconfirmed", phase="interrupted", reason="interrupted"
+                    status="unconfirmed",
+                    phase="interrupted",
+                    lifecycle_state="unconfirmed",
+                    reason="interrupted",
                 )
             if record["delivery"]["status"] == "pending":
                 changes["recovered"] = True

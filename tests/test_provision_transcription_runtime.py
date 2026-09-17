@@ -36,6 +36,14 @@ def test_runtime_python_path_does_not_dereference_a_venv_symlink(tmp_path):
     assert provisioner._absolute_path(python) != python.resolve()
 
 
+def test_transcription_lock_must_pin_every_probed_distribution(tmp_path):
+    lock = tmp_path / "transcription.lock"
+    lock.write_text("faster-whisper==1.2.1\n", encoding="utf-8")
+
+    with pytest.raises(provisioner.ProvisioningError, match="ctranslate2"):
+        provisioner._parse_lock_versions(lock)
+
+
 def test_provisioner_installs_and_probes_only_the_isolated_runtime(tmp_path, monkeypatch):
     bridge_home = tmp_path / "instance"
     runtime_dir = bridge_home / "state" / "runtimes" / "transcription" / "test"
@@ -43,7 +51,10 @@ def test_provisioner_installs_and_probes_only_the_isolated_runtime(tmp_path, mon
     base_python.parent.mkdir(parents=True)
     base_python.write_bytes(b"python")
     lock = tmp_path / "transcription.lock"
-    lock.write_text("faster-whisper==1.2.1\n", encoding="utf-8")
+    lock.write_text(
+        "faster-whisper==1.2.1\nctranslate2==4.7.1\nav==17.0.0\n",
+        encoding="utf-8",
+    )
     commands: list[list[str]] = []
 
     def run(command, **kwargs):
@@ -109,7 +120,10 @@ def test_failed_probe_does_not_publish_platform_config(tmp_path, monkeypatch):
     base_python = tmp_path / "python"
     base_python.write_bytes(b"python")
     lock = tmp_path / "transcription.lock"
-    lock.write_text("faster-whisper==1.2.1\n", encoding="utf-8")
+    lock.write_text(
+        "faster-whisper==1.2.1\nctranslate2==4.7.1\nav==17.0.0\n",
+        encoding="utf-8",
+    )
 
     def run(command, **kwargs):
         if "--probe" in [str(item) for item in command]:

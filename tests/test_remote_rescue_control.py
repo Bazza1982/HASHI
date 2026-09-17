@@ -324,8 +324,34 @@ def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
     client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
     states = iter(
         (
-            {"ok": True, "state": "starting_or_stuck", "hashi_running": False},
-            {"ok": True, "state": "running", "hashi_running": True},
+            {
+                "ok": True,
+                "state": "running",
+                "hashi_running": True,
+                "pid": 4141,
+                "pid_alive": True,
+                "workbench_health": {
+                    "ok": True,
+                    "ready": True,
+                    "instance_id": "HASHI_TEST",
+                    "runtime": {"core_api": "4", "function_api": "4"},
+                    "shared_functions": {"generation_id": "sha256:abc"},
+                },
+            },
+            {
+                "ok": True,
+                "state": "running",
+                "hashi_running": True,
+                "pid": 6161,
+                "pid_alive": True,
+                "workbench_health": {
+                    "ok": True,
+                    "ready": True,
+                    "instance_id": "HASHI_TEST",
+                    "runtime": {"core_api": "4", "function_api": "4"},
+                    "shared_functions": {"generation_id": "sha256:abc"},
+                },
+            },
         )
     )
     monkeypatch.setattr(
@@ -339,21 +365,120 @@ def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
         },
     )
     monkeypatch.setattr("remote.api.server._hashi_control_status", lambda: next(states))
+    monkeypatch.setattr("remote.api.server._process_exists", lambda pid: pid == 6161)
 
     response = client.post(
         "/control/hashi/restart",
-        json={"reason": "stuck provider loop"},
+        json={
+            "reason": "stuck provider loop",
+            "target_instance": "HASHI_TEST",
+            "requester_agent": "hashiko",
+            "request_source": "telegram",
+        },
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["restart_launched"] is True
-    assert body["pid"] == 5252
-    assert body["status"]["hashi_running"] is True
+    assert body["state"] == "completed"
+    assert body["target_instance"] == "HASHI_TEST"
+    assert body["evidence"]["old_pid"] == 4141
+    assert body["evidence"]["old_pid_exited"] is True
+    assert body["evidence"]["new_pid"] == 6161
+    assert body["evidence"]["new_pid_differs"] is True
+    assert body["evidence"]["backend_health_ok"] is True
+    assert body["evidence"]["instance_matches"] is True
+    assert body["evidence"]["runtime_version_verified"] is True
+    assert body["evidence"]["generation_verified"] is True
+
+    receipt = client.get(f"/control/hashi/restarts/{body['restart_id']}")
+    assert receipt.status_code == 200
+    assert receipt.json()["restart_id"] == body["restart_id"]
+    assert receipt.json()["state"] == "completed"
+
     audit_path = tmp_path / "logs" / "remote_rescue_audit.jsonl"
     record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
     assert record["operation"] == "restart"
-    assert record["outcome"] == "restart_launched"
+    assert record["outcome"] == "completed"
+    assert record["restart_id"] == body["restart_id"]
+
+
+def test_hashi_rescue_restart_rejects_wrong_target_before_launch(tmp_path, monkeypatch):
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(
+        "remote.api.server._restart_hashi_process",
+        lambda: pytest.fail("wrong target must be rejected before launch"),
+    )
+
+    response = client.post(
+        "/control/hashi/restart",
+        json={"reason": "wrong target", "target_instance": "HASHI_OTHER"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "restart_target_mismatch"
+
+
+def test_hashi_rescue_restart_fails_when_terminal_evidence_is_incomplete(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    before = {
+        "ok": True,
+        "state": "running",
+        "hashi_running": True,
+        "pid": 4141,
+        "pid_alive": True,
+        "workbench_health": {
+            "ok": True,
+            "ready": True,
+            "instance_id": "HASHI_TEST",
+            "runtime": {"core_api": "4"},
+            "shared_functions": {"generation_id": "sha256:abc"},
+        },
+    }
+    after = {
+        "ok": True,
+        "state": "starting_or_stuck",
+        "hashi_running": False,
+        "pid": 6161,
+        "pid_alive": True,
+        "workbench_health": None,
+    }
+    states = iter((before, after))
+    monkeypatch.setattr("remote.api.server._hashi_control_status", lambda: next(states))
+    monkeypatch.setattr("remote.api.server.RESTART_VERIFICATION_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr("remote.api.server._process_exists", lambda pid: pid == 6161)
+    monkeypatch.setattr(
+        "remote.api.server._restart_hashi_process",
+        lambda: {
+            "pid": 5252,
+            "command": ["fixed-launcher", "--force"],
+            "log_path": str(tmp_path / "logs" / "restart.log"),
+            "launcher_kind": "fixed-launcher",
+            "platform": "windows",
+        },
+    )
+
+    response = client.post(
+        "/control/hashi/restart",
+        json={"reason": "test", "target_instance": "HASHI_TEST"},
+    )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["state"] == "failed"
+    assert body["phase"] == "terminal_verification"
+    assert body["evidence"]["backend_health_ok"] is False
+    receipt = client.get(f"/control/hashi/restarts/{body['restart_id']}")
+    assert receipt.json()["state"] == "failed"
+
+
+def test_hashi_restart_receipt_rejects_path_traversal(tmp_path):
+    client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+
+    response = client.get("/control/hashi/restarts/not-a-restart-id")
+
+    assert response.status_code == 400
 
 
 def test_request_workbench_reboot_uses_authenticated_admin_endpoint(monkeypatch):

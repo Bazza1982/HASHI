@@ -333,6 +333,13 @@ diagnosis and journal de-duplication. HChat-origin failures are excluded so a
 failed diagnostic assignment cannot create a reporting loop. `/debug <request>`
 retains the separate one-shot strict-debug Skill behavior.
 
+`request_diagnostics` is the separate read-only evidence query. It joins one
+request's fail-open terminal projection with the existing Tool audit/Smart Tool
+ledger and BackgroundJob receipts. It reports Provider request/response IDs,
+wire references, observed writes/effects, final state, and whether safe retry
+evidence is present, absent, or unknown. It never retries work, changes HER v2
+control flow, or makes diagnostic persistence a completion condition.
+
 ### HASHI1 automatic debug-reporting trial (2026-09-13)
 
 - **Approval:** the user authorized this PAO/Functions change and live trial on

@@ -33,6 +33,7 @@ import re
 import socket
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 from urllib import request as urllib_request
@@ -173,6 +174,7 @@ TUI_PROXY_OPERATIONS = {
 TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
 TUI_PROXY_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+RESTART_VERIFICATION_TIMEOUT_SECONDS = 15.0
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -281,6 +283,11 @@ class HashiStartPayload(BaseModel):
 
 class HashiRestartPayload(BaseModel):
     reason: Optional[str] = None
+    target_instance: Optional[str] = None
+    requester_agent: Optional[str] = None
+    request_source: Optional[str] = None
+    notify_agent: Optional[str] = None
+    notify_via: Optional[str] = None
 
 
 class HashiRebootPayload(BaseModel):
@@ -953,6 +960,176 @@ def _sanitize_rescue_reason(reason: str | None, *, limit: int = 500) -> dict[str
     }
 
 
+_RESTART_ID_RE = re.compile(r"^rst_[0-9]{8}T[0-9]{6}Z_[a-f0-9]{12}$")
+_RUNTIME_VERSION_FIELDS = (
+    "python",
+    "platform_abi",
+    "core_api",
+    "function_api",
+    "worker_model",
+    "worker_protocol",
+    "generation_schema",
+    "dependency_digest",
+    "core_source_digest",
+)
+
+
+def _utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _new_restart_id() -> str:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return f"rst_{stamp}_{uuid.uuid4().hex[:12]}"
+
+
+def _restart_records_dir() -> Path:
+    if not _control_hashi_root:
+        raise ValueError("Hashi root is unavailable")
+    return Path(_control_hashi_root) / "state" / "restarts"
+
+
+def _restart_record_path(restart_id: str) -> Path:
+    value = str(restart_id or "").strip()
+    if not _RESTART_ID_RE.fullmatch(value):
+        raise ValueError("invalid restart id")
+    return _restart_records_dir() / f"{value}.json"
+
+
+def _write_restart_record(record: dict[str, Any]) -> dict[str, Any]:
+    value = dict(record)
+    value["updated_at"] = _utc_timestamp()
+    path = _restart_record_path(str(value.get("restart_id") or ""))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return value
+
+
+def _read_restart_record(restart_id: str) -> dict[str, Any]:
+    path = _restart_record_path(restart_id)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ValueError("restart record is unreadable") from exc
+    if not isinstance(value, dict) or value.get("restart_id") != restart_id:
+        raise ValueError("restart record is invalid")
+    return value
+
+
+def _controlled_instance_id(status: dict[str, Any] | None = None) -> str:
+    health = (status or {}).get("workbench_health") or {}
+    value = str(health.get("instance_id") or "").strip().upper()
+    if value:
+        return value
+    if _control_hashi_root:
+        config_path = Path(_control_hashi_root) / "agents.json"
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            global_config = config.get("global") if isinstance(config, dict) else None
+            value = str((global_config or {}).get("instance_id") or "").strip().upper()
+        except (OSError, ValueError):
+            value = ""
+        if value:
+            return value
+    return str(_instance_info.get("instance_id") or "HASHI").strip().upper()
+
+
+def _runtime_version(status: dict[str, Any]) -> dict[str, Any]:
+    health = status.get("workbench_health") or {}
+    runtime = health.get("runtime") or {}
+    if not isinstance(runtime, dict):
+        return {}
+    return {
+        key: runtime.get(key)
+        for key in _RUNTIME_VERSION_FIELDS
+        if runtime.get(key) not in (None, "")
+    }
+
+
+def _function_generation_id(status: dict[str, Any]) -> str:
+    health = status.get("workbench_health") or {}
+    function_generation = health.get("function_generation") or {}
+    shared_functions = health.get("shared_functions") or {}
+    return str(
+        (function_generation or {}).get("generation_id")
+        or (shared_functions or {}).get("generation_id")
+        or ""
+    ).strip()
+
+
+def _status_kernel_pid(status: dict[str, Any]) -> int | None:
+    value = status.get("pid")
+    if not isinstance(value, int) or value <= 0:
+        health = status.get("workbench_health") or {}
+        value = health.get("kernel_pid") if isinstance(health, dict) else None
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _restart_evidence(
+    status: dict[str, Any],
+    *,
+    old_pid: int | None,
+    target_instance: str,
+    expected_runtime: dict[str, Any],
+    expected_generation: str,
+) -> dict[str, Any]:
+    health = status.get("workbench_health") or {}
+    new_pid = _status_kernel_pid(status)
+    actual_instance = str(health.get("instance_id") or "").strip().upper()
+    runtime_version = _runtime_version(status)
+    generation_id = _function_generation_id(status)
+    backend_health_ok = bool(
+        status.get("hashi_running")
+        and isinstance(health, dict)
+        and health.get("ok") is True
+        and health.get("ready") is True
+    )
+    return {
+        "old_pid": old_pid,
+        "old_pid_exited": bool(old_pid and not _process_exists(old_pid)),
+        "new_pid": new_pid,
+        "new_pid_alive": bool(new_pid and _process_exists(new_pid)),
+        "new_pid_differs": bool(old_pid and new_pid and new_pid != old_pid),
+        "backend_health_ok": backend_health_ok,
+        "actual_instance": actual_instance or None,
+        "instance_matches": actual_instance == target_instance,
+        "runtime_version": runtime_version or None,
+        "runtime_version_verified": bool(
+            runtime_version
+            and (not expected_runtime or runtime_version == expected_runtime)
+        ),
+        "generation_id": generation_id or None,
+        "generation_verified": bool(
+            generation_id
+            and (not expected_generation or generation_id == expected_generation)
+        ),
+    }
+
+
+def _restart_evidence_complete(evidence: dict[str, Any]) -> bool:
+    return all(
+        evidence.get(key) is True
+        for key in (
+            "old_pid_exited",
+            "new_pid_alive",
+            "new_pid_differs",
+            "backend_health_ok",
+            "instance_matches",
+            "runtime_version_verified",
+            "generation_verified",
+        )
+    )
+
+
 def _hashi_start_command() -> list[str]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
@@ -1077,6 +1254,13 @@ def _append_rescue_audit(
     agent: str | None = None,
     mode: str | None = None,
     fallback_used: bool = False,
+    restart_id: str | None = None,
+    target_instance: str | None = None,
+    requester_agent: str | None = None,
+    request_source: str | None = None,
+    old_pid: int | None = None,
+    new_pid: int | None = None,
+    failure_stage: str | None = None,
 ) -> None:
     if not _control_hashi_root:
         return
@@ -1089,6 +1273,13 @@ def _append_rescue_audit(
         "agent": agent,
         "mode": mode,
         "fallback_used": bool(fallback_used),
+        "restart_id": restart_id,
+        "target_instance": target_instance,
+        "requester_agent": requester_agent,
+        "request_source": request_source,
+        "old_pid": old_pid,
+        "new_pid": new_pid,
+        "failure_stage": failure_stage,
         "reason": reason,
         "reason_truncated": bool(reason_truncated),
         "reason_original_length": reason_original_length,
@@ -1256,6 +1447,58 @@ def _forward_workbench_gateway_request(
             last_error = exc
             continue
     raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
+
+
+def _notify_restart_result(
+    *,
+    agent: str,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    """Best-effort completion notice; delivery never changes restart truth."""
+
+    normalized_agent = str(agent or "").strip()
+    if not normalized_agent:
+        return {"state": "not_requested"}
+    evidence = record.get("evidence") or {}
+    if record.get("state") == "completed":
+        text = (
+            f"HASHI restart verified for {record.get('target_instance')}. "
+            f"PID {evidence.get('old_pid')} -> {evidence.get('new_pid')}; "
+            f"generation {evidence.get('generation_id')}; "
+            f"receipt {record.get('restart_id')}."
+        )
+    else:
+        text = (
+            f"HASHI restart failed for {record.get('target_instance')} at "
+            f"{record.get('phase')}; receipt {record.get('restart_id')}."
+        )
+    body = json.dumps(
+        {"agent": normalized_agent, "text": text},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    try:
+        status, content, _headers = _forward_workbench_gateway_request(
+            method="POST",
+            api_path="admin/notify",
+            query="",
+            body_bytes=body,
+            request_headers={"content-type": "application/json"},
+            timeout=5.0,
+        )
+        response = json.loads(content.decode("utf-8")) if content else {}
+    except Exception as exc:
+        return {"state": "failed", "error": str(exc)}
+    if status >= 400 or not isinstance(response, dict) or response.get("ok") is not True:
+        return {
+            "state": "failed",
+            "status": status,
+            "error": str((response or {}).get("error") or f"HTTP {status}"),
+        }
+    return {
+        "state": "delivered",
+        "agent": normalized_agent,
+        "chat_id": response.get("chat_id"),
+    }
 
 
 def _fetch_workbench_json(
@@ -2605,12 +2848,79 @@ def create_app(
                     "error": "HASHI restart requires max_terminal_level=L3_RESTART",
                 },
             )
-        reason_meta = _sanitize_rescue_reason(payload.reason)
         before = _hashi_control_status()
+        reason_meta = _sanitize_rescue_reason(payload.reason)
+        restart_id = _new_restart_id()
+        target_instance = str(payload.target_instance or "").strip().upper()
+        controlled_instance = _controlled_instance_id(before)
+        old_pid = _status_kernel_pid(before)
+        record = _write_restart_record(
+            {
+                "schema_version": 1,
+                "ok": False,
+                "restart_id": restart_id,
+                "state": "accepted",
+                "phase": "target_validation",
+                "target_instance": target_instance,
+                "controlled_instance": controlled_instance,
+                "requester": client_id,
+                "requester_agent": str(payload.requester_agent or "").strip()
+                or None,
+                "request_source": str(payload.request_source or "").strip()
+                or None,
+                "reason": reason_meta["reason"],
+                "reason_truncated": reason_meta["truncated"],
+                "started_at": _utc_timestamp(),
+                "status_before": before,
+                "expected": {
+                    "instance_id": controlled_instance,
+                    "runtime_version": _runtime_version(before) or None,
+                    "generation_id": _function_generation_id(before) or None,
+                },
+                "evidence": None,
+                "error": None,
+            }
+        )
+        if not target_instance or target_instance != controlled_instance:
+            record.update(
+                {
+                    "state": "rejected",
+                    "phase": "target_validation",
+                    "completed_at": _utc_timestamp(),
+                    "error": "restart_target_mismatch",
+                }
+            )
+            record = _write_restart_record(record)
+            _append_rescue_audit(
+                requester=client_id,
+                reason=reason_meta["reason"],
+                reason_truncated=reason_meta["truncated"],
+                reason_original_length=reason_meta["original_length"],
+                outcome="rejected",
+                status=before,
+                error="restart_target_mismatch",
+                operation="restart",
+                restart_id=restart_id,
+                target_instance=target_instance,
+                requester_agent=record["requester_agent"],
+                request_source=record["request_source"],
+                old_pid=old_pid,
+                failure_stage="target_validation",
+            )
+            return JSONResponse(status_code=409, content=record)
         try:
             started = _restart_hashi_process()
         except Exception as exc:
             logger.exception("HASHI rescue restart failed")
+            record.update(
+                {
+                    "state": "failed",
+                    "phase": "launch",
+                    "completed_at": _utc_timestamp(),
+                    "error": str(exc),
+                }
+            )
+            record = _write_restart_record(record)
             _append_rescue_audit(
                 requester=client_id,
                 reason=reason_meta["reason"],
@@ -2620,41 +2930,112 @@ def create_app(
                 status=before,
                 error=str(exc),
                 operation="restart",
+                restart_id=restart_id,
+                target_instance=target_instance,
+                requester_agent=record["requester_agent"],
+                request_source=record["request_source"],
+                old_pid=old_pid,
+                failure_stage="launch",
             )
             return JSONResponse(
                 status_code=500,
-                content={"ok": False, "error": str(exc)},
+                content=record,
             )
-        deadline = time.monotonic() + 15.0
+        record.update(
+            {
+                "state": "verifying",
+                "phase": "terminal_verification",
+                "launcher": {
+                    "pid": started["pid"],
+                    "command": started["command"],
+                    "log_path": started["log_path"],
+                    "launcher_kind": started.get("launcher_kind"),
+                    "platform": started.get("platform"),
+                },
+            }
+        )
+        record = _write_restart_record(record)
+        deadline = time.monotonic() + RESTART_VERIFICATION_TIMEOUT_SECONDS
         status = _hashi_control_status()
-        while not status["hashi_running"] and time.monotonic() < deadline:
+        evidence = _restart_evidence(
+            status,
+            old_pid=old_pid,
+            target_instance=target_instance,
+            expected_runtime=record["expected"]["runtime_version"] or {},
+            expected_generation=record["expected"]["generation_id"] or "",
+        )
+        while not _restart_evidence_complete(evidence) and time.monotonic() < deadline:
             await asyncio.sleep(0.5)
             status = _hashi_control_status()
+            evidence = _restart_evidence(
+                status,
+                old_pid=old_pid,
+                target_instance=target_instance,
+                expected_runtime=record["expected"]["runtime_version"] or {},
+                expected_generation=record["expected"]["generation_id"] or "",
+            )
+        completed = _restart_evidence_complete(evidence)
+        record.update(
+            {
+                "ok": completed,
+                "state": "completed" if completed else "failed",
+                "phase": "completed" if completed else "terminal_verification",
+                "completed_at": _utc_timestamp(),
+                "status": status,
+                "evidence": evidence,
+                "error": None
+                if completed
+                else "restart_terminal_verification_failed",
+            }
+        )
+        record = _write_restart_record(record)
         _append_rescue_audit(
             requester=client_id,
             reason=reason_meta["reason"],
             reason_truncated=reason_meta["truncated"],
             reason_original_length=reason_meta["original_length"],
-            outcome="restart_launched",
+            outcome="completed" if completed else "verification_failed",
             command=started["command"],
             pid=started["pid"],
             log_path=started["log_path"],
             status=status,
             operation="restart",
+            restart_id=restart_id,
+            target_instance=target_instance,
+            requester_agent=record["requester_agent"],
+            request_source=record["request_source"],
+            old_pid=old_pid,
+            new_pid=evidence.get("new_pid"),
+            failure_stage=None if completed else "terminal_verification",
         )
-        return {
-            "ok": True,
-            "restart_launched": True,
-            "pid": started["pid"],
-            "command": started["command"],
-            "log_path": started["log_path"],
-            "launcher_kind": started.get("launcher_kind"),
-            "platform": started.get("platform"),
-            "reason": reason_meta["reason"],
-            "reason_truncated": reason_meta["truncated"],
-            "status_before": before,
-            "status": status,
-        }
+        if payload.notify_agent:
+            record["notification"] = await asyncio.to_thread(
+                _notify_restart_result,
+                agent=payload.notify_agent,
+                record=record,
+            )
+            record = _write_restart_record(record)
+        if not completed:
+            return JSONResponse(status_code=503, content=record)
+        return record
+
+    @app.get("/control/hashi/restarts/{restart_id}")
+    async def hashi_control_restart_record(request: Request, restart_id: str):
+        """Return one authenticated, path-safe durable restart record."""
+
+        _authenticate_rescue_control(request)
+        try:
+            return _read_restart_record(restart_id)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": str(exc)},
+            )
+        except FileNotFoundError:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "restart record not found"},
+            )
 
     @app.post("/control/hashi/reboot")
     async def hashi_control_reboot(request: Request, payload: HashiRebootPayload):

@@ -131,10 +131,9 @@ def _parse_lock_versions(lock_path: Path) -> dict[str, str]:
         version = version.split(";", 1)[0].strip()
         if normalized in required:
             versions[normalized] = version
-    if "faster-whisper" not in versions:
-        raise ProvisioningError(
-            "Transcription lock does not pin faster-whisper"
-        )
+    for name in REQUIRED_DISTRIBUTIONS:
+        if name.casefold() not in versions:
+            raise ProvisioningError(f"Transcription lock does not pin {name}")
     return versions
 
 

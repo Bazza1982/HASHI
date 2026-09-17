@@ -82,20 +82,17 @@ Worker model, protocol and generation schema
 
 `orchestrator.runtime_contract` loads and enforces this contract before normal
 project imports in `main.py`. Every probe and Worker recomputes the fingerprint
-with the same executable and must exactly match Core.
+with the same executable. ABI, runtime policy, protected Core, API and protocol
+fields must exactly match Core.
 
 The standard lock defines the Core runtime's required production packages. Its
-complete installed set is part of `dependency_digest`; Core and every Worker
-must therefore see the same stable environment. An optional Function profile
-does not extend that environment. Native or conflicting packages live in an
-isolated sidecar selected by platform/instance configuration and communicate
-with a Function Worker through a bounded, versioned data protocol.
-
-The repository-local virtual environment may belong to a running Core, so the
-project declares `[tool.uv] managed = false`. Project-aware `uv run`, `uv lock`,
-and `uv sync` must not implicitly create or synchronize that environment.
-Diagnostics use the existing approved interpreter directly; isolated helpers
-use `uv run --no-project` or an explicitly separate environment.
+exact package versions must be present in Core, the isolated candidate probe
+and the new Worker. `dependency_digest` still records the complete installed
+set for diagnosis, but unrelated additional distributions do not reject a
+Function generation. A missing or changed locked package always does. Native
+or conflicting Function dependencies still live in an isolated sidecar
+selected by platform/instance configuration and communicate with a Function
+Worker through a bounded, versioned data protocol.
 
 The repository-local virtual environment may belong to a running Core, so the
 project declares `[tool.uv] managed = false`. Project-aware `uv run`, `uv lock`,
@@ -161,8 +158,11 @@ candidate cannot fetch, acknowledge or process it early.
 For `min`, a number, `same`, or `max`, the shared Function supervisor performs:
 
 1. Resolve an immutable target set. Invalid input fails without widening it.
-2. Qualify one generation in an isolated process.
-3. Materialize and verify its immutable artifact.
+2. Require every file in the Function manifest to be clean in local Git HEAD,
+   record that exact source commit, then qualify the generation in an isolated
+   process. Dirty files outside the manifest do not block qualification.
+3. Materialize and verify a content-addressed immutable artifact carrying that
+   source commit and the probe receipt.
 4. Spawn one READY candidate Worker for every selected Agent.
 5. Close only those stable route gates and wait for in-flight shared route calls.
 6. Quiesce the selected old Workers and their Agent-local ingress.
@@ -192,12 +192,14 @@ that aggregate state as `mixed`.
 - Candidate loses a previously working Telegram capability: reject it and
   resume the old Worker.
 - Source or Core changes after qualification: reject before pointer commit.
+- Staged, unstaged or untracked files inside the Function manifest: reject the
+  candidate; unrelated dirty files outside that manifest do not block it.
 - Unexpected active Worker exit: close only that Agent route, start the same
   immutable generation up to three times, then either restore it or leave the
   route explicitly failed.
-- Core/Python/Core-dependency/ABI change: reject `/reboot`; use a planned Core
-  migration. Optional Function dependencies are not permitted to create this
-  condition.
+- Core/Python/locked Core dependency/ABI change: reject `/reboot`; use a planned
+  Core migration. Unrelated extra packages are diagnostic information, not a
+  rejection condition.
 
 No failure silently expands a target set, changes another Agent, or turns an
 unknown state into a claimed rollback.

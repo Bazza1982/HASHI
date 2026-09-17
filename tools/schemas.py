@@ -46,7 +46,8 @@ TOOL_SCHEMAS = [
                         "exclusiveMinimum": 0,
                         "description": (
                             "Optional timeout in seconds for this command only. "
-                            "When omitted, the instance safety default applies (600 s); "
+                            "When omitted, the instance safety deadline is the configured "
+                            "default (600 s); "
                             "values above the hard cap (1800 s) are reduced to the cap."
                         ),
                     },
@@ -80,7 +81,8 @@ TOOL_SCHEMAS = [
                         "exclusiveMinimum": 0,
                         "description": (
                             "Optional timeout in seconds for this command only. "
-                            "When omitted, the instance safety default applies (600 s); "
+                            "When omitted, the instance safety deadline is the configured "
+                            "default (600 s); "
                             "values above the hard cap (1800 s) are reduced to the cap."
                         ),
                     },
@@ -2117,6 +2119,30 @@ TOOL_SCHEMAS.extend(
                             "default": 12000,
                         },
                     },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "request_diagnostics",
+                "description": (
+                    "Read the sanitised terminal state, Provider request/response IDs, "
+                    "tool actions, file writes, background-job receipts, and safe-retry "
+                    "evidence for one request. This is a read-only evidence projection; "
+                    "it never retries or changes the request."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "request_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Exact HASHI request identifier.",
+                        }
+                    },
+                    "required": ["request_id"],
                     "additionalProperties": False,
                 },
             },

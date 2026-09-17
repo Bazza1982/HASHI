@@ -37,6 +37,7 @@ class _Generation:
         self.receipt = SimpleNamespace(
             probe_pid=9001,
             runtime=SimpleNamespace(runtime_id="core-runtime"),
+            source_commit="f" * 40,
         )
         self.verify_error = verify_error
         self.verify_calls = 0
@@ -275,8 +276,32 @@ async def test_reboot_persists_truthful_final_receipt_before_notification(
     data = json.loads((tmp_path / "state/instance/reboot-receipts.json").read_text())
     record = data["records"][-1]
     assert record["status"] == ("rejected" if reject else "succeeded")
+    assert record["lifecycle_state"] == (
+        "candidate_rejected" if reject else "online"
+    )
     assert record["targets"] == ["zelda"]
     assert record["committed"] is (not reject)
+    if not reject:
+        assert record["workers"]["zelda"] == {
+            "old_pid": 101,
+            "new_pid": 201,
+            "observed_pid": 201,
+            "pid_changed": True,
+            "old_exited": True,
+            "generation_id": "sha256:" + "a" * 64,
+            "observed_generation_id": "sha256:" + "a" * 64,
+            "source_commit": "f" * 40,
+            "runtime_id": "core-runtime",
+            "observed_runtime_id": "core-runtime",
+            "observed_agent": "zelda",
+            "agent_matches": True,
+            "process_alive": True,
+            "active": True,
+            "accepting": True,
+            "backend_ready": True,
+            "startup_success": True,
+            "online": True,
+        }
     assert record["delivery"]["status"] != "sent"
 
 
@@ -518,6 +543,7 @@ async def test_old_worker_drain_failure_discards_candidate_and_reopens_route():
     record = manager.receipts.records()[-1]
     assert record["reason"] == "drain_failed"
     assert record["restored"] is True
+    assert record["lifecycle_state"] == "rolled_back"
 
 
 @pytest.mark.asyncio
@@ -713,6 +739,7 @@ async def test_post_commit_health_decides_receipt_without_false_rollback(
     assert await manager.hot_restart(kernel._restart_request)
     record = manager.receipts.records()[-1]
     assert record["status"] == ("succeeded" if ready else "unconfirmed")
+    assert record["lifecycle_state"] == ("online" if ready else "unconfirmed")
     assert record["committed"] and record["online"] == {"zelda": ready}
     assert kernel.runtimes[0].client is candidate and candidate.process.is_alive()
     assert not old.process.is_alive()

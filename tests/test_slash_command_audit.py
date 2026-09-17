@@ -243,13 +243,17 @@ async def test_execute_local_say_audits_voice_side_effect(
 
 
 @pytest.mark.asyncio
-async def test_execute_local_command_writes_blocked_restart_audit(tmp_path):
-    runtime = _Runtime(tmp_path)
+async def test_execute_local_command_writes_authorized_restart_audit(tmp_path):
+    class _RestartRuntime(_Runtime):
+        async def cmd_restart(self, update, context):
+            await update.message.reply_text("restart accepted")
+
+    runtime = _RestartRuntime(tmp_path)
     result = await execute_local_command(runtime, "/restart", chat_id=99)
-    assert result["ok"] is False
+    assert result["ok"] is True
     rows = _read_jsonl(default_audit_path(tmp_path))
-    assert rows[0]["status"] == "blocked"
-    assert rows[0]["blocked_reason"] == "human_only_restart"
+    assert rows[0]["status"] == "success"
+    assert rows[0]["source_channel"] == "workbench_api"
 
 
 @pytest.mark.asyncio
@@ -271,28 +275,28 @@ def test_looks_like_and_parse_slash_command_text():
 
 def test_parse_slash_command_text_preserves_windows_paths():
     assert parse_slash_command_text(
-        "/workzone 2 C:\\Users\\thene\\projects\\HASHI4"
-    ) == ("workzone", ["2", "C:\\Users\\thene\\projects\\HASHI4"])
+        "/workzone 2 C:\\Users\\Example\\Projects\\HASHI4"
+    ) == ("workzone", ["2", "C:\\Users\\Example\\Projects\\HASHI4"])
     assert parse_slash_command_text(
-        "/worzone 2 C:\\Users\\thene\\projects\\HASHI4"
-    ) == ("worzone", ["2", "C:\\Users\\thene\\projects\\HASHI4"])
+        "/worzone 2 C:\\Users\\Example\\Projects\\HASHI4"
+    ) == ("worzone", ["2", "C:\\Users\\Example\\Projects\\HASHI4"])
 
 
 def test_split_slash_command_words_unified_non_posix():
     assert split_slash_command_words(
-        "workzone 2 C:\\Users\\thene\\projects\\HASHI4"
-    ) == ["workzone", "2", "C:\\Users\\thene\\projects\\HASHI4"]
+        "workzone 2 C:\\Users\\Example\\Projects\\HASHI4"
+    ) == ["workzone", "2", "C:\\Users\\Example\\Projects\\HASHI4"]
     assert split_slash_command_words(
-        "workzone 2 C:\\Users\\thene\\projects\\HASHI4" + "\\"
-    ) == ["workzone", "2", "C:\\Users\\thene\\projects\\HASHI4\\"]
+        "workzone 2 C:\\Users\\Example\\Projects\\HASHI4" + "\\"
+    ) == ["workzone", "2", "C:\\Users\\Example\\Projects\\HASHI4\\"]
     assert split_slash_command_words('say "hello world"') == ["say", "hello world"]
     assert split_slash_command_words("say 'hello world'") == ["say", "hello world"]
     assert split_slash_command_words("say hello world") == ["say", "hello", "world"]
     assert split_slash_command_words("status") == ["status"]
     assert split_slash_command_words("") == []
     assert split_slash_command_words(
-        "debug C:\\Users\\thene\\projects\\HASHI3\\logs\\audit.jsonl"
-    ) == ["debug", "C:\\Users\\thene\\projects\\HASHI3\\logs\\audit.jsonl"]
+        "debug C:\\Users\\Example\\Projects\\HASHI3\\logs\\audit.jsonl"
+    ) == ["debug", "C:\\Users\\Example\\Projects\\HASHI3\\logs\\audit.jsonl"]
 
 
 def test_parse_inline_callback_command():
