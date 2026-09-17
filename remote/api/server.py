@@ -174,7 +174,8 @@ TUI_PROXY_OPERATIONS = {
 TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
 TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
 TUI_PROXY_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-RESTART_VERIFICATION_TIMEOUT_SECONDS = 15.0
+# Covers normal service stop/start and product readiness, not Agent turn work.
+RESTART_VERIFICATION_TIMEOUT_SECONDS = 120.0
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -1159,7 +1160,10 @@ def _hashi_start_command() -> list[str]:
 
 
 def _launch_hashi_process(
-    cmd: list[str], *, log_name: str
+    cmd: list[str],
+    *,
+    log_name: str,
+    detach_on_windows: bool = True,
 ) -> dict[str, Any]:
     if not _control_hashi_root:
         raise ValueError("Hashi root is unavailable")
@@ -1177,7 +1181,14 @@ def _launch_hashi_process(
         env = os.environ.copy()
         env.setdefault("HASHI_ENABLE_LEGACY_FIXED_RUNTIME", "1")
         kwargs["env"] = env
-        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        if detach_on_windows:
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+                subprocess,
+                "DETACHED_PROCESS",
+                0,
+            )
+        else:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if flags:
             kwargs["creationflags"] = flags
     else:
@@ -1276,9 +1287,15 @@ def _configured_windows_service_target() -> str | None:
 
 
 def _restart_hashi_process() -> dict[str, Any]:
+    command = _hashi_restart_command()
+    service_restart = any(
+        Path(value).name.casefold() == "hashi_service_ctl.ps1"
+        for value in command
+    )
     return _launch_hashi_process(
-        _hashi_restart_command(),
+        command,
         log_name="remote_rescue_hashi_restart.log",
+        detach_on_windows=not service_restart,
     )
 
 

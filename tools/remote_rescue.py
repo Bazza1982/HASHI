@@ -288,7 +288,7 @@ def rescue_restart(
     token: str | None = None,
     shared_token: str | None = None,
     from_instance: str | None = None,
-    timeout: int = 15,
+    timeout: int = 135,
 ) -> tuple[int, dict]:
     base_url = _reachable_base_url(instance_id, token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
     payload = {
@@ -476,7 +476,15 @@ def main(argv: list[str] | None = None) -> int:
             _print_result(payload, as_json=args.json)
             return code
         if args.cmd == "restart":
-            code, payload = rescue_restart(args.instance, reason=args.reason, target_instance=args.target_instance, token=args.token, shared_token=None if args.token else args.shared_token, from_instance=args.from_instance, timeout=max(args.timeout, 25))
+            code, payload = rescue_restart(
+                args.instance,
+                reason=args.reason,
+                target_instance=args.target_instance,
+                token=args.token,
+                shared_token=None if args.token else args.shared_token,
+                from_instance=args.from_instance,
+                timeout=max(args.timeout, 135),
+            )
             _print_result(payload, as_json=args.json)
             return code
         if args.cmd == "restart-status":

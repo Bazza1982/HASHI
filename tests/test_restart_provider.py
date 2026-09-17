@@ -247,6 +247,7 @@ def test_restart_via_peer_revalidates_before_post(monkeypatch):
         calls["restart"] += 1
         assert target == "HASHI2"
         assert kwargs["reason"] == "test"
+        assert kwargs["timeout"] == 135
         return 0, {"ok": True, "restart_launched": True}
 
     monkeypatch.setattr(restart_provider, "peer_restart_provider", _revalidate)
