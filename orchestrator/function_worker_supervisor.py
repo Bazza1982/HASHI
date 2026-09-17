@@ -91,10 +91,12 @@ def _artifact_manifest_path(root: Path) -> Path:
     return root / "function-generation.json"
 
 
-def verify_generation_artifact(
+def generation_artifact_source_commit(
     root: Path,
-    generation: VerifiedFunctionGeneration,
-) -> None:
+    manifest: SourceManifest | Mapping[str, Any],
+) -> str:
+    """Read validated source provenance from an immutable generation artifact."""
+
     root = Path(root).resolve()
     metadata_path = _artifact_manifest_path(root)
     if not metadata_path.is_file():
@@ -109,7 +111,12 @@ def verify_generation_artifact(
         raise FunctionWorkerError(
             f"Function generation artifact schema mismatch: {root}"
         )
-    if stored.get("manifest") != generation.manifest.to_dict():
+    expected_manifest = (
+        manifest.to_dict()
+        if isinstance(manifest, SourceManifest)
+        else SourceManifest.from_mapping(manifest).to_dict()
+    )
+    if stored.get("manifest") != expected_manifest:
         raise FunctionWorkerError(
             f"Function generation artifact manifest mismatch: {root}"
         )
@@ -120,6 +127,15 @@ def verify_generation_artifact(
         raise FunctionWorkerError(
             f"Function generation artifact source commit is invalid: {root}"
         )
+    return source_commit
+
+
+def verify_generation_artifact(
+    root: Path,
+    generation: VerifiedFunctionGeneration,
+) -> None:
+    root = Path(root).resolve()
+    generation_artifact_source_commit(root, generation.manifest)
     verify_qualified_manifest_bytes(generation.manifest, code_root=root)
 
 

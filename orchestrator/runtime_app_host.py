@@ -87,22 +87,31 @@ class RuntimeAppHost:
         self.app._load_config_bundle()
         self.app.kernel_pid = self.bootstrap["kernel_pid"]
         self.app.shared_generation_id = manifest["generation_id"]
-        from orchestrator.function_worker_supervisor import generation_from_dict
+        from orchestrator.function_worker_supervisor import (
+            generation_artifact_source_commit,
+            generation_from_dict,
+            verify_generation_artifact,
+        )
 
+        generation_root = Path(self.bootstrap["generation_root"])
+        source_commit = generation_artifact_source_commit(generation_root, manifest)
+        startup_generation = generation_from_dict(
+            {
+                "code_root": self.bootstrap["code_root"],
+                "manifest": manifest,
+                "receipt": {
+                    "generation_id": manifest["generation_id"],
+                    "module_names": [e["module"] for e in manifest["entries"]],
+                    "runtime": self.bootstrap["runtime"],
+                    "probe_pid": 0,
+                    "source_commit": source_commit,
+                },
+            }
+        )
+        verify_generation_artifact(generation_root, startup_generation)
         self.app._startup_artifact = (
-            generation_from_dict(
-                {
-                    "code_root": self.bootstrap["code_root"],
-                    "manifest": manifest,
-                    "receipt": {
-                        "generation_id": manifest["generation_id"],
-                        "module_names": [e["module"] for e in manifest["entries"]],
-                        "runtime": self.bootstrap["runtime"],
-                        "probe_pid": 0,
-                    },
-                }
-            ),
-            Path(self.bootstrap["generation_root"]),
+            startup_generation,
+            generation_root,
         )
         self.app._handoff_draining = True
         # This process is supervised; it must never exit around IPC cleanup.

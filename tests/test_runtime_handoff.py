@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,6 +110,65 @@ def test_recovery_retains_mixed_agent_versions_selected_set_and_latest_offsets(
     )
     with pytest.raises(ValueError, match="outside"):
         runtime_handoff.agent_artifacts(app, handoff)
+
+
+@pytest.mark.asyncio
+async def test_runtime_host_retains_artifact_source_commit(tmp_path, monkeypatch):
+    from orchestrator import (
+        bootstrap_logging,
+        onboarding_gate,
+        pathing,
+        runtime_app,
+        runtime_app_host,
+    )
+
+    home = tmp_path / "instance"
+    runtime = enforce_runtime_contract(ROOT)
+    qualified = generation(tmp_path, home, "qualified", runtime)
+    app = SimpleNamespace(
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+        shutdown_manager=SimpleNamespace(start_exit_watchdog=lambda: None),
+        _load_config_bundle=lambda: None,
+    )
+
+    monkeypatch.setattr(runtime_app_host, "candidate_import_guard", nullcontext)
+    monkeypatch.setattr(runtime_app_host.importlib, "import_module", lambda _name: None)
+    monkeypatch.setattr(runtime_app_host, "validate_function_contract", lambda: None)
+    monkeypatch.setattr(runtime_app_host, "verify_artifact", lambda *_args: None)
+    monkeypatch.setattr(
+        pathing,
+        "build_bridge_paths",
+        lambda *_args, **_kwargs: SimpleNamespace(bridge_home=home),
+    )
+    monkeypatch.setattr(
+        runtime_app,
+        "UniversalOrchestrator",
+        lambda *_args, **_kwargs: app,
+    )
+    monkeypatch.setattr(bootstrap_logging, "configure_terminal_console", lambda *_args: None)
+    monkeypatch.setattr(onboarding_gate, "needs_onboarding", lambda _paths: False)
+
+    host = runtime_app_host.RuntimeAppHost(
+        None,
+        {
+            "manifest": qualified.generation.manifest.to_dict(),
+            "generation_root": str(qualified.generation_root),
+            "code_root": str(qualified.generation.code_root),
+            "bridge_home": str(home),
+            "runtime": runtime.to_dict(),
+            "kernel_pid": 123,
+            "arguments": {},
+        },
+    )
+
+    await host.prepare()
+
+    startup_generation, startup_root = app._startup_artifact
+    assert startup_root == qualified.generation_root
+    assert (
+        startup_generation.receipt.source_commit
+        == qualified.generation.receipt.source_commit
+    )
 
 
 @pytest.mark.asyncio
