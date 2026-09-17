@@ -168,3 +168,57 @@ async def test_agent_activation_persists_before_start_and_can_be_disabled(tmp_pa
     assert json.loads(disabled.text)["agent"]["is_active"] is False
     stored = json.loads(server.config_path.read_text(encoding="utf-8-sig"))
     assert stored["agents"][0]["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_add_agent_api_rejects_raw_config_and_publishes_public_intent(tmp_path):
+    server = _server(tmp_path, active=False)
+
+    rejected = await server.handle_admin_add_agent(
+        _Request(payload={"name": "unsafe", "backend": "codex-cli", "agent_cfg": {}})
+    )
+    assert rejected.status == 400
+    assert json.loads(rejected.text)["error_code"] == "invalid_request"
+
+    created = await server.handle_admin_add_agent(
+        _Request(
+            payload={
+                "name": "new-agent",
+                "display_name": "New Agent",
+                "backend": "codex-cli",
+                "model": "gpt-5.6-sol",
+                "effort": "medium",
+                "is_active": False,
+            }
+        )
+    )
+
+    assert created.status == 201
+    response = json.loads(created.text)
+    assert response["ok"] is True
+    assert response["agent"] == {
+        "name": "new-agent",
+        "display_name": "New Agent",
+        "is_active": False,
+        "active_backend": "codex-cli",
+    }
+    stored = read_config_json(server.config_path)
+    row = next(item for item in stored["agents"] if item["name"] == "new-agent")
+    assert row["is_active"] is False
+    assert row["allowed_backends"] == [
+        {"engine": "codex-cli", "model": "gpt-5.6-sol", "effort": "medium"}
+    ]
+    assert (tmp_path / "workspaces" / "new-agent" / "agent.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_add_agent_api_maps_duplicate_to_conflict(tmp_path):
+    server = _server(tmp_path, active=False)
+    request = _Request(payload={"name": "duplicate", "backend": "codex-cli"})
+
+    first = await server.handle_admin_add_agent(request)
+    second = await server.handle_admin_add_agent(request)
+
+    assert first.status == 201
+    assert second.status == 409
+    assert json.loads(second.text)["error_code"] == "agent_exists"
