@@ -12,14 +12,10 @@ from adapters.base import BackendResponse, TokenUsage
 from adapters.hashi_api import HashiApiAdapter
 from adapters.openrouter_api import OpenRouterAdapter, _APIResult
 from adapters.stream_events import (
-    DELIVERY_INTERNAL,
     DELIVERY_USER_COMMENTARY,
     KIND_COMMENTARY,
-    KIND_TOOL_END,
-    KIND_TOOL_START,
     StreamEvent,
 )
-from orchestrator.her_v2.models import Stage, StageRequest
 
 
 class _DummyToolRegistry:
@@ -214,48 +210,3 @@ async def test_openrouter_emits_interim_commentary_before_tool_calls(tmp_path):
     assert len(commentary_events) == 1
     assert commentary_events[0].summary == "正在复核状态并执行修复。"
     assert commentary_events[0].delivery_class == DELIVERY_USER_COMMENTARY
-
-
-@pytest.mark.asyncio
-async def test_her_v2_provider_capture_preserves_execution_commentary():
-    from adapters.her_v2_provider import HashiStageProvider
-
-    captured_events: list[StreamEvent] = []
-
-    async def outer_stream_cb(event: StreamEvent):
-        captured_events.append(event)
-
-    # Test the _capture logic directly
-    events_to_test = [
-        StreamEvent(
-            kind=KIND_COMMENTARY,
-            summary="月如开始按 Frontend Connector 边界落代码。",
-            delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="model_interim",
-        ),
-        StreamEvent(
-            kind=KIND_TOOL_START,
-            summary="Running tool",
-            delivery_class=DELIVERY_USER_COMMENTARY,  # should be downgraded to internal
-        ),
-        StreamEvent(
-            kind="voice_warning",
-            summary="Voice fallback",
-            delivery_class=DELIVERY_USER_COMMENTARY,  # allowed
-        ),
-    ]
-
-    # Verify filtering logic matching _capture
-    processed = []
-    for event in events_to_test:
-        if (
-            event.delivery_class == DELIVERY_USER_COMMENTARY
-            and event.kind not in {KIND_COMMENTARY, "voice_warning"}
-        ):
-            event.delivery_class = DELIVERY_INTERNAL
-        processed.append(event)
-
-    assert processed[0].delivery_class == DELIVERY_USER_COMMENTARY
-    assert processed[0].kind == KIND_COMMENTARY
-    assert processed[1].delivery_class == DELIVERY_INTERNAL
-    assert processed[2].delivery_class == DELIVERY_USER_COMMENTARY
