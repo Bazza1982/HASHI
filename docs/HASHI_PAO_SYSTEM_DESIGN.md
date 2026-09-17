@@ -339,6 +339,11 @@ ledger and BackgroundJob receipts. It reports Provider request/response IDs,
 wire references, observed writes/effects, final state, and whether safe retry
 evidence is present, absent, or unknown. It never retries work, changes HER v2
 control flow, or makes diagnostic persistence a completion condition.
+The query reconciles after the Turn ends, so a managed Job that finishes later
+updates the report without rewriting the terminal Run. Only a complete set of
+typed read-only Tool receipts may refine a coarse side-effect flag to “none
+observed”; writes and completed Jobs are retained as known effects, and missing
+or truncated evidence stays `unknown`.
 
 ### HASHI1 automatic debug-reporting trial (2026-09-13)
 

@@ -33,6 +33,30 @@ def _runtime(tmp_path: Path) -> SimpleNamespace:
     )
 
 
+def _write_smart_tool_receipt(
+    workspace: Path,
+    *,
+    request_id: str,
+    tool: str,
+    call_id: str,
+    status: str,
+    effect: str,
+    target: str = "",
+) -> None:
+    row = {
+        "timestamp": "2026-09-17T00:00:00.000Z",
+        "task_id": request_id,
+        "request_id": request_id,
+        "call_id": call_id,
+        "tool": tool,
+        "status": status,
+        "effect": effect,
+        "target": target,
+    }
+    with (workspace / "tool_ledger.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
 def test_backend_diagnostic_fields_keep_provider_request_response_and_wire_refs():
     response = BackendResponse(
         text="done",
@@ -156,12 +180,186 @@ async def test_request_diagnostic_query_joins_terminal_tools_and_background_hist
     assert report["tool_actions"][0]["request_id"] == "req-join"
     assert report["file_writes"][0]["target"] == "notes/result.txt"
     assert report["background_jobs"][0]["state"] == "succeeded"
+    assert report["reconciliation"]["request_completion"] == "not_completed"
+    assert report["reconciliation"]["effect_status"] == "observed"
     assert [event["state"] for event in report["background_jobs"][0]["history"]] == [
         "created",
         "starting",
         "running",
         "succeeded",
     ]
+
+
+def test_stream_failure_after_complete_read_only_receipts_has_safe_retry_evidence(
+    tmp_path: Path,
+):
+    runtime = _runtime(tmp_path)
+    runtime_debug_reporting.persist_terminal_diagnostic(
+        runtime,
+        "req-read-only",
+        {
+            "success": False,
+            "error": "provider stream ended",
+            "error_retryable": True,
+            "side_effects_possible": True,
+            "tool_call_count": 1,
+        },
+    )
+    _write_smart_tool_receipt(
+        tmp_path,
+        request_id="req-read-only",
+        tool="file_read",
+        call_id="call-read",
+        status="success",
+        effect="observed",
+    )
+
+    report = request_diagnostics.build_request_diagnostics(
+        workspace_dir=tmp_path,
+        request_id="req-read-only",
+    )
+
+    assert report["reconciliation"]["effect_status"] == "none_observed"
+    assert report["reconciliation"]["read_only_actions"] == [
+        {"tool_name": "file_read", "tool_call_id": "call-read"}
+    ]
+    assert report["safe_retry_evidence"]["status"] == "present"
+
+
+def test_stream_failure_after_file_write_reports_completed_effect(tmp_path: Path):
+    runtime = _runtime(tmp_path)
+    runtime_debug_reporting.persist_terminal_diagnostic(
+        runtime,
+        "req-write",
+        {
+            "success": False,
+            "error": "provider stream ended",
+            "error_retryable": True,
+            "side_effects_possible": True,
+            "tool_call_count": 1,
+        },
+    )
+    _write_smart_tool_receipt(
+        tmp_path,
+        request_id="req-write",
+        tool="file_write",
+        call_id="call-write",
+        status="success",
+        effect="changed",
+        target="notes/result.txt",
+    )
+
+    report = request_diagnostics.build_request_diagnostics(
+        workspace_dir=tmp_path,
+        request_id="req-write",
+    )
+
+    assert report["reconciliation"]["known_effects"] == [
+        {
+            "kind": "tool_change",
+            "tool_name": "file_write",
+            "tool_call_id": "call-write",
+            "target": "notes/result.txt",
+        }
+    ]
+    assert report["safe_retry_evidence"]["status"] == "absent"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_request_reconciles_background_job_that_finishes_later(
+    tmp_path: Path,
+):
+    runtime = _runtime(tmp_path)
+    runtime_debug_reporting.persist_terminal_diagnostic(
+        runtime,
+        "req-job",
+        {
+            "success": False,
+            "interrupted": True,
+            "tool_call_count": 1,
+            "side_effects_possible": True,
+        },
+    )
+    _write_smart_tool_receipt(
+        tmp_path,
+        request_id="req-job",
+        tool="background_job_start",
+        call_id="call-job",
+        status="success",
+        effect="unknown",
+    )
+    manager = BackgroundJobManager(tmp_path / "background_jobs")
+    await manager.start()
+    job = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "print('completed later')"],
+        origin={"request_id": "req-job"},
+        notify_on_complete=False,
+        trigger_agent_on_complete=False,
+    )
+    await manager._monitor_tasks[job.job_id]
+
+    report = request_diagnostics.build_request_diagnostics(
+        workspace_dir=tmp_path,
+        request_id="req-job",
+        background_jobs=manager.list(limit=20),
+        background_history={job.job_id: manager.history(job.job_id)},
+    )
+
+    assert report["background_jobs"][0]["state"] == "succeeded"
+    assert any(
+        effect["kind"] == "background_job_completed"
+        for effect in report["reconciliation"]["known_effects"]
+    )
+    assert report["safe_retry_evidence"]["status"] == "absent"
+
+
+def test_missing_tool_receipt_keeps_effect_and_retry_evidence_unknown(tmp_path: Path):
+    runtime = _runtime(tmp_path)
+    runtime_debug_reporting.persist_terminal_diagnostic(
+        runtime,
+        "req-missing",
+        {
+            "success": False,
+            "error_retryable": True,
+            "side_effects_possible": True,
+            "tool_call_count": 1,
+        },
+    )
+
+    report = request_diagnostics.build_request_diagnostics(
+        workspace_dir=tmp_path,
+        request_id="req-missing",
+    )
+
+    assert report["reconciliation"]["effect_status"] == "unknown"
+    assert "tool_receipts_incomplete" in report["reconciliation"][
+        "unknown_effect_reasons"
+    ]
+    assert report["safe_retry_evidence"]["status"] == "unknown"
+
+
+def test_unexplained_terminal_side_effect_flag_is_not_treated_as_safe(tmp_path: Path):
+    runtime = _runtime(tmp_path)
+    runtime_debug_reporting.persist_terminal_diagnostic(
+        runtime,
+        "req-coarse-effect",
+        {
+            "success": False,
+            "error_retryable": True,
+            "side_effects_possible": True,
+            "tool_call_count": 0,
+        },
+    )
+
+    report = request_diagnostics.build_request_diagnostics(
+        workspace_dir=tmp_path,
+        request_id="req-coarse-effect",
+    )
+
+    assert report["reconciliation"]["effect_status"] == "unknown"
+    assert report["safe_retry_evidence"]["status"] == "unknown"
 
 
 def test_debug_report_exposes_response_id_and_retry_evidence(tmp_path: Path):
