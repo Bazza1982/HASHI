@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -296,27 +297,31 @@ process.stdout.write(JSON.stringify({
     assert json.loads(result.stdout) == {"nested": True, "outside": False}
 
 
-def test_node_to_python_instance_list_is_read_only(node, tmp_path):
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HASHI_PYTHON": sys.executable,
-            "HASHI_REGISTRY_ROOT": str(tmp_path / "registry"),
-            "HASHI_DATA_ROOT": str(tmp_path / "data"),
-        }
-    )
+def test_node_to_python_instance_list_is_read_only(node):
+    # The instance registry is intentionally forbidden inside the installed
+    # program. Use the OS temp root even when pytest's basetemp is in-tree.
+    with tempfile.TemporaryDirectory(prefix="hashi-instance-list-") as directory:
+        temporary = Path(directory)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "HASHI_PYTHON": sys.executable,
+                "HASHI_REGISTRY_ROOT": str(temporary / "registry"),
+                "HASHI_DATA_ROOT": str(temporary / "data"),
+            }
+        )
 
-    result = subprocess.run(
-        [node, str(ROOT / "cli.js"), "instance", "list", "--json"],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
+        result = subprocess.run(
+            [node, str(ROOT / "cli.js"), "instance", "list", "--json"],
+            cwd=temporary,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
 
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["data"] == {"instances": []}
-    assert not (tmp_path / "registry").exists()
-    assert not (tmp_path / "data").exists()
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["data"] == {"instances": []}
+        assert not (temporary / "registry").exists()
+        assert not (temporary / "data").exists()

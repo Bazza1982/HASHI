@@ -881,6 +881,72 @@ class VoiceManager:
     def native_audio_enabled(self, terminal: str | None = None) -> bool:
         return self.native_policy_for_terminal(terminal)["mode"] == "native"
 
+    def set_native_terminal_override(
+        self,
+        terminal: str,
+        override: dict[str, object] | None,
+    ) -> dict:
+        """Persist one presentation-only terminal override safely."""
+
+        terminal_key = str(terminal or "").strip().casefold()
+        if not terminal_key:
+            raise RuntimeError("Terminal name is required.")
+        raw = dict(override or {})
+        allowed = {"mode", "reply_content", "retention_seconds"}
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            raise RuntimeError(
+                "Unsupported native terminal override: " + ", ".join(unknown)
+            )
+
+        normalized: dict[str, object] = {}
+        if "mode" in raw:
+            mode = str(raw["mode"] or "").strip().casefold()
+            mode = "native" if mode == "auto" else mode
+            if mode not in {"off", "tts", "native"}:
+                raise RuntimeError("Terminal mode must be off, tts, or native.")
+            normalized["mode"] = mode
+        if "reply_content" in raw:
+            aliases = {
+                "both": "audio_and_text",
+                "audio": "audio_only",
+                "text": "text_only",
+            }
+            content = str(raw["reply_content"] or "").strip().casefold()
+            content = aliases.get(content, content)
+            if content not in {"audio_and_text", "audio_only", "text_only"}:
+                raise RuntimeError("Reply content must be both, audio, or text.")
+            normalized["reply_content"] = content
+        if "retention_seconds" in raw:
+            retention_raw = str(raw["retention_seconds"] or "").strip().casefold()
+            if retention_raw in {"indefinite", "forever"}:
+                retention: int | str = "indefinite"
+            else:
+                try:
+                    retention = int(retention_raw)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "Terminal retention must be whole seconds or indefinite."
+                    ) from exc
+                if retention < 60:
+                    raise RuntimeError(
+                        "Terminal retention must be at least 60 seconds."
+                    )
+            normalized["retention_seconds"] = retention
+
+        def mutate(state: dict) -> None:
+            native = self._native_policy_from_state(state)
+            overrides = dict(native.get("terminal_overrides") or {})
+            if normalized:
+                overrides[terminal_key] = normalized
+            else:
+                overrides.pop(terminal_key, None)
+            native["terminal_overrides"] = overrides
+            state["native"] = native
+
+        self._update(mutate)
+        return self.native_policy_for_terminal(terminal_key)
+
     def set_native_mode(self, mode: str) -> str:
         return self.set_reply_mode(mode)
 

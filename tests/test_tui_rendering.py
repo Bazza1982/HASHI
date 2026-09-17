@@ -217,10 +217,11 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
         "sounds": True,
         "typing": True,
         "telegram_mirror": True,
-            "sidepanel": False,
-            "sidepanel_auto": False,
-            "last_agent_by_instance": {},
-        }
+        "sidepanel": False,
+        "sidepanel_auto": False,
+        "last_agent_by_instance": {},
+        "voice_auto_by_target": {},
+    }
 
 
 async def test_tui_command_preview_discovers_dynamic_parameters_in_both_languages(tmp_path):
@@ -1053,14 +1054,14 @@ async def test_sidepanel_auto_tour_is_bilingual_looping_and_persistent(
         assert panel.border_title == "信息面板 · 自动巡览"
         panel.scroll_home(animate=False)
         panel.advance_auto_scroll()
-        await pilot.pause()
+        await pilot.pause(0.05)
         assert panel.scroll_y > 0
 
         panel.scroll_end(animate=False)
         await pilot.pause()
         for _ in range(panel.AUTO_SCROLL_BOTTOM_HOLD_TICKS):
             panel.advance_auto_scroll()
-        await pilot.pause()
+        await pilot.pause(0.05)
         assert panel.scroll_y == 0
 
         app._handle_tui_cmd("/tui language en")

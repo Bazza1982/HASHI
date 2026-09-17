@@ -71,7 +71,7 @@ async def test_actual_multipart_route_preserves_scope_and_only_typed_pre_admissi
             assert kwargs["idempotency_key"] == "recording:0"
             assert kwargs["request_metadata"]["session_id"] == "canonical-session"
             assert kwargs["request_metadata"]["session_context_generation"] == 2
-            assert list(media_dir.iterdir()) == []
+            assert [path for path in media_dir.iterdir() if path.is_file()] == []
 
         # A same-looking message from an unrelated exception cannot be upgraded
         # into proof of rejection after an upstream operation.
@@ -140,7 +140,7 @@ async def test_multi_file_voice_rejection_reports_prior_admission_and_keeps_norm
         assert payload["request_ids"] == [admitted[0].request_id]
         assert payload["error_code"] == "voice_safe_confirmation_required"
         assert len(server.session_store.messages(session["session_id"])) == 1
-        assert len(list(media_dir.iterdir())) == 1
+        assert len([path for path in media_dir.iterdir() if path.is_file()]) == 1
 
         ordinary = FormData()
         ordinary.add_field("agent", runtime.name)

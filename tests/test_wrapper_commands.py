@@ -904,7 +904,8 @@ class FakeHandoffBuilder:
     def get_recent_rounds(self, max_rounds=10):
         return [[{"role": "user", "text": "Earlier question", "source": "text"}]]
 
-    def append_transcript(self, role, text, source="text"):
+    def append_transcript(self, role, text, source="text", metadata=None):
+        del metadata
         self.transcript.append((role, text, source))
 
     def refresh_recent_context(self):
