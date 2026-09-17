@@ -159,8 +159,10 @@ def test_start_can_send_shared_token_headers(monkeypatch):
 def test_restart_success_passes_reason(monkeypatch):
     monkeypatch.setattr(remote_rescue, "_load_instances", _instances)
     seen_payloads = []
+    seen_timeouts = []
 
     def fake_request(url, **kwargs):
+        seen_timeouts.append(kwargs["timeout"])
         if url.endswith("/health"):
             return remote_rescue.HttpResult(200, {"ok": True}, url)
         if url.endswith("/control/hashi/restart"):
@@ -176,6 +178,10 @@ def test_restart_success_passes_reason(monkeypatch):
     assert payload["restarted"] is True
     assert seen_payloads == [
         {"reason": "operator restart", "target_instance": "HASHI9"}
+    ]
+    assert seen_timeouts == [
+        remote_rescue.RESTART_REQUEST_TIMEOUT_SECONDS,
+        remote_rescue.RESTART_REQUEST_TIMEOUT_SECONDS,
     ]
 
 
