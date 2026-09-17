@@ -55,6 +55,7 @@ def test_activity_reports_retention_hole_instead_of_empty_complete_replay():
 async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp_path: Path):
     server = WorkbenchApiServer.__new__(WorkbenchApiServer)
     server.global_config = SimpleNamespace(instance_id="test", authorized_id=7, deployment_profile="personal")
+    server.config_path = tmp_path / "agents.json"
     server.session_store = SessionStore(tmp_path / "sessions.sqlite", instance_id="test")
     server._runtime_map = lambda: {}
     server._load_agent_rows = lambda: [{"name": "a", "workspace_dir": str(tmp_path)}]
@@ -444,6 +445,7 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
             "message_id": accepted.message_id,
             "attachment_id": "attachment-image",
         },
+        query={},
         headers={},
     )
 
@@ -489,6 +491,7 @@ async def test_transcript_image_attachment_is_bounded_to_visible_agent_media(
             "message_id": escaped_run.message_id,
             "attachment_id": "attachment-escaped",
         },
+        query={},
         headers={},
     )
     escaped = await server.handle_transcript_attachment(escaped_request)
@@ -601,6 +604,7 @@ async def test_staged_frontend_image_is_visible_through_transcript_route(
             "message_id": accepted.message_id,
             "attachment_id": staged["attachment_id"],
         },
+        query={},
         headers={},
     )
 
@@ -684,6 +688,7 @@ async def test_transcript_poll_rejects_invalid_message_cursor(
 def _server(tmp_path: Path):
     server = WorkbenchApiServer.__new__(WorkbenchApiServer)
     server.global_config = SimpleNamespace(instance_id="test", authorized_id=7, deployment_profile="personal")
+    server.config_path = tmp_path / "agents.json"
     server.session_store = SessionStore(tmp_path / "sessions.sqlite", instance_id="test")
     server._load_agent_rows = lambda: [{"name": "a", "workspace_dir": str(tmp_path)}]
     server._runtime_map = lambda: {}
