@@ -275,3 +275,18 @@ def test_digest_uses_backend_todo_as_planning_until_work_starts() -> None:
         )
     )
     assert digest.phase_label == "Execution"
+
+
+def test_digest_renders_antigravity_in_progress_line() -> None:
+    """Render-path proof for suggestion A: the agy init progress line must
+    produce a visible verbose row, not merely an emitted event."""
+    digest = ActivityDigest()
+    changed = digest.record(
+        StreamEvent(
+            kind=KIND_PROGRESS,
+            summary="Antigravity agent is still working on the request",
+            event_id="agy-init-1",
+        )
+    )
+    assert changed is True
+    assert digest.render_lines() == ["⏳ Waiting for a long-running operation"]

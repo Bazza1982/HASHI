@@ -163,3 +163,28 @@ def test_skill_detail_escapes_reference_and_reports_standard_package() -> None:
     assert "Use &lt;carefully&gt;." in text
     assert "Never expose A&amp;B." in text
     assert "debug&lt;strict&gt;" in text
+
+
+def test_think_menu_marks_unavailable_backend_visibility() -> None:
+    """/think must visibly state that the active backend exposes no reasoning."""
+    text = runtime_menu_views.thinking_output_text(
+        enabled=False,
+        her_backend=False,
+        reasoning_available=False,
+        commentary_available=False,
+        backend_name="antigravity-cli",
+    )
+    assert "antigravity-cli" in text
+    assert ("NOT EXPOSED" in text) or ("不暴露" in text)
+    assert ("reasoning stream" in text) or ("推理流" in text)
+
+
+def test_think_menu_omits_backend_fact_when_reasoning_available() -> None:
+    text = runtime_menu_views.thinking_output_text(
+        enabled=True,
+        her_backend=False,
+        reasoning_available=True,
+        commentary_available=False,
+        backend_name="openrouter-api",
+    )
+    assert "openrouter-api" not in text

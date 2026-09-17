@@ -341,6 +341,7 @@ def thinking_output_text(
     her_backend: bool,
     reasoning_available: bool,
     commentary_available: bool,
+    backend_name: str = "",
 ) -> str:
     """Render backend-aware reasoning ownership without growing the runtime."""
 
@@ -363,6 +364,8 @@ def thinking_output_text(
         consequence = _tr("menu.think.enabled_other")
     elif her_backend:
         consequence = _tr("menu.think.disabled_her")
+    elif not reasoning_available:
+        consequence = _tr("menu.think.unavailable_effect")
     else:
         consequence = _tr("menu.think.disabled_other")
     return setting_card(
@@ -377,6 +380,16 @@ def thinking_output_text(
                 )
             ),
             commentary_fact,
+            *(
+                (
+                    _fact(
+                        "menu.commentary.current_backend",
+                        f"<code>{html.escape(backend_name)}</code>",
+                    ),
+                )
+                if not reasoning_available and backend_name
+                else ()
+            ),
             _fact("common.saved", html.escape(_tr("menu.setting.workspace"))),
         ],
         consequence=consequence,

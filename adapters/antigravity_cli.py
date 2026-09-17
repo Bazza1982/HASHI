@@ -266,6 +266,17 @@ class AntigravityCLIAdapter(BaseBackend):
                 StreamEvent(kind=KIND_PROGRESS, summary="Antigravity task started"),
                 on_stream_event,
             )
+            # agy exposes no reasoning stream and its text deltas are
+            # DELIVERY_INTERNAL, so nothing above would render inside /verbose.
+            # Emit a progress line carrying the digest "still working" marker so
+            # the verbose panel shows a visible in-progress row for the turn.
+            self._emit_stream_event(
+                StreamEvent(
+                    kind=KIND_PROGRESS,
+                    summary="Antigravity agent is still working on the request",
+                ),
+                on_stream_event,
+            )
             return False, ""
 
         if etype == "step_update":

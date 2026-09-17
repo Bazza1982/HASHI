@@ -437,3 +437,28 @@ def test_global_config_exposes_agy_launch_mode_field():
 
     names = {f.name for f in fields(GlobalConfig)}
     assert "agy_launch_mode" in names
+
+
+def test_init_event_emits_verbose_renderable_progress(tmp_path):
+    """The init event must also emit a progress line the verbose digest can
+    actually render (its summary carries the digest "still working" marker)."""
+    from adapters.stream_events import KIND_PROGRESS
+
+    adapter = make_adapter(tmp_path)
+    events = []
+
+    async def collect(se):
+        events.append(se)
+
+    async def parse():
+        done, err = adapter._parse_stream_json_line(
+            '{"event": "init", "conversation_id": "abc-123"}', collect, []
+        )
+        assert done is False and err == ""
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    run(parse())
+    progresses = [e for e in events if e.kind == KIND_PROGRESS]
+    assert any(e.summary == "Antigravity task started" for e in progresses)
+    assert any("still working" in (e.summary or "") for e in progresses)

@@ -5929,6 +5929,7 @@ class FlexibleAgentRuntime:
             her_backend=self._is_her_commentary_backend(),
             reasoning_available=reasoning_available,
             commentary_available=commentary_available,
+            backend_name=str(getattr(self.config, "active_backend", "") or ""),
         )
 
     def _set_think_enabled(self, enabled: bool) -> None:

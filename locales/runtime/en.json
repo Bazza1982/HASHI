@@ -141,6 +141,7 @@
     "menu.think.enabled_other": "Shows genuine provider-returned reasoning when available. Model commentary stays under /commentary.",
     "menu.think.disabled_her": "HER provider reasoning is hidden; /commentary and /verbose are unaffected.",
     "menu.think.disabled_other": "Provider reasoning is hidden; /commentary, progress, and typing are unaffected.",
+  "menu.think.unavailable_effect": "The active backend does not expose a reasoning stream, so this toggle has no effect here. Final answers, commentary, and technical progress are unaffected.",
     "menu.setting.workspace": "workspace setting",
     "menu.setting.immediate_persistent_reboot": "Changes apply immediately and persist across reboot.",
     "menu.commentary.execution_mode": "HER execution mode",

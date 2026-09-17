@@ -141,6 +141,7 @@
     "menu.think.enabled_other": "在可用时仅显示服务方返回的真实推理；模型阶段说明仍由 /commentary 控制。",
     "menu.think.disabled_her": "HER 服务方推理已隐藏；/commentary 与 /verbose 不受影响。",
     "menu.think.disabled_other": "服务方推理已隐藏；/commentary、进度与输入状态不受影响。",
+  "menu.think.unavailable_effect": "当前后端不暴露推理流，此开关对其无效。最终回复、评论与技术进度不受影响。",
     "menu.setting.workspace": "工作区设置",
     "menu.setting.immediate_persistent_reboot": "更改立即生效，并在重启后继续保留。",
     "menu.commentary.execution_mode": "HER 执行模式",
