@@ -238,7 +238,7 @@ def restart_via_provider(
     reason: str,
     requester_agent: str | None = None,
     request_source: str | None = None,
-    timeout: int = 135,
+    timeout: int = remote_rescue.RESTART_REQUEST_TIMEOUT_SECONDS,
 ) -> tuple[int, dict[str, Any]]:
     """Revalidate the provider immediately before issuing the destructive request."""
 

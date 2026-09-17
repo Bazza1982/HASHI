@@ -232,6 +232,8 @@ Windows 服务型实例的补充边界：Remote 只读取本地 live-runtime pol
 
 H3 实测补充（2026-09-18）：Windows PowerShell 服务脚本若使用 `DETACHED_PROCESS`，可能只留下 launcher PID 而未执行服务控制；服务型路径必须改用无窗口、非 detached 子进程，并给正常的服务停止、启动和产品 readiness 留出独立验证窗口。该窗口只约束一次 restart 的健康确认，不属于 HER v2 的 turn、token、工具或上下文预算。
 
+H3 的连续现场样本从请求到最终 ready 约需 133–135 秒，120 秒会把随后正常上线的实例过早记为失败。终态验证窗口因此设为 240 秒，客户端请求为 270 秒并在 ready 后立即返回；不得以放宽 PID、身份、版本、Function 代际或健康条件来换取较快的成功回执。
+
 ### 阶段 5：只增强诊断证据，不大改 HER v2
 
 允许的唯一新增范围是可查询日志：

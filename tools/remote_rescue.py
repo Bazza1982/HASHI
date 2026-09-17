@@ -42,6 +42,7 @@ EXIT_REMOTE_ERROR = 1
 EXIT_LOCAL_ERROR = 2
 EXIT_UNSUPPORTED = 3
 EXIT_FORBIDDEN = 4
+RESTART_REQUEST_TIMEOUT_SECONDS = 270
 
 
 @dataclass
@@ -288,7 +289,7 @@ def rescue_restart(
     token: str | None = None,
     shared_token: str | None = None,
     from_instance: str | None = None,
-    timeout: int = 135,
+    timeout: int = RESTART_REQUEST_TIMEOUT_SECONDS,
 ) -> tuple[int, dict]:
     base_url = _reachable_base_url(instance_id, token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
     payload = {
@@ -483,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
                 token=args.token,
                 shared_token=None if args.token else args.shared_token,
                 from_instance=args.from_instance,
-                timeout=max(args.timeout, 135),
+                timeout=max(args.timeout, RESTART_REQUEST_TIMEOUT_SECONDS),
             )
             _print_result(payload, as_json=args.json)
             return code
