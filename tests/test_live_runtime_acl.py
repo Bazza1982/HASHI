@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+import orchestrator.live_runtime_acl as live_runtime_acl
 from orchestrator.live_runtime_acl import (
     NativeProtectionTarget,
     apply_posix_read_only,
@@ -92,6 +93,30 @@ def test_windows_acl_rejects_real_writes_and_restores_disposable_target(tmp_path
 
     child.write_text("restored\n", encoding="utf-8")
     assert child.read_text(encoding="utf-8") == "restored\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
+def test_windows_acl_installs_replacement_before_removing_inheritance(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "inherited-runtime"
+    root.mkdir()
+    calls: list[list[str]] = []
+
+    def record(command):
+        calls.append(command)
+        return "ok"
+
+    monkeypatch.setattr(live_runtime_acl, "_run_windows_acl", record)
+    apply_windows_read_only(
+        (NativeProtectionTarget(root, recursive=True, kind="runtime"),),
+        runtime_sid="S-1-5-21-1000",
+        lock_owner=False,
+    )
+
+    assert len(calls) == 1
+    assert calls[0].index("/grant:r") < calls[0].index("/inheritance:r")
 
 
 @pytest.mark.platform
