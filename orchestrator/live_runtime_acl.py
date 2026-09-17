@@ -33,7 +33,7 @@ def build_native_protection_targets(
         for path in policy.runtime_roots
     }
     for root in recursive_roots:
-        if root.parent == root or not (root / "pyvenv.cfg").is_file():
+        if root.parent == root or not _is_python_environment_root(root):
             raise ValueError(
                 f"live runtime root is not a validated Python environment: {root}"
             )
@@ -284,6 +284,47 @@ def _target_entries(target: NativeProtectionTarget) -> Iterable[Path]:
         for name in directories:
             yield base / name
     yield path
+
+
+def _is_python_environment_root(root: Path) -> bool:
+    """Accept a venv or an interpreter that reports this exact prefix."""
+
+    if (root / "pyvenv.cfg").is_file():
+        return True
+    candidates = (
+        root / "python.exe",
+        root / "Scripts" / "python.exe",
+        root / "bin" / "python3",
+        root / "bin" / "python",
+    )
+    for executable in candidates:
+        if not executable.is_file():
+            continue
+        kwargs: dict[str, object] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 10,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            result = subprocess.run(
+                [
+                    str(executable),
+                    "-I",
+                    "-c",
+                    "import pathlib, sys; print(pathlib.Path(sys.prefix).resolve())",
+                ],
+                **kwargs,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode != 0:
+            continue
+        reported = result.stdout.strip().splitlines()
+        if reported and _path_key(Path(reported[-1])) == _path_key(root):
+            return True
+    return False
 
 
 def _run_windows_acl(argv: Sequence[str]) -> str:
