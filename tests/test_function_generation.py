@@ -230,6 +230,31 @@ def test_manifest_commit_gate_is_scoped_to_qualified_files(tmp_path):
         )
 
 
+def test_manifest_excludes_gitignored_instance_assets(tmp_path):
+    package = tmp_path / "orchestrator"
+    package.mkdir()
+    source = package / "generation_demo.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("/exp/barry/\n", encoding="utf-8")
+    instance_asset = tmp_path / "exp" / "barry" / "training" / "state.json"
+    instance_asset.parent.mkdir(parents=True)
+    instance_asset.write_text('{"local": true}\n', encoding="utf-8")
+    expected_commit = _commit_all(tmp_path)
+
+    manifest = build_source_manifest(
+        ["orchestrator.generation_demo"],
+        code_root=tmp_path,
+    )
+
+    assert instance_asset.relative_to(tmp_path).as_posix() not in {
+        asset.relative_path for asset in manifest.assets
+    }
+    assert function_generation.verify_manifest_source_commit(
+        manifest,
+        code_root=tmp_path,
+    ) == expected_commit
+
+
 def test_candidate_import_guard_blocks_probe_side_effects_but_not_live_thread(tmp_path):
     probe_output = tmp_path / "probe.txt"
     live_output = tmp_path / "live.txt"
