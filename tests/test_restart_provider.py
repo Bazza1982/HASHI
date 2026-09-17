@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,12 +49,24 @@ def _supported_probe(instance: str, **_kwargs):
     }
 
 
-def test_peer_restart_provider_requires_accepted_handshake(monkeypatch, tmp_path):
-    state = tmp_path / "peers.json"
-    _write_peer_state(state, handshake="handshake_rejected")
+def _accepted_target_peer(*_args, **_kwargs):
+    return {
+        "instance_id": "HASHI1",
+        "properties": {"handshake_state": "handshake_accepted"},
+    }
+
+
+def _patch_peer_success(monkeypatch, state: Path) -> None:
     monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
     monkeypatch.setattr(restart_provider, "_peer_state_path", lambda _source: state)
     monkeypatch.setattr(restart_provider.remote_rescue, "probe_capabilities", _supported_probe)
+    monkeypatch.setattr(restart_provider, "_target_confirms_source_handshake", _accepted_target_peer)
+
+
+def test_peer_restart_provider_requires_accepted_handshake(monkeypatch, tmp_path):
+    state = tmp_path / "peers.json"
+    _write_peer_state(state, handshake="handshake_rejected")
+    _patch_peer_success(monkeypatch, state)
 
     with pytest.raises(restart_provider.RestartProviderError, match="not trusted"):
         restart_provider.peer_restart_provider("HASHI2")
@@ -62,9 +75,7 @@ def test_peer_restart_provider_requires_accepted_handshake(monkeypatch, tmp_path
 def test_peer_restart_provider_requires_handshake_capability(monkeypatch, tmp_path):
     state = tmp_path / "peers.json"
     _write_peer_state(state, capabilities=["rescue_control"])
-    monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
-    monkeypatch.setattr(restart_provider, "_peer_state_path", lambda _source: state)
-    monkeypatch.setattr(restart_provider.remote_rescue, "probe_capabilities", _supported_probe)
+    _patch_peer_success(monkeypatch, state)
 
     with pytest.raises(restart_provider.RestartProviderError, match="did not advertise rescue_restart"):
         restart_provider.peer_restart_provider("HASHI2")
@@ -73,14 +84,14 @@ def test_peer_restart_provider_requires_handshake_capability(monkeypatch, tmp_pa
 def test_peer_restart_provider_requires_live_rescue_restart(monkeypatch, tmp_path):
     state = tmp_path / "peers.json"
     _write_peer_state(state)
-    monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
-    monkeypatch.setattr(restart_provider, "_peer_state_path", lambda _source: state)
+    _patch_peer_success(monkeypatch, state)
     monkeypatch.setattr(
         restart_provider.remote_rescue,
         "probe_capabilities",
         lambda instance, **_kwargs: {
             "ok": True,
             "instance": instance,
+            "base_url": "http://127.0.0.1:8766",
             "capabilities": {"rescue_restart": False},
             "remote_supervisor": {"mode": "supervised"},
         },
@@ -93,14 +104,14 @@ def test_peer_restart_provider_requires_live_rescue_restart(monkeypatch, tmp_pat
 def test_peer_restart_provider_requires_supervised_remote(monkeypatch, tmp_path):
     state = tmp_path / "peers.json"
     _write_peer_state(state)
-    monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
-    monkeypatch.setattr(restart_provider, "_peer_state_path", lambda _source: state)
+    _patch_peer_success(monkeypatch, state)
     monkeypatch.setattr(
         restart_provider.remote_rescue,
         "probe_capabilities",
         lambda instance, **_kwargs: {
             "ok": True,
             "instance": instance,
+            "base_url": "http://127.0.0.1:8766",
             "capabilities": {"rescue_restart": True},
             "remote_supervisor": {"mode": "child"},
         },
@@ -110,12 +121,10 @@ def test_peer_restart_provider_requires_supervised_remote(monkeypatch, tmp_path)
         restart_provider.peer_restart_provider("HASHI2")
 
 
-def test_peer_restart_provider_accepts_supported_trusted_peer(monkeypatch, tmp_path):
+def test_peer_restart_provider_accepts_supported_bilateral_peer(monkeypatch, tmp_path):
     state = tmp_path / "peers.json"
     _write_peer_state(state)
-    monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
-    monkeypatch.setattr(restart_provider, "_peer_state_path", lambda _source: state)
-    monkeypatch.setattr(restart_provider.remote_rescue, "probe_capabilities", _supported_probe)
+    _patch_peer_success(monkeypatch, state)
 
     provider = restart_provider.peer_restart_provider("@hashi2")
 
@@ -123,6 +132,84 @@ def test_peer_restart_provider_accepts_supported_trusted_peer(monkeypatch, tmp_p
     assert provider["source_instance"] == "HASHI1"
     assert provider["target_instance"] == "HASHI2"
     assert provider["handshake_state"] == "handshake_accepted"
+    assert provider["target_handshake_state"] == "handshake_accepted"
+
+
+def test_target_confirms_source_handshake_requires_trusted_view(monkeypatch):
+    monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
+    monkeypatch.setattr(restart_provider, "_auth_kwargs", lambda: {"shared_token": "secret", "from_instance": "HASHI1"})
+    monkeypatch.setattr(
+        restart_provider.remote_rescue,
+        "_request_json_status",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            body={
+                "trusted_view": False,
+                "instance": {"instance_id": "HASHI2"},
+                "peers": [],
+            },
+        ),
+    )
+
+    with pytest.raises(restart_provider.RestartProviderError, match="authenticated trusted peer view"):
+        restart_provider._target_confirms_source_handshake(
+            "HASHI2", base_url="http://127.0.0.1:8766"
+        )
+
+
+def test_target_confirms_source_handshake_rejects_target_side_stale_trust(monkeypatch):
+    monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
+    monkeypatch.setattr(restart_provider, "_auth_kwargs", lambda: {"shared_token": "secret", "from_instance": "HASHI1"})
+    monkeypatch.setattr(
+        restart_provider.remote_rescue,
+        "_request_json_status",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            body={
+                "trusted_view": True,
+                "instance": {"instance_id": "HASHI2"},
+                "peers": [
+                    {
+                        "instance_id": "HASHI1",
+                        "properties": {"handshake_state": "rehydrate_required"},
+                    }
+                ],
+            },
+        ),
+    )
+
+    with pytest.raises(restart_provider.RestartProviderError, match="does not currently trust"):
+        restart_provider._target_confirms_source_handshake(
+            "HASHI2", base_url="http://127.0.0.1:8766"
+        )
+
+
+def test_target_confirms_source_handshake_accepts_live_bilateral_trust(monkeypatch):
+    monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
+    monkeypatch.setattr(restart_provider, "_auth_kwargs", lambda: {"shared_token": "secret", "from_instance": "HASHI1"})
+    monkeypatch.setattr(
+        restart_provider.remote_rescue,
+        "_request_json_status",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            body={
+                "trusted_view": True,
+                "instance": {"instance_id": "HASHI2"},
+                "peers": [
+                    {
+                        "instance_id": "HASHI1",
+                        "properties": {"handshake_state": "handshake_accepted"},
+                    }
+                ],
+            },
+        ),
+    )
+
+    peer = restart_provider._target_confirms_source_handshake(
+        "HASHI2", base_url="http://127.0.0.1:8766"
+    )
+
+    assert peer["instance_id"] == "HASHI1"
 
 
 def test_local_restart_provider_requires_supervised_remote(monkeypatch):
