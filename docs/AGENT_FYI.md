@@ -191,8 +191,8 @@ Prefer `log_query` for literal logs and Jobs for long work. Tests prove only
 scope; live adoption needs separate evidence. Preserve user work; report
 failures honestly.
 
-`/restart` keeps Remote responsive; success requires new PID, identity,
-runtime, generation, and Backend health.
+Remote reload preserves Core. `/restart` stays responsive and verifies new PID,
+identity, runtime, generation, and Backend health.
 
 Use `request_diagnostics` to query one request's final state, Provider IDs,
 observed writes/effects, Jobs, and retry evidence. It is read-only and never
@@ -200,9 +200,8 @@ authorizes or performs a retry.
 
 HCC is PCM-owned temporary context in `agent.md` between `[hcc]` and
 `[hcc_end]`. `/hcc on|off` controls current-Agent injection only and defaults
-off. Cached observations are not necessarily current, never grant permission,
-and do not override higher authority. Missing, empty, or off revokes active HCC
-without deleting history.
+off. Cached observations may be stale, grant no permission, and never override
+higher authority. Missing, empty, or off revokes HCC without deleting history.
 
 Refresh HCC only through the existing `hcc-refresh` Skill and authorized
 sources. Verify the named entry digest before fetch; publish only a successful

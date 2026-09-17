@@ -139,6 +139,11 @@ query Remote `/health` while the original restart request is still waiting.
 This liveness rule does not relax any PID, identity, runtime, generation, or
 Backend health evidence required for a completed receipt.
 
+On Linux, Remote's systemd user unit manages only the Remote main process.
+HASHI started through the rescue endpoint is a separately controlled runtime
+and must survive a Remote supervisor reload; stopping or restarting HASHI still
+uses the explicit HASHI control endpoint and its terminal receipt.
+
 `/control/hashi/restarts/{restart_id}` returns the durable restart record for a
 single restart id. Restart ids are validated before file lookup to avoid path
 traversal.

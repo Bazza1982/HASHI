@@ -236,6 +236,8 @@ H3 的连续现场样本从请求到最终 ready 约需 133–135 秒，120 秒�
 
 H3 最终验收又暴露了一个独立活性问题：Remote 在 `/restart` 请求内同步轮询 Workbench 时会占用自身请求循环，导致新 Core 启动阶段无法查询同一个 Remote 的 `/health`，进而把健康的独立 Remote 误记为不可用。修复要求把阻塞健康探测移出 Remote 请求循环，保持 `/health` 可并发响应；终态 PID、身份、运行时、Function 代际和 Backend 健康标准保持不变。失败回执不得因新 PID 已出现而改写为成功。
 
+H2 最终验收同时确认 Linux Remote systemd unit 的默认 `KillMode=control-group` 会在重载 Remote 时误杀由其救援入口启动、仍处于同一 cgroup 的 HASHI Core。Remote supervisor 必须只管理 Remote 主进程；Core 的停止与重启继续只由显式 HASHI 控制端点及终态回执负责。该边界不得让 Remote reload 隐式变成 Core restart。
+
 ### 阶段 5：只增强诊断证据，不大改 HER v2
 
 允许的唯一新增范围是可查询日志：
