@@ -20,17 +20,20 @@ HASHI instance.
 
 Peer cold restart is available only when all of these are true:
 
-1. the local Remote peer registry records the target as `handshake_accepted`;
+1. the source Remote peer registry records the target as `handshake_accepted`;
 2. the accepted handshake advertises `rescue_restart`;
 3. a live capability probe still reports `rescue_restart`;
 4. the target Remote reports `remote_supervisor.mode=supervised`;
-5. the restart request is authenticated by the existing Remote shared-token
+5. an authenticated live `/health` view from the target still records the
+   source as `handshake_accepted`;
+6. the restart request is authenticated by the existing Remote shared-token
    HMAC path; and
-6. the target Remote has `L3_RESTART` enabled, which is also what causes it to
+7. the target Remote has `L3_RESTART` enabled, which is also what causes it to
    advertise `rescue_restart`.
 
-The provider is revalidated immediately before the destructive POST so a stale
-90-second-old UI state or old peer cache is not sufficient authority.
+The provider is revalidated immediately before the destructive POST. Stale
+source-side peer state or a stale capability cache is therefore not sufficient
+authority for a cold restart.
 
 A target Remote still owns the actual process lifecycle. The requesting HASHI
 never receives arbitrary process-control or shell authority on the target.
@@ -56,6 +59,10 @@ HASHI-A trusted peer state
     |
     | accepted handshake + rescue_restart
     v
+HASHI-B authenticated /health
+    |
+    | HASHI-A is still handshake_accepted
+    v
 HASHI-B Remote (OS supervised)
     |
     | fixed /control/hashi/restart
@@ -63,8 +70,9 @@ HASHI-B Remote (OS supervised)
 HASHI-B Core stop -> start -> health verification
 ```
 
-The source rechecks the accepted handshake projection and the target's live
-capabilities immediately before issuing the restart request.
+The source rechecks its accepted handshake projection, the target's live
+capabilities, and the target's current trusted peer view immediately before
+issuing the restart request.
 
 ## Supported Remote configuration
 
