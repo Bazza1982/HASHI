@@ -23,6 +23,13 @@ from orchestrator.admin_local_testing import (
     supported_commands,
     try_execute_slash_command_text,
 )
+from orchestrator.agent_creation import (
+    AgentCreationError,
+    AgentCreationService,
+    AgentCreationSpec,
+    DEFAULT_HER_PRESET,
+    HER_CREATION_PRESETS,
+)
 from orchestrator.agent_overview import build_agent_overview
 from orchestrator.chat_transcript_projection import build_chat_projection
 from orchestrator.capability_broker import CapabilityBrokerError
@@ -77,6 +84,7 @@ from orchestrator.enterprise.scim import (
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.flexible_backend_registry import (
     BACKEND_REGISTRY,
+    HER_V2_ENGINE,
     is_selectable_backend,
 )
 from orchestrator.frontend_delivery import (
@@ -101,7 +109,7 @@ from orchestrator.private_authorization import (
 )
 from orchestrator.ui_language import normalize_locale
 from orchestrator.multimodal_contract import canonical_request_content
-from orchestrator.pathing import resolve_path_value
+from orchestrator.pathing import BridgePaths, resolve_instance_id, resolve_path_value
 from orchestrator.service_endpoints import ServiceEndpointError, select_service_bind_host
 from orchestrator.session_store import (
     MAX_SESSION_ATTACHMENT_BYTES,
@@ -509,6 +517,9 @@ class WorkbenchApiServer:
             "/api/backends/catalogue", self.handle_backend_catalogue
         )
         self.app.router.add_get("/api/agents", self.handle_agents)
+        self.app.router.add_post(
+            "/api/admin/add-agent", self.handle_admin_add_agent
+        )
         self.app.router.add_get("/api/v1/capabilities", self.handle_v1_capabilities)
         self.app.router.add_get("/api/v1/agents", self.handle_v1_agents)
 
@@ -756,7 +767,7 @@ class WorkbenchApiServer:
                     info["agent"], inst, host, port, wb_port=wb_port, ttl=ttl
                 )
         except Exception:
-            pass  # non-critical — don't break message delivery
+            pass  # non-critical â€” don't break message delivery
 
     def _runtime_list(self) -> list:
         if self.orchestrator is not None:
@@ -1234,7 +1245,7 @@ class WorkbenchApiServer:
                 "id": agent_row["name"],
                 "name": agent_row["name"],
                 "display_name": agent_row.get("display_name", agent_row["name"]),
-                "emoji": agent_row.get("emoji", "🤖"),
+                "emoji": agent_row.get("emoji", "ðŸ¤–"),
                 "engine": engine,
                 "active_backend": agent_row.get("active_backend", engine),
                 "model": model,
@@ -3794,14 +3805,216 @@ class WorkbenchApiServer:
                             for key, item in value.items()
                         }
                     entry[field] = value
+            if engine == HER_V2_ENGINE:
+                entry["creation"] = {
+                    "mode": "preset",
+                    "default_preset": DEFAULT_HER_PRESET,
+                    "presets": [dict(item) for item in HER_CREATION_PRESETS],
+                }
             backends[engine] = entry
         return web.json_response(
             {
                 "ok": True,
-                "schema_version": 1,
+                "schema_version": 2,
                 "source": "hashi_backend_registry",
                 "backends": backends,
             }
+        )
+
+    async def handle_admin_add_agent(self, request):
+        """Create an agent through the public, HASHI-owned creation service."""
+        if not self._check_admin_auth(request):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "admin auth failed",
+                    "error_code": "admin_auth_failed",
+                },
+                status=403,
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "invalid JSON",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        if not isinstance(payload, dict):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "JSON object is required",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        if "agent_cfg" in payload:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": (
+                        "agent_cfg is not accepted; use the public creation intent"
+                    ),
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        allowed_keys = {
+            "name",
+            "display_name",
+            "backend",
+            "preset",
+            "model",
+            "effort",
+            "is_active",
+        }
+        unknown = set(payload) - allowed_keys
+        if unknown:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": f"unknown field: {sorted(unknown)[0]}",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        name = payload.get("name")
+        backend = payload.get("backend")
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "agent name is required",
+                    "error_code": "invalid_agent_name",
+                },
+                status=400,
+            )
+        if not isinstance(backend, str) or not backend.strip():
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "backend is required",
+                    "error_code": "invalid_backend",
+                },
+                status=400,
+            )
+        display_name = payload.get("display_name")
+        if display_name is not None and not isinstance(display_name, str):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "display_name must be a string",
+                    "error_code": "invalid_display_name",
+                },
+                status=400,
+            )
+        is_active = payload.get("is_active", False)
+        if not isinstance(is_active, bool):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "is_active must be a boolean",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        for key in ("preset", "model", "effort"):
+            value = payload.get(key)
+            if value is not None and not isinstance(value, str):
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": f"{key} must be a string or null",
+                        "error_code": "invalid_request",
+                    },
+                    status=400,
+                )
+
+        started = time.monotonic()
+        spec = AgentCreationSpec(
+            name=name.strip(),
+            backend=backend.strip(),
+            display_name=display_name,
+            preset=payload.get("preset"),
+            model=payload.get("model"),
+            effort=payload.get("effort"),
+            is_active=is_active,
+        )
+        config_dir = self.config_path.parent
+        paths = BridgePaths(
+            code_root=config_dir,
+            bridge_home=config_dir,
+            instance_id=resolve_instance_id(self.config_path),
+            config_path=self.config_path,
+            secrets_path=config_dir / "secrets.json",
+            tasks_path=config_dir / "tasks.json",
+            state_path=config_dir / "scheduler_state.json",
+            lock_path=config_dir / "process.lock",
+            pid_path=config_dir / "process.pid",
+            workspaces_root=config_dir / "workspaces",
+        )
+        try:
+            result = AgentCreationService(
+                paths, global_config=self.global_config
+            ).create(spec)
+        except AgentCreationError as exc:
+            status = (
+                409
+                if exc.error_code
+                in {"agent_exists", "workspace_exists", "config_conflict"}
+                else 400
+            )
+            logger.info(
+                "agent_create.rejected agent_name=%s backend=%s error_code=%s",
+                spec.name,
+                spec.backend,
+                exc.error_code,
+            )
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=status,
+            )
+        except Exception as exc:
+            logger.error(
+                "agent_create.failed agent_name=%s backend=%s error=%s",
+                spec.name,
+                spec.backend,
+                type(exc).__name__,
+            )
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "agent creation failed",
+                    "error_code": "creation_failed",
+                },
+                status=500,
+            )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "agent_create.completed agent_name=%s backend=%s elapsed_ms=%s",
+            spec.name,
+            spec.backend,
+            elapsed_ms,
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "agent": {
+                    "name": result.name,
+                    "display_name": result.display_name,
+                    "is_active": result.is_active,
+                    "active_backend": result.active_backend,
+                },
+                "created": {
+                    "workspace": result.workspace_created,
+                    "config": result.config_published,
+                },
+            },
+            status=201,
         )
 
     async def handle_agents(self, request):

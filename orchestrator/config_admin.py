@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import logging
 
-from orchestrator.config_json import read_config_json, write_config_json
+from orchestrator.config_json import (
+    ConfigConflictError,
+    read_config_json,
+    write_config_json,
+)
 
 from orchestrator.pathing import BridgePaths
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
@@ -117,9 +121,11 @@ class ConfigAdmin:
             return (False, f"Agent '{agent_name}' already exists.") if wants_message else False
 
         ws_dir = self.paths.workspaces_root / agent_name
+        created_workspace = not ws_dir.exists()
         ws_dir.mkdir(parents=True, exist_ok=True)
 
         agent_md = ws_dir / "agent.md"
+        agent_md_created = False
         if not agent_md.exists():
             atomic_write_pcm(
                 agent_md,
@@ -131,6 +137,7 @@ class ConfigAdmin:
                     ),
                 ),
             )
+            agent_md_created = True
 
         if isinstance(agent_cfg, dict):
             new_entry = dict(agent_cfg)
@@ -186,7 +193,20 @@ class ConfigAdmin:
         )
 
         raw.setdefault("agents", []).append(new_entry)
-        self.write_raw_config(raw)
+        try:
+            self.write_raw_config(raw)
+        except ConfigConflictError:
+            # Narrow rollback: remove only what this invocation created.
+            # A pre-existing workspace and any concurrent scaffold are never
+            # touched, and a stale whole-document write is never retried.
+            if agent_md_created:
+                agent_md.unlink(missing_ok=True)
+            if created_workspace and ws_dir.exists():
+                try:
+                    ws_dir.rmdir()
+                except OSError:
+                    pass
+            raise
         if wants_message:
             suffix = ""
             if token:
