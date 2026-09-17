@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import multiprocessing
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -648,6 +649,30 @@ def _verified_generation(tmp_path: Path) -> VerifiedFunctionGeneration:
         ["orchestrator.worker_demo"],
         code_root=tmp_path,
     )
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "--all"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=HASHI Test",
+            "-c",
+            "user.email=hashi-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "test fixture",
+        ],
+        check=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
     policy = load_runtime_policy(ROOT)
     runtime = current_runtime_fingerprint(policy, code_root=ROOT)
     return VerifiedFunctionGeneration(
@@ -658,6 +683,7 @@ def _verified_generation(tmp_path: Path) -> VerifiedFunctionGeneration:
             module_names=manifest.module_names,
             runtime=runtime,
             probe_pid=1234,
+            source_commit=source_commit,
         ),
     )
 
@@ -684,6 +710,8 @@ def test_generation_artifact_contains_only_verified_immutable_bytes(tmp_path):
     )
     assert metadata["provenance"]["generation_id"] == generation.manifest.generation_id
     assert metadata["provenance"]["artifact_kind"] == "function-generation"
+    assert metadata["source_commit"] == generation.receipt.source_commit
+    assert metadata["provenance"]["commit"] == generation.receipt.source_commit
     assert str(source_root) not in json.dumps(metadata["provenance"])
     assert not (artifact / "flow" / "runs").exists()
 
@@ -777,6 +805,7 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
     assert loaded is not None
     loaded_generation, loaded_artifact = loaded
     assert loaded_generation.manifest == generation.manifest
+    assert loaded_generation.receipt.source_commit == generation.receipt.source_commit
     assert loaded_artifact == artifact
 
     source = artifact / "orchestrator" / "worker_demo.py"

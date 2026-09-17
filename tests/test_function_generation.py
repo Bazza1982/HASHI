@@ -29,6 +29,33 @@ from orchestrator.function_generation import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _git(root: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return completed.stdout.strip()
+
+
+def _commit_all(root: Path) -> str:
+    _git(root, "init", "-q")
+    _git(root, "add", "--all")
+    _git(
+        root,
+        "-c",
+        "user.name=HASHI Test",
+        "-c",
+        "user.email=hashi-test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "test fixture",
+    )
+    return _git(root, "rev-parse", "HEAD")
+
+
 def _source_module(name: str, source: Path) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__file__ = str(source)
@@ -156,6 +183,53 @@ def test_serialized_manifest_requires_current_schema(tmp_path):
         SourceManifest.from_mapping(invalid)
 
 
+def test_manifest_commit_gate_is_scoped_to_qualified_files(tmp_path):
+    package = tmp_path / "orchestrator"
+    package.mkdir()
+    source = package / "generation_demo.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    asset = package / "generation.json"
+    asset.write_text("{}\n", encoding="utf-8")
+    unrelated = tmp_path / "notes.md"
+    unrelated.write_text("first\n", encoding="utf-8")
+    expected_commit = _commit_all(tmp_path)
+    manifest = build_source_manifest(
+        ["orchestrator.generation_demo"],
+        code_root=tmp_path,
+    )
+
+    assert function_generation.verify_manifest_source_commit(
+        manifest,
+        code_root=tmp_path,
+    ) == expected_commit
+
+    unrelated.write_text("uncommitted but unrelated\n", encoding="utf-8")
+    assert function_generation.verify_manifest_source_commit(
+        manifest,
+        code_root=tmp_path,
+    ) == expected_commit
+
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(FunctionGenerationError, match="not committed"):
+        function_generation.verify_manifest_source_commit(
+            manifest,
+            code_root=tmp_path,
+        )
+
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    added_asset = package / "untracked.json"
+    added_asset.write_text("{}\n", encoding="utf-8")
+    expanded = build_source_manifest(
+        ["orchestrator.generation_demo"],
+        code_root=tmp_path,
+    )
+    with pytest.raises(FunctionGenerationError, match="not committed"):
+        function_generation.verify_manifest_source_commit(
+            expanded,
+            code_root=tmp_path,
+        )
+
+
 def test_candidate_import_guard_blocks_probe_side_effects_but_not_live_thread(tmp_path):
     probe_output = tmp_path / "probe.txt"
     live_output = tmp_path / "live.txt"
@@ -215,6 +289,10 @@ def test_default_hot_probe_does_not_seed_from_core_loaded_modules(monkeypatch):
             module_names=manifest.module_names,
             runtime=expected_runtime,
             probe_pid=os.getpid(),
+            source_commit=function_generation.verify_manifest_source_commit(
+                manifest,
+                code_root=code_root,
+            ),
         )
 
     kernel = types.SimpleNamespace(

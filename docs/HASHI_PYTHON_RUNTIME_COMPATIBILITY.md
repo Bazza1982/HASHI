@@ -158,8 +158,11 @@ candidate cannot fetch, acknowledge or process it early.
 For `min`, a number, `same`, or `max`, the shared Function supervisor performs:
 
 1. Resolve an immutable target set. Invalid input fails without widening it.
-2. Qualify one generation in an isolated process.
-3. Materialize and verify its immutable artifact.
+2. Require every file in the Function manifest to be clean in local Git HEAD,
+   record that exact source commit, then qualify the generation in an isolated
+   process. Dirty files outside the manifest do not block qualification.
+3. Materialize and verify a content-addressed immutable artifact carrying that
+   source commit and the probe receipt.
 4. Spawn one READY candidate Worker for every selected Agent.
 5. Close only those stable route gates and wait for in-flight shared route calls.
 6. Quiesce the selected old Workers and their Agent-local ingress.
@@ -189,6 +192,8 @@ that aggregate state as `mixed`.
 - Candidate loses a previously working Telegram capability: reject it and
   resume the old Worker.
 - Source or Core changes after qualification: reject before pointer commit.
+- Staged, unstaged or untracked files inside the Function manifest: reject the
+  candidate; unrelated dirty files outside that manifest do not block it.
 - Unexpected active Worker exit: close only that Agent route, start the same
   immutable generation up to three times, then either restore it or leave the
   route explicitly failed.

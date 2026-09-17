@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,11 +25,39 @@ def generation(tmp_path, home, marker, runtime):
     (source / "orchestrator").mkdir(parents=True)
     (source / "orchestrator" / "example.py").write_text(f"VALUE = {marker!r}\n")
     manifest = build_source_manifest(["orchestrator.example"], code_root=source)
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "--all"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=HASHI Test",
+            "-c",
+            "user.email=hashi-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "test fixture",
+        ],
+        check=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
     result = VerifiedFunctionGeneration(
         source,
         manifest,
         CandidateProbeReceipt(
-            manifest.generation_id, manifest.module_names, runtime, 123
+            manifest.generation_id,
+            manifest.module_names,
+            runtime,
+            123,
+            source_commit,
         ),
     )
     artifact = materialize_generation_artifact(home, result)
