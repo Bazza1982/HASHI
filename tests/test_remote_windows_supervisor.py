@@ -198,6 +198,57 @@ function Register-ScheduledTask {{ @{{}} }}
     assert "Everyone:" not in acl and "BUILTIN\\Users:" not in acl
 
 
+def test_restart_keeps_existing_readable_secrets_acl_for_current_principal(tmp_path):
+    root = tmp_path / "hashi protected secrets"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-ACL"}}),
+        encoding="utf-8",
+    )
+    (root / "secrets.json").write_text(
+        '{"hashi_remote_shared_token":"test-only"}\n',
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py"
+    )
+    staged = tmp_path / "staged"
+    (staged / "bin").mkdir(parents=True)
+    (staged / "tools").mkdir()
+    shutil.copyfile(
+        ROOT / "bin/hashi_remote_ctl.ps1",
+        staged / "bin/hashi_remote_ctl.ps1",
+    )
+    (staged / "tools/private_files.py").write_text(
+        "raise SystemExit('ACL_HELPER_CALLED')\n",
+        encoding="utf-8",
+    )
+
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+function Get-CimInstance {{ @() }}
+function Stop-ScheduledTask {{ param($TaskName) }}
+function Start-ScheduledTask {{ param($TaskName) }}
+function Invoke-RestMethod {{
+    param($Method, $Uri, $TimeoutSec)
+    [pscustomobject]@{{
+        ok=$true; status='ready';
+        instance=[pscustomobject]@{{instance_id='SUPERVISOR-ACL'}};
+        discovery=[pscustomobject]@{{
+            state='ready_empty'; readiness='ready'; peer_count=0;
+            trusted_peer_count=0; trust_state='no_peers';
+            backends=@([pscustomobject]@{{advertising=$true; browsing=$true}})
+        }}
+    }}
+}}
+& {_ps_string(staged / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+""")
+
+    assert result.returncode == 0, result.stderr
+    assert "ACL_HELPER_CALLED" not in result.stderr
+
+
 def test_restart_retires_only_exact_instance_remote_processes(tmp_path):
     root = tmp_path / "hashi space 测试"
     other = tmp_path / "other instance"
