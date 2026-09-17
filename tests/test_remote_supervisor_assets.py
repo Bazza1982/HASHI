@@ -97,6 +97,15 @@ def test_linux_remote_supervisor_units_are_isolated_per_instance(tmp_path):
     assert "WorkingDirectory=" in hashi1_text
     assert "StandardOutput=append:" in hashi1_text
     assert "Restart=on-failure" in hashi1_text
+    assert "KillMode=process" in hashi1_text
     assert "Instance HASHI1 (agents_json)" in hashi1_output
     assert "Instance HASHI2 (agents_json)" in hashi2_output
     assert "Registered, enabled, and activated Remote supervisor" in hashi1_output
+
+
+def test_packaged_linux_remote_unit_does_not_own_started_core_processes():
+    unit_text = (ROOT / "packaging/systemd/hashi-remote.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert "KillMode=process" in unit_text

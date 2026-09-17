@@ -117,6 +117,8 @@ After=network-online.target
 
 [Service]
 Type=simple
+# Remote may start the controlled Core; reloading Remote must not kill it.
+KillMode=process
 WorkingDirectory=$working_directory
 Environment=HASHI_REMOTE_SUPERVISED=1
 Environment=$instance_environment
