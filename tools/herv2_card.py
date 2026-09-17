@@ -47,21 +47,21 @@ class Herv2CardData:
 
 # Human-friendly stage labels (zh-CN and en)
 _STAGE_NAMES: dict[str, dict[str, str]] = {
-    "triage": {"zh": "分诊 (Triage)", "en": "Triage"},
-    "planning": {"zh": "规划 (Planning)", "en": "Planning"},
-    "replanning": {"zh": "重规划 (Replanning)", "en": "Replanning"},
-    "execution": {"zh": "执行 (Execution)", "en": "Execution"},
-    "review": {"zh": "评审 (Review)", "en": "Review"},
-    "direct": {"zh": "直答 (Direct)", "en": "Direct"},
-    "immediate_response": {"zh": "即时响应 (Immediate)", "en": "Immediate"},
-    "persona": {"zh": "人设润色 (Persona)", "en": "Persona"},
-    "finalisation": {"zh": "收尾 (Finalisation)", "en": "Finalisation"},
+    "triage": {"zh": "分诊", "en": "Triage"},
+    "planning": {"zh": "规划", "en": "Planning"},
+    "replanning": {"zh": "重规划", "en": "Replanning"},
+    "execution": {"zh": "执行", "en": "Execution"},
+    "review": {"zh": "评审", "en": "Review"},
+    "direct": {"zh": "直答", "en": "Direct"},
+    "immediate_response": {"zh": "即时响应", "en": "Immediate"},
+    "persona": {"zh": "人设润色", "en": "Persona"},
+    "finalisation": {"zh": "收尾", "en": "Finalisation"},
 }
 
+# Resolved model-slot display labels (zh-CN and en)
 _SLOT_DISPLAY: dict[str, dict[str, str]] = {
-    "fast": {"zh": "Quick", "en": "Quick"},
-    "quick": {"zh": "Quick", "en": "Quick"},
-    "pro": {"zh": "Pro", "en": "Pro"},
+    "Quick": {"zh": "快速档", "en": "Quick"},
+    "Pro": {"zh": "专业档", "en": "Pro"},
 }
 
 
@@ -89,11 +89,25 @@ def _fmt_duration(seconds: float | None, *, is_zh: bool) -> str:
     return f"{minutes}分{remaining_s}秒" if is_zh else f"{minutes}m {remaining_s}s"
 
 
+def _fmt_number(value: float) -> str:
+    """One-decimal compact number without a trailing zero, e.g. 65.3."""
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
 def _fmt_tokens(count: int, *, is_zh: bool) -> str:
     if count <= 0:
         return ""
-    suffix = " token" if is_zh else " tokens"
-    return f"{count:,}{suffix}"
+    if is_zh:
+        if count >= 10000:
+            return f"{_fmt_number(count / 10000.0)}万 token"
+        return f"{count:,} token"
+    if count >= 1000:
+        return f"{_fmt_number(count / 1000.0)}K tokens"
+    return f"{count:,} tokens"
+
+
+def _slot_display(slot: str, *, is_zh: bool) -> str:
+    return _SLOT_DISPLAY.get(slot, {}).get("zh" if is_zh else "en", slot)
 
 
 def _resolve_slot(
@@ -277,6 +291,82 @@ def herv2_card_data_from_metadata(
     )
 
 
+def _aggregate_stages(stages: Sequence[Herv2StageItem]) -> list[dict[str, Any]]:
+    """Collapse repeated (stage, slot, model) invocations into single rows."""
+    order: list[tuple[str, str, str]] = []
+    groups: dict[tuple[str, str, str], list[Herv2StageItem]] = {}
+    for st in stages:
+        key = (st.stage, st.slot, st.model)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(st)
+
+    rows: list[dict[str, Any]] = []
+    for key in order:
+        items = groups[key]
+        elapsed_vals = [it.elapsed_s for it in items if it.elapsed_s is not None]
+        rows.append(
+            {
+                "stage": key[0],
+                "slot": key[1],
+                "model": key[2],
+                "rounds": len(items),
+                "elapsed_s": sum(elapsed_vals) if elapsed_vals else None,
+                "tokens": sum(it.tokens for it in items),
+            }
+        )
+    return rows
+
+
+def _stage_parts(row: Mapping[str, Any], *, is_zh: bool) -> dict[str, str]:
+    """Localized display components for one aggregated stage row."""
+    stage_name = str(row["stage"])
+    slot = str(row["slot"])
+    model = str(row["model"] or "")
+    rounds = int(row["rounds"])
+    elapsed = row["elapsed_s"]
+
+    stage_disp = _STAGE_NAMES.get(stage_name, {}).get(
+        "zh" if is_zh else "en"
+    ) or stage_name.capitalize()
+    slot_disp = _slot_display(slot, is_zh=is_zh)
+
+    parts: dict[str, str] = {
+        "stage": stage_disp,
+        "slot": slot_disp,
+        "model": model,
+        "rounds": "",
+        "duration": "",
+        "tokens": "",
+    }
+
+    if rounds > 1:
+        parts["rounds"] = f"{rounds}轮" if is_zh else f"{rounds} rounds"
+
+    dur = _fmt_duration(elapsed, is_zh=is_zh)
+    if dur:
+        if rounds > 1:
+            dur = f"合计{dur}" if is_zh else f"Total {dur}"
+        parts["duration"] = dur
+
+    tok = _fmt_tokens(int(row["tokens"]), is_zh=is_zh)
+    if tok:
+        parts["tokens"] = tok
+
+    return parts
+
+
+def _finalisation_text(has_finalisation: bool, *, is_zh: bool) -> str:
+    if has_finalisation:
+        return "已做合并总结" if is_zh else "Merged summary produced"
+    return (
+        "未做合并总结（本档由执行直接给出最终答复）"
+        if is_zh
+        else "No merge summary (this tier delivered the final answer directly via execution)"
+    )
+
+
 def format_herv2_card(
     data: Herv2CardData,
     *,
@@ -297,112 +387,117 @@ def format_herv2_card(
         )
     )
 
-    route_lbl = "路由分诊" if is_zh else "Route"
-    cards_lbl = "策略卡" if is_zh else "Strategy Cards"
-    brief_lbl = "执行概要" if is_zh else "Execution Brief"
-    stages_lbl = "阶段与模型" if is_zh else "Stages & Model Slots"
-    metrics_lbl = "运行指标" if is_zh else "Metrics"
+    label_sep = "：" if is_zh else ": "
+    route_lbl = "路由" if is_zh else "Route"
+    cards_lbl = "策略" if is_zh else "Strategy"
+    stages_lbl = "阶段与模型" if is_zh else "Stages & Models"
+    final_lbl = "收尾" if is_zh else "Finalisation"
+    run_lbl = "运行" if is_zh else "Run"
     review_lbl = "评审" if is_zh else "Reviews"
     replan_lbl = "重规划" if is_zh else "Replans"
+    chk_lbl = "检查点" if is_zh else "Checkpoints"
     state_lbl = "最终状态" if is_zh else "State"
 
     lines: list[str] = [title]
-    if not is_tg:
-        lines.append("─" * 40)
-    else:
+    if is_tg:
         lines.append("")
+    else:
+        lines.append("─" * 40)
 
-    # Route & Effort
+    # Route
     route_val = data.classification
     effort_suffix = f" · {data.effort}" if data.effort else ""
     if is_tg:
-        lines.append(f"<b>{route_lbl}：</b><code>{html.escape(route_val)}</code>{html.escape(effort_suffix)}")
+        lines.append(
+            f"<b>{route_lbl}{label_sep}</b>"
+            f"<code>{html.escape(route_val)}</code>{html.escape(effort_suffix)}"
+        )
     else:
-        lines.append(f"{route_lbl}: {route_val}{effort_suffix}")
+        lines.append(f"{route_lbl}{label_sep}{route_val}{effort_suffix}")
 
-    # Strategy Cards
-    cards_text = ""
+    # Strategy cards (localized titles only; uppercase ids dropped)
     if data.strategy_card_details:
-        card_items = []
-        for cd in data.strategy_card_details:
-            cid = cd.get("id", "")
-            ctitle = cd.get("title", "")
-            if cid and ctitle and cid != ctitle:
-                card_items.append(f"{cid} ({ctitle})" if not is_tg else f"<code>{html.escape(cid)}</code> ({html.escape(ctitle)})")
-            elif cid:
-                card_items.append(cid if not is_tg else f"<code>{html.escape(cid)}</code>")
-        cards_text = ", ".join(card_items)
+        titles = [
+            str(cd.get("title") or "").strip()
+            for cd in data.strategy_card_details
+            if str(cd.get("title") or "").strip()
+        ]
+        cards_text = " · ".join(titles)
     elif data.strategy_cards:
-        if is_tg:
-            cards_text = ", ".join(f"<code>{html.escape(c)}</code>" for c in data.strategy_cards)
-        else:
-            cards_text = ", ".join(data.strategy_cards)
+        cards_text = " · ".join(str(c) for c in data.strategy_cards)
     else:
         cards_text = "直接响应 (无特定策略卡)" if is_zh else "Direct (None)"
 
     if is_tg:
-        lines.append(f"<b>{cards_lbl}：</b>{cards_text}")
+        lines.append(f"<b>{cards_lbl}{label_sep}</b>{html.escape(cards_text)}")
     else:
-        lines.append(f"{cards_lbl}: {cards_text}")
+        lines.append(f"{cards_lbl}{label_sep}{cards_text}")
 
-    # Execution Brief (if present)
-    if data.execution_brief:
-        brief_clean = data.execution_brief.strip()
-        if len(brief_clean) > 120:
-            brief_clean = brief_clean[:117] + "..."
-        if is_tg:
-            lines.append(f"<b>{brief_lbl}：</b><code>{html.escape(brief_clean)}</code>")
-        else:
-            lines.append(f"{brief_lbl}: {brief_clean}")
-
-    # Stages & Model Slots
+    # Stages & Model Slots (aggregated by stage+slot+model)
     if data.stages:
         lines.append("")
         if is_tg:
-            lines.append(f"<b>{stages_lbl}：</b>")
+            lines.append(f"<b>{stages_lbl}{label_sep}</b>")
         else:
-            lines.append(f"{stages_lbl}:")
+            lines.append(f"{stages_lbl}{label_sep}")
 
-        for st in data.stages:
-            stage_dict = _STAGE_NAMES.get(st.stage, {})
-            stage_disp = stage_dict.get("zh" if is_zh else "en") or st.stage.capitalize()
-            slot_disp = st.slot
-
-            # Details: timing, tokens
-            details = []
-            dur_str = _fmt_duration(st.elapsed_s, is_zh=is_zh)
-            if dur_str:
-                details.append(dur_str)
-            tok_str = _fmt_tokens(st.tokens, is_zh=is_zh)
-            if tok_str:
-                details.append(tok_str)
-
-            det_suffix = f" · {' · '.join(details)}" if details else ""
-
+        for row in _aggregate_stages(data.stages):
+            parts = _stage_parts(row, is_zh=is_zh)
             if is_tg:
-                model_str = f" · <code>{html.escape(st.model)}</code>" if st.model else ""
-                lines.append(
-                    f"• <b>{html.escape(stage_disp)}：</b>"
-                    f"<b>{html.escape(slot_disp)}</b>"
-                    f"{model_str}{html.escape(det_suffix)}"
-                )
+                seg = [
+                    f"<b>{html.escape(parts['stage'])}</b>",
+                    f"<b>{html.escape(parts['slot'])}</b>",
+                ]
+                if parts["model"]:
+                    seg.append(f"<code>{html.escape(parts['model'])}</code>")
+                for key in ("rounds", "duration", "tokens"):
+                    if parts[key]:
+                        seg.append(html.escape(parts[key]))
+                lines.append("• " + " · ".join(seg))
             else:
-                model_str = f" · {st.model}" if st.model else ""
-                lines.append(f"• {stage_disp}: {slot_disp}{model_str}{det_suffix}")
+                seg = [parts["stage"], parts["slot"]]
+                if parts["model"]:
+                    seg.append(parts["model"])
+                for key in ("rounds", "duration", "tokens"):
+                    if parts[key]:
+                        seg.append(parts[key])
+                lines.append("• " + " · ".join(seg))
 
-    # Metrics
-    metrics_parts = []
-    metrics_parts.append(f"{review_lbl}: {data.review_count}" if not is_tg else f"<b>{review_lbl}</b>: <code>{data.review_count}</code>")
-    metrics_parts.append(f"{replan_lbl}: {data.replan_count}" if not is_tg else f"<b>{replan_lbl}</b>: <code>{data.replan_count}</code>")
-    if data.checkpoint_count > 0:
-        chk_lbl = "检查点" if is_zh else "Checkpoints"
-        metrics_parts.append(f"{chk_lbl}: {data.checkpoint_count}" if not is_tg else f"<b>{chk_lbl}</b>: <code>{data.checkpoint_count}</code>")
-    metrics_parts.append(f"{state_lbl}: {data.terminal_state}" if not is_tg else f"<b>{state_lbl}</b>: <code>{html.escape(data.terminal_state)}</code>")
-
+    # Finalisation
+    has_finalisation = any(st.stage == "finalisation" for st in data.stages)
+    final_text = _finalisation_text(has_finalisation, is_zh=is_zh)
     lines.append("")
     if is_tg:
-        lines.append(f"<b>{metrics_lbl}：</b>{' · '.join(metrics_parts)}")
+        lines.append(f"<b>{final_lbl}{label_sep}</b>{html.escape(final_text)}")
     else:
-        lines.append(f"{metrics_lbl}: {' · '.join(metrics_parts)}")
+        lines.append(f"{final_lbl}{label_sep}{final_text}")
+
+    # Run metrics
+    metrics_parts: list[str] = []
+    metrics_parts.append(
+        f"{review_lbl}: {data.review_count}"
+        if not is_tg
+        else f"<b>{review_lbl}</b>: <code>{data.review_count}</code>"
+    )
+    metrics_parts.append(
+        f"{replan_lbl}: {data.replan_count}"
+        if not is_tg
+        else f"<b>{replan_lbl}</b>: <code>{data.replan_count}</code>"
+    )
+    if data.checkpoint_count > 0:
+        metrics_parts.append(
+            f"{chk_lbl}: {data.checkpoint_count}"
+            if not is_tg
+            else f"<b>{chk_lbl}</b>: <code>{data.checkpoint_count}</code>"
+        )
+    metrics_parts.append(
+        f"{state_lbl}: {data.terminal_state}"
+        if not is_tg
+        else f"<b>{state_lbl}</b>: <code>{html.escape(data.terminal_state)}</code>"
+    )
+    if is_tg:
+        lines.append(f"<b>{run_lbl}{label_sep}</b>{' · '.join(metrics_parts)}")
+    else:
+        lines.append(f"{run_lbl}{label_sep}{' · '.join(metrics_parts)}")
 
     return "\n".join(lines)

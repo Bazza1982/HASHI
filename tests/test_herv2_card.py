@@ -14,6 +14,7 @@ from orchestrator import telegram_stream_policy
 from tools.herv2_card import (
     Herv2CardData,
     Herv2StageItem,
+    _fmt_tokens,
     _resolve_slot,
     format_herv2_card,
     herv2_card_data_from_metadata,
@@ -76,6 +77,28 @@ def test_resolve_slot():
     # Route model slots override
     route_model_slots = {"execute": "fast"}
     assert _resolve_slot("execution", "custom-model", route_model_slots=route_model_slots) == "Quick"
+
+
+def test_fmt_tokens_compact_units():
+    # Chinese uses 万 (10k), singular "token"
+    assert _fmt_tokens(653358, is_zh=True) == "65.3万 token"
+    assert _fmt_tokens(85416, is_zh=True) == "8.5万 token"
+    assert _fmt_tokens(107726, is_zh=True) == "10.8万 token"
+    assert _fmt_tokens(10000, is_zh=True) == "1万 token"
+    assert _fmt_tokens(1500, is_zh=True) == "1,500 token"
+    assert _fmt_tokens(350, is_zh=True) == "350 token"
+
+    # English uses K (1k), plural "tokens"
+    assert _fmt_tokens(653358, is_zh=False) == "653.4K tokens"
+    assert _fmt_tokens(85416, is_zh=False) == "85.4K tokens"
+    assert _fmt_tokens(107726, is_zh=False) == "107.7K tokens"
+    assert _fmt_tokens(1000, is_zh=False) == "1K tokens"
+    assert _fmt_tokens(1500, is_zh=False) == "1.5K tokens"
+    assert _fmt_tokens(350, is_zh=False) == "350 tokens"
+
+    # Non-positive → empty
+    assert _fmt_tokens(0, is_zh=True) == ""
+    assert _fmt_tokens(-1, is_zh=False) == ""
 
 
 def test_herv2_card_data_extraction_complex():
@@ -226,26 +249,32 @@ def test_herv2_card_formatting_telegram_html():
     # Chinese Telegram HTML
     zh_html = format_herv2_card(card_data, locale="zh-CN", surface="telegram")
     assert "🧭 <b>HER v2 路由与策略卡</b>" in zh_html
-    assert "<b>路由分诊：</b><code>COMPLEX_TASK</code> · medium" in zh_html
-    assert "<code>CODE_MODIFY</code> (代码修改)" in zh_html
-    assert "<b>执行概要：</b><code>Refactor routing</code>" in zh_html
-    assert "<b>分诊 (Triage)：</b><b>Quick</b> · <code>gemini-2.5-flash</code>" in zh_html
-    assert "0.6秒" in zh_html
-    assert "350 token" in zh_html
-    assert "<b>执行 (Execution)：</b><b>Pro</b> · <code>claude-sonnet-4-6</code>" in zh_html
-    assert "3.5秒" in zh_html
-    assert "1,500 token" in zh_html
-    assert "<b>评审</b>: <code>1</code>" in zh_html
+    assert "<b>路由：</b><code>COMPLEX_TASK</code> · medium" in zh_html
+    assert "<b>策略：</b>代码修改" in zh_html
+    # Strategy card id must be dropped in favour of the localized title
+    assert "<code>CODE_MODIFY</code>" not in zh_html
+    # The former execution-brief section is no longer rendered
+    assert "执行概要" not in zh_html
+    assert "<b>阶段与模型：</b>" in zh_html
+    assert "• <b>分诊</b> · <b>快速档</b> · <code>gemini-2.5-flash</code> · 0.6秒 · 350 token" in zh_html
+    assert "• <b>执行</b> · <b>专业档</b> · <code>claude-sonnet-4-6</code> · 3.5秒 · 1,500 token" in zh_html
+    assert "<b>收尾：</b>未做合并总结（本档由执行直接给出最终答复）" in zh_html
+    assert "<b>运行：</b><b>评审</b>: <code>1</code>" in zh_html
+    assert "<b>重规划</b>: <code>0</code>" in zh_html
     assert "<b>最终状态</b>: <code>COMPLETED</code>" in zh_html
 
     # English Telegram HTML
     en_html = format_herv2_card(card_data, locale="en", surface="telegram")
     assert "🧭 <b>HER v2 Routing Card</b>" in en_html
-    assert "<b>Route：</b><code>COMPLEX_TASK</code> · medium" in en_html
-    assert "<b>Triage：</b><b>Quick</b> · <code>gemini-2.5-flash</code>" in en_html
+    assert "<b>Route: </b><code>COMPLEX_TASK</code> · medium" in en_html
+    assert "<b>Strategy: </b>代码修改" in en_html
+    assert "<b>Triage</b> · <b>Quick</b> · <code>gemini-2.5-flash</code>" in en_html
     assert "0.6s" in en_html
     assert "350 tokens" in en_html
-    assert "<b>Reviews</b>: <code>1</code>" in en_html
+    assert "<b>Execution</b> · <b>Pro</b> · <code>claude-sonnet-4-6</code> · 3.5s · 1.5K tokens" in en_html
+    assert "<b>Finalisation: </b>No merge summary (this tier delivered the final answer directly via execution)" in en_html
+    assert "<b>Run: </b><b>Reviews</b>: <code>1</code>" in en_html
+    assert "<b>State</b>: <code>COMPLETED</code>" in en_html
 
 
 def test_herv2_card_formatting_plain():
@@ -274,9 +303,94 @@ def test_herv2_card_formatting_plain():
     assert "──────────" in plain
     assert "<b>" not in plain
     assert "<code>" not in plain
-    assert "路由分诊: COMPLEX_TASK · medium" in plain
-    assert "CODE_MODIFY (代码修改)" in plain
-    assert "• 分诊 (Triage): Quick · gemini-2.5-flash · 0.6秒 · 350 token" in plain
+    assert "路由：COMPLEX_TASK · medium" in plain
+    assert "策略：代码修改" in plain
+    assert "CODE_MODIFY" not in plain
+    assert "执行概要" not in plain
+    assert "• 分诊 · 快速档 · gemini-2.5-flash · 0.6秒 · 350 token" in plain
+    assert "收尾：未做合并总结（本档由执行直接给出最终答复）" in plain
+    assert "运行：评审: 0 · 重规划: 0 · 最终状态: COMPLETED" in plain
+
+
+def test_herv2_card_aggregates_repeated_stage():
+    card_data = Herv2CardData(
+        turn_id="turn-agg",
+        classification="SIMPLE_TASK",
+        terminal_state="COMPLETED",
+        strategy_cards=("SIMPLE_QA",),
+        strategy_card_details=(),
+        stages=(
+            Herv2StageItem("execution", "Quick", "deepseek-flash", elapsed_s=60.0, tokens=200000),
+            Herv2StageItem("execution", "Quick", "deepseek-flash", elapsed_s=60.0, tokens=200000),
+            Herv2StageItem("execution", "Quick", "deepseek-flash", elapsed_s=36.0, tokens=253358),
+        ),
+        review_count=0,
+        replan_count=0,
+    )
+
+    zh = format_herv2_card(card_data, locale="zh-CN", surface="plain")
+    # Exactly one execution line, aggregated with rounds + total duration + total tokens
+    assert zh.count("• 执行") == 1
+    assert "• 执行 · 快速档 · deepseek-flash · 3轮 · 合计2分36秒 · 65.3万 token" in zh
+
+    en = format_herv2_card(card_data, locale="en", surface="plain")
+    assert en.count("• Execution") == 1
+    assert "• Execution · Quick · deepseek-flash · 3 rounds · Total 2m 36s · 653.4K tokens" in en
+
+
+def test_herv2_card_finalisation_present():
+    card_data = Herv2CardData(
+        turn_id="turn-fin",
+        classification="COMPLEX_TASK",
+        terminal_state="COMPLETED",
+        stages=(
+            Herv2StageItem("execution", "Pro", "claude-sonnet-4-6", elapsed_s=10.0, tokens=9000),
+            Herv2StageItem("finalisation", "Pro", "claude-sonnet-4-6", elapsed_s=2.0, tokens=3000),
+        ),
+        review_count=1,
+        replan_count=0,
+    )
+
+    zh = format_herv2_card(card_data, locale="zh-CN", surface="plain")
+    assert "收尾：已做合并总结" in zh
+
+    en = format_herv2_card(card_data, locale="en", surface="plain")
+    assert "Finalisation: Merged summary produced" in en
+
+
+def test_herv2_card_plain_html_copy_consistency():
+    card_data = Herv2CardData(
+        turn_id="turn-consistency",
+        classification="SIMPLE_TASK",
+        terminal_state="COMPLETED",
+        strategy_card_details=(
+            {"id": "A", "title": "监控与条件触发"},
+            {"id": "B", "title": "证据与条款抽取"},
+        ),
+        stages=(
+            Herv2StageItem("immediate_response", "Quick", "deepseek-flash", elapsed_s=10.1, tokens=85416),
+            Herv2StageItem("triage", "Quick", "deepseek-flash", elapsed_s=16.7, tokens=107726),
+        ),
+        review_count=0,
+        replan_count=0,
+    )
+
+    zh_html = format_herv2_card(card_data, locale="zh-CN", surface="telegram")
+    zh_plain = format_herv2_card(card_data, locale="zh-CN", surface="plain")
+
+    # Strip HTML tags; the remaining copy should match the plain branch.
+    import re
+
+    zh_html_text = re.sub(r"<[^>]+>", "", zh_html)
+    assert "路由：SIMPLE_TASK" in zh_html_text
+    assert "策略：监控与条件触发 · 证据与条款抽取" in zh_html_text
+    assert "即时响应 · 快速档 · deepseek-flash · 10.1秒 · 8.5万 token" in zh_html_text
+    assert "分诊 · 快速档 · deepseek-flash · 16.7秒 · 10.8万 token" in zh_html_text
+
+    assert "路由：SIMPLE_TASK" in zh_plain
+    assert "策略：监控与条件触发 · 证据与条款抽取" in zh_plain
+    assert "• 即时响应 · 快速档 · deepseek-flash · 10.1秒 · 8.5万 token" in zh_plain
+    assert "• 分诊 · 快速档 · deepseek-flash · 16.7秒 · 10.8万 token" in zh_plain
 
 
 @pytest.mark.asyncio
