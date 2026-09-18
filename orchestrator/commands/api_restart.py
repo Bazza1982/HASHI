@@ -17,8 +17,8 @@ from remote.security.shared_token import load_shared_token
 
 logger = logging.getLogger("BridgeU.RuntimeCommands.ApiRestart")
 
-WATCHTOWER_INSTANCE = "WATCHTOWER"
 ALLOWED_RESTART_SOURCES = {"telegram", "whatsapp", "tui", "agent"}
+_RESTART_INFLIGHT_ATTR = "_restart_inflight"
 
 
 def _instance_id(runtime: Any) -> str:
@@ -26,6 +26,12 @@ def _instance_id(runtime: Any) -> str:
     if global_config is None:
         global_config = getattr(getattr(runtime, "orchestrator", None), "global_cfg", None)
     return str(getattr(global_config, "instance_id", None) or "HASHI")
+
+
+def _restart_controller(runtime: Any) -> str:
+    """Return the instance-owned Remote that may restart this HASHI."""
+
+    return str(_instance_id(runtime) or "HASHI").strip().upper()
 
 
 def _service_manager(runtime: Any):
@@ -191,7 +197,7 @@ def _restart_auth_kwargs() -> dict[str, str | None]:
     }
 
 
-def _build_watchtower_restart_payload(
+def _build_restart_payload(
     runtime: Any, *, request_source: str, reason: str
 ) -> dict[str, Any]:
     source = str(request_source or "").strip().lower()
@@ -262,20 +268,26 @@ def _restart_completed_text(payload: dict[str, Any]) -> str:
     )
 
 
-def _watchtower_address() -> str:
+def _restart_remote_address(runtime: Any) -> str:
     try:
-        return remote_rescue._candidate_base_urls(WATCHTOWER_INSTANCE)[0]
+        return remote_rescue._candidate_base_urls(_restart_controller(runtime))[0]
     except Exception:
         return "unresolved"
 
 
-def _restart_status_text(payload: dict[str, Any] | None = None, *, error: str | None = None) -> str:
+def _restart_status_text(
+    runtime: Any,
+    payload: dict[str, Any] | None = None,
+    *,
+    error: str | None = None,
+) -> str:
+    controller = _restart_controller(runtime)
     lines = [
         card_title("🛠️", "Hard restart"),
         "",
         f"<b>{html.escape(ui_language.tr('common.current'))}</b> · {ui_language.tr('restart.current')}",
-        f"{ui_language.tr('restart.controller')}: <code>{WATCHTOWER_INSTANCE}</code>",
-        f"{ui_language.tr('restart.watchtower_api')}: <code>{html.escape(_watchtower_address())}</code>",
+        f"{ui_language.tr('restart.controller')}: <code>{html.escape(controller)}</code>",
+        f"{ui_language.tr('restart.remote_api')}: <code>{html.escape(_restart_remote_address(runtime))}</code>",
     ]
     if error:
         lines.append(f"Status: <code>{html.escape(error)}</code>")
@@ -324,22 +336,23 @@ def _restart_status_keyboard(confirm: bool = False, *, available: bool = True) -
 async def restart_command(runtime: Any, update: Any, context: Any) -> None:
     if not _authorized(runtime, update):
         return
-    if getattr(runtime, "_watchtower_restart_inflight", False):
+    if getattr(runtime, _RESTART_INFLIGHT_ATTR, False):
         await runtime._reply_text(update, ui_language.tr("api.restart.in_progress"))
         return
-    available, error, _payload = await _watchtower_restart_available()
+    available, error, _payload = await _restart_available(runtime)
     if not available:
         await runtime._reply_text(
             update,
             _restart_status_text(
-                error=error or ui_language.tr("api.restart.watchtower_unavailable")
+                runtime,
+                error=error or ui_language.tr("api.restart.remote_unavailable")
             ),
             parse_mode="HTML",
         )
         return
     try:
         request_source = _restart_request_source(context)
-        request_payload = _build_watchtower_restart_payload(
+        request_payload = _build_restart_payload(
             runtime,
             request_source=request_source,
             reason=f"{request_source} /restart hard restart",
@@ -354,42 +367,58 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
             parse_mode="HTML",
         )
         return
-    setattr(runtime, "_watchtower_restart_inflight", True)
+    setattr(runtime, _RESTART_INFLIGHT_ATTR, True)
     chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
     await runtime._reply_text(
         update,
-        ui_language.tr("api.restart.requested"),
+        ui_language.tr(
+            "api.restart.requested", instance=request_payload["target_instance"]
+        ),
     )
-    asyncio.create_task(_dispatch_watchtower_restart(runtime, chat_id, request_payload))
+    asyncio.create_task(_dispatch_restart(runtime, chat_id, request_payload))
 
 
-async def _watchtower_restart_available() -> tuple[bool, str | None, dict[str, Any] | None]:
+async def _restart_available(
+    runtime: Any,
+) -> tuple[bool, str | None, dict[str, Any] | None]:
+    controller = _restart_controller(runtime)
     try:
         code, payload = await asyncio.to_thread(
             remote_rescue.rescue_status,
-            WATCHTOWER_INSTANCE,
+            controller,
             **_restart_auth_kwargs(),
         )
     except Exception as exc:
         return False, str(exc), None
     if code != 0:
-        return False, payload.get("error") or payload.get("detail") or "WatchTower status check failed", payload
+        return (
+            False,
+            payload.get("error")
+            or payload.get("detail")
+            or "local HASHI Remote status check failed",
+            payload,
+        )
     return True, None, payload
 
 
-async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, request_payload: dict[str, Any]) -> None:
+async def _dispatch_restart(
+    runtime: Any,
+    chat_id: int | None,
+    request_payload: dict[str, Any],
+) -> None:
+    controller = _restart_controller(runtime)
     try:
         try:
             code, payload = await asyncio.to_thread(
                 remote_rescue.rescue_restart,
-                WATCHTOWER_INSTANCE,
+                controller,
                 reason=request_payload.get("reason"),
                 extra_payload=request_payload,
                 timeout=25,
                 **_restart_auth_kwargs(),
             )
         except Exception as exc:
-            logger.warning("WatchTower restart HTTP call failed or timed out: %s", exc)
+            logger.warning("Local HASHI Remote restart call failed or timed out: %s", exc)
             if chat_id is not None:
                 await runtime._send_text(
                     chat_id,
@@ -398,7 +427,7 @@ async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, reques
             return
         if code != 0:
             detail = payload.get("error") or payload.get("detail") or "remote error"
-            logger.warning("WatchTower hard restart rejected: %s", detail)
+            logger.warning("Local HASHI Remote hard restart rejected: %s", detail)
             if chat_id is not None:
                 await runtime._send_text(
                     chat_id,
@@ -410,7 +439,7 @@ async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, reques
             expected_target=str(request_payload.get("target_instance") or ""),
         )
         if not verified:
-            logger.warning("WatchTower returned an unverified restart result: %s", detail)
+            logger.warning("Local HASHI Remote returned an unverified restart result: %s", detail)
             if chat_id is not None:
                 await runtime._send_text(
                     chat_id,
@@ -420,7 +449,7 @@ async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, reques
         if chat_id is not None:
             await runtime._send_text(chat_id, _restart_completed_text(payload))
     finally:
-        setattr(runtime, "_watchtower_restart_inflight", False)
+        setattr(runtime, _RESTART_INFLIGHT_ATTR, False)
 
 
 async def api_callback(runtime: Any, update: Any, context: Any) -> None:
@@ -479,18 +508,19 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
         await query.answer()
         return
     if data == "hardrestart:arm":
-        available, error, _payload = await _watchtower_restart_available()
+        available, error, _payload = await _restart_available(runtime)
         if not available:
             await query.edit_message_text(
                 _restart_status_text(
+                    runtime,
                     error=error
-                    or ui_language.tr("api.restart.watchtower_unavailable")
+                    or ui_language.tr("api.restart.remote_unavailable")
                 ),
                 parse_mode="HTML",
                 reply_markup=_restart_status_keyboard(confirm=False, available=False),
             )
             await query.answer(
-                ui_language.tr("api.restart.watchtower_unavailable"),
+                ui_language.tr("api.restart.remote_unavailable"),
                 show_alert=True,
             )
             return
@@ -506,51 +536,47 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
         await query.answer()
         return
     if data == "hardrestart:refresh":
-        restart_available = False
         try:
-            code, payload = await asyncio.to_thread(
-                remote_rescue.rescue_status,
-                WATCHTOWER_INSTANCE,
-                **_restart_auth_kwargs(),
-            )
-            restart_available = code == 0
+            restart_available, error, payload = await _restart_available(runtime)
             text = _restart_status_text(
+                runtime,
                 payload,
                 error=(
                     None
                     if restart_available
-                    else payload.get("error")
-                    or ui_language.tr("api.restart.remote_error")
+                    else error or ui_language.tr("api.restart.remote_error")
                 ),
             )
         except Exception as exc:
-            text = _restart_status_text(error=str(exc))
+            restart_available = False
+            text = _restart_status_text(runtime, error=str(exc))
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=_restart_status_keyboard(confirm=False, available=restart_available))
         await query.answer()
         return
     if data == "hardrestart:confirm":
-        if getattr(runtime, "_watchtower_restart_inflight", False):
+        if getattr(runtime, _RESTART_INFLIGHT_ATTR, False):
             await query.answer(
                 ui_language.tr("api.restart.in_progress"), show_alert=True
             )
             return
-        available, error, _payload = await _watchtower_restart_available()
+        available, error, _payload = await _restart_available(runtime)
         if not available:
             await query.edit_message_text(
                 _restart_status_text(
+                    runtime,
                     error=error
-                    or ui_language.tr("api.restart.watchtower_unavailable")
+                    or ui_language.tr("api.restart.remote_unavailable")
                 ),
                 parse_mode="HTML",
                 reply_markup=_restart_status_keyboard(confirm=False, available=False),
             )
             await query.answer(
-                ui_language.tr("api.restart.watchtower_unavailable"),
+                ui_language.tr("api.restart.remote_unavailable"),
                 show_alert=True,
             )
             return
         try:
-            request_payload = _build_watchtower_restart_payload(
+            request_payload = _build_restart_payload(
                 runtime,
                 request_source="telegram",
                 reason="telegram /restart hard restart",
@@ -568,13 +594,16 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
                 ui_language.tr("api.restart.setup_incomplete"), show_alert=True
             )
             return
-        setattr(runtime, "_watchtower_restart_inflight", True)
+        setattr(runtime, _RESTART_INFLIGHT_ATTR, True)
         await query.edit_message_text(
-            ui_language.tr("api.restart.requested"),
+            ui_language.tr(
+                "api.restart.requested",
+                instance=request_payload["target_instance"],
+            ),
             reply_markup=None,
         )
         chat_id = getattr(getattr(query, "message", None), "chat_id", None)
-        asyncio.create_task(_dispatch_watchtower_restart(runtime, chat_id, request_payload))
+        asyncio.create_task(_dispatch_restart(runtime, chat_id, request_payload))
         await query.answer(ui_language.tr("api.restart.requested_short"))
         return
     await query.answer(ui_language.tr("api.restart.unknown"), show_alert=True)
@@ -582,7 +611,7 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
 
 async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /restart hard restart") -> tuple[bool, str]:
     try:
-        request_payload = _build_watchtower_restart_payload(
+        request_payload = _build_restart_payload(
             runtime, request_source="whatsapp", reason=reason
         )
     except Exception as exc:
@@ -591,18 +620,18 @@ async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /res
     try:
         code, payload = await asyncio.to_thread(
             remote_rescue.rescue_restart,
-            WATCHTOWER_INSTANCE,
+            _restart_controller(runtime),
             reason=request_payload.get("reason"),
             extra_payload=request_payload,
             timeout=25,
             **_restart_auth_kwargs(),
         )
     except Exception as exc:
-        logger.warning("WatchTower WhatsApp restart HTTP call failed or timed out: %s", exc)
+        logger.warning("Local HASHI Remote WhatsApp restart call failed or timed out: %s", exc)
         return False, str(exc)
     if code != 0:
         detail = payload.get("error") or payload.get("detail") or "remote error"
-        logger.warning("WatchTower WhatsApp hard restart rejected: %s", detail)
+        logger.warning("Local HASHI Remote WhatsApp hard restart rejected: %s", detail)
         return False, str(detail)
     verified, detail = _verified_restart_receipt(
         payload,
@@ -615,7 +644,6 @@ async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /res
 
 COMMANDS = [
     RuntimeCommand(name="api", description="Control API Gateway [on|off|model|status]", callback=api_command),
-    RuntimeCommand(name="restart", description="Hard restart via WatchTower", callback=restart_command),
 ]
 
 

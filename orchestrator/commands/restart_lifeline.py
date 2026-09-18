@@ -60,7 +60,7 @@ async def _dispatch_remote_restart(
             if chat_id is not None:
                 await runtime._send_text(
                     chat_id,
-                    f"Hard restart failed for {target}: {exc}",
+                    ui_language.tr("api.restart.failed", reason=str(exc)),
                 )
             return
         if code != 0:
@@ -69,7 +69,7 @@ async def _dispatch_remote_restart(
             if chat_id is not None:
                 await runtime._send_text(
                     chat_id,
-                    f"Hard restart was rejected for {target}: {detail}",
+                    ui_language.tr("api.restart.failed", reason=str(detail)),
                 )
             return
         verified, detail = legacy_restart._verified_restart_receipt(
@@ -85,7 +85,7 @@ async def _dispatch_remote_restart(
             if chat_id is not None:
                 await runtime._send_text(
                     chat_id,
-                    f"Hard restart failed for {target}: {detail}",
+                    ui_language.tr("api.restart.failed", reason=str(detail)),
                 )
             return
         if chat_id is not None:
@@ -95,44 +95,6 @@ async def _dispatch_remote_restart(
             )
     finally:
         setattr(runtime, _REMOTE_RESTART_INFLIGHT_ATTR, False)
-
-
-async def _dispatch_watchtower_fallback(
-    runtime: Any, update: Any, *, request_source: str
-) -> None:
-    available, error, _payload = await legacy_restart._watchtower_restart_available()
-    if not available:
-        await runtime._reply_text(
-            update,
-            legacy_restart._restart_status_text(
-                error=error or ui_language.tr("api.restart.watchtower_unavailable")
-            ),
-            parse_mode="HTML",
-        )
-        return
-    try:
-        request_payload = legacy_restart._build_watchtower_restart_payload(
-            runtime,
-            request_source=request_source,
-            reason=f"{request_source} /restart hard restart (WatchTower fallback)",
-        )
-    except Exception as exc:
-        logger.warning("Failed to build WatchTower fallback restart payload: %s", exc)
-        await runtime._reply_text(
-            update,
-            ui_language.tr("api.restart.setup_error", reason=str(exc)),
-        )
-        return
-
-    setattr(runtime, "_watchtower_restart_inflight", True)
-    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-    await runtime._reply_text(
-        update,
-        "Local supervised Hashi Remote is unavailable; WatchTower fallback restart requested.",
-    )
-    asyncio.create_task(
-        legacy_restart._dispatch_watchtower_restart(runtime, chat_id, request_payload)
-    )
 
 
 async def restart_command(runtime: Any, update: Any, context: Any) -> None:
@@ -147,7 +109,7 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
     if not legacy_restart._authorized(runtime, update):
         return
     if getattr(runtime, _REMOTE_RESTART_INFLIGHT_ATTR, False) or getattr(
-        runtime, "_watchtower_restart_inflight", False
+        runtime, legacy_restart._RESTART_INFLIGHT_ATTR, False
     ):
         await runtime._reply_text(update, ui_language.tr("api.restart.in_progress"))
         return
@@ -166,33 +128,34 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
         if target != local_instance:
             await runtime._reply_text(
                 update,
-                f"Hard restart unavailable for {target}: {exc}",
+                ui_language.tr("api.restart.failed", reason=str(exc)),
             )
             return
-        logger.info("Local Remote restart provider unavailable; trying WatchTower: %s", exc)
-        await _dispatch_watchtower_fallback(
-            runtime, update, request_source=request_source
+        logger.info("Local Remote restart provider unavailable: %s", exc)
+        await runtime._reply_text(
+            update,
+            ui_language.tr("api.restart.remote_unavailable"),
         )
         return
     except Exception as exc:
         if target != local_instance:
             await runtime._reply_text(
                 update,
-                f"Hard restart unavailable for {target}: {exc}",
+                ui_language.tr("api.restart.failed", reason=str(exc)),
             )
             return
-        logger.info("Local Remote restart probe failed; trying WatchTower: %s", exc)
-        await _dispatch_watchtower_fallback(
-            runtime, update, request_source=request_source
+        logger.info("Local Remote restart probe failed: %s", exc)
+        await runtime._reply_text(
+            update,
+            ui_language.tr("api.restart.remote_unavailable"),
         )
         return
 
     setattr(runtime, _REMOTE_RESTART_INFLIGHT_ATTR, True)
     chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-    provider_kind = str(provider.get("kind") or "remote")
     await runtime._reply_text(
         update,
-        f"Hard restart requested for {target} via trusted Hashi Remote ({provider_kind}).",
+        ui_language.tr("api.restart.requested", instance=target),
     )
     reason = f"{request_source} /restart {target} via trusted Hashi Remote"
     asyncio.create_task(
@@ -209,7 +172,7 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
 COMMANDS = [
     RuntimeCommand(
         name="restart",
-        description="Cold restart self or trusted HASHI peer [INSTANCE]",
+        description="Hard restart this HASHI or a trusted peer [INSTANCE]",
         callback=restart_command,
     )
 ]
