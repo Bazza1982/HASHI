@@ -56,9 +56,7 @@ async def submit(runtime, update, *, mode, number=None, targets=None, query=None
                 result["record"], locale=ui_language.preferred_locale(runtime, update)
             )
         elif result["accepted"]:
-            if origin["surface"] == "telegram":
-                return result  # Shared runtime sends start and final notices.
-            text = ui_language.tr("reboot.accepted")
+            return result  # Shared runtime sends the start and final notices.
         else:
             text = ui_language.tr(
                 "reboot.not_accepted",

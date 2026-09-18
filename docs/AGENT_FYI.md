@@ -31,8 +31,8 @@ Source, artifacts, clients, Workers, and delivery are separate facts.
 `/reboot min` replaces one Agent Worker; shared replacement is broader. Claim
 adoption only after the active generation is verified. Locked runtime packages
 must match exactly; unrelated extra packages alone must not block `/reboot`.
-The Function manifest must be clean in a recorded local Git commit; unrelated
-dirty files outside that manifest do not block it. Reboot receipts distinguish
+The Function manifest needs a clean commit; unrelated files outside it do not
+block `/reboot`. Reboots report start and final outcome. Receipts distinguish
 accepted, candidate rejected, committed, rolled back, online, and unconfirmed;
 only PID, identity, generation, and health evidence permits `online`. See
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
@@ -160,9 +160,9 @@ Attachments bind to one draft, instance, Agent, and submission. Remote sends
 verified managed bytes, never origin paths. Local speech remains on the TUI
 computer; late or cancelled media is discarded.
 
-Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): one fact owner,
-localization, escaping, accurate state/scope, safe navigation, and actionable
-errors. `/help` derives from registered metadata. Workbench and Telegram project
+Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize,
+escape, state plain user outcomes, and keep lifecycle internals in diagnostics.
+`/help` derives from registered metadata. Workbench and Telegram project
 one primary personal Conversation Session; semantic messages appear on both,
 while presentation rows never enter model history. Command menus reuse the
 authenticated runtime command path and keep action state server-side.
@@ -197,8 +197,9 @@ Prefer `log_query` for literal logs and Jobs for long work. Tests prove only
 scope; live adoption needs separate evidence. Preserve user work; report
 failures honestly.
 
-Remote reload keeps Core and readable secret ACLs; probe its own port.
-`/restart` verifies a new PID, identity, generation, and health.
+Remote reload preserves Core.
+`/restart` uses supervised `L3_RESTART` Remote, not WatchTower, and verifies PID,
+identity, generation and health.
 
 Use `request_diagnostics` to query one request's final state, Provider IDs,
 observed writes/effects, Jobs, and retry evidence. It is read-only and never

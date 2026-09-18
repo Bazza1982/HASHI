@@ -10,21 +10,25 @@ running Telegram agent.
 
 ## WatchTower Role
 
-HASHI WatchTower is the always-on rescue controller for a protected HASHI
-instance. It runs outside the HASHI process and exposes a narrow LAN rescue API
-for status, logs, start, and hard restart.
+HASHI WatchTower is an optional external rescue controller for a protected
+HASHI instance. It runs outside the HASHI process and exposes a narrow LAN
+rescue API for status, logs, start, and hard restart.
 
 WatchTower enables two operational capabilities:
 
 - **LAN rescue**: another trusted HASHI instance or operator tool can inspect
   and start a down HASHI instance without relying on that instance's Telegram
   bot or Backend API.
-- **Cold restart**: a running HASHI instance can ask WatchTower to stop the
-  current process, restart it with the configured launcher, and verify that
-  Backend API health returns.
+- **External cold restart**: an operator can ask WatchTower to stop a HASHI
+  process, restart it with the configured launcher, and verify that Backend API
+  health returns.
 
-The Telegram `/restart` command uses this mechanism. HASHI itself only asks
-WatchTower to restart; WatchTower owns the stop/start/verify supervision.
+The normal `/restart` command does not depend on WatchTower. It selects the
+calling instance's own supervised HASHI Remote, which survives the Core process,
+and that Remote owns stop/start/verify. The Remote must advertise
+`rescue_restart`, which requires `L3_RESTART`. An explicitly named trusted peer
+is routed to that peer's Remote only after the bilateral handshake and live
+capability checks pass. There is no automatic WatchTower fallback.
 
 ## Problem
 
@@ -190,7 +194,7 @@ POST /api/admin/notify
 on the controlled Backend API with an admin-authenticated payload such as:
 
 ```json
-{"agent":"hashiko","text":"WatchTower restart completed."}
+{"agent":"hashiko","text":"HASHI restart completed."}
 ```
 
 This endpoint sends a bounded operator notification through the target agent's

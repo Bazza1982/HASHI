@@ -28,9 +28,11 @@ from an Agent-only reboot. The planned operator cold start adopts both together.
    during a pending/active reboot or shared handoff is rejected as busy. The
    pending request is never overwritten. A group button submits one explicit
    target set; if any target is unavailable, the whole group request is rejected.
-3. Runtime sends a concise start notice, then performs the existing verified
-   candidate/drain/atomic route-switch transaction. Target membership is frozen
-   at acceptance, even if numbered configuration ordering changes afterward.
+3. Runtime sends one concise start notice and one final outcome; the command
+   path does not add a redundant acceptance reply. Multi-Agent success notices
+   show counts instead of name lists, while failures retain actionable target
+   names. The verified candidate/drain/atomic route-switch transaction and
+   target membership are unchanged.
 4. The terminal outcome is saved before notification delivery. Delivery never
    changes that outcome and never runs the operation again.
 
@@ -57,8 +59,10 @@ route gates and checks the old Workers rather than assuming restoration.
 
 Chinese examples (runtime messages have no persona greeting):
 
-- `🔄 系统正在最小热重启：月如……`
-- `✅ 系统最小热重启成功，月如已恢复在线。`
+- `🔄 正在热重启 月如…`
+- `✅ 月如已经在线。`
+- `🔄 正在热重启 20 个在线代理…`
+- `✅ 热重启完成：20 个代理已经在线。`
 - `❌ 系统最小热重启失败，月如已恢复原状态。`
 - `❌ 系统最小热重启失败，月如暂未恢复在线。`
 
@@ -76,8 +80,9 @@ are deduplicated and known active Telegram rate limits are respected. There is
 no model call, new Agent, new poller or external monitoring service.
 
 Destination identifiers are scoped to their frontend. A WhatsApp or Backend API
-command receives acceptance and can query its stored result on that surface;
-its phone number or channel ID is never interpreted as a Telegram chat ID.
+command receives the same start and final notices on that surface without an
+extra acceptance message; its phone number or channel ID is never interpreted
+as a Telegram chat ID.
 Proactive fallback in this implementation is for Telegram-origin requests.
 
 Each delivery round has a 15-second total budget and a 5-second per-Bot budget.
@@ -156,11 +161,11 @@ budget; generic lifecycle timeouts are unchanged. RPC transport adds its existin
 10-second allowance to drain. Preparation, delivery and rollback have separate
 budgets, so 10 seconds is not an end-to-end reboot promise.
 
-Start notices acknowledge checking/preparation. Persisted failure reasons distinguish
-route admission, Worker drain, source verification and activation. Recovery state
-is independently verified and rendered even when rollback fails. Busy and drain
-responses suggest /stop on the affected agent and queue inspection for stuck
-work; /reboot status remains available from another agent for the same destination.
+Start notices acknowledge the operation. Persisted failure reasons retain precise
+diagnostic categories, while ordinary notices describe only the user-visible
+outcome and next action. Recovery state is independently verified even when
+restoration fails. Busy responses suggest /stop for work that appears stuck;
+/reboot status remains an optional diagnostic view rather than required follow-up.
 No forced cancellation, automatic retry or widening of targets is introduced.
 Unresponsive activity rejects with a targeted recovery suggestion, not a claim
 that the agent is healthy. New behavior requires shared Functions adoption;

@@ -56,14 +56,56 @@ class HttpResult:
         return 200 <= self.status < 300 and bool(self.body.get("ok", True))
 
 
-def _default_instance_id() -> str | None:
-    return configured_instance_id(ROOT) or os.getenv("HASHI_INSTANCE_ID")
+def _resolve_hashi_root(root: Path | str | None = None) -> Path:
+    return Path(root or ROOT).expanduser().resolve()
 
 
-def _instance_entry(instance_id: str) -> dict:
+def _default_instance_id(root: Path | str | None = None) -> str | None:
+    return configured_instance_id(_resolve_hashi_root(root)) or os.getenv(
+        "HASHI_INSTANCE_ID"
+    )
+
+
+def _configured_local_entry(root: Path, instance_id: str) -> dict:
+    path = root / "agents.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    global_config = (data or {}).get("global") or {}
+    configured = _normalize_instance_id(global_config.get("instance_id"))
+    if configured != _normalize_instance_id(instance_id):
+        return {}
+    return {
+        "instance_id": configured,
+        "display_name": str(global_config.get("display_name") or configured),
+        "api_host": "127.0.0.1",
+        "lan_ip": "127.0.0.1",
+        "remote_port": int(global_config.get("remote_port") or DEFAULT_REMOTE_PORT),
+    }
+
+
+def _instance_entry(
+    instance_id: str,
+    *,
+    root: Path | str | None = None,
+    local_instance_id: str | None = None,
+) -> dict:
+    hashi_root = _resolve_hashi_root(root)
     normalized = (_normalize_instance_id(instance_id) or "").lower()
-    local_id = (_normalize_instance_id(_default_instance_id()) or "").lower()
-    live = read_live_endpoints(ROOT).get(normalized)
+    if local_instance_id:
+        configured_local_id = _normalize_instance_id(local_instance_id)
+    elif root is None:
+        # Preserve the original no-argument lookup for callers that do not
+        # provide an explicit runtime root.
+        configured_local_id = _default_instance_id()
+    else:
+        configured_local_id = _default_instance_id(hashi_root)
+    local_id = (
+        _normalize_instance_id(configured_local_id)
+        or ""
+    ).lower()
+    live = read_live_endpoints(hashi_root).get(normalized)
     if live:
         entry = dict(live)
         if normalized and normalized == local_id:
@@ -71,7 +113,7 @@ def _instance_entry(instance_id: str) -> dict:
             entry.setdefault("lan_ip", "127.0.0.1")
         return entry
     if normalized and normalized == local_id:
-        claim = read_runtime_claim(ROOT) or {}
+        claim = read_runtime_claim(hashi_root) or {}
         if claim:
             return {
                 "instance_id": _normalize_instance_id(instance_id),
@@ -80,6 +122,9 @@ def _instance_entry(instance_id: str) -> dict:
                 "lan_ip": "127.0.0.1",
                 "remote_port": int(claim.get("port") or DEFAULT_REMOTE_PORT),
             }
+        configured = _configured_local_entry(hashi_root, instance_id)
+        if configured:
+            return configured
     instances = _load_instances()
     entry = instances.get(normalized)
     if not entry:
@@ -88,8 +133,17 @@ def _instance_entry(instance_id: str) -> dict:
     return entry
 
 
-def _candidate_base_urls(instance_id: str) -> list[str]:
-    entry = _instance_entry(instance_id)
+def _candidate_base_urls(
+    instance_id: str,
+    *,
+    root: Path | str | None = None,
+    local_instance_id: str | None = None,
+) -> list[str]:
+    entry = _instance_entry(
+        instance_id,
+        root=root,
+        local_instance_id=local_instance_id,
+    )
     port = int(entry.get("remote_port") or entry.get("port") or DEFAULT_REMOTE_PORT)
     urls: list[str] = []
     for host in _candidate_hosts(entry):
@@ -144,9 +198,15 @@ def _reachable_base_url(
     shared_token: str | None = None,
     from_instance: str | None = None,
     timeout: int = 5,
+    root: Path | str | None = None,
+    local_instance_id: str | None = None,
 ) -> str:
     last_error = ""
-    for base_url in _candidate_base_urls(instance_id):
+    for base_url in _candidate_base_urls(
+        instance_id,
+        root=root,
+        local_instance_id=local_instance_id,
+    ):
         try:
             result = _request_json_status(
                 f"{base_url}/health",
@@ -182,8 +242,18 @@ def probe_capabilities(
     shared_token: str | None = None,
     from_instance: str | None = None,
     timeout: int = 5,
+    root: Path | str | None = None,
+    local_instance_id: str | None = None,
 ) -> dict:
-    base_url = _reachable_base_url(instance_id, token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
+    base_url = _reachable_base_url(
+        instance_id,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+        root=root,
+        local_instance_id=local_instance_id,
+    )
     protocol = _request_json_status(f"{base_url}/protocol/status", token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
     advertised = []
     if protocol.status != 404 and protocol.ok:
@@ -210,8 +280,25 @@ def probe_capabilities(
     }
 
 
-def rescue_status(instance_id: str, *, token: str | None = None, shared_token: str | None = None, from_instance: str | None = None, timeout: int = 5) -> tuple[int, dict]:
-    base_url = _reachable_base_url(instance_id, token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
+def rescue_status(
+    instance_id: str,
+    *,
+    token: str | None = None,
+    shared_token: str | None = None,
+    from_instance: str | None = None,
+    timeout: int = 5,
+    root: Path | str | None = None,
+    local_instance_id: str | None = None,
+) -> tuple[int, dict]:
+    base_url = _reachable_base_url(
+        instance_id,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+        root=root,
+        local_instance_id=local_instance_id,
+    )
     result = _request_json_status(f"{base_url}/control/hashi/status", token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
     if result.status == 404:
         return EXIT_UNSUPPORTED, _unsupported_payload(instance_id, "/control/hashi/status", base_url)
@@ -290,8 +377,18 @@ def rescue_restart(
     shared_token: str | None = None,
     from_instance: str | None = None,
     timeout: int = RESTART_REQUEST_TIMEOUT_SECONDS,
+    root: Path | str | None = None,
+    local_instance_id: str | None = None,
 ) -> tuple[int, dict]:
-    base_url = _reachable_base_url(instance_id, token=token, shared_token=shared_token, from_instance=from_instance, timeout=timeout)
+    base_url = _reachable_base_url(
+        instance_id,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+        timeout=timeout,
+        root=root,
+        local_instance_id=local_instance_id,
+    )
     payload = {
         "reason": reason,
         "target_instance": _normalize_instance_id(target_instance or instance_id),

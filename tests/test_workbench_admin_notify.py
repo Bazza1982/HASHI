@@ -12,8 +12,12 @@ from orchestrator.workbench_api import WorkbenchApiServer
 class _FakeRuntime:
     name = "hashiko"
 
-    def __init__(self):
+    def __init__(self, *, locale="en"):
         self.sent = []
+        self.global_config = SimpleNamespace(
+            ui_language=locale,
+            authorized_id=123,
+        )
 
     def _primary_chat_id(self):
         return 123
@@ -36,6 +40,7 @@ class _FakeRequest:
 def _server(tmp_path: Path, runtime: _FakeRuntime) -> WorkbenchApiServer:
     config_path = tmp_path / "agents.json"
     config_path.write_text(json.dumps({"agents": [{"name": "hashiko"}]}), encoding="utf-8")
+    runtime.global_config.bridge_home = tmp_path
     global_config = SimpleNamespace()
     return WorkbenchApiServer(
         config_path=config_path,
@@ -56,6 +61,54 @@ async def test_admin_notify_sends_text_to_primary_chat(tmp_path):
     assert response.status == 200
     assert payload["ok"] is True
     assert runtime.sent == [{"chat_id": 123, "text": "restarted"}]
+
+
+@pytest.mark.asyncio
+async def test_admin_notify_renders_restart_notice_in_user_locale(tmp_path):
+    runtime = _FakeRuntime(locale="zh-CN")
+    server = _server(tmp_path, runtime)
+
+    response = await server.handle_admin_notify(
+        _FakeRequest(
+            {
+                "agent": "hashiko",
+                "message_key": "api.restart.completed",
+                "message_args": {"instance": "HASHI3"},
+            }
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert runtime.sent == [
+        {"chat_id": 123, "text": "✅ HASHI3 已重启并恢复在线。"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admin_notify_hides_legacy_restart_diagnostics(tmp_path):
+    runtime = _FakeRuntime(locale="zh-CN")
+    server = _server(tmp_path, runtime)
+
+    response = await server.handle_admin_notify(
+        _FakeRequest(
+            {
+                "agent": "hashiko",
+                "text": (
+                    "HASHI restart verified for HASHI3. PID 123 -> 456; "
+                    "generation sha256:internal; receipt rst_internal."
+                ),
+            }
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert runtime.sent == [
+        {"chat_id": 123, "text": "✅ HASHI3 已重启并恢复在线。"}
+    ]
 
 
 @pytest.mark.asyncio

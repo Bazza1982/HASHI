@@ -14,7 +14,9 @@ def render_notice(
         mode = "generic"
     scope = ui_language.tr("reboot.scope." + mode, locale=language)
     names = record.get("display_names", {})
-    targets = record.get("targets", [])
+    all_targets = list(record.get("targets", []))
+    total_count = len(all_targets)
+    targets = all_targets
     recovered_targets = []
     if not starting and record["status"] == "failed" and not record.get("restored"):
         recovered_targets = [
@@ -32,8 +34,11 @@ def render_notice(
         str(names.get(record.get("source_agent")) or record.get("source_agent") or "")
     )
     lifecycle = record.get("lifecycle_state")
+    partial = bool(recovered_targets and targets)
     if starting:
         status = "starting"
+    elif partial:
+        status = "partial"
     elif lifecycle == "unconfirmed" and record.get("status") == "failed":
         status = "unavailable"
     elif lifecycle in {
@@ -50,8 +55,18 @@ def render_notice(
         if status == "failed":
             status = "restored" if record.get("restored") else "unavailable"
     key = "reboot.notice." + status
-    text = ui_language.tr(key, locale=language, scope=scope, agents=target)
-    if recovered_targets:
+    if total_count == 1 and status in {"starting", "online", "succeeded"}:
+        key += "_single"
+    text = ui_language.tr(
+        key,
+        locale=language,
+        scope=scope,
+        agents=target,
+        count=total_count,
+        online_count=len(recovered_targets),
+        failed_count=len(targets),
+    )
+    if recovered_targets and not partial:
         text += "\n" + ui_language.tr(
             "reboot.restored_targets",
             locale=language,
