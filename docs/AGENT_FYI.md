@@ -75,10 +75,10 @@ Qualify “Session”: PAO owns the HASHI Conversation Session, Messages, and Ru
 the selected Engine owns its Engine Session and Turns; Provider context is
 rebuildable transport state; frontend history is a disposable projection.
 
-External frontends stage, upload, and commit all advertised attachments before
-creating one ordered Message and one Run. Any required attachment failure
-rejects the whole Run; never split one submission into legacy per-file Turns.
-Telegram keeps its Connector intake, and the built-in TUI is separate.
+External frontends atomically stage advertised attachments into one ordered
+Message and Run; any required failure rejects the Run, never per-file Turns.
+Qualified personal instances advertise this by default unless explicitly opted
+out. Telegram retains its Connector intake; the built-in TUI stays separate.
 
 Every input has protected `CURRENT MESSAGE CONTEXT`. Keep message source,
 ingress, processing instance, sender assurance, authorization, and destination

@@ -164,9 +164,11 @@ class GlobalConfig:
     wiki_provider: dict[str, Any] = field(default_factory=dict)
     central_memory: dict[str, Any] = field(default_factory=dict)
     canonical_audit: dict[str, Any] = field(default_factory=dict)
-    # Additive, fail-closed protocol gates.  Existing installations retain
-    # their current text/STT/TTS behaviour until both are explicitly enabled.
-    persistent_session_v1: bool = False
+    # The qualified persistent Session/attachment contract is standard for a
+    # personal instance.  An explicit false remains an operator opt-out.
+    # Native audio remains separately opt-in because it has extra media and
+    # retention requirements.
+    persistent_session_v1: bool = True
     native_audio_chat_v1: bool = False
     native_audio_retention_seconds: int | str = 3600
 
@@ -728,7 +730,7 @@ class ConfigManager:
             central_memory=dict(g_raw.get("central_memory") or {}),
             canonical_audit=canonical_audit_config,
             persistent_session_v1=_truthy(
-                g_raw.get("persistent_session_v1", False)
+                g_raw.get("persistent_session_v1", True)
             ),
             native_audio_chat_v1=_truthy(
                 g_raw.get("native_audio_chat_v1", False)
