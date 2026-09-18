@@ -832,6 +832,75 @@ async def test_commands_callbacks_and_rpc_acknowledge_real_transaction_and_scope
     kernel._runtime_map()["zelda"]._client = old
 
 
+def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
+    from orchestrator.reboot_ui import render_notice
+
+    single = {
+        "source_agent": "zelda",
+        "mode": "min",
+        "targets": ["zelda"],
+        "display_names": {"zelda": "Zelda"},
+        "status": "succeeded",
+        "lifecycle_state": "online",
+        "locale": "en",
+    }
+    assert "Zelda" in render_notice(single, starting=True)
+    assert "Zelda" in render_notice(single)
+
+    many = {
+        **single,
+        "mode": "max",
+        "targets": [f"agent-{index}" for index in range(20)],
+        "display_names": {f"agent-{index}": f"Agent {index}" for index in range(20)},
+    }
+    starting = render_notice(many, starting=True)
+    completed = render_notice(many)
+    assert "20" in starting and "Agent 0" not in starting
+    assert "20" in completed and "Agent 0" not in completed
+    assert "/reboot status" not in starting
+
+    partial = {
+        **many,
+        "status": "failed",
+        "lifecycle_state": "unconfirmed",
+        "online": {name: index < 18 for index, name in enumerate(many["targets"])},
+    }
+    warning = render_notice(partial)
+    assert "18/20" in warning and "Agent 18" in warning and "Agent 0" not in warning
+
+
+@pytest.mark.asyncio
+async def test_shared_frontend_acceptance_relies_on_start_and_final_notices():
+    from orchestrator import runtime_reboot
+
+    class Orchestrator:
+        async def request_reboot(self, **_request):
+            return {"accepted": True, "record": {"id": "operation-1"}}
+
+    replies = []
+
+    async def reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        orchestrator=Orchestrator(),
+        global_config=SimpleNamespace(ui_language="en"),
+        _reply_text=reply,
+    )
+    update = SimpleNamespace(
+        update_id=321,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=SimpleNamespace(message_thread_id=None),
+        callback_query=None,
+        _hashi_session_surface="workbench",
+    )
+    result = await runtime_reboot.submit(runtime, update, mode="max")
+    assert result["accepted"]
+    assert replies == []
+
+
 @pytest.mark.asyncio
 async def test_group_button_reboots_one_exact_set_with_one_receipt(tmp_path):
     from orchestrator import runtime_groups

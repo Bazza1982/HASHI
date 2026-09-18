@@ -28,9 +28,11 @@ from an Agent-only reboot. The planned operator cold start adopts both together.
    during a pending/active reboot or shared handoff is rejected as busy. The
    pending request is never overwritten. A group button submits one explicit
    target set; if any target is unavailable, the whole group request is rejected.
-3. Runtime sends a concise start notice, then performs the existing verified
-   candidate/drain/atomic route-switch transaction. Target membership is frozen
-   at acceptance, even if numbered configuration ordering changes afterward.
+3. Runtime sends one concise start notice and one final outcome; the command
+   path does not add a redundant acceptance reply. Multi-Agent success notices
+   show counts instead of name lists, while failures retain actionable target
+   names. The verified candidate/drain/atomic route-switch transaction and
+   target membership are unchanged.
 4. The terminal outcome is saved before notification delivery. Delivery never
    changes that outcome and never runs the operation again.
 
@@ -57,8 +59,10 @@ route gates and checks the old Workers rather than assuming restoration.
 
 Chinese examples (runtime messages have no persona greeting):
 
-- `🔄 系统正在最小热重启：月如……`
-- `✅ 系统最小热重启成功，月如已恢复在线。`
+- `🔄 正在热重启 月如…`
+- `✅ 月如已恢复在线。`
+- `🔄 正在热重启 20 个在线代理…`
+- `✅ 热重启完成：20 个代理已恢复在线。`
 - `❌ 系统最小热重启失败，月如已恢复原状态。`
 - `❌ 系统最小热重启失败，月如暂未恢复在线。`
 
@@ -76,8 +80,9 @@ are deduplicated and known active Telegram rate limits are respected. There is
 no model call, new Agent, new poller or external monitoring service.
 
 Destination identifiers are scoped to their frontend. A WhatsApp or Backend API
-command receives acceptance and can query its stored result on that surface;
-its phone number or channel ID is never interpreted as a Telegram chat ID.
+command receives the same start and final notices on that surface without an
+extra acceptance message; its phone number or channel ID is never interpreted
+as a Telegram chat ID.
 Proactive fallback in this implementation is for Telegram-origin requests.
 
 Each delivery round has a 15-second total budget and a 5-second per-Bot budget.
