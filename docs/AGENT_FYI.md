@@ -56,11 +56,8 @@ model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
 the Function registry. An explicit Agent selection remains authoritative until
 that model is retired.
 
-Private EXP owner directories live under the selected instance's
-`<bridge_home>/exp` and stay ignored by Git. Runtime discovery resolves that
-instance directory through `BRIDGE_HOME`; it must not publish private EXP into
-the immutable Function artifact or make one instance's catalogue visible to
-another.
+Private EXP lives in ignored `<bridge_home>/exp`, resolved through
+`BRIDGE_HOME`; never publish it in Function artifacts or across instances.
 
 The open Tool wildcard is permission, not proof that an Engine, Workzone, or
 device Worker supplies a capability. Workzones expose only exact enabled roots;
@@ -173,10 +170,8 @@ one primary personal Conversation Session; semantic messages appear on both,
 while presentation rows never enter model history. Command menus reuse the
 authenticated runtime command path and keep action state server-side.
 
-Agent deletion is PAO-owned and default-on in a Function generation that
-advertises `agent_deletion`. Frontends keep the action in their existing Agent
-management surface and hide it when that authenticated capability is absent.
-The HASHI preview is authoritative; blockers and cleanup receipts remain binding.
+Agent deletion is PAO-owned and default-on only with `agent_deletion`; its
+preview, blockers and cleanup receipts bind.
 
 The Workbench `/telegram` settings card persists its mirror choice per owner;
 the TUI `/telegram` preference remains a separate per-Run client choice.
@@ -196,29 +191,20 @@ Scheduler entries disabled. History projection uses owner, generation, and
 provenance; `accepted` is not `completed`. See
 [Agent Move](HASHI_AGENT_MOVE_V1.md).
 
-Scheduler instants are UTC. Recurrence keeps wall time plus IANA timezone;
-unknown legacy zones use UTC. PCM orders absolute history in UTC, never by host
-local time. Telegram recovery binds exact instance, lifecycle, and Bot
-fingerprint. Permanent errors stop only that chat; transient recovery is bounded
-and `RetryAfter` wins.
+Scheduler uses UTC instants and wall time plus IANA zone for recurrence; unknown
+legacy zones use UTC. Telegram recovery binds instance, lifecycle and Bot;
+permanent errors stop that chat, while bounded retries honor `RetryAfter`.
 
-Use only authorized capabilities. Device actions need a live same-instance
-Worker; re-plan on `capability_unavailable` or `needs_replan`.
-Prefer `log_query` for literal logs. Agents work in the foreground and never
-start managed background jobs autonomously; only an explicit user `/bg` request
-grants `background_job_start` for that request. Existing jobs remain visible
-and cancellable. Tests prove only scope; live adoption needs separate evidence.
-Preserve user work; report failures honestly.
+Use only authorized capabilities. Device actions need a same-instance Worker;
+re-plan when unavailable. Prefer `log_query` for logs. Agents work foreground;
+only explicit user `/bg` grants `background_job_start` for that request.
+Tests prove scope, not live adoption; preserve user work and report failures.
 
-Remote reload preserves Core.
-`/restart` uses supervised `L3_RESTART` Remote, not WatchTower, and verifies PID,
-identity, generation and health.
+Remote reload preserves Core. `/restart` uses supervised `L3_RESTART` Remote
+and verifies identity, generation and health. `request_diagnostics` reads one
+request's final state, effects, Jobs and retry evidence; it never retries or
+authorizes one.
 
-Use `request_diagnostics` to query one request's final state, Provider IDs,
-observed writes/effects, Jobs, and retry evidence. It is read-only and never
-authorizes or performs a retry.
-
-HCC is optional PCM `agent.md` context. `/hcc on|off` controls injection and
-grants no authority. Refresh only with `hcc-refresh` from authorized sources:
-verify its digest, publish source/time, and never rewrite PCM or blindly retry
-conflicts. See [HCC](HASHI_HCC_IMPLEMENTATION.md).
+HCC is optional, non-authoritative PCM context. `/hcc` controls injection;
+`hcc-refresh` alone refreshes authorized sources after digest/provenance checks,
+without rewriting PCM or retrying conflicts.
