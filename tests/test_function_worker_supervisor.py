@@ -29,6 +29,7 @@ from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
     FunctionWorkerError,
     FunctionWorkerSupervisor,
+    load_bootable_generation_cache,
     load_qualified_generation_cache,
     materialize_generation_artifact,
     persist_qualified_generation_cache,
@@ -750,16 +751,18 @@ def test_qualified_byte_verification_does_not_rebuild_dependency_graph(
     )
 
 
-def test_qualified_byte_verification_rejects_new_asset(tmp_path):
+def test_qualified_byte_verification_ignores_new_optional_asset(tmp_path):
     generation = _verified_generation(tmp_path / "source")
     added = generation.code_root / "orchestrator" / "assets" / "unqualified.txt"
     added.write_text("not in the accepted manifest", encoding="utf-8")
 
-    with pytest.raises(Exception, match="source or asset changed"):
-        verify_qualified_manifest_bytes(
-            generation.manifest,
-            code_root=generation.code_root,
-        )
+    verify_qualified_manifest_bytes(
+        generation.manifest,
+        code_root=generation.code_root,
+    )
+    assert added.relative_to(generation.code_root).as_posix() not in {
+        item.relative_path for item in generation.manifest.assets
+    }
 
 
 def test_qualified_byte_verification_rejects_parent_traversal(tmp_path):
@@ -814,6 +817,47 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
 
     assert (
         load_qualified_generation_cache(
+            bridge_home,
+            source_root,
+            object(),
+        )
+        is None
+    )
+
+
+def test_boot_cache_keeps_last_verified_generation_when_checkout_is_broken(
+    tmp_path,
+    monkeypatch,
+):
+    source_root = tmp_path / "source"
+    bridge_home = tmp_path / "bridge"
+    generation = _verified_generation(source_root)
+    artifact = materialize_generation_artifact(bridge_home, generation)
+    persist_qualified_generation_cache(bridge_home, generation, artifact)
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.compare_function_candidate_runtime",
+        lambda *_args, **_kwargs: None,
+    )
+
+    source = source_root / "orchestrator" / "worker_demo.py"
+    source.write_text("this checkout no longer qualifies\n", encoding="utf-8")
+
+    loaded = load_bootable_generation_cache(
+        bridge_home,
+        source_root,
+        object(),
+    )
+
+    assert loaded is not None
+    loaded_generation, loaded_artifact = loaded
+    assert loaded_generation.manifest == generation.manifest
+    assert loaded_artifact == artifact
+
+    artifact_source = artifact / "orchestrator" / "worker_demo.py"
+    artifact_source.chmod(0o644)
+    artifact_source.write_text("tampered\n", encoding="utf-8")
+    assert (
+        load_bootable_generation_cache(
             bridge_home,
             source_root,
             object(),

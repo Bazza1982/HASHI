@@ -351,6 +351,20 @@ Function discovery is rooted to the checked-out project. A third-party module
 whose name happens to start with `tools.` or `orchestrator.` must never enter a
 generation artifact.
 
+Cold startup is availability-first. Required executable Function source still
+has to compile and satisfy the Core runtime contract, but broadly discovered
+non-code resources are optional: only clean files published by Git `HEAD` enter
+a new immutable generation. Ignored, untracked, locally modified, or nested
+repository resources are skipped with a warning; they may degrade their owning
+feature but must not prevent HASHI from starting. This applies to every Function
+root, including `exp/`, and is not a special-case path exclusion.
+
+If a new Function candidate cannot qualify, cold startup re-verifies and uses
+the last known-good immutable generation when its runtime contract still matches
+the current Core. Rejected checkout bytes are never executed. Startup may fail
+only when neither a valid candidate nor a compatible verified generation exists;
+that is a missing executable runtime, not an optional-resource failure.
+
 ## Stable Random Port Allocation
 
 Fixed default ports have repeatedly caused HASHI instances and APIs to fight
