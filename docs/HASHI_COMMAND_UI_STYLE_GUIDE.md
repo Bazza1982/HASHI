@@ -29,6 +29,9 @@ Put advanced text syntax last, or show it only after invalid input.
 - Explain consequences in one or two sentences. Avoid implementation detail.
 - Success, warning, error, and information notices start with `✅`, `⚠️`, `❌`,
   and `ℹ️` respectively.
+- Ordinary notices state the outcome, current user-visible state, and any next
+  action. Internal lifecycle terms such as Worker, candidate, route, PID,
+  generation, receipt, and adapter belong only in detailed diagnostic views.
 - Local/plain-text surfaces keep the same order and wording, omitting HTML tags.
 
 ## 3. Button rules

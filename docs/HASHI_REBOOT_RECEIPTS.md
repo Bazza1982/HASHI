@@ -60,9 +60,9 @@ route gates and checks the old Workers rather than assuming restoration.
 Chinese examples (runtime messages have no persona greeting):
 
 - `🔄 正在热重启 月如…`
-- `✅ 月如已恢复在线。`
+- `✅ 月如已经在线。`
 - `🔄 正在热重启 20 个在线代理…`
-- `✅ 热重启完成：20 个代理已恢复在线。`
+- `✅ 热重启完成：20 个代理已经在线。`
 - `❌ 系统最小热重启失败，月如已恢复原状态。`
 - `❌ 系统最小热重启失败，月如暂未恢复在线。`
 
@@ -161,11 +161,11 @@ budget; generic lifecycle timeouts are unchanged. RPC transport adds its existin
 10-second allowance to drain. Preparation, delivery and rollback have separate
 budgets, so 10 seconds is not an end-to-end reboot promise.
 
-Start notices acknowledge checking/preparation. Persisted failure reasons distinguish
-route admission, Worker drain, source verification and activation. Recovery state
-is independently verified and rendered even when rollback fails. Busy and drain
-responses suggest /stop on the affected agent and queue inspection for stuck
-work; /reboot status remains available from another agent for the same destination.
+Start notices acknowledge the operation. Persisted failure reasons retain precise
+diagnostic categories, while ordinary notices describe only the user-visible
+outcome and next action. Recovery state is independently verified even when
+restoration fails. Busy responses suggest /stop for work that appears stuck;
+/reboot status remains an optional diagnostic view rather than required follow-up.
 No forced cancellation, automatic retry or widening of targets is introduced.
 Unresponsive activity rejects with a targeted recovery suggestion, not a claim
 that the agent is healthy. New behavior requires shared Functions adoption;

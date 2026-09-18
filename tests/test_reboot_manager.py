@@ -369,7 +369,7 @@ async def test_failed_restore_is_reported_as_unavailable_not_restored(
     record = manager.receipts.records()[-1]
     assert record["status"] == "failed" and record["restored"] is False
     assert record["online"] == {"zelda": False}
-    assert "暂未恢复在线" in notices[-1]
+    assert "尚未在线" in notices[-1]
     assert "已恢复原状态" not in notices[-1]
     assert mirrored[-1]["agent_id"] == "zelda"
     assert mirrored[-1]["text"] == notices[-1]
@@ -846,6 +846,7 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
     }
     assert "Zelda" in render_notice(single, starting=True)
     assert "Zelda" in render_notice(single)
+    assert render_notice(single, locale="zh-CN") == "✅ Zelda已经在线。"
 
     many = {
         **single,
@@ -1106,4 +1107,6 @@ async def test_unreadable_activity_retains_worker_and_actionable_receipt(tmp_pat
     record = RebootManager(kernel, None).receipts.records()[-1]
     assert record["reason"] == "activity_unavailable"
     assert old.process.alive and not kernel.events
-    assert "/reboot status" in render_status(record, locale="en")
+    rendered = render_status(record, locale="en")
+    assert "retry through another online agent" in rendered
+    assert "/reboot status" not in rendered

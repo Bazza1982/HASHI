@@ -283,9 +283,10 @@ async def test_watchtower_dispatch_reports_only_verified_terminal_success(monkey
     )
 
     assert "HASHI_TEST" in runtime.sent[-1][1]
-    assert "100" in runtime.sent[-1][1]
-    assert "200" in runtime.sent[-1][1]
-    assert "rst_123" in runtime.sent[-1][1]
+    assert "online" in runtime.sent[-1][1]
+    assert "100" not in runtime.sent[-1][1]
+    assert "200" not in runtime.sent[-1][1]
+    assert "rst_123" not in runtime.sent[-1][1]
 
 
 @pytest.mark.asyncio

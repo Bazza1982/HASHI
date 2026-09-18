@@ -160,9 +160,9 @@ Attachments bind to one draft, instance, Agent, and submission. Remote sends
 verified managed bytes, never origin paths. Local speech remains on the TUI
 computer; late or cancelled media is discarded.
 
-Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): one fact owner,
-localization, escaping, accurate state/scope, safe navigation, and actionable
-errors. `/help` derives from registered metadata. Workbench and Telegram project
+Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize,
+escape, state plain user outcomes, and keep lifecycle internals in diagnostics.
+`/help` derives from registered metadata. Workbench and Telegram project
 one primary personal Conversation Session; semantic messages appear on both,
 while presentation rows never enter model history. Command menus reuse the
 authenticated runtime command path and keep action state server-side.
