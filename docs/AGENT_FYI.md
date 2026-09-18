@@ -56,6 +56,12 @@ model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
 the Function registry. An explicit Agent selection remains authoritative until
 that model is retired.
 
+Private EXP owner directories live under the selected instance's
+`<bridge_home>/exp` and stay ignored by Git. Runtime discovery resolves that
+instance directory through `BRIDGE_HOME`; it must not publish private EXP into
+the immutable Function artifact or make one instance's catalogue visible to
+another.
+
 The open Tool wildcard is permission, not proof that an Engine, Workzone, or
 device Worker supplies a capability. Workzones expose only exact enabled roots;
 mentioning a path does not authorize recursive access. Secrets, media bytes,

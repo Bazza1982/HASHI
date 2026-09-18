@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -49,7 +50,15 @@ class ExpStore:
     """Discover and read EXP domains under a HASHI repository."""
 
     def __init__(self, root: str | Path | None = None) -> None:
-        self.root = Path(root) if root is not None else Path(__file__).resolve().parent
+        if root is not None:
+            self.root = Path(root)
+            return
+        bridge_home = str(os.environ.get("BRIDGE_HOME") or "").strip()
+        self.root = (
+            Path(bridge_home).expanduser() / "exp"
+            if bridge_home
+            else Path(__file__).resolve().parent
+        )
 
     def list_ids(self) -> list[str]:
         ids: list[str] = []
