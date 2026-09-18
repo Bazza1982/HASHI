@@ -24,6 +24,7 @@ from orchestrator.function_generation import (
     FUNCTION_GENERATION_SCHEMA_VERSION,
     SourceManifest,
     VerifiedFunctionGeneration,
+    compare_function_candidate_runtime,
     probe_function_generation,
     configured_observers_are_qualified,
     verify_manifest_source_commit,
@@ -236,6 +237,41 @@ def _qualified_generation_cache_path(bridge_home: Path) -> Path:
     )
 
 
+def _read_qualified_generation_cache(
+    bridge_home: Path,
+    code_root: Path,
+) -> tuple[VerifiedFunctionGeneration, Path] | None:
+    cache_path = _qualified_generation_cache_path(bridge_home)
+    if not cache_path.is_file():
+        return None
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    if (
+        int(payload.get("schema_version", -1))
+        != QUALIFIED_GENERATION_CACHE_SCHEMA_VERSION
+    ):
+        return None
+    generation_value = dict(payload["generation"])
+    # The immutable artifact is portable across a moved or promoted checkout.
+    # The current root remains authority for runtime-policy comparison only.
+    generation_value["code_root"] = str(Path(code_root).resolve())
+    generation = generation_from_dict(generation_value)
+    if generation.receipt.generation_id != generation.manifest.generation_id:
+        return None
+    if generation.receipt.module_names != generation.manifest.module_names:
+        return None
+    slug = generation.manifest.generation_id.removeprefix("sha256:")
+    if str(payload.get("artifact_slug") or "") != slug:
+        return None
+    artifact = cache_path.parent / slug
+    if (
+        generation_artifact_source_commit(artifact, generation.manifest)
+        != generation.receipt.source_commit
+    ):
+        return None
+    verify_generation_artifact(artifact, generation)
+    return generation, artifact
+
+
 def persist_qualified_generation_cache(
     bridge_home: Path,
     generation: VerifiedFunctionGeneration,
@@ -274,31 +310,51 @@ def load_qualified_generation_cache(
 ) -> tuple[VerifiedFunctionGeneration, Path] | None:
     """Load a prior probe receipt only when runtime and every byte still match."""
 
-    cache_path = _qualified_generation_cache_path(bridge_home)
-    if not cache_path.is_file():
-        return None
     try:
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        if (
-            int(payload.get("schema_version", -1))
-            != QUALIFIED_GENERATION_CACHE_SCHEMA_VERSION
-        ):
+        cached = _read_qualified_generation_cache(bridge_home, code_root)
+        if cached is None:
             return None
-        generation_value = dict(payload["generation"])
-        # A repository may be moved or promoted to another instance without
-        # changing the qualified bytes.  The current source root is authority.
-        generation_value["code_root"] = str(Path(code_root).resolve())
-        generation = generation_from_dict(generation_value)
-        slug = generation.manifest.generation_id.removeprefix("sha256:")
-        if str(payload.get("artifact_slug") or "") != slug:
-            return None
-        artifact = cache_path.parent / slug
+        generation, artifact = cached
         generation.verify_qualified_source(expected_runtime)
-        verify_generation_artifact(artifact, generation)
         return generation, artifact
     except Exception as exc:
         bridge_logger.info(
             "Qualified generation cache rejected; running isolated probe: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def load_bootable_generation_cache(
+    bridge_home: Path,
+    code_root: Path,
+    expected_runtime: Any,
+) -> tuple[VerifiedFunctionGeneration, Path] | None:
+    """Return the last immutable generation when a new candidate is unusable.
+
+    This is a cold-start availability fallback, not an adoption shortcut.  It
+    never executes checkout bytes that failed qualification: the artifact and
+    its receipt are reverified, and the cached runtime must still match the
+    current Core contract.  Checkout drift is intentionally irrelevant because
+    the fallback's purpose is to keep the last known-good product behavior
+    online while the new Function candidate is repaired.
+    """
+
+    try:
+        cached = _read_qualified_generation_cache(bridge_home, code_root)
+        if cached is None:
+            return None
+        generation, artifact = cached
+        compare_function_candidate_runtime(
+            expected_runtime,
+            generation.receipt.runtime,
+            code_root=Path(code_root).resolve(),
+        )
+        return generation, artifact
+    except Exception as exc:
+        bridge_logger.info(
+            "Boot fallback generation rejected: %s: %s",
             type(exc).__name__,
             exc,
         )

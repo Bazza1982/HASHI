@@ -183,7 +183,7 @@ def test_serialized_manifest_requires_current_schema(tmp_path):
         SourceManifest.from_mapping(invalid)
 
 
-def test_manifest_commit_gate_is_scoped_to_qualified_files(tmp_path):
+def test_manifest_commit_gate_blocks_required_source_not_optional_files(tmp_path):
     package = tmp_path / "orchestrator"
     package.mkdir()
     source = package / "generation_demo.py"
@@ -219,26 +219,36 @@ def test_manifest_commit_gate_is_scoped_to_qualified_files(tmp_path):
     source.write_text("VALUE = 1\n", encoding="utf-8")
     added_asset = package / "untracked.json"
     added_asset.write_text("{}\n", encoding="utf-8")
+    asset.write_text('{"local": true}\n', encoding="utf-8")
     expanded = build_source_manifest(
         ["orchestrator.generation_demo"],
         code_root=tmp_path,
     )
-    with pytest.raises(FunctionGenerationError, match="not committed"):
-        function_generation.verify_manifest_source_commit(
-            expanded,
-            code_root=tmp_path,
-        )
+    assert added_asset.relative_to(tmp_path).as_posix() not in {
+        item.relative_path for item in expanded.assets
+    }
+    assert asset.relative_to(tmp_path).as_posix() not in {
+        item.relative_path for item in expanded.assets
+    }
+    assert function_generation.verify_manifest_source_commit(
+        expanded,
+        code_root=tmp_path,
+    ) == expected_commit
 
 
-def test_manifest_excludes_gitignored_instance_assets(tmp_path):
+def test_manifest_skips_optional_assets_inside_ignored_nested_repository(tmp_path):
     package = tmp_path / "orchestrator"
     package.mkdir()
     source = package / "generation_demo.py"
     source.write_text("VALUE = 1\n", encoding="utf-8")
-    (tmp_path / ".gitignore").write_text("/exp/barry/\n", encoding="utf-8")
-    instance_asset = tmp_path / "exp" / "barry" / "training" / "state.json"
+    (tmp_path / ".gitignore").write_text(
+        "/exp/*/\n!/exp/examples/\n",
+        encoding="utf-8",
+    )
+    instance_asset = tmp_path / "exp" / "aptenra" / "aptenra_debug" / "EXP.md"
     instance_asset.parent.mkdir(parents=True)
-    instance_asset.write_text('{"local": true}\n', encoding="utf-8")
+    instance_asset.write_text("local experiment material\n", encoding="utf-8")
+    _git(instance_asset.parent, "init", "-q")
     expected_commit = _commit_all(tmp_path)
 
     manifest = build_source_manifest(

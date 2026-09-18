@@ -31,10 +31,10 @@ Source, artifacts, clients, Workers, and delivery are separate facts.
 `/reboot min` replaces one Agent Worker; shared replacement is broader. Claim
 adoption only after the active generation is verified. Locked runtime packages
 must match exactly; unrelated extra packages alone must not block `/reboot`.
-The Function manifest needs a clean commit; unrelated files outside it do not
-block `/reboot`. Reboots report start and final outcome. Receipts distinguish
-accepted, candidate rejected, committed, rolled back, online, and unconfirmed;
-only PID, identity, generation, and health evidence permits `online`. See
+Optional local assets never block startup. Failed candidates reuse a compatible
+verified artifact; rejected bytes never run. Reboots report start/final outcome.
+Only PID, identity, generation, and health evidence permits `online`; receipts
+distinguish accepted, rejected, committed, rolled back, and unconfirmed. See
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
 [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 

@@ -470,8 +470,9 @@ def _order_source_entries(
 
 def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
     root = Path(code_root).resolve()
-    ignored = _gitignored_paths(root)
+    publishable = _git_clean_tracked_paths(root)
     assets: list[AssetEntry] = []
+    skipped_optional = 0
     for package in (*_ROOT_PACKAGES, "locales"):
         package_root = root / package
         if not package_root.is_dir():
@@ -481,13 +482,14 @@ def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
                 continue
             relative = source.relative_to(root)
             relative_text = relative.as_posix()
-            if relative_text in ignored:
-                continue
             if source.suffix in {".py", ".pyc", ".pyo"}:
                 continue
             if any(part in _ASSET_EXCLUDED_PARTS for part in relative.parts):
                 continue
             if relative_text.startswith(_ASSET_EXCLUDED_PREFIXES):
+                continue
+            if publishable is not None and relative_text not in publishable:
+                skipped_optional += 1
                 continue
             if source.is_symlink():
                 raise FunctionGenerationError(
@@ -501,6 +503,12 @@ def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
                     executable=bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)),
                 )
             )
+    if skipped_optional:
+        logger.warning(
+            "Continuing Function startup without %s local or modified optional "
+            "asset(s)",
+            skipped_optional,
+        )
     return tuple(sorted(assets, key=lambda item: item.relative_path))
 
 
@@ -621,8 +629,15 @@ def _nul_paths(payload: bytes) -> set[str]:
     }
 
 
-def _gitignored_paths(code_root: Path) -> set[str]:
-    """Return local files that Git explicitly excludes from publication."""
+def _git_clean_tracked_paths(code_root: Path) -> set[str] | None:
+    """Return clean files published by HEAD, or ``None`` outside a checkout.
+
+    Non-Python files found under broad Function roots are optional resources,
+    not boot requirements.  A real checkout therefore packages only resources
+    that are both committed and unchanged.  Local, ignored, untracked, nested
+    repository, and modified resources remain available to their owners on
+    disk but cannot make the whole HASHI instance fail qualification.
+    """
 
     try:
         checkout = _git_output(
@@ -631,21 +646,18 @@ def _gitignored_paths(code_root: Path) -> set[str]:
             "--show-toplevel",
         ).decode("utf-8", errors="replace").strip()
         if not checkout or Path(checkout).resolve() != Path(code_root).resolve():
-            return set()
-        return _nul_paths(
-            _git_output(
-                code_root,
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "-z",
-            )
+            return None
+        tracked = _nul_paths(
+            _git_output(code_root, "ls-tree", "-r", "--name-only", "-z", "HEAD")
         )
+        changed = _nul_paths(
+            _git_output(code_root, "diff", "--name-only", "-z", "HEAD", "--")
+        )
+        return tracked - changed
     except FunctionGenerationError:
         # Non-repository unit fixtures retain the historical asset behavior.
         # A real qualification still fails closed in the commit gate below.
-        return set()
+        return None
 
 
 def verify_manifest_source_commit(
