@@ -5,6 +5,7 @@ import inspect
 from typing import Any
 
 from orchestrator.background_jobs import TERMINAL_STATES
+from orchestrator.background_job_policy import USER_BACKGROUND_JOB_REQUEST_SOURCE
 from orchestrator.command_ui import card_title
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator import ui_language
@@ -15,7 +16,7 @@ RESERVED_SUBCOMMANDS = {"run", "status", "tail", "cancel", "list", "ls", "help",
 def _usage() -> str:
     return ui_language.tr("bg.usage")
 
-BG_INSTRUCTION = """This request was sent with /bg, meaning the user wants background-safe handling.
+BG_INSTRUCTION = """This request was sent with /bg, meaning the user explicitly authorized background-safe handling for this request only.
 
 Keep the user's task text exact. If you need to run long OS/process work, use HASHI BackgroundJobManager rather than blocking the chat on a foreground shell command. When tool calls are available, start work with background_job_start and inspect it with background_job_status, background_job_tail, background_job_cancel, or background_job_list. If tool calls are not available but the local Workbench API is reachable, use its live background-job endpoints instead: POST /api/background-jobs, GET /api/background-jobs/{job_id}, GET /api/background-jobs/{job_id}/tail, or POST /api/background-jobs/{job_id}/cancel. Do not create a temporary standalone BackgroundJobManager just to simulate success. Start managed background jobs with success/failure notification and agent completion/failure event routing enabled when possible. Report the job id, current state, where logs can be tailed, and how the user can follow up with /bg status, /bg tail, or /bg cancel. When a later background-job-event is delivered, inspect the job status/logs and decide whether to summarize, continue the workflow, ask for confirmation, or report failure; do not restart the same job unless explicitly requested. If no long OS process is needed, proceed normally but keep the response concise and explain that no managed background job was required."""
 
@@ -147,7 +148,7 @@ async def _run_task(runtime: Any, update: Any, task_text: str) -> None:
     request_id = await enqueue(
         chat_id,
         prompt,
-        "background:prompt",
+        USER_BACKGROUND_JOB_REQUEST_SOURCE,
         f"Background task: {_short(task_text)}",
     )
     suffix = (

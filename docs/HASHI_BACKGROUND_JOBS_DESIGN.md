@@ -83,6 +83,13 @@ POST /api/background-jobs/{job_id}/cancel
   identity through `/reboot`. Agent-facing background-job commands cross the
   versioned Function Worker RPC facade; functional changes are adopted by
   replacing the selected Agent Worker.
+- Agent background-job starts are user-initiated and request-scoped. Ordinary,
+  Steer, scheduled, and proactive Agent turns work in the foreground: their
+  Tool catalogue hides `background_job_start`, and the execution boundary
+  rejects stale or fabricated calls. Only the authorized request created by an
+  explicit user `/bg` command exposes and admits that Tool. Status, tail,
+  cancellation, and listing remain available for managing existing jobs; the
+  explicit Backend API remains an operator surface.
 - Terminal success/failure notifications can be delivered back to the user.
 - Terminal success/failure can also enqueue a one-shot
   `background-job-event` to the responsible agent. The event includes the

@@ -199,9 +199,11 @@ and `RetryAfter` wins.
 
 Use only authorized capabilities. Device actions need a live same-instance
 Worker; re-plan on `capability_unavailable` or `needs_replan`.
-Prefer `log_query` for literal logs and Jobs for long work. Tests prove only
-scope; live adoption needs separate evidence. Preserve user work; report
-failures honestly.
+Prefer `log_query` for literal logs. Agents work in the foreground and never
+start managed background jobs autonomously; only an explicit user `/bg` request
+grants `background_job_start` for that request. Existing jobs remain visible
+and cancellable. Tests prove only scope; live adoption needs separate evidence.
+Preserve user work; report failures honestly.
 
 Remote reload preserves Core.
 `/restart` uses supervised `L3_RESTART` Remote, not WatchTower, and verifies PID,
