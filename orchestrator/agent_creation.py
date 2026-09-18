@@ -1,10 +1,10 @@
 """HASHI-owned agent creation service.
 
-Converts a public creation intent (name / display_name / backend / preset /
-model / effort / is_active) into the internal ``agents.json`` row.  HASHI is
-the only authority for validation, backend resolution, HER v2 preset
-construction, workspace creation, lifecycle identity and configuration
-publication.  Workbench and other callers never build raw HASHI configuration.
+Converts a public creation intent (name / display_name / backend / model /
+effort / is_active) into the internal ``agents.json`` row.  HASHI is the only
+authority for validation, backend resolution, HER v2 profile construction,
+workspace creation, lifecycle identity and configuration publication.
+Workbench and other callers never build raw HASHI configuration.
 
 The service performs pre-flight duplicate and workspace-collision checks,
 then delegates to the existing ``ConfigAdmin.add_agent_to_config`` scaffold
@@ -36,11 +36,13 @@ from orchestrator.flexible_backend_registry import (
     get_available_efforts,
     get_available_models,
     get_backend_entry,
+    get_default_effort,
     get_default_model,
     get_provider_reasoning_efforts,
     is_selectable_backend,
     normalize_effort,
 )
+from orchestrator.her_v2.models import parse_effort
 from orchestrator.her_v2.runtime_configuration import (
     build_her_v2_provider_options,
 )
@@ -53,15 +55,10 @@ logger = logging.getLogger("BridgeU.AgentCreation")
 # components, so nothing that could traverse outside workspaces_root.
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
-DEFAULT_HER_PRESET = "balanced"
-HER_CREATION_PRESETS: tuple[dict[str, str], ...] = (
-    {"id": "fast", "label": "Fast"},
-    {"id": "balanced", "label": "Balanced"},
-    {"id": "maximum", "label": "Maximum"},
-)
-HER_PRESET_IDS = frozenset(preset["id"] for preset in HER_CREATION_PRESETS)
+DEFAULT_HER_EFFORT = str(get_default_effort(HER_V2_ENGINE) or "medium")
+HER_CREATION_EFFORTS = frozenset(get_available_efforts(HER_V2_ENGINE))
 
-# The five HER v2 role profiles a creation preset must produce.
+# The five HER v2 role profiles every new Agent must receive.
 HER_ROLE_ORDER: tuple[str, ...] = (
     "lightweight",
     "triage",
@@ -70,30 +67,16 @@ HER_ROLE_ORDER: tuple[str, ...] = (
     "orchestrator",
 )
 
-# Preset -> role -> (model tier, reasoning tier).  Model tiers are resolved
-# against the instance's configured HER providers, never hard-coded models.
-_HER_PRESET_POLICY: dict[str, dict[str, tuple[str, str]]] = {
-    "fast": {
-        "lightweight": ("fast", "moderate"),
-        "triage": ("fast", "moderate"),
-        "premium": ("pro", "moderate"),
-        "reviewer": ("pro", "high"),
-        "orchestrator": ("pro", "high"),
-    },
-    "balanced": {
-        "lightweight": ("fast", "moderate"),
-        "triage": ("fast", "moderate"),
-        "premium": ("pro", "high"),
-        "reviewer": ("pro", "max"),
-        "orchestrator": ("pro", "max"),
-    },
-    "maximum": {
-        "lightweight": ("pro", "high"),
-        "triage": ("pro", "high"),
-        "premium": ("pro", "high"),
-        "reviewer": ("pro", "max"),
-        "orchestrator": ("pro", "max"),
-    },
+# One internal provider profile for every public orchestration effort.  HER
+# effort selects Direct / Strategic / Planned orchestration and must never
+# select provider models or provider reasoning.  Models are resolved from the
+# instance's configured HER providers, never hard-coded model names.
+_HER_DEFAULT_PROFILE_POLICY: dict[str, tuple[str, str]] = {
+    "lightweight": ("fast", "moderate"),
+    "triage": ("fast", "moderate"),
+    "premium": ("pro", "high"),
+    "reviewer": ("pro", "max"),
+    "orchestrator": ("pro", "max"),
 }
 
 _REASONING_PREFERENCE: dict[str, tuple[str, ...]] = {
@@ -129,10 +112,6 @@ class InvalidEffortError(AgentCreationError):
     error_code = "invalid_effort"
 
 
-class InvalidHerPresetError(AgentCreationError):
-    error_code = "invalid_her_preset"
-
-
 class AgentExistsError(AgentCreationError):
     error_code = "agent_exists"
 
@@ -156,7 +135,6 @@ class AgentCreationSpec:
     name: str
     backend: str
     display_name: str | None = None
-    preset: str | None = None
     model: str | None = None
     effort: str | None = None
     is_active: bool = False
@@ -323,24 +301,29 @@ def _tier_choice(
 
 
 def build_her_backend_row(
-    preset: str,
+    effort: str,
     provider_profiles: dict[str, dict[str, Any]],
 ) -> dict:
-    """Build the internal her-v2 backend row for one HASHI-owned preset.
+    """Build a HER v2 row with one fixed provider profile and a public mode.
 
     The row contains exactly the five required role profiles with
     engine/model/reasoning resolved from the instance provider configuration.
-    No provider secrets or base URLs are embedded.
+    The selected effort changes orchestration only; it never changes those
+    profiles.  No provider secrets or base URLs are embedded.
     """
-    if preset not in HER_PRESET_IDS:
-        raise InvalidHerPresetError(
-            f"HER preset must be one of: {', '.join(sorted(HER_PRESET_IDS))}"
+    try:
+        canonical_effort = parse_effort(effort or DEFAULT_HER_EFFORT).value
+    except ValueError as exc:
+        raise InvalidEffortError(f"invalid HER orchestration effort: {effort!r}") from exc
+    if canonical_effort not in HER_CREATION_EFFORTS:
+        raise InvalidEffortError(
+            "HER orchestration effort must be one of: "
+            f"{', '.join(sorted(HER_CREATION_EFFORTS))}"
         )
     engine, fast_model, pro_model = _tier_choice(provider_profiles)
-    policy = _HER_PRESET_POLICY[preset]
     profiles: dict[str, dict[str, str]] = {}
     for role in HER_ROLE_ORDER:
-        tier, reasoning_tier = policy[role]
+        tier, reasoning_tier = _HER_DEFAULT_PROFILE_POLICY[role]
         model = pro_model if tier == "pro" else fast_model
         profile: dict[str, str] = {"engine": engine, "model": model}
         reasoning = _pick_reasoning(engine, model, reasoning_tier)
@@ -350,6 +333,7 @@ def build_her_backend_row(
     row = apply_backend_policy_defaults(
         {"engine": HER_V2_ENGINE, "model": "role-configured"}
     )
+    row["effort"] = canonical_effort
     row["her_v2"] = {
         "profiles": profiles,
         "audit_failure_terminal": "ERROR",
@@ -420,8 +404,10 @@ def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict) -> dict
     if not is_selectable_backend(backend):
         raise InvalidBackendError(f"backend {spec.backend!r} is not selectable")
     if backend == HER_V2_ENGINE:
-        preset = str(spec.preset or DEFAULT_HER_PRESET).strip().lower()
-        backend_row = build_her_backend_row(preset, provider_profiles)
+        backend_row = build_her_backend_row(
+            str(spec.effort or DEFAULT_HER_EFFORT).strip(),
+            provider_profiles,
+        )
     else:
         backend_row = build_ordinary_backend_row(backend, spec.model, spec.effort)
     return {
@@ -490,10 +476,14 @@ class AgentCreationService:
             )
 
         logger.info(
-            "agent_create.requested agent_name=%s backend=%s preset=%s is_active=%s",
+            "agent_create.requested agent_name=%s backend=%s effort=%s is_active=%s",
             name,
             backend,
-            str(spec.preset or "") if backend == HER_V2_ENGINE else "",
+            (
+                str(spec.effort or DEFAULT_HER_EFFORT)
+                if backend == HER_V2_ENGINE
+                else ""
+            ),
             bool(spec.is_active),
         )
 
@@ -519,7 +509,6 @@ class AgentCreationService:
                 name=name,
                 backend=backend,
                 display_name=display_name,
-                preset=spec.preset,
                 model=spec.model,
                 effort=spec.effort,
                 is_active=spec.is_active,

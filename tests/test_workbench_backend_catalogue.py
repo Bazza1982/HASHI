@@ -44,15 +44,7 @@ async def test_backend_catalogue_exposes_public_selectable_registry(tmp_path):
         "efforts": ["zero", "low", "medium"],
         "default_effort": "medium",
         "privacy_levels": [0, 1],
-        "creation": {
-            "mode": "preset",
-            "default_preset": "balanced",
-            "presets": [
-                {"id": "fast", "label": "Fast"},
-                {"id": "balanced", "label": "Balanced"},
-                {"id": "maximum", "label": "Maximum"},
-            ],
-        },
+        "creation": {"mode": "effort"},
     }
     assert payload["backends"]["codex-cli"]["creation"] == {"mode": "model"}
     assert "deepseek-api" not in payload["backends"]
