@@ -19,6 +19,26 @@ logger = logging.getLogger("Bridge.Workzone")
 
 _WINDOWS_DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 _WSL_UNC_RE = re.compile(r"^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+\\(.*)$", re.IGNORECASE)
+_WINDOWS_UNC_RE = re.compile(r"^(?:\\\\|//)")
+
+
+def _workzone_path_kind(raw_path: str) -> str:
+    raw = str(raw_path or "").strip()
+    if _WINDOWS_DRIVE_RE.match(raw):
+        return "windows_drive"
+    if _WSL_UNC_RE.match(raw):
+        return "wsl_unc"
+    if _WINDOWS_UNC_RE.match(raw):
+        return "windows_unc"
+    if raw.startswith("/"):
+        return "posix"
+    return "relative"
+
+
+def _execution_platform() -> str:
+    if os.name == "nt":
+        return "windows"
+    return "wsl" if is_wsl() else "linux"
 
 
 def state_path(workspace_dir: Path) -> Path:
@@ -63,6 +83,11 @@ def resolve_workzone_input(raw_path: str, project_root: Path, workspace_dir: Pat
     raw = (raw_path or "").strip()
     if not raw:
         raise ValueError("missing path")
+    if os.name == "nt" and _workzone_path_kind(raw) == "posix":
+        raise ValueError(
+            "POSIX absolute path is not valid on native Windows; use a Windows path "
+            "or a \\\\wsl.localhost\\<distribution>\\... UNC path"
+        )
     candidate = _normalize_workzone_input(raw)
     was_relative = not candidate.is_absolute()
     if was_relative:
@@ -117,18 +142,29 @@ def normalize_workzone_state(value: Mapping[str, Any] | None) -> dict[str, Any]:
         path_text = str(item.get("path") or "").strip()
         if not path_text:
             continue
-        path = Path(path_text).expanduser()
-        try:
-            path = path.resolve()
-        except (OSError, RuntimeError):
-            pass
+        path_kind = _workzone_path_kind(path_text)
+        host_compatible = not (os.name == "nt" and path_kind == "posix")
+        if host_compatible:
+            path = Path(path_text).expanduser()
+            try:
+                path = path.resolve()
+            except (OSError, RuntimeError):
+                pass
+            normalized_path = str(path)
+            available = path.is_dir()
+        else:
+            normalized_path = path_text
+            available = False
         seen.add(slot_id)
         slots.append(
             {
                 "slot_id": slot_id,
-                "path": str(path),
+                "path": normalized_path,
                 "enabled": bool(item.get("enabled")),
-                "available": path.is_dir(),
+                "available": available,
+                "path_kind": path_kind,
+                "execution_platform": _execution_platform(),
+                "host_compatible": host_compatible,
                 "label": str(item.get("label") or "").strip(),
                 "created_at": item.get("created_at"),
                 "updated_at": item.get("updated_at"),

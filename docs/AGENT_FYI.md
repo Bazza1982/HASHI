@@ -61,7 +61,9 @@ Private EXP lives in ignored `<bridge_home>/exp`, resolved through
 
 The open Tool wildcard is permission, not proof that an Engine, Workzone, or
 device Worker supplies a capability. Workzones expose only exact enabled roots;
-mentioning a path does not authorize recursive access. Secrets, media bytes,
+mentioning a path does not authorize recursive access. Use a path native to the
+executing instance; Windows rejects `/home/...` rather than retargeting it, and
+WSL paths presented to Windows use `\\wsl.localhost\\...`. Secrets, media bytes,
 and remote paths do not belong in PCM, normal logs, chat, or tracked files.
 
 JSON writers use validation, private candidates, locks, revisions, and atomic

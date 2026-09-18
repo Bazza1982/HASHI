@@ -112,6 +112,40 @@ def test_workzone_accepts_windows_relative_separators(tmp_path: Path):
 
 
 @pytest.mark.platform
+@pytest.mark.skipif(os.name != "nt", reason="native Windows path contract")
+def test_workzone_rejects_foreign_posix_absolute_path_on_windows(tmp_path: Path):
+    project = tmp_path / "project"
+    workspace = project / "workspaces" / "agent"
+    workspace.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="POSIX absolute path"):
+        resolve_workzone_input("/Users", project, workspace)
+
+
+@pytest.mark.platform
+@pytest.mark.skipif(os.name != "nt", reason="native Windows path contract")
+def test_workzone_state_preserves_foreign_path_and_marks_it_incompatible():
+    state = normalize_workzone_state(
+        {
+            "slots": [
+                {
+                    "slot_id": "main",
+                    "path": "/home/lily/projects/hashi-workbench-v2",
+                    "enabled": True,
+                }
+            ]
+        }
+    )
+
+    [slot] = state["slots"]
+    assert slot["path"] == "/home/lily/projects/hashi-workbench-v2"
+    assert slot["path_kind"] == "posix"
+    assert slot["execution_platform"] == "windows"
+    assert slot["host_compatible"] is False
+    assert slot["available"] is False
+
+
+@pytest.mark.platform
 @pytest.mark.skipif(os.name == "nt", reason="WSL path translation contract")
 def test_workzone_accepts_windows_wsl_unc_paths(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(workzone_module, "is_wsl", lambda: True)
