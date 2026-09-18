@@ -404,6 +404,102 @@ def test_hashi_rescue_restart_uses_fixed_out_of_process_launcher(
     assert record["restart_id"] == body["restart_id"]
 
 
+def test_restart_evidence_accepts_dependency_and_generation_adoption_with_local_services_ready(
+    monkeypatch,
+):
+    expected_runtime = {
+        "python": "3.12.13",
+        "platform_abi": ".cp312-win_amd64.pyd",
+        "core_api": 3,
+        "function_api": 3,
+        "worker_model": "per-agent-process",
+        "worker_protocol": 1,
+        "generation_schema": 2,
+        "dependency_digest": "sha256:before",
+        "core_source_digest": "sha256:core",
+    }
+    actual_runtime = {**expected_runtime, "dependency_digest": "sha256:after"}
+    status = {
+        "hashi_running": True,
+        "pid": 6161,
+        "workbench_health": {
+            "ok": True,
+            "ready": False,
+            "degraded": True,
+            "status": "degraded",
+            "instance_id": "HASHI_TEST",
+            "runtime": actual_runtime,
+            "shared_functions": {"generation_id": "sha256:new-generation"},
+            "startup": {
+                "services_ready": True,
+                "failed_agents": 0,
+                "issues": [
+                    {
+                        "code": "remote_already_running_degraded",
+                        "summary": "Remote/HChat is unavailable; local startup will continue.",
+                        "unaffected": ["local agents", "Workbench", "API"],
+                    }
+                ],
+            },
+        },
+    }
+    monkeypatch.setattr(remote_server, "_process_exists", lambda pid: pid == 6161)
+
+    evidence = remote_server._restart_evidence(
+        status,
+        old_pid=4141,
+        target_instance="HASHI_TEST",
+        expected_runtime=expected_runtime,
+        expected_generation="sha256:old-generation",
+    )
+
+    assert evidence["backend_health_ok"] is True
+    assert evidence["backend_health_state"] == "degraded_local_services_ready"
+    assert evidence["runtime_version_verified"] is True
+    assert evidence["runtime_version_changed"] is True
+    assert evidence["generation_verified"] is True
+    assert evidence["generation_changed"] is True
+    assert evidence["warning_codes"] == ["remote_already_running_degraded"]
+
+
+def test_restart_evidence_rejects_unexpected_core_contract_change(monkeypatch):
+    before = {
+        "python": "3.12.13",
+        "platform_abi": ".cp312-win_amd64.pyd",
+        "core_api": 3,
+        "function_api": 3,
+        "worker_model": "per-agent-process",
+        "worker_protocol": 1,
+        "generation_schema": 2,
+        "dependency_digest": "sha256:before",
+        "core_source_digest": "sha256:core-before",
+    }
+    after = {**before, "core_source_digest": "sha256:core-after"}
+    status = {
+        "hashi_running": True,
+        "pid": 6161,
+        "workbench_health": {
+            "ok": True,
+            "ready": True,
+            "instance_id": "HASHI_TEST",
+            "runtime": after,
+            "shared_functions": {"generation_id": "sha256:new-generation"},
+        },
+    }
+    monkeypatch.setattr(remote_server, "_process_exists", lambda pid: pid == 6161)
+
+    evidence = remote_server._restart_evidence(
+        status,
+        old_pid=4141,
+        target_instance="HASHI_TEST",
+        expected_runtime=before,
+        expected_generation="sha256:old-generation",
+    )
+
+    assert evidence["runtime_version_verified"] is False
+    assert evidence["runtime_contract_mismatches"] == ["core_source_digest"]
+
+
 def test_hashi_rescue_restart_keeps_remote_health_responsive(
     tmp_path,
     monkeypatch,
@@ -733,7 +829,7 @@ def test_request_workbench_reboot_uses_authenticated_admin_endpoint(monkeypatch)
     ("state", "expected_key"),
     [
         ("completed", "api.restart.completed"),
-        ("failed", "api.restart.failed_notice"),
+        ("failed", "api.restart.failed_detail"),
     ],
 )
 def test_restart_result_notification_sends_user_facing_message_key(
@@ -763,11 +859,88 @@ def test_restart_result_notification_sends_user_facing_message_key(
     )
 
     assert result["state"] == "delivered"
+    expected_args = {"instance": "HASHI3"}
+    if state == "failed":
+        expected_args.update(
+            stage="terminal verification",
+            reason=(
+                "the previous process did not exit; the new process is not alive; "
+                "no replacement process was observed"
+            ),
+        )
     assert captured == {
         "agent": "agent1",
         "message_key": expected_key,
-        "message_args": {"instance": "HASHI3"},
+        "message_args": expected_args,
     }
+
+
+def test_restart_result_notification_explains_nonblocking_degraded_success(monkeypatch):
+    captured = {}
+
+    def forward(**kwargs):
+        captured.update(json.loads(kwargs["body_bytes"].decode("utf-8")))
+        return 200, b'{"ok":true}', {}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+
+    result = remote_server._notify_restart_result(
+        agent="agent1",
+        record={
+            "state": "completed",
+            "target_instance": "HASHI4",
+            "status": {
+                "workbench_health": {
+                    "degraded": True,
+                    "issues": [
+                        {
+                            "code": "remote_already_running_degraded",
+                            "summary": "Remote/HChat is unavailable; local startup will continue.",
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    assert result["state"] == "delivered"
+    assert captured == {
+        "agent": "agent1",
+        "message_key": "api.restart.completed_degraded",
+        "message_args": {
+            "instance": "HASHI4",
+            "warning": "Remote/HChat is unavailable; local startup will continue.",
+        },
+    }
+
+
+def test_restart_result_notification_falls_back_for_older_workbench(monkeypatch):
+    captured = []
+
+    def forward(**kwargs):
+        payload = json.loads(kwargs["body_bytes"].decode("utf-8"))
+        captured.append(payload)
+        if len(captured) == 1:
+            return 400, b'{"ok":false,"error":"message_key is not supported"}', {}
+        return 200, b'{"ok":true,"chat_id":123}', {}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+
+    result = remote_server._notify_restart_result(
+        agent="agent1",
+        record={
+            "state": "failed",
+            "target_instance": "HASHI4",
+            "phase": "terminal_verification",
+            "evidence": {"old_pid_exited": True, "new_pid_alive": False},
+        },
+    )
+
+    assert result == {"state": "delivered", "agent": "agent1", "chat_id": 123}
+    assert captured[0]["message_key"] == "api.restart.failed_detail"
+    assert "text" in captured[1]
+    assert "HASHI4" in captured[1]["text"]
+    assert "new process is not alive" in captured[1]["text"]
 
 
 def test_hashi_rescue_reboot_prefers_hot_reboot_without_fallback(

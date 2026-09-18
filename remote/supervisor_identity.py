@@ -22,6 +22,8 @@ class RemoteSupervisorIdentity:
     windows_task_name: str
     source: str
     remote_port: int | None
+    display_name: str | None
+    workbench_port: int | None
 
 
 def _read_json_object(path: Path) -> dict:
@@ -34,13 +36,21 @@ def _read_json_object(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _configured_instance_id(root: Path) -> str:
+def _configured_global(root: Path) -> dict:
     path = root / "agents.json"
     data = _read_json_object(path)
     global_config = data.get("global") or {}
     if not isinstance(global_config, dict):
-        return ""
-    return str(global_config.get("instance_id") or "").strip()
+        return {}
+    return global_config
+
+
+def _configured_workbench_port(global_config: dict) -> int | None:
+    try:
+        port = int(global_config.get("workbench_port"))
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
 
 
 def configured_remote_port(
@@ -94,7 +104,8 @@ def resolve_supervisor_identity(
 ) -> RemoteSupervisorIdentity:
     resolved_root = Path(root).expanduser().resolve()
     explicit = str(instance_id or "").strip()
-    configured = _configured_instance_id(resolved_root)
+    global_config = _configured_global(resolved_root)
+    configured = str(global_config.get("instance_id") or "").strip()
     if explicit:
         effective_id = explicit
         source = "explicit"
@@ -115,6 +126,10 @@ def resolve_supervisor_identity(
             resolved_root,
             instance_id=effective_id,
         ),
+        display_name=(
+            str(global_config.get("display_name") or "").strip() or None
+        ),
+        workbench_port=_configured_workbench_port(global_config),
     )
 
 

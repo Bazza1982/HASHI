@@ -8267,6 +8267,8 @@ class WorkbenchApiServer:
         if message_key:
             allowed_keys = {
                 "api.restart.completed",
+                "api.restart.completed_degraded",
+                "api.restart.failed_detail",
                 "api.restart.failed_notice",
             }
             if message_key not in allowed_keys:
@@ -8280,10 +8282,24 @@ class WorkbenchApiServer:
                     status=400,
                 )
             instance = str(message_args.get("instance") or "HASHI").strip()
+            render_args = {"instance": instance}
+            if message_key == "api.restart.completed_degraded":
+                render_args["warning"] = str(
+                    message_args.get("warning")
+                    or "The restart completed with a non-blocking service warning."
+                ).strip()[:500]
+            elif message_key == "api.restart.failed_detail":
+                render_args["stage"] = str(
+                    message_args.get("stage") or "unknown stage"
+                ).strip()[:100]
+                render_args["reason"] = str(
+                    message_args.get("reason")
+                    or "restart verification did not confirm the new process"
+                ).strip()[:500]
             text = tr(
                 message_key,
                 locale=preferred_locale(runtime),
-                instance=instance,
+                **render_args,
             )
         if not text:
             return web.json_response(

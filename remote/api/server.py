@@ -973,6 +973,9 @@ _RUNTIME_VERSION_FIELDS = (
     "dependency_digest",
     "core_source_digest",
 )
+_RESTART_STABLE_RUNTIME_FIELDS = tuple(
+    field for field in _RUNTIME_VERSION_FIELDS if field != "dependency_digest"
+)
 
 
 def _utc_timestamp() -> str:
@@ -1075,6 +1078,42 @@ def _status_kernel_pid(status: dict[str, Any]) -> int | None:
     return value if isinstance(value, int) and value > 0 else None
 
 
+def _restart_runtime_contract_mismatches(
+    expected: dict[str, Any], actual: dict[str, Any]
+) -> list[str]:
+    """Compare the stable Core contract while allowing cold adoption changes.
+
+    A cold restart may intentionally adopt the approved dependency lock and a
+    newly qualified Function generation. The restarted Core has already
+    enforced its dependency contract before publishing health, so the complete
+    installed-set digest is diagnostic rather than an equality gate here.
+    """
+
+    if not expected:
+        return []
+    return [
+        field
+        for field in _RESTART_STABLE_RUNTIME_FIELDS
+        if expected.get(field) not in (None, "")
+        and actual.get(field) != expected.get(field)
+    ]
+
+
+def _restart_backend_health(status: dict[str, Any]) -> tuple[bool, str]:
+    health = status.get("workbench_health") or {}
+    if not status.get("hashi_running") or not isinstance(health, dict):
+        return False, "backend_unavailable"
+    if health.get("ok") is not True:
+        return False, "backend_unhealthy"
+    if health.get("ready") is True:
+        return True, "ready"
+    startup = health.get("startup") or {}
+    failed_agents = int(startup.get("failed_agents") or 0)
+    if startup.get("services_ready") is True and failed_agents == 0:
+        return True, "degraded_local_services_ready"
+    return False, "local_services_not_ready"
+
+
 def _restart_evidence(
     status: dict[str, Any],
     *,
@@ -1088,12 +1127,24 @@ def _restart_evidence(
     actual_instance = str(health.get("instance_id") or "").strip().upper()
     runtime_version = _runtime_version(status)
     generation_id = _function_generation_id(status)
-    backend_health_ok = bool(
-        status.get("hashi_running")
-        and isinstance(health, dict)
-        and health.get("ok") is True
-        and health.get("ready") is True
+    backend_health_ok, backend_health_state = _restart_backend_health(status)
+    runtime_contract_mismatches = _restart_runtime_contract_mismatches(
+        expected_runtime, runtime_version
     )
+    issues = (
+        list(
+            health.get("issues")
+            or (health.get("startup") or {}).get("issues")
+            or ()
+        )
+        if isinstance(health, dict)
+        else []
+    )
+    warning_codes = [
+        str(issue.get("code") or "").strip()
+        for issue in issues
+        if isinstance(issue, dict) and str(issue.get("code") or "").strip()
+    ]
     return {
         "old_pid": old_pid,
         "old_pid_exited": bool(old_pid and not _process_exists(old_pid)),
@@ -1101,17 +1152,22 @@ def _restart_evidence(
         "new_pid_alive": bool(new_pid and _process_exists(new_pid)),
         "new_pid_differs": bool(old_pid and new_pid and new_pid != old_pid),
         "backend_health_ok": backend_health_ok,
+        "backend_health_state": backend_health_state,
+        "warning_codes": warning_codes,
         "actual_instance": actual_instance or None,
         "instance_matches": actual_instance == target_instance,
         "runtime_version": runtime_version or None,
         "runtime_version_verified": bool(
-            runtime_version
-            and (not expected_runtime or runtime_version == expected_runtime)
+            runtime_version and not runtime_contract_mismatches
         ),
+        "runtime_version_changed": bool(
+            expected_runtime and runtime_version != expected_runtime
+        ),
+        "runtime_contract_mismatches": runtime_contract_mismatches,
         "generation_id": generation_id or None,
-        "generation_verified": bool(
-            generation_id
-            and (not expected_generation or generation_id == expected_generation)
+        "generation_verified": bool(generation_id),
+        "generation_changed": bool(
+            expected_generation and generation_id != expected_generation
         ),
     }
 
@@ -1510,6 +1566,61 @@ def _forward_workbench_gateway_request(
     raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
 
 
+def _restart_failure_notice(record: dict[str, Any]) -> tuple[str, str]:
+    phase = str(record.get("phase") or "unknown").strip().replace("_", " ")
+    evidence = record.get("evidence") or {}
+    checks = (
+        ("old_pid_exited", "the previous process did not exit"),
+        ("new_pid_alive", "the new process is not alive"),
+        ("new_pid_differs", "no replacement process was observed"),
+        (
+            "backend_health_ok",
+            "the local Backend API and services did not become ready",
+        ),
+        ("instance_matches", "the restarted instance identity did not match"),
+        (
+            "runtime_version_verified",
+            "the stable Core runtime contract changed unexpectedly",
+        ),
+        (
+            "generation_verified",
+            "the restarted instance did not publish a Function generation",
+        ),
+    )
+    failures = [message for key, message in checks if evidence.get(key) is not True]
+    if failures:
+        return phase, "; ".join(failures[:3])
+    error = str(record.get("error") or "").strip()
+    if error and error != "restart_terminal_verification_failed":
+        return phase, error[:500]
+    return phase, "restart verification did not confirm the new process"
+
+
+def _restart_warning_notice(record: dict[str, Any]) -> str:
+    health = ((record.get("status") or {}).get("workbench_health") or {})
+    for issue in health.get("issues") or ():
+        if not isinstance(issue, dict):
+            continue
+        summary = str(issue.get("summary") or "").strip()
+        if summary:
+            return summary[:500]
+    return "The restart completed with a non-blocking service warning."
+
+
+def _restart_notice_fallback_text(
+    message_key: str, message_args: dict[str, str]
+) -> str:
+    instance = message_args.get("instance") or "HASHI"
+    if message_key == "api.restart.completed":
+        return f"✅ {instance} restarted and is back online."
+    if message_key == "api.restart.completed_degraded":
+        warning = message_args.get("warning") or "A non-blocking warning remains."
+        return f"✅ {instance} restarted. Local services are online. ⚠️ {warning}"
+    stage = message_args.get("stage") or "unknown stage"
+    reason = message_args.get("reason") or "restart verification failed"
+    return f"❌ {instance} restart failed during {stage}: {reason}"
+
+
 def _notify_restart_result(
     *,
     agent: str,
@@ -1520,18 +1631,27 @@ def _notify_restart_result(
     normalized_agent = str(agent or "").strip()
     if not normalized_agent:
         return {"state": "not_requested"}
+    message_args = {
+        "instance": str(record.get("target_instance") or "HASHI"),
+    }
     if record.get("state") == "completed":
-        message_key = "api.restart.completed"
+        health = ((record.get("status") or {}).get("workbench_health") or {})
+        if health.get("degraded") is True:
+            message_key = "api.restart.completed_degraded"
+            message_args["warning"] = _restart_warning_notice(record)
+        else:
+            message_key = "api.restart.completed"
     else:
-        message_key = "api.restart.failed_notice"
+        message_key = "api.restart.failed_detail"
+        stage, reason = _restart_failure_notice(record)
+        message_args.update(stage=stage, reason=reason)
+    notification = {
+        "agent": normalized_agent,
+        "message_key": message_key,
+        "message_args": message_args,
+    }
     body = json.dumps(
-        {
-            "agent": normalized_agent,
-            "message_key": message_key,
-            "message_args": {
-                "instance": str(record.get("target_instance") or "HASHI"),
-            },
-        },
+        notification,
         separators=(",", ":"),
     ).encode("utf-8")
     try:
@@ -1544,6 +1664,29 @@ def _notify_restart_result(
             timeout=5.0,
         )
         response = json.loads(content.decode("utf-8")) if content else {}
+        if (
+            status == 400
+            and isinstance(response, dict)
+            and response.get("error") == "message_key is not supported"
+        ):
+            fallback_body = json.dumps(
+                {
+                    "agent": normalized_agent,
+                    "text": _restart_notice_fallback_text(
+                        message_key, message_args
+                    ),
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            status, content, _headers = _forward_workbench_gateway_request(
+                method="POST",
+                api_path="admin/notify",
+                query="",
+                body_bytes=fallback_body,
+                request_headers={"content-type": "application/json"},
+                timeout=5.0,
+            )
+            response = json.loads(content.decode("utf-8")) if content else {}
     except Exception as exc:
         return {"state": "failed", "error": str(exc)}
     if status >= 400 or not isinstance(response, dict) or response.get("ok") is not True:

@@ -200,10 +200,9 @@ re-plan when unavailable. Prefer `log_query` for logs. Agents work foreground;
 only explicit user `/bg` grants `background_job_start` for that request.
 Tests prove scope, not live adoption; preserve user work and report failures.
 
-Remote reload preserves Core. `/restart` uses supervised `L3_RESTART` Remote
-and verifies identity, generation and health. `request_diagnostics` reads one
-request's final state, effects, Jobs and retry evidence; it never retries or
-authorizes one.
+Remote reload preserves Core. Windows `/restart` passes identity/API port to its
+Limited `L3_RESTART` task. It permits approved adoption/warnings but requires
+stable runtime/local health. `request_diagnostics` only reads state/effects.
 
 HCC is optional, non-authoritative PCM context. `/hcc` controls injection;
 `hcc-refresh` alone refreshes authorized sources after digest/provenance checks,
