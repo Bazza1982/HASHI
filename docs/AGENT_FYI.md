@@ -108,6 +108,8 @@ Engine and Model Provider are different. HER v2 exposes Direct (`zero`),
 Strategic (`low`), and Planned (`medium`). Fixed/Flex, Memory+, and HER mode are
 independent. `/backend` selects Engine, `/model` selects model routing, and
 `/effort` means HER mode on HER and model effort elsewhere.
+Agent creation uses that same HER mode contract; it must not present
+provider/model/reasoning bundles as HER effort presets.
 
 Use current metadata for context, price, effort, and modality. Media support is
 the intersection of model semantics, Adapter transport, and instance policy;

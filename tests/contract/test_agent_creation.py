@@ -13,7 +13,7 @@ from orchestrator.agent_creation import (
     ConfigConflictCreationError,
     InvalidBackendError,
     InvalidAgentNameError,
-    InvalidHerPresetError,
+    InvalidEffortError,
     WorkspaceExistsError,
     build_agent_config,
     build_her_backend_row,
@@ -87,11 +87,14 @@ def test_service_creates_inactive_agent_through_authoritative_config_writer(tmp_
 
 def test_public_spec_has_no_raw_agent_config_field():
     assert "agent_cfg" not in AgentCreationSpec.__dataclass_fields__
+    assert "preset" not in AgentCreationSpec.__dataclass_fields__
 
 
-def test_her_presets_build_five_roles_without_secrets():
-    for preset in ("fast", "balanced", "maximum"):
-        row = build_her_backend_row(preset, HER_PROVIDER_PROFILES)
+def test_her_creation_efforts_persist_mode_without_changing_provider_profiles():
+    provider_rows = []
+    for effort in ("zero", "low", "medium"):
+        row = build_her_backend_row(effort, HER_PROVIDER_PROFILES)
+        assert row["effort"] == effort
         profiles = row["her_v2"]["profiles"]
         assert set(profiles) == {
             "lightweight", "triage", "premium", "reviewer", "orchestrator"
@@ -99,7 +102,9 @@ def test_her_presets_build_five_roles_without_secrets():
         encoded = json.dumps(row)
         assert "secret" not in encoded
         assert "base_url" not in encoded
-    with pytest.raises(InvalidHerPresetError):
+        provider_rows.append(row["her_v2"])
+    assert provider_rows[0] == provider_rows[1] == provider_rows[2]
+    with pytest.raises(InvalidEffortError):
         build_her_backend_row("unknown", HER_PROVIDER_PROFILES)
 
 

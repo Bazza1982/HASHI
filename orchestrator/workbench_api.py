@@ -27,8 +27,6 @@ from orchestrator.agent_creation import (
     AgentCreationError,
     AgentCreationService,
     AgentCreationSpec,
-    DEFAULT_HER_PRESET,
-    HER_CREATION_PRESETS,
 )
 from orchestrator.agent_overview import build_agent_overview
 from orchestrator.chat_transcript_projection import build_chat_projection
@@ -3808,11 +3806,7 @@ class WorkbenchApiServer:
                         }
                     entry[field] = value
             if engine == HER_V2_ENGINE:
-                entry["creation"] = {
-                    "mode": "preset",
-                    "default_preset": DEFAULT_HER_PRESET,
-                    "presets": [dict(item) for item in HER_CREATION_PRESETS],
-                }
+                entry["creation"] = {"mode": "effort"}
             else:
                 # Creation support is explicit. Older schema-v1 catalogues do
                 # not advertise this capability, so clients can fail closed
@@ -3940,13 +3934,24 @@ class WorkbenchApiServer:
                     },
                     status=400,
                 )
+        if payload.get("preset") is not None:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": (
+                        "HER creation presets are retired; use the public "
+                        "orchestration effort field"
+                    ),
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
 
         started = time.monotonic()
         spec = AgentCreationSpec(
             name=name.strip(),
             backend=backend.strip(),
             display_name=display_name,
-            preset=payload.get("preset"),
             model=payload.get("model"),
             effort=payload.get("effort"),
             is_active=is_active,

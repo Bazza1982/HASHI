@@ -52,6 +52,15 @@ def _server(tmp_path: Path, *, active: bool = False, orchestrator=None) -> Workb
         bridge_home=tmp_path,
         workbench_port=18800,
         project_root=tmp_path,
+        her_providers={
+            "providers": {
+                "hashi": {
+                    "fast_model": "gpt-5.6-luna",
+                    "pro_model": "gpt-5.6-sol",
+                    "status": "provisional",
+                }
+            }
+        },
     )
     return WorkbenchApiServer(
         config_path=config_path,
@@ -209,6 +218,44 @@ async def test_add_agent_api_rejects_raw_config_and_publishes_public_intent(tmp_
         {"engine": "codex-cli", "model": "gpt-5.6-sol", "effort": "medium"}
     ]
     assert (tmp_path / "workspaces" / "new-agent" / "agent.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_add_agent_api_persists_her_orchestration_effort(tmp_path):
+    server = _server(tmp_path, active=False)
+
+    retired = await server.handle_admin_add_agent(
+        _Request(
+            payload={
+                "name": "old-preset",
+                "backend": "her-v2",
+                "preset": "balanced",
+            }
+        )
+    )
+    assert retired.status == 400
+    assert json.loads(retired.text)["error_code"] == "invalid_request"
+
+    created = await server.handle_admin_add_agent(
+        _Request(
+            payload={
+                "name": "strategist",
+                "display_name": "Strategist",
+                "backend": "her-v2",
+                "effort": "low",
+                "is_active": False,
+            }
+        )
+    )
+
+    assert created.status == 201
+    stored = read_config_json(server.config_path)
+    row = next(item for item in stored["agents"] if item["name"] == "strategist")
+    assert row["allowed_backends"][0]["engine"] == "her-v2"
+    assert row["allowed_backends"][0]["effort"] == "low"
+    assert set(row["allowed_backends"][0]["her_v2"]["profiles"]) == {
+        "lightweight", "triage", "premium", "reviewer", "orchestrator"
+    }
 
 
 @pytest.mark.asyncio
