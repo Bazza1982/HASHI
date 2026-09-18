@@ -205,6 +205,12 @@ The richer API is published only when its fail-closed qualification boundary is
 satisfied. A client using basic chat routes must not be described as having the
 full Persistent Session API contract.
 
+The qualified v1 contract is enabled by default for personal instances. This
+includes ordered single- and multi-attachment intake for all advertised media
+forms and standard assistant attachment output. An instance may still set
+`global.persistent_session_v1=false` as an explicit operator opt-out; missing
+legacy configuration is not interpreted as an opt-out.
+
 The detailed state and qualification contracts are defined in:
 
 - [HASHI Persistent Multi-Session Frontend Design](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md)
@@ -349,7 +355,9 @@ into HASHI Functions or Core.
 - Some orchestrator modules directly depend on Telegram types rather than a
   transport-neutral event interface.
 - Retired Workbench compatibility names remain in source and configuration.
-- Persistent Session API v1 remains behind its qualification gate.
+- Persistent Session API v1 remains fail-closed when its runtime qualification
+  evidence is absent, even though qualified personal instances enable it by
+  default.
 
 These are current implementation facts, not target architecture exceptions.
 

@@ -79,6 +79,9 @@ External frontends stage, upload, and commit all advertised attachments before
 creating one ordered Message and one Run. Any required attachment failure
 rejects the whole Run; never split one submission into legacy per-file Turns.
 Telegram keeps its Connector intake, and the built-in TUI is separate.
+Qualified personal instances advertise this Session and multi-attachment
+contract by default. Only an explicit instance opt-out disables it; missing
+legacy configuration does not.
 
 Every input has protected `CURRENT MESSAGE CONTEXT`. Keep message source,
 ingress, processing instance, sender assurance, authorization, and destination

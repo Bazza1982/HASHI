@@ -125,6 +125,10 @@ The generic v1 surface provides:
 Capability publication includes independent Session, Event, Control,
 Attachment, Approval and Fencing versions. Routes return
 `session_api_not_ready` until the complete qualification boundary is enabled.
+Qualified personal instances enable this contract by default; an explicit
+`global.persistent_session_v1=false` remains available as an operator opt-out.
+Legacy configuration with no key adopts the qualified default rather than
+silently disabling standard attachment support.
 
 ## 7. Run submission
 

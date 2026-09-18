@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator.config import ConfigManager
 from orchestrator.workbench_api import WorkbenchApiServer
 from orchestrator.private_authorization import authorization_content_sha256
 
@@ -248,6 +249,57 @@ async def test_unqualified_session_api_is_not_advertised(tmp_path):
     assert capabilities["private_authorization"]["raw_secret_on_wire"] is False
     assert unavailable.status == 503
     assert json.loads(unavailable.text)["code"] == "session_api_not_ready"
+
+
+@pytest.mark.asyncio
+async def test_personal_instance_enables_standard_frontend_attachments_by_default(
+    tmp_path,
+):
+    config_path = tmp_path / "agents.json"
+    secrets_path = tmp_path / "secrets.json"
+    config_path.write_text(
+        json.dumps({"global": {}, "agents": []}),
+        encoding="utf-8",
+    )
+    secrets_path.write_text("{}", encoding="utf-8")
+    global_config, _agents, _secrets = ConfigManager(
+        config_path,
+        secrets_path,
+        bridge_home=tmp_path,
+        code_root=tmp_path,
+    ).load()
+    server, _runtime = _server(tmp_path)
+    server.global_config = global_config
+
+    capabilities = json.loads(
+        (await server.handle_v1_capabilities(_Request())).text
+    )
+
+    assert global_config.persistent_session_v1 is True
+    assert capabilities["session_api_version"] == "1.0"
+    assert capabilities["frontend_connector"]["multi_attachment"] is True
+    assert capabilities["frontend_connector"]["atomic_run_admission"] is True
+
+
+def test_personal_instance_can_explicitly_opt_out_of_persistent_session(tmp_path):
+    config_path = tmp_path / "agents.json"
+    secrets_path = tmp_path / "secrets.json"
+    config_path.write_text(
+        json.dumps(
+            {"global": {"persistent_session_v1": False}, "agents": []}
+        ),
+        encoding="utf-8",
+    )
+    secrets_path.write_text("{}", encoding="utf-8")
+
+    global_config, _agents, _secrets = ConfigManager(
+        config_path,
+        secrets_path,
+        bridge_home=tmp_path,
+        code_root=tmp_path,
+    ).load()
+
+    assert global_config.persistent_session_v1 is False
 
 
 @pytest.mark.asyncio
