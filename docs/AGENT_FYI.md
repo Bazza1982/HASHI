@@ -93,7 +93,8 @@ discovery-only, while unreadable or malformed secrets fail closed. See
 HChat keeps sender claim, verified peer, relay, and target separate. Never put
 shared secrets in messages or command arguments. `/debug on` sends one
 best-effort diagnosis for an eligible terminal error; the source does not retry
-or fix it, and HChat errors are excluded to prevent loops.
+or fix it, the diagnosis completion is not returned to the source Agent, and
+HChat errors are excluded to prevent loops.
 
 PAO freezes each Run's primary destination, mirrors, and automatic delivery
 before PCM. Queue acceptance is not delivery; `sent` needs a Connector receipt,
@@ -108,6 +109,8 @@ Engine and Model Provider are different. HER v2 exposes Direct (`zero`),
 Strategic (`low`), and Planned (`medium`). Fixed/Flex, Memory+, and HER mode are
 independent. `/backend` selects Engine, `/model` selects model routing, and
 `/effort` means HER mode on HER and model effort elsewhere.
+Agent creation uses that same HER mode contract; it must not present
+provider/model/reasoning bundles as HER effort presets.
 
 Use current metadata for context, price, effort, and modality. Media support is
 the intersection of model semantics, Adapter transport, and instance policy;
@@ -164,6 +167,9 @@ one primary personal Conversation Session; semantic messages appear on both,
 while presentation rows never enter model history. Command menus reuse the
 authenticated runtime command path and keep action state server-side.
 
+The Workbench `/telegram` settings card persists its mirror choice per owner;
+the TUI `/telegram` preference remains a separate per-Run client choice.
+
 Workbench press-to-talk is transcript-first. With Safe Voice off, admit text;
 with it on, hold a bounded preview until **Confirm and send**. Discard, expiry,
 Session/context change, or disabling it sends nothing. STT and other optional
@@ -198,13 +204,7 @@ Use `request_diagnostics` to query one request's final state, Provider IDs,
 observed writes/effects, Jobs, and retry evidence. It is read-only and never
 authorizes or performs a retry.
 
-HCC is PCM-owned temporary context in `agent.md` between `[hcc]` and
-`[hcc_end]`. `/hcc on|off` controls current-Agent injection only and defaults
-off. Cached observations may be stale, grant no permission, and never override
-higher authority. Missing, empty, or off revokes HCC without deleting history.
-
-Refresh HCC only through the existing `hcc-refresh` Skill and authorized
-sources. Verify the named entry digest before fetch; publish only a successful
-result with source and observation/retrieval times. Do not rewrite other PCM
-blocks, change the HCC flag, or blindly retry conflicts. See
-[HCC](HASHI_HCC_IMPLEMENTATION.md).
+HCC is optional PCM `agent.md` context. `/hcc on|off` controls injection and
+grants no authority. Refresh only with `hcc-refresh` from authorized sources:
+verify its digest, publish source/time, and never rewrite PCM or blindly retry
+conflicts. See [HCC](HASHI_HCC_IMPLEMENTATION.md).

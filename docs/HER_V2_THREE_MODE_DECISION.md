@@ -58,6 +58,10 @@ not a replacement for model-owned task semantics.
 - Canonical persisted and wire values remain `zero`, `low`, and `medium`.
 - `/effort direct`, `/effort strategic`, and `/effort planned` select those
   canonical values.
+- Agent creation exposes the same three orchestration efforts and persists the
+  selected canonical value in the HER backend row. Provider/model profiles and
+  provider reasoning use one independent instance-derived default; they are
+  not public HER effort presets.
 - Legacy aliases `fast` and `fast_path` continue to select Strategic (`low`).
 - Existing saved `high`, `xhigh`, or `max` HER values migrate to Planned
   (`medium`) when Agent state loads.

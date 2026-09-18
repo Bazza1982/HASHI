@@ -34,7 +34,7 @@ async def test_backend_catalogue_exposes_public_selectable_registry(tmp_path):
     assert response.status == 200
     payload = json.loads(response.text)
     assert payload["ok"] is True
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["source"] == "hashi_backend_registry"
     assert payload["backends"]["her-v2"] == {
         "engine": "her-v2",
@@ -44,7 +44,9 @@ async def test_backend_catalogue_exposes_public_selectable_registry(tmp_path):
         "efforts": ["zero", "low", "medium"],
         "default_effort": "medium",
         "privacy_levels": [0, 1],
+        "creation": {"mode": "effort"},
     }
+    assert payload["backends"]["codex-cli"]["creation"] == {"mode": "model"}
     assert "deepseek-api" not in payload["backends"]
     assert "openrouter-api" not in payload["backends"]
     assert "secret_keys" not in payload["backends"]["codex-cli"]
@@ -58,3 +60,4 @@ def test_backend_catalogue_route_is_registered(tmp_path):
         for route in server.app.router.routes()
     }
     assert ("GET", "/api/backends/catalogue") in routes
+    assert ("POST", "/api/admin/add-agent") in routes

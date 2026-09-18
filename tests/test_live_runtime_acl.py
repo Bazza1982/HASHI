@@ -72,6 +72,41 @@ def test_native_target_plan_is_exact_and_never_protects_repo_or_workzone(tmp_pat
     assert all(target.path.is_absolute() for target in targets)
 
 
+def test_native_target_plan_accepts_exact_managed_python_prefix(
+    tmp_path,
+    monkeypatch,
+):
+    policy = _policy(tmp_path)
+    runtime_root = tmp_path / "managed-python"
+    executable = (
+        runtime_root / "python.exe"
+        if os.name == "nt"
+        else runtime_root / "bin" / "python3"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"test-only")
+
+    def report_prefix(argv, **_kwargs):
+        assert Path(argv[0]) == executable
+        return subprocess.CompletedProcess(argv, 0, f"{runtime_root}\n", "")
+
+    monkeypatch.setattr(live_runtime_acl.subprocess, "run", report_prefix)
+    policy = LiveRuntimePolicy(
+        code_root=policy.code_root,
+        bridge_home=policy.bridge_home,
+        runtime_roots=(runtime_root,),
+        protected_write_paths=policy.protected_write_paths,
+        protected_read_paths=policy.protected_read_paths,
+        service_targets=policy.service_targets,
+        core_pid=policy.core_pid,
+        policy_path=policy.policy_path,
+    )
+
+    targets = build_native_protection_targets(policy)
+
+    assert any(target.path == runtime_root for target in targets)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
 def test_windows_acl_rejects_real_writes_and_restores_disposable_target(tmp_path):
     root = tmp_path / "live-runtime"

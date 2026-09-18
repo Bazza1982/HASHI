@@ -90,8 +90,10 @@ native ACLs to it together with the live targets.
 
 The platform helper is `scripts/protect_live_runtime.py`. All roots are
 required explicitly; it refuses filesystem roots, repository/instance roots as
-protection targets, missing Core files, and runtime roots without
-`pyvenv.cfg`.
+protection targets, missing Core files, and runtime roots that are neither a
+virtual environment nor the exact `sys.prefix` reported by their own Python
+interpreter. This includes standalone Python installations managed by `uv`
+without accepting an arbitrary directory as a runtime.
 
 Always start with the read-only plan:
 
