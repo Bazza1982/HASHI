@@ -87,6 +87,61 @@ async def test_admin_notify_renders_restart_notice_in_user_locale(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_admin_notify_renders_actionable_restart_failure(tmp_path):
+    runtime = _FakeRuntime(locale="en")
+    server = _server(tmp_path, runtime)
+
+    response = await server.handle_admin_notify(
+        _FakeRequest(
+            {
+                "agent": "hashiko",
+                "message_key": "api.restart.failed_detail",
+                "message_args": {
+                    "instance": "HASHI4",
+                    "stage": "terminal verification",
+                    "reason": "the new process did not publish a healthy Backend API",
+                },
+            }
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert len(runtime.sent) == 1
+    assert "HASHI4" in runtime.sent[0]["text"]
+    assert "terminal verification" in runtime.sent[0]["text"]
+    assert "the new process did not publish a healthy Backend API" in runtime.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_admin_notify_renders_degraded_restart_success(tmp_path):
+    runtime = _FakeRuntime(locale="en")
+    server = _server(tmp_path, runtime)
+
+    response = await server.handle_admin_notify(
+        _FakeRequest(
+            {
+                "agent": "hashiko",
+                "message_key": "api.restart.completed_degraded",
+                "message_args": {
+                    "instance": "HASHI4",
+                    "warning": "Remote/HChat discovery is degraded.",
+                },
+            }
+        )
+    )
+
+    payload = json.loads(response.text)
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert len(runtime.sent) == 1
+    assert "HASHI4" in runtime.sent[0]["text"]
+    assert "Local services are online" in runtime.sent[0]["text"]
+    assert "Remote/HChat discovery is degraded" in runtime.sent[0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_admin_notify_hides_legacy_restart_diagnostics(tmp_path):
     runtime = _FakeRuntime(locale="zh-CN")
     server = _server(tmp_path, runtime)

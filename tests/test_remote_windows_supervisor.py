@@ -21,7 +21,14 @@ pytestmark = [
 def _powershell(script: str):
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     return subprocess.run(
-        ["powershell.exe", "-NoProfile", "-EncodedCommand", encoded],
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded,
+        ],
         capture_output=True, text=True, timeout=30,
     )
 
@@ -36,7 +43,16 @@ def test_registered_task_preserves_module_arguments_stderr_and_exit(tmp_path, ro
     remote = root / "remote"
     remote.mkdir(parents=True)
     (root / "agents.json").write_text(
-        json.dumps({"global": {"instance_id": "SUPERVISOR-TEST"}}), encoding="utf-8"
+        json.dumps(
+            {
+                "global": {
+                    "instance_id": "SUPERVISOR-TEST",
+                    "display_name": "Supervisor Test",
+                    "workbench_port": 18891,
+                }
+            }
+        ),
+        encoding="utf-8",
     )
     shutil.copyfile(ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py")
     (remote / "__init__.py").write_text("", encoding="utf-8")
@@ -81,7 +97,7 @@ function Register-ScheduledTask {{
     param($TaskName, $InputObject, [switch]$Force)
     $InputObject | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(action_path)}
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -Port 18999 -NoTls
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE' -Port 18999 -NoTls
 """)
     assert register.returncode == 0, register.stderr
     action = json.loads(action_path.read_text(encoding="utf-8-sig"))
@@ -93,7 +109,11 @@ function Register-ScheduledTask {{
     )
     assert (root / "received.json").exists(), result.stderr
     assert json.loads((root / "received.json").read_text(encoding="utf-8")) == [
-        "--hashi-root", str(root), "--supervised", "--no-tls", "--port", "18999"
+        "--hashi-root", str(root), "--supervised",
+        "--instance-id", "SUPERVISOR-TEST",
+        "--display-name", "Supervisor Test",
+        "--workbench-port", "18891",
+        "--no-tls", "--port", "18999",
     ]
     assert result.returncode == exit_code, result.stderr
     log = (root / "logs/hashi-remote-supervisor.log").read_bytes()
@@ -378,6 +398,46 @@ function Invoke-RestMethod {{
 
     assert result.returncode != 0
     assert "discovery" in result.stderr.lower()
+
+
+def test_start_allows_trusted_handshake_to_settle_after_initial_degraded_health(tmp_path):
+    root = tmp_path / "hashi settling"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-SETTLING"}}),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py", remote / "supervisor_identity.py"
+    )
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+$global:HealthCalls = 0
+function Start-ScheduledTask {{ param($TaskName) }}
+function Start-Sleep {{ param([int]$Milliseconds) }}
+function Invoke-RestMethod {{
+    param($Method, $Uri, $TimeoutSec)
+    $global:HealthCalls++
+    $Ready = $global:HealthCalls -ge 30
+    [pscustomobject]@{{
+        ok=$true; status=$(if ($Ready) {{ 'ready' }} else {{ 'degraded' }});
+        instance=[pscustomobject]@{{instance_id='SUPERVISOR-SETTLING'}};
+        discovery=[pscustomobject]@{{
+            state=$(if ($Ready) {{ 'ready' }} else {{ 'degraded' }});
+            readiness=$(if ($Ready) {{ 'ready' }} else {{ 'starting' }});
+            peer_count=$(if ($Ready) {{ 1 }} else {{ 0 }});
+            trusted_peer_count=$(if ($Ready) {{ 1 }} else {{ 0 }});
+            trust_state=$(if ($Ready) {{ 'accepted' }} else {{ 'pending' }});
+            backends=@([pscustomobject]@{{advertising=$true; browsing=$true}})
+        }}
+    }}
+}}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} start -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE' -NoTls
+""")
+
+    assert result.returncode == 0, result.stderr
+    assert "trusted_peer" in result.stdout
 
 
 def test_doctor_uses_configured_tls_and_accepts_ready_empty(tmp_path):

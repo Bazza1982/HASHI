@@ -91,6 +91,12 @@ Windows supervised Remote:
 .\bin\hashi_remote_ctl.ps1 status
 ```
 
+The Windows supervisor resolves the instance identity while it still has access
+to instance configuration, then persists the instance id, display name and
+Backend API port in the scheduled-task command. The Limited task principal is
+not expected to read protected `agents.json`; failure to do so must never
+silently advertise the generic `HASHI` identity or default Backend API port.
+
 Linux/WSL supervised Remote:
 
 ```bash
@@ -124,6 +130,24 @@ Use two supported instances, for example `HASHI1` and `HASHI2`.
 8. Repeat in the reverse direction.
 9. Negative-test by removing trust or lowering the target to `L2_WRITE`; the
    peer `/restart` request must be rejected before a destructive POST.
+
+## Terminal verification
+
+Launch acceptance is not restart success. The durable terminal receipt must
+show that the old PID exited, a different live Core PID appeared, the instance
+identity matches, the stable Core runtime contract still matches, and the new
+process published a Function generation.
+
+Cold restart is also an adoption boundary. The approved dependency digest and
+Function generation may therefore change across it; those changes are recorded
+but are not compared to the pre-restart values as equality gates. The restarted
+Core enforces the active dependency contract before publishing health.
+
+Workbench health may be `degraded` when an optional connector such as
+Remote/HChat is unavailable. If local services are ready and no Agent failed to
+start, the cold restart is complete and the user receives a success notice with
+the remaining warning. A genuine terminal failure notice includes the failed
+stage and the first actionable verification reasons instead of a generic retry.
 
 ## Compatibility
 

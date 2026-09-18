@@ -10,7 +10,16 @@ from remote.supervisor_identity import (
 
 def test_supervisor_identity_uses_configured_instance(tmp_path):
     (tmp_path / "agents.json").write_text(
-        json.dumps({"global": {"instance_id": "HASHI1", "remote_port": 9999}}),
+        json.dumps(
+            {
+                "global": {
+                    "instance_id": "HASHI1",
+                    "display_name": "HASHI One",
+                    "workbench_port": 18801,
+                    "remote_port": 9999,
+                }
+            }
+        ),
         encoding="utf-8",
     )
     (tmp_path / "instances.json").write_text(
@@ -26,6 +35,8 @@ def test_supervisor_identity_uses_configured_instance(tmp_path):
     assert identity.windows_task_name == "HashiRemote-hashi1"
     assert identity.source == "agents_json"
     assert identity.remote_port == 8766
+    assert identity.display_name == "HASHI One"
+    assert identity.workbench_port == 18801
 
 
 def test_supervisor_identity_explicit_override_is_deterministic(tmp_path):
@@ -36,6 +47,8 @@ def test_supervisor_identity_explicit_override_is_deterministic(tmp_path):
     assert identity.systemd_service_name == "hashi-remote-lab-east.service"
     assert identity.windows_task_name == "HashiRemote-lab-east"
     assert identity.source == "explicit"
+    assert identity.display_name is None
+    assert identity.workbench_port is None
 
 
 def test_supervisor_slug_is_bounded_and_nonempty():

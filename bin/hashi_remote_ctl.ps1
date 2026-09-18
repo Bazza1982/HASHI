@@ -51,7 +51,18 @@ if ($TaskName -match '[\\/]') {
 
 $LogDir = Join-Path $HashiRoot "logs"
 $LogPath = Join-Path $LogDir "hashi-remote-supervisor.log"
-$ArgsList = @("-m", "remote", "--hashi-root", [string]$HashiRoot, "--supervised")
+$ArgsList = @(
+    "-m", "remote",
+    "--hashi-root", [string]$HashiRoot,
+    "--supervised",
+    "--instance-id", [string]$SupervisorIdentity.instance_id
+)
+if ($SupervisorIdentity.display_name) {
+    $ArgsList += @("--display-name", [string]$SupervisorIdentity.display_name)
+}
+if ($SupervisorIdentity.workbench_port) {
+    $ArgsList += @("--workbench-port", [string]$SupervisorIdentity.workbench_port)
+}
 $TaskRunner = Join-Path $PSScriptRoot "hashi_remote_task_runner.ps1"
 
 if ($NoTls -or $env:HASHI_REMOTE_NO_TLS -eq "1") {
@@ -315,7 +326,11 @@ function Wait-RemoteHealthAcceptance {
     param([int]$EffectivePort)
 
     $LastAcceptance = $null
-    for ($Attempt = 0; $Attempt -lt 24; $Attempt++) {
+    # The HTTP listener can become reachable before mDNS discovery and trusted
+    # peer handshakes settle. Allow a bounded 30-second adoption window instead
+    # of reporting a false failure after the old six-second probe window.
+    $MaxAttempts = 120
+    for ($Attempt = 0; $Attempt -lt $MaxAttempts; $Attempt++) {
         $Probe = Get-RemoteHealthProbe -EffectivePort $EffectivePort
         $Acceptance = Get-RemoteHealthAcceptance -Probe $Probe
         if ($Acceptance.Accepted) {
@@ -323,7 +338,7 @@ function Wait-RemoteHealthAcceptance {
             return $Acceptance
         }
         $LastAcceptance = $Acceptance
-        if ($Attempt -lt 23) {
+        if ($Attempt -lt ($MaxAttempts - 1)) {
             Start-Sleep -Milliseconds 250
         }
     }
@@ -407,8 +422,18 @@ function Show-RemoteDoctor {
         Where-Object { $_.DisplayName -match "Hashi|Remote|Python" }
     $Listening = Get-NetTCPConnection -LocalPort $EffectivePort -State Listen -ErrorAction SilentlyContinue
     $WslStatus = $null
-    if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
-        $WslStatus = (& wsl.exe --status 2>$null) -join "`n"
+    $WslError = $null
+    $WslCommand = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    $WslAvailable = $null -ne $WslCommand
+    if ($WslAvailable) {
+        try {
+            $WslStatus = (& $WslCommand.Source --status 2>$null) -join "`n"
+        } catch {
+            # WSL is diagnostic context only. A policy-blocked or unavailable
+            # executable must not hide an otherwise healthy Remote result.
+            $WslAvailable = $false
+            $WslError = $_.Exception.Message
+        }
     }
     $Probe = Get-RemoteHealthProbe -EffectivePort $EffectivePort
     $Health = $Probe.Health
@@ -428,8 +453,9 @@ function Show-RemoteDoctor {
         Listening = [bool]$Listening
         FirewallRuleCount = @($FirewallRules).Count
         FirewallRules = @($FirewallRules | Select-Object -ExpandProperty DisplayName)
-        WslAvailable = [bool](Get-Command wsl.exe -ErrorAction SilentlyContinue)
+        WslAvailable = $WslAvailable
         WslStatus = $WslStatus
+        WslError = $WslError
         RemoteReachable = $null -ne $Health
         RemoteHealthUri = $Probe.Uri
         RemoteHealthState = if ($null -ne $Health) { $Health.status } else { "unreachable" }
