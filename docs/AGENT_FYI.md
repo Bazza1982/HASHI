@@ -167,6 +167,11 @@ one primary personal Conversation Session; semantic messages appear on both,
 while presentation rows never enter model history. Command menus reuse the
 authenticated runtime command path and keep action state server-side.
 
+Agent deletion is PAO-owned and default-on in a Function generation that
+advertises `agent_deletion`. Frontends keep the action in their existing Agent
+management surface and hide it when that authenticated capability is absent.
+The HASHI preview is authoritative; blockers and cleanup receipts remain binding.
+
 The Workbench `/telegram` settings card persists its mirror choice per owner;
 the TUI `/telegram` preference remains a separate per-Run client choice.
 
