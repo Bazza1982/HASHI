@@ -224,8 +224,9 @@ Release verification must cover:
   recovery turn without a model, then clears only the matching Journal;
 - WIP commit failure, verification failure, and compare-and-swap race preserve
   the Journal and do not start the conversation-history phase;
-- active WIP produces a mandatory visible warning independently of `/verbose`,
-  while raw requests and full Journal JSONL are never sent to the provider;
+- active WIP remains quiet for ordinary later requests and produces one visible
+  warning only for an explicit typed recovery request, while raw requests and
+  full Journal JSONL are never sent to the provider;
 - new Journals are Session-scoped and legacy Agent-level WIP migrates without a
   delete-before-durable-write gap;
 - recovery turns render as quoted data and remain eligible historical context

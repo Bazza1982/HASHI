@@ -1620,9 +1620,18 @@ class HERv2Adapter(BaseBackend):
             if wip_journal is not None
             else {"record_count": 0, "size_bytes": 0}
         )
+        request_metadata = request_meta.get("request_metadata")
+        surface_wip_recovery = bool(
+            request_meta.get("surface_wip_recovery") is True
+            or (
+                isinstance(request_metadata, Mapping)
+                and request_metadata.get("surface_wip_recovery") is True
+            )
+        )
         if (
             int(prior_wip_summary.get("record_count") or 0) > 0
             and canonical_recovery_context is None
+            and surface_wip_recovery
         ):
             self._surface_wip_recovery_warning(
                 request_id=request_id,

@@ -1042,6 +1042,12 @@ class FunctionWorkerHost:
                 "active_transfer": bool(runtime.has_active_transfer()),
                 "is_generating": bool(runtime.is_generating),
                 "queue_depth": int(runtime.queue.qsize()),
+                "detached_request_count": len(
+                    getattr(runtime, "_background_request_ids", set())
+                ),
+                "agent_stop_epoch": int(
+                    getattr(runtime, "_agent_stop_epoch", 0) or 0
+                ),
                 "current_request_meta": self._current_request_metadata(runtime),
                 "org_id": getattr(runtime, "org_id", None),
                 "agent_lifecycle_id": lifecycle_id_from_config(runtime.config),
@@ -1067,6 +1073,7 @@ class FunctionWorkerHost:
             "summary",
             "session_id",
             "run_id",
+            "agent_stop_epoch",
         }
         return {
             str(key): value

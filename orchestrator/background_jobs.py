@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_stop_fence import (
+    AgentStopFenceStore,
+    record_predates_fence,
+)
 from orchestrator.process_execution import (
     decode_process_output,
     process_group_kwargs,
@@ -353,6 +357,9 @@ class BackgroundJobManager:
         self.logs_dir = self.base_dir / "logs"
         self.store = BackgroundJobStore(self.base_dir / "jobs.db")
         self.kernel = kernel
+        self.stop_fences = AgentStopFenceStore(
+            self.base_dir.parent / "runtime_control" / "agent_stop_fences.db"
+        )
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._monitor_tasks: dict[str, asyncio.Task[Any]] = {}
         self._stream_tasks: dict[str, list[asyncio.Task[Any]]] = {}
@@ -427,6 +434,11 @@ class BackgroundJobManager:
         stdout_path = job_log_dir / "stdout.log"
         stderr_path = job_log_dir / "stderr.log"
         now = utc_now()
+        origin_payload = dict(origin or {})
+        origin_payload.setdefault(
+            "agent_stop_epoch",
+            self.stop_fences.current(str(agent or "unknown")).epoch,
+        )
         command_payload = {
             "mode": "argv" if argv else "shell",
             "display": " ".join(argv or []) if argv else command,
@@ -468,7 +480,7 @@ class BackgroundJobManager:
                 state="created",
                 agent=str(agent or "unknown"),
                 command=command_payload,
-                origin=dict(origin or {}),
+                origin=origin_payload,
                 policy=policy,
                 process={},
                 logs=logs,
@@ -549,6 +561,22 @@ class BackgroundJobManager:
             return self.store.update(job_id, state="abandoned_after_restart", ended_at=utc_now(), error="process_not_attached")
         await self._terminate_process_group(process, grace_seconds=grace_seconds)
         return self.store.update(job_id, state="cancelled", ended_at=utc_now(), returncode=process.returncode)
+
+    async def cancel_agent(
+        self,
+        agent: str,
+        *,
+        grace_seconds: float = 2.0,
+    ) -> list[BackgroundJobRecord]:
+        """Cancel only non-terminal managed jobs owned by one Agent."""
+
+        records = self.list(agent=str(agent), states=NONTERMINAL_STATES, limit=1000)
+        cancelled: list[BackgroundJobRecord] = []
+        for record in records:
+            cancelled.append(
+                await self.cancel(record.job_id, grace_seconds=grace_seconds)
+            )
+        return cancelled
 
     async def _monitor_job(self, job_id: str, process: asyncio.subprocess.Process) -> None:
         record = self.store.get(job_id)
@@ -673,6 +701,11 @@ class BackgroundJobManager:
 
     async def _notify(self, record: BackgroundJobRecord) -> None:
         notification = dict(record.notification)
+        suppression = self._completion_suppression_reason(record)
+        if suppression:
+            notification["delivery_suppressed_reason"] = suppression
+            self.store.update(record.job_id, notification=notification)
+            return
         should_notify = (
             (record.state == "succeeded" and notification.get("notify_on_complete"))
             or (record.state != "succeeded" and notification.get("notify_on_failure"))
@@ -705,6 +738,11 @@ class BackgroundJobManager:
         notification = dict(record.notification)
         if notification.get("agent_event_enqueued"):
             return
+        suppression = self._completion_suppression_reason(record)
+        if suppression:
+            notification["agent_event_suppressed_reason"] = suppression
+            self.store.update(record.job_id, notification=notification)
+            return
         should_trigger = (
             (record.state == "succeeded" and notification.get("trigger_agent_on_complete"))
             or (record.state != "succeeded" and notification.get("trigger_agent_on_failure"))
@@ -721,6 +759,14 @@ class BackgroundJobManager:
                     self.format_agent_event(record),
                     source="background-job-event",
                     deliver_to_telegram=True,
+                    request_metadata={
+                        "agent_stop_epoch": record.origin.get(
+                            "agent_stop_epoch", 0
+                        ),
+                        "root_request_id": record.origin.get("request_id"),
+                        "origin_kind": "background_job",
+                        "origin_id": record.job_id,
+                    },
                 )
                 notification["agent_event_enqueued"] = request_id is not None
                 notification["agent_event_request_id"] = request_id
@@ -733,6 +779,25 @@ class BackgroundJobManager:
 
         notification["agent_event_errors"] = errors
         self.store.update(record.job_id, notification=notification)
+
+    def _completion_suppression_reason(
+        self,
+        record: BackgroundJobRecord,
+    ) -> str | None:
+        if record.state in {
+            "cancelled",
+            "cancel_requested",
+            "abandoned_after_restart",
+        }:
+            return "managed_job_cancelled"
+        fence = self.stop_fences.current(record.agent)
+        if record_predates_fence(
+            fence,
+            origin=record.origin,
+            created_at=record.created_at,
+        ):
+            return f"stale_after_agent_stop_epoch_{fence.epoch}"
+        return None
 
     def _runtime_for_agent(self, agent: str) -> Any | None:
         for runtime in getattr(self.kernel, "runtimes", []) if self.kernel is not None else []:

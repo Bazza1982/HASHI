@@ -1153,8 +1153,8 @@ conversation-history phase:
   Journal and prevent the conversation-history phase from starting;
 - a committed recovery turn renders as quoted data rather than instructions
   and remains eligible historical context for a later normal Compact;
-- each new HER v2 request that encounters previous-turn WIP schedules exactly
-  one mandatory visible warning even with `/verbose off`;
+- an ordinary HER v2 request encountering previous-turn WIP remains quiet,
+  while an explicit typed recovery request schedules exactly one warning;
 - new Journals are isolated by HASHI Session context, while legacy Agent-level
   state migrates by write-before-compare-and-swap-clear; and
 - a torn tail does not hide earlier durable recovery records.

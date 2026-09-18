@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import time
 from types import SimpleNamespace
 from typing import Any
 
 from orchestrator import runtime_pending, runtime_retry, runtime_session, ui_language
+from orchestrator.agent_stop_fence import advance_runtime_fence
 
 _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 
@@ -92,6 +94,30 @@ def _active_request_meta(runtime: Any) -> dict[str, Any] | None:
     return None
 
 
+def _active_request_metas(runtime: Any) -> list[dict[str, Any]]:
+    """Return every known active foreground or detached request exactly once."""
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    current = getattr(runtime, "current_request_meta", None)
+    if isinstance(current, dict) and current.get("request_id"):
+        request_id = str(current["request_id"])
+        seen.add(request_id)
+        result.append(current)
+    registry = getattr(runtime, "_request_meta_by_id", None)
+    if isinstance(registry, dict):
+        for request_id in _background_request_ids(runtime):
+            candidate = registry.get(request_id)
+            if (
+                request_id not in seen
+                and isinstance(candidate, dict)
+                and candidate.get("request_id")
+            ):
+                seen.add(request_id)
+                result.append(candidate)
+    return result
+
+
 def mark_user_interrupt(
     runtime: Any,
     reason: str,
@@ -108,15 +134,31 @@ def mark_user_interrupt(
         rid = meta.get("request_id")
         if rid:
             request_id = str(rid)
-    runtime._user_interrupt = {
+    interrupt = {
         "reason": reason,
         "request_id": request_id,
         "at": time.time(),
     }
+    interrupts = getattr(runtime, "_user_interrupts", None)
+    if not isinstance(interrupts, dict):
+        interrupts = {}
+        runtime._user_interrupts = interrupts
+    interrupts[request_id or "*"] = interrupt
+    # Retain the legacy single value for compatibility and operator inspection.
+    runtime._user_interrupt = interrupt
 
 
 def peek_user_interrupt(runtime: Any, request_id: str | None = None) -> str | None:
     """Return interrupt reason if one is pending for this turn, without consuming it."""
+    interrupts = getattr(runtime, "_user_interrupts", None)
+    if isinstance(interrupts, dict):
+        candidate = interrupts.get(str(request_id)) if request_id else None
+        if candidate is None:
+            candidate = interrupts.get("*")
+        if isinstance(candidate, dict):
+            reason = str(candidate.get("reason") or "").strip()
+            if reason in _USER_INTERRUPT_REASONS:
+                return reason
     data = getattr(runtime, "_user_interrupt", None)
     if not isinstance(data, dict):
         return None
@@ -134,7 +176,18 @@ def consume_user_interrupt(runtime: Any, request_id: str | None = None) -> str |
     reason = peek_user_interrupt(runtime, request_id)
     if reason is None:
         return None
-    runtime._user_interrupt = None
+    interrupts = getattr(runtime, "_user_interrupts", None)
+    if isinstance(interrupts, dict):
+        interrupts.pop(str(request_id) if request_id else "*", None)
+        if request_id:
+            interrupts.pop("*", None)
+    legacy = getattr(runtime, "_user_interrupt", None)
+    if not isinstance(legacy, dict) or (
+        not request_id
+        or not legacy.get("request_id")
+        or str(legacy.get("request_id")) == str(request_id)
+    ):
+        runtime._user_interrupt = None
     return reason
 
 
@@ -269,6 +322,89 @@ async def _clear_request_queue(
     return await runtime_pending.clear_ready(runtime, session_id=session_id)
 
 
+def _runtime_tasks_to_cancel(runtime: Any) -> tuple[asyncio.Task[Any], ...]:
+    """Snapshot cancellable Agent tasks before advancing the stop fence."""
+    current = asyncio.current_task()
+    tasks: set[asyncio.Task[Any]] = set()
+    for attribute in (
+        "_background_tasks",
+        "_scheduled_retry_tasks",
+        "_persona_background_status_tasks",
+    ):
+        values = getattr(runtime, attribute, None)
+        if isinstance(values, (set, list, tuple)):
+            tasks.update(
+                task
+                for task in values
+                if isinstance(task, asyncio.Task)
+                and task is not current
+                and not task.done()
+            )
+    return tuple(tasks)
+
+
+async def _cancel_runtime_tasks(tasks: tuple[asyncio.Task[Any], ...]) -> int:
+    """Cancel the pre-fence snapshot without consuming post-stop work."""
+
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return len(tasks)
+
+
+async def _cancel_managed_background_jobs(
+    runtime: Any,
+    *,
+    before_agent_stop_epoch: int,
+) -> int:
+    """Cancel this Agent's managed OS jobs through the existing manager facade."""
+
+    orchestrator = getattr(runtime, "orchestrator", None)
+    manager = getattr(runtime, "background_job_manager", None) or getattr(
+        orchestrator, "background_job_manager", None
+    )
+    if manager is None:
+        return 0
+    list_jobs = getattr(manager, "list", None)
+    cancel = getattr(manager, "cancel", None)
+    if not callable(list_jobs) or not callable(cancel):
+        return 0
+    records = list_jobs(
+        agent=str(getattr(runtime, "name", "") or ""),
+        states={"created", "starting", "running", "cancel_requested"},
+        limit=1000,
+    )
+    if inspect.isawaitable(records):
+        records = await records
+    cancelled = 0
+    for record in records or ():
+        origin = (
+            record.get("origin", {})
+            if isinstance(record, dict)
+            else getattr(record, "origin", {})
+        )
+        raw_epoch = origin.get("agent_stop_epoch") if isinstance(origin, dict) else None
+        try:
+            record_epoch = int(raw_epoch) if raw_epoch is not None else -1
+        except (TypeError, ValueError):
+            record_epoch = -1
+        if record_epoch >= int(before_agent_stop_epoch):
+            continue
+        job_id = (
+            record.get("job_id")
+            if isinstance(record, dict)
+            else getattr(record, "job_id", None)
+        )
+        if not job_id:
+            continue
+        result = cancel(str(job_id), grace_seconds=2.0)
+        if inspect.isawaitable(result):
+            await result
+        cancelled += 1
+    return cancelled
+
+
 async def _recall_request_queue(runtime: Any, count: int | None = None) -> int:
     """Compatibility wrapper for recalling READY and FUTURE requests."""
 
@@ -401,40 +537,35 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
         f"Manual stop requested for agent {runtime.name} "
         f"(queue_size={runtime.queue.qsize()}, backend={active})"
     )
-    # Mark before kill so the pipeline can suppress the expected non-zero exit
-    # (e.g. Grok CLI code -9 / SIGKILL) instead of showing ❌ Backend error.
     session_id = _command_session_id(runtime, update)
-    active_meta = _active_request_meta(runtime)
-    active_session_id = _meta_session_id(active_meta)
-    if session_id and active_meta and active_session_id != session_id:
-        dropped = await _clear_request_queue(runtime, session_id=session_id)
-        delayed_preserved = await runtime_pending.delayed_count(
-            runtime, session_id=session_id
-        )
-        await runtime._reply_text(
-            update,
-            ui_language.tr("control.stop.other_session", count=dropped)
-            + (
-                ui_language.tr(
-                    "control.stop.delayed_preserved",
-                    count=delayed_preserved,
-                )
-                if delayed_preserved
-                else ""
-            ),
-        )
-        return
-    busy = bool(active_meta) or bool(
-        getattr(runtime, "is_generating", False) and not session_id
+    active_metas = _active_request_metas(runtime)
+    active_meta = active_metas[0] if active_metas else None
+    busy = _agent_is_busy(runtime)
+    runtime_tasks = _runtime_tasks_to_cancel(runtime)
+    fence = advance_runtime_fence(
+        runtime,
+        reason="user_stop",
+        request_id=str((active_meta or {}).get("request_id") or ""),
+        source=f"session:{session_id}" if session_id else "command:/stop",
     )
-    interrupted_task = None
+    interrupted_tasks: list[Any] = []
     if busy:
-        interrupted_task = runtime_retry.remember_interrupted_task(
-            runtime,
-            active_meta,
-            backend=str(active or ""),
-            reason="user_stop",
-        )
+        candidates = active_metas or ([active_meta] if active_meta else [None])
+        for meta in candidates:
+            interrupted = runtime_retry.remember_interrupted_task(
+                runtime,
+                meta,
+                backend=str(active or ""),
+                reason="user_stop",
+            )
+            if interrupted is not None:
+                interrupted_tasks.append(interrupted)
+    # Mark every foreground and detached request before cancelling work so each
+    # terminal callback suppresses the expected backend exit independently.
+    if active_metas:
+        for meta in active_metas:
+            mark_user_interrupt(runtime, "user_stop", request_meta=meta)
+    elif busy:
         mark_user_interrupt(runtime, "user_stop", request_meta=active_meta)
     if busy:
         try:
@@ -448,38 +579,52 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
                 exc,
             )
         await _interrupt_active_backend(runtime, reason="USER_STOP")
-        await _notify_interrupted(
-            runtime,
-            reason="user_stop",
-            error="/stop received while right brain was running",
-            summary="Manual stop",
-            request_meta=active_meta,
-        )
+        for meta in active_metas or ([active_meta] if active_meta else []):
+            await _notify_interrupted(
+                runtime,
+                reason="user_stop",
+                error="/stop received while right brain was running",
+                summary="Manual stop",
+                request_meta=meta,
+            )
 
-    dropped = await _clear_request_queue(runtime, session_id=session_id)
-    delayed_preserved = await runtime_pending.delayed_count(
-        runtime, session_id=session_id
+    cancelled_tasks, removed, cancelled_jobs = await asyncio.gather(
+        _cancel_runtime_tasks(runtime_tasks),
+        runtime_pending.recall_pending(
+            runtime,
+            session_id=None,
+            before_agent_stop_epoch=fence.epoch,
+        ),
+        _cancel_managed_background_jobs(
+            runtime,
+            before_agent_stop_epoch=fence.epoch,
+        ),
     )
+    dropped = removed.total
 
     continuation_note = (
         ui_language.tr("control.stop.continuation_saved")
-        if interrupted_task is not None
+        if interrupted_tasks
         else ""
     )
     await runtime._reply_text(
         update,
         (
-            ui_language.tr("control.stop.stopped", count=dropped)
-            if busy
-            else ui_language.tr("control.stop.cleared_idle", count=dropped)
-        )
-        + (
             ui_language.tr(
-                "control.stop.delayed_preserved",
-                count=delayed_preserved,
+                "control.stop.stopped",
+                count=dropped,
+                jobs=cancelled_jobs,
+                tasks=cancelled_tasks,
+                epoch=fence.epoch,
             )
-            if delayed_preserved
-            else ""
+            if busy
+            else ui_language.tr(
+                "control.stop.cleared_idle",
+                count=dropped,
+                jobs=cancelled_jobs,
+                tasks=cancelled_tasks,
+                epoch=fence.epoch,
+            )
         )
         + f"{continuation_note}",
     )

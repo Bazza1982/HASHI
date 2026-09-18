@@ -305,6 +305,102 @@ def test_mark_and_consume_user_interrupt_matches_request():
     assert runtime_control.consume_user_interrupt(runtime, "req-1") is None
 
 
+def test_stop_interrupt_markers_are_scoped_to_each_detached_request():
+    runtime = SimpleNamespace(current_request_meta={"request_id": "req-1"})
+    runtime_control.mark_user_interrupt(
+        runtime,
+        "user_stop",
+        request_meta={"request_id": "req-1"},
+    )
+    runtime_control.mark_user_interrupt(
+        runtime,
+        "user_stop",
+        request_meta={"request_id": "req-2"},
+    )
+
+    assert runtime_control.consume_user_interrupt(runtime, "req-1") == "user_stop"
+    assert runtime_control.consume_user_interrupt(runtime, "req-2") == "user_stop"
+
+
+@pytest.mark.asyncio
+async def test_stop_preserves_each_active_session_for_explicit_resume(tmp_path):
+    shutdown = AsyncMock()
+    runtime = SimpleNamespace(
+        name="ajiao",
+        workspace_dir=tmp_path,
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        config=SimpleNamespace(active_backend="her-v2", engine="her-v2"),
+        queue=asyncio.Queue(),
+        backend_manager=SimpleNamespace(current_backend=SimpleNamespace(shutdown=shutdown)),
+        current_request_meta={
+            "request_id": "req-foreground",
+            "session_id": "session-a",
+            "chat_id": 42,
+            "prompt": "foreground work",
+            "source": "text",
+            "summary": "Foreground",
+        },
+        _background_request_ids={"req-detached"},
+        _request_meta_by_id={
+            "req-detached": {
+                "request_id": "req-detached",
+                "session_id": "session-b",
+                "chat_id": 84,
+                "prompt": "detached work",
+                "source": "text",
+                "summary": "Detached",
+            }
+        },
+        last_prompt=None,
+        is_generating=True,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=AsyncMock(),
+        _notify_right_brain_interrupted=lambda *a, **k: None,
+    )
+    message = SimpleNamespace(text="/stop", chat=SimpleNamespace(id=42))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=message,
+        message=message,
+    )
+
+    await runtime_control.cmd_stop(runtime, update, SimpleNamespace(args=[]))
+
+    assert runtime_retry.capture_interrupted_task(
+        runtime, session_id="session-a"
+    ).request_id == "req-foreground"
+    assert runtime_retry.capture_interrupted_task(
+        runtime, session_id="session-b"
+    ).request_id == "req-detached"
+
+
+@pytest.mark.asyncio
+async def test_stop_job_cancellation_keeps_post_fence_job():
+    cancelled: list[str] = []
+    records = [
+        SimpleNamespace(job_id="job-old", origin={"agent_stop_epoch": 0}),
+        SimpleNamespace(job_id="job-new", origin={"agent_stop_epoch": 1}),
+    ]
+
+    class _Manager:
+        def list(self, **_kwargs):
+            return records
+
+        async def cancel(self, job_id, **_kwargs):
+            cancelled.append(job_id)
+
+    runtime = SimpleNamespace(name="zelda", background_job_manager=_Manager())
+
+    count = await runtime_control._cancel_managed_background_jobs(
+        runtime,
+        before_agent_stop_epoch=1,
+    )
+
+    assert count == 1
+    assert cancelled == ["job-old"]
+
+
 @pytest.mark.asyncio
 async def test_cmd_stop_persists_active_task_before_killing_backend(tmp_path):
     replies: list[str] = []

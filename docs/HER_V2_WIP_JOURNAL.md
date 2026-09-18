@@ -24,9 +24,9 @@ and apply only within that boundary.
 1. At the start of a HER v2 turn, HASHI resolves the Journal owned by the
    current HASHI Session context generation. A bounded legacy Agent-level
    Journal is migrated into the first current Session that encounters it.
-2. If prior records exist, HASHI sends a mandatory visible warning independent
-   of `/verbose` and supplies only a deterministic bounded recovery summary to
-   the new turn. The raw Journal is never copied into a provider request.
+2. If prior records exist, HASHI quietly supplies only a deterministic bounded
+   recovery summary to the new turn. A visible warning requires an explicit
+   typed recovery request; the raw Journal is never copied into a provider request.
 3. HASHI durably appends a bounded request boundary for the new turn. While the
    turn is active, selected HER v2 events are projected into small recovery
    facts only after their canonical audit records are durable.
