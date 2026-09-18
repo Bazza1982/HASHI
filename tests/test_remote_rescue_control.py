@@ -729,6 +729,47 @@ def test_request_workbench_reboot_uses_authenticated_admin_endpoint(monkeypatch)
     assert captured["timeout"] == 2.5
 
 
+@pytest.mark.parametrize(
+    ("state", "expected_key"),
+    [
+        ("completed", "api.restart.completed"),
+        ("failed", "api.restart.failed_notice"),
+    ],
+)
+def test_restart_result_notification_sends_user_facing_message_key(
+    monkeypatch, state, expected_key
+):
+    captured = {}
+
+    def forward(**kwargs):
+        captured.update(json.loads(kwargs["body_bytes"].decode("utf-8")))
+        return 200, b'{"ok":true}', {}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+
+    result = remote_server._notify_restart_result(
+        agent="agent1",
+        record={
+            "state": state,
+            "target_instance": "HASHI3",
+            "phase": "terminal_verification",
+            "restart_id": "rst_internal",
+            "evidence": {
+                "old_pid": 123,
+                "new_pid": 456,
+                "generation_id": "sha256:internal",
+            },
+        },
+    )
+
+    assert result["state"] == "delivered"
+    assert captured == {
+        "agent": "agent1",
+        "message_key": expected_key,
+        "message_args": {"instance": "HASHI3"},
+    }
+
+
 def test_hashi_rescue_reboot_prefers_hot_reboot_without_fallback(
     tmp_path, monkeypatch
 ):

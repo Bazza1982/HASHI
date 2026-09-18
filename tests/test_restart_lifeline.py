@@ -80,7 +80,7 @@ async def test_restart_defaults_to_own_instance_remote(monkeypatch):
     assert observed["provider_hashi_root"] == Path("C:/hashi3-runtime")
     assert observed["kwargs"]["request_source"] == "telegram"
     assert runtime.messages == [
-        "🔁 Restarting HASHI3. A final result will follow automatically."
+        "🔄 Restarting HASHI3. You'll be notified when it's back online."
     ]
 
 
