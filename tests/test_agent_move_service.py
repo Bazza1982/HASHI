@@ -305,11 +305,40 @@ def test_schema5_commit_prepends_history_idempotently_and_rollback_preserves_tar
     assert committed["conversation_continuity"]["imported_messages"] == 2
     assert replayed["conversation_continuity"]["imported_messages"] == 2
 
+    # Reopening the durable store models a Function/instance restart. Imported
+    # history and its channel binding must remain canonical after that reopen.
+    reopened_target_store = SessionStore(
+        target / "state" / "sessions.sqlite3", instance_id="HASHI2"
+    )
+    reopened = reopened_target_store.resolve_session(
+        owner_id="user:7",
+        agent_id="zelda",
+        surface="workbench",
+        channel_key="default",
+    )
+    assert [
+        item["text"]
+        for item in reopened_target_store.messages(
+            reopened["session_id"], owner_id="user:7"
+        )
+    ] == [
+        "old source question",
+        "old source answer",
+        "new target question",
+        "new target answer",
+    ]
+
     rollback_agent_move(target, staged["package_id"])
     assert [
         item["text"]
         for item in target_store.messages(
             resolved["session_id"], owner_id="user:7"
+        )
+    ] == ["new target question", "new target answer"]
+    assert [
+        item["text"]
+        for item in reopened_target_store.messages(
+            reopened["session_id"], owner_id="user:7"
         )
     ] == ["new target question", "new target answer"]
     assert source_store.messages(
@@ -864,6 +893,20 @@ def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
         for item in json.loads((source / "tasks.json").read_text())["heartbeats"]
     )
     assert moved_agent_destination(source, "ZELDA")["address"] == "zelda@HASHI2"
+
+    # The tombstone is audit history, not authority over a later incarnation.
+    # Recreating the same local Agent identity must suppress the stale route.
+    recreated = json.loads((source / "agents.json").read_text())
+    recreated["agents"].append(
+        {
+            "name": "zelda",
+            "workspace_dir": "workspaces/zelda-new",
+            "type": "flex",
+            "is_active": True,
+        }
+    )
+    _write_json(source / "agents.json", recreated)
+    assert moved_agent_destination(source, "zelda") is None
 
 
 def test_schema5_move_cleanup_archives_source_history_and_rejects_unknown_owner(
