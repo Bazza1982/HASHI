@@ -34,7 +34,6 @@ from orchestrator.flexible_backend_registry import (
     apply_backend_policy_defaults,
     canonical_backend_engine,
     get_available_efforts,
-    get_available_models,
     get_backend_entry,
     get_default_effort,
     get_default_model,
