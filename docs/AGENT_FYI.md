@@ -204,13 +204,7 @@ Use `request_diagnostics` to query one request's final state, Provider IDs,
 observed writes/effects, Jobs, and retry evidence. It is read-only and never
 authorizes or performs a retry.
 
-HCC is PCM-owned temporary context in `agent.md` between `[hcc]` and
-`[hcc_end]`. `/hcc on|off` controls current-Agent injection only and defaults
-off. Cached observations may be stale, grant no permission, and never override
-higher authority. Missing, empty, or off revokes HCC without deleting history.
-
-Refresh HCC only through the existing `hcc-refresh` Skill and authorized
-sources. Verify the named entry digest before fetch; publish only a successful
-result with source and observation/retrieval times. Do not rewrite other PCM
-blocks, change the HCC flag, or blindly retry conflicts. See
-[HCC](HASHI_HCC_IMPLEMENTATION.md).
+HCC is optional PCM `agent.md` context. `/hcc on|off` controls injection and
+grants no authority. Refresh only with `hcc-refresh` from authorized sources:
+verify its digest, publish source/time, and never rewrite PCM or blindly retry
+conflicts. See [HCC](HASHI_HCC_IMPLEMENTATION.md).
