@@ -105,7 +105,7 @@ from orchestrator.message_context import (
 from orchestrator.private_authorization import (
     public_private_authorization_capabilities,
 )
-from orchestrator.ui_language import normalize_locale
+from orchestrator.ui_language import normalize_locale, preferred_locale, tr
 from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.pathing import BridgePaths, resolve_instance_id, resolve_path_value
 from orchestrator.service_endpoints import ServiceEndpointError, select_service_bind_host
@@ -8049,18 +8049,54 @@ class WorkbenchApiServer:
         payload = await request.json() if request.can_read_body else {}
         agent_name = str(payload.get("agent") or payload.get("agentId") or "").strip()
         text = str(payload.get("text") or payload.get("message") or "").strip()
+        message_key = str(payload.get("message_key") or "").strip()
+        message_args = payload.get("message_args") or {}
+        legacy_restart_prefixes = {
+            "HASHI restart verified for ": "api.restart.completed",
+            "HASHI restart failed for ": "api.restart.failed_notice",
+        }
+        if not message_key:
+            for prefix, key in legacy_restart_prefixes.items():
+                if text.startswith(prefix):
+                    instance = (
+                        text[len(prefix) :].split(".", 1)[0].split(" at ", 1)[0]
+                    )
+                    message_key = key
+                    message_args = {"instance": instance.strip() or "HASHI"}
+                    break
         if not agent_name:
             return web.json_response(
                 {"ok": False, "error": "agent is required"}, status=400
-            )
-        if not text:
-            return web.json_response(
-                {"ok": False, "error": "text is required"}, status=400
             )
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
+            )
+        if message_key:
+            allowed_keys = {
+                "api.restart.completed",
+                "api.restart.failed_notice",
+            }
+            if message_key not in allowed_keys:
+                return web.json_response(
+                    {"ok": False, "error": "message_key is not supported"},
+                    status=400,
+                )
+            if not isinstance(message_args, Mapping):
+                return web.json_response(
+                    {"ok": False, "error": "message_args must be an object"},
+                    status=400,
+                )
+            instance = str(message_args.get("instance") or "HASHI").strip()
+            text = tr(
+                message_key,
+                locale=preferred_locale(runtime),
+                instance=instance,
+            )
+        if not text:
+            return web.json_response(
+                {"ok": False, "error": "text is required"}, status=400
             )
         chat_id = payload.get("chat_id")
         if chat_id is None:

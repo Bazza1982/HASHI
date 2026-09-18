@@ -1520,21 +1520,18 @@ def _notify_restart_result(
     normalized_agent = str(agent or "").strip()
     if not normalized_agent:
         return {"state": "not_requested"}
-    evidence = record.get("evidence") or {}
     if record.get("state") == "completed":
-        text = (
-            f"HASHI restart verified for {record.get('target_instance')}. "
-            f"PID {evidence.get('old_pid')} -> {evidence.get('new_pid')}; "
-            f"generation {evidence.get('generation_id')}; "
-            f"receipt {record.get('restart_id')}."
-        )
+        message_key = "api.restart.completed"
     else:
-        text = (
-            f"HASHI restart failed for {record.get('target_instance')} at "
-            f"{record.get('phase')}; receipt {record.get('restart_id')}."
-        )
+        message_key = "api.restart.failed_notice"
     body = json.dumps(
-        {"agent": normalized_agent, "text": text},
+        {
+            "agent": normalized_agent,
+            "message_key": message_key,
+            "message_args": {
+                "instance": str(record.get("target_instance") or "HASHI"),
+            },
+        },
         separators=(",", ":"),
     ).encode("utf-8")
     try:

@@ -197,8 +197,9 @@ Prefer `log_query` for literal logs and Jobs for long work. Tests prove only
 scope; live adoption needs separate evidence. Preserve user work; report
 failures honestly.
 
-Remote reload keeps Core and readable secret ACLs; probe its own port.
-`/restart` verifies a new PID, identity, generation, and health.
+Remote reload preserves Core.
+`/restart` uses supervised `L3_RESTART` Remote, not WatchTower, and verifies PID,
+identity, generation and health.
 
 Use `request_diagnostics` to query one request's final state, Provider IDs,
 observed writes/effects, Jobs, and retry evidence. It is read-only and never

@@ -447,8 +447,9 @@ HASHI should remove or archive:
 - legacy code that starts WatchTower as if it were an in-repo HASHI sidecar;
 - test aliases that appear as production Remote instances.
 
-Deletion must be done through a separate audit pass so we do not remove the
-current `/restart` client path that correctly talks to external WatchTower.
+Deletion must be done through a separate audit pass so external WatchTower
+rescue clients are not removed accidentally. The normal `/restart` command is
+not one of those clients; it uses the instance's own supervised HASHI Remote.
 
 ## Pull-Safety Requirement
 
@@ -458,7 +459,7 @@ After `git pull`, an installed instance must still know:
 - which ports it owns;
 - which platform it runs on;
 - how to start its local functions;
-- how to reach its configured Remote and WatchTower peers.
+- how to reach its configured Remote and optional WatchTower peers.
 
 If the update cannot preserve that, startup must stop with a clear migration
 message rather than booting into a wrong identity or conflicting port.

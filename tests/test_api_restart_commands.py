@@ -156,7 +156,7 @@ async def test_restart_command_dispatches_background_request(monkeypatch):
     monkeypatch.setattr(api_restart.remote_rescue, "_candidate_base_urls", lambda instance: ["http://127.0.0.1:43766"])
     monkeypatch.setattr(
         api_restart,
-        "_build_watchtower_restart_payload",
+        "_build_restart_payload",
         lambda *args, **kwargs: {
             "reason": "telegram /restart hard restart",
             "target_instance": "HASHI_TEST",
@@ -168,20 +168,39 @@ async def test_restart_command_dispatches_background_request(monkeypatch):
         observed["chat_id"] = chat_id
         observed["payload"] = request_payload
 
-    monkeypatch.setattr(api_restart, "_dispatch_watchtower_restart", fake_dispatch)
+    monkeypatch.setattr(api_restart, "_dispatch_restart", fake_dispatch)
 
     await api_restart.restart_command(runtime, _command_update(), SimpleNamespace(args=[]))
     await asyncio.sleep(0)
 
     text, _kwargs = runtime.messages[-1]
-    assert "WatchTower hard restart requested" in text
+    assert "Restarting HASHI_TEST" in text
     assert observed["chat_id"] == 777
     assert observed["payload"]["target_instance"] == "HASHI_TEST"
     assert "human_restart_proof" not in observed["payload"]
 
 
 @pytest.mark.asyncio
-async def test_restart_command_fails_closed_when_watchtower_unavailable(monkeypatch):
+async def test_restart_availability_uses_own_instance_remote(monkeypatch):
+    runtime = _FakeRuntime()
+    observed = {}
+
+    def fake_status(instance_id, **kwargs):
+        observed["instance_id"] = instance_id
+        return 0, {"state": "running"}
+
+    monkeypatch.setattr(api_restart.remote_rescue, "rescue_status", fake_status)
+
+    available, error, payload = await api_restart._restart_available(runtime)
+
+    assert available is True
+    assert error is None
+    assert payload == {"state": "running"}
+    assert observed["instance_id"] == "HASHI_TEST"
+
+
+@pytest.mark.asyncio
+async def test_restart_command_fails_closed_when_own_remote_unavailable(monkeypatch):
     runtime = _FakeRuntime()
     monkeypatch.setattr(api_restart.remote_rescue, "rescue_status", lambda *args, **kwargs: (4, {"error": "forbidden"}))
     monkeypatch.setattr(api_restart.remote_rescue, "_candidate_base_urls", lambda instance: ["http://127.0.0.1:43766"])
@@ -203,7 +222,7 @@ async def test_restart_confirm_dispatches_background_request(monkeypatch):
     monkeypatch.setattr(api_restart.remote_rescue, "rescue_status", lambda *args, **kwargs: (0, {"state": "running"}))
     monkeypatch.setattr(
         api_restart,
-        "_build_watchtower_restart_payload",
+        "_build_restart_payload",
         lambda *args, **kwargs: {
             "reason": "telegram /restart hard restart",
             "target_instance": "HASHI_TEST",
@@ -215,13 +234,13 @@ async def test_restart_confirm_dispatches_background_request(monkeypatch):
         observed["chat_id"] = chat_id
         observed["payload"] = request_payload
 
-    monkeypatch.setattr(api_restart, "_dispatch_watchtower_restart", fake_dispatch)
+    monkeypatch.setattr(api_restart, "_dispatch_restart", fake_dispatch)
 
     await api_restart.restart_callback(runtime, update, SimpleNamespace())
     await asyncio.sleep(0)
 
     assert observed["chat_id"] == 777
-    assert "WatchTower hard restart requested" in query.edits[-1][0]
+    assert "Restarting HASHI_TEST" in query.edits[-1][0]
 
 
 @pytest.mark.asyncio
@@ -229,7 +248,7 @@ async def test_restart_payload_needs_no_second_human_proof(monkeypatch):
     runtime = _FakeRuntime()
     monkeypatch.delenv("HASHI_HUMAN_RESTART_SECRET", raising=False)
 
-    payload = api_restart._build_watchtower_restart_payload(
+    payload = api_restart._build_restart_payload(
         runtime,
         request_source="telegram",
         reason="telegram /restart hard restart",
@@ -242,12 +261,13 @@ async def test_restart_payload_needs_no_second_human_proof(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_watchtower_dispatch_reports_only_verified_terminal_success(monkeypatch):
+async def test_own_remote_dispatch_reports_only_verified_terminal_success(monkeypatch):
     runtime = _FakeRuntime()
-    monkeypatch.setattr(
-        api_restart.remote_rescue,
-        "rescue_restart",
-        lambda *args, **kwargs: (
+    observed = {}
+
+    def fake_restart(instance_id, *args, **kwargs):
+        observed["instance_id"] = instance_id
+        return (
             0,
             {
                 "ok": True,
@@ -269,10 +289,15 @@ async def test_watchtower_dispatch_reports_only_verified_terminal_success(monkey
                     "generation_verified": True,
                 },
             },
-        ),
+        )
+
+    monkeypatch.setattr(
+        api_restart.remote_rescue,
+        "rescue_restart",
+        fake_restart,
     )
 
-    await api_restart._dispatch_watchtower_restart(
+    await api_restart._dispatch_restart(
         runtime,
         777,
         {
@@ -283,14 +308,14 @@ async def test_watchtower_dispatch_reports_only_verified_terminal_success(monkey
     )
 
     assert "HASHI_TEST" in runtime.sent[-1][1]
-    assert "online" in runtime.sent[-1][1]
-    assert "100" not in runtime.sent[-1][1]
-    assert "200" not in runtime.sent[-1][1]
+    assert "back online" in runtime.sent[-1][1]
+    assert "PID" not in runtime.sent[-1][1]
     assert "rst_123" not in runtime.sent[-1][1]
+    assert observed["instance_id"] == "HASHI_TEST"
 
 
 @pytest.mark.asyncio
-async def test_watchtower_dispatch_rejects_unverified_success_shape(monkeypatch):
+async def test_own_remote_dispatch_rejects_unverified_success_shape(monkeypatch):
     runtime = _FakeRuntime()
     monkeypatch.setattr(
         api_restart.remote_rescue,
@@ -301,7 +326,7 @@ async def test_watchtower_dispatch_rejects_unverified_success_shape(monkeypatch)
         ),
     )
 
-    await api_restart._dispatch_watchtower_restart(
+    await api_restart._dispatch_restart(
         runtime,
         777,
         {
@@ -318,7 +343,7 @@ async def test_watchtower_dispatch_rejects_unverified_success_shape(monkeypatch)
 @pytest.mark.asyncio
 async def test_restart_confirm_rejects_duplicate_inflight():
     runtime = _FakeRuntime()
-    runtime._watchtower_restart_inflight = True
+    runtime._restart_inflight = True
     query = _FakeCallbackQuery("hardrestart:confirm")
     update = SimpleNamespace(callback_query=query)
 
@@ -329,7 +354,7 @@ async def test_restart_confirm_rejects_duplicate_inflight():
 
 
 @pytest.mark.asyncio
-async def test_restart_arm_fails_closed_when_watchtower_status_fails(monkeypatch):
+async def test_restart_arm_fails_closed_when_own_remote_status_fails(monkeypatch):
     runtime = _FakeRuntime()
     query = _FakeCallbackQuery("hardrestart:arm")
     update = SimpleNamespace(callback_query=query)
@@ -339,7 +364,10 @@ async def test_restart_arm_fails_closed_when_watchtower_status_fails(monkeypatch
     await api_restart.restart_callback(runtime, update, SimpleNamespace())
 
     assert "forbidden" in query.edits[-1][0]
-    assert query.answers[-1] == ("WatchTower unavailable.", True)
+    assert query.answers[-1] == (
+        "This instance's HASHI Remote is unavailable or does not have L3_RESTART enabled.",
+        True,
+    )
     buttons = query.edits[-1][1]["reply_markup"].inline_keyboard
     assert len(buttons) == 1
     assert buttons[0][0].text == "↻ Refresh"
