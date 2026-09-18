@@ -28,6 +28,11 @@ from orchestrator.agent_creation import (
     AgentCreationService,
     AgentCreationSpec,
 )
+from orchestrator.agent_deletion import (
+    AgentDeletionError,
+    AgentDeletionService,
+    CleanupPendingError,
+)
 from orchestrator.agent_overview import build_agent_overview
 from orchestrator.chat_transcript_projection import build_chat_projection
 from orchestrator.capability_broker import CapabilityBrokerError
@@ -519,6 +524,18 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_post(
             "/api/admin/add-agent", self.handle_admin_add_agent
+        )
+        self.app.router.add_post(
+            "/api/admin/agents/{agent_id}/deletion-preview",
+            self.handle_admin_agent_deletion_preview,
+        )
+        self.app.router.add_post(
+            "/api/admin/agents/{agent_id}/deletion",
+            self.handle_admin_agent_deletion,
+        )
+        self.app.router.add_get(
+            "/api/admin/agent-deletions/{operation_id}",
+            self.handle_admin_agent_deletion_status,
         )
         self.app.router.add_get("/api/v1/capabilities", self.handle_v1_capabilities)
         self.app.router.add_get("/api/v1/agents", self.handle_v1_agents)
@@ -4029,6 +4046,173 @@ class WorkbenchApiServer:
             status=201,
         )
 
+    async def handle_admin_agent_deletion_preview(self, request):
+        if not self._check_admin_auth(request):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "admin auth failed",
+                    "error_code": "admin_auth_failed",
+                },
+                status=403,
+            )
+        agent_id = request.match_info.get("agent_id")
+        config_dir = self.config_path.parent
+        paths = BridgePaths(
+            code_root=config_dir,
+            bridge_home=config_dir,
+            instance_id=resolve_instance_id(self.config_path),
+            config_path=self.config_path,
+            secrets_path=config_dir / "secrets.json",
+            tasks_path=config_dir / "tasks.json",
+            state_path=config_dir / "scheduler_state.json",
+            lock_path=config_dir / "process.lock",
+            pid_path=config_dir / "process.pid",
+            workspaces_root=config_dir / "workspaces",
+        )
+        try:
+            service = AgentDeletionService(
+                paths,
+                orchestrator=self.orchestrator,
+                session_store=self.session_store,
+            )
+            preview = service.preview(agent_id)
+            return web.json_response(preview.to_dict(), status=200)
+        except AgentDeletionError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=exc.status_code,
+            )
+        except Exception as exc:
+            logger.error("agent_deletion.preview_failed agent=%s error=%s", agent_id, exc)
+            return web.json_response(
+                {"ok": False, "error": "failed to generate deletion preview", "error_code": "preview_failed"},
+                status=500,
+            )
+
+    async def handle_admin_agent_deletion(self, request):
+        if not self._check_admin_auth(request):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "admin auth failed",
+                    "error_code": "admin_auth_failed",
+                },
+                status=403,
+            )
+        agent_id = request.match_info.get("agent_id")
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON", "error_code": "invalid_request"},
+                status=400,
+            )
+        if not isinstance(payload, dict):
+            return web.json_response(
+                {"ok": False, "error": "JSON object required", "error_code": "invalid_request"},
+                status=400,
+            )
+        preview_token = str(payload.get("preview_token") or "").strip()
+        confirmed_agent_id = str(payload.get("confirmed_agent_id") or "").strip()
+        idempotency_key = str(payload.get("idempotency_key") or "").strip() or None
+
+        if not preview_token or not confirmed_agent_id:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "preview_token and confirmed_agent_id are required",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+
+        config_dir = self.config_path.parent
+        paths = BridgePaths(
+            code_root=config_dir,
+            bridge_home=config_dir,
+            instance_id=resolve_instance_id(self.config_path),
+            config_path=self.config_path,
+            secrets_path=config_dir / "secrets.json",
+            tasks_path=config_dir / "tasks.json",
+            state_path=config_dir / "scheduler_state.json",
+            lock_path=config_dir / "process.lock",
+            pid_path=config_dir / "process.pid",
+            workspaces_root=config_dir / "workspaces",
+        )
+        try:
+            service = AgentDeletionService(
+                paths,
+                orchestrator=self.orchestrator,
+                session_store=self.session_store,
+            )
+            result = service.delete(
+                agent_id,
+                preview_token=preview_token,
+                confirmed_agent_id=confirmed_agent_id,
+                idempotency_key=idempotency_key,
+            )
+            return web.json_response(result, status=200)
+        except CleanupPendingError as exc:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "operation_id": exc.operation_id,
+                    "status": "cleanup_pending",
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                },
+                status=500,
+            )
+        except AgentDeletionError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=exc.status_code,
+            )
+        except Exception as exc:
+            logger.error("agent_deletion.failed agent=%s error=%s", agent_id, exc)
+            return web.json_response(
+                {"ok": False, "error": "agent deletion failed", "error_code": "deletion_failed"},
+                status=500,
+            )
+
+    async def handle_admin_agent_deletion_status(self, request):
+        if not self._check_admin_auth(request):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "admin auth failed",
+                    "error_code": "admin_auth_failed",
+                },
+                status=403,
+            )
+        operation_id = request.match_info.get("operation_id")
+        config_dir = self.config_path.parent
+        paths = BridgePaths(
+            code_root=config_dir,
+            bridge_home=config_dir,
+            instance_id=resolve_instance_id(self.config_path),
+            config_path=self.config_path,
+            secrets_path=config_dir / "secrets.json",
+            tasks_path=config_dir / "tasks.json",
+            state_path=config_dir / "scheduler_state.json",
+            lock_path=config_dir / "process.lock",
+            pid_path=config_dir / "process.pid",
+            workspaces_root=config_dir / "workspaces",
+        )
+        service = AgentDeletionService(
+            paths,
+            orchestrator=self.orchestrator,
+            session_store=self.session_store,
+        )
+        receipt = service.get_receipt(operation_id)
+        if receipt is None:
+            return web.json_response(
+                {"ok": False, "error": "operation not found", "error_code": "not_found"},
+                status=404,
+            )
+        return web.json_response({"ok": True, "receipt": receipt}, status=200)
+
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
         include_inactive = str(
@@ -4707,6 +4891,12 @@ class WorkbenchApiServer:
             "message_source": public_source_capabilities(),
             "private_authorization": public_private_authorization_capabilities(),
             "private_authorization_proof_version": 1,
+            "agent_deletion": {
+                "version": "1.0",
+                "supported": True,
+                "preview": True,
+                "quarantine": True,
+            },
         }
         if self._persistent_session_v1_ready():
             capabilities.update(
@@ -4733,6 +4923,7 @@ class WorkbenchApiServer:
                         "approvals",
                         "fencing",
                         "restart_interruption",
+                        "agent_deletion",
                     ],
                     "event_delivery": "cursor-polling-at-least-once",
                     "max_message_chars": 200000,

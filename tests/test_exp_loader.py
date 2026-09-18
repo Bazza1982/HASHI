@@ -39,6 +39,17 @@ def test_exp_store_lists_context_fixture(tmp_path: Path):
     assert store.list_ids() == ["sample-user/office_desktop"]
 
 
+def test_exp_store_defaults_to_instance_bridge_home(monkeypatch, tmp_path: Path):
+    bridge_home = tmp_path / "bridge-home"
+    configured_store = _exp_store(bridge_home)
+    monkeypatch.setenv("BRIDGE_HOME", str(bridge_home))
+
+    store = ExpStore()
+
+    assert store.root.resolve() == configured_store.root.resolve()
+    assert store.list_ids() == ["sample-user/office_desktop"]
+
+
 def test_exp_store_loads_manifest_and_playbook(tmp_path: Path):
     store = _exp_store(tmp_path)
 

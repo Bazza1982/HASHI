@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+from orchestrator.background_job_policy import USER_BACKGROUND_JOB_REQUEST_SOURCE
 from tools.gateway.context import (
     live_workbench_api_base_url,
     load_gateway_context,
@@ -266,7 +267,10 @@ async def test_gateway_background_jobs_use_serialized_workbench_api(tmp_path, mo
         access_root=tmp_path,
         workspace_dir=tmp_path,
         secrets={},
-        audit_context={"agent_name": "momo"},
+        audit_context={
+            "agent_name": "momo",
+            "request_source": USER_BACKGROUND_JOB_REQUEST_SOURCE,
+        },
     )
     context_path = tmp_path / "background-context.json"
     write_gateway_context(

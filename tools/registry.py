@@ -18,6 +18,7 @@ from urllib import request as urllib_request
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from orchestrator.background_job_policy import background_job_start_authorized
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
 from tools.smart_tools import SmartToolRuntime
 
@@ -353,6 +354,8 @@ class ToolRegistry:
             if "bash" in normalized_allowlist or "shell" in normalized_allowlist:
                 normalized_allowlist.update({"bash", "shell"})
             available.intersection_update(normalized_allowlist)
+        if not background_job_start_authorized(self._effective_audit_context()):
+            available.discard("background_job_start")
         if "shell" in available:
             available.discard("bash")
         unavailable_browser = False
@@ -541,6 +544,22 @@ class ToolRegistry:
                 output=f"Error: tool '{tool_name}' is not in your allowed tools list",
                 is_error=True,
                 details={"control_disposition": "denied"},
+            )
+        if tool_name == "background_job_start" and not background_job_start_authorized(
+            self._effective_audit_context()
+        ):
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=(
+                    "Error: background jobs can only be started from an explicit "
+                    "user /bg request. Continue in the foreground unless the user "
+                    "chooses /bg."
+                ),
+                is_error=True,
+                details={
+                    "control_disposition": "denied",
+                    "reason": "explicit_user_bg_required",
+                },
             )
         request_allowlist = self._effective_audit_context().get(
             "request_tool_allowlist"

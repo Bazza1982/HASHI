@@ -38,6 +38,13 @@ PAO owns the following product domains.
 - Fixed/Flex working-mode policy, retired outer-composition migration, and any
   future runtime composition that spans Engines.
 
+Agent deletion is a PAO-owned lifecycle operation in shared Functions. A
+Function generation that implements the preview, confirmation, cleanup, and
+receipt contract advertises `agent_deletion` as supported by default; there is
+no separate per-instance opt-in. Frontends derive availability from the
+authenticated capability response and hide the action when the capability is
+absent. Active or running Agents and other reported blockers remain protected.
+
 The stable process kernel belongs to the Core engineering layer. The Agent and
 runtime policies operated through that kernel belong functionally to PAO.
 The current working-mode contract is defined in

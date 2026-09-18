@@ -5318,6 +5318,50 @@ class SessionStore:
                 "replayed": False,
             }
 
+    def archive_agent_sessions(self, agent_id: str) -> list[str]:
+        """Archive all active sessions for an agent upon deletion."""
+        agent = str(agent_id or "").strip().lower()
+        if not agent:
+            return []
+        retired_at = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            sessions = connection.execute(
+                """
+                SELECT session_id FROM sessions
+                WHERE instance_id=? AND agent_id=?
+                  AND status != 'deleted' AND status != 'archived'
+                ORDER BY session_id
+                """,
+                (self.instance_id, agent),
+            ).fetchall()
+            session_ids = [str(row["session_id"]) for row in sessions]
+            for session_id in session_ids:
+                connection.execute(
+                    """
+                    UPDATE sessions SET status='archived', is_default=0,
+                        revision=revision+1,
+                        history_generation=history_generation+1,
+                        updated_at=? WHERE session_id=?
+                    """,
+                    (retired_at, session_id),
+                )
+                connection.execute(
+                    "DELETE FROM channel_bindings WHERE session_id=?",
+                    (session_id,),
+                )
+                self._append_event(
+                    connection,
+                    session_id=session_id,
+                    run_id=None,
+                    kind="session.archived",
+                    status="archived",
+                    phase="deletion",
+                    summary="Conversation history archived after Agent deletion",
+                    detail={"agent_id": agent},
+                )
+            return session_ids
+
     def recent_exchanges(
         self,
         session_id: str,

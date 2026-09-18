@@ -58,6 +58,13 @@ playbook = store.get_playbook("sample-user/office_desktop", "powerpoint")
 The loader is read-only. It does not register commands, mutate HASHI runtime
 state, or alter core orchestration behavior.
 
+Inside a running Function Worker, the default store is the selected instance's
+`<bridge_home>/exp` directory, resolved from `BRIDGE_HOME`. Outside an instance
+runtime it falls back to the `exp` directory containing the loader. Callers may
+still pass an explicit root for tests and offline tooling. This keeps private
+owner EXP available to its instance without copying ignored material into an
+immutable Function artifact.
+
 ## Optional asset packs
 
 Owner EXP directories contain preferences, machine details, failure memory, and

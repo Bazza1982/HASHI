@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.background_jobs import BackgroundJobManager, BackgroundJobStore, NONTERMINAL_STATES
+from orchestrator.background_job_policy import USER_BACKGROUND_JOB_REQUEST_SOURCE
 from orchestrator.service_manager import ServiceManager
 from tools.registry import ToolRegistry
 
@@ -165,7 +166,7 @@ async def test_background_job_tool_uses_live_manager_and_notifies(tmp_path: Path
         current_request_meta={
             "request_id": "req-bg-tool",
             "chat_id": 123,
-            "source": "background:prompt",
+            "source": USER_BACKGROUND_JOB_REQUEST_SOURCE,
             "summary": "Background smoke",
         },
         send_long_message=send_long_message,
@@ -188,10 +189,15 @@ async def test_background_job_tool_uses_live_manager_and_notifies(tmp_path: Path
             "_runtime": runtime,
             "request_id": "req-bg-tool",
             "chat_id": 123,
-            "request_source": "background:prompt",
+            "request_source": USER_BACKGROUND_JOB_REQUEST_SOURCE,
             "request_summary": "Background smoke",
         },
     )
+
+    definitions = {
+        item["function"]["name"] for item in registry.get_tool_definitions()
+    }
+    assert "background_job_start" in definitions
 
     result = await registry.execute(
         "background_job_start",
@@ -213,6 +219,36 @@ async def test_background_job_tool_uses_live_manager_and_notifies(tmp_path: Path
     assert sent and sent[0]["chat_id"] == 123
     assert sent[0]["request_id"] == "req-bg-tool"
     assert "tool background done" in manager.tail(job_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_source", [None, "text", "steer", "scheduler"])
+async def test_background_job_start_requires_explicit_user_bg_request(
+    tmp_path: Path, request_source: str | None
+):
+    registry = ToolRegistry(
+        allowed_tools=["background_job_start", "background_job_status"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"request_source": request_source},
+    )
+
+    definitions = {
+        item["function"]["name"] for item in registry.get_tool_definitions()
+    }
+    assert "background_job_start" not in definitions
+    assert "background_job_status" in definitions
+
+    result = await registry.execute(
+        "background_job_start",
+        {"argv": [sys.executable, "-c", "print('must not run')"], "cwd": "."},
+        tool_call_id="call-bg-denied",
+    )
+
+    assert result.is_error is True
+    assert result.details["reason"] == "explicit_user_bg_required"
+    assert "explicit user /bg request" in result.output
 
 
 @pytest.mark.asyncio
