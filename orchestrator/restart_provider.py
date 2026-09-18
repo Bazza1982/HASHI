@@ -22,14 +22,39 @@ def _normalize_instance(value: str | None) -> str:
     return str(normalized).upper()
 
 
-def local_instance_id() -> str:
-    return _normalize_instance(remote_rescue._default_instance_id())
+def local_instance_id(
+    instance_id: str | None = None,
+    *,
+    hashi_root: Path | str | None = None,
+) -> str:
+    return _normalize_instance(
+        instance_id or remote_rescue._default_instance_id(hashi_root)
+    )
 
 
-def _auth_kwargs() -> dict[str, str | None]:
+def _resolved_local_instance_id(
+    instance_id: str | None = None,
+    *,
+    hashi_root: Path | str | None = None,
+) -> str:
+    if instance_id is None and hashi_root is None:
+        return local_instance_id()
+    return local_instance_id(instance_id, hashi_root=hashi_root)
+
+
+def _auth_kwargs(
+    *,
+    source_instance: str | None = None,
+    hashi_root: Path | str | None = None,
+) -> dict[str, str | None]:
+    root = Path(hashi_root).expanduser().resolve() if hashi_root else remote_rescue.ROOT
     return {
-        "shared_token": load_shared_token(remote_rescue.ROOT),
-        "from_instance": local_instance_id(),
+        "shared_token": load_shared_token(root),
+        "from_instance": (
+            _normalize_instance(source_instance)
+            if source_instance
+            else _resolved_local_instance_id(hashi_root=hashi_root)
+        ),
     }
 
 
@@ -37,8 +62,16 @@ def _peer_state_path(source_instance: str) -> Path:
     return Path.home() / ".hashi-remote" / f"peers_state_{source_instance.lower()}.json"
 
 
-def _trusted_peer_record(target_instance: str) -> dict[str, Any]:
-    source = local_instance_id()
+def _trusted_peer_record(
+    target_instance: str,
+    *,
+    source_instance: str | None = None,
+) -> dict[str, Any]:
+    source = (
+        _normalize_instance(source_instance)
+        if source_instance
+        else _resolved_local_instance_id()
+    )
     target = _normalize_instance(target_instance)
     if source == target:
         raise RestartProviderError("local restart does not use a peer handshake")
@@ -108,6 +141,8 @@ def _target_confirms_source_handshake(
     target_instance: str,
     *,
     base_url: str,
+    source_instance: str | None = None,
+    hashi_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """Require the target Remote to still expose the source as an accepted peer.
 
@@ -116,13 +151,23 @@ def _target_confirms_source_handshake(
     same source instance; a stale source-side handshake record is insufficient.
     """
 
-    source = local_instance_id()
+    explicit_context = source_instance is not None or hashi_root is not None
+    source = (
+        _normalize_instance(source_instance)
+        if source_instance
+        else _resolved_local_instance_id(hashi_root=hashi_root)
+    )
     target = _normalize_instance(target_instance)
+    auth_kwargs = (
+        _auth_kwargs(source_instance=source, hashi_root=hashi_root)
+        if explicit_context
+        else _auth_kwargs()
+    )
     try:
         result = remote_rescue._request_json_status(
             f"{str(base_url).rstrip('/')}/health",
             timeout=5,
-            **_auth_kwargs(),
+            **auth_kwargs,
         )
     except Exception as exc:
         raise RestartProviderError(
@@ -163,13 +208,28 @@ def _target_confirms_source_handshake(
     )
 
 
-def _live_restart_capabilities(target_instance: str) -> dict[str, Any]:
+def _live_restart_capabilities(
+    target_instance: str,
+    *,
+    source_instance: str | None = None,
+    hashi_root: Path | str | None = None,
+) -> dict[str, Any]:
     target = _normalize_instance(target_instance)
+    source = (
+        _normalize_instance(source_instance)
+        if source_instance
+        else _resolved_local_instance_id(hashi_root=hashi_root)
+    )
     try:
         payload = remote_rescue.probe_capabilities(
             target,
             timeout=5,
-            **_auth_kwargs(),
+            root=hashi_root,
+            local_instance_id=source,
+            **_auth_kwargs(
+                source_instance=source,
+                hashi_root=hashi_root,
+            ),
         )
     except Exception as exc:
         raise RestartProviderError(f"{target} Remote is not reachable: {exc}") from exc
@@ -189,12 +249,20 @@ def _live_restart_capabilities(target_instance: str) -> dict[str, Any]:
     return payload
 
 
-def local_restart_provider() -> dict[str, Any]:
+def local_restart_provider(
+    *,
+    instance_id: str | None = None,
+    hashi_root: Path | str | None = None,
+) -> dict[str, Any]:
     """Return the local supervised Remote provider for a self cold restart."""
 
-    target = local_instance_id()
-    live = _live_restart_capabilities(target)
-    return {
+    target = _resolved_local_instance_id(instance_id, hashi_root=hashi_root)
+    live = _live_restart_capabilities(
+        target,
+        source_instance=target,
+        hashi_root=hashi_root,
+    )
+    provider = {
         "kind": "local_remote",
         "source_instance": target,
         "target_instance": target,
@@ -203,23 +271,40 @@ def local_restart_provider() -> dict[str, Any]:
         "remote_supervisor": live.get("remote_supervisor") or {},
         "capabilities": live.get("capabilities") or {},
     }
+    if hashi_root:
+        provider["hashi_root"] = str(Path(hashi_root).expanduser().resolve())
+    return provider
 
 
-def peer_restart_provider(target_instance: str) -> dict[str, Any]:
+def peer_restart_provider(
+    target_instance: str,
+    *,
+    source_instance: str | None = None,
+    hashi_root: Path | str | None = None,
+) -> dict[str, Any]:
     """Return a trusted peer Remote after bilateral handshake + live capability checks."""
 
-    source = local_instance_id()
+    source = _resolved_local_instance_id(source_instance, hashi_root=hashi_root)
     target = _normalize_instance(target_instance)
     if target == source:
-        return local_restart_provider()
+        return local_restart_provider(instance_id=source, hashi_root=hashi_root)
 
-    peer = _trusted_peer_record(target)
-    live = _live_restart_capabilities(target)
+    peer = _trusted_peer_record(target, source_instance=source)
+    live = _live_restart_capabilities(
+        target,
+        source_instance=source,
+        hashi_root=hashi_root,
+    )
     base_url = str(live.get("base_url") or "").strip()
     if not base_url:
         raise RestartProviderError(f"{target} Remote did not provide a live base URL")
-    target_peer = _target_confirms_source_handshake(target, base_url=base_url)
-    return {
+    target_peer = _target_confirms_source_handshake(
+        target,
+        base_url=base_url,
+        source_instance=source,
+        hashi_root=hashi_root,
+    )
+    provider = {
         "kind": "peer_remote",
         "source_instance": source,
         "target_instance": target,
@@ -230,6 +315,9 @@ def peer_restart_provider(target_instance: str) -> dict[str, Any]:
         "handshake_state": str((peer.get("properties") or {}).get("handshake_state") or ""),
         "target_handshake_state": _peer_handshake_state(target_peer),
     }
+    if hashi_root:
+        provider["hashi_root"] = str(Path(hashi_root).expanduser().resolve())
+    return provider
 
 
 def restart_via_provider(
@@ -244,16 +332,35 @@ def restart_via_provider(
 
     kind = str(provider.get("kind") or "")
     target = _normalize_instance(provider.get("target_instance"))
+    source = _normalize_instance(provider.get("source_instance"))
+    hashi_root = provider.get("hashi_root")
     if kind == "local_remote":
-        verified = local_restart_provider()
+        verified = (
+            local_restart_provider(instance_id=source, hashi_root=hashi_root)
+            if hashi_root
+            else local_restart_provider()
+        )
     elif kind == "peer_remote":
-        verified = peer_restart_provider(target)
+        verified = (
+            peer_restart_provider(
+                target,
+                source_instance=source,
+                hashi_root=hashi_root,
+            )
+            if hashi_root
+            else peer_restart_provider(target)
+        )
     else:
         raise RestartProviderError(f"unsupported restart provider kind: {kind or 'unknown'}")
 
     if _normalize_instance(verified.get("target_instance")) != target:
         raise RestartProviderError("restart provider target changed during revalidation")
 
+    auth_kwargs = (
+        _auth_kwargs(source_instance=source, hashi_root=hashi_root)
+        if hashi_root
+        else _auth_kwargs()
+    )
     return remote_rescue.rescue_restart(
         target,
         reason=reason,
@@ -264,7 +371,9 @@ def restart_via_provider(
             "notify_via": str(request_source or "").strip() or None,
         },
         timeout=timeout,
-        **_auth_kwargs(),
+        root=hashi_root,
+        local_instance_id=source,
+        **auth_kwargs,
     )
 
 

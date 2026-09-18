@@ -116,14 +116,24 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
 
     requested_target = _target_argument(context)
     local_instance = _local_instance(runtime)
+    hashi_root = legacy_restart._hashi_root(runtime)
     target = requested_target or local_instance
     request_source = legacy_restart._restart_request_source(context)
 
     try:
         if target == local_instance:
-            provider = await asyncio.to_thread(local_restart_provider)
+            provider = await asyncio.to_thread(
+                local_restart_provider,
+                instance_id=local_instance,
+                hashi_root=hashi_root,
+            )
         else:
-            provider = await asyncio.to_thread(peer_restart_provider, target)
+            provider = await asyncio.to_thread(
+                peer_restart_provider,
+                target,
+                source_instance=local_instance,
+                hashi_root=hashi_root,
+            )
     except RestartProviderError as exc:
         if target != local_instance:
             await runtime._reply_text(

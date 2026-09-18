@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,10 @@ from orchestrator.restart_provider import RestartProviderError
 class _Runtime:
     def __init__(self) -> None:
         self.name = "hashiko"
-        self.global_config = SimpleNamespace(instance_id="HASHI3")
+        self.global_config = SimpleNamespace(
+            instance_id="HASHI3",
+            bridge_home=Path("C:/hashi3-runtime"),
+        )
         self.messages: list[str] = []
 
     def _is_authorized_user(self, user_id):
@@ -40,7 +44,12 @@ async def test_restart_defaults_to_own_instance_remote(monkeypatch):
         "provider_instance": "HASHI3",
     }
 
-    monkeypatch.setattr(restart_lifeline, "local_restart_provider", lambda: provider)
+    def fake_local_provider(*, instance_id, hashi_root):
+        observed["provider_instance_id"] = instance_id
+        observed["provider_hashi_root"] = hashi_root
+        return provider
+
+    monkeypatch.setattr(restart_lifeline, "local_restart_provider", fake_local_provider)
     monkeypatch.setattr(
         restart_lifeline,
         "peer_restart_provider",
@@ -67,6 +76,8 @@ async def test_restart_defaults_to_own_instance_remote(monkeypatch):
     assert observed["runtime"] is runtime
     assert observed["chat_id"] == 777
     assert observed["provider"] is provider
+    assert observed["provider_instance_id"] == "HASHI3"
+    assert observed["provider_hashi_root"] == Path("C:/hashi3-runtime")
     assert observed["kwargs"]["request_source"] == "telegram"
     assert runtime.messages == [
         "🔁 Restarting HASHI3. A final result will follow automatically."

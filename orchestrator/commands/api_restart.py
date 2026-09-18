@@ -4,6 +4,7 @@ import asyncio
 import html
 import inspect
 import logging
+from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,11 +22,27 @@ ALLOWED_RESTART_SOURCES = {"telegram", "whatsapp", "tui", "agent"}
 _RESTART_INFLIGHT_ATTR = "_restart_inflight"
 
 
-def _instance_id(runtime: Any) -> str:
+def _global_config(runtime: Any) -> Any:
     global_config = getattr(runtime, "global_config", None)
     if global_config is None:
         global_config = getattr(getattr(runtime, "orchestrator", None), "global_cfg", None)
+    return global_config
+
+
+def _instance_id(runtime: Any) -> str:
+    global_config = _global_config(runtime)
     return str(getattr(global_config, "instance_id", None) or "HASHI")
+
+
+def _hashi_root(runtime: Any) -> Path:
+    global_config = _global_config(runtime)
+    bridge_home = getattr(global_config, "bridge_home", None)
+    if bridge_home:
+        return Path(bridge_home).expanduser().resolve()
+    config_path = getattr(global_config, "config_path", None)
+    if config_path:
+        return Path(config_path).expanduser().resolve().parent
+    return remote_rescue.ROOT
 
 
 def _restart_controller(runtime: Any) -> str:
@@ -190,10 +207,11 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
     )
 
 
-def _restart_auth_kwargs() -> dict[str, str | None]:
+def _restart_auth_kwargs(runtime: Any) -> dict[str, str | None]:
+    root = _hashi_root(runtime)
     return {
-        "shared_token": load_shared_token(remote_rescue.ROOT),
-        "from_instance": remote_rescue._default_instance_id(),
+        "shared_token": load_shared_token(root),
+        "from_instance": _restart_controller(runtime),
     }
 
 
@@ -270,7 +288,12 @@ def _restart_completed_text(payload: dict[str, Any]) -> str:
 
 def _restart_remote_address(runtime: Any) -> str:
     try:
-        return remote_rescue._candidate_base_urls(_restart_controller(runtime))[0]
+        controller = _restart_controller(runtime)
+        return remote_rescue._candidate_base_urls(
+            controller,
+            root=_hashi_root(runtime),
+            local_instance_id=controller,
+        )[0]
     except Exception:
         return "unresolved"
 
@@ -382,11 +405,14 @@ async def _restart_available(
     runtime: Any,
 ) -> tuple[bool, str | None, dict[str, Any] | None]:
     controller = _restart_controller(runtime)
+    root = _hashi_root(runtime)
     try:
         code, payload = await asyncio.to_thread(
             remote_rescue.rescue_status,
             controller,
-            **_restart_auth_kwargs(),
+            root=root,
+            local_instance_id=controller,
+            **_restart_auth_kwargs(runtime),
         )
     except Exception as exc:
         return False, str(exc), None
@@ -407,6 +433,7 @@ async def _dispatch_restart(
     request_payload: dict[str, Any],
 ) -> None:
     controller = _restart_controller(runtime)
+    root = _hashi_root(runtime)
     try:
         try:
             code, payload = await asyncio.to_thread(
@@ -415,7 +442,9 @@ async def _dispatch_restart(
                 reason=request_payload.get("reason"),
                 extra_payload=request_payload,
                 timeout=25,
-                **_restart_auth_kwargs(),
+                root=root,
+                local_instance_id=controller,
+                **_restart_auth_kwargs(runtime),
             )
         except Exception as exc:
             logger.warning("Local HASHI Remote restart call failed or timed out: %s", exc)
@@ -618,13 +647,16 @@ async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /res
         logger.warning("Failed to build WhatsApp restart payload: %s", exc)
         return False, str(exc)
     try:
+        controller = _restart_controller(runtime)
         code, payload = await asyncio.to_thread(
             remote_rescue.rescue_restart,
-            _restart_controller(runtime),
+            controller,
             reason=request_payload.get("reason"),
             extra_payload=request_payload,
             timeout=25,
-            **_restart_auth_kwargs(),
+            root=_hashi_root(runtime),
+            local_instance_id=controller,
+            **_restart_auth_kwargs(runtime),
         )
     except Exception as exc:
         logger.warning("Local HASHI Remote WhatsApp restart call failed or timed out: %s", exc)
