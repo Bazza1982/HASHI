@@ -50,12 +50,17 @@ capability is valid in child or supervised mode. On Windows the network-facing
 Remote remains a Limited scheduled task. A separate exact-instance
 `HashiRestart-<instance>` task runs Highest and accepts no action, executable, or
 target from the Remote request; it invokes only the fixed instance controller.
-If Core and Remote already share privilege and no actuator exists, the same
-fixed runner is used directly. Process termination errors are surfaced rather
-than swallowed. The Windows controller launches `main.py` directly with the
-instance bridge-home, saved Agent selection, and previously enabled API Gateway
-state. It runs hidden and writes separate stdout/stderr launch logs; the
-interactive menu batch file is not part of Remote recovery.
+The actuator stops the previous Core, triggers the exact-instance
+`HashiRuntime-<instance>` task, verifies Backend readiness, and exits. The
+runtime task, rather than the restart actuator, owns the long-running elevated
+Core process. Remote can therefore remain online and the same fixed restart can
+be used repeatedly. If Core and Remote already share privilege and no actuator
+exists, the fixed controller is used directly. Process termination errors are
+surfaced rather than swallowed. The Windows runtime task launches `main.py`
+directly with the instance bridge-home and saved Agent selection. It runs hidden
+and writes separate stdout/stderr launch logs; the interactive menu batch file
+is not part of Remote recovery. API Gateway startup follows its canonical
+persisted instance setting.
 
 ## Adoption and verification
 

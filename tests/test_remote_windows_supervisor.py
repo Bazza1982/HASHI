@@ -85,10 +85,15 @@ $global:RegisteredTasks | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -
     tasks = json.loads(captured.read_text(encoding="utf-8-sig"))
     by_name = {task["TaskName"]: task for task in tasks}
     restart = by_name["HashiRestart-supervisor-contract"]
+    runtime = by_name["HashiRuntime-supervisor-contract"]
     remote_task = by_name["HashiRemote-supervisor-contract"]
     assert restart["Principal"]["RunLevel"] == "Highest"
+    assert runtime["Principal"]["RunLevel"] == "Highest"
     assert remote_task["Principal"]["RunLevel"] == "Limited"
     assert "hashi_restart_task_runner.ps1" in restart["Action"]["Arguments"]
+    assert "HashiRuntime-supervisor-contract" in restart["Action"]["Arguments"]
+    assert "bridge_ctl.ps1" in runtime["Action"]["Arguments"]
+    assert "-Action start" in runtime["Action"]["Arguments"]
     assert str(root) in restart["Action"]["Arguments"]
 
 
@@ -107,7 +112,7 @@ def test_fixed_restart_actuator_triggers_only_its_registered_definition(tmp_path
     started = tmp_path / "started-task.txt"
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
-$global:RegisteredTask = $null
+$global:RegisteredTasks = @{{}}
 function New-ScheduledTaskAction {{
     param($Execute, $Argument, $WorkingDirectory)
     [pscustomobject]@{{Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory}}
@@ -123,9 +128,9 @@ function New-ScheduledTask {{
 }}
 function Register-ScheduledTask {{
     param($TaskName, $InputObject, [switch]$Force, $ErrorAction)
-    $global:RegisteredTask = $InputObject
+    $global:RegisteredTasks[$TaskName] = $InputObject
 }}
-function Get-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RegisteredTask }}
+function Get-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RegisteredTasks[$TaskName] }}
 function Start-ScheduledTask {{
     param($TaskName, $ErrorAction)
     Set-Content -Encoding UTF8 -LiteralPath {_ps_string(started)} -Value $TaskName
@@ -136,6 +141,59 @@ function Start-ScheduledTask {{
 
     assert result.returncode == 0, result.stderr
     assert started.read_text(encoding="utf-8-sig").strip() == "HashiRestart-restart-exact"
+
+
+def test_restart_runner_stops_core_then_starts_separate_runtime_task(tmp_path):
+    root = tmp_path / "hashi restart runner"
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"workbench_port": 18891}}),
+        encoding="utf-8",
+    )
+    stopped = tmp_path / "stopped.txt"
+    started = tmp_path / "started.txt"
+    log = tmp_path / "restart.log"
+    (bin_dir / "bridge_ctl.ps1").write_text(
+        "param([string]$Action)\n"
+        f"Set-Content -LiteralPath {_ps_string(stopped)} -Value $Action\n"
+        "if ($Action -ne 'stop') { exit 9 }\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+$global:RuntimeState = 'Ready'
+function Get-ScheduledTask {{
+    param($TaskName, $ErrorAction)
+    [pscustomobject]@{{State=$global:RuntimeState}}
+}}
+function Start-ScheduledTask {{
+    param($TaskName, $ErrorAction)
+    $global:RuntimeState = 'Running'
+    Set-Content -LiteralPath {_ps_string(started)} -Value $TaskName
+}}
+function Stop-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RuntimeState = 'Ready' }}
+function Get-ScheduledTaskInfo {{ [pscustomobject]@{{LastTaskResult=0}} }}
+function Start-Sleep {{ param($Seconds, $Milliseconds) }}
+function Invoke-RestMethod {{
+    param($Uri, $Method, $TimeoutSec)
+    [pscustomobject]@{{ready=$true; status='ready'}}
+}}
+& {_ps_string(ROOT / 'bin/hashi_restart_task_runner.ps1')} `
+    -HashiRoot {_ps_string(root)} `
+    -LogPath {_ps_string(log)} `
+    -RuntimeTaskName 'HashiRuntime-restart-exact'
+exit $LASTEXITCODE
+""")
+
+    assert result.returncode == 0, result.stderr
+    assert stopped.read_text(encoding="utf-8-sig").strip() == "stop"
+    assert started.read_text(encoding="utf-8-sig").strip() == (
+        "HashiRuntime-restart-exact"
+    )
+    assert "Backend ready" in log.read_text(encoding="utf-8-sig")
 
 
 def test_bridge_controller_does_not_swallow_process_termination_errors():

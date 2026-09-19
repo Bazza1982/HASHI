@@ -308,7 +308,11 @@ should report `remote_supervisor.mode=child`.
 
 On Windows supervisor registration also provisions the deterministic
 `HashiRestart-<instance>` task. Remote stays Limited; the no-argument task alone
-runs Highest and invokes the fixed controller for that instance root.
+runs Highest and invokes the fixed controller for that instance root. A second
+deterministic `HashiRuntime-<instance>` task owns the replacement Core. Keeping
+the long-running Core outside the short restart actuator lets the actuator
+finish successfully and accept every later `/restart` while Remote remains
+online.
 
 Supervisor health checks use the explicit command port first, then the
 instance-owned `remote_port` from `instances.json` or `agents.json`, and only

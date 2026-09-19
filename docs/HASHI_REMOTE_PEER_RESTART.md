@@ -97,7 +97,10 @@ to instance configuration, then persists the instance id, display name and
 Backend API port in the scheduled-task command. The network-facing Remote task
 stays `Limited`. A separate deterministic `HashiRestart-<instance>` task runs
 `Highest`, accepts no caller-supplied command, and can only invoke that
-instance's fixed restart controller. This bridges a privilege difference
+instance's fixed restart controller. It stops the old Core and triggers a
+separate `HashiRuntime-<instance>` task that owns the long-running elevated
+Core process. The restart actuator therefore exits after readiness and remains
+reusable while Remote stays online. This bridges a privilege difference
 without granting the Remote process broad elevated access. The Limited task
 principal is not expected to read protected `agents.json`; failure to do so
 must never silently advertise the generic `HASHI` identity or default Backend
@@ -113,7 +116,7 @@ bin/hashi-remote-ctl.sh status
 
 A child Remote is a valid provider while it is running and has the same trusted
 capabilities. On Windows it triggers the fixed elevated actuator when present;
-for a same-privilege manual Core, the same fixed runner is used directly. The
+for a same-privilege manual Core, the fixed controller is used directly. The
 provider mode is diagnostic context, not an authorization gate.
 
 ## Local acceptance test
