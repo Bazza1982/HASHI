@@ -252,6 +252,106 @@ async def test_remote_child_fallback_is_available_without_degrading_startup(
     assert "Hashi Remote is active for HASHI2" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_remote_recovery_clears_latched_startup_issue(monkeypatch, tmp_path):
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(project_root=tmp_path, instance_id="HASHI3")
+    kernel.startup_status = {
+        "phase": "degraded",
+        "services_ready": True,
+        "ready": False,
+        "degraded": True,
+        "failed_agents": 0,
+        "issues": [
+            {
+                "code": "remote_already_running_degraded",
+                "component": "remote",
+                "severity": "warning",
+            }
+        ],
+    }
+    manager = StartupManager(kernel, logging.NullHandler())
+    settings = SimpleNamespace(enabled=True, supervised=True, port=8769)
+
+    async def inspect_remote(_root):
+        return {
+            "ok": True,
+            "action": "running",
+            "settings": settings,
+            "port": 8769,
+            "remote_ready": True,
+            "remote_state": "ready",
+            "discovery_state": "ready",
+            "trust_state": "accepted",
+        }
+
+    monkeypatch.setattr(
+        "orchestrator.startup_manager.importlib.import_module",
+        lambda _name: SimpleNamespace(inspect_remote=inspect_remote),
+    )
+
+    await manager.reconcile_remote_status(publish=False)
+
+    assert kernel.startup_status["issues"] == []
+    assert kernel.startup_status["ready"] is True
+    assert kernel.startup_status["degraded"] is False
+    assert kernel.startup_status["phase"] == "ready"
+    assert kernel.remote_lifecycle_status["available"] is True
+    assert kernel.remote_lifecycle_status["action"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_remote_recovery_preserves_unrelated_startup_issue(monkeypatch, tmp_path):
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(project_root=tmp_path, instance_id="HASHI3")
+    connector_issue = {
+        "code": "connector_runtime_error",
+        "component": "telegram",
+        "severity": "warning",
+    }
+    kernel.startup_status = {
+        "phase": "degraded",
+        "services_ready": True,
+        "ready": False,
+        "degraded": True,
+        "failed_agents": 0,
+        "issues": [
+            {
+                "code": "remote_already_running_degraded",
+                "component": "remote",
+                "severity": "warning",
+            },
+            connector_issue,
+        ],
+    }
+    manager = StartupManager(kernel, logging.NullHandler())
+    settings = SimpleNamespace(enabled=True, supervised=True, port=8769)
+
+    async def inspect_remote(_root):
+        return {
+            "ok": True,
+            "action": "already_running",
+            "settings": settings,
+            "port": 8769,
+            "remote_ready": True,
+            "remote_state": "ready",
+            "discovery_state": "ready",
+            "trust_state": "accepted",
+        }
+
+    monkeypatch.setattr(
+        "orchestrator.startup_manager.importlib.import_module",
+        lambda _name: SimpleNamespace(inspect_remote=inspect_remote),
+    )
+
+    await manager.reconcile_remote_status(publish=False)
+
+    assert kernel.startup_status["issues"] == [connector_issue]
+    assert kernel.startup_status["ready"] is False
+    assert kernel.startup_status["degraded"] is True
+    assert kernel.startup_status["phase"] == "degraded"
+
+
 def test_command_registry_notices_are_deduplicated_across_workers(caplog):
     kernel = _Kernel()
     duplicate_notices = [

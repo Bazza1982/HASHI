@@ -460,6 +460,35 @@ async def test_ensure_remote_started_does_not_report_degraded_remote_as_ready(
 
 
 @pytest.mark.asyncio
+async def test_inspect_remote_reports_live_health_without_starting_it(
+    monkeypatch,
+    tmp_path,
+):
+    start_child = AsyncMock()
+
+    async def fake_owned(_settings):
+        return {
+            "port": 8766,
+            "health": {"ok": True, "status": "ready"},
+            "health_host": "127.0.0.1",
+            "remote_ready": True,
+            "remote_state": "ready",
+            "discovery_state": "ready",
+            "trust_state": "accepted",
+        }
+
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(remote_lifecycle, "_start_child_remote", start_child)
+
+    result = await remote_lifecycle.inspect_remote(tmp_path)
+
+    assert result["ok"] is True
+    assert result["action"] == "already_running"
+    assert result["trust_state"] == "accepted"
+    start_child.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ensure_remote_started_uses_per_instance_supervisor(monkeypatch, tmp_path):
     (tmp_path / "remote").mkdir()
     (tmp_path / "remote" / "config.yaml").write_text(

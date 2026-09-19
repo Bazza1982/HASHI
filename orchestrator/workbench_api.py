@@ -8017,6 +8017,11 @@ class WorkbenchApiServer:
         if (manager is not None and startup.get("services_ready")
                 and startup.get("phase") in {"ready", "degraded"}
                 and not getattr(orchestrator, "_handoff_draining", False)):
+            reconcile_remote = getattr(manager, "reconcile_remote_status", None)
+            if callable(reconcile_remote):
+                remote_result = reconcile_remote(publish=False)
+                if inspect.isawaitable(remote_result):
+                    await remote_result
             manager.reconcile_connector_status(publish=False)
             startup = dict(orchestrator.startup_status)
         if startup:

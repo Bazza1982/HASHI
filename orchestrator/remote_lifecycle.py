@@ -526,6 +526,50 @@ async def _wait_for_owned_remote(
     return last_owned
 
 
+async def inspect_remote(root: Path | str | None = None) -> dict[str, Any]:
+    """Return current Remote lifecycle health without starting or stopping it."""
+
+    settings = load_settings(root)
+    disabled = read_disabled_state(settings.root)
+    if not settings.enabled:
+        return {
+            "ok": False,
+            "action": "skipped",
+            "reason": "remote_enabled=false",
+            "settings": settings,
+        }
+    if disabled:
+        return {
+            "ok": False,
+            "action": "skipped",
+            "reason": "remote explicitly disabled",
+            "disabled": disabled,
+            "settings": settings,
+        }
+
+    owned = await _find_owned_remote(settings)
+    if owned is None:
+        return {
+            "ok": False,
+            "action": "not_running",
+            "reason": f"No owned HASHI Remote endpoint is reachable on port {settings.port}",
+            "settings": settings,
+        }
+
+    ready = owned.get("remote_ready") is not False
+    return {
+        "ok": ready,
+        "action": "already_running" if ready else "already_running_degraded",
+        "reason": (
+            "Remote process is reachable"
+            if ready
+            else "Remote process is reachable but discovery or trusted handshaking is degraded"
+        ),
+        "settings": settings,
+        **owned,
+    }
+
+
 async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any]:
     settings = load_settings(root)
     disabled = read_disabled_state(settings.root)

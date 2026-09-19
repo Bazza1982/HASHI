@@ -88,6 +88,20 @@ The public health/status projection distinguishes:
 - `degraded`: discovery failed, or visible peers have no accepted trust result;
 - `disabled`: no discovery backend is configured.
 
+Periodic trust revalidation keeps the most recent accepted handshake visible
+while the replacement request is in flight. The public registry changes an
+accepted peer only after a definitive reject, timeout, stale transition, or
+metadata/credential invalidation; a first-time handshake still reports
+`handshake_in_progress`. This prevents a healthy trusted route from briefly
+appearing untrusted merely because its proof is being refreshed.
+
+Backend API startup issues are historical observations, not permanent current
+health. While a Remote lifecycle issue is latched, the health projection may
+perform a throttled, read-only ownership and `/health` inspection. A currently
+ready (or intentionally disabled) Remote clears only the matching Remote issue;
+Agent and connector failures and unrelated startup issues remain intact. The
+inspection never starts, stops, or replaces Remote.
+
 Static `instances.json` discovery is an observable bootstrap fallback. A peer
 reached through it is marked as such and must not be reported as proof that
 mDNS discovery succeeded.

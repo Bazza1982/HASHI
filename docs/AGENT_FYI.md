@@ -102,6 +102,12 @@ best-effort diagnosis for an eligible terminal error; the source does not retry
 or fix it, the diagnosis completion is not returned to the source Agent, and
 HChat errors are excluded to prevent loops.
 
+Remote trust revalidation retains the last accepted peer state until the new
+check has a definitive result. Backend health rechecks a latched Remote startup
+warning read-only and removes it after recovery without clearing unrelated
+Agent or connector problems; a warning therefore describes current Remote
+health rather than permanent startup history.
+
 PAO freezes each Run's primary destination, mirrors, and automatic delivery
 before PCM. Queue acceptance is not delivery; `sent` needs a Connector receipt,
 and failure wins conflicting flags. Never duplicate an automatic destination
