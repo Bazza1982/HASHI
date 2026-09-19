@@ -32,6 +32,14 @@ PIDs as the second replacement's baselines, then performs the same shared PID,
 generation, Worker, and Remote checks. A failed candidate never upgrades the
 legacy receipt store or prevents the old shared generation from recovering.
 
+The legacy Agent-Worker qualification step deliberately retains the historical
+asset closure when its requested module set does not include `remote.main`.
+This keeps the candidate digest verifiable by the running legacy generation.
+The subsequent Core-owned whole-Function qualification explicitly seeds
+`remote.main` and must include and verify the complete Remote/restart launcher
+chain. Compatibility therefore enables the handoff without weakening the
+final broad-generation asset contract.
+
 Frontend Connector/Remote Functions own restart provider discovery and the
 fixed restart launcher. A running Remote with an authenticated `rescue_restart`
 capability is valid in child or supervised mode. On Windows the network-facing

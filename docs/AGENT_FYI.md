@@ -32,6 +32,8 @@ Source, artifacts, clients, Workers, and delivery are separate facts.
 Functions, all running Agent Workers, and enabled Remote while retaining Core.
 Legacy Worker-only broad generations bridge once through the same Core handoff;
 receipt promotion waits for Core commit, never a cold restart.
+The bootstrap Worker keeps the legacy Agent-only asset closure; the Core-owned
+whole-Function candidate separately requires the Remote/restart launcher chain.
 Claim adoption only after every active generation is verified. Locked runtime
 packages must match; unrelated extras do not block. Rejected bytes never run.
 Only PID, identity, generation, and health evidence permits `online`; receipts

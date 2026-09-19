@@ -307,17 +307,37 @@ def test_function_generation_has_explicit_cold_core_entrypoints():
     )
 
 
-def test_full_product_generation_requires_lifecycle_assets(tmp_path):
+def test_agent_worker_generation_does_not_require_broad_lifecycle_assets(tmp_path):
     package = tmp_path / "orchestrator"
     package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "runtime_app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    manifest = build_source_manifest(
+        ["orchestrator.runtime_app"],
+        code_root=tmp_path,
+    )
+
+    assert manifest.module_names == ("orchestrator.runtime_app",)
+    assert manifest.assets == ()
+
+
+def test_whole_function_generation_requires_lifecycle_assets(tmp_path):
+    package = tmp_path / "orchestrator"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "runtime_app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (remote / "__init__.py").write_text("", encoding="utf-8")
+    (remote / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     with pytest.raises(
         FunctionGenerationError,
         match="Required Function lifecycle asset is missing: bin/bridge-u.bat",
     ):
         build_source_manifest(
-            ["orchestrator.runtime_app"],
+            ["orchestrator.runtime_app", "remote.main"],
             code_root=tmp_path,
         )
 
