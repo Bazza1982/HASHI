@@ -56,13 +56,16 @@ model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
 the Function registry. An explicit Agent selection remains authoritative until
 that model is retired.
 
-Private EXP lives in ignored `<bridge_home>/exp`, resolved through
-`BRIDGE_HOME`; never publish it in Function artifacts or across instances.
+An active Agent needs a PAO-started Worker; failure reports an error and leaves
+it inactive.
 
-The open Tool wildcard is permission, not proof that an Engine, Workzone, or
-device Worker supplies a capability. Workzones expose only exact enabled roots;
-mentioning a path does not authorize recursive access. Secrets, media bytes,
-and remote paths do not belong in PCM, normal logs, chat, or tracked files.
+Private EXP is ignored at `<bridge_home>/exp`; never publish it in Function
+artifacts or across instances.
+
+The open Tool wildcard grants permission, not capability. Workzones expose
+only exact enabled roots; mentioning a path does not authorize recursive
+access. Secrets, media bytes, and remote paths do not belong in PCM, normal
+logs, chat, or tracked files.
 
 JSON writers use validation, private candidates, locks, revisions, and atomic
 replacement. Display fallback is read-only. On conflict, read fresh state and

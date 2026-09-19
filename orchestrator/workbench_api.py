@@ -36,7 +36,12 @@ from orchestrator.agent_deletion import (
 from orchestrator.agent_overview import build_agent_overview
 from orchestrator.chat_transcript_projection import build_chat_projection
 from orchestrator.capability_broker import CapabilityBrokerError
-from orchestrator.config_json import read_config_json, write_config_json
+from orchestrator.config_json import (
+    ConfigConflictError,
+    ConfigDurabilityError,
+    read_config_json,
+    write_config_json,
+)
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
@@ -4029,19 +4034,148 @@ class WorkbenchApiServer:
             spec.backend,
             elapsed_ms,
         )
+        lifecycle = {
+            "ok": True,
+            "message": "Agent was created inactive; no start was requested.",
+        }
+        response_is_active = result.is_active
+        if result.is_active:
+            start_agent = getattr(self.orchestrator, "start_agent", None)
+            if callable(start_agent):
+                try:
+                    started_ok, start_message = await start_agent(result.name)
+                except Exception as exc:
+                    logger.exception(
+                        "agent_create.start_failed agent_name=%s error=%s",
+                        result.name,
+                        type(exc).__name__,
+                    )
+                    started_ok = False
+                    start_message = (
+                        "Agent was created, but its Function Worker could not be "
+                        "started."
+                    )
+            else:
+                started_ok = False
+                start_message = (
+                    "Agent was created, but the lifecycle service is unavailable."
+                )
+
+            lifecycle = {"ok": bool(started_ok), "message": str(start_message)}
+            if not started_ok:
+                deactivation_error: str | None = None
+                try:
+                    async with self._agent_config_lock:
+                        raw = self._load_raw_agent_config()
+                        agent_row = next(
+                            (
+                                row
+                                for row in raw.get("agents", [])
+                                if row.get("name") == result.name
+                            ),
+                            None,
+                        )
+                        if agent_row is None:
+                            deactivation_error = (
+                                "created Agent configuration is no longer present"
+                            )
+                        else:
+                            if agent_row.get("is_active", True) is not False:
+                                agent_row["is_active"] = False
+                                self._write_raw_agent_config(raw)
+                            response_is_active = False
+                except ConfigDurabilityError:
+                    # Atomic replacement committed. Do not retry a durability
+                    # error; report the inactive state with a warning instead.
+                    response_is_active = False
+                    deactivation_error = (
+                        "inactive state was committed but directory durability "
+                        "could not be confirmed"
+                    )
+                except ConfigConflictError:
+                    # A fresh action must resolve the newer configuration. Never
+                    # overwrite it with the pre-start snapshot.
+                    deactivation_error = (
+                        "Agent configuration changed while startup was failing"
+                    )
+                    try:
+                        fresh = self._load_raw_agent_config()
+                        fresh_row = next(
+                            (
+                                row
+                                for row in fresh.get("agents", [])
+                                if row.get("name") == result.name
+                            ),
+                            None,
+                        )
+                        if fresh_row is not None:
+                            response_is_active = bool(
+                                fresh_row.get("is_active", True)
+                            )
+                    except Exception:
+                        # The conflict remains the classified result. A failed
+                        # display refresh cannot authorize another write.
+                        pass
+                except Exception as exc:
+                    logger.exception(
+                        "agent_create.deactivate_failed agent_name=%s error=%s",
+                        result.name,
+                        type(exc).__name__,
+                    )
+                    deactivation_error = (
+                        "Agent startup failed and its inactive state could not be "
+                        "confirmed"
+                    )
+
+                logger.error(
+                    "agent_create.start_rejected agent_name=%s deactivated=%s "
+                    "deactivation_error=%s",
+                    result.name,
+                    response_is_active is False,
+                    deactivation_error or "",
+                )
+                error_code = (
+                    "agent_start_failed"
+                    if response_is_active is False
+                    else "agent_start_failed_config_unconfirmed"
+                )
+                payload = {
+                    "ok": False,
+                    "error": str(start_message),
+                    "error_code": error_code,
+                    "agent": {
+                        "name": result.name,
+                        "display_name": result.display_name,
+                        "is_active": response_is_active,
+                        "active_backend": result.active_backend,
+                    },
+                    "created": {
+                        "workspace": result.workspace_created,
+                        "config": result.config_published,
+                    },
+                    "lifecycle": lifecycle,
+                }
+                if deactivation_error:
+                    payload["configuration_warning"] = deactivation_error
+                return web.json_response(
+                    payload,
+                    status=503 if response_is_active is False else 409,
+                )
+
         return web.json_response(
             {
                 "ok": True,
                 "agent": {
                     "name": result.name,
                     "display_name": result.display_name,
-                    "is_active": result.is_active,
+                    "is_active": response_is_active,
                     "active_backend": result.active_backend,
                 },
                 "created": {
                     "workspace": result.workspace_created,
                     "config": result.config_published,
                 },
+                "lifecycle": lifecycle,
             },
             status=201,
         )
