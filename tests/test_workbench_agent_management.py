@@ -221,6 +221,131 @@ async def test_add_agent_api_rejects_raw_config_and_publishes_public_intent(tmp_
 
 
 @pytest.mark.asyncio
+async def test_add_agent_api_starts_agent_when_created_active(tmp_path):
+    start_calls: list[str] = []
+    orchestrator = SimpleNamespace(runtimes=[])
+
+    async def start_agent(name: str):
+        start_calls.append(name)
+        return True, f"started {name}"
+
+    orchestrator.start_agent = start_agent
+    server = _server(tmp_path, active=False, orchestrator=orchestrator)
+
+    created = await server.handle_admin_add_agent(
+        _Request(
+            payload={
+                "name": "ready-agent",
+                "display_name": "Ready Agent",
+                "backend": "codex-cli",
+                "model": "gpt-5.6-sol",
+                "is_active": True,
+            }
+        )
+    )
+
+    assert created.status == 201
+    response = json.loads(created.text)
+    assert response["ok"] is True
+    assert response["agent"]["is_active"] is True
+    assert response["lifecycle"] == {
+        "ok": True,
+        "message": "started ready-agent",
+    }
+    assert start_calls == ["ready-agent"]
+
+
+@pytest.mark.asyncio
+async def test_add_agent_api_start_failure_leaves_created_agent_inactive(tmp_path):
+    orchestrator = SimpleNamespace(runtimes=[])
+
+    async def start_agent(name: str):
+        return False, f"worker failed for {name}"
+
+    orchestrator.start_agent = start_agent
+    server = _server(tmp_path, active=False, orchestrator=orchestrator)
+
+    created = await server.handle_admin_add_agent(
+        _Request(
+            payload={
+                "name": "offline-agent",
+                "display_name": "Offline Agent",
+                "backend": "codex-cli",
+                "model": "gpt-5.6-sol",
+                "is_active": True,
+            }
+        )
+    )
+
+    assert created.status == 503
+    response = json.loads(created.text)
+    assert response["ok"] is False
+    assert response["error_code"] == "agent_start_failed"
+    assert response["created"] == {"workspace": True, "config": True}
+    assert response["agent"]["is_active"] is False
+    assert response["lifecycle"] == {
+        "ok": False,
+        "message": "worker failed for offline-agent",
+    }
+    stored = read_config_json(server.config_path)
+    row = next(item for item in stored["agents"] if item["name"] == "offline-agent")
+    assert row["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_add_agent_api_does_not_overwrite_newer_config_after_start_failure(
+    tmp_path, monkeypatch
+):
+    orchestrator = SimpleNamespace(runtimes=[])
+
+    async def start_agent(name: str):
+        return False, f"worker failed for {name}"
+
+    orchestrator.start_agent = start_agent
+    server = _server(tmp_path, active=False, orchestrator=orchestrator)
+    actual_write = write_config_json
+    injected = False
+
+    def interleaved(path, stale):
+        nonlocal injected
+        if not injected:
+            injected = True
+            winner = read_config_json(path)
+            winner["newer_configuration"] = {"kept": True}
+            created_row = next(
+                item for item in winner["agents"] if item["name"] == "racing-agent"
+            )
+            created_row["is_active"] = False
+            actual_write(path, winner)
+        actual_write(path, stale)
+
+    monkeypatch.setattr(workbench_module, "write_config_json", interleaved)
+
+    created = await server.handle_admin_add_agent(
+        _Request(
+            payload={
+                "name": "racing-agent",
+                "display_name": "Racing Agent",
+                "backend": "codex-cli",
+                "model": "gpt-5.6-sol",
+                "is_active": True,
+            }
+        )
+    )
+
+    assert created.status == 503
+    response = json.loads(created.text)
+    assert response["ok"] is False
+    assert response["error_code"] == "agent_start_failed"
+    assert response["agent"]["is_active"] is False
+    assert "configuration changed" in response["configuration_warning"].lower()
+    stored = read_config_json(server.config_path)
+    assert stored["newer_configuration"] == {"kept": True}
+    row = next(item for item in stored["agents"] if item["name"] == "racing-agent")
+    assert row["is_active"] is False
+
+
+@pytest.mark.asyncio
 async def test_add_agent_api_persists_her_orchestration_effort(tmp_path):
     server = _server(tmp_path, active=False)
 

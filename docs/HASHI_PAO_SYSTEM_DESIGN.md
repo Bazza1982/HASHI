@@ -45,6 +45,14 @@ no separate per-instance opt-in. Frontends derive availability from the
 authenticated capability response and hide the action when the capability is
 absent. Active or running Agents and other reported blockers remain protected.
 
+Agent creation is also a PAO-owned lifecycle operation. Creating an Agent with
+`is_active=false` publishes only its validated configuration and workspace.
+Creating one with `is_active=true` succeeds only after the isolated Function
+Worker start contract accepts it. If startup fails, the created Agent remains
+available for recovery but is written back inactive through the revisioned
+configuration owner; the caller receives a lifecycle failure rather than a
+false ready result. Configured, active, and running remain distinct states.
+
 The stable process kernel belongs to the Core engineering layer. The Agent and
 runtime policies operated through that kernel belong functionally to PAO.
 The current working-mode contract is defined in

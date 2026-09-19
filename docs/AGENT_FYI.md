@@ -56,6 +56,10 @@ model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
 the Function registry. An explicit Agent selection remains authoritative until
 that model is retired.
 
+Agent creation with `is_active=true` is complete only after PAO starts its
+Function Worker. A failed start reports failure and leaves the new Agent
+configured inactive; configured, active, and running are distinct states.
+
 Private EXP lives in ignored `<bridge_home>/exp`, resolved through
 `BRIDGE_HOME`; never publish it in Function artifacts or across instances.
 

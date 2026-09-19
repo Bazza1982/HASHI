@@ -28,8 +28,15 @@ configuration, transition, migration, and regression contract.
   `her-v2` (with `her` as a migration alias), `ollama-api`, and `xai-api`.
   `openrouter-api` and `deepseek-api` remain Model Provider adapters for HER v2
   and internal rendering; they are hidden from `/backend`.
-- **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set `type` explicitly. New agents should normally use `type: "flex"`; omitted `type` is rejected so HASHI cannot accidentally fall back to the retired legacy fixed runtime.
+- **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set
+  `type` explicitly. New agents should normally use `type: "flex"`; omitted
+  `type` is rejected so HASHI cannot accidentally fall back to the retired
+  legacy fixed runtime.
   - Flex required fields: `name`, `type: "flex"`, `workspace_dir`, `allowed_backends`, `active_backend`, `is_active`; the workspace must contain a strict lower-case `agent.md`
+  - The authenticated creation API starts the isolated Function Worker when
+    `is_active` is `true`; success means the lifecycle start completed. A failed
+    start preserves the new workspace and configuration but marks the Agent
+    inactive and returns a lifecycle error.
   - `default_mode` may be `fixed` or `flex`. If omitted, session-capable backends default to `fixed`; stateless backends use `flex`.
   - Legacy `type: "fixed"` and `system_md` values are one-time migration inputs only; successful startup converts the row to Flex shape, validates/writes `agent.md`, and removes `system_md`
   - Optional: `display_name`, `emoji`, `typing_message`, `typing_parse_mode`, `effort`, `resume_policy`
