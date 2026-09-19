@@ -434,7 +434,7 @@ async def test_queue_commands_only_show_and_clear_the_current_session(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_stop_from_one_session_does_not_interrupt_another_session(tmp_path):
+async def test_stop_from_one_session_interrupts_agent_work_in_another_session(tmp_path):
     runtime, default, replies, _resets = _session_command_runtime(tmp_path)
     other = runtime.session_store.create_session(
         owner_id="user:123", agent_id="arale", title="Other"
@@ -464,10 +464,10 @@ async def test_stop_from_one_session_does_not_interrupt_another_session(tmp_path
 
     await runtime.cmd_stop(fake_update(), fake_context())
 
-    shutdown.assert_not_awaited()
+    shutdown.assert_awaited_once()
     assert runtime.queue.empty()
     assert runtime.current_request_meta["request_id"] == "req-running-other"
-    assert "other Session continues" in replies[-1]
+    assert "other Session continues" not in replies[-1]
 
 
 @pytest.mark.asyncio

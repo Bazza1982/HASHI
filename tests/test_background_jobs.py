@@ -255,7 +255,12 @@ async def test_background_job_start_requires_explicit_user_bg_request(
 async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Path):
     queued: list[dict] = []
 
-    async def enqueue_api_text(text: str, source: str = "api", deliver_to_telegram: bool = True):
+    async def enqueue_api_text(
+        text: str,
+        source: str = "api",
+        deliver_to_telegram: bool = True,
+        request_metadata: dict | None = None,
+    ):
         request_id = f"queued-{len(queued) + 1}"
         queued.append(
             {
@@ -263,6 +268,7 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
                 "text": text,
                 "source": source,
                 "deliver_to_telegram": deliver_to_telegram,
+                "request_metadata": request_metadata,
             }
         )
         return request_id
@@ -289,6 +295,7 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
     assert len(queued) == 1
     assert queued[0]["source"] == "background-job-event"
     assert queued[0]["deliver_to_telegram"] is True
+    assert queued[0]["request_metadata"]["origin_kind"] == "background_job"
     assert f"job_id: {record.job_id}" in queued[0]["text"]
     assert "event: succeeded" in queued[0]["text"]
     assert "background event smoke" in queued[0]["text"]
@@ -302,7 +309,13 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
 async def test_background_job_failure_enqueues_agent_event(tmp_path: Path):
     queued: list[str] = []
 
-    async def enqueue_api_text(text: str, source: str = "api", deliver_to_telegram: bool = True):
+    async def enqueue_api_text(
+        text: str,
+        source: str = "api",
+        deliver_to_telegram: bool = True,
+        request_metadata: dict | None = None,
+    ):
+        del source, deliver_to_telegram, request_metadata
         queued.append(text)
         return "queued-failure"
 
@@ -328,3 +341,95 @@ async def test_background_job_failure_enqueues_agent_event(tmp_path: Path):
     assert "event: failed" in queued[0]
     assert "returncode: 3" in queued[0]
     assert "agent event failed" in queued[0]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_background_job_does_not_requeue_agent_event(tmp_path: Path):
+    queued: list[str] = []
+
+    async def enqueue_api_text(
+        text: str,
+        source: str = "api",
+        deliver_to_telegram: bool = True,
+    ):
+        del source, deliver_to_telegram
+        queued.append(text)
+        return "unexpected-requeue"
+
+    runtime = SimpleNamespace(name="zelda", enqueue_api_text=enqueue_api_text)
+    kernel = SimpleNamespace(runtimes=[runtime])
+    manager = BackgroundJobManager(tmp_path / "background_jobs", kernel=kernel)
+    await manager.start()
+    record = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+        notify_on_failure=False,
+    )
+    monitor = manager._monitor_tasks[record.job_id]
+
+    await manager.cancel(record.job_id, grace_seconds=0.1)
+    await monitor
+
+    saved = manager.get(record.job_id)
+    assert saved is not None
+    assert saved.state == "cancelled"
+    assert saved.notification["agent_event_enqueued"] is False
+    assert queued == []
+
+
+@pytest.mark.asyncio
+async def test_background_completion_before_stop_cannot_requeue_after_stop(
+    tmp_path: Path,
+):
+    queued: list[str] = []
+
+    async def enqueue_api_text(text: str, **_kwargs):
+        queued.append(text)
+        return "unexpected-stale-event"
+
+    runtime = SimpleNamespace(name="zelda", enqueue_api_text=enqueue_api_text)
+    manager = BackgroundJobManager(
+        tmp_path / "state" / "background_jobs",
+        kernel=SimpleNamespace(runtimes=[runtime]),
+    )
+    await manager.start()
+    record = await manager.start_job(
+        agent="zelda",
+        cwd=tmp_path,
+        argv=[sys.executable, "-c", "print('done before stop')"],
+        notify_on_complete=False,
+        trigger_agent_on_complete=False,
+    )
+    monitor = manager._monitor_tasks[record.job_id]
+    await monitor
+    saved = manager.get(record.job_id)
+    assert saved is not None
+    notification = dict(saved.notification)
+    notification["trigger_agent_on_complete"] = True
+    saved = manager.store.update(record.job_id, notification=notification)
+
+    fence = manager.stop_fences.advance("zelda")
+    await manager._enqueue_agent_event(saved)
+
+    final = manager.get(record.job_id)
+    assert final is not None
+    assert final.notification["agent_event_enqueued"] is False
+    assert final.notification["agent_event_suppressed_reason"] == (
+        f"stale_after_agent_stop_epoch_{fence.epoch}"
+    )
+    assert queued == []
+
+
+def test_scheduler_and_background_manager_share_stop_fence_store(tmp_path: Path):
+    from orchestrator.scheduler import TaskScheduler
+
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[],
+        authorized_id=1,
+    )
+    manager = BackgroundJobManager(tmp_path / "state" / "background_jobs")
+
+    assert scheduler.stop_fences.path == manager.stop_fences.path

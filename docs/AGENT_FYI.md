@@ -140,7 +140,9 @@ typed stop, and degraded intent cannot complete a request without native repair.
 Capture request, response prefix, parsing, Tool effects, recovery, terminal
 state, and receipt in one correlation chain at real I/O. Keep restricted
 originals separate from safe projections; partial or unread evidence is not
-empty. `/stop` preserves interruption evidence; `/retry`, `/resend`, and
+empty. `/stop` is Agent-wide across Sessions: it advances a durable stop epoch,
+cancels current and pending work, rejects older callbacks, and preserves their
+evidence without deleting Scheduler definitions. `/retry`, `/resend`, and
 `/steer` retain their distinct contracts. Recovery never duplicates a Cron Run,
 replays completed effects, restores revoked authority, or reconciles a live
 fixed-session owner. Unknown effects remain fail-closed. See

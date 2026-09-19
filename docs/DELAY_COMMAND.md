@@ -88,8 +88,9 @@ and cancel its new READY request ID, or use `/recall`, before processing begins.
 - `/recall` removes all READY and FUTURE requests.
 - `/recall n` removes the newest `n` requests across both layers by creation
   time while preserving the order of retained READY requests.
-- `/stop`, busy `/steer`, `/focus`, and `/retry` clear READY requests but
-  preserve FUTURE records and report that fact.
+- `/stop` is Agent-wide and removes both READY and FUTURE work while retaining
+  cron/nudge definitions. Busy `/steer`, `/focus`, and `/retry` retain their
+  narrower continuation semantics.
 - `/wipe`, `/reset`, agent deletion, agent move, and session transfer are
   blocked while the affected agent owns FUTURE records. Recall them first.
 - Delays do not make an agent busy and do not alter `/jobs` state or recovery.

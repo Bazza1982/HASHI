@@ -159,7 +159,7 @@ the same effect as recalling the whole current queue.
 
 | Command | Active task | Waiting queue | What happens next |
 | --- | --- | --- | --- |
-| `/stop` | Interrupted and saved durably | READY cleared; FUTURE preserved | A later plain `continue`, `resume`, or `继续` resumes the saved task |
+| `/stop` | All current Agent work is interrupted and saved durably | READY+FUTURE cleared across Sessions | A later plain `continue`, `resume`, or `继续` resumes the saved task |
 | `/steer <direction>` while busy | Interrupted | READY cleared; FUTURE preserved | Continue with the added direction and preserved progress |
 | `/focus` | Re-focused through an immediate continuation | READY cleared when busy; FUTURE preserved | Continue only within the original scope until done or genuinely blocked |
 | `/recall [count]` | Continues untouched | All or newest `count` across READY+FUTURE removed | Current task keeps running |

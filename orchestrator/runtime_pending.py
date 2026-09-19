@@ -163,6 +163,29 @@ def _request_id(item: Any) -> str:
     return str(getattr(item, "request_id", "") or "")
 
 
+def _request_stop_epoch(value: Any) -> int | None:
+    if isinstance(value, dict):
+        metadata = value.get("request_metadata")
+    else:
+        metadata = getattr(value, "request_metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("agent_stop_epoch")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _predates_stop_epoch(value: Any, epoch: int | None) -> bool:
+    if epoch is None:
+        return True
+    item_epoch = _request_stop_epoch(value)
+    return item_epoch is None or item_epoch < int(epoch)
+
+
 def _id_matches(candidate: str, requested: str) -> bool:
     wanted = str(requested or "").strip()
     return bool(wanted and (candidate == wanted or candidate.endswith(wanted)))
@@ -215,12 +238,21 @@ async def recall_pending(
     count: int | None = None,
     *,
     session_id: str | None = None,
+    before_agent_stop_epoch: int | None = None,
 ) -> PendingRemoval:
-    """Recall the newest READY+FUTURE requests in one Session."""
+    """Recall READY+FUTURE requests, optionally only from before a stop fence."""
 
     async with pending_lock(runtime):
-        ready = ready_items(runtime, session_id=session_id)
-        delayed = await delayed_messages(runtime, session_id=session_id)
+        ready = [
+            item
+            for item in ready_items(runtime, session_id=session_id)
+            if _predates_stop_epoch(item, before_agent_stop_epoch)
+        ]
+        delayed = [
+            record
+            for record in await delayed_messages(runtime, session_id=session_id)
+            if _predates_stop_epoch(record, before_agent_stop_epoch)
+        ]
 
         candidates: list[tuple[float, int, str, Any]] = []
         for index, item in enumerate(ready):

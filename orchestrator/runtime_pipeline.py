@@ -1069,6 +1069,12 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
             (getattr(item, "request_metadata", None) or {}).get("session_workspace")
             or ""
         ),
+        "agent_stop_epoch": int(
+            (getattr(item, "request_metadata", None) or {}).get(
+                "agent_stop_epoch", 0
+            )
+            or 0
+        ),
         "habit_learning_eligible": bool(
             getattr(item, "habit_learning_eligible", True)
         ),
