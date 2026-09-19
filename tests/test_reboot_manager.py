@@ -633,12 +633,9 @@ async def test_explicit_group_success_commits_every_route_and_then_retires_old_w
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["same", "max"])
-async def test_broad_reboot_switches_workers_before_whole_function_replacement(
-    tmp_path, mode
-):
+async def test_broad_reboot_submits_one_whole_function_replacement(tmp_path, mode):
     kernel = _Kernel()
     kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    candidates = kernel.queue_generation("b")
     manager = RebootManager(kernel, None)
 
     result = await manager.hot_restart({"mode": mode, "agent_name": "zelda"})
@@ -654,14 +651,7 @@ async def test_broad_reboot_switches_workers_before_whole_function_replacement(
         ).read_text(encoding="utf-8")
     )
     assert request == {"id": record["id"]}
-    assert {
-        name: handle.client for name, handle in kernel._runtime_map().items()
-    } == candidates
-    assert record["generations"] == {
-        "zelda": "sha256:" + "b" * 64,
-        "sunny": "sha256:" + "b" * 64,
-    }
-    assert kernel.events.index("commit") < len(kernel.events)
+    assert kernel.events == []
 
 
 @pytest.mark.asyncio
@@ -671,24 +661,22 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
 ):
     old_kernel = _Kernel()
     old_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    old_kernel.queue_generation("b")
     old_manager = RebootManager(old_kernel, None)
     assert await old_manager.hot_restart({"mode": "max"})
     pending = old_manager.receipts.records()[-1]
 
-    shared_generation = _Generation("a")
-    worker_generation = _Generation("b")
+    generation = _Generation("a")
     new_kernel = _Kernel()
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    new_kernel.shared_generation_id = shared_generation.manifest.generation_id
+    new_kernel.shared_generation_id = generation.manifest.generation_id
     new_kernel.runtimes = []
     for index, name in enumerate(("zelda", "sunny"), start=1):
-        client = _Client(name, 300 + index, worker_generation, new_kernel.events)
+        client = _Client(name, 200 + index, generation, new_kernel.events)
         new_kernel.runtimes.append(
             AgentRuntimeHandle(
                 new_kernel,
                 client,
-                _metadata(name, client.pid, worker_generation, telegram=True),
+                _metadata(name, client.pid, generation, telegram=True),
             )
         )
 
@@ -696,10 +684,7 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
     (state_dir / "kernel-requests" / f"{pending['id']}.json").unlink()
     (state_dir / f"replacement-{pending['id']}.json").write_text(
         json.dumps(
-            {
-                "ok": True,
-                "generation_id": shared_generation.manifest.generation_id,
-            }
+            {"ok": True, "generation_id": generation.manifest.generation_id}
         ),
         encoding="utf-8",
     )
@@ -736,14 +721,8 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
         "reason": "",
     }
     assert all(record["online"].values())
-    assert {item["old_pid"] for item in record["workers"].values()} == {201, 202}
-    assert {item["new_pid"] for item in record["workers"].values()} == {301, 302}
-    assert set(record["generations"].values()) == {
-        worker_generation.manifest.generation_id
-    }
-    assert record["shared_replacement"]["generation_id"] == (
-        shared_generation.manifest.generation_id
-    )
+    assert {item["old_pid"] for item in record["workers"].values()} == {101, 102}
+    assert {item["new_pid"] for item in record["workers"].values()} == {201, 202}
     remote_reload.assert_awaited_once_with(tmp_path)
 
 
@@ -824,12 +803,12 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
     new_kernel.shared_generation_id = shared_generation_id
     new_kernel.runtimes = []
     for index, name in enumerate(("zelda", "sunny"), start=1):
-        client = _Client(name, 200 + index, worker_generation, new_kernel.events)
+        client = _Client(name, 200 + index, shared_generation, new_kernel.events)
         new_kernel.runtimes.append(
             AgentRuntimeHandle(
                 new_kernel,
                 client,
-                _metadata(name, client.pid, worker_generation, telegram=True),
+                _metadata(name, client.pid, shared_generation, telegram=True),
             )
         )
     remote_reload = AsyncMock(
@@ -855,7 +834,7 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
     assert promoted["shared_replacement"]["status"] == "committed"
     assert {item["old_pid"] for item in promoted["workers"].values()} == {151, 152}
     assert {item["new_pid"] for item in promoted["workers"].values()} == {201, 202}
-    assert set(promoted["generations"].values()) == {worker_generation_id}
+    assert set(promoted["generations"].values()) == {shared_generation_id}
     assert promoted["shared_replacement"]["generation_id"] == shared_generation_id
     assert not marker_dir.joinpath(f"{record['id']}.json").exists()
     remote_reload.assert_awaited_once_with(tmp_path)
@@ -935,7 +914,6 @@ async def test_successor_records_remote_reload_exception_without_retry(
 ):
     old_kernel = _Kernel()
     old_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    old_kernel.queue_generation("b")
     old_manager = RebootManager(old_kernel, None)
     assert await old_manager.hot_restart({"mode": "max"})
     pending = old_manager.receipts.records()[-1]
