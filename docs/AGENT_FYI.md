@@ -182,7 +182,10 @@ escape, state plain user outcomes, and keep lifecycle internals in diagnostics.
 `/help` derives from registered metadata. Workbench and Telegram project
 one primary personal Conversation Session; semantic messages appear on both,
 while presentation rows never enter model history. Command menus reuse the
-authenticated runtime command path and keep action state server-side.
+authenticated runtime command path and keep action state server-side. Their
+presentation rows carry allowlisted menu state through negotiated chat
+projection v2, so a full snapshot cannot erase an unexpired card; v1 projections
+remain unchanged. Opening another menu does not expire an earlier card.
 
 Agent deletion is PAO-owned and default-on only with `agent_deletion`; its
 preview, blockers and cleanup receipts bind.

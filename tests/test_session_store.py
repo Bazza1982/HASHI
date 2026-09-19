@@ -1055,6 +1055,16 @@ def test_delivered_frontend_message_uses_shared_primary_and_is_idempotent(tmp_pa
         session_id=session["session_id"],
     )
 
+    message_context = {
+        "command_ui": {
+            "version": 1,
+            "menu_id": "menuabcdefghijklmnop",
+            "revision": 1,
+            "expires_at": 4_102_444_800_000,
+            "closed": False,
+            "rows": [],
+        }
+    }
     first = runtime_session.record_frontend_message(
         runtime,
         role="assistant",
@@ -1064,6 +1074,7 @@ def test_delivered_frontend_message_uses_shared_primary_and_is_idempotent(tmp_pa
         surface="telegram",
         channel_key="7",
         explicit_session_id=stale["session_id"],
+        message_context=message_context,
     )
     replay = runtime_session.record_frontend_message(
         runtime,
@@ -1074,6 +1085,7 @@ def test_delivered_frontend_message_uses_shared_primary_and_is_idempotent(tmp_pa
         surface="telegram",
         channel_key="7",
         explicit_session_id=stale["session_id"],
+        message_context=message_context,
     )
 
     assert first is not None and replay is not None
@@ -1081,12 +1093,11 @@ def test_delivered_frontend_message_uses_shared_primary_and_is_idempotent(tmp_pa
     assert store.resolve_primary_session(owner_id="user:7", agent_id="lily")[
         "session_id"
     ] == session["session_id"]
-    assert [
-        message["text"]
-        for message in store.recent_visible_messages(
-            session["session_id"], owner_id="user:7"
-        )
-    ] == ["handoff prepared"]
+    visible = store.recent_visible_messages(
+        session["session_id"], owner_id="user:7"
+    )
+    assert [message["text"] for message in visible] == ["handoff prepared"]
+    assert visible[0]["message_context"]["command_ui"] == message_context["command_ui"]
 
 
 def test_workzone_slots_are_session_scoped_revisioned_and_snapshot_visible(tmp_path):

@@ -179,8 +179,121 @@ async def test_projection_poll_preserves_half_record_then_acknowledges_completio
 
 
 @pytest.mark.asyncio
+async def test_projection_v2_restores_authoritative_command_ui_while_v1_stays_compatible(tmp_path):
+    runtime = _runtime(tmp_path)
+    session = _session(runtime)
+    menu_id = "menuabcdefghijklmnop"
+    command_ui = {
+        "version": 1,
+        "menu_id": menu_id,
+        "revision": 1,
+        "expires_at": 4_102_444_800_000,
+        "closed": False,
+        "rows": [[{
+            "text": "Continue",
+            "button_id": "buttonabcdefghijkl",
+            "disabled": False,
+        }]],
+    }
+    runtime.session_store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="agent",
+        role="assistant",
+        text="Choose",
+        source="telegram.reply",
+        idempotency_key="workbench:default:assistant:command-menu",
+        content_format="telegram-html",
+        presentation_channel="command",
+        message_context={"command_ui": command_ui},
+    )
+
+    v2 = await try_execute_slash_command_text(
+        runtime,
+        _wire(version=2, capabilities={"command_ui": True}),
+        source_channel="workbench_api",
+    )
+    v1 = await try_execute_slash_command_text(
+        runtime, _wire(), source_channel="workbench_api"
+    )
+
+    assert v2["ok"] is True
+    assert v2["chat_projection_version"] == 2
+    projected = v2["projection"]["messages"][0]
+    assert projected["message_ref"] == f"command-ui:{menu_id}"
+    assert projected["command_ui"] == command_ui
+    assert v2["projection"]["command_uis"] == [{
+        "message_ref": f"command-ui:{menu_id}",
+        "command_ui": command_ui,
+    }]
+    assert v1["chat_projection_version"] == 1
+    assert "command_ui" not in v1["projection"]["messages"][0]
+    assert "command_uis" not in v1["projection"]
+
+
+@pytest.mark.asyncio
+async def test_projection_v2_reads_the_latest_persisted_menu_revision(tmp_path):
+    runtime = _runtime(tmp_path)
+    store = runtime.session_store
+    session = _session(runtime)
+    menu_id = "menuabcdefghijklmnop"
+    first_ui = {
+        "version": 1,
+        "menu_id": menu_id,
+        "revision": 1,
+        "expires_at": 4_102_444_800_000,
+        "closed": False,
+        "rows": [],
+    }
+    recorded = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="agent",
+        role="assistant",
+        text="Page one",
+        source="telegram.reply",
+        idempotency_key="workbench:default:assistant:command-menu-update",
+        presentation_channel="command",
+        message_context={"command_ui": first_ui},
+    )
+    latest_ui = {**first_ui, "revision": 2}
+
+    store.update_presentation_message(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="agent",
+        message_id=recorded["message_id"],
+        text="Page two",
+        message_context={"command_ui": latest_ui},
+    )
+    result = await try_execute_slash_command_text(
+        runtime,
+        _wire(version=2, capabilities={"command_ui": True}),
+        source_channel="workbench_api",
+    )
+    polled = await try_execute_slash_command_text(
+        runtime,
+        _wire(
+            version=2,
+            capabilities={"command_ui": True},
+            op="poll",
+            offset=0,
+            message_cursor=recorded["ordinal"],
+        ),
+        source_channel="workbench_api",
+    )
+
+    assert result["projection"]["messages"][0]["text"] == "Page two"
+    assert result["projection"]["messages"][0]["command_ui"]["revision"] == 2
+    assert polled["projection"]["messages"][0]["text"] == "Page two"
+    assert polled["projection"]["messages"][0]["command_ui"]["revision"] == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fields", [
     {"version": True}, {"version": 2}, {"op": "send"}, {"op": []},
+    {"version": 2, "capabilities": {"command_ui": 1}},
+    {"version": 2, "capabilities": {"command_ui": True, "extra": True}},
     {"limit": True}, {"limit": "2"}, {"limit": 1.5}, {"limit": 0}, {"limit": 201},
     {"op": "poll"}, {"op": "poll", "offset": -1}, {"op": "poll", "offset": True},
     {"op": "poll", "offset": "0"}, {"op": "poll", "offset": 9007199254740992},

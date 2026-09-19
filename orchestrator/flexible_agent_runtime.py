@@ -1235,15 +1235,29 @@ class FlexibleAgentRuntime:
         for _ in range(2):
             try:
                 sent = await update.message.reply_text(text, **kwargs)
-                runtime_session.record_frontend_message_for_update(
+                presentation_context = getattr(sent, "_hashi_message_context", None)
+                recorded = runtime_session.record_frontend_message_for_update(
                     self,
                     update,
                     role="assistant",
                     text=text,
                     source="telegram.reply",
-                    transport_message_id=getattr(sent, "message_id", None),
+                    transport_message_id=(
+                        getattr(sent, "_hashi_transport_message_id", None)
+                        or getattr(sent, "message_id", None)
+                    ),
                     content_format=content_format,
+                    message_context=(
+                        presentation_context
+                        if isinstance(presentation_context, Mapping)
+                        else None
+                    ),
                 )
+                bind_presentation = getattr(
+                    sent, "_hashi_bind_presentation_message", None
+                )
+                if callable(bind_presentation) and recorded is not None:
+                    bind_presentation(recorded)
                 return sent
             except RetryAfter as exc:
                 last_error = exc

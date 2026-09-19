@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from orchestrator.command_interactions import ID_PATTERN, safe_url
+
 if TYPE_CHECKING:
     from orchestrator.session_store import SessionStore
 
@@ -20,6 +22,7 @@ def build_chat_projection(
     limit: int = 200,
     known_history_generation: int | None = None,
     after_message_ordinal: int | None = None,
+    include_command_ui: bool = False,
 ) -> dict:
     """Project one already-resolved Session snapshot for HTTP and Worker reads."""
     limit = max(1, min(int(limit), 200))
@@ -52,7 +55,12 @@ def build_chat_projection(
         if canonical_overflow:
             canonical = canonical[-limit:]
         canonical_rows = [
-            _canonical_projection_row(store, item, owner_id=owner_id)
+            _canonical_projection_row(
+                store,
+                item,
+                owner_id=owner_id,
+                include_command_ui=include_command_ui,
+            )
             for item in canonical
         ]
         payload["messages"] = _merge_snapshot_rows(
@@ -77,7 +85,12 @@ def build_chat_projection(
         if canonical_overflow:
             canonical = canonical[:limit]
         canonical_rows = [
-            _canonical_projection_row(store, item, owner_id=owner_id)
+            _canonical_projection_row(
+                store,
+                item,
+                owner_id=owner_id,
+                include_command_ui=include_command_ui,
+            )
             for item in canonical
         ]
         payload["messages"] = _merge_snapshot_rows(
@@ -99,11 +112,24 @@ def build_chat_projection(
     payload["message_cursor"] = message_cursor
     payload["requests"] = requests
     payload["request_discovery_complete"] = len(requests) < 64
+    if include_command_ui:
+        payload["command_uis"] = [
+            {
+                "message_ref": str(item["message_ref"]),
+                "command_ui": item["command_ui"],
+            }
+            for item in payload["messages"]
+            if isinstance(item.get("command_ui"), dict)
+        ]
     return payload
 
 
 def _canonical_projection_row(
-    store: SessionStore, message: dict, *, owner_id: str
+    store: SessionStore,
+    message: dict,
+    *,
+    owner_id: str,
+    include_command_ui: bool = False,
 ) -> dict:
     run_id = str(message.get("run_id") or "")
     role = str(message.get("role") or "")
@@ -111,6 +137,11 @@ def _canonical_projection_row(
     request_id = str(message.get("request_id") or "")
     context = message.get("message_context")
     context = dict(context) if isinstance(context, dict) else {}
+    command_ui = (
+        _project_command_ui(context.get("command_ui"))
+        if include_command_ui
+        else None
+    )
     attachments = _project_message_attachments(store, message, owner_id=owner_id)
     text = str(message.get("text") or "")
     if attachments and str(message.get("source") or "").strip().casefold() in {
@@ -134,14 +165,15 @@ def _canonical_projection_row(
             and str(message.get("run_final_message_id") or "") == message_id
             else "message"
         )
+    message_ref = f"run:{run_id}:{role}" if run_id else f"message:{message_id}"
+    if command_ui is not None:
+        message_ref = "command-ui:" + command_ui["menu_id"]
     row = {
         "role": role,
         "text": text,
         "source": str(message.get("source") or "session_store"),
         "message_id": message_id,
-        "message_ref": (
-            f"run:{run_id}:{role}" if run_id else f"message:{message_id}"
-        ),
+        "message_ref": message_ref,
         "session_id": str(message.get("session_id") or ""),
         "context_generation": int(message.get("context_generation") or 1),
         "source_sequence": int(message.get("ordinal") or 0),
@@ -154,9 +186,80 @@ def _canonical_projection_row(
         "channel": str(context.get("presentation_channel") or "") or None,
         "history_eligible": bool(message.get("history_eligible", True)),
         "attachments": attachments,
+        "command_ui": command_ui,
         "canonical": True,
     }
     return {key: value for key, value in row.items() if value not in (None, [], "")}
+
+
+def _project_command_ui(value: object) -> dict | None:
+    """Allowlist persisted Connector state before returning it to Workbench."""
+
+    if not isinstance(value, dict):
+        return None
+    version = value.get("version")
+    menu_id = value.get("menu_id")
+    revision = value.get("revision")
+    expires_at = value.get("expires_at")
+    rows = value.get("rows")
+    if (
+        type(version) is not int
+        or version not in {1, 2}
+        or not isinstance(menu_id, str)
+        or not ID_PATTERN.fullmatch(menu_id)
+        or type(revision) is not int
+        or revision < 1
+        or type(expires_at) is not int
+        or not 0 <= expires_at <= 9007199254740991
+        or not isinstance(rows, list)
+        or len(rows) > 100
+    ):
+        return None
+    projected_rows: list[list[dict]] = []
+    button_count = 0
+    for raw_row in rows:
+        if not isinstance(raw_row, list):
+            return None
+        button_count += len(raw_row)
+        if button_count > 100:
+            return None
+        projected_row = []
+        for raw_button in raw_row:
+            if not isinstance(raw_button, dict):
+                return None
+            text = str(raw_button.get("text") or "")[:256]
+            button_id = raw_button.get("button_id")
+            if not isinstance(button_id, str) or not ID_PATTERN.fullmatch(button_id):
+                button_id = None
+            url = safe_url(raw_button.get("url"))
+            disabled = (
+                raw_button.get("disabled") is not False
+                or not text
+                or bool(button_id) == bool(url)
+            )
+            button = {
+                "text": text,
+                "disabled": disabled,
+            }
+            if button_id is not None:
+                button["button_id"] = button_id
+            if url is not None:
+                button["url"] = url
+            reason = raw_button.get("reason")
+            if isinstance(reason, str) and reason:
+                button["reason"] = reason[:100]
+            projected_row.append(button)
+        if projected_row:
+            projected_rows.append(projected_row)
+    closed = value.get("closed") is True
+    return {
+        "version": version,
+        "menu_id": menu_id,
+        "revision": revision,
+        "expires_at": expires_at,
+        "closed": closed,
+        "rows": [] if closed else projected_rows,
+    }
 
 
 def _project_message_attachments(

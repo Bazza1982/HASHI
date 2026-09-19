@@ -1,4 +1,4 @@
-"""Bounded, disposable command-menu projections (Frontend Connector / Functions).
+"""Bounded command-menu projections (Frontend Connector / Functions).
 
 No Telegram network client, model execution, or configuration writer lives here.
 The bridge supplies registered callbacks and an authenticated, canonical binding.
@@ -42,8 +42,8 @@ def validate_operation(payload: Any) -> None:
     op = payload.get("op")
     if not isinstance(op, str) or op not in {"catalogue", "open", "act", "close"}:
         raise InteractionError("command_menu_operation_invalid", 400)
-    for field in ("client_id", "request_id"):
-        value = payload.get(field)
+    for request_field in ("client_id", "request_id"):
+        value = payload.get(request_field)
         if not isinstance(value, str) or not ID_PATTERN.fullmatch(value):
             raise InteractionError("command_menu_request_invalid", 400)
     if "ui_locale" in payload and payload["ui_locale"] is not None and (
@@ -88,6 +88,7 @@ class Menu:
     rows: list = field(default_factory=list)
     actions: dict = field(default_factory=dict)
     closed: bool = False
+    presentation_message_id: str | None = None
 
 
 def safe_url(value: Any) -> str | None:
@@ -231,9 +232,11 @@ class MenuStore:
 class Capture:
     """A narrow Telegram-compatible reply/edit projection, scoped to one request."""
     def __init__(self, store: MenuStore, binding: Binding, command: str,
-                 resolve_callback: Callable[[str], tuple | None]):
+                 resolve_callback: Callable[[str], tuple | None], *,
+                 persist_menu: Callable[[Menu], None] | None = None):
         self.store, self.binding, self.command = store, binding, command
         self.resolve_callback = resolve_callback
+        self.persist_menu = persist_menu
         self.active = True
         self.messages: list[dict] = []
         self.notifications: list[dict] = []
@@ -248,6 +251,8 @@ class Capture:
         item = self.store.message(menu, deleted=deleted)
         self.messages[:] = [m for m in self.messages if m["message_ref"] != item["message_ref"]]
         self.messages.append(item)
+        if menu.presentation_message_id and self.persist_menu is not None:
+            self.persist_menu(menu)
 
     def attach(self, menu: Menu):
         self._owned[menu.message_id] = menu
@@ -334,6 +339,20 @@ class CapturedMessage:
     def text_html(self):
         return self.menu.text
 
+    @property
+    def _hashi_transport_message_id(self):
+        """Stable identity shared by the direct response and Session projection."""
+        return "command-ui:" + self.menu.id
+
+    @property
+    def _hashi_message_context(self):
+        return {"command_ui": self.capture.store.render(self.menu)}
+
+    def _hashi_bind_presentation_message(self, record: Mapping[str, Any] | None):
+        message_id = str((record or {}).get("message_id") or "").strip()
+        if message_id:
+            self.menu.presentation_message_id = message_id
+
     async def reply_text(self, text, **kwargs):
         return await self.capture.capture_send(self.chat_id, text, **kwargs)
 
@@ -379,6 +398,25 @@ class CapturedQuery:
         return await self.message.delete(**kwargs)
 
 
+def _disable_action_rows(menu: Menu, reason: str) -> None:
+    """Fence callback actions without making the visible card disappear."""
+
+    rows = []
+    for row in menu.rows:
+        projected = []
+        for button in row:
+            item = copy.deepcopy(button)
+            if item.get("button_id"):
+                item["disabled"] = True
+                item["reason"] = reason
+            projected.append(item)
+        if projected:
+            rows.append(projected)
+    menu.rows = rows
+    menu.actions.clear()
+    menu.closed = False
+
+
 async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
                          capture: Capture, *, actor_id: int,
                          authorize: Callable[[str], bool],
@@ -398,15 +436,13 @@ async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
         raise InteractionError("command_menu_handler_changed")
     capture.command = menu.command
     menu.revision += 1
-    menu.actions.clear()
-    menu.closed = True
+    _disable_action_rows(menu, "processing")
     capture._record(menu)
     query = CapturedQuery(capture, menu, data, actor_id)
     try:
         await invoke(resolved, query)
     except BaseException:
-        menu.closed = True
-        menu.actions.clear()
+        _disable_action_rows(menu, "outcome_unknown")
         capture._record(menu)
         raise
     return capture.result()
