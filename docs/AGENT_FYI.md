@@ -46,9 +46,13 @@ distinguish accepted, committed, rolled back, and unconfirmed. See
 Agent tools cannot write live Core, mutate its Python, read secrets, kill Core,
 or raw-control its service. Workzones and selected development roots remain
 writable. Windows restart uses an exact service or per-instance fixed actuator;
-Remote stays Limited and only that no-argument actuator runs Highest. Success
-requires a different healthy Core PID with matching identity, runtime, and
-Function generation; launch is not success.
+Remote stays Limited. The no-argument `HashiRestart-<instance>` actuator and a
+separate `HashiRuntime-<instance>` launch task run Highest, so the actuator can
+finish and remain reusable while Remote stays online. A runtime launch task
+that completes with result zero may leave its independently launched Core
+running; task completion is not Core exit. Restart success requires a different
+healthy Core PID with matching identity, runtime, and Function generation;
+launch alone is not success.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
 ## Configuration, identity, and persistence

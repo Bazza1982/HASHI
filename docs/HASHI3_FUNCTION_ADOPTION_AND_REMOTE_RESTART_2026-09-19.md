@@ -55,8 +55,8 @@ The actuator stops the previous Core, triggers the exact-instance
 runtime task provides the replacement Core's isolated elevated launch boundary;
 the restart actuator does not remain attached to that Core. Remote can therefore
 remain online and the same fixed restart can be used repeatedly. If Core and
-Remote already share privilege and no actuator
-exists, the fixed controller is used directly. Process termination errors are
+Remote already share privilege and no actuator exists, the fixed controller is
+used directly. Process termination errors are
 surfaced rather than swallowed. The Windows runtime task launches `main.py`
 directly with the instance bridge-home and saved Agent selection. It runs hidden
 and writes separate stdout/stderr launch logs; the interactive menu batch file
@@ -71,3 +71,22 @@ runtime gate, and full offline tests are required before handoff. Source changes
 and offline tests do not prove that the currently running HASHI3 generation has
 adopted them. Live `/reboot` and `/restart` remain separately authorized
 operational actions.
+
+## Live verification — 2026-09-20
+
+The user explicitly authorized HASHI3 `/reboot` and `/restart` testing. Protected
+Core was not changed.
+
+- Two consecutive local `/restart` commands completed successfully through the
+  authenticated running Remote. Core changed `9916 -> 29424 -> 17452`; both
+  restart task results were zero, and Remote stayed on PID `32748` throughout.
+- Broad `/reboot max` receipt `1d45fdea0cbc4e72aafedc9997943c40`
+  finished `succeeded` and committed. Core remained PID `17452`, shared
+  Functions changed PID `5248 -> 33172`, all eight Worker PIDs changed and
+  returned online, and Remote adopted the generation at PID `16868`.
+- The reboot correctly retained generation
+  `sha256:5f8d035fbb101769a56ecff06be5d36e3f1d82b043ea01cc3ee3e74f37da8add`
+  because the qualified source bytes were unchanged. PID replacement, matching
+  generation, health, and the committed receipt are the adoption proof; a
+  changed generation hash is not required for a same-source reboot.
+- The focused lifecycle suite completed with 176 passed and 2 platform skips.
