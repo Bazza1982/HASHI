@@ -52,7 +52,10 @@ Remote remains a Limited scheduled task. A separate exact-instance
 target from the Remote request; it invokes only the fixed instance controller.
 If Core and Remote already share privilege and no actuator exists, the same
 fixed runner is used directly. Process termination errors are surfaced rather
-than swallowed.
+than swallowed. The Windows controller launches `main.py` directly with the
+instance bridge-home, saved Agent selection, and previously enabled API Gateway
+state. It runs hidden and writes separate stdout/stderr launch logs; the
+interactive menu batch file is not part of Remote recovery.
 
 ## Adoption and verification
 

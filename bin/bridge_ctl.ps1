@@ -17,7 +17,7 @@
     Skip graceful shutdown, go straight to taskkill
 
 .PARAMETER Resume
-    Pass --resume-last to bridge-u.bat when starting
+    Resume the saved Agent selection when starting
 
 .EXAMPLE
     .\bridge_ctl.ps1 status
@@ -43,7 +43,7 @@ $ScriptDir = ([System.IO.Path]::GetFullPath($PSScriptRoot)).TrimEnd('\')
 $ProjectDir = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir "..")).TrimEnd('\')
 $BridgeHome = if ($env:BRIDGE_HOME) { $env:BRIDGE_HOME } else { $ProjectDir }
 $BridgeHome = ([System.IO.Path]::GetFullPath($BridgeHome)).TrimEnd('\')
-$LauncherBat = Join-Path $ScriptDir "bridge-u.bat"
+$MainScript = Join-Path $ProjectDir "main.py"
 $AgentsJson = Join-Path $BridgeHome "agents.json"
 if (-not (Test-Path $AgentsJson)) { $AgentsJson = Join-Path $ProjectDir "agents.json" }
 $SecretsJson = Join-Path $BridgeHome "secrets.json"
@@ -349,12 +349,63 @@ function Remove-StaleFiles {
     }
 }
 
+function Get-ResumeAgentNames {
+    param([switch]$ResumeMode)
+
+    if (-not $ResumeMode) {
+        return @()
+    }
+    $StateFile = Join-Path $BridgeHome ".bridge_u_last_agents.txt"
+    if (-not (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
+        return @()
+    }
+    $StateLine = [string](Get-Content -LiteralPath $StateFile -TotalCount 1)
+    $StateParts = $StateLine -split '\|', 2
+    if ($StateParts.Count -lt 2 -or $StateParts[0] -ine "selected") {
+        return @()
+    }
+    $Requested = @($StateParts[1] -split '\s+' | Where-Object { $_ })
+    $Configured = @(
+        (Get-Content -LiteralPath $AgentsJson -Raw | ConvertFrom-Json).agents |
+            Where-Object { $_.is_active -ne $false } |
+            ForEach-Object { [string]$_.name }
+    )
+    $Invalid = @($Requested | Where-Object { $_ -notin $Configured })
+    if ($Invalid.Count -gt 0) {
+        throw "Saved Agent selection contains unknown or inactive names: $($Invalid -join ', ')"
+    }
+    return $Requested
+}
+
+function Test-ApiGatewayWasEnabled {
+    param($Processes)
+
+    foreach ($Process in $Processes.Values) {
+        if ([string]$Process.Cmd -match '(?i)(?:^|\s)--api-gateway(?:\s|$)') {
+            return $true
+        }
+    }
+    return $false
+}
+
+function ConvertTo-NativeArgument {
+    param([string]$Value)
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+    return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
 function Start-Bridge {
     <#
     .DESCRIPTION
-        Start bridge-u-f using the launcher batch file.
+        Start HASHI directly through its fixed Python entry point.
     #>
-    param([switch]$ResumeMode)
+    param(
+        [switch]$ResumeMode,
+        [switch]$ApiGateway
+    )
     
     # Check if already running
     $procs = Get-BridgeProcesses
@@ -371,32 +422,45 @@ function Start-Bridge {
     # Clean up any stale files
     Remove-StaleFiles
     
-    # Build arguments
-    $args = @("--no-pause")
-    if ($ResumeMode) {
-        $args += "--resume-last"
+    $LaunchArguments = @(
+        $MainScript,
+        "--bridge-home", $BridgeHome
+    )
+    $ResumeAgents = @(Get-ResumeAgentNames -ResumeMode:$ResumeMode)
+    if ($ResumeMode -and $ResumeAgents.Count -gt 0) {
+        $LaunchArguments += "--agents"
+        $LaunchArguments += $ResumeAgents
+    }
+    if ($ApiGateway) {
+        $LaunchArguments += "--api-gateway"
     }
     
     Write-Log "Starting bridge-u-f..."
     
-    # Start the launcher
+    # Start the fixed entry point. The controller can exit while the child
+    # remains owned by the logged-in user's elevated scheduled-task session.
     try {
-        # Use a single cmd /c command string so bridge-u.bat receives args consistently.
-        $argString = $args -join ' '
-        $cmdLine = "`"$LauncherBat`" $argString"
-        $previousLegacyFlag = $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME
-        if (-not $previousLegacyFlag) {
-            $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = "1"
-        }
-        try {
-            Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cmdLine" -WorkingDirectory $ProjectDir
-        } finally {
-            if ($previousLegacyFlag) {
-                $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = $previousLegacyFlag
-            } else {
-                Remove-Item Env:\HASHI_ENABLE_LEGACY_FIXED_RUNTIME -ErrorAction SilentlyContinue
-            }
-        }
+        $LaunchLogDir = Join-Path $BridgeHome "logs"
+        New-Item -ItemType Directory -Force -Path $LaunchLogDir | Out-Null
+        $LaunchStamp = [DateTimeOffset]::Now.ToString("yyyyMMdd_HHmmssfff")
+        $StdoutLog = Join-Path $LaunchLogDir "core_restart_$LaunchStamp.stdout.log"
+        $StderrLog = Join-Path $LaunchLogDir "core_restart_$LaunchStamp.stderr.log"
+        $ArgumentString = ($LaunchArguments | ForEach-Object {
+            ConvertTo-NativeArgument -Value ([string]$_)
+        }) -join ' '
+        $env:BRIDGE_HOME = $BridgeHome
+        $env:PYTHONUTF8 = "1"
+        $env:PYTHONIOENCODING = "utf-8"
+        $env:PYTHONPATH = $ProjectDir
+        $env:HASHI_ENABLE_LEGACY_FIXED_RUNTIME = "1"
+        $Launcher = Start-Process `
+            -FilePath $PythonExe `
+            -ArgumentList $ArgumentString `
+            -WorkingDirectory $ProjectDir `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $StdoutLog `
+            -RedirectStandardError $StderrLog `
+            -PassThru
         
         # Wait for startup
         for ($i = 0; $i -lt 30; $i++) {
@@ -406,9 +470,13 @@ function Start-Bridge {
                 Write-Log "Bridge-u-f started ($($procs.Count) processes)" -Level "OK"
                 return $true
             }
+            if ($Launcher.HasExited) {
+                Write-Log "Bridge-u-f launcher exited with code $($Launcher.ExitCode). stdout=$StdoutLog stderr=$StderrLog" -Level "ERROR"
+                return $false
+            }
         }
         
-        Write-Log "Bridge-u-f did not start within 30 seconds" -Level "ERROR"
+        Write-Log "Bridge-u-f did not start within 30 seconds. stdout=$StdoutLog stderr=$StderrLog" -Level "ERROR"
         return $false
         
     } catch {
@@ -495,11 +563,13 @@ switch ($Action) {
     }
     "restart" {
         Write-Log "=== Restarting bridge-u-f ==="
+        $RestartProcesses = Get-BridgeProcesses
+        $RestartApiGateway = Test-ApiGatewayWasEnabled -Processes $RestartProcesses
         $stopOk = Stop-BridgeProcesses -ForceImmediate:$Force
         if ($stopOk) {
             Remove-StaleFiles
             Start-Sleep -Seconds 2
-            $startOk = Start-Bridge -ResumeMode:$Resume
+            $startOk = Start-Bridge -ResumeMode:$Resume -ApiGateway:$RestartApiGateway
             exit $(if ($startOk) { 0 } else { 1 })
         } else {
             Write-Log "Failed to stop existing instance" -Level "ERROR"

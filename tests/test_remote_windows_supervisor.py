@@ -150,6 +150,24 @@ def test_bridge_controller_does_not_swallow_process_termination_errors():
     assert "Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue" not in stop_block
 
 
+def test_bridge_controller_restarts_fixed_hidden_entrypoint_with_logs():
+    text = (ROOT / "bin/bridge_ctl.ps1").read_text(encoding="utf-8")
+    start_block = text.split("function Start-Bridge", 1)[1].split(
+        "function Show-Status", 1
+    )[0]
+    restart_block = text.split('"restart" {', 1)[1]
+
+    assert "$MainScript" in start_block
+    assert "-FilePath $PythonExe" in start_block
+    assert "-WindowStyle Hidden" in start_block
+    assert "-RedirectStandardOutput $StdoutLog" in start_block
+    assert "-RedirectStandardError $StderrLog" in start_block
+    assert "--bridge-home" in start_block
+    assert "$LauncherBat" not in start_block
+    assert "Test-ApiGatewayWasEnabled" in restart_block
+    assert "-ApiGateway:$RestartApiGateway" in restart_block
+
+
 @pytest.mark.parametrize("root_name,exit_code", [("hashi", 0), ("hashi space 测试", 7)])
 def test_registered_task_preserves_module_arguments_stderr_and_exit(tmp_path, root_name, exit_code):
     root = tmp_path / root_name
