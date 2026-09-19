@@ -69,6 +69,21 @@ FUNCTION_GENERATION_ENTRYPOINTS = (
     "tools.registry",
     "transports.chat_router",
     "transports.whatsapp",
+    "remote.main",
+)
+
+# Platform launchers execute outside the Python import graph but are part of
+# the Function lifecycle contract. A broad /reboot must reject a generation
+# whose Remote/restart path is absent, modified, or uncommitted.
+REQUIRED_FUNCTION_ASSETS = (
+    "bin/bridge-u.bat",
+    "bin/bridge_ctl.ps1",
+    "bin/hashi_remote_ctl.ps1",
+    "bin/hashi_remote_task_runner.ps1",
+    "bin/hashi_restart_ctl.ps1",
+    "bin/hashi_restart_task_runner.ps1",
+    "scripts/check_runtime_contract.py",
+    "scripts/resolve_instance_runtime.py",
 )
 
 _ASSET_EXCLUDED_PREFIXES = ("flow/runs/",)
@@ -471,8 +486,36 @@ def _order_source_entries(
 def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
     root = Path(code_root).resolve()
     publishable = _git_clean_tracked_paths(root)
+    full_product = (root / "orchestrator" / "runtime_app.py").is_file()
     assets: list[AssetEntry] = []
+    recorded: set[str] = set()
     skipped_optional = 0
+
+    def append_asset(source: Path, relative_text: str) -> None:
+        if source.is_symlink():
+            raise FunctionGenerationError(
+                f"Function asset must not be a symbolic link: {relative_text}"
+            )
+        mode = source.stat().st_mode
+        assets.append(
+            AssetEntry(
+                relative_path=relative_text,
+                sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                executable=bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)),
+            )
+        )
+        recorded.add(relative_text)
+
+    for relative_text in REQUIRED_FUNCTION_ASSETS:
+        source = root.joinpath(*PurePosixPath(relative_text).parts)
+        if not source.is_file():
+            if full_product:
+                raise FunctionGenerationError(
+                    f"Required Function lifecycle asset is missing: {relative_text}"
+                )
+            continue
+        append_asset(source, relative_text)
+
     for package in (*_ROOT_PACKAGES, "locales"):
         package_root = root / package
         if not package_root.is_dir():
@@ -482,6 +525,8 @@ def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
                 continue
             relative = source.relative_to(root)
             relative_text = relative.as_posix()
+            if relative_text in recorded:
+                continue
             if source.suffix in {".py", ".pyc", ".pyo"}:
                 continue
             if any(part in _ASSET_EXCLUDED_PARTS for part in relative.parts):
@@ -491,18 +536,7 @@ def _asset_entries(code_root: Path) -> tuple[AssetEntry, ...]:
             if publishable is not None and relative_text not in publishable:
                 skipped_optional += 1
                 continue
-            if source.is_symlink():
-                raise FunctionGenerationError(
-                    f"Function asset must not be a symbolic link: {relative_text}"
-                )
-            mode = source.stat().st_mode
-            assets.append(
-                AssetEntry(
-                    relative_path=relative_text,
-                    sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
-                    executable=bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)),
-                )
-            )
+            append_asset(source, relative_text)
     if skipped_optional:
         logger.warning(
             "Continuing Function startup without %s local or modified optional "

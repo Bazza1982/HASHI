@@ -42,24 +42,25 @@ cached mutable modules in Core under a different filename.
 
 ### Agent-only replacement
 
-`/reboot min`, a numbered target, `same` and `max` keep their existing target
-rules. They qualify real candidate Agent Workers, close only selected route
-gates, drain, activate, atomically publish selected pointers and retire old
-Workers. Candidate failure resumes the old selected Workers; unselected Agents,
-shared services and Core remain online. No mode silently widens into a shared
-service replacement.
+`/reboot min`, a numbered target, and an explicit `group` qualify real candidate
+Agent Workers, close only selected route gates, drain, activate, atomically
+publish selected pointers and retire old Workers. Candidate failure resumes the
+old selected Workers; unselected Agents, shared services and Core remain online.
+No malformed or targeted request silently widens into shared replacement.
 
 Agent updates can adopt new models, effort choices, commands and execution code
 without replacing the shared Functions process. Shared views (for example the
 model API catalogue or terminal display) retain their own installed generation
 until an explicitly authorized shared replacement.
 
-### Shared Functions replacement
+### Whole-Function replacement
 
-The local operator entry is `python main.py --replace-functions`, using the
-normal `--bridge-home` when needed. It submits a request; acceptance is not a
-completion receipt. This is a broad operational action requiring the user's
-scope, just like reboot. It never authorizes itself from a code-edit request.
+`/reboot same` and `/reboot max` are the normal broad entries. They submit one
+durable request to the already-running Core handoff protocol; acceptance is not
+a completion receipt. `python main.py --replace-functions`, using the normal
+`--bridge-home` when needed, remains an operator recovery entry to the same
+protocol. These are broad operational actions requiring the user's scope; they
+never authorize themselves from a code-edit request.
 
 1. Qualify and hash the complete candidate closure and assets out of process.
 2. Verify the artifact and prepare a new shared process without binding ports
@@ -72,8 +73,11 @@ scope, just like reboot. It never authorizes itself from a code-edit request.
 5. Close the old shared process and its Agent Workers; retain the Core PID and
    instance lock. Start the candidate from its pinned artifact, with exactly the
    previously running Agent set and preserved Telegram offsets.
-6. Commit the replacement and reopen intake. A later observability/transport
-   error is a post-commit fault, not a claim that the old generation resumed.
+6. Commit the replacement and reopen intake. The successor verifies every
+   running Agent Worker and reloads enabled Remote from current source. Only
+   then does the broad reboot receipt become successful. A later
+   observability/transport error is a post-commit fault, not a claim that the
+   old generation resumed.
 
 Preparation failure leaves the original shared PID unchanged. Startup failure
 before commit restores the previous shared artifact and each Agent's own
@@ -82,10 +86,10 @@ Durable Session, journal, schedule, configuration and Memory+ stores stay in the
 instance home. A failed rollback is reported as failed, never as successful
 recovery. This mechanism does not reverse an incompatible database migration.
 
-Shared replacement has a service gap while processes and listeners transfer;
+Whole-Function replacement has a service gap while processes and listeners transfer;
 it is **not zero downtime**, and existing streaming/client connections may need
-to reconnect. It does not cold-restart Core. Keep normal feature updates scoped
-to the relevant Agent whenever the shared service itself has not changed.
+to reconnect. It does not cold-restart Core. Keep Agent-local feature updates
+targeted whenever shared Functions and Remote do not need adoption.
 
 `state/instance/kernel.json` records Core PID, shared PID, shared generation and
 outcome. `replacement-<request-id>.json` records completion. Backend API health

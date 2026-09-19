@@ -139,9 +139,10 @@ The Windows helper (`tools.windows_helper` and
 modules are excluded from the in-process function generation and are launched
 with their own declared `uv` dependency set.
 
-Shared Function managers and services retain identity during Agent-only `/reboot`.
-They are owned by a separately replaceable Function process, not by Core. The
-explicit shared handoff keeps Core/lock identity but has a service gap; see
+Shared Function managers and services retain identity during a targeted Agent
+Worker reboot. They are owned by a separately replaceable Function process, not
+by Core. Broad `/reboot same|max` uses the existing shared handoff, keeps the
+Core/lock identity, and has a service gap; see
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md). Ordinary product changes never
 require moving these owners back into the long-lived Core process.
 
@@ -180,8 +181,8 @@ protected paths change.
 ## Layer 2: HASHI Functions
 
 Purpose: replaceable product behavior in shared or per-Agent Function processes.
-Agent behavior changes through a Worker `/reboot`; shared services require the
-separate, explicitly scoped shared handoff.
+Agent behavior changes through a targeted Worker `/reboot`; shared services and
+enabled Remote adopt through the broad `/reboot same|max` scope.
 
 Examples:
 
@@ -196,10 +197,12 @@ Examples:
 Rules:
 
 - Feature work should land here by default.
-- Every function-layer change must be adoptable through `/reboot min` for one
-  Agent. `/reboot max` may also adopt it, but must never be a prerequisite.
-- A function change without a verified targeted adoption path is incomplete
-  and must not be promoted.
+- Every non-Core function-layer change must be adoptable through `/reboot`.
+  Agent-local changes should use `/reboot min`; shared Functions or Remote
+  changes use `/reboot same|max`. A cold Core restart is never their adoption
+  path.
+- A function change without a verified adoption path at its actual owner scope
+  is incomplete and must not be promoted.
 - Optional or native Function dependencies must run in a replaceable sidecar
   or another explicitly isolated Function environment. Installing them into a
   running Core interpreter is forbidden: it invalidates hot adoption and must
@@ -207,7 +210,8 @@ Rules:
   restart.
 - A targeted reboot must never be widened or rejected because class members,
   signatures, fields, or other valid Python interfaces changed. Only an
-  explicit `same` or `max` request may select multiple Agents.
+  explicit `group` request may select multiple Agent routes without replacing
+  shared Functions. `same` and `max` are explicit whole-Function scopes.
 - Workers may request a narrow shared capability through versioned JSON IPC; they
   may not receive or mutate Core Python objects.
 - New behavior should be modular and swappable rather than added to stable
@@ -313,9 +317,9 @@ existence, is authoritative. This avoids the unlock/delete inode race.
 
 ## Function-change contract
 
-Tracked Agent behavior should be usable after `/reboot` whenever the process
-bootstrap contract itself did not change. Shared-service changes use the broad
-handoff defined in the Minimal Core decision; they do not widen `/reboot`:
+Tracked Function behavior must be usable after `/reboot` whenever the protected
+Core/bootstrap contract itself did not change. Targeted and broad scopes are
+explicit; malformed or targeted input never widens into a shared handoff:
 
 1. Resolve the requested lifecycle scope once; targeted modes contain exactly
    one immutable target and malformed input never falls back to all.
@@ -331,8 +335,16 @@ handoff defined in the Minimal Core decision; they do not widen `/reboot`:
 9. Open the gates together, publish topology, and retire the old Workers.
 10. If anything before pointer commit fails, terminate every candidate, resume
     the prior Workers, and reopen the same routes.
-11. Keep Core PID, instance lock, runtime fingerprint, shared Function managers, Backend API,
-    API Gateway, scheduler, background jobs and unselected Agent handles intact.
+11. For targeted scopes, keep Core PID, instance lock, runtime fingerprint,
+    shared Function managers, Backend API, API Gateway, scheduler, background
+    jobs and unselected Agent handles intact.
+12. For `same|max`, persist one whole-Function receipt and submit one request to
+    the existing Core handoff protocol only after the initiating operation has
+    released its shared drain guard. Core qualifies, drains, commits or rolls
+    back the shared generation without changing its PID or lock.
+13. The successor shared process verifies the Core receipt, shared PID and
+    generation, every running Agent Worker, and reloads enabled Remote from the
+    new source. It reports success only after all of that evidence passes.
 
 Cold process restart is not an allowed Function-change adoption or recovery
 path. Process bootstrap, runtime policy, generic process control and native supervision
@@ -463,7 +475,9 @@ HASHI should remove or archive:
 
 Deletion must be done through a separate audit pass so external WatchTower
 rescue clients are not removed accidentally. The normal `/restart` command is
-not one of those clients; it uses the instance's own supervised HASHI Remote.
+not one of those clients; it uses the instance's running authenticated HASHI
+Remote and an exact-instance lifecycle actuator where a Windows privilege
+boundary requires one.
 
 ## Pull-Safety Requirement
 
@@ -484,7 +498,9 @@ Changes that touch these boundaries require focused checks:
 
 - protected Core touched: explicit major-version authorization + version bump
   + `core-change-approved` label + matching independent review record;
-- function layer touched: isolated probe plus `/reboot min` Worker switch;
+- Agent-local function layer touched: isolated probe plus `/reboot min` Worker
+  switch; shared/Remote function layer touched: broad handoff tests for
+  `/reboot same|max`;
 - platform config touched: at least one WSL/Windows/macOS-relevant fixture;
 - instance config touched: migration test preserving existing local values;
 - port allocation touched: collision, persistence, and legacy migration tests.

@@ -298,12 +298,21 @@ function Stop-BridgeProcesses {
     # Force kill
     Write-Log "Force killing processes..."
     $procs = Get-BridgeProcesses  # Refresh list
+    $killFailures = @()
     foreach ($procId in $procs.Keys) {
         $info = $procs[$procId]
         Write-Log "  Killing PID $procId ($($info.Name))"
         try {
-            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-        } catch {}
+            Stop-Process -Id $procId -Force -ErrorAction Stop
+        } catch {
+            $StillAlive = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            if ($StillAlive) {
+                $killFailures += "PID $procId ($($_.Exception.Message))"
+                Write-Log "  Failed to kill PID $procId`: $($_.Exception.Message)" -Level "ERROR"
+            } else {
+                Write-Log "  PID $procId exited before forced termination completed."
+            }
+        }
     }
     
     Start-Sleep -Seconds 2
@@ -312,6 +321,10 @@ function Stop-BridgeProcesses {
     $remaining = Get-BridgeProcesses
     if ($remaining.Count -gt 0) {
         Write-Log "WARNING: $($remaining.Count) processes still running after kill" -Level "WARN"
+        return $false
+    }
+    if ($killFailures.Count -gt 0) {
+        Write-Log "Process termination reported errors: $($killFailures -join '; ')" -Level "ERROR"
         return $false
     }
     

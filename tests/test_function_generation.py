@@ -299,11 +299,27 @@ def test_function_generation_has_explicit_cold_core_entrypoints():
         "orchestrator.admin_local_testing",
         "tools.registry",
         "transports.whatsapp",
+        "remote.main",
     } <= set(FUNCTION_GENERATION_ENTRYPOINTS)
     assert "adapters.registry" not in FUNCTION_GENERATION_ENTRYPOINTS
     assert "orchestrator.telegram_delivery_failover" not in (
         FUNCTION_GENERATION_ENTRYPOINTS
     )
+
+
+def test_full_product_generation_requires_lifecycle_assets(tmp_path):
+    package = tmp_path / "orchestrator"
+    package.mkdir()
+    (package / "runtime_app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    with pytest.raises(
+        FunctionGenerationError,
+        match="Required Function lifecycle asset is missing: bin/bridge-u.bat",
+    ):
+        build_source_manifest(
+            ["orchestrator.runtime_app"],
+            code_root=tmp_path,
+        )
 
 
 def test_default_hot_probe_does_not_seed_from_core_loaded_modules(monkeypatch):

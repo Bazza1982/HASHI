@@ -1,5 +1,11 @@
 # HASHI Remote Side Program Upgrade Plan
 
+> Historical plan note (2026-09-19): statements below that equate
+> `remote_supervisor.mode=child` with an invalid restart provider are
+> superseded by `HASHI3_FUNCTION_ADOPTION_AND_REMOTE_RESTART_2026-09-19.md`.
+> Restart authority comes from live authentication, trust, capability, and
+> exact instance ownership; launch mode remains operational evidence only.
+
 ## Executive Summary
 
 Hashi Remote should become a first-class side program for HASHI: a small,

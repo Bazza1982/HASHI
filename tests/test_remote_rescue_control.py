@@ -600,21 +600,39 @@ def test_windows_restart_uses_only_explicit_configured_service_target(
     assert command[-2:] == ["-ServiceName", "HASHI_TEST"]
 
 
-def test_windows_restart_falls_back_without_explicit_service_target(
+def test_windows_restart_uses_fixed_actuator_without_service_target(
     tmp_path,
     monkeypatch,
 ):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "bridge_ctl.ps1").write_text("# fallback\n", encoding="utf-8")
+    (bin_dir / "hashi_restart_ctl.ps1").write_text("# actuator\n", encoding="utf-8")
     (bin_dir / "hashi_service_ctl.ps1").write_text("# service\n", encoding="utf-8")
     _client(tmp_path, max_level=AuthLevel.L3_RESTART)
     monkeypatch.setattr(remote_server.platform, "system", lambda: "Windows")
 
     command = remote_server._hashi_restart_command()
 
-    assert "bridge_ctl.ps1" in " ".join(command)
+    assert "hashi_restart_ctl.ps1" in " ".join(command)
+    assert "trigger" in command
+    assert command[-2:] == ["-HashiRoot", str(tmp_path)]
     assert "hashi_service_ctl.ps1" not in " ".join(command)
+
+
+def test_windows_restart_keeps_bridge_controller_as_legacy_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "bridge_ctl.ps1").write_text("# fallback\n", encoding="utf-8")
+    _client(tmp_path, max_level=AuthLevel.L3_RESTART)
+    monkeypatch.setattr(remote_server.platform, "system", lambda: "Windows")
+
+    command = remote_server._hashi_restart_command()
+
+    assert "bridge_ctl.ps1" in " ".join(command)
 
 
 def test_windows_service_restart_launcher_avoids_detached_process(
@@ -667,6 +685,10 @@ def test_windows_service_restart_launcher_avoids_detached_process(
     [
         (
             ["powershell.exe", "-File", "C:/HASHI/bin/hashi_service_ctl.ps1"],
+            False,
+        ),
+        (
+            ["powershell.exe", "-File", "C:/HASHI/bin/hashi_restart_ctl.ps1"],
             False,
         ),
         (

@@ -20,6 +20,7 @@ class RemoteSupervisorIdentity:
     instance_slug: str
     systemd_service_name: str
     windows_task_name: str
+    windows_restart_task_name: str
     source: str
     remote_port: int | None
     display_name: str | None
@@ -121,6 +122,7 @@ def resolve_supervisor_identity(
         instance_slug=slug,
         systemd_service_name=f"hashi-remote-{slug}.service",
         windows_task_name=f"HashiRemote-{slug}",
+        windows_restart_task_name=f"HashiRestart-{slug}",
         source=source,
         remote_port=configured_remote_port(
             resolved_root,

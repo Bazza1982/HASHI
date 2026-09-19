@@ -14,10 +14,11 @@ retry, model, command or presentation policy. See
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
 [Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 
-`/reboot` still replaces only Agent Workers. It does not replace shared Functions
-or Core. This feature changes both shared Functions and Agent command Functions;
-a running old shared generation will not acquire the new acknowledgement RPC
-from an Agent-only reboot. The planned operator cold start adopts both together.
+Targeted `/reboot min`, numbered, and group scopes replace only selected Agent
+Workers. Broad `/reboot same|max` replaces shared Functions and every running
+Agent Worker through the existing Core handoff, then reloads enabled Remote.
+Neither scope replaces Core. This supersedes the original Agent-only limitation;
+see [Function Adoption and Remote Restart](HASHI3_FUNCTION_ADOPTION_AND_REMOTE_RESTART_2026-09-19.md).
 
 ## Observable contract
 
@@ -44,6 +45,10 @@ from an Agent-only reboot. The planned operator cold start adopts both together.
 | `rolled_back` | Cutover failed; every previous Worker resumed and passed readiness | Original state restored |
 | `online` | Old PID exited; new PID differs; exact Agent/runtime/generation reports ACTIVE, accepting, backend ready and startup successful | Selected Agents are verified online |
 | `unconfirmed` | Observation was interrupted, a rollback was incomplete, or a committed switch lacks verified readiness | Result must not be claimed as success or rollback |
+
+Broad receipts additionally persist the shared request identity, old/new shared
+process evidence, committed generation, per-Worker evidence, and Remote adoption
+result. A Core handoff receipt alone is not broad reboot success.
 
 The compatibility `status` field remains for existing clients, while
 `lifecycle_state` carries the precise state above. Each committed/final receipt
@@ -100,11 +105,12 @@ file atomically. Old completed delivery records may be pruned. Pending records
 are never discarded to admit a new request; full or invalid storage rejects a
 new reboot without interrupting healthy services.
 
-On shared-process recovery, inherited accepted/running receipts become
-unconfirmed. Pending terminal notices are retried within their existing budget
-and labeled as delayed historical results. Newly accepted work in the current
-process is not mistaken for an interrupted previous operation. Recovery does
-not re-execute a reboot or infer its outcome merely because an Agent is online.
+On shared-process recovery, an inherited broad receipt with a published handoff
+request remains active so the successor can reconcile Core, Worker, and Remote
+evidence. Other inherited accepted/running receipts become unconfirmed. Pending
+terminal notices are retried within their existing budget and labeled as delayed
+historical results. Recovery does not rerun a targeted reboot or infer success
+merely because an Agent is online.
 
 `/reboot`, `/reboot status` and the refresh button show the latest receipt for
 the same authenticated actor, frontend, original chat and thread. Another Agent in the

@@ -55,7 +55,22 @@ def render_notice(
         if status == "failed":
             status = "restored" if record.get("restored") else "unavailable"
     key = "reboot.notice." + status
-    if total_count == 1 and status in {"starting", "online", "succeeded"}:
+    broad = mode in {"same", "max"}
+    if broad and status in {
+        "starting",
+        "candidate_rejected",
+        "committed",
+        "rolled_back",
+        "online",
+        "succeeded",
+        "partial",
+        "rejected",
+        "restored",
+        "unavailable",
+        "unconfirmed",
+    }:
+        key += "_broad"
+    elif total_count == 1 and status in {"starting", "online", "succeeded"}:
         key += "_single"
     text = ui_language.tr(
         key,

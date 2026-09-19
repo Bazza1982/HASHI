@@ -1,5 +1,11 @@
 # HASHI Remote Always-On Secure Upgrade Plan
 
+> Historical plan note (2026-09-19): any launch-mode eligibility assertion in
+> this plan is superseded by
+> `HASHI3_FUNCTION_ADOPTION_AND_REMOTE_RESTART_2026-09-19.md`. A running child
+> Remote is not disqualified from `/restart`; live trust, capability, and exact
+> instance ownership are the authorization boundary.
+
 ## Executive Summary
 
 This plan upgrades Hashi Remote into an always-on, secure, OS-supervised side

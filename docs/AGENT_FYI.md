@@ -28,8 +28,9 @@ Authorization flags only record approval; they never create it. Do not move
 policy into Core or duplicate registries and state writers.
 
 Source, artifacts, clients, Workers, and delivery are separate facts.
-`/reboot min` replaces one Agent Worker; shared replacement is broader. Claim
-adoption only after the active generation is verified. Locked runtime packages
+`/reboot min` replaces one Agent Worker; `/reboot same|max` replaces shared
+Functions, all running Agent Workers, and enabled Remote while retaining Core.
+Claim adoption only after every active generation is verified. Locked runtime packages
 must match exactly; unrelated extra packages alone must not block `/reboot`.
 Optional local assets never block startup. Failed candidates reuse a compatible
 verified artifact; rejected bytes never run. Reboots report start/final outcome.
@@ -42,9 +43,10 @@ Agent tools cannot write authoritative live Core paths, mutate the live Python
 environment, read instance secrets, kill the current Core PID, or raw-control
 the current HASHI service. Workzones and explicitly selected development
 environments remain writable; use supported `/reboot` and `/restart` paths.
-Windows service restart uses only the exact service in local policy and
-start/stop-only permission. Success requires a different healthy Core PID plus
-matching identity, runtime, and Function generation; launch is not success.
+Windows restart uses an exact service in local policy or the per-instance fixed
+restart actuator. Remote remains Limited; only the no-argument actuator runs
+Highest. Success requires a different healthy Core PID plus matching identity,
+runtime, and Function generation; launch is not success.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
 ## Configuration, identity, and persistence
@@ -209,8 +211,9 @@ re-plan when unavailable. Prefer `log_query` for logs. Agents work foreground;
 only explicit user `/bg` grants `background_job_start` for that request.
 Tests prove scope, not live adoption; preserve user work and report failures.
 
-Remote reload preserves Core. Windows `/restart` passes identity/API port to its
-Limited `L3_RESTART` task. It permits approved adoption/warnings but requires
+Broad `/reboot` reloads enabled Remote and preserves Core. `/restart` accepts any
+running authenticated Remote with `L3_RESTART`; child versus supervised mode is
+not an authorization gate. It permits approved adoption/warnings but requires
 stable runtime/local health. `request_diagnostics` only reads state/effects.
 
 HCC is optional, non-authoritative PCM context. `/hcc` controls injection;
