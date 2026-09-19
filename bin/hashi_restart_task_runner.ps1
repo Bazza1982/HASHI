@@ -86,8 +86,10 @@ for ($Attempt = 0; $Attempt -lt 90; $Attempt++) {
     $RuntimeTask = Get-ScheduledTask -TaskName $RuntimeTaskName -ErrorAction Stop
     if ([string]$RuntimeTask.State -ne "Running") {
         $RuntimeInfo = Get-ScheduledTaskInfo -TaskName $RuntimeTaskName -ErrorAction SilentlyContinue
-        Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Fixed HASHI runtime task exited before readiness; result=$($RuntimeInfo.LastTaskResult)"
-        exit 1
+        if ($null -eq $RuntimeInfo -or [int64]$RuntimeInfo.LastTaskResult -ne 0) {
+            Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value "Fixed HASHI runtime task failed before readiness; result=$($RuntimeInfo.LastTaskResult)"
+            exit 1
+        }
     }
 }
 

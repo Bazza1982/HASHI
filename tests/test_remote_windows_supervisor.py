@@ -165,13 +165,14 @@ def test_restart_runner_stops_core_then_starts_separate_runtime_task(tmp_path):
     result = _powershell(f"""
 $ErrorActionPreference = 'Stop'
 $global:RuntimeState = 'Ready'
+$global:HealthCalls = 0
 function Get-ScheduledTask {{
     param($TaskName, $ErrorAction)
     [pscustomobject]@{{State=$global:RuntimeState}}
 }}
 function Start-ScheduledTask {{
     param($TaskName, $ErrorAction)
-    $global:RuntimeState = 'Running'
+    $global:RuntimeState = 'Ready'
     Set-Content -LiteralPath {_ps_string(started)} -Value $TaskName
 }}
 function Stop-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RuntimeState = 'Ready' }}
@@ -179,7 +180,11 @@ function Get-ScheduledTaskInfo {{ [pscustomobject]@{{LastTaskResult=0}} }}
 function Start-Sleep {{ param($Seconds, $Milliseconds) }}
 function Invoke-RestMethod {{
     param($Uri, $Method, $TimeoutSec)
-    [pscustomobject]@{{ready=$true; status='ready'}}
+    $global:HealthCalls++
+    [pscustomobject]@{{
+        ready=($global:HealthCalls -ge 2)
+        status=$(if ($global:HealthCalls -ge 2) {{ 'ready' }} else {{ 'connecting' }})
+    }}
 }}
 & {_ps_string(ROOT / 'bin/hashi_restart_task_runner.ps1')} `
     -HashiRoot {_ps_string(root)} `
