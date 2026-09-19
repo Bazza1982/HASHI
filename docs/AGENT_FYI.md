@@ -30,23 +30,19 @@ policy into Core or duplicate registries and state writers.
 Source, artifacts, clients, Workers, and delivery are separate facts.
 `/reboot min` replaces one Agent Worker; `/reboot same|max` replaces shared
 Functions, all running Agent Workers, and enabled Remote while retaining Core.
-Claim adoption only after every active generation is verified. Locked runtime packages
-must match exactly; unrelated extra packages alone must not block `/reboot`.
-Optional local assets never block startup. Failed candidates reuse a compatible
-verified artifact; rejected bytes never run. Reboots report start/final outcome.
+Claim adoption only after every active generation is verified. Locked runtime
+packages must match; unrelated extras do not block. Rejected bytes never run.
 Only PID, identity, generation, and health evidence permits `online`; receipts
-distinguish accepted, rejected, committed, rolled back, and unconfirmed. See
+distinguish accepted, committed, rolled back, and unconfirmed. See
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
 [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
-Agent tools cannot write authoritative live Core paths, mutate the live Python
-environment, read instance secrets, kill the current Core PID, or raw-control
-the current HASHI service. Workzones and explicitly selected development
-environments remain writable; use supported `/reboot` and `/restart` paths.
-Windows restart uses an exact service in local policy or the per-instance fixed
-restart actuator. Remote remains Limited; only the no-argument actuator runs
-Highest. Success requires a different healthy Core PID plus matching identity,
-runtime, and Function generation; launch is not success.
+Agent tools cannot write live Core, mutate its Python, read secrets, kill Core,
+or raw-control its service. Workzones and selected development roots remain
+writable. Windows restart uses an exact service or per-instance fixed actuator;
+Remote stays Limited and only that no-argument actuator runs Highest. Success
+requires a different healthy Core PID with matching identity, runtime, and
+Function generation; launch is not success.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
 ## Configuration, identity, and persistence
@@ -58,11 +54,8 @@ model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
 the Function registry. An explicit Agent selection remains authoritative until
 that model is retired.
 
-An active Agent needs a PAO-started Worker; failure reports an error and leaves
-it inactive.
-
-Private EXP is ignored at `<bridge_home>/exp`; never publish it in Function
-artifacts or across instances.
+An active Agent needs a PAO-started Worker. Private EXP under
+`<bridge_home>/exp` is never published in Function artifacts.
 
 The open Tool wildcard grants permission, not capability. Workzones expose
 only exact enabled roots; mentioning a path does not authorize recursive
@@ -210,11 +203,6 @@ Use only authorized capabilities. Device actions need a same-instance Worker;
 re-plan when unavailable. Prefer `log_query` for logs. Agents work foreground;
 only explicit user `/bg` grants `background_job_start` for that request.
 Tests prove scope, not live adoption; preserve user work and report failures.
-
-Broad `/reboot` reloads enabled Remote and preserves Core. `/restart` accepts any
-running authenticated Remote with `L3_RESTART`; child versus supervised mode is
-not an authorization gate. It permits approved adoption/warnings but requires
-stable runtime/local health. `request_diagnostics` only reads state/effects.
 
 HCC is optional, non-authoritative PCM context. `/hcc` controls injection;
 `hcc-refresh` alone refreshes authorized sources after digest/provenance checks,

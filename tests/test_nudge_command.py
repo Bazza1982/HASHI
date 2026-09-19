@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -103,7 +103,7 @@ async def test_scheduler_nudge_default_max_is_unlimited(tmp_path):
 
 
 def test_should_fire_returns_missed_seconds_for_due_cron():
-    now = datetime(2026, 5, 18, 12, 0)
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
     last_run = (now - timedelta(days=1)).timestamp()
 
     missed_by = _should_fire("0 12 * * *", last_run, now)
