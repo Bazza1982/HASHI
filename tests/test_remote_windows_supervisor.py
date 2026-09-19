@@ -77,7 +77,7 @@ function Register-ScheduledTask {{
         Principal=$InputObject.Principal
     }}
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
 $global:RegisteredTasks | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(captured)}
 """)
 
@@ -277,7 +277,7 @@ function Register-ScheduledTask {{
     param($TaskName, $InputObject, [switch]$Force, $ErrorAction)
     if ([string]$ErrorAction -eq 'Stop') {{ throw 'REGISTRATION_DENIED' }}
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
 """)
     assert result.returncode != 0
     assert "Registered and enabled Remote supervisor" not in result.stdout
@@ -375,7 +375,7 @@ function Invoke-RestMethod {{
         }}
     }}
 }}
-& {_ps_string(staged / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(staged / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
 """)
 
     assert result.returncode == 0, result.stderr
@@ -420,7 +420,7 @@ function Stop-Process {{
     Add-Content -LiteralPath {_ps_string(stopped)} -Value $Id
     $global:RemoteRows = @($global:RemoteRows | Where-Object {{ [int]$_.ProcessId -ne $Id }})
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
 """)
     assert result.returncode == 0, result.stderr
     assert stopped.read_text(encoding="utf-8-sig").splitlines() == ["101", "100"]
@@ -471,7 +471,7 @@ function Invoke-RestMethod {{
     }}
 }}
 function Stop-Process {{ param([int]$Id, [switch]$Force) }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
 """)
     assert result.returncode == 0, result.stderr
     assert started.read_text(encoding="utf-8-sig").strip() == (
@@ -506,7 +506,7 @@ function Invoke-RestMethod {{
         }}
     }}
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} start -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -NoTls
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} start -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE' -NoTls
 """)
 
     assert result.returncode != 0
