@@ -511,6 +511,19 @@ class RebootManager:
             )
             handles = self.kernel._runtime_map()
             missing = [name for name in record["targets"] if name not in handles]
+            worker_generations = {
+                name: str(
+                    (record.get("workers", {}).get(name, {}) or {}).get("generation_id")
+                    or ""
+                )
+                for name in record["targets"]
+            }
+            missing.extend(
+                name
+                for name, generation in worker_generations.items()
+                if not generation
+            )
+            missing = list(dict.fromkeys(missing))
             evidence = {}
             try:
                 if not missing:
@@ -522,7 +535,7 @@ class RebootManager:
                                     self._replacement_worker_evidence(
                                         handles[name],
                                         record.get("workers", {}).get(name, {}),
-                                        expected_generation=generation_id,
+                                        expected_generation=worker_generations[name],
                                     )
                                     for name in record["targets"]
                                 )
@@ -553,7 +566,7 @@ class RebootManager:
                     reason="",
                     online=online,
                     workers=evidence,
-                    generations={name: generation_id for name in record["targets"]},
+                    generations=worker_generations,
                     shared_replacement=shared_result,
                 )
             else:
@@ -585,7 +598,6 @@ class RebootManager:
                 record.get("mode") not in BROAD_REBOOT_MODES
                 or record.get("status") != "succeeded"
                 or shared.get("status") != "not_requested"
-                or marker.get("expected_generation_id") != current_generation
                 or marker.get("old_shared_pid") == os.getpid()
             ):
                 continue
@@ -607,12 +619,12 @@ class RebootManager:
                 targets = list(record.get("targets") or ())
                 workers = record.get("workers") or {}
                 generations = record.get("generations") or {}
+                worker_generation = str(marker.get("expected_generation_id") or "")
                 if (
                     not targets
                     or min(targets) != marker.get("leader_agent")
                     or any(
-                        generations.get(name) != current_generation
-                        for name in targets
+                        generations.get(name) != worker_generation for name in targets
                     )
                 ):
                     raise ValueError("legacy broad receipt generation mismatch")
@@ -624,13 +636,13 @@ class RebootManager:
                         isinstance(pid, bool)
                         or not isinstance(pid, int)
                         or pid <= 0
-                        or evidence.get("generation_id") != current_generation
+                        or evidence.get("generation_id") != worker_generation
                         or evidence.get("online") is not True
                     ):
                         raise ValueError("legacy broad receipt evidence mismatch")
                     baselines[name] = {
                         "old_pid": pid,
-                        "generation_id": current_generation,
+                        "generation_id": worker_generation,
                     }
                 leader = baselines.get(str(marker.get("leader_agent"))) or {}
                 if leader.get("old_pid") != marker.get("worker_pid"):
@@ -970,8 +982,23 @@ class RebootManager:
                     "Reboot start notification failed (%s)", type(exc).__name__
                 )
             if str(restart.get("mode") or "same") in BROAD_REBOOT_MODES:
-                staged_shared = self._stage_shared_replacement(record)
-                result = True
+                # A whole-Function handoff deliberately restores the existing
+                # per-Agent Worker artifacts so live sessions survive the
+                # shared-process cutover. Qualify and switch those Workers
+                # first, then hand their new artifacts to the successor shared
+                # process. Shared and Worker manifests are different closures
+                # and therefore must not be asserted to have the same digest.
+                worker_result = await self._perform_restart(restart, record)
+                completed = self.receipts.get(record["id"])
+                if (
+                    worker_result
+                    and completed
+                    and completed.get("status") == "succeeded"
+                ):
+                    staged_shared = self._stage_shared_replacement(completed)
+                    result = True
+                else:
+                    result = False
             else:
                 result = await self._perform_restart(restart, record)
         except asyncio.CancelledError:

@@ -633,9 +633,12 @@ async def test_explicit_group_success_commits_every_route_and_then_retires_old_w
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["same", "max"])
-async def test_broad_reboot_submits_one_whole_function_replacement(tmp_path, mode):
+async def test_broad_reboot_switches_workers_before_whole_function_replacement(
+    tmp_path, mode
+):
     kernel = _Kernel()
     kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    candidates = kernel.queue_generation("b")
     manager = RebootManager(kernel, None)
 
     result = await manager.hot_restart({"mode": mode, "agent_name": "zelda"})
@@ -647,15 +650,18 @@ async def test_broad_reboot_submits_one_whole_function_replacement(tmp_path, mod
     assert record["shared_replacement"]["request_id"] == record["id"]
     request = json.loads(
         (
-            tmp_path
-            / "state"
-            / "instance"
-            / "kernel-requests"
-            / f"{record['id']}.json"
+            tmp_path / "state" / "instance" / "kernel-requests" / f"{record['id']}.json"
         ).read_text(encoding="utf-8")
     )
     assert request == {"id": record["id"]}
-    assert kernel.events == []
+    assert {
+        name: handle.client for name, handle in kernel._runtime_map().items()
+    } == candidates
+    assert record["generations"] == {
+        "zelda": "sha256:" + "b" * 64,
+        "sunny": "sha256:" + "b" * 64,
+    }
+    assert kernel.events.index("commit") < len(kernel.events)
 
 
 @pytest.mark.asyncio
@@ -665,22 +671,24 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
 ):
     old_kernel = _Kernel()
     old_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    old_kernel.queue_generation("b")
     old_manager = RebootManager(old_kernel, None)
     assert await old_manager.hot_restart({"mode": "max"})
     pending = old_manager.receipts.records()[-1]
 
-    generation = _Generation("a")
+    shared_generation = _Generation("a")
+    worker_generation = _Generation("b")
     new_kernel = _Kernel()
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    new_kernel.shared_generation_id = generation.manifest.generation_id
+    new_kernel.shared_generation_id = shared_generation.manifest.generation_id
     new_kernel.runtimes = []
     for index, name in enumerate(("zelda", "sunny"), start=1):
-        client = _Client(name, 200 + index, generation, new_kernel.events)
+        client = _Client(name, 300 + index, worker_generation, new_kernel.events)
         new_kernel.runtimes.append(
             AgentRuntimeHandle(
                 new_kernel,
                 client,
-                _metadata(name, client.pid, generation, telegram=True),
+                _metadata(name, client.pid, worker_generation, telegram=True),
             )
         )
 
@@ -688,12 +696,20 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
     (state_dir / "kernel-requests" / f"{pending['id']}.json").unlink()
     (state_dir / f"replacement-{pending['id']}.json").write_text(
         json.dumps(
-            {"ok": True, "generation_id": generation.manifest.generation_id}
+            {
+                "ok": True,
+                "generation_id": shared_generation.manifest.generation_id,
+            }
         ),
         encoding="utf-8",
     )
     remote_reload = AsyncMock(
-        return_value={"ok": True, "action": "remote_reloaded", "old_pid": 41, "new_pid": 42}
+        return_value={
+            "ok": True,
+            "action": "remote_reloaded",
+            "old_pid": 41,
+            "new_pid": 42,
+        }
     )
     monkeypatch.setattr(
         "orchestrator.reboot_manager.remote_lifecycle.reload_remote_for_reboot",
@@ -720,8 +736,14 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
         "reason": "",
     }
     assert all(record["online"].values())
-    assert {item["old_pid"] for item in record["workers"].values()} == {101, 102}
-    assert {item["new_pid"] for item in record["workers"].values()} == {201, 202}
+    assert {item["old_pid"] for item in record["workers"].values()} == {201, 202}
+    assert {item["new_pid"] for item in record["workers"].values()} == {301, 302}
+    assert set(record["generations"].values()) == {
+        worker_generation.manifest.generation_id
+    }
+    assert record["shared_replacement"]["generation_id"] == (
+        shared_generation.manifest.generation_id
+    )
     remote_reload.assert_awaited_once_with(tmp_path)
 
 
@@ -730,8 +752,10 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
     tmp_path,
     monkeypatch,
 ):
-    generation = _Generation("a")
-    generation_id = generation.manifest.generation_id
+    shared_generation = _Generation("a")
+    worker_generation = _Generation("b")
+    shared_generation_id = shared_generation.manifest.generation_id
+    worker_generation_id = worker_generation.manifest.generation_id
     legacy = RebootReceipts(tmp_path)
     record = legacy.create(
         source="zelda",
@@ -743,13 +767,13 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
         "zelda": {
             "old_pid": 101,
             "new_pid": 151,
-            "generation_id": generation_id,
+            "generation_id": worker_generation_id,
             "online": True,
         },
         "sunny": {
             "old_pid": 102,
             "new_pid": 152,
-            "generation_id": generation_id,
+            "generation_id": worker_generation_id,
             "online": True,
         },
     }
@@ -761,7 +785,10 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
         committed=True,
         online={"zelda": True, "sunny": True},
         workers=legacy_workers,
-        generations={"zelda": generation_id, "sunny": generation_id},
+        generations={
+            "zelda": worker_generation_id,
+            "sunny": worker_generation_id,
+        },
     )
     store_path = tmp_path / "state" / "instance" / "reboot-receipts.json"
     store = json.loads(store_path.read_text(encoding="utf-8"))
@@ -780,7 +807,7 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
                 "requested_at": 1000.0,
                 "old_shared_pid": 41,
                 "old_shared_generation_id": "sha256:" + "0" * 64,
-                "expected_generation_id": generation_id,
+                "expected_generation_id": worker_generation_id,
                 "leader_agent": "sunny",
                 "worker_pid": 152,
             }
@@ -788,25 +815,30 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
         encoding="utf-8",
     )
     state_dir.joinpath(f"replacement-{record['id']}.json").write_text(
-        json.dumps({"ok": True, "generation_id": generation_id}),
+        json.dumps({"ok": True, "generation_id": shared_generation_id}),
         encoding="utf-8",
     )
 
     new_kernel = _Kernel()
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    new_kernel.shared_generation_id = generation_id
+    new_kernel.shared_generation_id = shared_generation_id
     new_kernel.runtimes = []
     for index, name in enumerate(("zelda", "sunny"), start=1):
-        client = _Client(name, 200 + index, generation, new_kernel.events)
+        client = _Client(name, 200 + index, worker_generation, new_kernel.events)
         new_kernel.runtimes.append(
             AgentRuntimeHandle(
                 new_kernel,
                 client,
-                _metadata(name, client.pid, generation, telegram=True),
+                _metadata(name, client.pid, worker_generation, telegram=True),
             )
         )
     remote_reload = AsyncMock(
-        return_value={"ok": True, "action": "remote_reloaded", "old_pid": 51, "new_pid": 52}
+        return_value={
+            "ok": True,
+            "action": "remote_reloaded",
+            "old_pid": 51,
+            "new_pid": 52,
+        }
     )
     monkeypatch.setattr(
         "orchestrator.reboot_manager.remote_lifecycle.reload_remote_for_reboot",
@@ -823,6 +855,8 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
     assert promoted["shared_replacement"]["status"] == "committed"
     assert {item["old_pid"] for item in promoted["workers"].values()} == {151, 152}
     assert {item["new_pid"] for item in promoted["workers"].values()} == {201, 202}
+    assert set(promoted["generations"].values()) == {worker_generation_id}
+    assert promoted["shared_replacement"]["generation_id"] == shared_generation_id
     assert not marker_dir.joinpath(f"{record['id']}.json").exists()
     remote_reload.assert_awaited_once_with(tmp_path)
 
@@ -901,6 +935,7 @@ async def test_successor_records_remote_reload_exception_without_retry(
 ):
     old_kernel = _Kernel()
     old_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    old_kernel.queue_generation("b")
     old_manager = RebootManager(old_kernel, None)
     assert await old_manager.hot_restart({"mode": "max"})
     pending = old_manager.receipts.records()[-1]

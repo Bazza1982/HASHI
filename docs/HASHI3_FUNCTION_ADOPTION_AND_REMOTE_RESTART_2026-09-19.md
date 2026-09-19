@@ -14,13 +14,17 @@ Approved by the user on 2026-09-19:
 
 PAO owns reboot admission, durable receipts, and evidence reconciliation.
 Targeted `min`, numbered, and group scopes keep the per-Agent Worker transaction.
-Broad `same|max` records one request and invokes the existing protected-Core
-shared handoff. The successor shared process verifies the Core receipt, changed
-shared PID, committed generation, every running Agent Worker, and enabled Remote
-adoption before reporting success. The qualified generation includes the
-`remote.main` service closure and the fixed Windows Remote/restart launcher
-chain, so an absent, modified, or uncommitted lifecycle component is rejected
-before cutover.
+Broad `same|max` uses one operation and an ordered adoption: it first qualifies
+and atomically switches every running Agent Worker, then invokes the existing
+protected-Core shared handoff, and finally reloads enabled Remote. The successor
+shared process verifies the Core receipt, changed shared PID, committed shared
+generation, every running Agent Worker's independently qualified generation,
+and Remote adoption before reporting success. Shared Functions and Agent
+Workers intentionally have different manifest closures and generation digests;
+neither may be asserted equal to the other. The shared qualified generation
+includes the `remote.main` service closure and the fixed Windows Remote/restart
+launcher chain, so an absent, modified, or uncommitted lifecycle component is
+rejected before cutover.
 
 One compatibility bridge is required when the currently running shared
 generation predates whole-Function reboot semantics. Its newly qualified Agent

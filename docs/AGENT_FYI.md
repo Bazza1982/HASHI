@@ -30,6 +30,9 @@ policy into Core or duplicate registries and state writers.
 Source, artifacts, clients, Workers, and delivery are separate facts.
 `/reboot min` replaces one Agent Worker; `/reboot same|max` replaces shared
 Functions, all running Agent Workers, and enabled Remote while retaining Core.
+The broad order is Workers, shared Functions, then Remote. Shared and Worker
+manifests are separate closures with separate generation digests; never require
+their digests to match.
 Legacy Worker-only broad generations bridge once through the same Core handoff;
 receipt promotion waits for Core commit, never a cold restart.
 The bootstrap Worker keeps the legacy Agent-only asset closure; the Core-owned
