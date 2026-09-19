@@ -30,6 +30,8 @@ policy into Core or duplicate registries and state writers.
 Source, artifacts, clients, Workers, and delivery are separate facts.
 `/reboot min` replaces one Agent Worker; `/reboot same|max` replaces shared
 Functions, all running Agent Workers, and enabled Remote while retaining Core.
+Legacy Worker-only broad generations bridge once through the same Core handoff;
+receipt promotion waits for Core commit, never a cold restart.
 Claim adoption only after every active generation is verified. Locked runtime
 packages must match; unrelated extras do not block. Rejected bytes never run.
 Only PID, identity, generation, and health evidence permits `online`; receipts

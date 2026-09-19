@@ -14,6 +14,7 @@ from orchestrator.reboot_ui import render_notice
 from orchestrator import remote_lifecycle, runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
 from orchestrator.kernel_process import instance_runtime_dir, write_record
+from orchestrator.reboot_adoption_bridge import legacy_handoff_markers
 
 from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
@@ -382,6 +383,7 @@ class RebootManager:
             return
         moment = time.time() if now is None else now
         state_dir = self._runtime_state_dir()
+        self._promote_legacy_shared_replacements(state_dir)
         for record in self.receipts.records():
             shared = record.get("shared_replacement") or {}
             if (
@@ -564,6 +566,112 @@ class RebootManager:
                     workers=evidence,
                     shared_replacement={**shared_result, "status": "unconfirmed"},
                 )
+
+    def _promote_legacy_shared_replacements(self, state_dir: Path) -> None:
+        """Adopt a legacy broad receipt only after Core committed its handoff."""
+
+        current_generation = str(
+            getattr(self.kernel, "shared_generation_id", "") or ""
+        )
+        for marker_path, marker in legacy_handoff_markers(
+            self.kernel.paths.bridge_home
+        ):
+            operation_id = marker["operation_id"]
+            record = self.receipts.get(operation_id)
+            if record is None:
+                continue
+            shared = record.get("shared_replacement") or {}
+            if (
+                record.get("mode") not in BROAD_REBOOT_MODES
+                or record.get("status") != "succeeded"
+                or shared.get("status") != "not_requested"
+                or marker.get("expected_generation_id") != current_generation
+                or marker.get("old_shared_pid") == os.getpid()
+            ):
+                continue
+            replacement_path = state_dir / f"replacement-{operation_id}.json"
+            if not replacement_path.exists():
+                continue
+            try:
+                if replacement_path.stat().st_size > 4096:
+                    raise ValueError("oversized shared replacement receipt")
+                replacement = json.loads(
+                    replacement_path.read_text(encoding="utf-8")
+                )
+                if (
+                    not isinstance(replacement, dict)
+                    or replacement.get("ok") is not True
+                    or replacement.get("generation_id") != current_generation
+                ):
+                    continue
+                targets = list(record.get("targets") or ())
+                workers = record.get("workers") or {}
+                generations = record.get("generations") or {}
+                if (
+                    not targets
+                    or min(targets) != marker.get("leader_agent")
+                    or any(
+                        generations.get(name) != current_generation
+                        for name in targets
+                    )
+                ):
+                    raise ValueError("legacy broad receipt generation mismatch")
+                baselines = {}
+                for name in targets:
+                    evidence = workers.get(name) or {}
+                    pid = evidence.get("new_pid")
+                    if (
+                        isinstance(pid, bool)
+                        or not isinstance(pid, int)
+                        or pid <= 0
+                        or evidence.get("generation_id") != current_generation
+                        or evidence.get("online") is not True
+                    ):
+                        raise ValueError("legacy broad receipt evidence mismatch")
+                    baselines[name] = {
+                        "old_pid": pid,
+                        "generation_id": current_generation,
+                    }
+                leader = baselines.get(str(marker.get("leader_agent"))) or {}
+                if leader.get("old_pid") != marker.get("worker_pid"):
+                    raise ValueError("legacy bridge leader evidence mismatch")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                bridge_logger.error(
+                    "Legacy broad reboot promotion rejected: operation=%s error=%s",
+                    operation_id,
+                    exc,
+                )
+                continue
+
+            promoted = {
+                "status": "requested",
+                "request_id": operation_id,
+                "requested_at": marker["requested_at"],
+                "old_shared_pid": marker["old_shared_pid"],
+                "generation_id": None,
+                "remote": {},
+            }
+            self.receipts.update(
+                operation_id,
+                status="running",
+                phase="shared_replacement_requested",
+                lifecycle_state="accepted",
+                committed=False,
+                reason="",
+                workers=baselines,
+                shared_replacement=promoted,
+            )
+            try:
+                marker_path.unlink()
+            except OSError:
+                bridge_logger.warning(
+                    "Legacy reboot marker cleanup failed: operation=%s",
+                    operation_id,
+                )
+            bridge_logger.info(
+                "Legacy broad reboot receipt promoted after Core handoff: operation=%s",
+                operation_id,
+            )
 
     def start_delivery(self):
         if self.delivery_task is not None and not self.delivery_task.done():

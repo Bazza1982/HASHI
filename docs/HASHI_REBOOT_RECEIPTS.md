@@ -112,6 +112,14 @@ terminal notices are retried within their existing budget and labeled as delayed
 historical results. Recovery does not rerun a targeted reboot or infer success
 merely because an Agent is online.
 
+For the one-generation transition from legacy Worker-only `same|max`, a newly
+qualified deterministic leader Worker may publish the existing Core handoff only
+after the schema-1/2 receipt is terminal, committed, and online for every exact
+target. The successor does not promote that receipt to the current schema until
+Core has written a successful replacement receipt for the expected generation.
+This keeps pre-commit rollback compatible with the old shared process and avoids
+claiming that the first Worker switch was the complete broad reboot.
+
 `/reboot`, `/reboot status` and the refresh button show the latest receipt for
 the same authenticated actor, frontend, original chat and thread. Another Agent in the
 same instance can serve this query. The view separates outcome from delivery;

@@ -13,6 +13,7 @@ from orchestrator.function_worker_supervisor import (
     FunctionWorkerSupervisor,
 )
 from orchestrator.reboot_manager import RebootManager, _resolve_restart_targets
+from orchestrator.reboot_receipts import RebootReceipts
 
 
 class _Process:
@@ -722,6 +723,175 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
     assert {item["old_pid"] for item in record["workers"].values()} == {101, 102}
     assert {item["new_pid"] for item in record["workers"].values()} == {201, 202}
     remote_reload.assert_awaited_once_with(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commit(
+    tmp_path,
+    monkeypatch,
+):
+    generation = _Generation("a")
+    generation_id = generation.manifest.generation_id
+    legacy = RebootReceipts(tmp_path)
+    record = legacy.create(
+        source="zelda",
+        targets=["zelda", "sunny"],
+        display_names={"zelda": "Zelda", "sunny": "Sunny"},
+        mode="max",
+    )
+    legacy_workers = {
+        "zelda": {
+            "old_pid": 101,
+            "new_pid": 151,
+            "generation_id": generation_id,
+            "online": True,
+        },
+        "sunny": {
+            "old_pid": 102,
+            "new_pid": 152,
+            "generation_id": generation_id,
+            "online": True,
+        },
+    }
+    legacy.update(
+        record["id"],
+        status="succeeded",
+        phase="finished",
+        lifecycle_state="online",
+        committed=True,
+        online={"zelda": True, "sunny": True},
+        workers=legacy_workers,
+        generations={"zelda": generation_id, "sunny": generation_id},
+    )
+    store_path = tmp_path / "state" / "instance" / "reboot-receipts.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    store["schema"] = 2
+    store["records"][0].pop("shared_replacement")
+    store_path.write_text(json.dumps(store), encoding="utf-8")
+
+    state_dir = tmp_path / "state" / "instance"
+    marker_dir = state_dir / "legacy-reboot-handoffs"
+    marker_dir.mkdir()
+    marker_dir.joinpath(f"{record['id']}.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "operation_id": record["id"],
+                "requested_at": 1000.0,
+                "old_shared_pid": 41,
+                "old_shared_generation_id": "sha256:" + "0" * 64,
+                "expected_generation_id": generation_id,
+                "leader_agent": "sunny",
+                "worker_pid": 152,
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_dir.joinpath(f"replacement-{record['id']}.json").write_text(
+        json.dumps({"ok": True, "generation_id": generation_id}),
+        encoding="utf-8",
+    )
+
+    new_kernel = _Kernel()
+    new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    new_kernel.shared_generation_id = generation_id
+    new_kernel.runtimes = []
+    for index, name in enumerate(("zelda", "sunny"), start=1):
+        client = _Client(name, 200 + index, generation, new_kernel.events)
+        new_kernel.runtimes.append(
+            AgentRuntimeHandle(
+                new_kernel,
+                client,
+                _metadata(name, client.pid, generation, telegram=True),
+            )
+        )
+    remote_reload = AsyncMock(
+        return_value={"ok": True, "action": "remote_reloaded", "old_pid": 51, "new_pid": 52}
+    )
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.remote_lifecycle.reload_remote_for_reboot",
+        remote_reload,
+    )
+    monkeypatch.setattr("orchestrator.reboot_manager.os.getpid", lambda: 42)
+
+    successor = RebootManager(new_kernel, None)
+    successor.receipts.recover()
+    await successor.reconcile_shared_replacements(now=1001.0)
+
+    promoted = successor.receipts.get(record["id"])
+    assert promoted["status"] == "succeeded"
+    assert promoted["shared_replacement"]["status"] == "committed"
+    assert {item["old_pid"] for item in promoted["workers"].values()} == {151, 152}
+    assert {item["new_pid"] for item in promoted["workers"].values()} == {201, 202}
+    assert not marker_dir.joinpath(f"{record['id']}.json").exists()
+    remote_reload.assert_awaited_once_with(tmp_path)
+
+
+def test_legacy_broad_receipt_is_not_promoted_before_core_commit(
+    tmp_path,
+    monkeypatch,
+):
+    generation_id = "sha256:" + "a" * 64
+    legacy = RebootReceipts(tmp_path)
+    record = legacy.create(
+        source="sunny",
+        targets=["sunny"],
+        display_names={"sunny": "Sunny"},
+        mode="same",
+    )
+    legacy.update(
+        record["id"],
+        status="succeeded",
+        phase="finished",
+        committed=True,
+        online={"sunny": True},
+        workers={
+            "sunny": {
+                "old_pid": 101,
+                "new_pid": 151,
+                "generation_id": generation_id,
+                "online": True,
+            }
+        },
+        generations={"sunny": generation_id},
+    )
+    store_path = tmp_path / "state" / "instance" / "reboot-receipts.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    store["schema"] = 2
+    store["records"][0].pop("shared_replacement")
+    store_path.write_text(json.dumps(store), encoding="utf-8")
+    marker_dir = tmp_path / "state" / "instance" / "legacy-reboot-handoffs"
+    marker_dir.mkdir()
+    marker = marker_dir / f"{record['id']}.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "operation_id": record["id"],
+                "requested_at": 1000.0,
+                "old_shared_pid": 41,
+                "old_shared_generation_id": "sha256:" + "0" * 64,
+                "expected_generation_id": generation_id,
+                "leader_agent": "sunny",
+                "worker_pid": 151,
+            }
+        ),
+        encoding="utf-8",
+    )
+    kernel = _Kernel(names=("sunny",))
+    kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    kernel.shared_generation_id = generation_id
+    monkeypatch.setattr("orchestrator.reboot_manager.os.getpid", lambda: 42)
+
+    manager = RebootManager(kernel, None)
+    manager.receipts.recover()
+    manager._promote_legacy_shared_replacements(tmp_path / "state" / "instance")
+
+    unchanged = json.loads(store_path.read_text(encoding="utf-8"))
+    assert unchanged["schema"] == 2
+    assert unchanged["records"][0]["status"] == "succeeded"
+    assert "shared_replacement" not in unchanged["records"][0]
+    assert marker.exists()
 
 
 @pytest.mark.asyncio

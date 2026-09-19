@@ -345,6 +345,11 @@ explicit; malformed or targeted input never widens into a shared handoff:
 13. The successor shared process verifies the Core receipt, shared PID and
     generation, every running Agent Worker, and reloads enabled Remote from the
     new source. It reports success only after all of that evidence passes.
+14. A legacy shared generation that implements broad reboot as Worker-only may
+    bootstrap exactly once through a deterministic newly qualified Worker. It
+    publishes the same Core request only after the legacy Worker receipt is
+    fully successful; the successor upgrades that receipt only after Core commit,
+    preserving rollback compatibility with the legacy shared generation.
 
 Cold process restart is not an allowed Function-change adoption or recovery
 path. Process bootstrap, runtime policy, generic process control and native supervision

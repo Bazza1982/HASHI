@@ -22,6 +22,16 @@ adoption before reporting success. The qualified generation includes the
 chain, so an absent, modified, or uncommitted lifecycle component is rejected
 before cutover.
 
+One compatibility bridge is required when the currently running shared
+generation predates whole-Function reboot semantics. Its newly qualified Agent
+Workers wait for the legacy `same|max` Worker transaction to finish; the
+deterministic target leader then publishes one request through the existing Core
+handoff protocol. The successor PAO promotes the legacy receipt only after the
+Core replacement receipt proves commit. It uses the first replacement's Worker
+PIDs as the second replacement's baselines, then performs the same shared PID,
+generation, Worker, and Remote checks. A failed candidate never upgrades the
+legacy receipt store or prevents the old shared generation from recovering.
+
 Frontend Connector/Remote Functions own restart provider discovery and the
 fixed restart launcher. A running Remote with an authenticated `rescue_restart`
 capability is valid in child or supervised mode. On Windows the network-facing
