@@ -51,6 +51,13 @@ and `docs/TESTING_POLICY.md`. For command/UI work also read
   user's scope. If forbidden, finish code and offline checks and explicitly leave
   live adoption unverified. Source changes, qualified artifacts, and running Worker
   generations are separate facts; report which was checked.
+- When the current user asks to "run essential live test", use
+  `docs/HASHI_FRONTEND_LIVE_ACCEPTANCE.md` and the versioned suite manifest. This
+  means real interaction through the named external frontend, not only automated
+  tests. Resolve the exact checkout, instance, and Agent before acting; do not infer
+  a broader target or future authorization. Keep screenshots, runtime receipts,
+  source/runtime snapshots, and operator observations distinct, and require every
+  mandatory item plus the final Core/source invariant to pass.
 - Update the owning decision and FYI when behavior changes. Record approval,
   implementation and live verification separately, scoped to branch/instance.
 
