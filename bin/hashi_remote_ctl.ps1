@@ -189,6 +189,10 @@ function Register-HashiRemoteSupervisor {
     $Settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
+        -DontStopOnIdleEnd `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew `
         -RestartCount 999 `
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -Priority 4

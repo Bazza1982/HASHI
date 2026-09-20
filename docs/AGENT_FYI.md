@@ -5,11 +5,10 @@ This is orientation, not a task queue, authorization, or proof of adoption.
 
 ## Authority, ownership, and engineering
 
-Before changing HASHI, read [AGENTS.md](../AGENTS.md),
-[Architecture](../ARCHITECTURE.md),
+Before changing HASHI, read [AGENTS.md](../AGENTS.md), [Architecture](../ARCHITECTURE.md),
 [runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md), the
-[UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), and
-[testing policy](TESTING_POLICY.md). Old examples and approvals grant nothing.
+[UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), and [testing policy](TESTING_POLICY.md).
+Old examples and approvals grant nothing.
 
 - **PCM** owns Persona, Context, Memory, authority sources, retrieval, and
   typed projection; it does not execute tools or Runs.
@@ -28,26 +27,26 @@ Authorization flags only record approval; they never create it. Do not move
 policy into Core or duplicate registries and state writers.
 
 Source, artifacts, clients, Workers, and delivery are separate facts.
-`/reboot min` replaces one Agent Worker; `same|max` adopts one full Function
+`/reboot min` replaces one Agent Worker; `same|max` adopts a full Function
 generation across shared Functions, running Workers, and enabled Remote while
-Core stays live. Legacy Worker-only candidates bridge once: bootstrap and Core
-validate their respective assets, and receipts promote only after Core commit.
-Pre-handoff digests may differ; successors report the committed generation.
-Claim adoption only after verification. Locked packages must match; extras do
-not block.
-Rejected bytes never run.
-Only PID, identity, generation, and health evidence permits `online`; receipts
-distinguish accepted, committed, rolled back, and unconfirmed. See
-[Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
-[Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
+Core stays live. A legacy Worker-only bridge promotes receipts only after
+bootstrap/Core validation and Core commit. Pre-handoff digests may differ;
+successors report the committed generation. Claim adoption only from PID,
+identity, generation, health, and receipt evidence; rejected bytes never run.
+Locked packages must match; extras do not block.
 
-Agent tools cannot write live Core or its Python, read secrets, kill Core, or
-raw-control its service; development roots remain writable. Windows restart
-uses an exact service or fixed per-instance actuator while Remote stays Limited.
-The restart actuator and separate runtime launch task run Highest; task
-completion may leave Core running. Success still requires a different healthy
-Core PID with matching identity, runtime, and Function generation.
+Agent tools cannot write live Core/Python, read secrets, kill, or raw-control
+Core; development roots remain writable. Windows restart uses an exact service
+or fixed per-instance actuator while Remote stays Limited. Its tasks run
+Highest, but success requires a different healthy Core PID matching identity,
+runtime, and Function generation; task completion alone is insufficient.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
+
+WSL login startup is Windows platform behavior. Use the versioned
+`packaging/windows` installer with explicit instance, identity, distribution,
+checkout, and interpreter. Only the `wsl.exe` exit code decides success;
+stderr is diagnostic. Keep lifecycle/stdout/stderr logs and source, registered
+task, and live adoption facts distinct.
 
 ## Configuration, identity, and persistence
 
@@ -78,9 +77,9 @@ the selected Engine owns its Engine Session and Turns; Provider context is
 rebuildable transport state; frontend history is a disposable projection.
 
 External frontends atomically stage advertised attachments into one ordered
-Message and Run; any required failure rejects the Run, never per-file Turns.
-Qualified personal instances advertise this by default unless explicitly opted
-out. Telegram retains its Connector intake; the built-in TUI stays separate.
+Message and Run; required failure rejects the Run, never creates per-file Turns.
+Qualified personal instances advertise this by default unless opted out.
+Telegram intake and the built-in TUI remain separate.
 
 Every input has protected `CURRENT MESSAGE CONTEXT`. Keep message source,
 ingress, processing instance, sender assurance, authorization, and destination
@@ -95,11 +94,10 @@ Private files use the intended runtime principal. Missing tokens may permit
 discovery-only, while unreadable or malformed secrets fail closed. See
 [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
-HChat keeps sender claim, verified peer, relay, and target separate. Never put
-shared secrets in messages or command arguments. `/debug on` sends one
-best-effort diagnosis for an eligible terminal error; the source does not retry
-or fix it, the diagnosis completion is not returned to the source Agent, and
-HChat errors are excluded to prevent loops.
+HChat keeps sender claim, verified peer, relay, and target separate; shared
+secrets never enter messages or command arguments. `/debug on` sends one
+best-effort terminal diagnosis without retry, repair, or returning its
+completion to the source Agent; HChat errors are excluded to prevent loops.
 
 Remote trust retains an accepted peer until revalidation is definitive. Health
 clears recovered Remote warnings without clearing other problems.
@@ -120,12 +118,11 @@ independent. `/backend` selects Engine, `/model` selects model routing, and
 Agent creation uses that same HER mode contract; it must not present
 provider/model/reasoning bundles as HER effort presets.
 
-Use current metadata for context, price, effort, and modality. Media support is
-the intersection of model semantics, Adapter transport, and instance policy;
-distinguish unknown, unsupported, unimplemented, blocked, and unavailable.
-Provider cost wins; catalogue cost is an estimate; partial or unknown usage is
-not complete zero cost. OpenRouter's public schedule is the only automatic
-network-model price source; missing exact evidence stays unknown.
+Use current metadata for context, price, effort, and modality. Media support
+intersects model semantics, Adapter transport, and instance policy; distinguish
+unknown, unsupported, unimplemented, blocked, and unavailable. Provider cost
+wins; catalogue cost is an estimate and unknown usage is not zero. OpenRouter's
+public schedule is the only automatic network-model price source.
 
 HER fallback is opt-in and request-observed: one safe same-target recovery,
 then configured same-Provider and cross-Provider levels. Never downgrade Pro.
@@ -133,6 +130,11 @@ The narrow meaningful-output read guard applies per SSE call, ignores
 heartbeats, and excludes Tool execution; never wrap a whole invocation, stage,
 or Turn in that timeout. Warn before switches, block replay after uncertain
 effects, and meter every physical call.
+
+Tool-enabled HER Direct and Primary Execution may publish Persona-authored
+interim commentary; provider progress from other stages stays internal.
+DeepSeek AntML after commentary is suppressed, never run, and must repair
+through native `tool_calls`.
 
 Validate a Tool batch before effects. Malformed batches execute zero calls;
 completed calls never replay. Repair preserves Provider fields, identity,
@@ -156,11 +158,10 @@ catalogues. `/language` changes shared HASHI UI; `/tui language` changes only
 local TUI. Neither translates replies, IDs, commands, paths, logs, or transcripts.
 
 The selected instance is TUI's highest routing scope. A switch atomically binds
-its connection generation, Agent directory, target, capabilities, logs, and
-sends. Submission freezes instance, Agents, Session, and generation. Remote TUI
-admission requires a completed authenticated handshake; cached liveness is not
-authorization. Persist local preferences only after success; saved state does
-not start an Agent or replay a draft.
+generation, Agent directory, target, capabilities, logs, and sends; submission
+freezes instance, Agents, Session, and generation. Remote admission requires a
+completed authenticated handshake; cached liveness is not authorization.
+Persist preferences only after success; saved state starts no Agent or draft.
 
 `/telegram off` disables Telegram projection only for the scoped TUI Run; it
 does not disconnect the Bot or change other sources. `/think` controls genuine
@@ -170,13 +171,12 @@ verified managed bytes, never origin paths. Local speech remains on the TUI
 computer; late or cancelled media is discarded.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize,
-escape, state plain user outcomes, and keep lifecycle internals in diagnostics.
-`/help` derives from registered metadata. Workbench and Telegram project
-one primary personal Conversation Session; semantic messages appear on both,
-while presentation rows never enter model history. Command menus reuse the
-authenticated runtime path and keep action state server-side. Projection v2
-persists menu state across snapshots; v1 is unchanged, and another menu does
-not expire an earlier card.
+escape, state plain outcomes, and keep lifecycle internals in diagnostics.
+`/help` derives from registered metadata. Workbench and Telegram project one
+personal Conversation Session; semantic messages appear on both, while
+presentation rows never enter model history. Menus use the authenticated path
+and server-side action state. Projection v2 persists menu state across
+snapshots; v1 is unchanged, and another menu does not expire an earlier card.
 
 `/new` selects a fresh primary Session; it never deletes prior Conversations.
 Workbench history is an owner-and-Agent-scoped display projection across

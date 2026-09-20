@@ -229,6 +229,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Windows-to-WSL login deployment** — added a parameterized, transactional
+  scheduled-task installer and versioned launcher. Windows PowerShell 5.1 no
+  longer terminates a healthy HASHI runtime merely because `wsl.exe` emits
+  diagnostics on stderr; the real native exit code is authoritative, and
+  lifecycle, stdout, and stderr logs remain separate across launches. The
+  deployment no longer hardcodes an instance, identity, distribution, or
+  checkout. The native Windows Remote supervisor task now also has an explicit
+  unlimited execution lifetime and deterministic missed/duplicate-run policy.
+  Upgraded launchers archive NUL-bearing legacy mixed-encoding logs on first
+  use instead of waiting for the size-based rotation threshold.
 - **Function Worker cold-start latency and readiness truth** — qualifies and
   materializes one immutable Function generation per startup instead of
   rebuilding the same 268-module dependency graph for every Agent; unchanged

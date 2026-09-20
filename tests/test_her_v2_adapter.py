@@ -3893,7 +3893,7 @@ Please scan Outlook.""",
 
 
 @pytest.mark.asyncio
-async def test_only_tool_enabled_execution_can_publish_provider_commentary():
+async def test_only_tool_enabled_direct_and_execution_can_publish_provider_commentary():
     manager = _CommentaryManager()
     events = []
 
@@ -3911,6 +3911,18 @@ async def test_only_tool_enabled_execution_can_publish_provider_commentary():
         _stage_request(Stage.REPLANNING, allow_tools=False),
     )
     assert events[-1].summary == "Raw provider progress"
+    assert events[-1].delivery_class == DELIVERY_INTERNAL
+
+    await provider.invoke(
+        profile,
+        _stage_request(Stage.DIRECT, allow_tools=True),
+    )
+    assert events[-1].delivery_class == DELIVERY_USER_COMMENTARY
+
+    await provider.invoke(
+        profile,
+        _stage_request(Stage.DIRECT, allow_tools=False),
+    )
     assert events[-1].delivery_class == DELIVERY_INTERNAL
 
     await provider.invoke(
