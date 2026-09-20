@@ -1,57 +1,60 @@
-# Shared Demo Mode — 计划入口
+# HASHI Shared Demo Mode
 
-日期：2026-09-20
-分支：`feature/demo-mode-20260920`
-源代码基线：`637422c88692680d35592a46acef5c4e22f33c3f`
-状态：**仅实施与测试计划；尚未实现、部署或完成容量验证。**
+日期：2026-09-20  
+分支：`feature/demo-mode-20260920`  
+当前 main 基线：`b3649c9c1336aa81facb44bb8ef3f60567d42780`  
+协议：`hashi.shared-demo` / version `1`
 
-## 本次交付的边界
+## 当前状态
 
-本分支从上述 main 快照建立。本次只增加 `docs/demo-mode/` 下的文档，不修改 runtime、配置、依赖、Core、现有架构正文或 main，不启动任何实例，不开通公网路由，也不合并分支。后续实现、实机采用和公网发布分别记录，不能把这些计划当成现成开关。
+**HASHI 侧 Demo Connector 源码施工已完成，离线 CI 已通过。**
+
+本分支实现匿名 Demo lease、一个访客一个真实 HASHI Agent、最多三个原生 Conversation Sessions、HER Direct/zero、按需 Agent Worker、纯文字 Run、取消、事件长轮询、每日请求预算和到期/结束清理。没有修改 Core major version，也没有合并到 main。
+
+尚未由本次施工声明完成的部分：真实 Workbench↔HASHI 联调、真实模型、Windows/目标 VM、200 用户压力、Cloudflare/公网 canary。它们按用户要求留给本地验证。
 
 ## 阅读顺序
 
-1. [共同接口契约](CONTRACT.md)：客户端与 HASHI 的唯一协议基线，标识为 `hashi.shared-demo` / version `1`（设计草案）。
-2. [HASHI 实施计划](IMPLEMENTATION_PLAN.md)：文件级责任、访客生命周期、受限执行、资源管理和施工顺序。
-3. [HASHI 测试计划](TESTING_PLAN.md)：隔离、恢复、到期清理、容量和正常模式回归。
+1. [共同接口契约](CONTRACT.md)
+2. [实现状态](IMPLEMENTATION_STATUS.md)
+3. [本地联调与测试](LOCAL_TESTING.md)
+4. [原实施计划](IMPLEMENTATION_PLAN.md)
+5. [原测试计划](TESTING_PLAN.md)
 
-外部客户端应引用本契约，而不是另建一份独立演进的后台协议。实现开始时固定本目录所在的提交 SHA，并在联调记录中同时记录客户端和 HASHI 提交；本文中的分支名只是施工入口，不是不可变发布版本。
+## 实际实现边界
 
-## 已确定的产品范围
+- Demo 路由：`/api/demo/*`，通过独立 `X-Hashi-Demo-Service-Token` 认证。
+- 匿名访客 token 由 HASHI 生成；数据库只保存摘要。
+- 每个访客绑定唯一 `owner_id`、`agent_id`、`lease_epoch`。
+- Agent 使用正常 HASHI AgentCreation/配置 owner 创建，但保持 inactive，首次 Run 时才启动 Function Worker。
+- 每个 Session 显式使用 Demo owner；`memory_policy=disabled`，promotion schedule 关闭。
+- Run 仍进入原生 HASHI Session/Run/HER 路径；Connector 不直接调用模型。
+- Demo Agent 固定 HER v2、`zero` effort，并写入空 Tool allowlist。
+- 每访客最多一个未完成 Run；全局 generation semaphore 与 Worker 上限独立限制。
+- 每日请求预算保存在独立 Demo lease DB 中，清除访客不会重置当日全局预算。
+- 结束/过期先 revoke，再 cancel active Runs、停止 Worker、清 Session owner 数据、删除 Agent config/workspace、最后删除 lease。
+- 长轮询只投影安全公开事件，不暴露内部 event detail、推理、路径或其他 Agent 数据。
 
-- 一个隔离 VM、一个 HASHI instance、一个兼容的受限网页客户端；不依赖托管控制平台，不为每位访客创建 VM/container，不引入独立网关产品。
-- 无账户。使用一个匿名随机凭证；浏览器以一枚 HttpOnly Cookie 持有。IP 只用于辅助限流，不能作为聊天归属。
-- 每位访客一个真实 Agent，最多三个原生 Conversation Sessions；只能看自己的数据。
-- 最多 200 个有效访客槽位。连接数、有效租约数、存在的 Worker 数、模型并发数是不同限额。
-- 对话最长 24 小时；默认建议闲置 30 分钟提前回收，可用配置关闭提前回收。界面必须披露实际策略。
-- HER Direct / `zero`，配置决定模型；无工具、slash 控制、上传、语音、长期记忆晋升和后台自主工作。
-- 使用现有逐 Agent Function Worker 生命周期，按需启动并在空闲时释放；不跨访客复用可变 Worker，不改造 Core 为多租户调度器。
+## 初始容量参数
 
-## 容量参数不是容量证明
+| profile 用途 | Worker 上限 | generation 并发 | visitor slots |
+|---|---:|---:|---:|
+| 16GB 起步 | 12 | 8 | 200 |
+| 32GB 目标验证 | 32 | 24 | 200 |
+| 64GB 后续 | 64 | 48 | 200 |
 
-| 测试配置 | 主机内存标签 | Worker 上限 | 执行并发上限 | 有效访客上限 |
-|---|---:|---:|---:|---:|
-| small | 16GB | 12 | 8 | 200 |
-| standard | 32GB | 32 | 24 | 200 |
-| large | 64GB | 64 | 48 | 200 |
+实际参数通过环境变量配置；这些仍是容量测试起点，不是已证明承载量。
 
-这些是显式选择的初始参数，不自动探测硬件、不承诺能承载相应人数。默认采用 small；standard 是 200 人轻量体验的目标验证配置。此前每 Worker 0.5GB、每轮 10 秒和每人 3 分钟一条的数字均为估算假设，不能写成验收结果。200 人突发同时发送与 200 个在线连接分开测试。
+## 施工证据
 
-## 架构归属
+当前 Demo Connector CI 运行：
+- protected Core guard
+- Ruff lint
+- `tests/test_demo_connector.py`
+- `tests/test_session_api.py`
 
-PAO owns：访客与 Agent 绑定、Conversation Sessions、接纳控制、Worker 使用、回收协调。PCM owns：公开 Persona/Context 的组装。HER owns：Engine Session、受限执行和模型计量。Frontend Connector owns：受限协议及公开投影。工程放置为 Functions、平台配置、实例配置；**不授权 Core major-version migration**。
+真实联调与容量测试见 [LOCAL_TESTING.md](LOCAL_TESTING.md)。
 
-以 [ARCHITECTURE](../../ARCHITECTURE.md)、[Layered Runtime Boundaries](../HASHI_LAYERED_RUNTIME_BOUNDARIES.md) 和 [Testing Policy](../TESTING_POLICY.md) 为上位约束。现有兼容文件名 `workbench_api.py` 仅指 Backend API，不表示在 HASHI 仓库中新增外部 UI 产品。
+## 分支规则
 
-## 交付与发布状态
-
-| 阶段 | 状态 |
-|---|---|
-| 产品方向及文档分支 | 已批准 |
-| 实施计划与测试设计 | 本目录 |
-| 代码实现、focused/core gate | 未执行 |
-| 真实 Worker 恢复与内存测试 | 未执行 |
-| 200 连接压力与费用验证 | 未执行 |
-| 隔离 VM、真实模型、公网 canary | 未执行；需单独操作授权 |
-
-后续不覆盖 main、不重置他人分支、不动日常实例。文档内的测试命令和配置均是将来实施步骤，不是本次运行记录。
+本分支不得覆盖 main；本地验证后再决定是否创建 PR。普通 HASHI 的 owner、Agent lifecycle、Session、删除/quarantine、Remote/HChat 和其他 Frontend Connector 行为保持原有语义。
