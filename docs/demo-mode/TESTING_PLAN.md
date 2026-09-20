@@ -1,8 +1,8 @@
 # HASHI Shared Demo — Detailed Testing Plan
 
-日期：2026-09-20  
-分支：`feature/demo-mode-20260920`  
-源代码基线：`637422c88692680d35592a46acef5c4e22f33c3f`  
+日期：2026-09-20
+分支：`feature/demo-mode-20260920`
+源代码基线：`637422c88692680d35592a46acef5c4e22f33c3f`
 状态：**测试设计，未实现测试、未运行产品测试、未验证 200 人容量。**
 
 参考：[实施计划](IMPLEMENTATION_PLAN.md)、[共同契约](CONTRACT.md)、[现行 Testing Policy](../TESTING_POLICY.md)。本次 docs-only 交付只需要相关静态检查；下列步骤用于未来实现，不构成执行实机操作的授权。
