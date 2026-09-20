@@ -20,6 +20,7 @@ from orchestrator.session_store import SessionNotFound, TERMINAL_RUN_STATES
 
 from .leases import (
     DemoBusy,
+    DemoConflict,
     DemoExpired,
     DemoLease,
     DemoLeaseError,
@@ -756,6 +757,10 @@ class DemoConnector:
                     idempotency_key=key,
                 )
                 if prior is not None:
+                    if str(prior.get("user_text") or "") != text:
+                        raise DemoConflict(
+                            "idempotency key was already accepted with different text"
+                        )
                     return self._json(
                         {
                             "ok": True,
@@ -946,6 +951,7 @@ class DemoConnector:
             ):
                 await asyncio.to_thread(shutil.rmtree, workspace)
             self.leases.delete(lease.lease_id)
+            self._run_locks.pop(lease.lease_id, None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
