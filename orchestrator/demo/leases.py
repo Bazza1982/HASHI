@@ -9,6 +9,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -36,6 +37,11 @@ class DemoBusy(DemoLeaseError):
 class DemoConflict(DemoLeaseError):
     code = "demo_idempotency_conflict"
     status = 409
+
+
+class DemoBudgetExhausted(DemoLeaseError):
+    code = "demo_budget_exhausted"
+    status = 429
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,23 @@ class DemoLeaseStore:
                 );
                 CREATE INDEX IF NOT EXISTS demo_leases_state_expiry
                     ON demo_leases(state, expires_at, idle_expires_at);
+
+                CREATE TABLE IF NOT EXISTS demo_budget_windows (
+                    window_key TEXT PRIMARY KEY,
+                    accepted_runs INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS demo_budget_reservations (
+                    lease_id TEXT NOT NULL,
+                    window_key TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    run_id TEXT,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(lease_id, window_key, idempotency_key),
+                    FOREIGN KEY(lease_id) REFERENCES demo_leases(lease_id) ON DELETE CASCADE
+                );
 
                 CREATE TABLE IF NOT EXISTS demo_session_intents (
                     lease_id TEXT NOT NULL,
@@ -302,6 +325,100 @@ class DemoLeaseStore:
     def delete(self, lease_id: str) -> None:
         with self._lock, self._connection() as connection:
             connection.execute("DELETE FROM demo_leases WHERE lease_id=?", (str(lease_id),))
+
+    @staticmethod
+    def _utc_window(now: float | None = None) -> str:
+        current = time.time() if now is None else float(now)
+        return datetime.fromtimestamp(current, timezone.utc).strftime("%Y-%m-%d")
+
+    def reserve_daily_run(
+        self,
+        *,
+        lease_id: str,
+        idempotency_key: str,
+        text: str,
+        limit: int,
+        now: float | None = None,
+    ) -> bool:
+        """Reserve one conservative UTC daily request unit.
+
+        Returns True when the same reservation already exists. A reservation is
+        deliberately not refunded after uncertain provider admission; this keeps
+        the fallback budget conservative across process restarts.
+        """
+        if int(limit) <= 0:
+            raise DemoBudgetExhausted("demo daily budget is not configured")
+        current = time.time() if now is None else float(now)
+        window = self._utc_window(current)
+        digest = hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT request_digest FROM demo_budget_reservations
+                WHERE lease_id=? AND window_key=? AND idempotency_key=?
+                """,
+                (str(lease_id), window, str(idempotency_key)),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["request_digest"]) != digest:
+                    raise DemoConflict(
+                        "run idempotency key reused with different content"
+                    )
+                return True
+            row = connection.execute(
+                "SELECT accepted_runs FROM demo_budget_windows WHERE window_key=?",
+                (window,),
+            ).fetchone()
+            used = int(row["accepted_runs"] if row is not None else 0)
+            if used >= int(limit):
+                raise DemoBudgetExhausted("demo daily request budget exhausted")
+            connection.execute(
+                """
+                INSERT INTO demo_budget_windows(window_key,accepted_runs,updated_at)
+                VALUES(?,?,?)
+                ON CONFLICT(window_key) DO UPDATE SET
+                    accepted_runs=accepted_runs+1,
+                    updated_at=excluded.updated_at
+                """,
+                (window, 1, current),
+            )
+            connection.execute(
+                """
+                INSERT INTO demo_budget_reservations(
+                    lease_id,window_key,idempotency_key,request_digest,created_at
+                ) VALUES(?,?,?,?,?)
+                """,
+                (str(lease_id), window, str(idempotency_key), digest, current),
+            )
+        return False
+
+    def commit_daily_run(
+        self,
+        *,
+        lease_id: str,
+        idempotency_key: str,
+        run_id: str,
+        now: float | None = None,
+    ) -> None:
+        window = self._utc_window(now)
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE demo_budget_reservations SET run_id=?
+                WHERE lease_id=? AND window_key=? AND idempotency_key=?
+                """,
+                (str(run_id), str(lease_id), window, str(idempotency_key)),
+            )
+
+    def budget_used(self, *, now: float | None = None) -> int:
+        window = self._utc_window(now)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT accepted_runs FROM demo_budget_windows WHERE window_key=?",
+                (window,),
+            ).fetchone()
+        return int(row["accepted_runs"] if row is not None else 0)
 
     def session_intent(
         self,
