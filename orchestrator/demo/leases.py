@@ -10,7 +10,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
 
 
 class DemoLeaseError(RuntimeError):
