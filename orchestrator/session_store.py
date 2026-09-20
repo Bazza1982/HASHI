@@ -1194,7 +1194,8 @@ class SessionStore:
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
-                SELECT r.* FROM runs AS r
+                SELECT r.*, m.text AS user_text FROM runs AS r
+                JOIN messages AS m ON m.message_id=r.user_message_id
                 WHERE r.session_id=? AND r.idempotency_key=?
                 """,
                 (str(session_id), str(idempotency_key)),
