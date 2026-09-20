@@ -44,6 +44,7 @@ from orchestrator.config_json import (
 )
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
+from orchestrator.demo.api import DemoConnector
 from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.auth_providers import load_auth_providers
@@ -344,6 +345,8 @@ class WorkbenchApiServer:
 
         self.app = web.Application(client_max_size=64 * 1024 * 1024,
                                    middlewares=[runtime_admission])
+        self.demo_connector = DemoConnector(self)
+        self.demo_connector.register(self.app)
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
