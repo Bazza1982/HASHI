@@ -112,6 +112,8 @@ class DemoConnector:
         self._cleanup_task: asyncio.Task | None = None
         self._tasks: set[asyncio.Task] = set()
         self._provision_lock = asyncio.Lock()
+        self._worker_start_lock = asyncio.Lock()
+        self._run_locks: dict[str, asyncio.Lock] = {}
 
     def register(self, app: web.Application) -> None:
         app.router.add_get("/api/demo/config", self.handle_config)
@@ -431,16 +433,15 @@ class DemoConnector:
             title = str(body.get("title") or "New conversation").strip()
             if not title or len(title) > 120:
                 raise DemoRequestError("invalid title")
-            existing = self.server.session_store.list_sessions(
-                owner_id=lease.owner_id,
-                agent_id=lease.agent_id,
-                include_archived=False,
-                limit=10,
-            )
-            if len(existing) >= self.profile.max_sessions:
-                raise DemoBusy("session limit reached")
-
             def create():
+                existing = self.server.session_store.list_sessions(
+                    owner_id=lease.owner_id,
+                    agent_id=lease.agent_id,
+                    include_archived=False,
+                    limit=10,
+                )
+                if len(existing) >= self.profile.max_sessions:
+                    raise DemoBusy("session limit reached")
                 row = self.server.session_store.create_session(
                     owner_id=lease.owner_id,
                     agent_id=lease.agent_id,
@@ -581,7 +582,7 @@ class DemoConnector:
                     "event_id": event_id + "_status",
                     "kind": "run.status",
                     "run_id": run_id,
-                    "state": _public_state(run.get("state")),
+                    "state": "queued",
                 }
             )
         elif kind == "run.started" and run_id:
@@ -595,20 +596,32 @@ class DemoConnector:
             )
         elif kind == "run.completed" and run_id:
             run = self.server.session_store.get_run(run_id, owner_id=lease.owner_id)
-            message = self._run_message(
-                session_id, lease.owner_id, str(run.get("final_message_id") or "")
-            )
-            if message:
-                projected.append({**base, "kind": "message.final", "message": message})
+            state = _public_state(run.get("state"))
+            if state == "completed":
+                message = self._run_message(
+                    session_id, lease.owner_id, str(run.get("final_message_id") or "")
+                )
+                if message:
+                    projected.append({**base, "kind": "message.final", "message": message})
             projected.append(
                 {
                     **base,
                     "event_id": event_id + "_status",
                     "kind": "run.status",
                     "run_id": run_id,
-                    "state": "completed",
+                    "state": state,
                 }
             )
+            if state == "failed":
+                projected.append(
+                    {
+                        **base,
+                        "event_id": event_id + "_error",
+                        "kind": "run.error",
+                        "run_id": run_id,
+                        "code": "demo_unavailable",
+                    }
+                )
         elif kind == "run.stopped" and run_id:
             projected.append(
                 {
@@ -622,6 +635,15 @@ class DemoConnector:
             projected.append(
                 {
                     **base,
+                    "kind": "run.status",
+                    "run_id": run_id,
+                    "state": "failed",
+                }
+            )
+            projected.append(
+                {
+                    **base,
+                    "event_id": event_id + "_error",
                     "kind": "run.error",
                     "run_id": run_id,
                     "code": "demo_unavailable",
@@ -661,14 +683,13 @@ class DemoConnector:
                 lease = self.leases.authenticate(self._visitor_token(request))
 
             public: list[dict[str, Any]] = []
+            next_cursor = cursor
             for event in native:
-                public.extend(self._project_event(lease, session["session_id"], event))
-                if len(public) >= 100:
-                    public = public[:100]
+                projected = self._project_event(lease, session["session_id"], event)
+                if projected and len(public) + len(projected) > 100:
                     break
-            next_cursor = (
-                int(native[-1]["sequence"]) if native else cursor
-            )
+                public.extend(projected)
+                next_cursor = int(event["sequence"])
             return self._json(
                 {
                     "ok": True,
@@ -682,26 +703,29 @@ class DemoConnector:
             return self._error(exc)
 
     async def _ensure_worker(self, lease: DemoLease):
-        runtime = self.server._runtime_map().get(lease.agent_id)
-        if runtime is not None:
+        async with self._worker_start_lock:
+            runtime = self.server._runtime_map().get(lease.agent_id)
+            if runtime is not None:
+                return runtime
+            runtime_names = set(self.server._runtime_map())
+            starting = set(getattr(self.server.orchestrator, "_startup_tasks", {}))
+            occupied = {
+                name for name in runtime_names | starting if str(name).startswith("demo_")
+            }
+            if len(occupied) >= self.profile.max_running_workers:
+                raise DemoBusy("Demo workers are busy")
+            ok, message = await self.server.orchestrator.start_agent(lease.agent_id)
+            runtime = self.server._runtime_map().get(lease.agent_id)
+            if not ok and runtime is None:
+                logger.warning(
+                    "Demo Agent start rejected agent=%s reason=%s",
+                    lease.agent_id,
+                    str(message)[:160],
+                )
+                raise DemoUnavailable("Demo Agent could not start")
+            if runtime is None:
+                raise DemoUnavailable("Demo Agent runtime unavailable")
             return runtime
-        demo_running = sum(
-            1 for name in self.server._runtime_map() if str(name).startswith("demo_")
-        )
-        if demo_running >= self.profile.max_running_workers:
-            raise DemoBusy("Demo workers are busy")
-        ok, message = await self.server.orchestrator.start_agent(lease.agent_id)
-        runtime = self.server._runtime_map().get(lease.agent_id)
-        if not ok and runtime is None:
-            logger.warning(
-                "Demo Agent start rejected agent=%s reason=%s",
-                lease.agent_id,
-                str(message)[:160],
-            )
-            raise DemoUnavailable("Demo Agent could not start")
-        if runtime is None:
-            raise DemoUnavailable("Demo Agent runtime unavailable")
-        return runtime
 
     async def handle_run(self, request: web.Request) -> web.Response:
         try:
@@ -718,31 +742,33 @@ class DemoConnector:
             if len(text) > self.profile.max_input_chars:
                 raise DemoMessageTooLarge("message too large")
 
-            prior = self.server.session_store.find_run_by_idempotency(
-                session_id=session["session_id"],
-                owner_id=lease.owner_id,
-                idempotency_key=key,
-            )
-            if prior is not None:
-                return self._json(
-                    {
-                        "ok": True,
-                        "session_id": session["session_id"],
-                        "run_id": prior["run_id"],
-                        "message_id": prior["user_message_id"],
-                        "state": _public_state(prior["state"]),
-                        "replayed": True,
-                    },
-                    status=202,
+            run_lock = self._run_locks.setdefault(lease.lease_id, asyncio.Lock())
+            async with run_lock:
+                prior = self.server.session_store.find_run_by_idempotency(
+                    session_id=session["session_id"],
+                    owner_id=lease.owner_id,
+                    idempotency_key=key,
                 )
-            if self.server.session_store.list_active_runs(owner_id=lease.owner_id):
-                raise DemoRunActive("another Demo Run is active")
+                if prior is not None:
+                    return self._json(
+                        {
+                            "ok": True,
+                            "session_id": session["session_id"],
+                            "run_id": prior["run_id"],
+                            "message_id": prior["user_message_id"],
+                            "state": _public_state(prior["state"]),
+                            "replayed": True,
+                        },
+                        status=202,
+                    )
+                if self.server.session_store.list_active_runs(owner_id=lease.owner_id):
+                    raise DemoRunActive("another Demo Run is active")
 
-            runtime = await self._ensure_worker(lease)
-            request_content = canonical_request_content(
+                runtime = await self._ensure_worker(lease)
+                request_content = canonical_request_content(
                 [{"type": "text", "item_index": 1, "text": text}]
-            )
-            request_id = await runtime.enqueue_request(
+                )
+                request_id = await runtime.enqueue_request(
                 runtime._primary_chat_id(),
                 text,
                 "session-api",
@@ -763,15 +789,15 @@ class DemoConnector:
                     "response_preferences": {},
                 },
                 request_content=request_content,
-            )
-            if not request_id:
-                raise DemoUnavailable("Run was not accepted")
-            run = self.server.session_store.get_run_by_request(str(request_id))
+                )
+                if not request_id:
+                    raise DemoUnavailable("Run was not accepted")
+                run = self.server.session_store.get_run_by_request(str(request_id))
             self.leases.touch(lease.lease_id)
             self._track(
                 self._watch_run(lease, str(run["run_id"])),
                 name=f"hashi-demo-run:{run['run_id']}",
-            )
+                )
             return self._json(
                 {
                     "ok": True,
@@ -782,7 +808,7 @@ class DemoConnector:
                     "replayed": False,
                 },
                 status=202,
-            )
+                )
         except Exception as exc:
             return self._error(exc)
 
@@ -825,8 +851,9 @@ class DemoConnector:
             )
             runtime = self.server._runtime_map().get(lease.agent_id)
             if runtime is not None:
-                await self.server.orchestrator.stop_agent(
-                    lease.agent_id, reason="demo-cancel"
+                self._track(
+                    self._stop_agent_safe(lease.agent_id, reason="demo-cancel"),
+                    name=f"hashi-demo-cancel:{lease.agent_id}",
                 )
             return self._json(
                 {
@@ -838,6 +865,16 @@ class DemoConnector:
             )
         except Exception as exc:
             return self._error(exc)
+
+    async def _stop_agent_safe(self, agent_id: str, *, reason: str) -> None:
+        try:
+            await self.server.orchestrator.stop_agent(agent_id, reason=reason)
+        except Exception as exc:
+            logger.warning(
+                "Demo Worker stop deferred agent=%s error=%s",
+                agent_id,
+                type(exc).__name__,
+            )
 
     async def handle_end(self, request: web.Request) -> web.Response:
         try:
@@ -856,7 +893,10 @@ class DemoConnector:
         while True:
             try:
                 for lease in self.leases.list_expired_or_pending(limit=100):
-                    await self._purge_lease(lease)
+                    try:
+                        await self._purge_lease(lease)
+                    except Exception:
+                        continue
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
