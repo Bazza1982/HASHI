@@ -1,8 +1,8 @@
 # HASHI Shared Demo — Detailed Implementation Plan
 
-日期：2026-09-20  
-基线：`637422c88692680d35592a46acef5c4e22f33c3f`  
-分支：`feature/demo-mode-20260920`  
+日期：2026-09-20
+基线：`637422c88692680d35592a46acef5c4e22f33c3f`
+分支：`feature/demo-mode-20260920`
 范围：后台 Functions 和实例/平台配置。**本次仅编写计划，以下代码、配置和命令尚未实施。**
 
 先读 [README](README.md)、[共同契约](CONTRACT.md)、[测试计划](TESTING_PLAN.md)、根目录 AGENTS.md、ARCHITECTURE.md 及现行 Testing Policy。上位架构优先；不为本功能变更 Core major version。
