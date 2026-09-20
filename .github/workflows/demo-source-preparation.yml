@@ -1,22 +1,49 @@
-name: Demo source preparation
+name: Demo Connector
+
 on:
   push:
     branches: [feature/demo-mode-20260920]
-    paths: [.github/workflows/demo-source-preparation.yml]
+    paths:
+      - 'orchestrator/demo/**'
+      - 'orchestrator/session_store.py'
+      - 'orchestrator/workbench_api.py'
+      - 'tests/test_demo_connector.py'
+      - 'docs/demo-mode/**'
+      - '.github/workflows/demo-source-preparation.yml'
+  pull_request:
+    paths:
+      - 'orchestrator/demo/**'
+      - 'orchestrator/session_store.py'
+      - 'orchestrator/workbench_api.py'
+      - 'tests/test_demo_connector.py'
+
 permissions:
   contents: read
+
+concurrency:
+  group: demo-connector-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  tracked-source:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Archive tracked source only for isolated development
-        run: git archive --format=tar.gz --output="$RUNNER_TEMP/demo-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: demo-source-preparation
-          path: ${{ runner.temp }}/demo-source.tar.gz
-          retention-days: 1
+          python-version: "3.12.13"
+      - name: Install isolated test dependencies
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
+      - name: Protected Core guard
+        run: |
+          python scripts/check_protected_core_changes.py --validate-manifest
+          python scripts/check_protected_core_changes.py --base origin/main
+          git diff --check origin/main HEAD
+      - name: Lint Demo Connector
+        run: python -m ruff check orchestrator/demo tests/test_demo_connector.py
+      - name: Focused Demo tests
+        run: python -m pytest -q tests/test_demo_connector.py tests/test_workbench_session_api.py
