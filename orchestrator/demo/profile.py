@@ -32,6 +32,8 @@ class DemoProfile:
     max_input_chars: int = 4000
     max_request_bytes: int = 32768
     max_running_workers: int = 12
+    max_concurrent_generations: int = 8
+    daily_run_limit: int = 0
     worker_idle_seconds: int = 60
     cleanup_interval_seconds: int = 60
     event_wait_seconds: int = 20
@@ -64,6 +66,12 @@ class DemoProfile:
             max_input_chars=_integer(env.get("HASHI_DEMO_MAX_INPUT_CHARS"), 4000, 1, 4000),
             max_request_bytes=_integer(env.get("HASHI_DEMO_MAX_REQUEST_BYTES"), 32768, 128, 32768),
             max_running_workers=_integer(env.get("HASHI_DEMO_MAX_WORKERS"), 12, 1, 256),
+            max_concurrent_generations=_integer(
+                env.get("HASHI_DEMO_MAX_GENERATIONS"), 8, 1, 256
+            ),
+            daily_run_limit=_integer(
+                env.get("HASHI_DEMO_DAILY_RUN_LIMIT"), 0, 0, 10_000_000
+            ),
             worker_idle_seconds=_integer(env.get("HASHI_DEMO_WORKER_IDLE_SECONDS"), 60, 5, 3600),
             cleanup_interval_seconds=_integer(env.get("HASHI_DEMO_CLEANUP_SECONDS"), 60, 5, 3600),
             event_wait_seconds=_integer(env.get("HASHI_DEMO_EVENT_WAIT_SECONDS"), 20, 1, 20),
@@ -73,7 +81,11 @@ class DemoProfile:
 
     @property
     def ready(self) -> bool:
-        return bool(self.enabled and len(self.service_token) >= 24)
+        return bool(
+            self.enabled
+            and len(self.service_token) >= 24
+            and self.daily_run_limit > 0
+        )
 
     def public_config(self) -> dict[str, Any]:
         return {
