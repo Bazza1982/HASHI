@@ -229,3 +229,218 @@ async def test_ready_demo_connector_sets_empty_start_and_authenticates_config(
     )
     response = await connector.handle_config(bad)
     assert response.status == 503
+
+
+@pytest.mark.asyncio
+async def test_demo_run_replay_returns_existing_run_without_starting_worker():
+    lease = SimpleNamespace(
+        lease_id="lease_one",
+        owner_id="demo:one",
+        agent_id="demo_agent_one",
+        lease_epoch="epoch_one",
+        csrf_token="csrf",
+    )
+
+    class Store:
+        def find_run_by_idempotency(self, **kwargs):
+            assert kwargs == {
+                "session_id": "ses_one",
+                "owner_id": "demo:one",
+                "idempotency_key": "1234567890abcdef",
+            }
+            return {
+                "run_id": "run_one",
+                "user_message_id": "msg_one",
+                "user_text": "hello",
+                "state": "completed",
+            }
+
+        def list_active_runs(self, **kwargs):
+            raise AssertionError("replay must return before active-run admission")
+
+    connector = DemoConnector.__new__(DemoConnector)
+    connector.profile = SimpleNamespace(max_request_bytes=32768, max_input_chars=4000)
+    connector.server = SimpleNamespace(session_store=Store())
+    connector._run_locks = {}
+    connector._service_auth = lambda request: None
+    connector._require_lease = lambda request, write=False: lease
+    connector._owned_session = lambda current, session_id: {"session_id": "ses_one"}
+
+    async def should_not_start(_lease):
+        raise AssertionError("idempotent replay must not start a Worker")
+
+    connector._ensure_worker = should_not_start
+    raw = b'{"idempotency_key":"1234567890abcdef","text":"hello"}'
+
+    async def read():
+        return raw
+
+    request = SimpleNamespace(
+        headers={},
+        match_info={"session_id": "ses_one"},
+        content_length=len(raw),
+        read=read,
+    )
+    response = await connector.handle_run(request)
+    payload = __import__("json").loads(response.text)
+    assert response.status == 202
+    assert payload == {
+        "ok": True,
+        "session_id": "ses_one",
+        "run_id": "run_one",
+        "message_id": "msg_one",
+        "state": "completed",
+        "replayed": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_demo_run_admission_uses_native_worker_and_durable_budget():
+    lease = SimpleNamespace(
+        lease_id="lease_one",
+        owner_id="demo:one",
+        agent_id="demo_agent_one",
+        lease_epoch="epoch_one",
+        csrf_token="csrf",
+    )
+    calls = {"reserved": 0, "committed": 0, "touched": 0, "enqueue": None}
+
+    class Store:
+        def find_run_by_idempotency(self, **kwargs):
+            return None
+
+        def list_active_runs(self, **kwargs):
+            assert kwargs == {"owner_id": "demo:one"}
+            return []
+
+        def get_run_by_request(self, request_id):
+            assert request_id == "request_one"
+            return {
+                "run_id": "run_one",
+                "user_message_id": "msg_one",
+                "state": "queued",
+            }
+
+    class Leases:
+        def reserve_daily_run(self, **kwargs):
+            calls["reserved"] += 1
+            assert kwargs["lease_id"] == "lease_one"
+            assert kwargs["idempotency_key"] == "1234567890abcdef"
+            assert kwargs["text"] == "hello"
+            assert kwargs["limit"] == 25
+            return False
+
+        def commit_daily_run(self, **kwargs):
+            calls["committed"] += 1
+            assert kwargs == {
+                "lease_id": "lease_one",
+                "idempotency_key": "1234567890abcdef",
+                "run_id": "run_one",
+            }
+
+        def touch(self, lease_id):
+            calls["touched"] += 1
+            assert lease_id == "lease_one"
+
+    class Runtime:
+        def _primary_chat_id(self):
+            return "chat"
+
+        async def enqueue_request(self, *args, **kwargs):
+            calls["enqueue"] = (args, kwargs)
+            return "request_one"
+
+    connector = DemoConnector.__new__(DemoConnector)
+    connector.profile = SimpleNamespace(
+        max_request_bytes=32768,
+        max_input_chars=4000,
+        daily_run_limit=25,
+    )
+    connector.server = SimpleNamespace(session_store=Store())
+    connector.leases = Leases()
+    connector._run_locks = {}
+    connector._generation_slots = __import__("asyncio").BoundedSemaphore(1)
+    connector._service_auth = lambda request: None
+    connector._require_lease = lambda request, write=False: lease
+    connector._owned_session = lambda current, session_id: {
+        "session_id": "ses_one",
+        "context_generation": 1,
+    }
+
+    async def ensure_worker(_lease):
+        return Runtime()
+
+    connector._ensure_worker = ensure_worker
+
+    def discard_watcher(coro, *, name):
+        assert name == "hashi-demo-run:run_one"
+        coro.close()
+
+    connector._track = discard_watcher
+    raw = b'{"idempotency_key":"1234567890abcdef","text":"hello"}'
+
+    async def read():
+        return raw
+
+    request = SimpleNamespace(
+        headers={},
+        match_info={"session_id": "ses_one"},
+        content_length=len(raw),
+        read=read,
+    )
+    response = await connector.handle_run(request)
+    payload = __import__("json").loads(response.text)
+    assert response.status == 202
+    assert payload["run_id"] == "run_one"
+    assert payload["replayed"] is False
+    assert calls["reserved"] == 1
+    assert calls["committed"] == 1
+    assert calls["touched"] == 1
+    args, kwargs = calls["enqueue"]
+    assert args[1] == "hello"
+    assert kwargs["skip_memory_injection"] is True
+    assert kwargs["habit_learning_eligible"] is False
+    assert kwargs["request_metadata"]["owner_id"] == "demo:one"
+    assert kwargs["request_metadata"]["session_id"] == "ses_one"
+    assert kwargs["request_metadata"]["execution_mode"] == "zero"
+
+
+@pytest.mark.asyncio
+async def test_demo_cancel_is_owner_and_session_scoped():
+    lease = SimpleNamespace(
+        lease_id="lease_one",
+        owner_id="demo:one",
+        agent_id="demo_agent_one",
+        lease_epoch="epoch_one",
+        csrf_token="csrf",
+    )
+
+    class Store:
+        def get_run(self, run_id, *, owner_id):
+            assert run_id == "run_one"
+            assert owner_id == "demo:one"
+            return {"run_id": "run_one", "session_id": "ses_one", "state": "running"}
+
+        def cancel_run(self, run_id, *, owner_id, reason):
+            assert run_id == "run_one"
+            assert owner_id == "demo:one"
+            assert reason == "demo_user_cancel"
+            return {"run_id": "run_one", "state": "stopped"}
+
+    connector = DemoConnector.__new__(DemoConnector)
+    connector.server = SimpleNamespace(
+        session_store=Store(),
+        _runtime_map=lambda: {},
+    )
+    connector._service_auth = lambda request: None
+    connector._require_lease = lambda request, write=False: lease
+    connector._owned_session = lambda current, session_id: {"session_id": "ses_one"}
+    request = SimpleNamespace(
+        headers={},
+        match_info={"session_id": "ses_one", "run_id": "run_one"},
+    )
+    response = await connector.handle_cancel(request)
+    payload = __import__("json").loads(response.text)
+    assert response.status == 200
+    assert payload["state"] == "stopped"
+    assert payload["session_id"] == "ses_one"
