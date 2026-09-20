@@ -110,6 +110,11 @@ class DemoConnector:
         self._cleanup_task: asyncio.Task | None = None
         self._tasks: set[asyncio.Task] = set()
         self._provision_lock = asyncio.Lock()
+        if self.profile.ready and self.server.orchestrator is not None:
+            # Backend API starts before initial Agent selection. This existing
+            # Functions-layer hook lets an isolated Demo instance boot with zero
+            # active Agents; visitors start their own Workers on demand.
+            self.server.orchestrator._allow_empty_start = True
         self._worker_start_lock = asyncio.Lock()
         self._run_locks: dict[str, asyncio.Lock] = {}
 
