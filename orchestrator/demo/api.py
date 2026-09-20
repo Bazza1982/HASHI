@@ -118,6 +118,9 @@ class DemoConnector:
             self.server.orchestrator._allow_empty_start = True
         self._worker_start_lock = asyncio.Lock()
         self._run_locks: dict[str, asyncio.Lock] = {}
+        self._generation_slots = asyncio.BoundedSemaphore(
+            self.profile.max_concurrent_generations
+        )
 
     def register(self, app: web.Application) -> None:
         app.router.add_get("/api/demo/config", self.handle_config)
@@ -775,40 +778,74 @@ class DemoConnector:
                 if self.server.session_store.list_active_runs(owner_id=lease.owner_id):
                     raise DemoRunActive("another Demo Run is active")
 
-                runtime = await self._ensure_worker(lease)
-                request_content = canonical_request_content(
-                [{"type": "text", "item_index": 1, "text": text}]
-                )
-                request_id = await runtime.enqueue_request(
-                runtime._primary_chat_id(),
-                text,
-                "session-api",
-                text[:160],
-                deliver_to_telegram=False,
-                skip_memory_injection=True,
-                habit_learning_eligible=False,
-                idempotency_key=key,
-                request_metadata={
-                    "session_id": session["session_id"],
-                    "owner_id": lease.owner_id,
-                    "session_surface": "hashi-demo",
-                    "session_channel_key": lease.lease_epoch,
-                    "execution_mode": "zero",
-                    "session_message_text": text,
-                    "session_message_content": [{"type": "text", "text": text}],
-                    "session_context_generation": session["context_generation"],
-                    "response_preferences": {},
-                },
-                request_content=request_content,
-                )
-                if not request_id:
-                    raise DemoUnavailable("Run was not accepted")
-                run = self.server.session_store.get_run_by_request(str(request_id))
+                try:
+                    await asyncio.wait_for(
+                        self._generation_slots.acquire(), timeout=0.05
+                    )
+                except TimeoutError as exc:
+                    raise DemoBusy("Demo generation capacity is busy") from exc
+
+                slot_transferred = False
+                try:
+                    self.leases.reserve_daily_run(
+                        lease_id=lease.lease_id,
+                        idempotency_key=key,
+                        text=text,
+                        limit=self.profile.daily_run_limit,
+                    )
+                    runtime = await self._ensure_worker(lease)
+                    request_content = canonical_request_content(
+                        [{"type": "text", "item_index": 1, "text": text}]
+                    )
+                    request_id = await runtime.enqueue_request(
+                        runtime._primary_chat_id(),
+                        text,
+                        "session-api",
+                        text[:160],
+                        deliver_to_telegram=False,
+                        skip_memory_injection=True,
+                        habit_learning_eligible=False,
+                        idempotency_key=key,
+                        request_metadata={
+                            "session_id": session["session_id"],
+                            "owner_id": lease.owner_id,
+                            "session_surface": "hashi-demo",
+                            "session_channel_key": lease.lease_epoch,
+                            "execution_mode": "zero",
+                            "session_message_text": text,
+                            "session_message_content": [
+                                {"type": "text", "text": text}
+                            ],
+                            "session_context_generation": session[
+                                "context_generation"
+                            ],
+                            "response_preferences": {},
+                        },
+                        request_content=request_content,
+                    )
+                    if not request_id:
+                        raise DemoUnavailable("Run was not accepted")
+                    run = self.server.session_store.get_run_by_request(
+                        str(request_id)
+                    )
+                    self.leases.commit_daily_run(
+                        lease_id=lease.lease_id,
+                        idempotency_key=key,
+                        run_id=str(run["run_id"]),
+                    )
+                    slot_transferred = True
+                finally:
+                    if not slot_transferred:
+                        self._generation_slots.release()
             self.leases.touch(lease.lease_id)
             self._track(
-                self._watch_run(lease, str(run["run_id"])),
+                self._watch_run(
+                    lease,
+                    str(run["run_id"]),
+                    release_generation_slot=True,
+                ),
                 name=f"hashi-demo-run:{run['run_id']}",
-                )
+            )
             return self._json(
                 {
                     "ok": True,
@@ -823,7 +860,13 @@ class DemoConnector:
         except Exception as exc:
             return self._error(exc)
 
-    async def _watch_run(self, lease: DemoLease, run_id: str) -> None:
+    async def _watch_run(
+        self,
+        lease: DemoLease,
+        run_id: str,
+        *,
+        release_generation_slot: bool = False,
+    ) -> None:
         try:
             while True:
                 await asyncio.sleep(0.5)
@@ -846,6 +889,9 @@ class DemoConnector:
                 run_id,
                 type(exc).__name__,
             )
+        finally:
+            if release_generation_slot:
+                self._generation_slots.release()
 
     async def handle_cancel(self, request: web.Request) -> web.Response:
         try:
