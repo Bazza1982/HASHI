@@ -4312,6 +4312,155 @@ class SessionStore:
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
 
+    @staticmethod
+    def _agent_history_boundary(row: Mapping[str, Any]) -> dict[str, Any]:
+        """Return the stable, internal ordering key for one visible message."""
+
+        try:
+            ordinal = int(row["ordinal"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("agent history boundary ordinal is invalid") from exc
+        boundary = {
+            "created_at": str(row.get("created_at") or "").strip(),
+            "session_id": str(row.get("session_id") or "").strip(),
+            "ordinal": ordinal,
+            "message_id": str(row.get("message_id") or "").strip(),
+        }
+        if (
+            not boundary["created_at"]
+            or not boundary["session_id"]
+            or boundary["ordinal"] < 1
+            or not boundary["message_id"]
+        ):
+            raise ValueError("agent history boundary is invalid")
+        return boundary
+
+    def agent_history_anchor(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        session_id: str,
+        ordinal: int,
+    ) -> dict[str, Any]:
+        """Resolve one canonical Session message into a global history boundary."""
+
+        owner = str(owner_id).strip()
+        agent = str(agent_id).strip().lower()
+        target_session = str(session_id).strip()
+        try:
+            target_ordinal = int(ordinal)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("agent history anchor ordinal is invalid") from exc
+        if not owner or not agent or not target_session or target_ordinal < 1:
+            raise ValueError("agent history anchor is invalid")
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT m.created_at, m.session_id, m.ordinal, m.message_id
+                FROM messages AS m
+                JOIN sessions AS s ON s.session_id = m.session_id
+                WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.status != 'deleted' AND m.session_id = ? AND m.ordinal = ?
+                  AND m.visibility = 'visible'
+                """,
+                (
+                    self.instance_id,
+                    owner,
+                    agent,
+                    target_session,
+                    target_ordinal,
+                ),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound("agent history anchor was not found")
+        return self._agent_history_boundary(dict(row))
+
+    def agent_history_page(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        before: Mapping[str, Any] | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Read one chronological, cross-Session page of visible Agent history.
+
+        This is a presentation read only.  It never changes the primary Session
+        binding and must not be used as a model-context source.
+        """
+
+        owner = str(owner_id).strip()
+        agent = str(agent_id).strip().lower()
+        if not owner or not agent:
+            raise ValueError("owner_id and agent_id are required")
+        bounded = max(1, min(int(limit), 200))
+        boundary = self._agent_history_boundary(before) if before is not None else None
+        clauses = [
+            "s.instance_id = ?",
+            "s.owner_id = ?",
+            "s.agent_id = ?",
+            "s.status != 'deleted'",
+            "m.visibility = 'visible'",
+        ]
+        params: list[Any] = [self.instance_id, owner, agent]
+        if boundary is not None:
+            clauses.append(
+                """
+                (m.created_at < ? OR (
+                    m.created_at = ? AND (
+                        m.session_id < ? OR (
+                            m.session_id = ? AND (
+                                m.ordinal < ? OR (
+                                    m.ordinal = ? AND m.message_id < ?
+                                )
+                            )
+                        )
+                    )
+                ))
+                """
+            )
+            params.extend(
+                [
+                    boundary["created_at"],
+                    boundary["created_at"],
+                    boundary["session_id"],
+                    boundary["session_id"],
+                    boundary["ordinal"],
+                    boundary["ordinal"],
+                    boundary["message_id"],
+                ]
+            )
+        params.append(bounded + 1)
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT m.*, r.request_id,
+                       r.state AS run_state,
+                       r.final_message_id AS run_final_message_id
+                FROM messages AS m
+                JOIN sessions AS s ON s.session_id = m.session_id
+                LEFT JOIN runs AS r ON r.run_id = m.run_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY m.created_at DESC, m.session_id DESC,
+                         m.ordinal DESC, m.message_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        has_more = len(rows) > bounded
+        page_rows = rows[:bounded]
+        next_boundary = (
+            self._agent_history_boundary(dict(page_rows[-1]))
+            if has_more and page_rows
+            else None
+        )
+        return {
+            "messages": [self._message_dict(row) for row in reversed(page_rows)],
+            "history_complete": not has_more,
+            "next_boundary": next_boundary,
+        }
+
     def visible_message_attachment(
         self,
         session_id: str,
@@ -4370,6 +4519,49 @@ class SessionStore:
                     detail=str(part.get("detail") or ""),
                 )
         raise SessionNotFound("visible message attachment not found")
+
+    def visible_agent_message_attachment(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        message_id: str,
+        attachment_id: str,
+    ) -> dict[str, Any]:
+        """Resolve a visible attachment across an Agent's retained Sessions.
+
+        Transcript attachment URLs intentionally identify a message, not the
+        currently selected Session.  A primary-Session switch therefore must
+        not make a retained historical attachment inaccessible.  The lookup
+        remains owner- and Agent-scoped and excludes tombstoned Sessions.
+        """
+
+        owner = str(owner_id).strip()
+        agent = str(agent_id).strip().lower()
+        target_message = str(message_id).strip()
+        if not owner or not agent or not target_message:
+            raise ValueError("agent message attachment lookup is invalid")
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT m.session_id, m.context_generation
+                FROM messages AS m
+                JOIN sessions AS s ON s.session_id = m.session_id
+                WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.status != 'deleted' AND m.message_id = ?
+                  AND m.visibility = 'visible'
+                """,
+                (self.instance_id, owner, agent, target_message),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound("visible message attachment not found")
+        return self.visible_message_attachment(
+            str(row["session_id"]),
+            owner_id=owner,
+            message_id=target_message,
+            attachment_id=str(attachment_id),
+            context_generation=int(row["context_generation"]),
+        )
 
     def visible_messages_after(
         self,

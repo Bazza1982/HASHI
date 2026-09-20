@@ -122,6 +122,18 @@ The generic v1 surface provides:
 - approval decision; and
 - promotion status, scheduling and execution.
 
+### Cross-Session presentation history
+
+An authenticated Connector may page retained, visible Messages for one owner
+and Agent across active and archived Sessions. The result is display-only: it
+does not change the primary Session, rebuild provider context, or revive an old
+command control. Opaque page cursors are scoped to the owner and Agent.
+Tombstoned Sessions and other owners remain invisible. Historical attachment
+lookups resolve from the retained Message's own Session, not whichever Session
+is primary now. A Connector that lacks this capability must report it as
+unavailable; it must not substitute a current-Session transcript and claim that
+the Agent-wide archive is complete.
+
 Capability publication includes independent Session, Event, Control,
 Attachment, Approval and Fencing versions. Routes return
 `session_api_not_ready` until the complete qualification boundary is enabled.

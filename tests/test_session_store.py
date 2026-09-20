@@ -66,6 +66,178 @@ def _complete(
     return accepted
 
 
+def test_agent_history_pages_across_sessions_without_deleted_or_other_owner(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+
+    oldest = store.create_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=oldest["session_id"],
+        owner_id=owner,
+        request_id="history-oldest",
+        key="history-oldest",
+        text="oldest question",
+        answer="oldest answer",
+    )
+
+    archived = store.create_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=archived["session_id"],
+        owner_id=owner,
+        request_id="history-archived",
+        key="history-archived",
+        text="archived question",
+        answer="archived answer",
+    )
+    store.archive_session(archived["session_id"])
+
+    deleted = store.create_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=deleted["session_id"],
+        owner_id=owner,
+        request_id="history-deleted",
+        key="history-deleted",
+        text="deleted question",
+        answer="deleted answer",
+    )
+    store.archive_session(deleted["session_id"], deleted=True)
+
+    other_owner = store.create_session(owner_id="user:8", agent_id="lily")
+    _complete(
+        store,
+        session_id=other_owner["session_id"],
+        owner_id="user:8",
+        request_id="history-other-owner",
+        key="history-other-owner",
+        text="other owner question",
+        answer="other owner answer",
+    )
+
+    other_agent = store.create_session(owner_id=owner, agent_id="arale")
+    _complete(
+        store,
+        session_id=other_agent["session_id"],
+        owner_id=owner,
+        agent_id="arale",
+        request_id="history-other-agent",
+        key="history-other-agent",
+        text="other agent question",
+        answer="other agent answer",
+    )
+
+    current = store.create_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=current["session_id"],
+        owner_id=owner,
+        request_id="history-current",
+        key="history-current",
+        text="current question",
+        answer="current answer",
+    )
+    current_first = store.messages(current["session_id"], owner_id=owner)[0]
+    anchor = store.agent_history_anchor(
+        owner_id=owner,
+        agent_id="lily",
+        session_id=current["session_id"],
+        ordinal=current_first["ordinal"],
+    )
+
+    first = store.agent_history_page(
+        owner_id=owner,
+        agent_id="lily",
+        before=anchor,
+        limit=2,
+    )
+    assert [row["text"] for row in first["messages"]] == [
+        "archived question",
+        "archived answer",
+    ]
+    assert first["history_complete"] is False
+    assert first["next_boundary"] is not None
+
+    second = store.agent_history_page(
+        owner_id=owner,
+        agent_id="lily",
+        before=first["next_boundary"],
+        limit=2,
+    )
+    assert [row["text"] for row in second["messages"]] == [
+        "oldest question",
+        "oldest answer",
+    ]
+    assert second["history_complete"] is True
+
+
+def test_visible_agent_message_attachment_survives_primary_session_change(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    older = store.create_session(owner_id=owner, agent_id="lily")
+    body = b"retained historical attachment"
+    staged = store.stage_attachment(
+        session_id=older["session_id"],
+        owner_id=owner,
+        filename="history.txt",
+        media_type="text/plain",
+        size_bytes=len(body),
+        sha256=hashlib.sha256(body).hexdigest(),
+    )
+    store.upload_attachment_bytes(
+        session_id=older["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        payload=body,
+    )
+    store.commit_attachment(
+        session_id=older["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+    )
+    accepted = store.accept_run(
+        session_id=older["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="history-attachment",
+        text="",
+        content=[{"type": "attachment", "attachment_id": staged["attachment_id"]}],
+        source="test",
+        idempotency_key="history-attachment",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="retained attachment acknowledged",
+    )
+    store.archive_session(older["session_id"])
+    current = store.create_session(owner_id=owner, agent_id="lily")
+    store.bind_primary_session(
+        owner_id=owner,
+        agent_id="lily",
+        session_id=current["session_id"],
+    )
+
+    attachment = store.visible_agent_message_attachment(
+        owner_id=owner,
+        agent_id="lily",
+        message_id=accepted.message_id,
+        attachment_id=staged["attachment_id"],
+    )
+
+    assert attachment["attachment_id"] == staged["attachment_id"]
+    assert attachment["filename"] == "history.txt"
+    with pytest.raises(SessionNotFound):
+        store.visible_agent_message_attachment(
+            owner_id="user:8",
+            agent_id="lily",
+            message_id=accepted.message_id,
+            attachment_id=staged["attachment_id"],
+        )
+
+
 def test_conversation_continuity_capsule_imports_history_before_new_target_messages_idempotently(tmp_path):
     owner = "user:7"
     source = SessionStore(tmp_path / "source" / "state" / "sessions.sqlite3", instance_id="HASHI2")

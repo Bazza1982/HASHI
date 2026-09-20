@@ -178,6 +178,12 @@ authenticated runtime path and keep action state server-side. Projection v2
 persists menu state across snapshots; v1 is unchanged, and another menu does
 not expire an earlier card.
 
+`/new` selects a fresh primary Session; it never deletes prior Conversations.
+Workbench history is an owner-and-Agent-scoped display projection across
+retained Sessions. It keeps old messages read-only, uses the old Message's own
+Session for its attachments, and never treats a current-Session transcript as
+proof that the full Agent archive is empty.
+
 Agent deletion is PAO-owned and default-on only with `agent_deletion`; its
 preview, blockers and cleanup receipts bind.
 

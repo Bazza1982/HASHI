@@ -255,6 +255,15 @@ async def test_new_creates_and_binds_a_hashi_session_for_any_backend(tmp_path):
         message["text"]
         for message in runtime.session_store.messages(default["session_id"])
     ] == ["retained Bridge history", "retained answer"]
+    history = runtime.session_store.agent_history_page(
+        owner_id="user:123",
+        agent_id="arale",
+        limit=200,
+    )
+    assert [message["text"] for message in history["messages"]] == [
+        "retained Bridge history",
+        "retained answer",
+    ]
 
 
 @pytest.mark.asyncio

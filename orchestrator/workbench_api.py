@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import hmac
 import inspect
 import json
 import logging
@@ -34,7 +35,10 @@ from orchestrator.agent_deletion import (
     CleanupPendingError,
 )
 from orchestrator.agent_overview import build_agent_overview
-from orchestrator.chat_transcript_projection import build_chat_projection
+from orchestrator.chat_transcript_projection import (
+    build_agent_history_projection,
+    build_chat_projection,
+)
 from orchestrator.capability_broker import CapabilityBrokerError
 from orchestrator.config_json import (
     ConfigConflictError,
@@ -643,6 +647,11 @@ class WorkbenchApiServer:
                 "POST",
                 "/api/v1/agents/{agent_id}/promotion",
                 self.handle_v1_promotion_post,
+            ),
+            (
+                "GET",
+                "/api/v1/agents/{agent_id}/history",
+                self.handle_v1_agent_history,
             ),
         ):
             self.app.router.add_route(method, path, session_handler(handler))
@@ -4647,16 +4656,11 @@ class WorkbenchApiServer:
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
         try:
-            session = self.session_store.resolve_primary_session(
+            attachment = self.session_store.visible_agent_message_attachment(
                 owner_id=owner_id,
                 agent_id=name,
-            )
-            attachment = self.session_store.visible_message_attachment(
-                session["session_id"],
-                owner_id=owner_id,
                 message_id=request.match_info["message_id"],
                 attachment_id=request.match_info["attachment_id"],
-                context_generation=int(session["context_generation"]),
             )
             raw_path = str(attachment.get("local_ref") or "").strip()
             if not raw_path:
@@ -4944,6 +4948,79 @@ class WorkbenchApiServer:
             return f"enterprise:{user.id}" if user is not None else None
         return SessionStore.owner_id_for(self.global_config)
 
+    def _agent_history_cursor_key(self) -> bytes:
+        """Bind opaque paging tokens to this Function instance's authority."""
+
+        material = self.admin_token or (
+            f"{getattr(self.global_config, 'instance_id', '')}:{self.config_path}"
+        )
+        return hashlib.sha256(
+            ("agent-history-cursor-v1\\x00" + material).encode("utf-8")
+        ).digest()
+
+    def _encode_agent_history_cursor(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        boundary: Mapping[str, Any],
+    ) -> str:
+        payload = {
+            "version": 1,
+            "instance_id": str(getattr(self.global_config, "instance_id", "")),
+            "owner_id": str(owner_id),
+            "agent_id": str(agent_id).lower(),
+            "before": dict(boundary),
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        body = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        signature = base64.urlsafe_b64encode(
+            hmac.new(
+                self._agent_history_cursor_key(), body.encode("ascii"), hashlib.sha256
+            ).digest()
+        ).decode("ascii").rstrip("=")
+        return f"v1.{body}.{signature}"
+
+    def _decode_agent_history_cursor(
+        self,
+        value: str,
+        *,
+        owner_id: str,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        pieces = str(value or "").split(".")
+        if len(pieces) != 3 or pieces[0] != "v1" or not all(pieces[1:]):
+            raise ValueError("agent history cursor is invalid")
+        body, signature = pieces[1:]
+        try:
+            supplied = base64.urlsafe_b64decode(
+                signature + "=" * (-len(signature) % 4)
+            )
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("agent history cursor is invalid") from exc
+        expected = hmac.new(
+            self._agent_history_cursor_key(), body.encode("ascii"), hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(supplied, expected):
+            raise ValueError("agent history cursor is invalid")
+        try:
+            decoded = json.loads(
+                base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode("utf-8")
+            )
+        except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+            raise ValueError("agent history cursor is invalid") from exc
+        if (
+            not isinstance(decoded, dict)
+            or decoded.get("version") != 1
+            or decoded.get("instance_id")
+            != str(getattr(self.global_config, "instance_id", ""))
+            or decoded.get("owner_id") != str(owner_id)
+            or decoded.get("agent_id") != str(agent_id).lower()
+            or not isinstance(decoded.get("before"), dict)
+        ):
+            raise ValueError("agent history cursor is invalid")
+        return dict(decoded["before"])
+
     def _persistent_session_v1_ready(self) -> bool:
         return bool(
             PERSISTENT_SESSION_V1_QUALIFIED
@@ -5069,6 +5146,13 @@ class WorkbenchApiServer:
                         "max_sessions_page_size": 100,
                         "max_messages_page_size": 200,
                         "max_events_page_size": 2000,
+                        "agent_history": {
+                            "version": "1.0",
+                            "scope": "owner_agent",
+                            "includes_archived_sessions": True,
+                            "opaque_cursor": True,
+                            "max_page_size": 200,
+                        },
                     },
                     "frontend_connector": {
                         "version": "1.1",
@@ -5181,6 +5265,79 @@ class WorkbenchApiServer:
             )
             return web.json_response(
                 {"ok": True, "sessions": rows, "next_cursor": None}
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_agent_history(self, request):
+        """Return one owner-scoped, cross-Session presentation history page."""
+
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            agent_id = str(request.match_info.get("agent_id") or "").strip().lower()
+            if agent_id not in self._runtime_map():
+                raise SessionNotFound("agent not found")
+            raw_limit = request.query.get("limit")
+            limit = 80 if raw_limit in {None, ""} else int(raw_limit)
+            if not 1 <= limit <= 200:
+                raise ValueError("history limit must be between 1 and 200")
+            cursor = str(request.query.get("cursor") or "").strip() or None
+            before_session_id = (
+                str(request.query.get("before_session_id") or "").strip() or None
+            )
+            raw_before_ordinal = request.query.get("before_ordinal")
+            if (before_session_id is None) != (raw_before_ordinal is None):
+                raise ValueError("history anchor requires Session and ordinal")
+            if cursor is not None and before_session_id is not None:
+                raise ValueError("history cursor and anchor cannot be combined")
+            if cursor is not None and len(cursor) > 512:
+                raise ValueError("agent history cursor is invalid")
+            if before_session_id is not None:
+                if len(before_session_id) > 256:
+                    raise ValueError("agent history anchor is invalid")
+                before = self.session_store.agent_history_anchor(
+                    owner_id=owner,
+                    agent_id=agent_id,
+                    session_id=before_session_id,
+                    ordinal=int(raw_before_ordinal),
+                )
+            elif cursor is not None:
+                before = self._decode_agent_history_cursor(
+                    cursor,
+                    owner_id=owner,
+                    agent_id=agent_id,
+                )
+            else:
+                before = None
+            page = self.session_store.agent_history_page(
+                owner_id=owner,
+                agent_id=agent_id,
+                before=before,
+                limit=limit,
+            )
+            next_boundary = page["next_boundary"]
+            next_cursor = (
+                self._encode_agent_history_cursor(
+                    owner_id=owner,
+                    agent_id=agent_id,
+                    boundary=next_boundary,
+                )
+                if next_boundary is not None
+                else None
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "messages": build_agent_history_projection(
+                        self.session_store,
+                        messages=page["messages"],
+                        owner_id=owner,
+                    ),
+                    "history_complete": bool(page["history_complete"]),
+                    "next_cursor": next_cursor,
+                }
             )
         except Exception as exc:
             return self._v1_error(exc)

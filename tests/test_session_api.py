@@ -323,6 +323,13 @@ async def test_qualified_capability_is_client_neutral_and_limit_driven(
         "max_sessions_page_size": 100,
         "max_messages_page_size": 200,
         "max_events_page_size": 2000,
+        "agent_history": {
+            "version": "1.0",
+            "scope": "owner_agent",
+            "includes_archived_sessions": True,
+            "opaque_cursor": True,
+            "max_page_size": 200,
+        },
     }
     assert not any(
         "client" in str(value).lower() and "specific" in str(value).lower()
@@ -1013,3 +1020,83 @@ async def test_session_api_cancel_and_attachment_controls(tmp_path):
         ).text
     )
     assert committed["attachment"]["state"] == "committed"
+
+
+@pytest.mark.asyncio
+async def test_agent_history_api_reads_archived_session_before_new_session(tmp_path):
+    server, _runtime = _server(tmp_path)
+    owner = "user:7"
+    earlier = server.session_store.create_session(owner_id=owner, agent_id="lily")
+    earlier_message = server.session_store.append_presentation_message(
+        session_id=earlier["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        role="assistant",
+        text="A message from the earlier session",
+        source="test",
+        idempotency_key="agent-history-earlier",
+    )
+    later_earlier_message = server.session_store.append_presentation_message(
+        session_id=earlier["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        role="assistant",
+        text="A later message from the earlier session",
+        source="test",
+        idempotency_key="agent-history-later-earlier",
+    )
+    server.session_store.archive_session(earlier["session_id"])
+
+    current = server.session_store.create_session(owner_id=owner, agent_id="lily")
+    current_message = server.session_store.append_presentation_message(
+        session_id=current["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        role="assistant",
+        text="A message from the new session",
+        source="test",
+        idempotency_key="agent-history-current",
+    )
+
+    response = await server.handle_v1_agent_history(
+        _Request(
+            query={
+                "before_session_id": current["session_id"],
+                "before_ordinal": str(current_message["ordinal"]),
+                "limit": "1",
+            },
+            match_info={"agent_id": "lily"},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["history_complete"] is False
+    assert isinstance(payload["next_cursor"], str)
+    assert [message["text"] for message in payload["messages"]] == [
+        "A later message from the earlier session"
+    ]
+    assert payload["messages"][0]["session_id"] == earlier["session_id"]
+    assert payload["messages"][0]["message_id"] == later_earlier_message["message_id"]
+
+    older_response = await server.handle_v1_agent_history(
+        _Request(
+            query={"cursor": payload["next_cursor"], "limit": "1"},
+            match_info={"agent_id": "lily"},
+        )
+    )
+    older_payload = json.loads(older_response.text)
+
+    assert older_response.status == 200
+    assert older_payload["history_complete"] is True
+    assert older_payload["next_cursor"] is None
+    assert [message["text"] for message in older_payload["messages"]] == [
+        "A message from the earlier session"
+    ]
+    assert older_payload["messages"][0]["message_id"] == earlier_message["message_id"]
+    with pytest.raises(ValueError):
+        server._decode_agent_history_cursor(
+            payload["next_cursor"],
+            owner_id="user:8",
+            agent_id="lily",
+        )
