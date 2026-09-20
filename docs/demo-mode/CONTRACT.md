@@ -1,8 +1,8 @@
 # Shared Demo Contract v1
 
-日期：2026-09-20  
-协议标识：`hashi.shared-demo`，版本：`1`  
-状态：**拟实现的共同契约，不代表当前 Backend API 已支持。**  
+日期：2026-09-20
+协议标识：`hashi.shared-demo`，版本：`1`
+状态：**拟实现的共同契约，不代表当前 Backend API 已支持。**
 源代码基线及授权范围见 [README](README.md)。
 
 ## 1. 范围和事实所有者
