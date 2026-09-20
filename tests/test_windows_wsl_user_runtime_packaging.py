@@ -51,6 +51,7 @@ def test_wsl_launcher_uses_exit_code_authority_and_separate_stream_logs():
     assert "user-runtime.stdout.log" in launcher
     assert "user-runtime.stderr.log" in launcher
     assert "Archive-PreviousStreamLog" in launcher
+    assert "Test-LogContainsNullByte" in launcher
     assert launcher.count("Invoke-WslNative -Arguments") == 2
 
 
@@ -119,6 +120,11 @@ def test_windows_powershell_launcher_tolerates_stderr_and_propagates_exit_code(
         ["whoami"], text=True, encoding="utf-8", errors="replace"
     ).strip()
     runtime_base = tmp_path / "runtime"
+    log_dir = runtime_base / "TEST1" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "user-runtime.log").write_bytes(
+        "legacy mixed stream".encode("utf-16-le")
+    )
 
     completed = subprocess.run(
         [
@@ -154,10 +160,12 @@ def test_windows_powershell_launcher_tolerates_stderr_and_propagates_exit_code(
     )
 
     assert completed.returncode == expected_exit, completed.stderr
-    log_dir = runtime_base / "TEST1" / "logs"
     lifecycle = (log_dir / "user-runtime.log").read_text(encoding="utf-8")
     stdout = _read_powershell_log(log_dir / "user-runtime.stdout.log")
     stderr = _read_powershell_log(log_dir / "user-runtime.stderr.log")
+    assert "\x00" not in lifecycle
+    assert "legacy mixed stream" not in lifecycle
+    assert len(list(log_dir.glob("user-runtime-*.log"))) == 1
     if expected_exit == 0:
         assert "launcher exited with code 0" in lifecycle
         assert stdout.count("fake stdout") == 1

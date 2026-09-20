@@ -237,6 +237,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment no longer hardcodes an instance, identity, distribution, or
   checkout. The native Windows Remote supervisor task now also has an explicit
   unlimited execution lifetime and deterministic missed/duplicate-run policy.
+  Upgraded launchers archive NUL-bearing legacy mixed-encoding logs on first
+  use instead of waiting for the size-based rotation threshold.
 - **Function Worker cold-start latency and readiness truth** — qualifies and
   materializes one immutable Function generation per startup instead of
   rebuilding the same 268-module dependency graph for every Agent; unchanged

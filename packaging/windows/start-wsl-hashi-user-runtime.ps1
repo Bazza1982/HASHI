@@ -74,13 +74,42 @@ function Get-RotatedLogPath {
     return Join-Path $parent ("{0}-{1}-{2}{3}" -f $stem, $stamp, $suffix, $extension)
 }
 
+function Test-LogContainsNullByte {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::ReadWrite
+    )
+    try {
+        $buffer = New-Object byte[] 4096
+        while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            for ($index = 0; $index -lt $count; $index++) {
+                if ($buffer[$index] -eq 0) {
+                    return $true
+                }
+            }
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+    return $false
+}
+
 function Rotate-LauncherLogIfNeeded {
     if (-not (Test-Path -LiteralPath $launcherLogPath -PathType Leaf)) {
         return
     }
 
     $logItem = Get-Item -LiteralPath $launcherLogPath
-    if ($logItem.Length -ge 10MB) {
+    $containsLegacyEncoding = (
+        $logItem.Length -gt 0 -and
+        (Test-LogContainsNullByte -Path $launcherLogPath)
+    )
+    if ($logItem.Length -ge 10MB -or $containsLegacyEncoding) {
         Move-Item -LiteralPath $launcherLogPath -Destination (
             Get-RotatedLogPath -Path $launcherLogPath
         )

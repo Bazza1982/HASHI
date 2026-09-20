@@ -43,7 +43,8 @@ Windows PowerShell 5.1 may project native standard error as
 the launcher therefore redirects the native streams directly and propagates
 the actual `wsl.exe` exit code. Stream logs are archived between launches so
 they are never appended into the UTF-8 lifecycle log or mixed with a previous
-encoding.
+encoding. A legacy lifecycle log containing NUL bytes is also archived on the
+first upgraded launch, even when it has not reached the normal size limit.
 
 Stop the exact scheduled task/runtime before replacing its deployment, then
 use `-StartNow` or `Start-ScheduledTask` and verify the instance's own health
