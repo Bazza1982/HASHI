@@ -29,7 +29,10 @@ def test_demo_profile_requires_explicit_enable_and_strong_service_token():
     ready = DemoProfile.from_runtime(
         cfg,
         {"demo_service_token": "x" * 32},
-        environ={"HASHI_DEMO_ENABLED": "1"},
+        environ={
+            "HASHI_DEMO_ENABLED": "1",
+            "HASHI_DEMO_DAILY_RUN_LIMIT": "1000",
+        },
     )
     assert ready.ready is True
     assert ready.public_config()["capabilities"]["tools"] is False
@@ -130,3 +133,64 @@ def test_owner_purge_does_not_cross_agent_boundary(tmp_path: Path):
     with pytest.raises(SessionNotFound):
         store.get_session(a["session_id"], owner_id="demo:shared")
     assert store.get_session(b["session_id"], owner_id="demo:shared")["agent_id"] == "demo_b"
+
+
+def test_demo_daily_budget_is_durable_conservative_and_unlinkable_after_purge(tmp_path: Path):
+    store = DemoLeaseStore(
+        tmp_path / "demo.sqlite3",
+        max_live_visitors=2,
+        absolute_ttl_seconds=60,
+        idle_ttl_seconds=0,
+    )
+    first, _ = store.allocate(now=100)
+    second, _ = store.allocate(now=100)
+    store.mark_ready(first.lease_id)
+    store.mark_ready(second.lease_id)
+
+    assert store.reserve_daily_run(
+        lease_id=first.lease_id,
+        idempotency_key="1234567890abcdef",
+        text="hello",
+        limit=2,
+        now=100,
+    ) is False
+    assert store.reserve_daily_run(
+        lease_id=first.lease_id,
+        idempotency_key="1234567890abcdef",
+        text="hello",
+        limit=2,
+        now=101,
+    ) is True
+    with pytest.raises(DemoConflict):
+        store.reserve_daily_run(
+            lease_id=first.lease_id,
+            idempotency_key="1234567890abcdef",
+            text="changed",
+            limit=2,
+            now=102,
+        )
+
+    assert store.reserve_daily_run(
+        lease_id=second.lease_id,
+        idempotency_key="abcdef1234567890",
+        text="second",
+        limit=2,
+        now=103,
+    ) is False
+    assert store.budget_used(now=103) == 2
+
+    from orchestrator.demo.leases import DemoBudgetExhausted
+
+    with pytest.raises(DemoBudgetExhausted):
+        store.reserve_daily_run(
+            lease_id=second.lease_id,
+            idempotency_key="fedcba0987654321",
+            text="third",
+            limit=2,
+            now=104,
+        )
+
+    store.delete(first.lease_id)
+    # Per-visitor reservation rows cascade away, while the aggregate daily
+    # counter survives so clearing a visitor cannot reset the public budget.
+    assert store.budget_used(now=105) == 2
