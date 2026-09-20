@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
@@ -1385,6 +1386,10 @@ class SessionStore:
                 # Database authority is already removed. A later media sweeper can
                 # retry orphan bytes; never restore the purged Session graph.
                 pass
+        for session_id in session_ids:
+            workspace = (self.workspaces_root / session_id).resolve()
+            if workspace.parent == self.workspaces_root.resolve() and workspace.exists():
+                shutil.rmtree(workspace, ignore_errors=True)
         return {"sessions": len(session_ids), "attachments": len(removed_files)}
 
     def bind_channel(
