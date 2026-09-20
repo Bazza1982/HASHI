@@ -124,6 +124,25 @@ def build_chat_projection(
     return payload
 
 
+def build_agent_history_projection(
+    store: SessionStore,
+    *,
+    messages: list[dict],
+    owner_id: str,
+) -> list[dict]:
+    """Project durable cross-Session history without reviving live controls."""
+
+    return [
+        _canonical_projection_row(
+            store,
+            message,
+            owner_id=owner_id,
+            include_command_ui=False,
+        )
+        for message in messages
+    ]
+
+
 def _canonical_projection_row(
     store: SessionStore,
     message: dict,

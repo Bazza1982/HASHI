@@ -997,6 +997,7 @@ class CodexCLIAdapter(BaseBackend):
         terminal_failure: CodexFailure | None = None
         terminal_event_type: str | None = None
         terminal_event_at: float | None = None
+        terminal_event_seen = asyncio.Event()
         forced_terminal = False
         tool_item_ids: set[str] = set()
         side_effect_item_ids: set[str] = set()
@@ -1135,10 +1136,12 @@ class CodexCLIAdapter(BaseBackend):
                         elif event_type == "turn.completed":
                             terminal_event_type = event_type
                             terminal_event_at = time.perf_counter()
+                            terminal_event_seen.set()
                         elif event_type == "turn.failed":
                             terminal_event_type = event_type
                             terminal_event_at = time.perf_counter()
                             terminal_failure = parse_codex_failure(event)
+                            terminal_event_seen.set()
                     pending_agent_message = self._parse_codex_event(
                         decoded,
                         on_stream_event,
@@ -1165,7 +1168,15 @@ class CodexCLIAdapter(BaseBackend):
                 await proc.stdin.drain()
                 proc.stdin.close()
 
-            while proc.returncode is None and timeout_kind is None:
+            while timeout_kind is None:
+                pending_readers = [
+                    task
+                    for task in (stdout_task, stderr_task)
+                    if not task.done()
+                ]
+                if proc.returncode is not None and not pending_readers:
+                    break
+
                 now_perf = time.perf_counter()
                 idle_for = self._last_activity_age()
                 if idle_for >= self.IDLE_TIMEOUT_SEC:
@@ -1183,10 +1194,35 @@ class CodexCLIAdapter(BaseBackend):
                         forced_terminal = True
                         break
                     wait_slice = min(wait_slice, max(0.1, remaining_turn))
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=wait_slice)
-                except asyncio.TimeoutError:
-                    continue
+                if proc.returncode is None:
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=wait_slice)
+                    except asyncio.TimeoutError:
+                        continue
+                else:
+                    terminal_wait_task: asyncio.Task | None = None
+                    waiters = set(pending_readers)
+                    if terminal_event_at is None:
+                        terminal_wait_task = asyncio.create_task(
+                            terminal_event_seen.wait()
+                        )
+                        waiters.add(terminal_wait_task)
+                    try:
+                        await asyncio.wait(
+                            waiters,
+                            timeout=wait_slice,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    finally:
+                        if (
+                            terminal_wait_task is not None
+                            and not terminal_wait_task.done()
+                        ):
+                            terminal_wait_task.cancel()
+                            await asyncio.gather(
+                                terminal_wait_task,
+                                return_exceptions=True,
+                            )
 
             if timeout_kind is not None:
                 duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -1226,17 +1262,36 @@ class CodexCLIAdapter(BaseBackend):
                     )
                 )
 
-            if forced_terminal and proc.returncode is None:
+            if forced_terminal:
                 terminal_label = terminal_event_type or "terminal event"
-                self.logger.warning(
-                    f"Codex request {request_id} produced {terminal_label} but the subprocess "
-                    f"did not exit within {self.POST_TURN_COMPLETION_GRACE_SEC}s; forcing shutdown."
-                )
-                await self.force_kill_process_tree(
-                    proc,
-                    logger=self.logger,
-                    reason=f"{terminal_label.replace('.', '-')}-grace-expired:{request_id}",
-                )
+                if proc.returncode is None:
+                    self.logger.warning(
+                        f"Codex request {request_id} produced {terminal_label} but the subprocess "
+                        f"did not exit within {self.POST_TURN_COMPLETION_GRACE_SEC}s; forcing shutdown."
+                    )
+                    await self.force_kill_process_tree(
+                        proc,
+                        logger=self.logger,
+                        reason=f"{terminal_label.replace('.', '-')}-grace-expired:{request_id}",
+                    )
+                else:
+                    self.logger.warning(
+                        f"Codex request {request_id} produced {terminal_label} and exited, but its "
+                        f"output pipes did not close within {self.POST_TURN_COMPLETION_GRACE_SEC}s; "
+                        "stopping the lingering readers."
+                    )
+                lingering_readers = [
+                    task
+                    for task in (stdout_task, stderr_task)
+                    if not task.done()
+                ]
+                for task in lingering_readers:
+                    task.cancel()
+                if lingering_readers:
+                    await asyncio.gather(
+                        *lingering_readers,
+                        return_exceptions=True,
+                    )
 
             read_results = await asyncio.gather(
                 stdout_task,

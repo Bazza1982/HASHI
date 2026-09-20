@@ -8,6 +8,7 @@ import pytest
 
 from adapters.stream_events import StreamEvent
 from orchestrator.chat_transcript_projection import (
+    build_agent_history_projection,
     build_chat_projection,
     read_chat_transcript,
 )
@@ -647,6 +648,40 @@ def test_projection_message_cursor_streams_presentation_only_messages(tmp_path: 
     ]
     assert polled["messages"][0]["history_eligible"] is False
     assert polled["message_cursor"] > snapshot["message_cursor"]
+
+
+def test_agent_history_projection_keeps_old_command_text_but_not_live_controls(
+    tmp_path: Path,
+):
+    store = SessionStore(tmp_path / "history-command.sqlite", instance_id="HASHI2")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="a")
+    recorded = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        role="assistant",
+        text="Choose a history action",
+        source="test",
+        idempotency_key="history-command-ui",
+        message_context={
+            "command_ui": {
+                "version": 1,
+                "menu_id": "historymenuabcdefghijkl",
+                "revision": 1,
+                "closed": False,
+                "rows": [],
+            }
+        },
+    )
+
+    projected = build_agent_history_projection(
+        store,
+        messages=[recorded],
+        owner_id="user:7",
+    )
+
+    assert projected[0]["text"] == "Choose a history action"
+    assert "command_ui" not in projected[0]
 
 
 @pytest.mark.asyncio

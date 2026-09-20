@@ -71,6 +71,32 @@ class _HangingProc:
         self._exit_event.set()
 
 
+class _InheritedPipeReader:
+    """A pipe whose writer survives after the direct child has exited."""
+
+    def __init__(self, lines: list[str]):
+        self._lines = [line.encode("utf-8") + b"\n" for line in lines]
+        self._never_closes = asyncio.Event()
+
+    async def read(self, _size: int) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        await self._never_closes.wait()
+        return b""
+
+
+class _ExitedProcWithInheritedPipes:
+    def __init__(self, lines: list[str], pid: int = 12345):
+        self.pid = pid
+        self.returncode = 0
+        self.stdin = _FakeStdin()
+        self.stdout = _InheritedPipeReader(lines)
+        self.stderr = _InheritedPipeReader([])
+
+    async def wait(self) -> int:
+        return 0
+
+
 def _build_adapter(tmp_path: Path, *, model: str = "gpt-5.4") -> CodexCLIAdapter:
     cfg = SimpleTestConfig(name="hashiko", workspace_dir=str(tmp_path))
     cfg.model = model
@@ -473,6 +499,52 @@ def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path
     assert response.usage.prompt_cache_miss_tokens == 6
     assert adapter._session_id == "thread_123"
     assert killed_reasons == ["turn-completed-grace-expired:req-0001"]
+
+
+def test_codex_completed_turn_does_not_wait_for_inherited_pipe_eof(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _build_adapter(tmp_path)
+    adapter.POST_TURN_COMPLETION_GRACE_SEC = 0.01
+    proc = _ExitedProcWithInheritedPipes(
+        [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "final answer"},
+                }
+            ),
+            json.dumps({"type": "turn.completed"}),
+        ]
+    )
+    killed_reasons: list[str] = []
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        return proc
+
+    async def _fake_force_kill_process_tree(
+        _proc_obj,
+        logger=None,
+        reason: str = "",
+    ):
+        killed_reasons.append(reason)
+        return False
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(adapter, "force_kill_process_tree", _fake_force_kill_process_tree)
+
+    response = asyncio.run(
+        asyncio.wait_for(
+            adapter.generate_response("hello", "req-inherited-pipes"),
+            timeout=0.5,
+        )
+    )
+
+    assert response.is_success is True
+    assert response.text == "final answer"
+    assert killed_reasons == []
+    assert adapter._active_read_tasks == []
 
 
 def test_codex_idle_timeout_is_enforced_when_process_stalls(tmp_path, monkeypatch: pytest.MonkeyPatch):

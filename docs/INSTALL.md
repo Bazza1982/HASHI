@@ -260,6 +260,28 @@ copy installed on the recipient PC.
 - HASHI exposes its Python Backend API on the configured `workbench_port`.
   Workbench has retired and is no longer installed or launched by HASHI.
 
+### Optional WSL login task
+
+For a source checkout that runs inside WSL but should start at Windows
+interactive logon, use the versioned platform installer from an elevated
+Windows PowerShell 5.1 prompt:
+
+```powershell
+.\packaging\windows\install-wsl-hashi-user-runtime.ps1 `
+    -InstanceId research `
+    -Distro Ubuntu-22.04 `
+    -LinuxRoot /home/me/projects/hashi `
+    -LinuxPython /home/me/projects/hashi/.venv/bin/python3 `
+    -StartNow
+```
+
+The task is bound to the exact Windows identity and explicit WSL paths. Its
+launcher keeps lifecycle, stdout, and stderr logs separate and treats the
+native `wsl.exe` exit code—not the presence of stderr—as the process result.
+Stop the exact instance before replacing an existing task. See the
+[Windows deployment assets](../packaging/windows/README.md) for log locations,
+transaction behavior, and verification boundaries.
+
 ---
 
 ## macOS

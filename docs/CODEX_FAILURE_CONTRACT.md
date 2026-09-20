@@ -24,6 +24,13 @@ themselves: Codex also uses them while reconnecting.  A later
 terminal and starts the same bounded subprocess-exit grace period as
 `turn.completed`.
 
+That terminal grace covers both direct-process exit and output-stream drain.
+A long-running descendant can inherit stdout or stderr after the direct Codex
+process has exited, so pipe EOF is not proof of turn completion.  Once a typed
+terminal event is recorded, HASHI accepts the buffered result and cancels any
+reader still awaiting EOF when the grace period expires.  A completed turn
+must not remain busy until an operator sends `/stop`.
+
 Current stable classifications include:
 
 | Code | Typical condition | Retryable |

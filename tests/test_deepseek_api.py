@@ -21,6 +21,7 @@ from adapters.openrouter_api import (
     _tool_call_forensic_details,
 )
 from adapters.stream_events import (
+    KIND_COMMENTARY,
     KIND_SHELL_EXEC,
     KIND_TEXT_DELTA,
     KIND_THINKING,
@@ -822,16 +823,30 @@ def test_invalid_dsml_requires_repair(tmp_path, text):
     assert inspected.tool_calls == ()
 
 
-def test_code_fenced_dsml_example_is_not_treated_as_tool_intent(tmp_path):
+@pytest.mark.parametrize(
+    "example",
+    [
+        (
+            "Example only:\n```xml\n"
+            "<｜DSML｜ calls></｜DSML｜ calls>\n"
+            "```"
+        ),
+        (
+            "Example only:\n```xml\n"
+            '<antml:function_calls><antml:invoke name="file_list">'
+            "</antml:invoke></antml:function_calls>\n"
+            "```"
+        ),
+    ],
+)
+def test_code_fenced_tool_markup_example_is_not_treated_as_tool_intent(
+    tmp_path,
+    example,
+):
     adapter = _adapter(tmp_path, model="deepseek-flash")
     tools = adapter._build_payload([{"role": "user", "content": "explain"}])[
         "tools"
     ]
-    example = (
-        "Example only:\n```xml\n"
-        "<｜DSML｜ calls></｜DSML｜ calls>\n"
-        "```"
-    )
 
     inspected = inspect_deepseek_text_tool_calls(
         example,
@@ -840,6 +855,83 @@ def test_code_fenced_dsml_example_is_not_treated_as_tool_intent(tmp_path):
     )
 
     assert inspected.status == "none"
+
+
+@pytest.mark.parametrize(
+    ("envelope", "expected_dialect"),
+    [
+        (
+            (
+                '<antml:function_calls><antml:invoke name="file_list">'
+                '<antml:parameter name="path">/tmp</antml:parameter>'
+                "</antml:invoke></antml:function_calls>"
+            ),
+            "antml-degraded",
+        ),
+        (
+            (
+                "<｜DSML｜ calls>"
+                '<｜DSML｜ invoke name="file_list">'
+                '<｜DSML｜ parameter name="path" string="true">/tmp'
+                "</｜DSML｜ parameter>"
+                "</｜DSML｜ invoke>"
+                "</｜DSML｜ calls>"
+            ),
+            "v4.1",
+        ),
+    ],
+)
+def test_commentary_prefixed_text_tool_intent_requires_native_repair(
+    tmp_path,
+    envelope,
+    expected_dialect,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    tools = adapter._build_payload([{"role": "user", "content": "inspect"}])[
+        "tools"
+    ]
+
+    inspected = inspect_deepseek_text_tool_calls(
+        "正在检查目录，马上回来。\n\n" + envelope,
+        tools,
+        response_id="response-prefixed-tool-intent",
+    )
+
+    assert inspected.status == "repair_required"
+    assert inspected.dialect == expected_dialect
+    assert inspected.issue == "text_before_tool_call_envelope"
+    assert inspected.candidate_tool_name == "file_list"
+    assert inspected.tool_calls == ()
+
+
+def test_stream_gate_delivers_commentary_and_blocks_following_antml():
+    gate = DeepSeekToolMarkupStreamGate(enabled=True)
+
+    visible = [
+        gate.feed("正在检查目录，马上回来。\n\n"),
+        gate.feed("<ant"),
+        gate.feed("ml:function_calls>"),
+        gate.feed('<antml:invoke name="file_list">'),
+    ]
+
+    assert "".join(visible) == "正在检查目录，马上回来。\n\n"
+    assert gate.blocked is True
+    assert gate.finish() == ""
+
+
+def test_stream_gate_preserves_code_fenced_tool_markup_example():
+    gate = DeepSeekToolMarkupStreamGate(enabled=True)
+    chunks = [
+        "Example only:\n```xml\n",
+        "<ant",
+        "ml:function_calls>",
+        "</antml:function_calls>\n```",
+    ]
+
+    visible = "".join(gate.feed(chunk) for chunk in chunks) + gate.finish()
+
+    assert visible == "".join(chunks)
+    assert gate.blocked is False
 
 
 def test_incomplete_streamed_dsml_prefix_is_held_and_requires_repair(tmp_path):
@@ -1269,6 +1361,134 @@ async def test_degraded_v32_tool_intent_requires_native_repair_before_execution(
         "HASHI rejected DeepSeek textual tool intent:\n"
     )
     assert degraded in rejected_arguments
+
+
+@pytest.mark.asyncio
+async def test_commentary_prefixed_antml_is_repaired_before_tool_execution(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    commentary = "正在检查目录，马上回来。"
+    leaked_call = (
+        commentary
+        + "\n\n"
+        + '<antml:function_calls><antml:invoke name="file_list">'
+        + '<antml:parameter name="path">/tmp</antml:parameter>'
+        + "</antml:invoke></antml:function_calls>"
+    )
+    repaired_call = {
+        "id": "call-native-antml-repair",
+        "type": "function",
+        "function": {"name": "file_list", "arguments": '{"path":"/tmp"}'},
+    }
+
+    class _StreamResponse:
+        headers = {}
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            choice = self._payload["choices"][0]
+            message = choice["message"]
+            delta = {"content": message.get("content", "")}
+            if message.get("tool_calls"):
+                delta["tool_calls"] = [
+                    {"index": index, **tool_call}
+                    for index, tool_call in enumerate(message["tool_calls"])
+                ]
+            yield "data: " + json.dumps(
+                {
+                    "id": self._payload["id"],
+                    "model": self._payload["model"],
+                    "choices": [
+                        {
+                            "delta": delta,
+                            "finish_reason": choice["finish_reason"],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            yield "data: [DONE]"
+
+    class _StreamContext:
+        def __init__(self, payload):
+            self._response = _StreamResponse(payload)
+
+        async def __aenter__(self):
+            return self._response
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class _Client:
+        def __init__(self, payloads):
+            self._payloads = iter(payloads)
+
+        def stream(self, *args, **kwargs):
+            return _StreamContext(next(self._payloads))
+
+    responses = [
+        {
+            "id": "deepseek-antml-leak",
+            "model": "deepseek-flash",
+            "choices": [
+                {
+                    "message": {"content": leaked_call},
+                    "finish_reason": "stop",
+                }
+            ],
+        },
+        {
+            "id": "deepseek-antml-native-repair",
+            "model": "deepseek-flash",
+            "choices": [
+                {
+                    "message": {
+                        "content": commentary,
+                        "tool_calls": [repaired_call],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+        },
+        {
+            "id": "deepseek-antml-final",
+            "model": "deepseek-flash",
+            "choices": [
+                {
+                    "message": {"content": "检查完成。"},
+                    "finish_reason": "stop",
+                }
+            ],
+        },
+    ]
+    adapter.client = _Client(responses)
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    response = await adapter.generate_response(
+        "inspect",
+        "req-commentary-antml-repair",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert response.text == "检查完成。"
+    assert response.tool_call_count == 1
+    assert response.stream_metadata["provider_tool_repair_count"] == 1
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/tmp"}, "call-native-antml-repair")
+    ]
+    commentary_events = [event for event in events if event.kind == KIND_COMMENTARY]
+    assert [event.summary for event in commentary_events] == [commentary]
+    assert all("<antml:" not in event.summary for event in commentary_events)
 
 
 @pytest.mark.asyncio

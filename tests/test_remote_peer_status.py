@@ -1453,7 +1453,7 @@ def test_trusted_peer_stays_accepted_while_periodic_revalidation_runs():
     peer = PeerInfo(
         instance_id="HASHI4",
         display_name="HASHI4",
-        host="192.168.0.211",
+        host="192.0.2.21",
         port=8771,
         workbench_port=18806,
         platform="windows",
@@ -1480,10 +1480,10 @@ def test_trusted_peer_stays_accepted_while_periodic_revalidation_runs():
     }
     manager._handshake_timeout_seconds = 1
     manager._force_handshake = False
-    manager._candidate_hosts_for_peer = lambda _peer: ["192.168.0.211"]
+    manager._candidate_hosts_for_peer = lambda _peer: ["192.0.2.21"]
     manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
     manager._local_network_profile = lambda: {
-        "host_identity": "a9max",
+        "host_identity": "workstation-a",
         "environment_kind": "windows",
         "address_candidates": [],
         "observed_candidates": [],
