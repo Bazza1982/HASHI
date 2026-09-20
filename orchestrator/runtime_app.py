@@ -407,7 +407,8 @@ class UniversalOrchestrator:
             self._restart_request = None
 
             if restart is not None:
-                # --- Hot restart: stop agents only, keep services alive ---
+                # Targeted scopes switch Workers here; broad scopes publish one
+                # Core handoff request after this operation releases its guard.
                 self.shutdown_event.clear()
                 await self._do_hot_restart(restart)
                 continue

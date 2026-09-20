@@ -19,6 +19,7 @@ bridge_logger = logging.getLogger("BridgeU.Bridge")
 INITIAL_AGENT_STARTUP_CONCURRENCY = 8
 STARTUP_PROGRESS_HEARTBEAT_SECONDS = 5.0
 STARTUP_STALL_NOTICE_SECONDS = 15.0
+REMOTE_STATUS_RECONCILE_INTERVAL_SECONDS = 2.0
 
 
 def _remote_issue_from_result(result: dict[str, Any], instance_id: str) -> dict[str, Any]:
@@ -212,7 +213,7 @@ class StartupManager:
 
         return True, wa_cfg
 
-    async def _ensure_remote_lifecycle(self, global_config=None) -> None:
+    def _remote_lifecycle_root(self, global_config=None):
         if global_config is None:
             global_config = getattr(self.kernel, "global_cfg", None) or getattr(
                 self.kernel,
@@ -220,11 +221,41 @@ class StartupManager:
                 None,
             )
         portable_root = str(os.environ.get("HASHI_REMOTE_ROOT") or "").strip()
-        root = (
+        return (
             portable_root
             or getattr(global_config, "bridge_home", None)
             or getattr(global_config, "project_root", None)
         )
+
+    @staticmethod
+    def _remote_status_from_result(result: dict[str, Any]) -> dict[str, Any]:
+        action = str(result.get("action") or "unknown")
+        settings = result.get("settings")
+        return {
+            "available": bool(result.get("ok")),
+            "enabled": bool(getattr(settings, "enabled", action != "skipped")),
+            "supervised": bool(
+                getattr(settings, "supervised", False)
+                and action not in {"started_child", "started_child_fallback"}
+                and not isinstance(result.get("supervisor_fallback"), dict)
+            ),
+            "supervisor_requested": bool(getattr(settings, "supervised", False)),
+            "action": action,
+            "port": result.get("port") or getattr(settings, "port", None),
+            "service_name": str(result.get("service_name") or ""),
+            "remote_state": result.get("remote_state"),
+            "discovery_state": result.get("discovery_state"),
+            "trust_state": result.get("trust_state"),
+        }
+
+    async def _ensure_remote_lifecycle(self, global_config=None) -> None:
+        if global_config is None:
+            global_config = getattr(self.kernel, "global_cfg", None) or getattr(
+                self.kernel,
+                "global_config",
+                None,
+            )
+        root = self._remote_lifecycle_root(global_config)
         instance_id = str(
             getattr(global_config, "instance_id", None)
             or getattr(getattr(self.kernel, "paths", None), "instance_id", None)
@@ -243,20 +274,7 @@ class StartupManager:
                 "settings": None,
             }
         action = result.get("action")
-        settings = result.get("settings")
-        remote_status = {
-            "available": bool(result.get("ok")),
-            "enabled": bool(getattr(settings, "enabled", action != "skipped")),
-            "supervised": bool(
-                getattr(settings, "supervised", False)
-                and action not in {"started_child", "started_child_fallback"}
-                and not isinstance(result.get("supervisor_fallback"), dict)
-            ),
-            "supervisor_requested": bool(getattr(settings, "supervised", False)),
-            "action": str(action or "unknown"),
-            "port": getattr(settings, "port", None),
-            "service_name": str(result.get("service_name") or ""),
-        }
+        remote_status = self._remote_status_from_result(result)
         setattr(self.kernel, "remote_lifecycle_status", remote_status)
         status = dict(getattr(self.kernel, "startup_status", {}) or {})
         status["remote"] = remote_status
@@ -307,6 +325,78 @@ class StartupManager:
         self.kernel.startup_status = status
         message = _format_remote_issue(issue)
         bridge_logger.warning(message)
+
+    async def reconcile_remote_status(self, *, publish: bool = True) -> None:
+        """Clear a latched startup Remote issue after live Remote recovery."""
+
+        status = dict(getattr(self.kernel, "startup_status", {}) or {})
+        previous_issues = list(status.get("issues") or ())
+
+        def _is_remote_lifecycle_issue(issue) -> bool:
+            return (
+                isinstance(issue, dict)
+                and issue.get("component") == "remote"
+                and str(issue.get("code") or "").startswith("remote_")
+            )
+
+        if not any(_is_remote_lifecycle_issue(issue) for issue in previous_issues):
+            return
+
+        now = time.monotonic()
+        last_check = float(getattr(self, "_remote_status_checked_at", 0.0) or 0.0)
+        if now - last_check < REMOTE_STATUS_RECONCILE_INTERVAL_SECONDS:
+            return
+        self._remote_status_checked_at = now
+
+        try:
+            remote_lifecycle = importlib.import_module("orchestrator.remote_lifecycle")
+            inspect_remote = getattr(remote_lifecycle, "inspect_remote")
+            result = await inspect_remote(self._remote_lifecycle_root())
+        except Exception as exc:
+            bridge_logger.debug(
+                "Remote health reconciliation deferred: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        remote_status = self._remote_status_from_result(result)
+        setattr(self.kernel, "remote_lifecycle_status", remote_status)
+        status["remote"] = remote_status
+        resolved = bool(result.get("ok")) or result.get("action") == "skipped"
+        if not resolved:
+            self.kernel.startup_status = status
+            return
+
+        issues = [
+            issue for issue in previous_issues
+            if not _is_remote_lifecycle_issue(issue)
+        ]
+        degraded = bool(
+            status.get("failed_agents")
+            or any(
+                isinstance(issue, dict)
+                and issue.get("severity") in {"warning", "error", "critical"}
+                for issue in issues
+            )
+        )
+        status.update(issues=issues, degraded=degraded)
+        if status.get("services_ready"):
+            status.update(
+                ready=not degraded,
+                phase="degraded" if degraded else "ready",
+            )
+        self.kernel.startup_status = status
+
+        if publish:
+            bridge_logger.info("Hashi Remote startup degradation recovered.")
+            main_logger.info(
+                "Hashi Remote recovered; current health is ready.",
+                extra={"terminal_safe": True},
+            )
+            report = getattr(self.kernel, "_report_startup", None)
+            if callable(report):
+                report()
 
     def _publish_startup_issues(self, issues: list[dict[str, Any]]) -> None:
         for issue in issues:

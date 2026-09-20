@@ -1,6 +1,7 @@
 # Frontend command interactions v1
 
-Status: locally integrated source candidate; live adoption not yet verified.
+Status: HASHI3 persistence correction implemented and offline-qualified; live
+adoption of this correction is not yet verified.
 Owner: Frontend Connectors. Engineering layer: Functions (per-Agent Worker;
 the separate Workbench client remains a Frontend Connector). Parent: `HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md` and
 `HASHI_COMMAND_UI_STYLE_GUIDE.md`. Existing Core, PCM/PAO/Engine ownership is unchanged.
@@ -14,10 +15,14 @@ remain unchanged. A bounded adapter captures reply/edit/answer operations and
 projects them as client-neutral JSON cards. No Telegram HTTP request is needed
 for the supported synchronous menu interaction.
 
-`command_interactions.py` owns only the disposable projection, its revision
-fences and bounded request replay protection. `command_interaction_bridge.py`
-adapts the existing command/callback owners. `command_interaction_transport.py`
-is a Worker-owned adapter over the existing `runtime.slash` RPC. The shared
+`command_interactions.py` owns the bounded live action state, revision fences
+and request replay protection. `command_interaction_bridge.py` adapts the
+existing command/callback owners. Presentation-only menu state is recorded in
+the canonical Conversation Session and exposed through capability-negotiated
+chat projection v2. It never enters model history. This makes a full transcript
+refresh derive the same menu card as the direct command response instead of
+depending on client retention heuristics. `command_interaction_transport.py`
+remains a Worker-owned adapter over the existing `runtime.slash` RPC. The shared
 Backend API, Supervisor, Core protocol and protected source paths are unchanged.
 
 ## Transport
@@ -34,6 +39,14 @@ a connection-binding fence; it is not an identity or permission. The Worker
 derives the configured personal actor and the canonical `workbench/default`
 Conversation Session and context generation. Catalogue reads do not create a
 Conversation Session.
+
+Chat projection v2 is a separate, capability-negotiated read contract. A caller
+must request exactly `capabilities.command_ui=true`; v1 reads remain unchanged
+and never receive menu state. V2 returns allowlisted `command_ui` state using
+the same `command-ui:<menu_id>` identity as the direct response. Initial cards
+and later revisions are Session-backed presentation rows, so snapshots and
+polls are authoritative even when a client event or full refresh races the
+direct response.
 
 The Workbench-to-instance hop uses the existing authenticated Remote connection;
 the token is not sent to the browser. The reserved transport is accepted only
@@ -67,10 +80,12 @@ into commands or send callbacks to a model.
 Cards are bound to instance, Agent, canonical actor, Session, context generation,
 client and connection. A stale revision, expired card, changed callback
 registration or incompatible binding fails closed. A revision is consumed before
-the callback begins; an exception never re-enables a possibly executed button.
+the callback begins; the card remains visible with its actions disabled while
+the callback runs, and an exception never re-enables a possibly executed button.
 
-The store is in memory, bounded to 128 cards and 2,048 replay entries per runtime,
-with a 15-minute lifetime. Repeated `(binding, request_id)` with the same payload
+Live action state is in memory, bounded to 128 cards and 2,048 replay entries per
+runtime, with a 15-minute lifetime. Opening another menu does not invalidate an
+earlier unexpired menu. Repeated `(binding, request_id)` with the same payload
 returns its cached result within that lifetime. A different payload using the
 same request ID is rejected. Pending/failed outcomes are reserved before awaits.
 This is **not durable exactly-once execution** across restarts or expiration.
@@ -80,7 +95,11 @@ an operation.
 
 `close` only invalidates this projection. It does not undo an operation, cancel a
 Run or replace the existing command's own Cancel/Keep-current business action.
-All projection state is disposable and is not a second sent-message archive.
+The Session-backed row is presentation-only and mutable by stable identity; it
+is not a second semantic message or model-history archive. Before TTL, ordinary
+polling, a full snapshot, an unrelated click reaching the transcript layer, or
+opening another menu cannot erase the card because the backend projects it
+again from authoritative state.
 
 ## Supported compatibility surface
 
@@ -153,3 +172,25 @@ an authenticated catalogue probe therefore returns the expected 501 upgrade
 boundary. End-to-end live adoption still requires the operator's next targeted
 Agent `/reboot`; no restart or shared replacement is required or permitted for
 this change.
+
+### HASHI3 persistence correction (2026-09-20)
+
+The user reported that `/sys` and `/reboot` cards on HASHI3 appeared and then
+vanished while the same Workbench frontend remained stable on HASHI4. A live,
+read-only reproduction showed that HASHI3 returned a complete menu immediately
+but stored only its text. The next v1 transcript snapshot therefore lacked
+`command_ui` and could replace the direct response. Source and running menu-file
+hashes matched HASHI4, ruling out a stale frontend or missing source file; the
+regression was the incomplete HASHI3 projection contract.
+
+The correction gives every captured menu a stable presentation identity,
+records its allowlisted state with the presentation row, persists later menu
+revisions, and implements the Workbench's already-negotiated chat projection
+v2 contract. V1 remains compatible. A second menu no longer prematurely
+invalidates the first. Four focused regressions failed before implementation
+and passed afterward. The final command interaction, projection, SessionStore
+and Connector selection passed 140 tests and 11 subtests.
+
+Approval, implementation and adoption remain separate: the current user request
+authorized diagnosis and source correction, not a HASHI3 `/reboot` or
+`/restart`. No live process was changed during this correction.

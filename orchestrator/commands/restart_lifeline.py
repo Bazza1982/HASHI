@@ -102,8 +102,9 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
 
     `/restart` restarts the local instance. `/restart INSTANCE` restarts a peer.
     Peer restart is only exposed after the local Remote records an accepted
-    handshake and the target still advertises rescue_restart from a supervised
-    Remote. The provider is revalidated immediately before the POST.
+    handshake and the running target still advertises rescue_restart. Child or
+    supervised mode is diagnostic, not an authorization gate. The provider is
+    revalidated immediately before the POST.
     """
 
     if not legacy_restart._authorized(runtime, update):

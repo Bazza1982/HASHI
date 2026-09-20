@@ -161,22 +161,39 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError('never surface private details')
         with self.assertRaises(RuntimeError):
             await self.action(menu, payload=payload, invoke=fail_after_change)
-        self.assertTrue(menu.closed)
+        self.assertFalse(menu.closed)
         self.assertEqual(menu.actions, {})
+        self.assertTrue(menu.rows[0][0]['disabled'])
         result = await self.action(menu, payload=payload, invoke=fail_after_change)
         self.assertEqual(result['error_code'], 'command_menu_outcome_unknown')
         self.assertEqual(self.calls, ['changed'])
         self.assertNotIn('private details', json.dumps(result))
+
+    async def test_callback_without_an_edit_keeps_a_visible_revision_fenced_card(self):
+        _, menu = await self.open()
+
+        async def no_edit(_resolved, _query):
+            self.calls.append('completed')
+
+        result = await self.action(menu, invoke=no_edit)
+
+        self.assertTrue(result['ok'])
+        self.assertFalse(menu.closed)
+        self.assertEqual(menu.actions, {})
+        self.assertEqual(result['messages'][0]['op'], 'upsert')
+        self.assertTrue(result['messages'][0]['command_ui']['rows'][0][0]['disabled'])
 
     async def test_cancellation_does_not_allow_duplicate_reexecution(self):
         _, menu = await self.open()
         payload = self.payload(menu)
         begun = asyncio.Event()
         async def waiting(resolved, query):
-            self.calls.append('started'); begun.set()
+            self.calls.append('started')
+            begun.set()
             await asyncio.Event().wait()
         task = asyncio.create_task(self.action(menu, payload=payload, invoke=waiting))
-        await begun.wait(); task.cancel()
+        await begun.wait()
+        task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
         result = await self.action(menu, payload=payload)
@@ -193,6 +210,39 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(menu.closed)
         self.assertEqual(capture.messages[0]['op'], 'delete')
         self.assertEqual(capture.messages[0]['command_ui']['rows'], [])
+
+    async def test_captured_menu_exposes_stable_presentation_identity_and_persists_edits(self):
+        persisted = []
+        capture = Capture(
+            self.store,
+            self.binding,
+            'example',
+            self.resolve,
+            persist_menu=lambda menu: persisted.append(self.store.render(menu)),
+        )
+        capture.chat_id = 7
+        message = await capture.capture_reply(
+            'Initial', parse_mode='HTML', reply_markup=self.keyboard()
+        )
+
+        self.assertEqual(
+            message._hashi_transport_message_id,
+            f'command-ui:{message.menu.id}',
+        )
+        self.assertEqual(
+            message._hashi_message_context['command_ui'],
+            self.store.render(message.menu),
+        )
+        self.assertEqual(persisted, [])
+
+        message._hashi_bind_presentation_message({'message_id': 'msg_persisted'})
+        await message.edit_text(
+            'Updated', parse_mode='HTML', reply_markup=self.keyboard()
+        )
+
+        self.assertEqual(message.menu.presentation_message_id, 'msg_persisted')
+        self.assertEqual(persisted[-1]['revision'], 1)
+        self.assertEqual(persisted[-1]['menu_id'], message.menu.id)
 
     async def test_cross_chat_send_and_late_capture_are_rejected(self):
         capture = self.capture()
@@ -251,7 +301,8 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_request_cannot_run_and_capacity_does_not_drop_dedup_records(self):
         calls = []
         async def run():
-            calls.append(1); return {'ok': True}
+            calls.append(1)
+            return {'ok': True}
         with self.assertRaises(InteractionError):
             await self.store.once(self.binding, 'tiny', {}, run)
         self.store.max_requests = 1

@@ -107,6 +107,7 @@ def test_native_target_plan_accepts_exact_managed_python_prefix(
     assert any(target.path == runtime_root for target in targets)
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
 def test_windows_acl_rejects_real_writes_and_restores_disposable_target(tmp_path):
     root = tmp_path / "live-runtime"

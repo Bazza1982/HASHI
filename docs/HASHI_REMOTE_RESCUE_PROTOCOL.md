@@ -24,16 +24,20 @@ WatchTower enables two operational capabilities:
   health returns.
 
 The normal `/restart` command does not depend on WatchTower. It selects the
-calling instance's own supervised HASHI Remote, which survives the Core process,
-and that Remote owns stop/start/verify. The Remote must advertise
-`rescue_restart`, which requires `L3_RESTART`. An explicitly named trusted peer
-is routed to that peer's Remote only after the bilateral handshake and live
-capability checks pass. There is no automatic WatchTower fallback.
+calling instance's running authenticated HASHI Remote, and that Remote owns
+stop/start/verify. The Remote must advertise `rescue_restart`, which requires
+`L3_RESTART`; child versus supervised mode is not an authorization gate. On
+Windows a Limited Remote triggers a separate exact-instance Highest actuator,
+so Core privilege does not require elevating the network service. An explicitly
+named trusted peer is routed to that peer's Remote only after the bilateral
+handshake and live capability checks pass. There is no automatic WatchTower
+fallback.
 
 ## Problem
 
-`/remote on` starts `python -m remote` from inside a running HASHI agent runtime.
-That is useful for normal operation, but it is not enough for rescue:
+`/remote on` can start `python -m remote` from a running HASHI Function process.
+That process is a valid restart provider while it remains running, but OS
+supervision still provides stronger independent availability:
 
 - if HASHI core crashes or the launcher terminal closes, the child Remote
   process can also disappear depending on the platform/session;
@@ -49,8 +53,8 @@ Run Hashi Remote under an OS-level supervisor:
 - Windows: Task Scheduler, NSSM, or a small persistent PowerShell service.
 - Development fallback: manually run `python -m remote --no-tls --hashi-root <repo>`.
 
-HASHI core may still start/stop Remote for convenience, but production rescue
-should not rely on `/remote on`.
+HASHI may still start/stop Remote for convenience. Provider authorization uses
+live identity, trust, and capability evidence rather than launch mode.
 
 ## v1 Topology
 
@@ -302,6 +306,14 @@ The supervisor starts Remote with `--supervised`, so `/protocol/status` can
 report `remote_supervisor.mode=supervised`. Legacy `/remote on` still works and
 should report `remote_supervisor.mode=child`.
 
+On Windows supervisor registration also provisions the deterministic
+`HashiRestart-<instance>` task. Remote stays Limited; the no-argument task alone
+runs Highest and invokes the fixed controller for that instance root. A second
+deterministic `HashiRuntime-<instance>` task provides the replacement Core's
+isolated elevated launch boundary. Keeping the Core launch outside the short
+restart actuator lets the actuator finish successfully and accept every later
+`/restart` while Remote remains online.
+
 Supervisor health checks use the explicit command port first, then the
 instance-owned `remote_port` from `instances.json` or `agents.json`, and only
 then the YAML compatibility default. A healthy endpoint for another instance
@@ -321,7 +333,7 @@ Remote remains `L2_WRITE`.
   shell.
 - Treat `/control/hashi/restart` as a destructive cold-restart operation. It
   must be scoped to the intended HASHI instance and audited.
-- Prefer `/control/hashi/reboot` for a healthy Core. It is Agent-scoped,
+- Prefer `/control/hashi/reboot` for a healthy Core. It is Function-scoped,
   authenticated at both Remote and Workbench, and falls back to a cold restart
   only when Workbench is unreachable and fallback was explicitly allowed.
 - Prefer `bridge_ctl.ps1` on HASHI9 Windows because it follows the native

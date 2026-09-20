@@ -33,6 +33,8 @@ def test_supervisor_identity_uses_configured_instance(tmp_path):
     assert identity.instance_slug == "hashi1"
     assert identity.systemd_service_name == "hashi-remote-hashi1.service"
     assert identity.windows_task_name == "HashiRemote-hashi1"
+    assert identity.windows_restart_task_name == "HashiRestart-hashi1"
+    assert identity.windows_runtime_task_name == "HashiRuntime-hashi1"
     assert identity.source == "agents_json"
     assert identity.remote_port == 8766
     assert identity.display_name == "HASHI One"
@@ -46,6 +48,8 @@ def test_supervisor_identity_explicit_override_is_deterministic(tmp_path):
     assert identity.instance_slug == "lab-east"
     assert identity.systemd_service_name == "hashi-remote-lab-east.service"
     assert identity.windows_task_name == "HashiRemote-lab-east"
+    assert identity.windows_restart_task_name == "HashiRestart-lab-east"
+    assert identity.windows_runtime_task_name == "HashiRuntime-lab-east"
     assert identity.source == "explicit"
     assert identity.display_name is None
     assert identity.workbench_port is None

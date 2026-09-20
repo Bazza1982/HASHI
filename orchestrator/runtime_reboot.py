@@ -78,7 +78,7 @@ async def show_menu(runtime, update, *, status_only=False, query=None):
         )
     except Exception:
         status = ui_language.tr("reboot.status_unavailable")
-    lines = [card_title("🔄", "Reboot agents"), "", status]
+    lines = [card_title("🔄", ui_language.tr("reboot.title")), "", status]
     rows = [[InlineKeyboardButton(refresh_label(), callback_data="tgl:reboot:status")]]
     if not status_only:
         running = {rt.name: rt for rt in orchestrator.runtimes}

@@ -240,12 +240,6 @@ def _live_restart_capabilities(
             f"{target} Remote is reachable but rescue_restart is not enabled; enable L3_RESTART"
         )
 
-    supervisor = payload.get("remote_supervisor") or {}
-    mode = str(supervisor.get("mode") or "").strip().lower()
-    if mode != "supervised":
-        raise RestartProviderError(
-            f"{target} Remote is not rescue-grade: supervisor mode is {mode or 'unknown'}"
-        )
     return payload
 
 
@@ -254,7 +248,7 @@ def local_restart_provider(
     instance_id: str | None = None,
     hashi_root: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Return the local supervised Remote provider for a self cold restart."""
+    """Return the running local Remote provider for a self cold restart."""
 
     target = _resolved_local_instance_id(instance_id, hashi_root=hashi_root)
     live = _live_restart_capabilities(

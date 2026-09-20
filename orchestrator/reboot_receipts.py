@@ -27,7 +27,18 @@ LIFECYCLE_STATES = frozenset(
         "unconfirmed",
     }
 )
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
+
+
+def _default_shared_replacement():
+    return {
+        "status": "not_requested",
+        "request_id": None,
+        "requested_at": None,
+        "old_shared_pid": None,
+        "generation_id": None,
+        "remote": {},
+    }
 
 
 def _lifecycle_for(record):
@@ -54,6 +65,10 @@ def _normalize_record(record):
         raise ValueError("Invalid reboot receipt record")
     record.setdefault("lifecycle_state", _lifecycle_for(record))
     record.setdefault("workers", {})
+    shared = record.setdefault("shared_replacement", _default_shared_replacement())
+    if isinstance(shared, dict):
+        for key, value in _default_shared_replacement().items():
+            shared.setdefault(key, deepcopy(value))
     return record
 
 
@@ -114,6 +129,60 @@ def validate_record(record):
             and record["status"] in ACTIVE | TERMINAL
             and record["lifecycle_state"] in LIFECYCLE_STATES
             and isinstance(record["workers"], dict)
+            and isinstance(record["shared_replacement"], dict)
+            and record["shared_replacement"].get("status")
+            in {
+                "not_requested",
+                "requested",
+                "committed",
+                "rolled_back",
+                "unconfirmed",
+            }
+            and (
+                record["shared_replacement"].get("request_id") is None
+                or (
+                    isinstance(record["shared_replacement"].get("request_id"), str)
+                    and len(record["shared_replacement"]["request_id"]) == 32
+                    and all(
+                        char in "0123456789abcdef"
+                        for char in record["shared_replacement"]["request_id"]
+                    )
+                )
+            )
+            and (
+                record["shared_replacement"].get("requested_at") is None
+                or (
+                    isinstance(
+                        record["shared_replacement"].get("requested_at"),
+                        (int, float),
+                    )
+                    and not isinstance(
+                        record["shared_replacement"].get("requested_at"), bool
+                    )
+                    and math.isfinite(
+                        record["shared_replacement"]["requested_at"]
+                    )
+                )
+            )
+            and (
+                record["shared_replacement"].get("old_shared_pid") is None
+                or (
+                    isinstance(
+                        record["shared_replacement"].get("old_shared_pid"), int
+                    )
+                    and not isinstance(
+                        record["shared_replacement"].get("old_shared_pid"), bool
+                    )
+                    and record["shared_replacement"]["old_shared_pid"] > 0
+                )
+            )
+            and (
+                record["shared_replacement"].get("generation_id") is None
+                or isinstance(
+                    record["shared_replacement"].get("generation_id"), str
+                )
+            )
+            and isinstance(record["shared_replacement"].get("remote", {}), dict)
             and record["delivery"]["status"]
             in {"pending", "sent", "exhausted", "not_requested"}
             and isinstance(record["delivery"]["attempts"], int)
@@ -142,7 +211,7 @@ class RebootReceipts:
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
                 if (
                     not isinstance(payload, dict)
-                    or payload.get("schema") not in {1, RECEIPT_SCHEMA_VERSION}
+                    or payload.get("schema") not in {1, 2, RECEIPT_SCHEMA_VERSION}
                     or not isinstance(payload.get("records"), list)
                 ):
                     raise ValueError("Invalid reboot receipt storage")
@@ -232,6 +301,7 @@ class RebootReceipts:
             "reason": "",
             "online": {},
             "workers": {},
+            "shared_replacement": _default_shared_replacement(),
             "delivery": {
                 "status": (
                     "pending" if origin_delivery_requested(origin) else "not_requested"
@@ -260,14 +330,18 @@ class RebootReceipts:
             if record["id"] not in self._inherited_ids:
                 continue
             changes = {}
-            if record["status"] in ACTIVE:
+            pending_shared = (
+                record.get("shared_replacement", {}).get("status") == "requested"
+                and bool(record.get("shared_replacement", {}).get("request_id"))
+            )
+            if record["status"] in ACTIVE and not pending_shared:
                 changes.update(
                     status="unconfirmed",
                     phase="interrupted",
                     lifecycle_state="unconfirmed",
                     reason="interrupted",
                 )
-            if record["delivery"]["status"] == "pending":
+            if record["delivery"]["status"] == "pending" or pending_shared:
                 changes["recovered"] = True
             if changes:
                 self.update(record["id"], **changes)

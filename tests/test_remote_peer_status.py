@@ -1448,6 +1448,67 @@ def test_old_peer_without_hmac_is_marked_rejected_auth_required():
     assert recorded[-1] == ("HASHI2", {"state": "handshake_rejected", "last_error": "auth_required"})
 
 
+def test_trusted_peer_stays_accepted_while_periodic_revalidation_runs():
+    manager = object.__new__(ProtocolManager)
+    peer = PeerInfo(
+        instance_id="HASHI4",
+        display_name="HASHI4",
+        host="192.168.0.211",
+        port=8771,
+        workbench_port=18806,
+        platform="windows",
+        properties={
+            "handshake_state": "handshake_accepted",
+            "last_handshake_at": time.time() - 31,
+        },
+    )
+    recorded: list[tuple[str, dict]] = []
+
+    class _Registry:
+        def get_peers(self):
+            return [peer]
+
+        def mark_handshake_result(self, instance_id, **kwargs):
+            recorded.append((instance_id, kwargs))
+
+    manager._peer_registry = _Registry()
+    manager._instance_info = {
+        "instance_id": "HASHI3",
+        "remote_port": 8769,
+        "workbench_port": 18804,
+        "platform": "windows",
+    }
+    manager._handshake_timeout_seconds = 1
+    manager._force_handshake = False
+    manager._candidate_hosts_for_peer = lambda _peer: ["192.168.0.211"]
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    manager._local_network_profile = lambda: {
+        "host_identity": "a9max",
+        "environment_kind": "windows",
+        "address_candidates": [],
+        "observed_candidates": [],
+    }
+    manager.get_local_agents_snapshot = lambda: []
+    manager.get_local_agent_directory_state = lambda: {
+        "version": "",
+        "directory_state": "fresh",
+    }
+    manager._post_json = lambda _url, _payload, timeout=0: {
+        "status": "handshake_accept",
+        "instance_id": "HASHI4",
+        "protocol_version": "2.0",
+        "capabilities": ["handshake_v2"],
+        "agents": [],
+    }
+
+    asyncio.run(ProtocolManager._handshake_once(manager))
+
+    assert recorded
+    assert all(call[1].get("state") != "handshake_in_progress" for call in recorded)
+    assert recorded[-1][0] == "HASHI4"
+    assert recorded[-1][1]["state"] == "handshake_accepted"
+
+
 def test_control_loop_retries_bootstrap_after_startup_window():
     manager = object.__new__(ProtocolManager)
     manager._running = True

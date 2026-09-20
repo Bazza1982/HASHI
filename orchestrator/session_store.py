@@ -1817,6 +1817,115 @@ class SessionStore:
             ).fetchone()
         return self._message_dict(inserted)
 
+    def update_presentation_message(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        agent_id: str,
+        message_id: str,
+        text: str,
+        message_context: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Update one non-semantic UI row and make its revision poll-visible."""
+
+        clean = str(text or "").strip()
+        if not clean:
+            raise ValueError("presentation message text is required")
+        supplied_context = dict(message_context or {})
+        if set(supplied_context) != {"command_ui"} or not isinstance(
+            supplied_context.get("command_ui"), Mapping
+        ):
+            raise ValueError("only command_ui presentation state may be updated")
+        content = [{"type": "text", "text": clean}]
+        content_json = _json(content)
+        content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE session_id = ? AND instance_id = ? AND owner_id = ?
+                  AND agent_id = ? AND status = 'active'
+                """,
+                (
+                    str(session_id),
+                    self.instance_id,
+                    str(owner_id),
+                    str(agent_id).lower(),
+                ),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(str(session_id))
+            existing = connection.execute(
+                """
+                SELECT * FROM messages
+                WHERE message_id = ? AND session_id = ?
+                  AND context_generation = ? AND role = 'assistant'
+                  AND run_id IS NULL AND history_eligible = 0
+                  AND visibility = 'visible' AND author_id = ?
+                """,
+                (
+                    str(message_id),
+                    str(session_id),
+                    int(session["context_generation"]),
+                    str(agent_id).lower(),
+                ),
+            ).fetchone()
+            if existing is None:
+                raise SessionNotFound("presentation message not found")
+            context = _json_object(existing["message_context_json"])
+            context.update(supplied_context)
+            # These invariants keep the row outside model history regardless of
+            # what a Connector callback attempted to supply.
+            context["presentation_only"] = True
+            context_json = _json(context)
+            if (
+                str(existing["text"]) == clean
+                and str(existing["content_json"]) == content_json
+                and str(existing["message_context_json"]) == context_json
+            ):
+                return self._message_dict(existing)
+            ordinal = self._next_ordinal(connection, str(session_id))
+            connection.execute(
+                """
+                UPDATE messages
+                SET ordinal = ?, message_context_json = ?, content_json = ?,
+                    text = ?, content_hash = ?
+                WHERE message_id = ?
+                """,
+                (
+                    ordinal,
+                    context_json,
+                    content_json,
+                    clean,
+                    content_hash,
+                    str(message_id),
+                ),
+            )
+            self._append_event(
+                connection,
+                session_id=str(session_id),
+                run_id=None,
+                kind="frontend.message.updated",
+                status="recorded",
+                phase="presentation",
+                summary="Frontend-visible command menu updated",
+                detail={"message_id": str(message_id)},
+            )
+            connection.execute(
+                """
+                UPDATE sessions SET updated_at = ?, revision = revision + 1
+                WHERE session_id = ?
+                """,
+                (now, str(session_id)),
+            )
+            updated = connection.execute(
+                "SELECT * FROM messages WHERE message_id = ?", (str(message_id),)
+            ).fetchone()
+        return self._message_dict(updated)
+
     def mark_request_running(
         self,
         request_id: str,
