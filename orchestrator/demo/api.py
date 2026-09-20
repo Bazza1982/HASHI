@@ -20,7 +20,6 @@ from orchestrator.session_store import SessionNotFound, TERMINAL_RUN_STATES
 
 from .leases import (
     DemoBusy,
-    DemoConflict,
     DemoExpired,
     DemoIdentityRequired,
     DemoLease,
@@ -490,10 +489,13 @@ class DemoConnector:
         role = str(row.get("role") or "").casefold()
         if role not in {"user", "assistant"}:
             return None
+        text = str(row.get("text") or "")
+        if len(text) > 32768:
+            text = text[:32768]
         result = {
             "message_id": str(row.get("message_id") or ""),
             "role": role,
-            "text": str(row.get("text") or ""),
+            "text": text,
         }
         if row.get("run_id"):
             result["run_id"] = str(row["run_id"])
@@ -916,9 +918,13 @@ class DemoConnector:
                 except Exception:
                     pass
             if self.server._runtime_map().get(lease.agent_id) is not None:
-                await self.server.orchestrator.stop_agent(
+                stopped, message = await self.server.orchestrator.stop_agent(
                     lease.agent_id, reason="demo-purge"
                 )
+                if not stopped and self.server._runtime_map().get(lease.agent_id) is not None:
+                    raise DemoUnavailable(
+                        "Demo Worker could not stop before purge: " + str(message)[:120]
+                    )
 
             self.server.session_store.purge_owner(
                 owner_id=lease.owner_id, agent_id=lease.agent_id
