@@ -1160,6 +1160,233 @@ class SessionStore:
             ).fetchall()
         return [self._session_dict(row) for row in rows]
 
+    def set_memory_policy(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        policy: str,
+    ) -> dict[str, Any]:
+        """Set the Session memory policy after an ownership check."""
+        normalized = str(policy or "").strip().casefold()
+        if normalized not in {"promote", "disabled"}:
+            raise ValueError("memory policy must be promote or disabled")
+        self.get_session(session_id, owner_id=owner_id, include_deleted=False)
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "UPDATE sessions SET memory_policy=?, updated_at=? WHERE session_id=?",
+                (normalized, _utc_now(), str(session_id)),
+            )
+            row = connection.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (str(session_id),)
+            ).fetchone()
+        return self._session_dict(row)
+
+    def find_run_by_idempotency(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        self.get_session(session_id, owner_id=owner_id, include_deleted=False)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT r.* FROM runs AS r
+                WHERE r.session_id=? AND r.idempotency_key=?
+                """,
+                (str(session_id), str(idempotency_key)),
+            ).fetchone()
+        return None if row is None else self._run_dict(row)
+
+    def list_active_runs(
+        self,
+        *,
+        owner_id: str,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = [
+            "s.instance_id=?",
+            "s.owner_id=?",
+            "r.state NOT IN ('completed','failed','stopped','superseded','interrupted')",
+        ]
+        params: list[Any] = [self.instance_id, str(owner_id)]
+        if session_id is not None:
+            clauses.append("r.session_id=?")
+            params.append(str(session_id))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT r.* FROM runs AS r
+                JOIN sessions AS s ON s.session_id=r.session_id
+                WHERE {" AND ".join(clauses)}
+                ORDER BY r.created_at, r.run_id
+                """,
+                params,
+            ).fetchall()
+        return [self._run_dict(row) for row in rows]
+
+    def purge_owner(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str | None = None,
+    ) -> dict[str, int]:
+        """Permanently remove Session-owned demo data without archive/quarantine.
+
+        This is intentionally lower level than ordinary Agent deletion. Callers
+        must revoke execution and stop the owned Worker before invoking it.
+        """
+        owner = str(owner_id)
+        agent = None if agent_id is None else str(agent_id).lower()
+        removed_files: list[Path] = []
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            clauses = ["instance_id=?", "owner_id=?"]
+            params: list[Any] = [self.instance_id, owner]
+            if agent is not None:
+                clauses.append("agent_id=?")
+                params.append(agent)
+            session_rows = connection.execute(
+                f"SELECT session_id, agent_id FROM sessions WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchall()
+            session_ids = [str(row["session_id"]) for row in session_rows]
+            agent_ids = sorted({str(row["agent_id"]).lower() for row in session_rows})
+            if agent is not None and agent not in agent_ids:
+                agent_ids.append(agent)
+            if not session_ids:
+                for table in (
+                    "conversation_continuity_imports",
+                    "conversation_continuity_batches",
+                    "conversation_continuity_origin_claims",
+                    "conversation_continuity_retirements",
+                ):
+                    connection.execute(f"DELETE FROM {table} WHERE owner_id=?", (owner,))
+                return {"sessions": 0, "attachments": 0}
+
+            marks = ",".join("?" for _ in session_ids)
+            attachments = connection.execute(
+                f"""
+                SELECT attachment_id, filename FROM session_attachments
+                WHERE session_id IN ({marks})
+                """,
+                session_ids,
+            ).fetchall()
+            for row in attachments:
+                removed_files.append(
+                    self._attachment_file_path(
+                        str(row["attachment_id"]), str(row["filename"])
+                    )
+                )
+
+            run_rows = connection.execute(
+                f"SELECT run_id FROM runs WHERE session_id IN ({marks})",
+                session_ids,
+            ).fetchall()
+            run_ids = [str(row["run_id"]) for row in run_rows]
+            run_marks = ",".join("?" for _ in run_ids)
+
+            if run_ids:
+                connection.execute(
+                    f"DELETE FROM run_audio_assets WHERE run_id IN ({run_marks})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM run_output_attachments WHERE run_id IN ({run_marks})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM run_attempts WHERE run_id IN ({run_marks})",
+                    run_ids,
+                )
+            for table in (
+                "voice_transcripts",
+                "runtime_event_correlations",
+                "run_approvals",
+                "delivery_outbox",
+                "event_consumers",
+                "agent_memory_records",
+                "memory_promotion_watermarks",
+                "idempotency_records",
+                "run_projection_records",
+                "backend_bindings",
+                "channel_bindings",
+                "session_capsules",
+                "session_attachments",
+            ):
+                column = "target_session_id" if table == "conversation_continuity_imports" else "session_id"
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {column} IN ({marks})",
+                    session_ids,
+                )
+
+            connection.execute(
+                "DELETE FROM conversation_continuity_imports WHERE owner_id=?",
+                (owner,),
+            )
+            connection.execute(
+                "DELETE FROM conversation_continuity_batches WHERE owner_id=?",
+                (owner,),
+            )
+            connection.execute(
+                "DELETE FROM conversation_continuity_origin_claims WHERE owner_id=?",
+                (owner,),
+            )
+            connection.execute(
+                "DELETE FROM conversation_continuity_retirements WHERE owner_id=?",
+                (owner,),
+            )
+            for agent_name in agent_ids:
+                connection.execute(
+                    "DELETE FROM memory_promotion_jobs WHERE agent_id=?",
+                    (agent_name,),
+                )
+                connection.execute(
+                    "DELETE FROM memory_promotion_schedules WHERE agent_id=?",
+                    (agent_name,),
+                )
+
+            # Delete event/message/run graph only after every dependent projection.
+            connection.execute(
+                f"DELETE FROM run_events WHERE session_id IN ({marks})",
+                session_ids,
+            )
+            connection.execute(
+                f"DELETE FROM runs WHERE session_id IN ({marks})",
+                session_ids,
+            )
+            connection.execute(
+                f"DELETE FROM messages WHERE session_id IN ({marks})",
+                session_ids,
+            )
+            connection.execute(
+                f"DELETE FROM session_workzones WHERE session_id IN ({marks})",
+                session_ids,
+            )
+            connection.execute(
+                f"DELETE FROM session_participants WHERE session_id IN ({marks})",
+                session_ids,
+            )
+            connection.execute(
+                f"DELETE FROM session_context_generations WHERE session_id IN ({marks})",
+                session_ids,
+            )
+            connection.execute(
+                f"DELETE FROM sessions WHERE session_id IN ({marks})",
+                session_ids,
+            )
+
+        for file_path in removed_files:
+            try:
+                file_path.unlink(missing_ok=True)
+            except OSError:
+                # Database authority is already removed. A later media sweeper can
+                # retry orphan bytes; never restore the purged Session graph.
+                pass
+        return {"sessions": len(session_ids), "attachments": len(removed_files)}
+
     def bind_channel(
         self,
         *,
