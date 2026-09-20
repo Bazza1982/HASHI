@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator.demo.api import DemoConnector
 from orchestrator.demo.leases import (
     DemoBusy,
     DemoConflict,
@@ -194,3 +195,37 @@ def test_demo_daily_budget_is_durable_conservative_and_unlinkable_after_purge(tm
     # Per-visitor reservation rows cascade away, while the aggregate daily
     # counter survives so clearing a visitor cannot reset the public budget.
     assert store.budget_used(now=105) == 2
+
+
+@pytest.mark.asyncio
+async def test_ready_demo_connector_sets_empty_start_and_authenticates_config(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("HASHI_DEMO_ENABLED", "1")
+    monkeypatch.setenv("HASHI_DEMO_DAILY_RUN_LIMIT", "25")
+    token = "t" * 32
+    orchestrator = SimpleNamespace()
+    server = SimpleNamespace(
+        global_config=SimpleNamespace(bridge_home=tmp_path),
+        secrets={"demo_service_token": token},
+        orchestrator=orchestrator,
+    )
+    connector = DemoConnector(server)
+    assert connector.profile.ready is True
+    assert orchestrator._allow_empty_start is True
+
+    good = SimpleNamespace(
+        headers={"X-Hashi-Demo-Service-Token": token}
+    )
+    response = await connector.handle_config(good)
+    assert response.status == 200
+    payload = __import__("json").loads(response.text)
+    assert payload["protocol"] == "hashi.shared-demo"
+    assert payload["ready"] is True
+    assert payload["capabilities"]["tools"] is False
+
+    bad = SimpleNamespace(
+        headers={"X-Hashi-Demo-Service-Token": "wrong"}
+    )
+    response = await connector.handle_config(bad)
+    assert response.status == 503
