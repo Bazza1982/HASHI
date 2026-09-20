@@ -46,4 +46,4 @@ jobs:
       - name: Lint Demo Connector
         run: python -m ruff check orchestrator/demo tests/test_demo_connector.py
       - name: Focused Demo tests
-        run: python -m pytest -q tests/test_demo_connector.py tests/test_workbench_session_api.py
+        run: python -m pytest -q tests/test_demo_connector.py tests/test_session_api.py
