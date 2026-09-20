@@ -51,12 +51,41 @@ use `-StartNow` or `Start-ScheduledTask` and verify the instance's own health
 and identity. Installing source bytes, registering the task, and observing a
 healthy running generation are separate facts.
 
+## Native Windows source-checkout runtime at interactive logon
+
+Use `install-native-hashi-user-runtime.ps1` from an elevated Windows
+PowerShell 5.1 prompt for a native Windows source checkout. For example:
+
+```powershell
+.\packaging\windows\install-native-hashi-user-runtime.ps1 `
+    -InstanceId research `
+    -HashiRoot C:\src\hashi-research `
+    -ApiGateway `
+    -StartNow
+```
+
+The installer validates the checkout's configured `instance_id`, interpreter,
+entrypoint, Windows identity, and exact task before changing deployment state.
+It installs a parameterized shared launcher transactionally and registers a
+Highest interactive-logon task with no runtime or idle-end cutoff, bounded
+restart-on-failure, battery operation, missed-start recovery, and duplicate
+start suppression. Machine identity, checkout paths, and instance names are
+task arguments rather than tracked template literals.
+
+As with the WSL launcher, native stdout and stderr go directly to independent
+files. They never pass through a Windows PowerShell pipeline: PowerShell 5.1
+turns native stderr merged by `*>>` into a terminating `NativeCommandError`
+when `$ErrorActionPreference` is `Stop`, which can kill the Core process tree.
+The native child's real exit code is the only process-result authority. Legacy
+mixed-encoding lifecycle logs and prior stream logs are archived before launch.
+
 ## Native Windows portable runtime
 
 The native portable installer is independently owned by
 `packaging/portable_windows`. Its launcher uses the packaged interpreter,
 quoted arguments, separate stdout/stderr files, and a verified local endpoint.
-Do not route a native portable installation through the WSL login task.
+Do not route a native portable installation through either source-checkout
+login task.
 
 The native Windows Remote controller in `bin/hashi_remote_ctl.ps1` registers a
 separate Limited task with an unlimited execution lifetime, missed-start

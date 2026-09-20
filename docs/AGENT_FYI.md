@@ -42,11 +42,12 @@ Highest, but success requires a different healthy Core PID matching identity,
 runtime, and Function generation; task completion alone is insufficient.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
-WSL login startup is Windows platform behavior. Use the versioned
-`packaging/windows` installer with explicit instance, identity, distribution,
-checkout, and interpreter. Only the `wsl.exe` exit code decides success;
-stderr is diagnostic. Keep lifecycle/stdout/stderr logs and source, registered
-task, and live adoption facts distinct.
+WSL and native source-checkout login startup are Windows platform behavior. Use
+the matching versioned `packaging/windows` installer with explicit instance,
+identity, checkout, and interpreter (plus distribution for WSL). Native stderr
+is diagnostic and never traverses a PowerShell pipeline; only the launched
+process exit code decides success. Keep lifecycle/stdout/stderr logs and
+source, registered task, and live adoption facts distinct.
 
 ## Configuration, identity, and persistence
 
