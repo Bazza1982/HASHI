@@ -50,6 +50,35 @@ baseline-to-final invariant holds:
 Source state, runtime state, frontend observations, and lifecycle receipts are
 kept as separate evidence. A stable snapshot alone does not prove behavior.
 
+## Human-facing result reporting
+
+The operator-facing summary is a short decision note, not an evidence dump.
+Write it in the user's language and lead with what is actually broken:
+
+- if the run passed, say plainly that no tested behavior failed;
+- if the run failed, name the observable broken behavior in the first sentence;
+- report one root problem once, even when it causes several failed or blocked
+  checklist items; and
+- follow with one sentence saying whether everything else tested worked.
+
+Keep untested scope separate from real failures. For example, a HER v2 run does
+not prove or disprove a Codex-specific process-exit bug. Do not turn a dependent
+blocked item into another product defect.
+
+Do not lead with item IDs, evidence counts, PID or hash details, report paths,
+or pass percentages. Include those only when they change a decision or the user
+asks for supporting detail. The generated `report.md` keeps the full status and
+evidence record; the normal user-facing handoff should fit in three short
+paragraphs or bullets.
+
+Preferred form:
+
+> HASHI Exchange is offline. Everything else tested worked. The Codex-specific
+> exit case was not tested because this run used HER v2.
+
+Avoid turning the same result into a long scoreboard of passed, failed, and
+blocked implementation details.
+
 ## Prerequisites
 
 Before a run:
