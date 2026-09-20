@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "suite_id": "hashi-frontend-essential",
+  "title": "HASHI–Frontend Essential Live Acceptance",
+  "description": "A short, real-runtime acceptance suite for the HASHI lifecycle, remote topology, backend completion, and an external frontend such as Workbench.",
+  "policy": {
+    "interactive": true,
+    "automatic_lifecycle_actions": false,
+    "default_output_root": "state/live-tests",
+    "core_source_must_remain_unchanged": true,
+    "git_head_must_remain_unchanged": true,
+    "working_tree_must_remain_unchanged": true,
+    "required_status": "pass"
+  },
+  "evidence_types": [
+    "screenshot",
+    "transcript",
+    "runtime_receipt",
+    "snapshot",
+    "comparison",
+    "observation"
+  ],
+  "items": [
+    {
+      "id": "frontend_roundtrip",
+      "title": "Frontend command round-trip",
+      "required": true,
+      "depends_on": [],
+      "operator_steps": [
+        "In the external frontend, select the exact instance and Agent recorded for this run.",
+        "Send /status and wait for the final response.",
+        "Confirm the response appears once in the selected Session and the Agent returns to idle."
+      ],
+      "pass_criteria": [
+        "The command reaches the intended HASHI instance and Agent.",
+        "The final response is rendered exactly once and no request remains stuck."
+      ],
+      "evidence_minimum": {
+        "screenshot": 1,
+        "observation": 1
+      }
+    },
+    {
+      "id": "remote_topology",
+      "title": "Remote topology and discovery",
+      "required": true,
+      "depends_on": [
+        "frontend_roundtrip"
+      ],
+      "operator_steps": [
+        "Send /remote from the selected Session.",
+        "Compare the visible connected instances with the expected test topology.",
+        "Refresh once and confirm the topology remains usable."
+      ],
+      "pass_criteria": [
+        "All expected instances are present and connected.",
+        "The remote view refreshes without losing the selected Session or command path."
+      ],
+      "evidence_minimum": {
+        "screenshot": 1,
+        "observation": 1
+      }
+    },
+    {
+      "id": "dynamic_menu_persistence",
+      "title": "Dynamic menu persistence",
+      "required": true,
+      "depends_on": [
+        "frontend_roundtrip"
+      ],
+      "operator_steps": [
+        "Open the /sys dynamic card, then open the /reboot mode card without selecting a lifecycle action yet.",
+        "Capture a screenshot, wait at least 30 seconds, switch to another Session or instance and return, and allow transcript refresh.",
+        "Capture another screenshot and confirm both cards did not flash away, collapse unexpectedly, or click through to content underneath."
+      ],
+      "pass_criteria": [
+        "Dynamic cards survive transcript refresh and navigation within their validity period.",
+        "Visible controls remain clickable, keyboard reachable, and spatially stable."
+      ],
+      "evidence_minimum": {
+        "screenshot": 2,
+        "observation": 1
+      }
+    },
+    {
+      "id": "reboot_min",
+      "title": "Targeted /reboot min",
+      "required": true,
+      "depends_on": [
+        "dynamic_menu_persistence"
+      ],
+      "operator_steps": [
+        "Capture a pre-reboot snapshot with this runner.",
+        "Use the visible /reboot card to select min for the recorded Agent.",
+        "Wait for an online terminal receipt, capture a post-reboot snapshot, and compare them with Core PID=same and Core digest=same.",
+        "Send a benign follow-up message and confirm the targeted Agent responds."
+      ],
+      "pass_criteria": [
+        "The selected Agent Worker adopts the requested Function generation and returns online.",
+        "The Core PID and all protected Core source hashes remain unchanged.",
+        "The frontend command chain remains usable after adoption."
+      ],
+      "evidence_minimum": {
+        "screenshot": 1,
+        "runtime_receipt": 1,
+        "comparison": 1,
+        "observation": 1
+      }
+    },
+    {
+      "id": "reboot_max",
+      "title": "Broad /reboot max",
+      "required": true,
+      "depends_on": [
+        "reboot_min"
+      ],
+      "operator_steps": [
+        "Capture a pre-reboot snapshot with this runner.",
+        "Use the visible /reboot card to select max.",
+        "Wait for an online terminal receipt covering shared Functions, Workers, and Remote; capture a post-reboot snapshot and compare with Core PID=same and Core digest=same.",
+        "Confirm the selected Agent and remote topology are responsive."
+      ],
+      "pass_criteria": [
+        "All required Function and Worker generations return online with Remote healthy.",
+        "The Core PID and all protected Core source hashes remain unchanged.",
+        "No unrelated frontend Session is lost."
+      ],
+      "evidence_minimum": {
+        "screenshot": 1,
+        "runtime_receipt": 1,
+        "comparison": 1,
+        "observation": 1
+      }
+    },
+    {
+      "id": "restart_with_draft",
+      "title": "/restart while preserving an unsent draft",
+      "required": true,
+      "depends_on": [
+        "reboot_max"
+      ],
+      "operator_steps": [
+        "Open two frontend tabs for the same Session. In tab A, type a unique unsent draft and capture it without sending.",
+        "Capture a pre-restart snapshot. In tab B, issue /restart and complete its confirmation flow.",
+        "Wait for reconnection, capture a post-restart snapshot, and compare with Core PID=changed and Core digest=same.",
+        "Return to tab A and verify the draft text is byte-for-byte unchanged; then send a benign message to confirm the chain is live."
+      ],
+      "pass_criteria": [
+        "The old Core exits and a different healthy Core PID serves the same instance.",
+        "Protected Core source and the checked-out commit remain unchanged.",
+        "The external frontend reconnects and preserves the exact unsent draft."
+      ],
+      "evidence_minimum": {
+        "screenshot": 2,
+        "runtime_receipt": 1,
+        "comparison": 1,
+        "observation": 2
+      }
+    },
+    {
+      "id": "post_restart_remote",
+      "title": "Remote recovery after restart",
+      "required": true,
+      "depends_on": [
+        "restart_with_draft"
+      ],
+      "operator_steps": [
+        "After restart reconnection, send /remote again.",
+        "Confirm all expected instances return and the dynamic view remains usable after one refresh."
+      ],
+      "pass_criteria": [
+        "Remote discovery and authentication recover after Core replacement.",
+        "No stale or duplicate instance entry blocks normal use."
+      ],
+      "evidence_minimum": {
+        "screenshot": 1,
+        "observation": 1
+      }
+    },
+    {
+      "id": "backend_completion",
+      "title": "Backend completion exits cleanly",
+      "required": true,
+      "depends_on": [
+        "restart_with_draft"
+      ],
+      "operator_steps": [
+        "Send a small bounded task that requires a final response but no long-running job.",
+        "After the final response appears, wait for the frontend to show idle and send one more short message.",
+        "Do not use /stop unless this item has already failed and the stuck process must be recovered."
+      ],
+      "pass_criteria": [
+        "The backend process exits naturally after the final response.",
+        "The Session releases its active slot and accepts the next message without /stop."
+      ],
+      "evidence_minimum": {
+        "screenshot": 1,
+        "observation": 1
+      }
+    },
+    {
+      "id": "visual_layout",
+      "title": "Desktop and compact layout review",
+      "required": true,
+      "depends_on": [
+        "post_restart_remote",
+        "backend_completion"
+      ],
+      "operator_steps": [
+        "Capture the conversation, dynamic card, and composer at the normal desktop width.",
+        "Capture the same surfaces at a compact or narrow supported width.",
+        "Inspect for clipping, overlap, unintended horizontal scroll, hidden state text, and undersized controls."
+      ],
+      "pass_criteria": [
+        "No important content or controls are clipped, obscured, or overlapping.",
+        "State, focus, progress, and disabled feedback remain understandable at both widths."
+      ],
+      "evidence_minimum": {
+        "screenshot": 2,
+        "observation": 1
+      }
+    }
+  ]
+}
