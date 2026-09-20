@@ -140,12 +140,13 @@ finish/error, and retry count. Continuation is not retry, prose “stop” is no
 typed stop, and degraded intent cannot complete a request without native repair.
 
 Capture request, response prefix, parsing, Tool effects, recovery, terminal
-state, and receipt in one correlation chain at real I/O. Keep restricted
+state, and receipt in one I/O chain. Keep restricted
 originals separate from safe projections; partial or unread evidence is not
 empty. `/stop` preserves interruption evidence; `/retry`, `/resend`, and
 `/steer` retain their distinct contracts. Recovery never duplicates a Cron Run,
 replays completed effects, restores revoked authority, or reconciles a live
-fixed-session owner. Unknown effects remain fail-closed. See
+fixed-session owner. CLI terminal events bound drain; open handles cannot keep
+Runs busy. Unknown effects remain fail-closed. See
 [HER v2](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md).
 
 ## TUI, Workbench, and media
