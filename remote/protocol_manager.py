@@ -841,7 +841,16 @@ class ProtocolManager:
                 continue
             if state == "handshake_accepted" and not should_revalidate:
                 continue
-            self._peer_registry.mark_handshake_result(peer.instance_id, state="handshake_in_progress")
+            # A periodic revalidation must not erase the last accepted trust
+            # state while the new handshake is in flight.  The previous code
+            # briefly published zero trusted peers, so an unrelated startup
+            # health probe could latch a false Remote degradation.  First-time
+            # handshakes still expose their in-progress state as before.
+            if state != "handshake_accepted":
+                self._peer_registry.mark_handshake_result(
+                    peer.instance_id,
+                    state="handshake_in_progress",
+                )
             local_profile = self._local_network_profile()
             payload = {
                 "from_instance": self._instance_info.get("instance_id"),

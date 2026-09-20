@@ -11,11 +11,13 @@ import unittest
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import orchestrator
 import pytest
 from orchestrator import command_interaction_bridge as bridge
+from orchestrator.command_interactions import Binding, Capture, MenuStore
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
 def module(name, **values):
@@ -58,8 +60,10 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
             return {'ok': True, 'messages': capture_store.messages}
         @contextmanager
         def scope(runtime, capture):
-            try: yield
-            finally: capture.active = False
+            try:
+                yield
+            finally:
+                capture.active = False
         class FakeUpdate:
             def __init__(self, user, chat, capture, text, session_metadata):
                 self.effective_user = NS(id=user)
@@ -91,9 +95,11 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                 COMMAND_SPECS=[NS(name='example', guide=NS(usage='/example [value]'))]),
         }
         self.patcher = patch.dict(sys.modules, self.modules)
-        self.patcher.start(); self.addCleanup(self.patcher.stop)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
         self.language_patch = patch.object(orchestrator, 'ui_language', language, create=True)
-        self.language_patch.start(); self.addCleanup(self.language_patch.stop)
+        self.language_patch.start()
+        self.addCleanup(self.language_patch.stop)
 
     @staticmethod
     def keyboard():
@@ -120,6 +126,24 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.wrapped, ['callback_example'])
         self.assertEqual(len(self.executions), 1)
         self.assertIs(self.runtime._send_text, self.original_send)
+
+    async def test_opening_another_menu_does_not_expire_the_first_before_its_ttl(self):
+        first = await self.dispatch(self.payload(request_id='firstrequestabcdefgh'))
+        second = await self.dispatch(self.payload(request_id='secondrequestabcdefg'))
+        first_menu = first['messages'][-1]['command_ui']
+        second_menu = second['messages'][-1]['command_ui']
+
+        self.assertNotEqual(first_menu['menu_id'], second_menu['menu_id'])
+        result = await self.dispatch(self.payload(
+            'act',
+            request_id='firstactionabcdefgh',
+            menu_id=first_menu['menu_id'],
+            revision=first_menu['revision'],
+            button_id=first_menu['rows'][0][0]['button_id'],
+        ))
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.actions, ['example:next'])
 
     async def test_catalogue_is_registry_derived_and_policy_disabled_is_not_available(self):
         self.allowed = False
@@ -183,6 +207,55 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first['error_code'], 'command_menu_outcome_unknown')
         self.assertNotIn('sensitive-path', json.dumps(first))
         self.assertIs(self.runtime._send_text, self.original_send)
+
+
+@pytest.mark.asyncio
+async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_message():
+    menu_store = MenuStore()
+    binding = Binding(
+        'instance', 'agent', '7', 'session', 1,
+        'clientabcdefghijkl', 'connectionabcdefghijkl',
+    )
+    capture = Capture(menu_store, binding, 'example', lambda _data: None)
+    capture.chat_id = 7
+
+    class Message:
+        async def reply_text(self, text, **kwargs):
+            return await capture.capture_reply(text, **kwargs)
+
+    update = NS(message=Message(), effective_chat=NS(id=7))
+    runtime = NS(telegram_logger=NS(warning=lambda *_args, **_kwargs: None))
+    recorded = {'message_id': 'msg_persisted'}
+    with (
+        patch(
+            'orchestrator.flexible_agent_runtime.apply_disable_notification_default'
+        ),
+        patch(
+            'orchestrator.flexible_agent_runtime.telegram_delivery_failover.handle_blocked_send',
+            new=AsyncMock(return_value=False),
+        ),
+        patch(
+            'orchestrator.flexible_agent_runtime.runtime_session.record_frontend_message_for_update',
+            return_value=recorded,
+        ) as record,
+    ):
+        sent = await FlexibleAgentRuntime._reply_text(
+            runtime,
+            update,
+            'Choose',
+            parse_mode='HTML',
+            reply_markup={
+                'inline_keyboard': [[{
+                    'text': 'Continue',
+                    'callback_data': 'example:continue',
+                }]],
+            },
+        )
+
+    kwargs = record.call_args.kwargs
+    assert kwargs['transport_message_id'] == f'command-ui:{sent.menu.id}'
+    assert kwargs['message_context']['command_ui'] == menu_store.render(sent.menu)
+    assert sent.menu.presentation_message_id == 'msg_persisted'
 
 
 if __name__ == '__main__':

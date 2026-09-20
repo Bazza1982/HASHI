@@ -37,6 +37,200 @@ def _ps_string(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def test_remote_registration_keeps_network_process_limited_and_actuator_highest(
+    tmp_path,
+):
+    root = tmp_path / "hashi restart boundary"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "SUPERVISOR-CONTRACT"}}),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py",
+        remote / "supervisor_identity.py",
+    )
+    captured = tmp_path / "registered-tasks.json"
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+$global:RegisteredTasks = @()
+function New-ScheduledTaskAction {{
+    param($Execute, $Argument, $WorkingDirectory)
+    [pscustomobject]@{{Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory}}
+}}
+function New-ScheduledTaskTrigger {{ [pscustomobject]@{{Kind='logon'}} }}
+function New-ScheduledTaskSettingsSet {{ [pscustomobject]@{{}} }}
+function New-ScheduledTaskPrincipal {{
+    param($UserId, $LogonType, $RunLevel)
+    [pscustomobject]@{{UserId=$UserId; LogonType=$LogonType; RunLevel=[string]$RunLevel}}
+}}
+function New-ScheduledTask {{
+    param($Action, $Trigger, $Settings, $Principal)
+    [pscustomobject]@{{Actions=@($Action); Trigger=$Trigger; Principal=$Principal}}
+}}
+function Register-ScheduledTask {{
+    param($TaskName, $InputObject, [switch]$Force, $ErrorAction)
+    $global:RegisteredTasks += [pscustomobject]@{{
+        TaskName=$TaskName
+        Action=@($InputObject.Actions)[0]
+        Principal=$InputObject.Principal
+    }}
+}}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
+$global:RegisteredTasks | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -LiteralPath {_ps_string(captured)}
+""")
+
+    assert result.returncode == 0, result.stderr
+    tasks = json.loads(captured.read_text(encoding="utf-8-sig"))
+    by_name = {task["TaskName"]: task for task in tasks}
+    restart = by_name["HashiRestart-supervisor-contract"]
+    runtime = by_name["HashiRuntime-supervisor-contract"]
+    remote_task = by_name["HashiRemote-supervisor-contract"]
+    assert restart["Principal"]["RunLevel"] == "Highest"
+    assert runtime["Principal"]["RunLevel"] == "Highest"
+    assert remote_task["Principal"]["RunLevel"] == "Limited"
+    assert "hashi_restart_task_runner.ps1" in restart["Action"]["Arguments"]
+    assert "HashiRuntime-supervisor-contract" in restart["Action"]["Arguments"]
+    assert "bridge_ctl.ps1" in runtime["Action"]["Arguments"]
+    assert "-Action start" in runtime["Action"]["Arguments"]
+    assert str(root) in restart["Action"]["Arguments"]
+
+
+def test_fixed_restart_actuator_triggers_only_its_registered_definition(tmp_path):
+    root = tmp_path / "hashi exact restart"
+    remote = root / "remote"
+    remote.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "RESTART-EXACT"}}),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        ROOT / "remote/supervisor_identity.py",
+        remote / "supervisor_identity.py",
+    )
+    started = tmp_path / "started-task.txt"
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+$global:RegisteredTasks = @{{}}
+function New-ScheduledTaskAction {{
+    param($Execute, $Argument, $WorkingDirectory)
+    [pscustomobject]@{{Execute=$Execute; Arguments=$Argument; WorkingDirectory=$WorkingDirectory}}
+}}
+function New-ScheduledTaskSettingsSet {{ [pscustomobject]@{{}} }}
+function New-ScheduledTaskPrincipal {{
+    param($UserId, $LogonType, $RunLevel)
+    [pscustomobject]@{{UserId=$UserId; LogonType=$LogonType; RunLevel=[string]$RunLevel}}
+}}
+function New-ScheduledTask {{
+    param($Action, $Settings, $Principal)
+    [pscustomobject]@{{Actions=@($Action); Principal=$Principal}}
+}}
+function Register-ScheduledTask {{
+    param($TaskName, $InputObject, [switch]$Force, $ErrorAction)
+    $global:RegisteredTasks[$TaskName] = $InputObject
+}}
+function Get-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RegisteredTasks[$TaskName] }}
+function Start-ScheduledTask {{
+    param($TaskName, $ErrorAction)
+    Set-Content -Encoding UTF8 -LiteralPath {_ps_string(started)} -Value $TaskName
+}}
+& {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(ROOT / 'bin/hashi_restart_ctl.ps1')} trigger -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+""")
+
+    assert result.returncode == 0, result.stderr
+    assert started.read_text(encoding="utf-8-sig").strip() == "HashiRestart-restart-exact"
+
+
+def test_restart_runner_stops_core_then_starts_separate_runtime_task(tmp_path):
+    root = tmp_path / "hashi restart runner"
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True)
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"workbench_port": 18891}}),
+        encoding="utf-8",
+    )
+    stopped = tmp_path / "stopped.txt"
+    started = tmp_path / "started.txt"
+    log = tmp_path / "restart.log"
+    (bin_dir / "bridge_ctl.ps1").write_text(
+        "param([string]$Action)\n"
+        f"Set-Content -LiteralPath {_ps_string(stopped)} -Value $Action\n"
+        "if ($Action -ne 'stop') { exit 9 }\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    result = _powershell(f"""
+$ErrorActionPreference = 'Stop'
+$global:RuntimeState = 'Ready'
+$global:HealthCalls = 0
+function Get-ScheduledTask {{
+    param($TaskName, $ErrorAction)
+    [pscustomobject]@{{State=$global:RuntimeState}}
+}}
+function Start-ScheduledTask {{
+    param($TaskName, $ErrorAction)
+    $global:RuntimeState = 'Ready'
+    Set-Content -LiteralPath {_ps_string(started)} -Value $TaskName
+}}
+function Stop-ScheduledTask {{ param($TaskName, $ErrorAction) $global:RuntimeState = 'Ready' }}
+function Get-ScheduledTaskInfo {{ [pscustomobject]@{{LastTaskResult=0}} }}
+function Start-Sleep {{ param($Seconds, $Milliseconds) }}
+function Invoke-RestMethod {{
+    param($Uri, $Method, $TimeoutSec)
+    $global:HealthCalls++
+    [pscustomobject]@{{
+        ready=($global:HealthCalls -ge 2)
+        status=$(if ($global:HealthCalls -ge 2) {{ 'ready' }} else {{ 'connecting' }})
+    }}
+}}
+& {_ps_string(ROOT / 'bin/hashi_restart_task_runner.ps1')} `
+    -HashiRoot {_ps_string(root)} `
+    -LogPath {_ps_string(log)} `
+    -RuntimeTaskName 'HashiRuntime-restart-exact'
+exit $LASTEXITCODE
+""")
+
+    assert result.returncode == 0, result.stderr
+    assert stopped.read_text(encoding="utf-8-sig").strip() == "stop"
+    assert started.read_text(encoding="utf-8-sig").strip() == (
+        "HashiRuntime-restart-exact"
+    )
+    assert "Backend ready" in log.read_text(encoding="utf-8-sig")
+
+
+def test_bridge_controller_does_not_swallow_process_termination_errors():
+    text = (ROOT / "bin/bridge_ctl.ps1").read_text(encoding="utf-8")
+    stop_block = text.split("function Stop-BridgeProcesses", 1)[1].split(
+        "function Remove-StaleFiles", 1
+    )[0]
+
+    assert "Stop-Process -Id $procId -Force -ErrorAction Stop" in stop_block
+    assert "$killFailures +=" in stop_block
+    assert "Process termination reported errors" in stop_block
+    assert "Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue" not in stop_block
+
+
+def test_bridge_controller_restarts_fixed_hidden_entrypoint_with_logs():
+    text = (ROOT / "bin/bridge_ctl.ps1").read_text(encoding="utf-8")
+    start_block = text.split("function Start-Bridge", 1)[1].split(
+        "function Show-Status", 1
+    )[0]
+    restart_block = text.split('"restart" {', 1)[1]
+
+    assert "$MainScript" in start_block
+    assert "-FilePath $PythonExe" in start_block
+    assert "-WindowStyle Hidden" in start_block
+    assert "-RedirectStandardOutput $StdoutLog" in start_block
+    assert "-RedirectStandardError $StderrLog" in start_block
+    assert "--bridge-home" in start_block
+    assert "$LauncherBat" not in start_block
+    assert "Test-ApiGatewayWasEnabled" in restart_block
+    assert "-ApiGateway:$RestartApiGateway" in restart_block
+
+
 @pytest.mark.parametrize("root_name,exit_code", [("hashi", 0), ("hashi space 测试", 7)])
 def test_registered_task_preserves_module_arguments_stderr_and_exit(tmp_path, root_name, exit_code):
     root = tmp_path / root_name
@@ -164,7 +358,7 @@ function Register-ScheduledTask {{
     param($TaskName, $InputObject, [switch]$Force, $ErrorAction)
     if ([string]$ErrorAction -eq 'Stop') {{ throw 'REGISTRATION_DENIED' }}
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} register -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
 """)
     assert result.returncode != 0
     assert "Registered and enabled Remote supervisor" not in result.stdout
@@ -262,7 +456,7 @@ function Invoke-RestMethod {{
         }}
     }}
 }}
-& {_ps_string(staged / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(staged / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
 """)
 
     assert result.returncode == 0, result.stderr
@@ -307,7 +501,7 @@ function Stop-Process {{
     Add-Content -LiteralPath {_ps_string(stopped)} -Value $Id
     $global:RemoteRows = @($global:RemoteRows | Where-Object {{ [int]$_.ProcessId -ne $Id }})
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
 """)
     assert result.returncode == 0, result.stderr
     assert stopped.read_text(encoding="utf-8-sig").splitlines() == ["101", "100"]
@@ -358,7 +552,7 @@ function Invoke-RestMethod {{
     }}
 }}
 function Stop-Process {{ param([int]$Id, [switch]$Force) }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)}
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} restart -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE'
 """)
     assert result.returncode == 0, result.stderr
     assert started.read_text(encoding="utf-8-sig").strip() == (
@@ -393,7 +587,7 @@ function Invoke-RestMethod {{
         }}
     }}
 }}
-& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} start -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -NoTls
+& {_ps_string(ROOT / 'bin/hashi_remote_ctl.ps1')} start -HashiRoot {_ps_string(root)} -Python {_ps_string(sys.executable)} -TaskUserId 'NT AUTHORITY\\LOCAL SERVICE' -NoTls
 """)
 
     assert result.returncode != 0

@@ -101,7 +101,7 @@ def test_peer_restart_provider_requires_live_rescue_restart(monkeypatch, tmp_pat
         restart_provider.peer_restart_provider("HASHI2")
 
 
-def test_peer_restart_provider_requires_supervised_remote(monkeypatch, tmp_path):
+def test_peer_restart_provider_accepts_running_child_remote(monkeypatch, tmp_path):
     state = tmp_path / "peers.json"
     _write_peer_state(state)
     _patch_peer_success(monkeypatch, state)
@@ -117,8 +117,10 @@ def test_peer_restart_provider_requires_supervised_remote(monkeypatch, tmp_path)
         },
     )
 
-    with pytest.raises(restart_provider.RestartProviderError, match="not rescue-grade"):
-        restart_provider.peer_restart_provider("HASHI2")
+    provider = restart_provider.peer_restart_provider("HASHI2")
+
+    assert provider["kind"] == "peer_remote"
+    assert provider["remote_supervisor"]["mode"] == "child"
 
 
 def test_peer_restart_provider_accepts_supported_bilateral_peer(monkeypatch, tmp_path):
@@ -212,7 +214,7 @@ def test_target_confirms_source_handshake_accepts_live_bilateral_trust(monkeypat
     assert peer["instance_id"] == "HASHI1"
 
 
-def test_local_restart_provider_requires_supervised_remote(monkeypatch):
+def test_local_restart_provider_accepts_running_child_remote(monkeypatch):
     monkeypatch.setattr(restart_provider, "local_instance_id", lambda: "HASHI1")
     monkeypatch.setattr(
         restart_provider.remote_rescue,
@@ -225,8 +227,10 @@ def test_local_restart_provider_requires_supervised_remote(monkeypatch):
         },
     )
 
-    with pytest.raises(restart_provider.RestartProviderError, match="not rescue-grade"):
-        restart_provider.local_restart_provider()
+    provider = restart_provider.local_restart_provider()
+
+    assert provider["kind"] == "local_remote"
+    assert provider["remote_supervisor"]["mode"] == "child"
 
 
 def test_restart_via_peer_revalidates_before_post(monkeypatch):

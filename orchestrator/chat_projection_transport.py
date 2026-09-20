@@ -22,15 +22,23 @@ TRANSPORT_PREFIX = "__hashi_chat_projection_v1__:"
 MAX_TRANSPORT_LENGTH = 1024
 MAX_SAFE_OFFSET = 9007199254740991
 _FIELDS = {
-    "recent": frozenset({"version", "op", "limit"}),
-    "poll": frozenset({"version", "op", "offset", "message_cursor"}),
+    1: {
+        "recent": frozenset({"version", "op", "limit"}),
+        "poll": frozenset({"version", "op", "offset", "message_cursor"}),
+    },
+    2: {
+        "recent": frozenset({"version", "capabilities", "op", "limit"}),
+        "poll": frozenset(
+            {"version", "capabilities", "op", "offset", "message_cursor"}
+        ),
+    },
 }
 
 
-def _error(code: str, http_status: int) -> dict[str, Any]:
+def _error(code: str, http_status: int, *, version: int = 1) -> dict[str, Any]:
     return {
         "ok": False,
-        "chat_projection_version": 1,
+        "chat_projection_version": version,
         "error_code": "chat_projection_" + code,
         "http_status": http_status,
     }
@@ -45,10 +53,22 @@ def _decode_transport(text: str) -> dict[str, Any]:
         value = json.loads(raw.decode("utf-8"))
     except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("invalid transport encoding") from None
-    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
+    if not isinstance(value, dict) or type(value.get("version")) is not int:
         raise ValueError("invalid transport version")
+    version = value["version"]
+    if version not in _FIELDS:
+        raise ValueError("invalid transport version")
+    if version == 2:
+        capabilities = value.get("capabilities")
+        if (
+            not isinstance(capabilities, dict)
+            or set(capabilities) != {"command_ui"}
+            or capabilities.get("command_ui") is not True
+        ):
+            raise ValueError("invalid transport capabilities")
     op = value.get("op")
-    if not isinstance(op, str) or op not in _FIELDS or set(value) - _FIELDS[op]:
+    fields = _FIELDS[version]
+    if not isinstance(op, str) or op not in fields or set(value) - fields[op]:
         raise ValueError("invalid transport operation")
     if op == "recent":
         limit = value.get("limit", 200)
@@ -88,17 +108,19 @@ async def try_dispatch_chat_projection_transport(
         return await runtime.execute_slash_command(text, source_channel=source_channel)
     config = getattr(runtime, "global_config", None)
     if str(getattr(config, "deployment_profile", "personal") or "personal") != "personal":
-        return _error("governed_not_supported", 501)
+        return _error(
+            "governed_not_supported", 501, version=int(payload["version"])
+        )
     actor = getattr(config, "authorized_id", None)
     checker = getattr(runtime, "_is_authorized_user", None)
     if type(actor) is not int or actor <= 0 or (callable(checker) and not checker(actor)):
-        return _error("forbidden", 403)
+        return _error("forbidden", 403, version=int(payload["version"]))
     try:
         session = runtime_session.current_session(runtime, surface="workbench", channel_key="default")
         store = runtime_session.ensure_store(runtime)
         owner_id = runtime_session.owner_id(runtime)
     except Exception:
-        return _error("session_unavailable", 503)
+        return _error("session_unavailable", 503, version=int(payload["version"]))
     try:
         projection = build_chat_projection(
             store,
@@ -107,10 +129,15 @@ async def try_dispatch_chat_projection_transport(
             limit=payload.get("limit", 200),
             offset=payload.get("offset"),
             after_message_ordinal=payload.get("message_cursor"),
+            include_command_ui=payload["version"] == 2,
         )
     except Exception:
         # Neither the envelope nor transcript text belongs in the command audit
         # or failure logs. Return a typed terminal error instead of chat fallback.
         logger.warning("Chat projection read unavailable")
-        return _error("read_unavailable", 503)
-    return {"ok": True, "chat_projection_version": 1, "projection": projection}
+        return _error("read_unavailable", 503, version=int(payload["version"]))
+    return {
+        "ok": True,
+        "chat_projection_version": int(payload["version"]),
+        "projection": projection,
+    }

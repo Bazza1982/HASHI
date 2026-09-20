@@ -321,6 +321,7 @@ def record_frontend_message_for_update(
     transport_message_id: Any = None,
     content_format: str = "plain-text",
     presentation_channel: str = "command",
+    message_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort projection of text already visible on one frontend."""
 
@@ -348,6 +349,7 @@ def record_frontend_message_for_update(
             explicit_session_id=explicit_session_id,
             content_format=content_format,
             presentation_channel=presentation_channel,
+            message_context=message_context,
         )
     except Exception as exc:  # presentation mirroring must never block delivery
         target_logger = getattr(runtime, "logger", None) or logger
@@ -372,6 +374,7 @@ def record_frontend_message(
     explicit_session_id: str | None = None,
     content_format: str = "plain-text",
     presentation_channel: str = "command",
+    message_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Record successfully delivered semantic text for another frontend."""
 
@@ -409,6 +412,7 @@ def record_frontend_message(
             content_format=content_format,
             presentation_channel=presentation_channel,
             history_eligible=False,
+            message_context=message_context,
         )
     except Exception as exc:  # presentation mirroring must never block delivery
         target_logger = getattr(runtime, "logger", None) or logger

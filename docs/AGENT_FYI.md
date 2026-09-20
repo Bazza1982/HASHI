@@ -28,23 +28,25 @@ Authorization flags only record approval; they never create it. Do not move
 policy into Core or duplicate registries and state writers.
 
 Source, artifacts, clients, Workers, and delivery are separate facts.
-`/reboot min` replaces one Agent Worker; shared replacement is broader. Claim
-adoption only after the active generation is verified. Locked runtime packages
-must match exactly; unrelated extra packages alone must not block `/reboot`.
-Optional local assets never block startup. Failed candidates reuse a compatible
-verified artifact; rejected bytes never run. Reboots report start/final outcome.
+`/reboot min` replaces one Agent Worker; `same|max` adopts one full Function
+generation across shared Functions, running Workers, and enabled Remote while
+Core stays live. Legacy Worker-only candidates bridge once: bootstrap and Core
+validate their respective assets, and receipts promote only after Core commit.
+Pre-handoff digests may differ; successors report the committed generation.
+Claim adoption only after verification. Locked packages must match; extras do
+not block.
+Rejected bytes never run.
 Only PID, identity, generation, and health evidence permits `online`; receipts
-distinguish accepted, rejected, committed, rolled back, and unconfirmed. See
+distinguish accepted, committed, rolled back, and unconfirmed. See
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
 [Reboot Receipts](HASHI_REBOOT_RECEIPTS.md).
 
-Agent tools cannot write authoritative live Core paths, mutate the live Python
-environment, read instance secrets, kill the current Core PID, or raw-control
-the current HASHI service. Workzones and explicitly selected development
-environments remain writable; use supported `/reboot` and `/restart` paths.
-Windows service restart uses only the exact service in local policy and
-start/stop-only permission. Success requires a different healthy Core PID plus
-matching identity, runtime, and Function generation; launch is not success.
+Agent tools cannot write live Core or its Python, read secrets, kill Core, or
+raw-control its service; development roots remain writable. Windows restart
+uses an exact service or fixed per-instance actuator while Remote stays Limited.
+The restart actuator and separate runtime launch task run Highest; task
+completion may leave Core running. Success still requires a different healthy
+Core PID with matching identity, runtime, and Function generation.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
 ## Configuration, identity, and persistence
@@ -56,11 +58,8 @@ model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
 the Function registry. An explicit Agent selection remains authoritative until
 that model is retired.
 
-An active Agent needs a PAO-started Worker; failure reports an error and leaves
-it inactive.
-
-Private EXP is ignored at `<bridge_home>/exp`; never publish it in Function
-artifacts or across instances.
+An active Agent needs a PAO-started Worker. Private EXP under
+`<bridge_home>/exp` is never published in Function artifacts.
 
 The open Tool wildcard grants permission, not capability. Workzones expose
 only exact enabled roots; mentioning a path does not authorize recursive
@@ -101,6 +100,9 @@ shared secrets in messages or command arguments. `/debug on` sends one
 best-effort diagnosis for an eligible terminal error; the source does not retry
 or fix it, the diagnosis completion is not returned to the source Agent, and
 HChat errors are excluded to prevent loops.
+
+Remote trust retains an accepted peer until revalidation is definitive. Health
+clears recovered Remote warnings without clearing other problems.
 
 PAO freezes each Run's primary destination, mirrors, and automatic delivery
 before PCM. Queue acceptance is not delivery; `sent` needs a Connector receipt,
@@ -171,7 +173,9 @@ escape, state plain user outcomes, and keep lifecycle internals in diagnostics.
 `/help` derives from registered metadata. Workbench and Telegram project
 one primary personal Conversation Session; semantic messages appear on both,
 while presentation rows never enter model history. Command menus reuse the
-authenticated runtime command path and keep action state server-side.
+authenticated runtime path and keep action state server-side. Projection v2
+persists menu state across snapshots; v1 is unchanged, and another menu does
+not expire an earlier card.
 
 Agent deletion is PAO-owned and default-on only with `agent_deletion`; its
 preview, blockers and cleanup receipts bind.
@@ -202,10 +206,6 @@ Use only authorized capabilities. Device actions need a same-instance Worker;
 re-plan when unavailable. Prefer `log_query` for logs. Agents work foreground;
 only explicit user `/bg` grants `background_job_start` for that request.
 Tests prove scope, not live adoption; preserve user work and report failures.
-
-Remote reload preserves Core. Windows `/restart` passes identity/API port to its
-Limited `L3_RESTART` task. It permits approved adoption/warnings but requires
-stable runtime/local health. `request_diagnostics` only reads state/effects.
 
 HCC is optional, non-authoritative PCM context. `/hcc` controls injection;
 `hcc-refresh` alone refreshes authorized sources after digest/provenance checks,

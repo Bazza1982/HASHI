@@ -33,6 +33,7 @@ from orchestrator.function_worker_protocol import (
 )
 from orchestrator.function_contract import validate_function_contract
 from orchestrator.pathing import build_bridge_paths
+from orchestrator.reboot_adoption_bridge import bridge_legacy_broad_reboot
 from orchestrator.runtime_contract import (
     RuntimeFingerprint,
     compare_runtime_fingerprints,
@@ -807,10 +808,12 @@ class FunctionWorkerHost:
         self.phase = "BOOTING"
         self.accepting = False
         self.started_at = datetime.now().astimezone().isoformat()
+        self.started_wall_time = time.time()
         self.adopted_at: str | None = None
         self.was_telegram_connected = False
         self.stop_event = asyncio.Event()
         self.audio_transcript_tasks: set[asyncio.Task[Any]] = set()
+        self.legacy_reboot_bridge_task: asyncio.Task[Any] | None = None
         self.generation_finder: _GenerationModuleFinder | None = None
 
     async def prepare(self) -> None:
@@ -1179,11 +1182,48 @@ class FunctionWorkerHost:
             accepting=True,
         )
         await self.emit_metadata()
+        self._start_legacy_reboot_bridge()
         return {
             "ok": True,
             "local_mode": not telegram_connected,
             "metadata": self.metadata(),
         }
+
+    def _start_legacy_reboot_bridge(self) -> None:
+        """Let one new Worker bootstrap legacy broad reboot into shared adoption."""
+
+        if self.legacy_reboot_bridge_task is not None:
+            return
+        topology = self.facade.version_topology() if self.facade is not None else {}
+        shared = topology.get("shared_functions") or {}
+        try:
+            shared_pid = int(shared.get("pid") or 0)
+        except (TypeError, ValueError):
+            shared_pid = 0
+        shared_generation = str(shared.get("generation_id") or "")
+
+        async def run() -> None:
+            try:
+                await bridge_legacy_broad_reboot(
+                    self.bridge_home,
+                    agent_name=self.agent_name,
+                    worker_pid=os.getpid(),
+                    generation_id=self.manifest.generation_id,
+                    shared_pid=shared_pid,
+                    shared_generation_id=shared_generation,
+                    worker_started_at=self.started_wall_time,
+                    stop_event=self.stop_event,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Legacy broad reboot bridge failed for %s", self.agent_name
+                )
+
+        self.legacy_reboot_bridge_task = asyncio.create_task(
+            run(), name=f"legacy-reboot-bridge:{self.agent_name}"
+        )
 
     async def quiesce(self, timeout: float) -> dict[str, Any]:
         if self.phase != "ACTIVE":
@@ -1241,6 +1281,12 @@ class FunctionWorkerHost:
             return {"ok": True}
         self.phase = "STOPPING"
         self.accepting = False
+        if self.legacy_reboot_bridge_task is not None:
+            self.legacy_reboot_bridge_task.cancel()
+            await asyncio.gather(
+                self.legacy_reboot_bridge_task, return_exceptions=True
+            )
+            self.legacy_reboot_bridge_task = None
         runtime = self.runtime
         if runtime is not None:
             process_task = getattr(runtime, "process_task", None)

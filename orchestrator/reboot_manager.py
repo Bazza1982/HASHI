@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from orchestrator.reboot_receipts import RebootReceipts, ACTIVE, MAX_DELIVERY_ATTEMPTS
 from orchestrator.reboot_ui import render_notice
-from orchestrator import runtime_session, ui_language
+from orchestrator import remote_lifecycle, runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
+from orchestrator.kernel_process import instance_runtime_dir, write_record
+from orchestrator.reboot_adoption_bridge import legacy_handoff_markers
 
 from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
@@ -22,6 +27,10 @@ bridge_logger = logging.getLogger("BridgeU.Bridge")
 # Interactive recovery must not wait two minutes for a stuck task.
 # This Functions policy does not alter generic Worker lifecycle timeouts.
 REBOOT_DRAIN_TIMEOUT_SECONDS = 10.0
+# Qualification (240s), drain (180s), activation (360s), and commit (120s)
+# have independent bounded stages. Leave headroom before declaring a missing
+# Core receipt unconfirmed; this timeout never changes Core's own transaction.
+SHARED_REPLACEMENT_TIMEOUT_SECONDS = 1200.0
 
 TARGETED_REBOOT_MODES = frozenset({"min", "number"})
 BROAD_REBOOT_MODES = frozenset({"same", "max"})
@@ -69,7 +78,7 @@ def _resolve_restart_targets(kernel, restart: Mapping[str, Any]) -> tuple[str, .
 
 
 class RebootManager:
-    """Transactional route cutover between isolated per-Agent Workers."""
+    """Adopt Function generations without replacing the Core process."""
 
     def __init__(self, kernel, console_handler):
         self.kernel = kernel
@@ -260,9 +269,11 @@ class RebootManager:
                     )
                 else:
                     delivery.update(
-                        status="exhausted"
-                        if delivery["attempts"] >= MAX_DELIVERY_ATTEMPTS
-                        else "pending",
+                        status=(
+                            "exhausted"
+                            if delivery["attempts"] >= MAX_DELIVERY_ATTEMPTS
+                            else "pending"
+                        ),
                         next_attempt_at=moment
                         + max(
                             result.get("retry_after", 5),
@@ -270,6 +281,399 @@ class RebootManager:
                         ),
                     )
                 self.receipts.update(record["id"], delivery=delivery)
+
+    def _runtime_state_dir(self) -> Path:
+        return instance_runtime_dir(self.kernel.paths.bridge_home)
+
+    def _stage_shared_replacement(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Persist the whole-Function request before publishing it to Core."""
+
+        request_id = record["id"]
+        workers = {
+            handle.name: {
+                "old_pid": handle.worker_pid,
+                "generation_id": handle.generation_id,
+            }
+            for handle in self.kernel.runtimes
+            if handle.name in record["targets"]
+        }
+        shared = {
+            "status": "requested",
+            "request_id": request_id,
+            "requested_at": time.time(),
+            "old_shared_pid": os.getpid(),
+            "generation_id": None,
+            "remote": {},
+        }
+        self.receipts.update(
+            record["id"],
+            status="running",
+            phase="shared_replacement_requested",
+            lifecycle_state="accepted",
+            workers=workers,
+            shared_replacement=shared,
+        )
+        return shared
+
+    def _publish_shared_replacement(self, shared: Mapping[str, Any]) -> None:
+        request_id = str(shared.get("request_id") or "")
+        if len(request_id) != 32 or any(
+            char not in "0123456789abcdef" for char in request_id
+        ):
+            raise ValueError("invalid shared Function replacement request id")
+        write_record(
+            self._runtime_state_dir() / "kernel-requests" / f"{request_id}.json",
+            {"id": request_id},
+        )
+        bridge_logger.info(
+            "Whole-Function replacement submitted: operation=%s", request_id
+        )
+
+    @staticmethod
+    def _remote_pid(result: Mapping[str, Any] | None) -> int | None:
+        health = (result or {}).get("health") or {}
+        instance = health.get("instance") or {}
+        claim = instance.get("runtime_claim") or {}
+        try:
+            pid = int(claim.get("pid") or 0)
+        except (TypeError, ValueError):
+            return None
+        return pid or None
+
+    @staticmethod
+    def _remote_evidence(result: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "adopted" if result.get("ok") else "failed",
+            "action": str(result.get("action") or "unknown"),
+            "old_pid": result.get("old_pid"),
+            "new_pid": result.get("new_pid") or RebootManager._remote_pid(result),
+            "ready": bool(result.get("ok")),
+            "reason": str(result.get("reason") or ""),
+        }
+
+    async def _replacement_worker_evidence(
+        self,
+        handle: AgentRuntimeHandle,
+        previous: Mapping[str, Any],
+        *,
+        expected_generation: str,
+    ) -> dict[str, Any]:
+        evidence = await self._online_evidence(handle.client)
+        old_pid = previous.get("old_pid")
+        new_pid = evidence.get("new_pid")
+        evidence.update(
+            old_pid=old_pid,
+            pid_changed=old_pid is None or new_pid != old_pid,
+            old_exited=old_pid is None or new_pid != old_pid,
+        )
+        evidence["online"] = bool(
+            evidence.get("online")
+            and evidence["pid_changed"]
+            and evidence.get("generation_id") == expected_generation
+            and evidence.get("observed_generation_id") == expected_generation
+        )
+        return evidence
+
+    async def reconcile_shared_replacements(self, *, now: float | None = None) -> None:
+        """Complete broad reboot receipts from the successor shared process."""
+
+        if getattr(self.kernel, "_handoff_draining", False) or getattr(
+            self.kernel, "is_stopping", False
+        ):
+            return
+        moment = time.time() if now is None else now
+        state_dir = self._runtime_state_dir()
+        self._promote_legacy_shared_replacements(state_dir)
+        for record in self.receipts.records():
+            shared = record.get("shared_replacement") or {}
+            if (
+                record.get("status") not in ACTIVE
+                or shared.get("status") != "requested"
+            ):
+                continue
+            request_id = str(shared.get("request_id") or "")
+            receipt_path = state_dir / f"replacement-{request_id}.json"
+            if not receipt_path.exists():
+                requested_at = float(shared.get("requested_at") or 0.0)
+                request_path = state_dir / "kernel-requests" / f"{request_id}.json"
+                if (
+                    requested_at
+                    and moment - requested_at > SHARED_REPLACEMENT_TIMEOUT_SECONDS
+                    and not request_path.exists()
+                ):
+                    failed = {
+                        **shared,
+                        "status": "unconfirmed",
+                    }
+                    self._finish(
+                        record,
+                        "unconfirmed",
+                        reason="shared_replacement_unconfirmed",
+                        shared_replacement=failed,
+                    )
+                continue
+            try:
+                if receipt_path.stat().st_size > 4096:
+                    raise ValueError("oversized shared replacement receipt")
+                replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if (
+                    not isinstance(replacement, dict)
+                    or type(replacement.get("ok")) is not bool
+                ):
+                    raise ValueError("invalid shared replacement receipt")
+            except (OSError, ValueError, TypeError) as exc:
+                failed = {**shared, "status": "unconfirmed"}
+                self._finish(
+                    record,
+                    "unconfirmed",
+                    reason="shared_replacement_unconfirmed",
+                    shared_replacement=failed,
+                )
+                bridge_logger.error(
+                    "Shared replacement receipt is invalid: operation=%s error=%s",
+                    request_id,
+                    exc,
+                )
+                continue
+            generation_id = str(replacement.get("generation_id") or "")
+            if not replacement["ok"]:
+                rolled_back = {
+                    **shared,
+                    "status": "rolled_back",
+                    "generation_id": generation_id or None,
+                }
+                self._finish(
+                    record,
+                    "failed",
+                    lifecycle_state="rolled_back",
+                    restored=True,
+                    reason="shared_replacement_failed",
+                    shared_replacement=rolled_back,
+                )
+                continue
+            current_generation = str(
+                getattr(self.kernel, "shared_generation_id", "") or ""
+            )
+            if not generation_id or generation_id != current_generation:
+                unconfirmed = {
+                    **shared,
+                    "status": "unconfirmed",
+                    "generation_id": generation_id or None,
+                }
+                self._finish(
+                    record,
+                    "unconfirmed",
+                    committed=True,
+                    reason="shared_generation_mismatch",
+                    shared_replacement=unconfirmed,
+                )
+                continue
+
+            try:
+                remote_result = await remote_lifecycle.reload_remote_for_reboot(
+                    self.kernel.paths.bridge_home
+                )
+            except Exception as exc:
+                bridge_logger.exception(
+                    "Enabled Remote adoption failed unexpectedly: operation=%s",
+                    request_id,
+                )
+                remote_result = {
+                    "ok": False,
+                    "action": "remote_reload_exception",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+            remote = self._remote_evidence(remote_result)
+            shared_result = {
+                **shared,
+                "status": "committed" if remote_result.get("ok") else "unconfirmed",
+                "generation_id": generation_id,
+                "remote": remote,
+            }
+            if not remote_result.get("ok"):
+                self._finish(
+                    record,
+                    "unconfirmed",
+                    committed=True,
+                    reason="remote_reload_failed",
+                    shared_replacement={**shared_result, "status": "unconfirmed"},
+                )
+                continue
+            # Persist the one-shot Remote adoption before Worker verification.
+            # A successor crash now becomes unconfirmed on recovery instead of
+            # repeating a destructive Remote stop/start loop.
+            self.receipts.update(
+                record["id"],
+                phase="verifying",
+                lifecycle_state="committed",
+                committed=True,
+                shared_replacement=shared_result,
+            )
+            handles = self.kernel._runtime_map()
+            missing = [name for name in record["targets"] if name not in handles]
+            evidence = {}
+            try:
+                if not missing:
+                    evidence = dict(
+                        zip(
+                            record["targets"],
+                            await asyncio.gather(
+                                *(
+                                    self._replacement_worker_evidence(
+                                        handles[name],
+                                        record.get("workers", {}).get(name, {}),
+                                        expected_generation=generation_id,
+                                    )
+                                    for name in record["targets"]
+                                )
+                            ),
+                            strict=True,
+                        )
+                    )
+            except Exception:
+                bridge_logger.exception(
+                    "Replacement Worker evidence failed: operation=%s",
+                    request_id,
+                )
+                missing = list(record["targets"])
+            online = {name: bool(item.get("online")) for name, item in evidence.items()}
+            adopted = (
+                not missing
+                and len(evidence) == len(record["targets"])
+                and all(online.values())
+                and bool(remote_result.get("ok"))
+                and os.getpid() != shared.get("old_shared_pid")
+            )
+            if adopted:
+                self._finish(
+                    record,
+                    "succeeded",
+                    lifecycle_state="online",
+                    committed=True,
+                    reason="",
+                    online=online,
+                    workers=evidence,
+                    generations={name: generation_id for name in record["targets"]},
+                    shared_replacement=shared_result,
+                )
+            else:
+                self._finish(
+                    record,
+                    "unconfirmed",
+                    committed=True,
+                    reason="readiness",
+                    online=online,
+                    workers=evidence,
+                    shared_replacement={**shared_result, "status": "unconfirmed"},
+                )
+
+    def _promote_legacy_shared_replacements(self, state_dir: Path) -> None:
+        """Adopt a legacy broad receipt only after Core committed its handoff."""
+
+        current_generation = str(
+            getattr(self.kernel, "shared_generation_id", "") or ""
+        )
+        for marker_path, marker in legacy_handoff_markers(
+            self.kernel.paths.bridge_home
+        ):
+            operation_id = marker["operation_id"]
+            record = self.receipts.get(operation_id)
+            if record is None:
+                continue
+            shared = record.get("shared_replacement") or {}
+            if (
+                record.get("mode") not in BROAD_REBOOT_MODES
+                or record.get("status") != "succeeded"
+                or shared.get("status") != "not_requested"
+                or marker.get("old_shared_pid") == os.getpid()
+            ):
+                continue
+            replacement_path = state_dir / f"replacement-{operation_id}.json"
+            if not replacement_path.exists():
+                continue
+            try:
+                if replacement_path.stat().st_size > 4096:
+                    raise ValueError("oversized shared replacement receipt")
+                replacement = json.loads(
+                    replacement_path.read_text(encoding="utf-8")
+                )
+                if (
+                    not isinstance(replacement, dict)
+                    or replacement.get("ok") is not True
+                    or replacement.get("generation_id") != current_generation
+                ):
+                    continue
+                targets = list(record.get("targets") or ())
+                workers = record.get("workers") or {}
+                generations = record.get("generations") or {}
+                worker_generation = str(marker.get("expected_generation_id") or "")
+                if (
+                    not targets
+                    or min(targets) != marker.get("leader_agent")
+                    or any(
+                        generations.get(name) != worker_generation for name in targets
+                    )
+                ):
+                    raise ValueError("legacy broad receipt generation mismatch")
+                baselines = {}
+                for name in targets:
+                    evidence = workers.get(name) or {}
+                    pid = evidence.get("new_pid")
+                    if (
+                        isinstance(pid, bool)
+                        or not isinstance(pid, int)
+                        or pid <= 0
+                        or evidence.get("generation_id") != worker_generation
+                        or evidence.get("online") is not True
+                    ):
+                        raise ValueError("legacy broad receipt evidence mismatch")
+                    baselines[name] = {
+                        "old_pid": pid,
+                        # The legacy PID is the pre-handoff baseline. The
+                        # successor Worker must run from the committed full
+                        # shared generation, not the legacy Agent-only closure.
+                        "generation_id": current_generation,
+                    }
+                leader = baselines.get(str(marker.get("leader_agent"))) or {}
+                if leader.get("old_pid") != marker.get("worker_pid"):
+                    raise ValueError("legacy bridge leader evidence mismatch")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                bridge_logger.error(
+                    "Legacy broad reboot promotion rejected: operation=%s error=%s",
+                    operation_id,
+                    exc,
+                )
+                continue
+
+            promoted = {
+                "status": "requested",
+                "request_id": operation_id,
+                "requested_at": marker["requested_at"],
+                "old_shared_pid": marker["old_shared_pid"],
+                "generation_id": None,
+                "remote": {},
+            }
+            self.receipts.update(
+                operation_id,
+                status="running",
+                phase="shared_replacement_requested",
+                lifecycle_state="accepted",
+                committed=False,
+                reason="",
+                workers=baselines,
+                shared_replacement=promoted,
+            )
+            try:
+                marker_path.unlink()
+            except OSError:
+                bridge_logger.warning(
+                    "Legacy reboot marker cleanup failed: operation=%s",
+                    operation_id,
+                )
+            bridge_logger.info(
+                "Legacy broad reboot receipt promoted after Core handoff: operation=%s",
+                operation_id,
+            )
 
     def start_delivery(self):
         if self.delivery_task is not None and not self.delivery_task.done():
@@ -286,6 +690,7 @@ class RebootManager:
         async def watch():
             while True:
                 try:
+                    await self.reconcile_shared_replacements()
                     await self.send_pending()
                 except Exception as exc:
                     bridge_logger.error(
@@ -408,7 +813,7 @@ class RebootManager:
     def reload_project_modules(self, module_names=None):
         del module_names
         raise FunctionWorkerError(
-            "In-process module reload is retired; /reboot replaces Function Workers"
+            "In-process module reload is retired; /reboot replaces qualified Function processes"
         )
 
     def _target_handles(
@@ -556,6 +961,8 @@ class RebootManager:
         if record["status"] not in ACTIVE:
             return record["status"] == "succeeded"
         self.active_operation = record["id"]
+        staged_shared = None
+        result = False
         try:
             self.receipts.update(record["id"], status="running", phase="preparing")
             try:
@@ -564,7 +971,11 @@ class RebootManager:
                 bridge_logger.warning(
                     "Reboot start notification failed (%s)", type(exc).__name__
                 )
-            return await self._perform_restart(restart, record)
+            if str(restart.get("mode") or "same") in BROAD_REBOOT_MODES:
+                staged_shared = self._stage_shared_replacement(record)
+                result = True
+            else:
+                result = await self._perform_restart(restart, record)
         except asyncio.CancelledError:
             current = self.receipts.get(record["id"])
             if current["status"] in ACTIVE:
@@ -573,9 +984,24 @@ class RebootManager:
         except Exception:
             self._finish(record, "unconfirmed", reason="unexpected")
             bridge_logger.exception("Reboot result could not be confirmed")
-            return False
+            result = False
         finally:
             self.active_operation = None
+            if staged_shared is not None:
+                try:
+                    self._publish_shared_replacement(staged_shared)
+                except Exception:
+                    failed = {**staged_shared, "status": "unconfirmed"}
+                    self._finish(
+                        record,
+                        "unconfirmed",
+                        reason="shared_replacement_unconfirmed",
+                        shared_replacement=failed,
+                    )
+                    bridge_logger.exception(
+                        "Whole-Function replacement request could not be published"
+                    )
+                    result = False
             try:
                 await self.send_pending()
             except Exception as exc:
@@ -583,6 +1009,7 @@ class RebootManager:
                     "Reboot result is retained; notification pending (%s)",
                     type(exc).__name__,
                 )
+        return result
 
     async def _perform_restart(self, restart, record) -> bool:
         mode = str(restart.get("mode") or "same")

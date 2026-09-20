@@ -134,6 +134,7 @@ def test_build_tool_audit_record_redacts_legacy_screenshot_payloads(output):
     assert "[image-redacted]" in record["output_snippet"]
 
 
+@pytest.mark.platform
 @pytest.mark.asyncio
 async def test_tool_registry_allows_bash_without_enterprise_context(tmp_path):
     registry = ToolRegistry(
@@ -461,6 +462,7 @@ async def test_tool_registry_enterprise_shell_gate_defaults_closed(tmp_path):
     assert "shell_disabled" in record["output_snippet"]
 
 
+@pytest.mark.platform
 @pytest.mark.asyncio
 async def test_tool_registry_enterprise_shell_gate_can_be_explicitly_enabled(tmp_path):
     registry = ToolRegistry(

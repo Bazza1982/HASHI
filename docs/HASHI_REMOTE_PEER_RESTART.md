@@ -23,7 +23,7 @@ Peer cold restart is available only when all of these are true:
 1. the source Remote peer registry records the target as `handshake_accepted`;
 2. the accepted handshake advertises `rescue_restart`;
 3. a live capability probe still reports `rescue_restart`;
-4. the target Remote reports `remote_supervisor.mode=supervised`;
+4. the target Remote is currently running and owns the exact target instance;
 5. an authenticated live `/health` view from the target still records the
    source as `handshake_accepted`;
 6. the restart request is authenticated by the existing Remote shared-token
@@ -42,11 +42,12 @@ never receives arbitrary process-control or shell authority on the target.
 
 For a local `/restart`:
 
-1. use the local supervised Hashi Remote when it advertises `rescue_restart`;
+1. use the running local Hashi Remote when it advertises `rescue_restart`;
 2. otherwise retain the existing WatchTower hard-restart path as fallback.
 
 This means WatchTower remains useful but is no longer the mandatory restart
-controller when a rescue-grade local Remote is present.
+controller when a trusted, restart-capable local Remote is present. Child and
+supervised launch modes are both valid; mode is diagnostic, not authority.
 
 ## Peer restart flow
 
@@ -63,7 +64,7 @@ HASHI-B authenticated /health
     |
     | HASHI-A is still handshake_accepted
     v
-HASHI-B Remote (OS supervised)
+HASHI-B Remote (running and authenticated)
     |
     | fixed /control/hashi/restart
     v
@@ -76,14 +77,14 @@ issuing the restart request.
 
 ## Supported Remote configuration
 
-A rescue-grade target Remote must be OS supervised and allow L3 restart:
+A restart provider must be running, authenticated, and allow L3 restart:
 
 ```yaml
 security:
   max_terminal_level: "L3_RESTART"
 ```
 
-Windows supervised Remote:
+Windows Remote and its fixed restart actuator:
 
 ```powershell
 .\bin\hashi_remote_ctl.ps1 install
@@ -93,9 +94,17 @@ Windows supervised Remote:
 
 The Windows supervisor resolves the instance identity while it still has access
 to instance configuration, then persists the instance id, display name and
-Backend API port in the scheduled-task command. The Limited task principal is
-not expected to read protected `agents.json`; failure to do so must never
-silently advertise the generic `HASHI` identity or default Backend API port.
+Backend API port in the scheduled-task command. The network-facing Remote task
+stays `Limited`. A separate deterministic `HashiRestart-<instance>` task runs
+`Highest`, accepts no caller-supplied command, and can only invoke that
+instance's fixed restart controller. It stops the old Core and triggers a
+separate `HashiRuntime-<instance>` task that provides an isolated elevated
+launch boundary for the replacement Core. The restart actuator therefore exits
+after readiness and remains reusable while Remote stays online. This bridges a
+privilege difference without granting the Remote process broad elevated access. The Limited task
+principal is not expected to read protected `agents.json`; failure to do so
+must never silently advertise the generic `HASHI` identity or default Backend
+API port.
 
 Linux/WSL supervised Remote:
 
@@ -105,16 +114,17 @@ bin/hashi-remote-ctl.sh start
 bin/hashi-remote-ctl.sh status
 ```
 
-A child Remote started only by the HASHI Core is intentionally rejected as a
-cold-restart provider because it may disappear with the Core it is meant to
-rescue.
+A child Remote is a valid provider while it is running and has the same trusted
+capabilities. On Windows it triggers the fixed elevated actuator when present;
+for a same-privilege manual Core, the fixed controller is used directly. The
+provider mode is diagnostic context, not an authorization gate.
 
 ## Local acceptance test
 
 Use two supported instances, for example `HASHI1` and `HASHI2`.
 
 1. Start both HASHI cores.
-2. Start both Remotes in supervised mode with `L3_RESTART`.
+2. Start both Remotes (child or supervised) with `L3_RESTART`.
 3. Complete the normal Hashi Remote handshake and confirm both peers show the
    accepted state.
 4. From HASHI1 run:
@@ -123,8 +133,8 @@ Use two supported instances, for example `HASHI1` and `HASHI2`.
 /restart HASHI2
 ```
 
-5. Confirm HASHI2 Remote remains reachable while HASHI2 Core is stopped and
-   started again.
+5. Confirm HASHI2 Remote and, on Windows, its exact fixed actuator remain
+   available while HASHI2 Core is stopped and started again.
 6. Confirm HASHI2 Backend API returns healthy after restart.
 7. Inspect HASHI2 `logs/remote_rescue_audit.jsonl` and restart logs.
 8. Repeat in the reverse direction.

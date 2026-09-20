@@ -387,6 +387,59 @@ async def test_health_explains_degraded_remote_without_failing_liveness(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_health_reconciles_recovered_remote_before_projecting_status(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    owner = SimpleNamespace(
+        instance_id="HASHI3",
+        api_gateway=None,
+        runtimes=[],
+        _handoff_draining=False,
+        startup_status={
+            "phase": "degraded",
+            "services_ready": True,
+            "ready": False,
+            "degraded": True,
+            "issues": [
+                {
+                    "code": "remote_already_running_degraded",
+                    "component": "remote",
+                    "severity": "warning",
+                }
+            ],
+        },
+    )
+
+    class _Manager:
+        def __init__(self):
+            self.remote_calls = 0
+
+        async def reconcile_remote_status(self, *, publish=True):
+            self.remote_calls += 1
+            owner.startup_status.update(
+                phase="ready",
+                ready=True,
+                degraded=False,
+                issues=[],
+            )
+
+        def reconcile_connector_status(self, *, publish=True):
+            return None
+
+    manager = _Manager()
+    owner.startup_manager = manager
+    server.orchestrator = owner
+
+    response = await server.handle_health(_FakeRequest())
+    payload = json.loads(response.text)
+
+    assert manager.remote_calls == 1
+    assert payload["ready"] is True
+    assert payload["degraded"] is False
+    assert payload["status"] == "ready"
+    assert payload["issues"] == []
+
+
+@pytest.mark.asyncio
 async def test_shared_handoff_rejects_new_http_work_and_can_resume(tmp_path):
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer

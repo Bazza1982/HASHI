@@ -64,6 +64,7 @@ if ($SupervisorIdentity.workbench_port) {
     $ArgsList += @("--workbench-port", [string]$SupervisorIdentity.workbench_port)
 }
 $TaskRunner = Join-Path $PSScriptRoot "hashi_remote_task_runner.ps1"
+$RestartController = Join-Path $PSScriptRoot "hashi_restart_ctl.ps1"
 
 if ($NoTls -or $env:HASHI_REMOTE_NO_TLS -eq "1") {
     $ArgsList += "--no-tls"
@@ -157,6 +158,17 @@ function Register-HashiRemoteSupervisor {
     Ensure-LogDir
     $ResolvedPrincipal = Resolve-RemoteTaskPrincipal
     Protect-RemoteCredentialAccess -Principal $ResolvedPrincipal
+    if (Test-Path -LiteralPath $RestartController -PathType Leaf) {
+        try {
+            & $RestartController register `
+                -HashiRoot $HashiRoot `
+                -Python $Python `
+                -TaskUserId $ResolvedPrincipal.UserId `
+                -InstanceId $SupervisorIdentity.instance_id
+        } catch {
+            Write-Warning "Fixed restart task registration deferred: $($_.Exception.Message)"
+        }
+    }
     $RunnerArgs = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
@@ -498,6 +510,12 @@ switch ($Action) {
     { $_ -in "unregister", "uninstall" } {
         Stop-RemoteSupervisor
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $RestartController -PathType Leaf) {
+            & $RestartController unregister `
+                -HashiRoot $HashiRoot `
+                -Python $Python `
+                -InstanceId $SupervisorIdentity.instance_id
+        }
         Write-Host "Unregistered Remote supervisor task '$TaskName'"
     }
     "start" {

@@ -9,7 +9,7 @@ from typing import Mapping
 
 from orchestrator.command_interactions import (
     Binding, Capture, CapturedQuery, InteractionError, MenuStore, VERSION,
-    ID_PATTERN, perform_action, validate_operation,
+    perform_action, validate_operation,
 )
 
 logger = logging.getLogger("HASHI.CommandInteractions")
@@ -131,15 +131,41 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
             command, _ = _split_command(command_line)
             if not command_line.lstrip().startswith("/") or not _allowed(runtime, command):
                 raise InteractionError("command_menu_forbidden", 403)
-        capture = Capture(store, binding, command, lambda data: _resolve(runtime, data))
+        def persist_menu(menu):
+            """Refresh the canonical presentation row; command execution never depends on it."""
+            if not menu.presentation_message_id:
+                return
+            try:
+                from orchestrator import runtime_session
+                session_store = runtime_session.ensure_store(runtime)
+                session_store.update_presentation_message(
+                    session_id=binding.session,
+                    owner_id=runtime_session.owner_id(runtime),
+                    agent_id=binding.agent,
+                    message_id=menu.presentation_message_id,
+                    text=menu.text,
+                    message_context={"command_ui": store.render(menu)},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Command menu presentation persistence failed for %s (%s)",
+                    getattr(runtime, "name", "unknown"),
+                    type(exc).__name__,
+                )
+
+        capture = Capture(
+            store,
+            binding,
+            command,
+            lambda data: _resolve(runtime, data),
+            persist_menu=persist_menu,
+        )
         capture.chat_id = actor
         before = _refresh_signature(runtime)
 
         async def perform():
             try:
                 if op == "open":
-                    for stale in store.invalidate(binding):
-                        capture._record(stale)
                     result = await execute_local_command(
                         runtime, command_line, chat_id=actor, source_channel="workbench_command_ui",
                         session_metadata={**dict(metadata), "ui_locale": locale},

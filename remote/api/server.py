@@ -1288,6 +1288,20 @@ def _hashi_restart_command() -> list[str]:
                 "-ServiceName",
                 service_target,
             ]
+        restart_ctl = root / "bin" / "hashi_restart_ctl.ps1"
+        if restart_ctl.exists():
+            return [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(restart_ctl),
+                "trigger",
+                "-HashiRoot",
+                str(root),
+            ]
         ctl = root / "bin" / "bridge_ctl.ps1"
         if ctl.exists():
             return [
@@ -1344,14 +1358,15 @@ def _configured_windows_service_target() -> str | None:
 
 def _restart_hashi_process() -> dict[str, Any]:
     command = _hashi_restart_command()
-    service_restart = any(
-        Path(value).name.casefold() == "hashi_service_ctl.ps1"
+    controlled_restart = any(
+        Path(value).name.casefold()
+        in {"hashi_service_ctl.ps1", "hashi_restart_ctl.ps1"}
         for value in command
     )
     return _launch_hashi_process(
         command,
         log_name="remote_rescue_hashi_restart.log",
-        detach_on_windows=not service_restart,
+        detach_on_windows=not controlled_restart,
     )
 
 
