@@ -49,6 +49,12 @@ completion may leave Core running. Success still requires a different healthy
 Core PID with matching identity, runtime, and Function generation.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
+WSL login startup belongs to the Windows platform adapter. Deploy it through
+the versioned `packaging/windows` installer with explicit instance, identity,
+distribution, checkout, and interpreter. Native stderr is diagnostic data;
+only the `wsl.exe` exit code decides success, and lifecycle/stdout/stderr logs
+remain separate. Source, registered task, and live adoption are distinct.
+
 ## Configuration, identity, and persistence
 
 Read Agents, identities, ports, workspaces, endpoints, and model opt-ins from
