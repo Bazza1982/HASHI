@@ -32,6 +32,9 @@ from orchestrator.runtime_contract import (  # noqa: E402
     CORE_SOURCE_PATHS,
     core_source_digest,
 )
+from orchestrator.process_execution import (  # noqa: E402
+    process_is_alive as process_is_alive_without_signal,
+)
 
 
 DEFAULT_SUITE = (
@@ -250,15 +253,7 @@ def read_pid(path: Path) -> int | None:
 def pid_is_alive(pid: int | None) -> bool | None:
     if pid is None:
         return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return None
-    return True
+    return process_is_alive_without_signal(pid)
 
 
 def capture_snapshot(code_root: Path, bridge_home: Path, label: str) -> dict[str, Any]:

@@ -47,7 +47,10 @@ the matching versioned `packaging/windows` installer with explicit instance,
 identity, checkout, and interpreter (plus distribution for WSL). Native stderr
 is diagnostic and never traverses a PowerShell pipeline; only the launched
 process exit code decides success. Keep lifecycle/stdout/stderr logs and
-source, registered task, and live adoption facts distinct.
+source, registered task, and live adoption facts distinct. Cross-platform PID
+liveness checks use `orchestrator.process_execution.process_is_alive`; never
+use `os.kill(pid, 0)` on Windows, where it can interrupt every process sharing
+the console.
 
 ## Configuration, identity, and persistence
 

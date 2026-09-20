@@ -29,6 +29,10 @@ not need a new command for each item.
 - **Core boundary:** the protected source list is imported from
   `orchestrator.runtime_contract.CORE_SOURCE_PATHS`. The suite does not carry a
   copied list.
+- **Process boundary:** PID liveness checks use the shared non-signalling
+  process probe. The runner never calls `os.kill(pid, 0)` directly because on
+  Windows signal zero is a console control event, not a harmless existence
+  query.
 
 The runner never sends a slash command, clicks a control, restarts a process,
 or claims that a screenshot proves runtime state. Lifecycle actions remain

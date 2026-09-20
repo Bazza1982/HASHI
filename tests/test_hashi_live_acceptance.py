@@ -90,6 +90,25 @@ def test_suite_validation_rejects_lifecycle_automation_and_cycles() -> None:
     assert "cannot depend on itself" in str(error.value)
 
 
+def test_pid_liveness_uses_shared_non_signalling_probe(monkeypatch) -> None:
+    observed: list[int] = []
+    monkeypatch.setattr(
+        live,
+        "process_is_alive_without_signal",
+        lambda pid: observed.append(pid) or True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        live.os,
+        "kill",
+        lambda *_args: pytest.fail("PID liveness checks must not signal processes"),
+    )
+
+    assert live.pid_is_alive(None) is None
+    assert live.pid_is_alive(4242) is True
+    assert observed == [4242]
+
+
 def test_snapshot_comparison_enforces_core_pid_source_and_tree() -> None:
     before = {
         "label": "before",
