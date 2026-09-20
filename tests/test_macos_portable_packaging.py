@@ -42,6 +42,7 @@ def test_macos_portable_builder_pins_the_official_apple_silicon_python_asset() -
     assert 'pbs_arch="x86_64"' not in source
 
 
+@pytest.mark.platform
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
 def test_macos_portable_builder_has_valid_bash_syntax() -> None:
     result = subprocess.run(
