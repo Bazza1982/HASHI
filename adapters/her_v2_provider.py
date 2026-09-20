@@ -3711,18 +3711,18 @@ class HashiStageProvider(StageProvider):
             if not event.delivery_class:
                 event.delivery_class = owner
             # Provider-native progress is not the HER v2 commentary contract.
-            # The sole exception is model-authored commentary from an actual
-            # tool-enabled Execution call, whose prompt already contains the
-            # validated Persona block.
-            execution_commentary = bool(
+            # The exceptions are model-authored commentary from actual
+            # tool-enabled Direct and Execution calls, whose prompts already
+            # contain the validated Persona block.
+            persona_authored_commentary = bool(
                 event.kind == KIND_COMMENTARY
-                and request.stage is Stage.EXECUTION
+                and request.stage in {Stage.DIRECT, Stage.EXECUTION}
                 and request.allow_tools
             )
             if (
                 event.delivery_class == DELIVERY_USER_COMMENTARY
                 and event.kind != "voice_warning"
-                and not execution_commentary
+                and not persona_authored_commentary
             ):
                 event.delivery_class = DELIVERY_INTERNAL
             event.origin = event.origin or f"her_v2:{profile.engine}"
