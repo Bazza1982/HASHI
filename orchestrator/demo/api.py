@@ -21,7 +21,6 @@ from orchestrator.session_store import SessionNotFound, TERMINAL_RUN_STATES
 from .leases import (
     DemoBusy,
     DemoExpired,
-    DemoIdentityRequired,
     DemoLease,
     DemoLeaseError,
     DemoLeaseStore,
