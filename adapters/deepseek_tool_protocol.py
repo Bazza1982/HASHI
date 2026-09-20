@@ -45,6 +45,8 @@ _DIALECTS = (
 
 _CANONICAL_STARTS = tuple(f"<{dialect.calls}>" for dialect in _DIALECTS)
 _DEGRADED_STARTS = (
+    "<antml:function_calls",
+    "<antml:invoke",
     "<function_calls",
     "<tool_calls",
     "<invoke",
@@ -55,6 +57,9 @@ _DEGRADED_STARTS = (
 )
 _STREAM_CANDIDATE_STARTS = tuple(
     marker.casefold() for marker in (*_CANONICAL_STARTS, *_DEGRADED_STARTS)
+)
+_SORTED_STREAM_CANDIDATE_STARTS = tuple(
+    sorted(set(_STREAM_CANDIDATE_STARTS), key=lambda marker: (-len(marker), marker))
 )
 
 
@@ -72,6 +77,86 @@ class _DSMLParseError(ValueError):
         super().__init__(issue)
         self.issue = issue
         self.candidate_tool_name = candidate_tool_name
+
+
+def _marker_starts_a_line(text: str, index: int) -> bool:
+    line_start = text.rfind("\n", 0, index) + 1
+    return not text[line_start:index].strip()
+
+
+def _inside_code_fence(text: str, index: int) -> bool:
+    return text.count("```", 0, index) % 2 == 1
+
+
+def _find_candidate_marker(
+    text: str,
+    *,
+    start: int = 0,
+) -> tuple[int, str] | None:
+    folded = text.casefold()
+    best: tuple[int, str] | None = None
+    for marker in _SORTED_STREAM_CANDIDATE_STARTS:
+        index = folded.find(marker, max(0, start))
+        while index >= 0:
+            if _marker_starts_a_line(text, index) and not _inside_code_fence(
+                text, index
+            ):
+                candidate = (index, marker)
+                if (
+                    best is None
+                    or candidate[0] < best[0]
+                    or (
+                        candidate[0] == best[0]
+                        and len(candidate[1]) > len(best[1])
+                    )
+                ):
+                    best = candidate
+                break
+            index = folded.find(marker, index + 1)
+    return best
+
+
+def _find_partial_candidate_marker(
+    text: str,
+    *,
+    start: int = 0,
+) -> tuple[int, str] | None:
+    folded = text.casefold()
+    minimum = max(
+        max(0, start),
+        len(text) - max(map(len, _STREAM_CANDIDATE_STARTS)),
+    )
+    for index in range(minimum, len(text)):
+        suffix = folded[index:]
+        if len(suffix) < 1:
+            continue
+        if not _marker_starts_a_line(text, index) or _inside_code_fence(
+            text,
+            index,
+        ):
+            continue
+        matches = [
+            marker
+            for marker in _SORTED_STREAM_CANDIDATE_STARTS
+            if marker.startswith(suffix)
+        ]
+        if matches:
+            return index, matches[0]
+    return None
+
+
+def _dialect_for_marker(marker: str) -> str:
+    folded = marker.casefold()
+    for dialect in _DIALECTS:
+        if folded == f"<{dialect.calls}>".casefold():
+            return dialect.name
+    if folded.startswith("<antml:"):
+        return "antml-degraded"
+    if folded.startswith("<function_calls"):
+        return "v3.2-degraded"
+    if folded.startswith("<|dsml|") or folded.startswith("<||dsml||"):
+        return "dsml-degraded"
+    return "unknown-degraded"
 
 
 def _skip_whitespace(text: str, index: int) -> int:
@@ -338,20 +423,23 @@ def inspect_deepseek_text_tool_calls(
 
     if not text or not tools:
         return DeepSeekTextToolInspection("none")
+    stripped = text.strip()
+    candidate = _find_candidate_marker(
+        stripped[: MAX_TEXT_TOOL_CHARACTERS + MAX_TAG_HEADER_CHARACTERS]
+    )
     if len(text) > MAX_TEXT_TOOL_CHARACTERS:
-        stripped_prefix = text[:512].lstrip().casefold()
-        if any(
-            stripped_prefix.startswith(item) for item in _STREAM_CANDIDATE_STARTS
-        ):
+        if candidate is not None:
+            candidate_index, candidate_marker = candidate
             return DeepSeekTextToolInspection(
                 "repair_required",
-                dialect="oversized",
+                dialect=_dialect_for_marker(candidate_marker),
                 issue="text_tool_call_exceeds_limit",
-                candidate_tool_name=_candidate_name(text[:512]),
+                candidate_tool_name=_candidate_name(
+                    stripped[candidate_index : candidate_index + 512]
+                ),
             )
         return DeepSeekTextToolInspection("none")
 
-    stripped = text.strip()
     for dialect in _DIALECTS:
         if not stripped.startswith(f"<{dialect.calls}>"):
             continue
@@ -379,17 +467,22 @@ def inspect_deepseek_text_tool_calls(
 
     folded = stripped[:512].casefold()
     if any(folded.startswith(marker) for marker in _DEGRADED_STARTS):
-        if folded.startswith("<function_calls"):
-            dialect = "v3.2-degraded"
-        elif folded.startswith("<|dsml|") or folded.startswith("<||dsml||"):
-            dialect = "dsml-degraded"
-        else:
-            dialect = "unknown-degraded"
+        marker = next(
+            marker for marker in _DEGRADED_STARTS if folded.startswith(marker)
+        )
         return DeepSeekTextToolInspection(
             "repair_required",
-            dialect=dialect,
+            dialect=_dialect_for_marker(marker),
             issue="noncanonical_text_tool_call",
             candidate_tool_name=_candidate_name(stripped),
+        )
+    if candidate is not None and candidate[0] > 0:
+        candidate_index, candidate_marker = candidate
+        return DeepSeekTextToolInspection(
+            "repair_required",
+            dialect=_dialect_for_marker(candidate_marker),
+            issue="text_before_tool_call_envelope",
+            candidate_tool_name=_candidate_name(stripped[candidate_index:]),
         )
     if len(folded) >= 4 and any(
         marker.startswith(folded) for marker in _STREAM_CANDIDATE_STARTS
@@ -399,15 +492,25 @@ def inspect_deepseek_text_tool_calls(
             dialect="incomplete",
             issue="incomplete_text_tool_call_prefix",
         )
+    partial_candidate = _find_partial_candidate_marker(stripped)
+    if partial_candidate is not None and partial_candidate[0] > 0:
+        candidate_index, candidate_marker = partial_candidate
+        if len(stripped[candidate_index:]) >= 4:
+            return DeepSeekTextToolInspection(
+                "repair_required",
+                dialect=_dialect_for_marker(candidate_marker),
+                issue="incomplete_text_tool_call_prefix",
+            )
     return DeepSeekTextToolInspection("none")
 
 
 class DeepSeekToolMarkupStreamGate:
-    """Hold only a possible leading tool envelope until its prefix is known."""
+    """Pass commentary while withholding a later textual tool envelope."""
 
     def __init__(self, *, enabled: bool) -> None:
-        self._state = "pending" if enabled else "passthrough"
-        self._buffer = ""
+        self._state = "scanning" if enabled else "disabled"
+        self._observed = ""
+        self._delivered_until = 0
 
     @property
     def blocked(self) -> bool:
@@ -416,38 +519,51 @@ class DeepSeekToolMarkupStreamGate:
     def feed(self, delta: str) -> str:
         if not delta:
             return ""
-        if self._state == "passthrough":
+        if self._state == "disabled":
             return delta
         if self._state == "blocked":
             return ""
-        self._buffer += delta
-        probe = self._buffer.lstrip().casefold()
-        if not probe:
-            if len(self._buffer) > 1024:
-                output, self._buffer = self._buffer, ""
-                return output
-            return ""
-        if any(marker.startswith(probe) for marker in _STREAM_CANDIDATE_STARTS):
-            return ""
-        if any(probe.startswith(marker) for marker in _STREAM_CANDIDATE_STARTS):
+        self._observed += delta
+        candidate = _find_candidate_marker(
+            self._observed,
+            start=self._delivered_until,
+        )
+        if candidate is not None:
+            candidate_index, _ = candidate
+            output = self._observed[self._delivered_until : candidate_index]
+            self._delivered_until = candidate_index
             self._state = "blocked"
-            return ""
-        self._state = "passthrough"
-        output, self._buffer = self._buffer, ""
+            return output
+        partial_candidate = _find_partial_candidate_marker(
+            self._observed,
+            start=self._delivered_until,
+        )
+        emit_end = (
+            partial_candidate[0]
+            if partial_candidate is not None
+            else len(self._observed)
+        )
+        output = self._observed[self._delivered_until : emit_end]
+        self._delivered_until = emit_end
         return output
 
     def finish(self) -> str:
         if self._state == "blocked":
-            self._buffer = ""
             return ""
-        probe = self._buffer.lstrip().casefold()
-        if len(probe) >= 4 and any(
-            marker.startswith(probe) or probe.startswith(marker)
-            for marker in _STREAM_CANDIDATE_STARTS
+        if self._state == "disabled":
+            return ""
+        partial_candidate = _find_partial_candidate_marker(
+            self._observed,
+            start=self._delivered_until,
+        )
+        if (
+            partial_candidate is not None
+            and len(self._observed[partial_candidate[0] :]) >= 4
         ):
+            output = self._observed[self._delivered_until : partial_candidate[0]]
+            self._delivered_until = partial_candidate[0]
             self._state = "blocked"
-            self._buffer = ""
-            return ""
-        output, self._buffer = self._buffer, ""
-        self._state = "passthrough"
+            return output
+        output = self._observed[self._delivered_until :]
+        self._delivered_until = len(self._observed)
         return output

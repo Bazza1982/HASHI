@@ -133,6 +133,8 @@ effects, and meter every physical call.
 
 Tool-enabled HER Direct and Primary Execution may publish Persona-authored
 interim commentary; provider progress from other stages stays internal.
+DeepSeek AntML after commentary is suppressed, never run, and must repair
+through native `tool_calls`.
 
 Validate a Tool batch before effects. Malformed batches execute zero calls;
 completed calls never replay. Repair preserves Provider fields, identity,

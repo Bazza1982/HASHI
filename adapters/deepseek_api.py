@@ -315,7 +315,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
             f"[{_TEXT_TOOL_REPAIR_MARKER}] DeepSeek emitted explicit tool intent "
             "as malformed or noncanonical text. Re-emit the same intended call "
             "through the native tool_calls channel. Do not answer as if the tool "
-            "ran, and do not repeat any completed tool. "
+            "ran, and do not repeat any completed tool. If the rejected text began "
+            "with a brief natural-language progress update, preserve that update "
+            "once in assistant content alongside the native tool_calls; never place "
+            "textual tool-control markup in assistant content. "
             + prompt
         )
 

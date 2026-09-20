@@ -1518,17 +1518,21 @@ each converted call a stable synthetic ID, and supplies the non-null assistant
 `content` required when replaying a DeepSeek tool-call message.
 
 Partial, malformed, unknown-tool, schema-invalid, or merely DSML-like text is
-never executed. When a response starts with explicit DeepSeek tool intent but
-cannot be converted safely, the Adapter suppresses that control text and asks
-the Provider to reissue the batch through native structured `tool_calls`. A
-plain-language claim of success cannot satisfy this repair. Streaming content
-is prefix-gated so a possible tool-control envelope is not delivered before it
-is classified, and the final runtime dangling-tool guard remains a last-line
-delivery defence rather than an execution parser. All repair attempts share the
-existing bounded recovery budget described below. The rejected assistant turn
-may retain a bounded private copy of its own text so DeepSeek can reproduce
-arguments derived during reasoning; a fixed invalid prefix prevents that copy
-from becoming executable, and it is never delivered as user-visible text.
+never executed. This includes noncanonical AntML-shaped control text and a
+canonical or degraded envelope that follows a brief natural-language progress
+update. In those cases the Adapter may publish only the safe progress prefix,
+suppresses the control envelope, and asks the Provider to reissue the batch
+through native structured `tool_calls`. A plain-language claim of success
+cannot satisfy this repair. Streaming content is continuously gated outside
+code fences so a possible tool-control envelope is not delivered before it is
+classified, including when its opening marker spans SSE deltas. Code-fenced
+examples remain ordinary text. The final runtime dangling-tool guard remains a
+last-line delivery defence rather than an execution parser. All repair attempts
+share the existing bounded recovery budget described below. The rejected
+assistant turn may retain a bounded private copy of its own text so DeepSeek can
+reproduce arguments derived during reasoning; a fixed invalid prefix prevents
+that copy from becoming executable, and it is never delivered as user-visible
+text.
 
 The initial malformed response may consume the shared recovery budget, recorded
 as `1/3`, `2/3` and `3/3` with physical-call and evidence references. A
