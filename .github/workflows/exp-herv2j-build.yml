@@ -1,19 +1,82 @@
-name: HERv2J isolated workspace
+name: HERv2J isolated checks
 on:
   push:
     branches: [exp-herv2j]
     paths: [.github/workflows/exp-herv2j-build.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  experiment:
+    if: github.ref == 'refs/heads/exp-herv2j'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Export experiment source
-        run: git archive --format=zip HEAD -o /tmp/hashi-exp-source.zip
-      - uses: actions/upload-artifact@v4
         with:
-          name: hashi-exp-source
-          path: /tmp/hashi-exp-source.zip
-          retention-days: 1
+          ref: exp-herv2j
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply experiment changes and verify sandbox source identity
+        run: |
+          cat .exp-herv2j-{1,2,3}.patch > /tmp/herv2j.patch
+          git apply --recount --check /tmp/herv2j.patch
+          git apply --recount /tmp/herv2j.patch
+          python - <<'PY'
+          import subprocess
+          expected = '''900226964c9f55411f6f8297090bb09a2752be59 adapters/her_v2.py
+          9de973e1e4191a56d76bc3572823f62678d9c067 adapters/her_v2_provider.py
+          bb5c89b3f0045d1ad911925eb7318a18df13fbe2 adapters/her_v2_style.py
+          8a3bde73035d7ea9154dbe8b9b1d770bb066b522 docs/HER_V2_JEV_STYLE_EXPERIMENT.md
+          7310c4923a4fed0303d79f9d99d7a2ee5a4a3a42 locales/runtime/en.json
+          30c2633731bead1ec34e7dad29e84bfec18ee52a locales/runtime/zh-CN.json
+          00e9021bc73b2d948435d2776b4e826130f588b3 orchestrator/her_v2/config.py
+          d1a9b83517b78d95c0d1faebcd9e5c17447a6ca9 orchestrator/her_v2/final_style.py
+          f1d9139c7b155062088d773aba4c19e23f24f63b orchestrator/her_v2/prompt_assets/system_style_rewrite.txt
+          97586f93ae0d159424eba639628560e4f48fe85a orchestrator/her_v2/prompt_catalog.py
+          7472e72a512ddd163e2b13fc1cb078a0fdabc9a5 orchestrator/her_v2/runtime.py
+          41a094a45445bd8789e39b249231b5b83543d287 orchestrator/her_v2/runtime_configuration.py
+          fba3063a1e15b1832866a8861569d957280b910a orchestrator/runtime_menu_views.py
+          d6f63365fafc945aa70d48fb729b6ed636776c4b orchestrator/runtime_model_selection.py
+          55a4f450a33bb6ebd52e42b029d5c158977ac270 tests/test_her_v2_final_style.py'''
+          for line in expected.splitlines():
+              sha, path = line.strip().split(' ', 1)
+              actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+              assert actual == sha, (path, actual, sha)
+          print('All 15 changed files match the locally checked source.')
+          PY
+      - name: Install isolated test dependencies
+        run: python -m pip install pytest pytest-asyncio anyio httpx aiohttp PyYAML jsonschema croniter psutil python-telegram-bot rich
+      - name: Focused experiment tests only
+        run: |
+          set -o pipefail
+          python -m pytest -q tests/test_her_v2_final_style.py | tee /tmp/herv2j-tests.txt
+          python -m compileall -q adapters/her_v2.py adapters/her_v2_provider.py adapters/her_v2_style.py orchestrator/her_v2 orchestrator/runtime_model_selection.py orchestrator/runtime_menu_views.py
+      - name: Remove temporary transport files and enforce scope
+        run: |
+          git rm .exp-herv2j-1.patch .exp-herv2j-2.patch .exp-herv2j-3.patch .github/workflows/exp-herv2j-build.yml
+          git add adapters/her_v2.py adapters/her_v2_provider.py adapters/her_v2_style.py orchestrator/her_v2 orchestrator/runtime_model_selection.py orchestrator/runtime_menu_views.py locales/runtime/en.json locales/runtime/zh-CN.json tests/test_her_v2_final_style.py docs/HER_V2_JEV_STYLE_EXPERIMENT.md
+          git diff --cached --check
+          python scripts/check_protected_core_changes.py --base 6073915a8694b5b9e5ed83f17f43e2cbe1498e2b
+      - name: Publish tested experiment branch only
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('docs/HER_V2_JEV_STYLE_EXPERIMENT.md')
+          summary = Path('/tmp/herv2j-tests.txt').read_text().strip().splitlines()[-1]
+          with p.open('a') as f:
+              f.write('\nIsolated Python 3.12 runner, full focused module (including UI): `' + summary + '`.\n')
+          PY
+          git add docs/HER_V2_JEV_STYLE_EXPERIMENT.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(her-v2): opt-in JEV style check and single Quick rewrite'
+          git push origin HEAD:exp-herv2j
+          git rev-parse HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: herv2j-focused-tests
+          path: /tmp/herv2j-tests.txt
+          if-no-files-found: ignore
+          retention-days: 7
