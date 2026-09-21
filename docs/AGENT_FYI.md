@@ -47,17 +47,13 @@ it can interrupt processes sharing a console.
 
 ## Configuration, identity, and persistence
 
-Read Agents, identities, ports, workspaces, endpoints, and model opt-ins from
-authoritative configuration; never infer them from folder names or memory.
-Keep credentials and local identity in ignored instance stores. Instance
-model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
-the Function registry. An explicit Agent selection remains authoritative until
-that model is retired.
+Use authoritative config for Agent identity, ports, workspaces, endpoints and
+model opt-ins—not names/memory. Keep secrets ignored. Instance opt-ins belong
+in `allowed_backends`; shared compatibility in Function registry; explicit
+model choices persist until retired.
 
-Public Windows Portable images contain no credentials and pre-populate model
-choices only for DeepSeek. Other provider endpoints may remain configurable,
-but their model choices are supplied by the user after installation; the
-builder fails closed if either boundary is violated.
+Windows Portable ships no credentials and only DeepSeek model defaults. Users
+supply all others; validation fails closed.
 
 An active Agent needs a PAO-started Worker. Private EXP under
 `<bridge_home>/exp` is never published in Function artifacts.
