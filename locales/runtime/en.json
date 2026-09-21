@@ -4,6 +4,13 @@
   "native_name": "English",
   "telegram_language_code": "en",
   "strings": {
+    "menu.her.style.label": "Style finalisation",
+    "menu.her.style.button": "Style finalisation · {state}",
+    "menu.her.style.title": "HER v2 style finalisation",
+    "menu.her.style.scope": "Optional text-only style and Persona fix. No task review or extra commentary.",
+    "menu.her.style.target": "Rewrite model: <code>{target}</code> (Quick/light, reasoning off).",
+    "menu.her.style.effect": "When enabled, the final draft and active instructions are sent to TypeSafe/JEV for one style check. Only a clear mismatch is rewritten once. Requires TYPESAFE_API_KEY. Saved for future turns; existing execution modes are unchanged.",
+    "menu.her.style.usage": "Use /model style on or /model style off. Change the rewrite model through Quick settings.",
     "common.back": "← Back",
     "common.refresh": "↻ Refresh",
     "common.on": "ON",

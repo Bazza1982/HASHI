@@ -259,6 +259,7 @@ class _TurnState:
     terminal_failure: StageInvocationError | None = None
     last_foreground_cleanup: Mapping[str, Any] = field(default_factory=dict)
     last_execution_invocation_id: str = ""
+    style_finalisation_done: bool = False
     execution_elapsed_s: float = 0.0
     replan_continuation: dict[str, Any] = field(default_factory=dict)
     late_immediate_source_task: asyncio.Task | None = None
@@ -296,8 +297,10 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         timing_clock: Callable[[], float] = time.perf_counter,
         skills_catalogue: Sequence[Mapping[str, Any]] | None = None,
         capability_cache_path: Path | str | None = None,
+        final_style: Any | None = None,
     ) -> None:
         self.config = config
+        self.final_style = final_style
         self.provider = provider
         self.ledger_store = ledger_store
         self.audit_log = audit_log
@@ -1330,6 +1333,15 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 deliver_if_source_ready=False,
             )
 
+    async def _final_style_text(self, state: _TurnState, text: str, *, content=()) -> str:
+        """Optional presentation only: no stages, lifecycle changes or commentary."""
+        if self.final_style is None or state.style_finalisation_done or content:
+            return text
+        state.style_finalisation_done = True
+        return await state.control.run_cancellable(
+            self.final_style.render(text, state.ledger.turn_id)
+        )
+
     async def _run_direct(
         self,
         state: _TurnState,
@@ -1391,6 +1403,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             if evidence_ref not in state.evidence_refs:
                 state.evidence_refs.append(evidence_ref)
 
+        direct_text = await self._final_style_text(
+            state, direct_text, content=response.content
+        )
         await self._deliver(
             state,
             kind="final",
@@ -1468,6 +1483,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             request_content_override=direct_content,
         )
         assert isinstance(direct_text, str)
+        direct_text = await self._final_style_text(
+            state, direct_text, content=response.content
+        )
         await self._deliver(
             state,
             kind="final",
@@ -1725,10 +1743,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 reason="execution_response_ready",
                 deliver_if_source_ready=True,
             )
+            final_text = await self._final_style_text(state, execution)
             await self._deliver(
                 state,
                 kind="final",
-                text=execution,
+                text=final_text,
                 event_id=f"{state.ledger.turn_id}:final",
                 required=True,
                 provenance="primary_execution_natural_language",
@@ -1747,7 +1766,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             return self._result(
                 state,
                 terminal=TerminalState.COMPLETED,
-                text=execution,
+                text=final_text,
             )
 
         if isinstance(execution, str) and state.effort in {Effort.XHIGH, Effort.MAX}:

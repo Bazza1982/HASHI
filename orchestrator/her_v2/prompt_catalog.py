@@ -30,6 +30,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "tool_catalogue",
         }
     ),
+    "system_style_rewrite": frozenset(),
     "system_dream": frozenset(),
     "system_dream_report": frozenset(),
     "system_execution": frozenset(

@@ -1499,6 +1499,7 @@ class HERv2Adapter(BaseBackend):
         # ingress. A concurrent /provider or /model change updates only the
         # adapter default used by the next call to generate_response.
         turn_config = self._v2_config
+        style_original_prompt = prompt
         request_meta = self._runtime_request_meta(request_id)
         try:
             effort_resolution = resolve_request_effort(
@@ -1743,6 +1744,7 @@ class HERv2Adapter(BaseBackend):
                         for route in Route
                         for profile in (turn_config.profile_for_route(route),)
                     },
+                    "style_finalisation_enabled": turn_config.style_finalisation.enabled,
                     "voice_origin_active": bool(turn_config.voice_origin_active),
                 }
                 frozen_route = self._session_coordinator.store.freeze_turn_routing(
@@ -1912,8 +1914,22 @@ class HERv2Adapter(BaseBackend):
 
         if habit_context_suppressed(self._runtime_context()):
             habit_advisor = None
+        final_style = None
+        if runtime_config.style_finalisation.enabled:
+            try:
+                from adapters.her_v2_style import capture_style_context, make_final_style_pass
+
+                final_style = make_final_style_pass(
+                    provider=provider, config=runtime_config,
+                    context=capture_style_context(self, style_original_prompt, fixed_turn),
+                    request_id=request_id,
+                )
+            except Exception as exc:
+                # Snapshot/configuration failure degrades only this optional editor.
+                self.logger.warning("Style finalisation unavailable: %s", type(exc).__name__)
         runtime = HERv2Runtime(
             config=runtime_config,
+            final_style=final_style,
             provider=execution_provider,
             ledger_store=self._ledger_store,
             audit_log=self._audit_log,

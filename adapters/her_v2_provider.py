@@ -4917,6 +4917,7 @@ class HashiStageProvider(StageProvider):
         max_chars: int,
         attempt: int,
         activity: ProviderActivityTracker,
+        metering_phase: str = "persona",
     ) -> str:
         backend = None
         try:
@@ -4975,7 +4976,7 @@ class HashiStageProvider(StageProvider):
             self._bind_provider_call_observer(
                 backend,
                 request_id=request_id,
-                phase="persona",
+                phase=metering_phase,
                 engine=profile.engine,
                 model=profile.model,
                 invocation_id=request_id,
@@ -4983,10 +4984,12 @@ class HashiStageProvider(StageProvider):
                 recovery_kind=("fresh_connection_retry" if attempt > 1 else "none"),
                 turn_id=persona_turn_id,
                 request_ref=persona_request_ref,
-                role="persona_packager",
+                role="style_editor" if metering_phase == "style_rewrite" else "persona_packager",
             )
             effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):
+                if metering_phase == "style_rewrite":
+                    raise StageInvocationError("style editor cannot isolate its system prompt", retryable=False)
                 effective_prompt = f"{system_prompt}\n\n{prompt}"
             response = await backend.generate_response(
                 effective_prompt,
@@ -5006,7 +5009,7 @@ class HashiStageProvider(StageProvider):
             self.cost_usd += float(response.cost_usd or 0.0)
             self._record_usage_line_item(
                 request_id=request_id,
-                phase="persona",
+                phase=metering_phase,
                 engine=profile.engine,
                 model=profile.model,
                 response=response,

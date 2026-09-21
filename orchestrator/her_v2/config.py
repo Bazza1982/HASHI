@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .final_style import FinalStyleConfig
+
 from .models import (
     DEFAULT_ROUTES_BY_STAGE,
     EXECUTION_ROUTES,
@@ -181,6 +183,7 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
 class HERv2Config:
     profiles: Mapping[str, ProviderProfile]
     stage_roles: Mapping[Stage, str]
+    style_finalisation: FinalStyleConfig = field(default_factory=FinalStyleConfig)
     routing_mode: str = "single"
     stage_reasoning: Mapping[Stage, str] = field(default_factory=dict)
     slot_models: Mapping[str, str] = field(default_factory=dict)
@@ -661,6 +664,7 @@ class HERv2Config:
             },
         )
         return cls(
+            style_finalisation=FinalStyleConfig.from_mapping(raw.get("style_finalisation")),
             profiles=profiles,
             stage_roles=stage_roles,
             routing_mode=routing_mode,

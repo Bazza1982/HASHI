@@ -544,6 +544,7 @@ def her_v2_model_menu_text(
     pro_provider: str = "",
     pro_model: str,
     draft: bool = False,
+    style_finalisation_enabled: bool = False,
 ) -> str:
     fast_provider = fast_provider or provider
     pro_provider = pro_provider or provider
@@ -564,6 +565,7 @@ def her_v2_model_menu_text(
                 "menu.her.pro_target",
                 f"<code>{html.escape(pro_provider)} / {html.escape(pro_model)}</code>",
             ),
+            _fact("menu.her.style.label", _state("common.on" if style_finalisation_enabled else "common.off")),
             _fact("menu.her.mode.direct", _tr("menu.her.mode.direct_path")),
             _fact("menu.her.mode.strategic", _tr("menu.her.mode.strategic_path")),
             _fact("menu.her.mode.planned", _tr("menu.her.mode.planned_path")),

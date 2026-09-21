@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from dataclasses import replace
 from hashlib import blake2s
 from pathlib import Path
 from typing import Any
@@ -338,6 +339,13 @@ def her_v2_model_keyboard(runtime) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
+                ui_language.tr("menu.her.style.button", state=ui_language.tr(
+                    "common.on" if selected.style_finalisation_enabled else "common.off")),
+                callback_data="her_model_style",
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 ui_language.tr("menu.her.advanced_settings"),
                 callback_data="her_model_advanced",
             )
@@ -371,7 +379,46 @@ def her_v2_model_menu_text(runtime) -> str:
         pro_provider=selected.pro_provider,
         pro_model=selected.pro_model,
         draft=runtime.backend_manager.has_her_v2_configuration_draft(),
+        style_finalisation_enabled=selected.style_finalisation_enabled,
     )
+
+
+def her_v2_style_text(runtime) -> str:
+    selected = _her_v2_edit_configuration(runtime)
+    draft = runtime.backend_manager.has_her_v2_configuration_draft()
+    return setting_card(
+        "✍️", ui_language.tr("menu.her.style.title"),
+        current=ui_language.tr("common.on" if selected.style_finalisation_enabled else "common.off")
+        + (" · " + ui_language.tr("common.draft") if draft else ""),
+        facts=[ui_language.tr("menu.her.style.scope"),
+               ui_language.tr("menu.her.style.target", target=html.escape(
+                   f"{selected.fast_provider} / {selected.fast_model}"))],
+        consequence=ui_language.tr("menu.her.style.effect"),
+        action=ui_language.tr("menu.her.review_apply" if draft else "menu.her.style.usage"),
+    )
+
+
+def her_v2_style_keyboard(runtime) -> InlineKeyboardMarkup:
+    selected = _her_v2_edit_configuration(runtime)
+    rows = [[InlineKeyboardButton(selected_label(ui_language.tr("common.on"),
+                    selected.style_finalisation_enabled), callback_data="her_model_style:on"),
+             InlineKeyboardButton(selected_label(ui_language.tr("common.off"),
+                    not selected.style_finalisation_enabled), callback_data="her_model_style:off")]]
+    if runtime.backend_manager.has_her_v2_configuration_draft():
+        rows.append([InlineKeyboardButton(ui_language.tr("menu.her.apply_draft"),
+                                          callback_data="her_model_apply"),
+                     InlineKeyboardButton(ui_language.tr("menu.her.discard"),
+                                          callback_data="her_model_discard")])
+    rows.append([InlineKeyboardButton(back_label(), callback_data="model_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _set_her_v2_style(runtime, value: str) -> str | None:
+    if value not in {"on", "off"}:
+        return ui_language.tr("menu.her.style.usage")
+    selected = replace(_her_v2_edit_configuration(runtime),
+                       style_finalisation_enabled=value == "on")
+    return save_her_v2_candidate(runtime, selected)
 
 
 def her_v2_compact_text(runtime) -> str:
@@ -1347,6 +1394,18 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
         return
 
     action = args[0].strip().lower()
+    if action == "style":
+        error = None
+        if len(args) == 2:
+            error = _set_her_v2_style(runtime, args[1].strip().lower())
+        elif len(args) != 1:
+            error = ui_language.tr("menu.her.style.usage")
+        if error:
+            await runtime._reply_text(update, error)
+            return
+        await runtime._reply_text(update, her_v2_style_text(runtime), parse_mode="HTML",
+                                  reply_markup=her_v2_style_keyboard(runtime))
+        return
     if action == "apply" and len(args) == 1:
         try:
             runtime.backend_manager.apply_her_v2_configuration_draft()
@@ -1651,7 +1710,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         )
         return
     if (
-        data.startswith("her_model_compact")
+        data.startswith(("her_model_compact", "her_model_style"))
         and runtime.config.active_backend != HER_V2_ENGINE
     ):
         await query.answer(
@@ -1660,7 +1719,15 @@ async def callback_model(runtime, update, context: Any) -> None:
         )
         return
     try:
-        if data == "backend_mode_confirm":
+        if data == "her_model_style" or data.startswith("her_model_style:"):
+            if ":" in data:
+                error = _set_her_v2_style(runtime, data.split(":", 1)[1])
+                if error:
+                    await query.answer(error, show_alert=True)
+                    return
+            await query.edit_message_text(her_v2_style_text(runtime), parse_mode="HTML",
+                                          reply_markup=her_v2_style_keyboard(runtime))
+        elif data == "backend_mode_confirm":
             # Old Telegram cards remain usable without changing working mode.
             await query.edit_message_text(
                 runtime._build_backend_menu_text(),

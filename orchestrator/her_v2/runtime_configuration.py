@@ -21,6 +21,7 @@ from orchestrator.flexible_backend_registry import (
 )
 from tools import token_tracker
 
+from .final_style import FinalStyleConfig
 from .config import DEFAULT_STAGE_ROLES
 from .models import DEFAULT_ROUTES_BY_STAGE, ROUTE_STAGES, Route, Stage
 
@@ -272,11 +273,14 @@ class HERv2RuntimeConfiguration:
     fallback_targets: Mapping[int, Mapping[str, ProviderModelTarget]] = field(
         default_factory=dict
     )
+    style_finalisation_enabled: bool = False
     routing_revision: int = 1
     capability_revision: int = HER_V2_CAPABILITY_REVISION
     pricing_revision: str = HER_V2_PRICING_REVISION
 
     def __post_init__(self) -> None:
+        if not isinstance(self.style_finalisation_enabled, bool):
+            raise ValueError("style_finalisation_enabled must be a boolean")
         mode = str(self.routing_mode or "single").strip().lower()
         if mode not in HER_V2_ROUTING_MODES:
             raise ValueError(f"invalid HER v2 routing mode: {mode!r}")
@@ -340,6 +344,7 @@ class HERv2RuntimeConfiguration:
                 self.fallback_enabled,
                 self.fallback_targets,
             ),
+            "style_finalisation_enabled": self.style_finalisation_enabled,
             "routing_revision": self.routing_revision,
             "capability_revision": self.capability_revision,
             "pricing_revision": self.pricing_revision,
@@ -610,6 +615,10 @@ def resolve_her_v2_configuration(
                 override.get("fallback")
             )
 
+    style_enabled = FinalStyleConfig.from_mapping(raw.get("style_finalisation")).enabled
+    if isinstance(override, Mapping) and "style_finalisation_enabled" in override:
+        style_enabled = override["style_finalisation_enabled"]
+
     revision_source = override if isinstance(override, Mapping) else raw
     routing_revision = max(1, int(revision_source.get("routing_revision") or 1))
     # Capability and price revisions describe the loaded runtime, not a saved
@@ -640,6 +649,7 @@ def resolve_her_v2_configuration(
         route_targets=route_targets,
         fallback_enabled=fallback_enabled,
         fallback_targets=fallback_targets,
+        style_finalisation_enabled=style_enabled,
         routing_revision=routing_revision,
         capability_revision=capability_revision,
         pricing_revision=pricing_revision,
@@ -982,6 +992,9 @@ def apply_her_v2_runtime_configuration(
         "pro": selected.pro_model,
     }
     result["route_model_slots"] = dict(selected.route_model_slots)
+    style = dict(result.get("style_finalisation") or {})
+    style["enabled"] = selected.style_finalisation_enabled
+    result["style_finalisation"] = style
     result["routing_revision"] = selected.routing_revision
     result["capability_revision"] = selected.capability_revision
     result["pricing_revision"] = selected.pricing_revision
