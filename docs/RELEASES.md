@@ -13,7 +13,8 @@ Publication snapshot checked on **2026-09-21**:
 | Surface | Observed state |
 |---|---|
 | Source metadata | v4.0.0-beta.1 / 4.0.0b1 |
-| GitHub newest published pre-release | v4.0.0-alpha.1, an earlier Claw-era snapshot |
+| GitHub newest published pre-release | [v4.0.0-beta.1](https://github.com/Bazza1982/HASHI/releases/tag/v4.0.0-beta.1) |
+| GitHub Beta installation package | [hashi-bridge-4.0.0-beta.1.tgz](https://github.com/Bazza1982/HASHI/releases/download/v4.0.0-beta.1/hashi-bridge-4.0.0-beta.1.tgz) |
 | GitHub stable Latest | v2.0.0, a historical release |
 | npm latest | hashi-bridge 1.0.1, a legacy package |
 
@@ -24,6 +25,13 @@ registries for today's state:
 gh release list --repo Bazza1982/HASHI
 npm view hashi-bridge dist-tags --json
 npm view hashi-bridge versions --json
+~~~
+
+The Beta installation package is available from the GitHub pre-release while
+publication to the npm registry remains pending:
+
+~~~bash
+npm install --global https://github.com/Bazza1982/HASHI/releases/download/v4.0.0-beta.1/hashi-bridge-4.0.0-beta.1.tgz
 ~~~
 
 ## What Latest means
@@ -88,8 +96,9 @@ wrapper-mode, model, and hot-reload descriptions are not current instructions.
 
 The current
 [Beta notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-beta.1.md)
-describe scope and limitations. They are not evidence that a matching
-GitHub Release, npm package, or installation bundle exists.
+describe scope and limitations. The matching GitHub pre-release and its
+npm-format installation archive are published; npm-registry publication is a
+separate operation and is not implied by the GitHub asset.
 
 Maintainers use the
 [versioning policy](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_VERSIONING_POLICY.md)
