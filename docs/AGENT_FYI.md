@@ -201,7 +201,9 @@ the TUI `/telegram` preference remains a separate per-Run client choice.
 
 Workbench voice is transcript-first. Safe Voice off admits text; on holds a
 bounded preview until **Confirm and send**. Discard, expiry, Session change, or
-disabling sends nothing. Optional STT stays outside Core in a sidecar.
+disabling sends nothing. Optional STT stays outside Core in a sidecar. Its
+stdio protocol is always UTF-8 bytes, independent of Windows code pages or
+Linux locale, and npm deployments include its isolated-runtime provisioner.
 
 ## Move, Clone, jobs, and HCC
 
