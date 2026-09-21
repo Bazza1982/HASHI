@@ -20,9 +20,10 @@
 - [Nagare developer install](#nagare-core-developer-install)
 
 Check [release and package selection](RELEASES.md) before choosing an archive
-or npm version. At the 2026-09-11 documentation review, npm latest was still
+or npm version. At the 2026-09-21 documentation review, npm latest was still
 1.0.1 and GitHub stable Latest was v2.0.0; neither represented the current
-v4.0.0-alpha.2 source candidate. Beta publication remains a separate step.
+v4.0.0-beta.1 source Beta. Registry and installer publication remain separate
+steps.
 
 ---
 

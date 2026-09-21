@@ -10,18 +10,19 @@
 HASHI is a local-first platform for persistent AI agents, with PCM,
 provider-agnostic orchestration, the native HER v2 Engine, and Frontend
 Connectors. Personal/local operation is the primary path; team and enterprise
-governance remains available for Alpha evaluation.
+governance remains available for environment-specific evaluation.
 
-The next release preparation focuses on installation and upgrade reliability,
-usable documentation, clear package provenance, and scoped platform validation.
-Beta maturity and its release number will be declared through the
+The current Beta focuses on small-scale public testing of installation and
+upgrade reliability, external-client integration, Windows/WSL deployment,
+restricted online demonstration, and portable installation media. Publication
+and wider production acceptance remain separate decisions under the
 [versioning policy](HASHI_VERSIONING_POLICY.md) and
-[release checklist](RELEASE_CHECKLIST.md), after review of the release scope.
+[release checklist](RELEASE_CHECKLIST.md).
 
 Current version-line interpretation:
 
-- **HASHI `v4.0.0-alpha.2` / Python package `4.0.0a2`** is the single current
-  repository release candidate, led by the provider-neutral HASHI-native
+- **HASHI `v4.0.0-beta.1` / Python package `4.0.0b1`** is the single current
+  repository Beta, led by the provider-neutral HASHI-native
   Python HER v2 runtime, evidence-backed execution contracts, and governed AAI
   control plane.
 - **Enterprise AAI `v0.1.0-alpha.1`** is a historical tagged milestone and no
@@ -34,7 +35,7 @@ Current version-line interpretation:
 HASHI AAI Enterprise `v0.1.0-alpha.1` froze the first enterprise
 artifact-review line and reset its package metadata to `0.1.0a1`. That tag and
 its release notes remain historical provenance; current development and
-package metadata continue only under `v4.0.0-alpha.2`.
+package metadata continue only under `v4.0.0-beta.1`.
 
 This enterprise alpha includes governed profiles, identity/SSO/SCIM primitives,
 policy/approval/audit, connector MVPs, authenticated Backend API surfaces, and
@@ -42,7 +43,26 @@ Compose/Kubernetes/Helm/systemd/SIEM deployment artifacts for alpha operator
 review. It is not production-certified; customer-like enterprise server, IdP,
 SIEM, and Kubernetes/cloud validation remain post-alpha.
 
-## v4.0.0-alpha.2 (Current Release Candidate)
+## v4.0.0-beta.1 (Current Beta)
+
+The first v4 Beta opens HASHI for small-scale public testing. Its readiness is
+driven by:
+
+- sustained integration and debugging with Workbench v2 as an independent
+  external client of HASHI's public APIs;
+- hardened conversation, delivery, attachment, lifecycle, and recovery paths;
+- parameterized native Windows and WSL/Linux deployment templates;
+- a restricted shared Demo Connector for simple operator-hosted online demos;
+  and
+- verified USB installation media from the Portable Windows builder for rapid
+  setup on another Windows PC.
+
+The Beta does not declare general production readiness, a hosted public demo,
+validated 200-user capacity, macOS packaging acceptance, or publication of a
+matching GitHub Release, npm package, or binary artifact. See
+[the Beta release notes](RELEASE_NOTES_v4.0.0-beta.1.md).
+
+## v4.0.0-alpha.2 (Historical Release Candidate)
 
 The development accumulated after the first v4 foundation alpha is now
 consolidated as the `v4.0.0-alpha.2` release candidate:

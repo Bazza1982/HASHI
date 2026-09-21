@@ -1,7 +1,7 @@
 # HASHI Demo Connector — Implementation Status
 
-Date: 2026-09-20
-Branch: `feature/demo-mode-20260920`
+Date: 2026-09-21
+Status: integrated into `main` for the HASHI v4 Beta source line
 
 ## Implemented
 

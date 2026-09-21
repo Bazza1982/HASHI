@@ -9,8 +9,9 @@
   evidence as required by that policy. Preserve published tags/artifacts and
   distinguish a version label from actual running-generation adoption.
 - These are release-review requirements, not proof of automatic version checks
-  or Portable updater support. This documentation update does not change the
-  current candidate or grant publication/restart authority.
+  or Portable updater support. A metadata promotion does not itself publish a
+  registry package, create a GitHub Release, build an installer, or adopt a
+  running generation.
 
 ## HASHI Bridge
 
@@ -95,8 +96,8 @@
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
 - HER v2 mode gates:
-  - release scope uses HASHI `v4.0.0-alpha.2` as the single current repository,
-    Python package (`4.0.0a2`), root Node package, and Helm application line;
+  - release scope uses HASHI `v4.0.0-beta.1` as the single current repository,
+    Python package (`4.0.0b1`), root Node package, and Helm application line;
     Enterprise AAI `v0.1.0-alpha.1` is labelled only as historical provenance
   - HER v2 changes run the touched v2 module plus its direct adapter/runtime
     consumers; no active path imports the retired HER v1 implementation

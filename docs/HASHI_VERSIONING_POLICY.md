@@ -190,13 +190,16 @@ edit or a successful offline check is not proof of running-version adoption.
 ## 6. Acceptance, implementation, and rollout boundary
 
 - **Approval:** the user accepted the architecture-based numbering and Portable
-  naming proposal on 2026-09-09 and requested documentation in HASHI1.
-- **Documentation implementation:** this decision is recorded on HASHI1 `main`,
-  with references from the documentation index, release checklist, and Agent
-  FYI. Other checkouts must not be claimed updated without separate evidence.
-- **Current version:** this documentation change does not rename or promote
-  `v4.0.0-alpha.2`, change package versions, or rewrite historical tags. Future
-  releases apply the policy relative to a recorded Core/source baseline.
+  naming proposal on 2026-09-09, then approved the first v4 Beta for
+  small-scale public testing on 2026-09-21.
+- **Documentation implementation:** the original decision was recorded on
+  HASHI1 `main`; the Beta promotion is recorded through the repository release
+  metadata, documentation index, release notes, roadmap, and checklist. Each
+  checkout still requires separate synchronization evidence.
+- **Current version:** on 2026-09-21 the user approved the first v4 Beta for
+  small-scale public testing. The canonical public label is
+  `v4.0.0-beta.1`, with Python metadata `4.0.0b1`. Historical tags remain
+  unchanged, and registry/artifact publication remains a separate operation.
 - **Validation:** use the documentation-only scope in
   [Testing Policy](TESTING_POLICY.md): local link checks, `git diff --check`,
   and the protected-Core guard. Record actual results with the change; no

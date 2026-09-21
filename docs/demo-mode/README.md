@@ -1,17 +1,16 @@
 # HASHI Shared Demo Mode
 
-日期：2026-09-20
-分支：`feature/demo-mode-20260920`
-当前 main 基线：`b3649c9c1336aa81facb44bb8ef3f60567d42780`
+日期：2026-09-21
+状态：已合并到 HASHI v4 Beta 的 `main` 源码线
 协议：`hashi.shared-demo` / version `1`
 
 ## 当前状态
 
 **HASHI 侧 Demo Connector 源码施工已完成，离线 CI 已通过。**
 
-本分支实现匿名 Demo lease、一个访客一个真实 HASHI Agent、最多三个原生 Conversation Sessions、HER Direct/zero、按需 Agent Worker、纯文字 Run、取消、事件长轮询、每日请求预算和到期/结束清理。没有修改 Core major version，也没有合并到 main。
+当前实现包含匿名 Demo lease、一个访客一个真实 HASHI Agent、最多三个原生 Conversation Sessions、HER Direct/zero、按需 Agent Worker、纯文字 Run、取消、事件长轮询、每日请求预算和到期/结束清理。它没有修改 Core major version，现已进入 `main`，可供运营者部署简单的在线演示。
 
-尚未由本次施工声明完成的部分：真实 Workbench↔HASHI 联调、真实模型、Windows/目标 VM、200 用户压力、Cloudflare/公网 canary。它们按用户要求留给本地验证。
+尚未由 Demo Connector 本身声明完成的部分：Demo 前端与真实模型联调、Windows/目标 VM、200 用户压力、Cloudflare/公网 canary。源码合并不等于这些部署验证已经完成。
 
 ## 阅读顺序
 

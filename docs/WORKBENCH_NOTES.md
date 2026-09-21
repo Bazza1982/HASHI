@@ -13,6 +13,19 @@ Any successor graphical frontend is developed in a separate repository. It may
 consume HASHI's generic Connector and API contracts, but it is not part of the
 HASHI program or this architecture.
 
+## Workbench v2 integration boundary
+
+Workbench v2 is an independently maintained external client. It is not the
+retired bundled Workbench and is not packaged, started, upgraded, or owned by
+HASHI.
+
+The HASHI v4 Beta readiness work included sustained Workbench v2 integration
+and debugging against HASHI's Backend API and Persistent Session API. That work
+hardened shared conversation, delivery, attachment, lifecycle, and recovery
+contracts used by all compatible clients. It is integration evidence for the
+public HASHI interfaces, not a transfer of frontend state or product ownership
+into HASHI.
+
 ## Compatibility Names
 
 Some established internal names remain to avoid breaking HASHI deployments and
