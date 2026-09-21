@@ -6,12 +6,11 @@ The Level 0 authority is [HASHI System Architecture](../ARCHITECTURE.md). It
 defines the two orthogonal dimensions—four functional modules and four
 engineering layers—and governs every lower-level design in this directory.
 
-> **Status:** HASHI `v4.0.0-alpha.2` is the single current repository and
-> package release candidate. It consolidates HER v2,
-> conversation/delivery hardening, task-matched execution effort, and one Flex
-> Agent runtime with Fixed/Flex working modes, alongside the governed AAI
-> control plane. See
-> [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md).
+> **Status:** HASHI `v4.0.0-beta.1` (Python `4.0.0b1`) is the current source
+> Beta for small-scale public testing. It combines HER v2, hardened
+> conversation and delivery paths, external Workbench v2 client integration,
+> Windows/WSL deployment templates, restricted Demo Mode, and the Portable
+> Windows builder. See [the release notes](RELEASE_NOTES_v4.0.0-beta.1.md).
 >
 > Enterprise AAI `v0.1.0-alpha.1` is a historical tagged milestone, not a
 > parallel current version. Its production-validation limits still apply to
@@ -57,12 +56,12 @@ Use these docs by intent:
   [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md).
 - **Understand the long-term route:** read [ROADMAP.md](ROADMAP.md) and
   [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md).
-- **Understand the v4 release-candidate baseline:** read the
-  [v4.0.0-alpha.2 release candidate notes](RELEASE_NOTES_v4.0.0-alpha.2.md),
+- **Understand the current v4 Beta:** read the
+  [v4.0.0-beta.1 release notes](RELEASE_NOTES_v4.0.0-beta.1.md),
   then the current HER Engine, execution-mode, Session control-plane,
   compaction, multimodal, and Habit contracts linked below. Dated checkpoints
   remain historical integration evidence.
-- **Operate the current alpha artifacts:** read
+- **Operate the current deployment artifacts:** read
   [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) and the
   enterprise runbooks linked from the readiness review.
 
@@ -178,7 +177,8 @@ line.
 
 ### Release Notes
 - [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — historical Enterprise AAI v0.1 alpha release notes and known limits
-- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — current unified HASHI v4 release-candidate scope and alpha boundaries
+- [RELEASE_NOTES_v4.0.0-beta.1.md](RELEASE_NOTES_v4.0.0-beta.1.md) — current HASHI v4 Beta scope, testing paths, and limitations
+- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — historical unified HASHI v4 release-candidate scope and alpha boundaries
 - [RELEASE_PREPARATION_v4.0.0-alpha.2.md](RELEASE_PREPARATION_v4.0.0-alpha.2.md) — historical consolidation, verification, publication-hygiene findings, and original tag/push boundary
 - [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for HER mode and Superloop foundation
 - [RELEASE_NOTES_v1.1.md](RELEASE_NOTES_v1.1.md) — v1.1 release notes

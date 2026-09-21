@@ -84,7 +84,7 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
     )
     provenance = build_info["provenance"]
     assert provenance["release_channel"] == "npm"
-    assert provenance["product_version"] == "4.0.0a2"
+    assert provenance["product_version"] == "4.0.0b1"
     assert provenance["build_id"].startswith("sha256:")
     assert not any(
         key in provenance for key in ("code_root", "path", "remote_url", "username")

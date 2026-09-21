@@ -45,9 +45,8 @@ and connected services. See the [integration guide](docs/INTEGRATIONS.md).
 
 ## Project Status
 
-Current source metadata is **v4.0.0-alpha.2** (Python: **4.0.0a2**).
-The project is preparing for broader Beta evaluation; a Beta release has
-not yet been declared.
+Current source metadata is **v4.0.0-beta.1** (Python: **4.0.0b1**). This is a
+Beta release for small-scale public testing, not a general-production release.
 
 The repository, npm registry, and GitHub Releases can be at different points.
 A source version does not prove that a matching npm package or installer has
@@ -56,15 +55,17 @@ before downloading.
 
 | Area | Current boundary |
 |---|---|
-| Personal/local use | Primary development path; still an Alpha candidate |
+| Personal/local use | Primary development path; open for small-scale Beta testing |
 | HER v2 | Native Python engine with Direct, Strategic, and Planned execution |
 | Team/enterprise governance | Alpha profiles, policy, approvals, audit, and deployment artifacts; production deployment validation remains pending |
-| Frontends | Built-in TUI, Telegram, WhatsApp, and client APIs; Workbench is retired |
-| Platform evidence | Windows and Linux/WSL work is recorded in scoped validation reports; macOS releases still need platform acceptance |
+| Frontends | Built-in TUI, Telegram, WhatsApp, and client APIs; the independently maintained Workbench v2 is an external client, not bundled with HASHI |
+| Platform evidence | Windows-native and WSL/Linux deployment templates are included; macOS releases still need platform acceptance |
+| Shared demo | A restricted Demo Connector supports simple operator-hosted online demos; public hosting and capacity validation remain operator gates |
+| Portable Windows | A verified USB installation bundle can carry HASHI to a new Windows PC and install it locally with its private runtime |
 | Device/browser control | Requires the relevant worker, browser, permissions, and per-platform validation |
 
 Detailed candidate scope is in the
-[release notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-alpha.2.md).
+[release notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-beta.1.md).
 Historical milestones are recorded in
 [CHANGELOG.md](https://github.com/Bazza1982/HASHI/blob/main/CHANGELOG.md).
 
@@ -83,7 +84,7 @@ npm view hashi-bridge versions --json
 
 Choose an actually published version using the guide. An unqualified npm
 install uses its registry's latest tag, which may still point to a legacy
-release during the Alpha-to-Beta transition.
+release until a matching Beta package is actually published.
 
 Source installs require the approved **CPython 3.12.13** runtime and locked
 dependencies. npm additionally requires Node.js and npm; it prepares a
@@ -92,9 +93,10 @@ CLI engines, API credentials, and optional tool dependencies are configured
 separately. Telegram is optional.
 
 Portable distributions have their own bundled capability profiles. The
-[Portable Windows builder](https://github.com/Bazza1982/HASHI/blob/main/packaging/portable_windows/README.md) documents its
-source and runtime requirements; an npm tarball alone is not a self-contained
-offline installer.
+[Portable Windows builder](https://github.com/Bazza1982/HASHI/blob/main/packaging/portable_windows/README.md)
+creates verified USB installation media for quickly installing HASHI and its
+private runtime on another Windows PC. HASHI runs from the verified local
+installation; an npm tarball alone is not a self-contained offline installer.
 
 ## Using HASHI
 

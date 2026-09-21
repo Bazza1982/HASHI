@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No unreleased changes are recorded yet.
+
+---
+
+## [4.0.0-beta.1] - 2026-09-21
+
+### Beta release highlights
+
+- Promoted the unified HASHI source, Python package, root Node package, and
+  Helm application metadata to the first v4 Beta for small-scale public
+  testing.
+- Hardened HASHI's public client contracts through sustained integration and
+  debugging with the independently maintained Workbench v2 external client.
+- Added parameterized deployment templates for native Windows and WSL/Linux
+  source-checkout runtimes.
+- Integrated the restricted shared Demo Connector needed for an operator-hosted
+  simple online demonstration, with isolated visitors, bounded resources, and
+  scoped cleanup.
+- Added the Portable Windows builder for verified USB installation media and
+  fast deployment onto a new Windows PC.
+
 ### Documentation and packaging guidance
 
 - Shorten the project homepage and separate everyday usage, configuration,
@@ -176,10 +197,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the current official DeepSeek V4.1 Flash and V4 Pro IDs while retaining
   adapter compatibility for temporary legacy aliases.
 
-- **Unified release identity** — made HASHI `v4.0.0-alpha.2` the single current
-  repository, Python package (`4.0.0a2`), root Node package, and Helm
-  application line. Enterprise AAI `v0.1.0-alpha.1` remains an immutable
-  historical milestone rather than a parallel active version.
+- **Unified release identity** — established HASHI `v4.0.0-alpha.2` as the
+  prior unified repository, Python package (`4.0.0a2`), root Node package, and
+  Helm application baseline. Enterprise AAI `v0.1.0-alpha.1` remains an
+  immutable historical milestone rather than a parallel active version.
 - **npm package hygiene** — excluded ignored Python bytecode and machine-local
   skill state from the root package allow-list so a lived-in checkout packs
   only Git-tracked release inputs.

@@ -1,6 +1,6 @@
 {
   "name": "hashi-bridge",
-  "version": "4.0.0-alpha.2",
+  "version": "4.0.0-beta.1",
   "description": "HASHI \u2014 local-first control plane for persistent, provider-agnostic AI agents.",
   "keywords": [
     "ai",

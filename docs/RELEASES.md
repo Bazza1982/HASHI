@@ -5,14 +5,14 @@
 
 ## Current development and published releases
 
-The source candidate is **v4.0.0-alpha.2**, encoded as **4.0.0a2** in Python
-metadata. Preparing for Beta does not itself promote the version.
+The current source Beta is **v4.0.0-beta.1**, encoded as **4.0.0b1** in Python
+metadata. It is intended for small-scale public testing, not general production.
 
-Publication snapshot checked on **2026-09-11**:
+Publication snapshot checked on **2026-09-21**:
 
 | Surface | Observed state |
 |---|---|
-| Source metadata | v4.0.0-alpha.2 / 4.0.0a2 |
+| Source metadata | v4.0.0-beta.1 / 4.0.0b1 |
 | GitHub newest published pre-release | v4.0.0-alpha.1, an earlier Claw-era snapshot |
 | GitHub stable Latest | v2.0.0, a historical release |
 | npm latest | hashi-bridge 1.0.1, a legacy package |
@@ -38,9 +38,8 @@ notes. Their tags and original historical notes remain intact. Use the
 [Releases list](https://github.com/Bazza1982/HASHI/releases), rather than
 assuming releases/latest contains current development.
 
-The current Alpha candidate has not been declared stable simply to obtain a
-Latest badge. A new release should identify the reviewed source commit and
-its actual maturity.
+The current Beta has not been declared stable simply to obtain a Latest badge.
+A release should identify the reviewed source commit and its actual maturity.
 
 ## Choose an npm version
 
@@ -88,8 +87,8 @@ Milestone descriptions record what existed then; older Workbench, Claw,
 wrapper-mode, model, and hot-reload descriptions are not current instructions.
 
 The current
-[candidate notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-alpha.2.md)
-describe intended scope and limitations. They are not evidence that a matching
+[Beta notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v4.0.0-beta.1.md)
+describe scope and limitations. They are not evidence that a matching
 GitHub Release, npm package, or installation bundle exists.
 
 Maintainers use the

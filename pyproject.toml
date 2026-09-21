@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hashi-bridge"
-version = "4.0.0a2"
+version = "4.0.0b1"
 description = "HASHI — local-first control plane for persistent, provider-agnostic AI agents."
 readme = "README.md"
 license = "MIT"
@@ -18,7 +18,7 @@ keywords = [
     "self-hosted", "persistent-agents"
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.12",
