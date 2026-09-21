@@ -168,6 +168,13 @@ Attachments bind to one draft, instance, Agent, and submission. Remote sends
 verified managed bytes, never origin paths. Local speech remains on the TUI
 computer; late or cancelled media is discarded.
 
+HER v2 keeps each stage's authorised attachment manifest through Planning,
+Execution, Replanning, Review, and Finalisation. Native-capable providers use
+the native content; local fallback stages receive the exact managed reference
+and must not guess a same-named workspace copy. This reference visibility does
+not widen Tool or filesystem authority, and sub-agents still receive only their
+explicitly delegated subset.
+
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize and
 escape. Remote Agent lifecycle timeouts are outcome-unknown: use PAO's budget,
 reconcile state, and never replay.

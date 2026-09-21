@@ -81,6 +81,7 @@ from orchestrator.her_v2.prompts import (
     render_immediate_response_system_prompt,
     render_internal_stage_system_prompt,
     render_persona_commentary_system_prompt,
+    render_request_attachments_contract,
     render_review_system_prompt,
     render_stage_prompt,
     uses_complete_system_prompt,
@@ -4123,6 +4124,45 @@ class HashiStageProvider(StageProvider):
                         )
                     else:
                         stage_prompt = f"{environment_contract}\n\n{stage_prompt}"
+
+            attachment_contract = render_request_attachments_contract(
+                request.attachment_manifest
+            )
+            if attachment_contract:
+                current_system = str(
+                    getattr(backend, "sys_prompt", "") or ""
+                ).strip()
+                if current_system:
+                    combined_system = f"{current_system}\n\n{attachment_contract}"
+                    if _install_system_prompt(backend, combined_system):
+                        system_prompt = combined_system
+                    elif request.allow_tools:
+                        raise StageInvocationError(
+                            f"{request.stage.value} backend cannot install the request attachment contract",
+                            retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                f"The configured {request.stage.value} provider cannot "
+                                "isolate HASHI's authorised request attachment references."
+                            ),
+                        )
+                    else:
+                        stage_prompt = f"{attachment_contract}\n\n{stage_prompt}"
+                else:
+                    if _install_system_prompt(backend, attachment_contract):
+                        system_prompt = attachment_contract
+                    elif request.allow_tools:
+                        raise StageInvocationError(
+                            f"{request.stage.value} backend cannot install the request attachment contract",
+                            retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                f"The configured {request.stage.value} provider cannot "
+                                "isolate HASHI's authorised request attachment references."
+                            ),
+                        )
+                    else:
+                        stage_prompt = f"{attachment_contract}\n\n{stage_prompt}"
 
             if lifecycle_task_state is not None:
                 contracts = []
