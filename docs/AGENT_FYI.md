@@ -1,7 +1,7 @@
 # HASHI Agent FYI
 
-This is orientation, not a task queue, authorization, or proof of adoption.
-`/fyi` reloads it. Follow the current user and live typed envelopes first.
+Orientation only: not a task queue, authorization, or adoption proof. `/fyi`
+reloads it; the current user and live typed envelopes remain authoritative.
 
 ## Authority, ownership, and engineering
 
@@ -10,40 +10,37 @@ Before changing HASHI, read [AGENTS.md](../AGENTS.md), [Architecture](../ARCHITE
 [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), and [testing policy](TESTING_POLICY.md).
 Old examples and approvals grant nothing.
 
-- **PCM** owns Persona, Context, Memory, authority, retrieval, and typed
-  projection; it never executes tools or Runs.
+- **PCM** owns Persona, Context, Memory, authority, and projection; never tools
+  or Runs.
 - **PAO** owns Agents, Conversations, Messages, Runs, Engines, Workzones, jobs,
   routing, outer recovery, and delivery.
 - **HER v2** owns Engine Sessions/Turns, routing, execution, recovery, and cost.
-- **Frontend Connectors** project Telegram, WhatsApp, TUI, API, HChat, and Remote.
+- **Connectors** project Telegram, WhatsApp, TUI, API, HChat, and Remote.
 
-Put behavior in the narrowest Function/configuration owner. Protected paths are
-only those in `CORE_SOURCE_PATHS`; changing one needs explicit Core
-major-migration approval, a major-version bump, `core-change-approved`, and an
-independent review. Flags record approval but never grant it. Keep product
-policy out of Core and registries/state writers singular.
+Use the narrowest Function/configuration owner. `CORE_SOURCE_PATHS` alone
+defines protected paths; edits require explicit Core major-migration approval,
+a major bump, `core-change-approved`, and independent review. Flags only record
+approval. Keep product policy out of Core and each registry/state writer unique.
 
 Source, artifacts, clients, Workers, and delivery are separate facts. `/reboot
 min` replaces one Agent Worker; `same|max` adopts a Function generation across
-shared Functions, Workers, and enabled Remote while Core stays live. Legacy
-bridges promote receipts only after bootstrap/Core validation and commit.
-Successors report the committed generation; claim adoption only from PID,
-identity, generation, health, and receipts. Rejected bytes never run. Locked
-packages must match; extras do not block.
+shared Functions, Workers, and Remote while Core stays live. Legacy bridges
+promote only after validation and commit. Claim adoption only from matching
+PID, identity, generation, health, and receipts. Rejected bytes never run;
+locked packages must match, while extras do not block.
 
 Agent tools cannot alter live Core/Python, read secrets, kill, or raw-control
 Core; development roots stay writable. Windows restart uses an exact service or
-fixed actuator while Remote stays Limited. Tasks run Highest, but success needs
-a different healthy Core PID matching identity, runtime, and Function
-generation; task completion is insufficient.
+fixed actuator while Remote stays Limited. Task completion is not success:
+require a different healthy Core PID matching identity, runtime, and Function
+generation.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
-WSL/native login startup is Windows platform behavior. Use its versioned
-installer with explicit instance, identity, checkout, interpreter, and WSL
-distribution when applicable. Native stderr is diagnostic; the process exit
-code decides success. Keep source, task, logs, and live adoption distinct. Use
-`process_is_alive` across platforms, never `os.kill(pid, 0)` on Windows because
-it can interrupt processes sharing a console.
+WSL/native login startup is Windows platform behavior. Its versioned installer
+names instance, identity, checkout, interpreter, and WSL distribution. Exit
+code, not native stderr, decides success. Keep source, task, logs, and adoption
+distinct. Use `process_is_alive`; never `os.kill(pid, 0)` on Windows because it
+can interrupt processes sharing a console.
 
 ## Configuration, identity, and persistence
 
@@ -151,78 +148,69 @@ Runs busy. Unknown effects remain fail-closed. See
 
 ## TUI, Workbench, and media
 
-The TUI is a Frontend Connector. UI text belongs in renderers and language
-catalogues. `/language` changes shared HASHI UI; `/tui language` changes only
-local TUI. Neither translates replies, IDs, commands, paths, logs, or transcripts.
+TUI is a Frontend Connector; renderers and catalogues own its text. `/language`
+changes shared UI, `/tui language` only local TUI. Neither translates replies,
+IDs, commands, paths, logs, or transcripts.
 
-The selected instance is TUI's highest routing scope. A switch atomically binds
+The selected instance is TUI's highest scope. Switching atomically binds
 generation, Agent directory, target, capabilities, logs, and sends; submission
-freezes instance, Agents, Session, and generation. Remote admission requires a
-completed authenticated handshake; cached liveness is not authorization.
-Persist preferences only after success; saved state starts no Agent or draft.
+freezes instance, Agents, Session, and generation. Remote needs a completed
+authenticated handshake; cached liveness grants nothing. Persist preferences
+only after success; saved state starts nothing.
 
-`/telegram off` disables Telegram projection only for the scoped TUI Run; it
-does not disconnect the Bot or change other sources. `/think` controls genuine
-provider reasoning, while `/commentary` controls explicit Engine commentary.
-Attachments bind to one draft, instance, Agent, and submission. Remote sends
-verified managed bytes, never origin paths. Local speech remains on the TUI
-computer; late or cancelled media is discarded.
+`/telegram off` stops Telegram only for the scoped TUI Run; the Bot and other
+sources stay unchanged. `/think` controls genuine provider reasoning;
+`/commentary` controls explicit Engine commentary. Attachments bind to one
+draft, instance, Agent, and submission. Remote sends managed bytes, never
+origin paths; speech stays local; late or cancelled media is discarded.
 
-HER v2 keeps each stage's authorised attachment manifest through Planning,
-Execution, Replanning, Review, and Finalisation. Native-capable providers use
-the native content; local fallback stages receive the exact managed reference
-and must not guess a same-named workspace copy. This reference visibility does
-not widen Tool or filesystem authority, and sub-agents still receive only their
-explicitly delegated subset.
+HER v2 carries authorised attachment manifests through Planning, Execution,
+Replanning, Review, and Finalisation. Native providers get native content;
+fallbacks get exact managed references, never guessed workspace copies. Tool,
+filesystem, and sub-agent authority do not widen.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize and
-escape. Remote Agent lifecycle timeouts are outcome-unknown: use PAO's budget,
-reconcile state, and never replay.
-When reboot qualification finds unfinished Function source work, the ordinary
-notice says a software update is still in progress, confirms saved settings and
-the current Agent remain safe, and asks the user to retry after it completes.
-Technical paths remain in diagnostics rather than the ordinary notice.
-`/help` derives from registered metadata. Workbench and Telegram project one
-personal Conversation Session; semantic messages appear on both, while
-presentation rows never enter model history. Menus use the authenticated path
-and server-side action state. Projection v2 persists menu state across
-snapshots; v1 is unchanged, and another menu does not expire an earlier card.
+escape, state plain outcomes, and keep internals in diagnostics. Remote Agent
+lifecycle timeouts are outcome-unknown: obey PAO's budget, reconcile, never
+replay. If reboot finds unfinished Function source, say an update is still in
+progress, saved settings and the current Agent are safe, and retry later;
+technical paths remain diagnostic.
+`/help` derives from metadata. Workbench and Telegram share one personal
+Session: semantic messages appear on both; presentation rows stay out of model
+history. Menus use authenticated paths and server state. Projection v2 retains
+menus across snapshots and cards do not invalidate one another; v1 is unchanged.
 
-`/new` selects a fresh primary Session without deleting prior Conversations.
-Workbench history projects retained Sessions by owner and Agent; old messages
-stay read-only and resolve attachments through their original Session. A
-current transcript does not prove the Agent archive is empty.
+`/new` selects a fresh primary Session without deleting old Conversations.
+History is owner/Agent scoped; old messages stay read-only and attachments use
+their original Session. A current transcript does not prove an empty archive.
 
-Agent deletion is PAO-owned and default-on only with `agent_deletion`; its
-preview, blockers and cleanup receipts bind.
-
-The Workbench `/telegram` settings card persists its mirror choice per owner;
-the TUI `/telegram` preference remains a separate per-Run client choice.
+PAO owns Agent deletion; it is default-on only with `agent_deletion`, and its
+preview, blockers, and cleanup receipts bind. Workbench `/telegram` persists
+per owner; the TUI preference remains a separate per-Run choice.
 
 Workbench voice is transcript-first. Safe Voice off admits text; on holds a
-bounded preview until **Confirm and send**. Discard, expiry, Session change, or
-disabling sends nothing. Optional STT stays outside Core in a sidecar. Its
-stdio protocol is always UTF-8 bytes, independent of Windows code pages or
-Linux locale, and npm deployments include its isolated-runtime provisioner.
+preview until **Confirm and send**. Discard, expiry, Session change, or disable
+sends nothing. Optional STT stays in a sidecar; its stdio is always UTF-8 bytes,
+independent of locale or code page, and npm ships its runtime provisioner.
 
 ## Move, Clone, jobs, and HCC
 
-`/move` and `/clone` share authenticated package, journal, registry, workspace,
-Scheduler, secret, and lifecycle owners. Move keeps the source active until
-target activation, then removes verified source state. Clone keeps it active,
-excludes Telegram credentials, and imports Scheduler entries disabled. History
-uses owner, generation, and provenance; `accepted` is not `completed`. See
+`/move` and `/clone` share package, journal, registry, workspace, Scheduler,
+secret, and lifecycle owners. Move removes verified source state only after
+target activation. Clone preserves it, excludes Telegram credentials, and
+disables imported jobs. History records owner, generation, and provenance;
+`accepted` is not `completed`. See
 [Agent Move](HASHI_AGENT_MOVE_V1.md).
 
-Scheduler uses UTC instants and wall time plus IANA zone for recurrence; unknown
-legacy zones use UTC. Telegram recovery binds instance, lifecycle and Bot;
-permanent errors stop that chat, while bounded retries honor `RetryAfter`.
+Scheduler recurrence stores UTC instants, wall time, and IANA zone; unknown
+legacy zones use UTC. Telegram recovery binds instance, lifecycle, and Bot;
+permanent errors stop the chat, bounded retries honor `RetryAfter`.
 
-Use only authorized capabilities. Device actions need a same-instance Worker;
-re-plan when unavailable. Prefer `log_query` for logs. Agents work foreground;
-only explicit `/bg` grants that request background work. Tests prove scope,
-not live adoption; preserve user work and report failures.
+Use authorized capabilities only. Device actions need a same-instance Worker;
+re-plan if absent. Prefer `log_query` for logs. Agents work foreground; only
+explicit `/bg` grants that request background work. Tests prove scope, not live
+adoption; preserve user work and report failures.
 
 HCC is optional, non-authoritative PCM context. `/hcc` controls injection;
-`hcc-refresh` alone refreshes authorized, verified sources without rewriting
-PCM or retrying conflicts.
+`hcc-refresh` refreshes authorized sources without rewriting PCM or retrying
+conflicts.

@@ -748,7 +748,7 @@ def test_primary_prose_and_windows_path_do_not_create_choice_receipt(tmp_path):
         session_id="session-a",
         context_generation=1,
     )
-    visible = "Reply summary:\nC:\\Users\\thene\\projects\\HASHI4"
+    visible = "Reply summary:\nC:\\projects\\HASHI4"
 
     receipt = runtime_cross_session.record_turn_result(
         runtime,
