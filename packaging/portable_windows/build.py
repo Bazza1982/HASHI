@@ -993,24 +993,7 @@ def write_manifest(image_root: Path, build_info: dict) -> int:
     return tree_size(image_root)
 
 
-def validate_image(image_root: Path) -> None:
-    app_hashi = image_root / "app" / "hashi"
-    validate_portable_runtime_inputs(app_hashi)
-    portable_identity = json.loads(
-        (image_root / "data" / "portable-instance.json").read_text(encoding="utf-8")
-    )
-    if (
-        portable_identity.get("schema_version") != 2
-        or portable_identity.get("product") != "HASHI Portable Windows x64"
-        or portable_identity.get("provisioning_state") != "unprovisioned"
-        or portable_identity.get("portable_instance_id") is not None
-        or portable_identity.get("identity_lineage_id") is not None
-        or portable_identity.get("created_at_utc") is not None
-    ):
-        raise RuntimeError("portable public provisioning template is invalid")
-    portable_secrets = json.loads(
-        (image_root / "data" / "secrets.json").read_text(encoding="utf-8")
-    )
+def validate_portable_secrets(portable_secrets: dict) -> None:
     permitted_secret_keys = {
         "authorized_telegram_id",
         "agent",
@@ -1032,6 +1015,55 @@ def validate_image(image_root: Path) -> None:
             raise RuntimeError("private finalization did not create independent tokens")
     elif local_token or remote_token:
         raise RuntimeError("public portable image contains generated credentials")
+
+
+def validate_packaged_provider_models(config: dict) -> None:
+    providers = config["global"]["her_providers"]["providers"]
+    if not isinstance(providers, dict):
+        raise RuntimeError("portable providers table is invalid")
+    deepseek = providers.get("deepseek")
+    if not isinstance(deepseek, dict):
+        raise RuntimeError("portable image has no deepseek provider")
+    deepseek_models = deepseek.get("models")
+    if not isinstance(deepseek_models, list) or not deepseek_models:
+        raise RuntimeError("portable image packages no deepseek provider models")
+    modeled_others = [
+        name
+        for name, provider in providers.items()
+        if name != "deepseek"
+        and isinstance(provider, dict)
+        and (
+            provider.get("models")
+            or str(provider.get("fast_model") or "").strip()
+            or str(provider.get("pro_model") or "").strip()
+        )
+    ]
+    if modeled_others:
+        raise RuntimeError(
+            "portable image packages non-deepseek provider models: "
+            + ", ".join(sorted(modeled_others))
+        )
+
+
+def validate_image(image_root: Path) -> None:
+    app_hashi = image_root / "app" / "hashi"
+    validate_portable_runtime_inputs(app_hashi)
+    portable_identity = json.loads(
+        (image_root / "data" / "portable-instance.json").read_text(encoding="utf-8")
+    )
+    if (
+        portable_identity.get("schema_version") != 2
+        or portable_identity.get("product") != "HASHI Portable Windows x64"
+        or portable_identity.get("provisioning_state") != "unprovisioned"
+        or portable_identity.get("portable_instance_id") is not None
+        or portable_identity.get("identity_lineage_id") is not None
+        or portable_identity.get("created_at_utc") is not None
+    ):
+        raise RuntimeError("portable public provisioning template is invalid")
+    portable_secrets = json.loads(
+        (image_root / "data" / "secrets.json").read_text(encoding="utf-8")
+    )
+    validate_portable_secrets(portable_secrets)
     config = json.loads(
         (image_root / "data" / "agents.json").read_text(encoding="utf-8")
     )
@@ -1039,6 +1071,7 @@ def validate_image(image_root: Path) -> None:
     engines = [item["engine"] for item in agent["allowed_backends"]]
     if engines != ["her-v2"] or agent["active_backend"] != "her-v2":
         raise RuntimeError("portable Agent exposes a non-HER Engine")
+    validate_packaged_provider_models(config)
     remote_config = (image_root / "data" / "remote" / "config.yaml").read_text(
         encoding="utf-8"
     )

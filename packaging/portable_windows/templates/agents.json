@@ -29,7 +29,7 @@
         "allowed_hosts": [
           "openrouter.ai"
         ],
-        "model": "anthropic/claude-sonnet-4.6",
+        "model": "google/gemini-3.8-flash",
         "api_key_secret": "openrouter_key",
         "idle_timeout_seconds": 90
       }
@@ -42,14 +42,13 @@
       },
       "providers": {
         "deepseek": {
-          "engine": "deepseek-api",
           "base_url": "https://api.deepseek.com/v1",
           "secret": "deepseek_api_key",
           "models": [
-            "deepseek-v4-flash",
+            "deepseek-flash",
             "deepseek-v4-pro"
           ],
-          "fast_model": "deepseek-v4-flash",
+          "fast_model": "deepseek-flash",
           "pro_model": "deepseek-v4-pro",
           "status": "stable"
         },
@@ -57,12 +56,6 @@
           "engine": "openai-compatible-api",
           "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
           "secret": "dashscope_api_key",
-          "models": [
-            "qwen-plus",
-            "qwen-max"
-          ],
-          "fast_model": "qwen-plus",
-          "pro_model": "qwen-max",
           "status": "stable"
         }
       }
@@ -91,7 +84,7 @@
         {
           "engine": "her-v2",
           "model": "role-configured",
-          "effort": "medium",
+          "effort": "high",
           "permission_mode": "danger-full-access",
           "access_scope": "drive",
           "idle_timeout_sec": 300,
@@ -111,12 +104,12 @@
             "profiles": {
               "lightweight": {
                 "engine": "deepseek-api",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "reasoning": "high"
               },
               "triage": {
                 "engine": "deepseek-api",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "reasoning": "high"
               },
               "premium": {
