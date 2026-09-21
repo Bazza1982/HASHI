@@ -986,7 +986,7 @@ async def test_her_fixed_backend_replaces_assembled_pcm_with_typed_transport(
 
 
 @pytest.mark.asyncio
-async def test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task():
+async def test_build_turn_prompt_keeps_bare_continue_as_current_user_text():
     runtime = _runtime()
     original_item = _item(
         request_id="req-original",
@@ -1012,24 +1012,25 @@ async def test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task()
         is_bridge_request=False,
     )
 
-    assert "[HASHI /stop continuation" in prompt.effective_prompt
-    assert original_item.prompt in prompt.effective_prompt
-    assert "You can continue now" in prompt.effective_prompt
-    assert (
-        runtime.current_request_meta["resumed_interrupted_task"]["request_id"]
-        == "req-original"
-    )
-    assert continuation._resumed_interrupted_task["prompt"] == original_item.prompt
+    assert prompt.effective_prompt.endswith("You can continue now")
+    assert original_item.prompt not in prompt.effective_prompt
+    assert "resumed_interrupted_task" not in runtime.current_request_meta
+    assert not hasattr(continuation, "_resumed_interrupted_task")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fixed", "flex"])
-async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task(
+async def test_build_turn_prompt_uses_ordered_scheduler_history_without_binding(
     mode,
 ):
     runtime = _runtime()
     runtime.config.active_backend = "codex-cli"
     runtime.backend_manager.agent_mode = mode
+
+    async def pre_turn(item, _prompt, *, is_bridge_request):
+        return runtime_cross_session.context_section(runtime, item)
+
+    runtime._build_pre_turn_context_sections = pre_turn
     runtime.backend_manager.current_backend = SimpleNamespace(
         _session_id="primary-session",
         persistent_session_busy=False,
@@ -1089,9 +1090,10 @@ async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_ta
         is_bridge_request=False,
     )
 
-    assert "HASHI cross-session reply binding" in prompt.effective_prompt
-    assert "Newer scheduler task is incomplete" in prompt.effective_prompt
-    assert "HASHI /stop continuation" not in prompt.effective_prompt
+    assert prompt.effective_prompt.endswith("continue.")
+    assert "Newer scheduler task is incomplete" not in prompt.effective_prompt
+    assert "Newer scheduler task is incomplete" in prompt.final_prompt
+    assert "Older primary-session task" not in prompt.effective_prompt
     assert runtime.current_request_meta["session_scope"] == "persistent"
     assert "resume_session_id" not in runtime.current_request_meta
     assert prompt.incremental is (mode == "fixed")

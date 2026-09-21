@@ -85,7 +85,7 @@ def _begin(runtime: SimpleNamespace, item: SimpleNamespace) -> None:
     runtime._request_meta_by_id[item.request_id] = metadata
 
 
-def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
+def test_scheduler_exchange_is_persisted_as_read_only_history(tmp_path):
     runtime = _runtime(tmp_path)
     item = _item()
     visible = "Reply with a letter:\nA — Comment one\nB — Comment two"
@@ -100,11 +100,8 @@ def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
     )
 
     assert receipt is not None
-    assert receipt["active"] is True
-    assert receipt["pending_interaction"] == {
-        "kind": "choice",
-        "labels": ["A", "B"],
-    }
+    assert receipt["active"] is False
+    assert receipt["pending_interaction"] is None
     state_path = runtime_cross_session.receipt_state_path(runtime)
     assert state_path is not None
     assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == 2
@@ -116,6 +113,8 @@ def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
     assert sections[0][0] == "CROSS-SESSION TURN RECEIPTS"
     assert "Comment one" in sections[0][1]
     assert "read-only context" in sections[0][1]
+    assert "USER:\nRun the evening engagement task" in sections[0][1]
+    assert "pending_interaction" not in sections[0][1]
 
     timeline = runtime_cross_session.timeline_entries(runtime, user_item)
     assert len(timeline) == 1
@@ -125,7 +124,7 @@ def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
     assert timeline[0]["assistant_text"] == visible
 
 
-def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tmp_path):
+def test_primary_pending_turn_stays_in_canonical_session_not_receipt_state(tmp_path):
     runtime = _runtime(tmp_path, mode="flex")
     item = _item(
         request_id="req-primary-pending",
@@ -182,13 +181,8 @@ def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tm
         completion_path="foreground",
     )
 
-    assert receipt is not None
-    assert receipt["task_status"] == "awaiting_user"
-    assert receipt["task_checkpoint"]["completed"] == ["Inspected source files"]
-    assert receipt["planning_status"] == "failed"
-    assert "write_file 或 hashi_file_write" in receipt["planning_error"]
-    assert receipt["execution_ledger"]["entries"][0]["tool_use_id"] == "read-1"
-    assert receipt["delivery_receipt"]["confirmed"] is True
+    assert receipt is None
+    assert runtime_cross_session.load_receipts(runtime) == []
 
     reply = _item(
         request_id="req-primary-answer",
@@ -197,17 +191,16 @@ def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tm
         summary="Mapping answer",
     )
     _begin(runtime, reply)
-    bound_prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
+    effective_prompt = runtime_cross_session.prepare_reply_binding(
+        runtime, reply, reply.prompt
+    )
 
-    assert "Populate the workbook after clarification" in bound_prompt
-    assert "Planning status: failed" in bound_prompt
-    assert "write_file 或 hashi_file_write" in bound_prompt
-    assert "read-1" in bound_prompt
-    assert "preserve all current workbook formatting" in bound_prompt
-    assert reply._cross_session_receipt["reply_kind"] == "answer"
+    assert effective_prompt == reply.prompt
+    assert "cross_session_receipt" not in runtime.current_request_meta
+    assert not hasattr(reply, "_cross_session_receipt")
 
 
-def test_active_receipt_is_not_trimmed_out_by_recent_completed_receipts(tmp_path):
+def test_context_uses_the_most_recent_receipts_in_chronological_order(tmp_path):
     runtime = _runtime(tmp_path)
     for index in range(runtime_cross_session.MAX_CONTEXT_RECEIPTS):
         item = _item(request_id=f"req-completed-{index}")
@@ -235,7 +228,9 @@ def test_active_receipt_is_not_trimmed_out_by_recent_completed_receipts(tmp_path
     section = runtime_cross_session.context_section(runtime, user_item)[0][1]
 
     assert "Keep this active choice" in section
-    assert section.count("## Receipt ") == runtime_cross_session.MAX_CONTEXT_RECEIPTS
+    assert "Completed scheduled task 0." not in section
+    assert "Completed scheduled task 1." in section
+    assert section.count("## Exchange ") == runtime_cross_session.MAX_CONTEXT_RECEIPTS
 
 
 def test_incomplete_status_and_legacy_recommendation_do_not_invent_a_pending_reply(
@@ -265,7 +260,7 @@ def test_incomplete_status_and_legacy_recommendation_do_not_invent_a_pending_rep
     assert receipt["active"] is False
 
 
-def test_continue_binds_cross_session_receipt_without_backend_resume(tmp_path):
+def test_continue_remains_verbatim_with_scheduler_exchange_in_history(tmp_path):
     runtime = _runtime(tmp_path)
     scheduler_item = _item()
     visible = "Task incomplete. CONTINUE from the saved session."
@@ -296,13 +291,15 @@ def test_continue_binds_cross_session_receipt_without_backend_resume(tmp_path):
     )
 
     metadata = runtime._request_meta_by_id[continuation.request_id]
-    assert "cross-session reply binding" in prompt
-    assert "Task incomplete" in prompt
-    assert "resume_session_id" not in metadata
-    assert continuation._cross_session_receipt["reply_kind"] == "continuation"
+    assert prompt == "continue."
+    assert "cross_session_receipt" not in metadata
+    assert not hasattr(continuation, "_cross_session_receipt")
+    assert "Task incomplete" in runtime_cross_session.context_section(
+        runtime, continuation
+    )[0][1]
 
 
-def test_choice_reply_uses_newest_delivered_choice_set(tmp_path):
+def test_choice_reply_is_verbatim_and_receipts_remain_chronological(tmp_path):
     runtime = _runtime(tmp_path)
     old_item = _item(request_id="req-old", summary="Cron Task [old]")
     new_item = _item(request_id="req-new", summary="Cron Task [new]")
@@ -339,11 +336,10 @@ def test_choice_reply_uses_newest_delivered_choice_set(tmp_path):
 
     prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
 
-    assert "New action" in prompt
-    assert "Old action" not in prompt
-    assert reply._cross_session_receipt["reply_kind"] == "choice"
-    receipts = runtime_cross_session.load_receipts(runtime)
-    assert [receipt["active"] for receipt in receipts] == [False, True]
+    assert prompt == "comment A, C"
+    assert not hasattr(reply, "_cross_session_receipt")
+    timeline = runtime_cross_session.timeline_entries(runtime, reply)
+    assert [entry["assistant_text"] for entry in timeline] == [old_text, new_text]
 
 
 def test_reply_target_is_frozen_at_enqueue_before_later_scheduler_delivery(tmp_path):
@@ -381,7 +377,7 @@ def test_reply_target_is_frozen_at_enqueue_before_later_scheduler_delivery(tmp_p
     assert "cross_session_receipt" not in runtime.current_request_meta
 
 
-def test_reply_target_captured_at_enqueue_survives_later_scheduler_delivery(tmp_path):
+def test_reply_target_is_never_captured_and_later_history_stays_ordered(tmp_path):
     runtime = _runtime(tmp_path)
     first_item = _item(request_id="req-first-scheduler")
     first_text = "Reply with a letter:\nA — First visible action"
@@ -415,13 +411,16 @@ def test_reply_target_captured_at_enqueue_survives_later_scheduler_delivery(tmp_
     _begin(runtime, reply)
     prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
 
-    assert binding is not None
-    assert binding["request_id"] == "req-first-scheduler"
-    assert "First visible action" in prompt
-    assert "Later action" not in prompt
+    assert binding is None
+    assert prompt == "A"
+    timeline = runtime_cross_session.timeline_entries(runtime, reply)
+    assert [entry["assistant_text"] for entry in timeline] == [
+        first_text,
+        second_text,
+    ]
 
 
-def test_newer_primary_choice_prevents_stale_scheduler_choice_binding(tmp_path):
+def test_primary_choice_is_not_copied_into_cross_session_receipts(tmp_path):
     runtime = _runtime(tmp_path)
     scheduler_item = _item()
     scheduler_text = (
@@ -462,16 +461,14 @@ def test_newer_primary_choice_prevents_stale_scheduler_choice_binding(tmp_path):
 
     prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
 
-    assert "Original task:\nGive me a different choice" in prompt
-    assert "Current user reply:\nA" in prompt
-    assert runtime.current_request_meta["cross_session_receipt"]["request_id"] == "req-primary"
+    assert prompt == "A"
+    assert "cross_session_receipt" not in runtime.current_request_meta
     receipts = runtime_cross_session.load_receipts(runtime)
-    assert receipts[0]["active"] is False
-    assert receipts[1]["active"] is True
-    assert receipts[1]["task_status"] == "awaiting_user"
+    assert len(receipts) == 1
+    assert receipts[0]["request_id"] == scheduler_item.request_id
 
 
-def test_newer_primary_question_with_trailing_emoji_closes_scheduler_prompt(tmp_path):
+def test_primary_question_does_not_mutate_scheduler_task_status(tmp_path):
     runtime = _runtime(tmp_path)
     scheduler_item = _item()
     scheduler_text = "Task incomplete. CONTINUE from the saved session."
@@ -509,13 +506,13 @@ def test_newer_primary_question_with_trailing_emoji_closes_scheduler_prompt(tmp_
     )
 
     receipts = runtime_cross_session.load_receipts(runtime)
-    assert receipts[0]["active"] is False
-    assert receipts[0]["resolved_by"].startswith("superseded_by:")
-    assert receipts[1]["active"] is True
-    assert receipts[1]["pending_interaction"]["kind"] == "question"
+    assert len(receipts) == 1
+    assert receipts[0]["active"] is True
+    assert receipts[0]["pending_interaction"]["kind"] == "continuation"
+    assert "resolved_by" not in receipts[0]
 
 
-def test_newer_scheduler_completion_closes_older_scheduler_choice(tmp_path):
+def test_scheduler_receipts_do_not_semantically_supersede_each_other(tmp_path):
     runtime = _runtime(tmp_path)
     old_item = _item(request_id="req-old")
     old_text = "Reply with a letter:\nA — Old action\nB — Old alternative"
@@ -523,7 +520,10 @@ def test_newer_scheduler_completion_closes_older_scheduler_choice(tmp_path):
         runtime,
         old_item,
         assistant_text=old_text,
-        response=_response(old_text),
+        response=_response(
+            old_text,
+            pending_interaction={"kind": "choice", "labels": ["A", "B"]},
+        ),
         delivered=True,
         completion_path="foreground",
     )
@@ -541,11 +541,11 @@ def test_newer_scheduler_completion_closes_older_scheduler_choice(tmp_path):
 
     receipts = runtime_cross_session.load_receipts(runtime)
 
-    assert [receipt["active"] for receipt in receipts] == [False, False]
-    assert receipts[0]["resolved_by"].startswith("superseded_by:")
+    assert [receipt["active"] for receipt in receipts] == [True, False]
+    assert "resolved_by" not in receipts[0]
 
 
-def test_successful_bound_reply_resolves_receipt(tmp_path):
+def test_natural_reply_does_not_resolve_or_overwrite_receipt(tmp_path):
     runtime = _runtime(tmp_path)
     scheduler_item = _item()
     visible = "Reply with a letter:\nA — Do it"
@@ -553,7 +553,10 @@ def test_successful_bound_reply_resolves_receipt(tmp_path):
         runtime,
         scheduler_item,
         assistant_text=visible,
-        response=_response(visible),
+        response=_response(
+            visible,
+            pending_interaction={"kind": "choice", "labels": ["A"]},
+        ),
         delivered=True,
         completion_path="foreground",
     )
@@ -576,18 +579,18 @@ def test_successful_bound_reply_resolves_receipt(tmp_path):
     )
 
     receipt = runtime_cross_session.load_receipts(runtime)[0]
-    assert receipt["active"] is False
-    assert receipt["resolved_by"] == "req-choice"
-    assert receipt["assistant_text"] == "Action completed."
+    assert receipt["active"] is True
+    assert "resolved_by" not in receipt
+    assert receipt["assistant_text"] == visible
     timeline = runtime_cross_session.timeline_entries(
         runtime,
         _item(request_id="req-after", source="text", prompt="What happened?"),
     )
-    assert timeline[0]["user_text"] == "A"
-    assert timeline[0]["assistant_text"] == "Action completed."
+    assert timeline[0]["user_text"] == scheduler_item.prompt
+    assert timeline[0]["assistant_text"] == visible
 
 
-def test_failed_bound_reply_keeps_original_checkpoint_retryable(tmp_path):
+def test_failed_natural_reply_does_not_mutate_receipt(tmp_path):
     runtime = _runtime(tmp_path)
     scheduler_item = _item()
     visible = "Task incomplete. CONTINUE from the saved session."
@@ -625,8 +628,7 @@ def test_failed_bound_reply_keeps_original_checkpoint_retryable(tmp_path):
     receipt = runtime_cross_session.load_receipts(runtime)[0]
     assert receipt["active"] is True
     assert receipt["assistant_text"] == visible
-    assert receipt["last_attempt"]["status"] == "failed"
-    assert receipt["last_attempt"]["delivered"] is True
+    assert "last_attempt" not in receipt
 
 
 def test_failed_scheduler_turn_is_context_only(tmp_path):
@@ -698,4 +700,64 @@ def test_receipts_never_cross_hashi_session_or_context_generation(tmp_path):
     assert "Continue Session A" in runtime_cross_session.context_section(
         runtime, same_generation
     )[0][1]
-    assert runtime_cross_session.capture_reply_target(runtime, same_generation)
+    assert runtime_cross_session.capture_reply_target(runtime, same_generation) is None
+
+
+def test_natural_choice_reply_remains_verbatim_and_unbound(tmp_path):
+    runtime = _runtime(tmp_path)
+    scheduled = _item(session_id="session-a", context_generation=1)
+    visible = "Choose 1, 2, or 3."
+    runtime_cross_session.record_turn_result(
+        runtime,
+        scheduled,
+        assistant_text=visible,
+        response=_response(
+            visible,
+            pending_interaction={"kind": "choice", "labels": ["1", "2", "3"]},
+        ),
+        delivered=True,
+        completion_path="foreground",
+    )
+    reply = _item(
+        request_id="req-natural-choice",
+        source="text",
+        prompt="3",
+        summary="3",
+        session_id="session-a",
+        context_generation=1,
+    )
+    _begin(runtime, reply)
+
+    effective = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
+
+    assert effective == "3"
+    assert "cross_session_receipt" not in runtime.current_request_meta
+    assert not hasattr(reply, "_cross_session_receipt")
+    assert runtime_cross_session.timeline_entries(runtime, reply)[-1][
+        "assistant_text"
+    ] == visible
+
+
+def test_primary_prose_and_windows_path_do_not_create_choice_receipt(tmp_path):
+    runtime = _runtime(tmp_path)
+    item = _item(
+        request_id="req-primary-report",
+        source="text",
+        prompt="Report the result plainly",
+        summary="Plain report",
+        session_id="session-a",
+        context_generation=1,
+    )
+    visible = "Reply summary:\nC:\\Users\\thene\\projects\\HASHI4"
+
+    receipt = runtime_cross_session.record_turn_result(
+        runtime,
+        item,
+        assistant_text=visible,
+        response=_response(visible),
+        delivered=True,
+        completion_path="foreground",
+    )
+
+    assert receipt is None
+    assert runtime_cross_session.load_receipts(runtime) == []

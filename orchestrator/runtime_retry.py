@@ -3,43 +3,17 @@ from __future__ import annotations
 import copy
 import json
 import os
-import re
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.multimodal_contract import (
-    attachment_manifest,
-    normalize_request_content,
-)
+from orchestrator.multimodal_contract import normalize_request_content
 
 RETRY_STATE_VERSION = 3
 RETRY_STATE_FILENAME = "retry_state.json"
 RETRY_HANDOFF_SOURCE = "retry-handoff"
-
-_DIRECT_CONTINUATION_SOURCES = frozenset({"text", "voice", "telegram"})
-_ENGLISH_CONTINUATION_RE = re.compile(
-    r"(?:please\s+)?(?:you\s+can\s+)?"
-    r"(?:continue|resume|carry\s+on|go\s+on)"
-    r"(?:\s+(?:now|please|the\s+(?:task|work)|working|with\s+it|"
-    r"from\s+where\s+(?:you|we)\s+left\s+off|"
-    r"where\s+(?:you|we)\s+left\s+off|what\s+you\s+were\s+doing))?",
-    re.IGNORECASE,
-)
-_ENGLISH_PICK_UP_RE = re.compile(
-    r"(?:please\s+)?pick\s+(?:it\s+)?up\s+where\s+(?:you|we)\s+left\s+off",
-    re.IGNORECASE,
-)
-_CHINESE_CONTINUATION_RE = re.compile(
-    r"(?:请|您可以|可以)?(?:继续|接着)"
-    r"(?:吧|了|做|进行|完成|工作|这个|它|刚才(?:的)?(?:任务|工作)?|"
-    r"之前(?:的)?(?:任务|工作)?|上次(?:的)?(?:任务|工作)?)?"
-)
-_CHINESE_FROM_STOP_RE = re.compile(
-    r"(?:请)?从(?:刚才|之前|上次)(?:停下|中断)(?:的)?地方(?:继续|接着)"
-)
 
 _NON_RETRYABLE_PROMPT_SOURCES = frozenset(
     {
@@ -496,55 +470,6 @@ def capture_interrupted_task(
     return None
 
 
-def is_explicit_continuation(prompt: str) -> bool:
-    """Recognize a short referent-free request to resume the stopped task."""
-    text = str(prompt or "").strip()
-    if not text or len(text) > 240 or text.startswith("/"):
-        return False
-    text = text.strip(" \t\r\n.?!。！？~～")
-    return any(
-        pattern.fullmatch(text) is not None
-        for pattern in (
-            _ENGLISH_CONTINUATION_RE,
-            _ENGLISH_PICK_UP_RE,
-            _CHINESE_CONTINUATION_RE,
-            _CHINESE_FROM_STOP_RE,
-        )
-    )
-
-
-def build_interrupted_task_continuation(
-    snapshot: InterruptedTaskSnapshot,
-    continuation_prompt: str,
-    *,
-    backend: str = "",
-) -> str:
-    original = snapshot.prompt.strip()
-    if len(original) > 20000:
-        original = original[:20000] + "\n…[original task truncated]"
-    backend_name = str(backend or snapshot.backend or "").strip()
-    backend_note = f"\nActive backend/engine now: {backend_name}" if backend_name else ""
-    return (
-        "[HASHI /stop continuation — resume preserved unfinished task]\n"
-        "The user explicitly asked to continue the task interrupted by /stop. "
-        "This is not a new blank task and not a status-only request.\n"
-        "Requirements:\n"
-        "1. Continue the original requested outcome and scope below.\n"
-        "2. Resume from existing session state, workspace files, artefacts, tool results, "
-        "and partial progress; do not restart completed work without need.\n"
-        "3. Take the next concrete action and keep working until the original task is "
-        "complete or genuinely blocked.\n"
-        "4. Treat the current message only as permission to resume unless it contains an "
-        "explicit additional direction."
-        f"{backend_note}\n\n"
-        "Current continuation message:\n"
-        f"{str(continuation_prompt or '').strip()}\n\n"
-        "--- Original unfinished user task (authoritative) ---\n"
-        f"{original}\n"
-        "--- End original unfinished user task ---"
-    )
-
-
 def prepare_interrupted_task_continuation(
     runtime: Any,
     item: Any,
@@ -552,50 +477,9 @@ def prepare_interrupted_task_continuation(
     *,
     backend: str = "",
 ) -> str:
-    """Bind a bare 'continue' turn to the durable /stop snapshot when present."""
-    source = str(_value(item, "source", "") or "").strip().lower()
-    if (
-        bool(_value(item, "silent", False))
-        or source not in _DIRECT_CONTINUATION_SOURCES
-        or not is_explicit_continuation(str(_value(item, "prompt", "") or ""))
-    ):
-        return effective_prompt
-    session_id = _session_id(item)
-    snapshot = capture_interrupted_task(runtime, session_id=session_id)
-    if snapshot is None:
-        return effective_prompt
-    from orchestrator.fresh_context import entry_is_after_boundary
+    """Compatibility no-op: natural continuation text is never hard-bound."""
 
-    if not entry_is_after_boundary(runtime, snapshot.interrupted_at):
-        return effective_prompt
-    metadata = asdict(snapshot)
-    current_meta = getattr(runtime, "current_request_meta", None)
-    if isinstance(current_meta, dict):
-        current_meta["resumed_interrupted_task"] = metadata
-    try:
-        setattr(item, "_resumed_interrupted_task", metadata)
-        if snapshot.request_content is not None:
-            item.request_content = copy.deepcopy(snapshot.request_content)
-            item.attachment_manifest = attachment_manifest(item.request_content)
-            if isinstance(current_meta, dict):
-                current_meta["request_content"] = copy.deepcopy(item.request_content)
-                current_meta["attachment_manifest"] = [
-                    copy.deepcopy(entry) for entry in item.attachment_manifest
-                ]
-    except Exception:
-        pass
-    logger = getattr(runtime, "logger", None)
-    log_info = getattr(logger, "info", None)
-    if callable(log_info):
-        log_info(
-            f"Bound continuation request {_value(item, 'request_id', '')} "
-            f"to interrupted task {snapshot.request_id or 'unknown'}"
-        )
-    return build_interrupted_task_continuation(
-        snapshot,
-        effective_prompt,
-        backend=backend,
-    )
+    return effective_prompt
 
 
 def clear_completed_interrupted_task(runtime: Any, item: Any) -> bool:

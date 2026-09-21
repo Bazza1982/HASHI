@@ -53,7 +53,10 @@ from orchestrator.her_v2.checkpoint import (
     ReplanCompletionInterruption,
     ReplanDirective,
 )
-from orchestrator.her_v2.commentary import PackagedCommentary
+from orchestrator.her_v2.commentary import (
+    PackagedCommentary,
+    PersonaCommentaryPipeline,
+)
 from orchestrator.her_v2.config import ProviderProfile
 from orchestrator.her_v2.interfaces import ProviderFailureCode, StageInvocationError
 from orchestrator.her_v2.ledger import ExecutionLedger, LedgerStore
@@ -1479,6 +1482,60 @@ async def test_adapter_delivers_stage_authored_strategy_commentary_without_repac
     assert commentary[0].detail == "persona_packaging_fallback=false"
     assert commentary[0].summary == strategy_commentary
     assert packager.commentaries == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_binds_provider_commentary_to_persona_pipeline(tmp_path):
+    class DirectCommentaryManager(_CommentaryManager):
+        agent_mode = "fixed"
+
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert engine == "openrouter-api"
+            assert target_model
+            backend = _CommentaryFakeBackend(self.system_md)
+            backend.input_capability = SimpleNamespace(
+                input_modalities=frozenset({"text"}),
+                source="test",
+            )
+            backend.capabilities.output_modalities = frozenset({"text"})
+            self.backends.append(backend)
+            return backend
+
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    config = _agent_config(tmp_path, effort="zero")
+    manager = DirectCommentaryManager(config.system_md)
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        on_stream_event=capture,
+    )
+    packager = _StaticPersonaPackager()
+    setattr(config, "_her_v2_stage_provider", provider)
+    setattr(config, "_her_v2_persona_packager", packager)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Inspect the configured state",
+        "request-provider-commentary-persona",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True, response.text
+    commentary = [
+        event
+        for event in events
+        if event.delivery_class == DELIVERY_USER_COMMENTARY
+    ]
+    assert [event.summary for event in commentary] == [
+        "Persona update: Raw provider progress"
+    ]
+    assert commentary[0].phase == Stage.DIRECT.value
+    assert commentary[0].provenance == "persona_packager"
+    assert [item.stage for item in packager.commentaries] == [Stage.DIRECT]
 
 
 @pytest.mark.asyncio
@@ -3893,16 +3950,26 @@ Please scan Outlook.""",
 
 
 @pytest.mark.asyncio
-async def test_only_tool_enabled_direct_and_execution_can_publish_provider_commentary():
+async def test_tool_enabled_direct_and_execution_package_provider_commentary_before_delivery():
     manager = _CommentaryManager()
     events = []
 
     async def capture(event):
         events.append(event)
 
+    packager = _StaticPersonaPackager()
     provider = HashiStageProvider(
         backend_manager=manager,
         on_stream_event=capture,
+    )
+    provider.bind_commentary_port(
+        PersonaCommentaryPipeline(
+            packager=packager,
+            delivery=_AdapterDelivery(
+                capture,
+                allow_immediate_response=False,
+            ),
+        )
     )
     profile = ProviderProfile("premium", "openrouter-api", "configured/model")
 
@@ -3917,7 +3984,9 @@ async def test_only_tool_enabled_direct_and_execution_can_publish_provider_comme
         profile,
         _stage_request(Stage.DIRECT, allow_tools=True),
     )
+    assert events[-1].summary == "Persona update: Raw provider progress"
     assert events[-1].delivery_class == DELIVERY_USER_COMMENTARY
+    assert packager.commentaries[-1].stage is Stage.DIRECT
 
     await provider.invoke(
         profile,
@@ -3929,13 +3998,63 @@ async def test_only_tool_enabled_direct_and_execution_can_publish_provider_comme
         profile,
         _stage_request(Stage.EXECUTION, allow_tools=True),
     )
+    assert events[-1].summary == "Persona update: Raw provider progress"
     assert events[-1].delivery_class == DELIVERY_USER_COMMENTARY
+    assert packager.commentaries[-1].stage is Stage.EXECUTION
 
     await provider.invoke(
         profile,
         _stage_request(Stage.EXECUTION, allow_tools=False),
     )
     assert events[-1].delivery_class == DELIVERY_INTERNAL
+    assert [item.stage for item in packager.commentaries] == [
+        Stage.DIRECT,
+        Stage.EXECUTION,
+    ]
+    assert all(
+        event.summary.startswith("Persona update: ")
+        for event in events
+        if event.delivery_class == DELIVERY_USER_COMMENTARY
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_commentary_packaging_rejection_never_leaks_raw_text():
+    class RejectingCommentaryPort:
+        def __init__(self):
+            self.calls = []
+
+        async def publish(self, commentary):
+            self.calls.append(commentary)
+            return False
+
+        async def publish_draft(self, commentary):
+            raise AssertionError(f"unexpected draft: {commentary}")
+
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    port = RejectingCommentaryPort()
+    provider = HashiStageProvider(
+        backend_manager=_CommentaryManager(),
+        on_stream_event=capture,
+    )
+    provider.bind_commentary_port(port)
+
+    response = await provider.invoke(
+        ProviderProfile("premium", "openrouter-api", "configured/model"),
+        _stage_request(Stage.DIRECT, allow_tools=True),
+    )
+
+    assert response.text
+    assert [item.stage for item in port.calls] == [Stage.DIRECT]
+    assert events[-1].summary == "Raw provider progress"
+    assert events[-1].delivery_class == DELIVERY_INTERNAL
+    assert not any(
+        event.delivery_class == DELIVERY_USER_COMMENTARY for event in events
+    )
 
 
 @pytest.mark.asyncio

@@ -47,12 +47,13 @@ it can interrupt processes sharing a console.
 
 ## Configuration, identity, and persistence
 
-Read Agents, identities, ports, workspaces, endpoints, and model opt-ins from
-authoritative configuration; never infer them from folder names or memory.
-Keep credentials and local identity in ignored instance stores. Instance
-model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
-the Function registry. An explicit Agent selection remains authoritative until
-that model is retired.
+Use authoritative config for Agent identity, ports, workspaces, endpoints and
+model opt-ins—not names/memory. Keep secrets ignored. Instance opt-ins belong
+in `allowed_backends`; shared compatibility in Function registry; explicit
+model choices persist until retired.
+
+Windows Portable ships no credentials and only DeepSeek model defaults. Users
+supply all others; validation fails closed.
 
 An active Agent needs a PAO-started Worker. Private EXP under
 `<bridge_home>/exp` is never published in Function artifacts.
@@ -71,7 +72,8 @@ ask for a fresh action; never blindly retry or restore stale bytes. See
 
 Qualify “Session”: PAO owns the HASHI Conversation Session, Messages, and Runs;
 the selected Engine owns its Engine Session and Turns; Provider context is
-rebuildable transport state; frontend history is a disposable projection.
+rebuildable; frontend history is a disposable projection. Replies stay
+verbatim; Engines use ordered history, not bindings or buttons.
 
 External frontends atomically stage advertised attachments into one ordered
 Message/Run; required failure rejects it, never creates per-file Turns.
@@ -126,8 +128,9 @@ heartbeats, and excludes Tool execution; never wrap a whole invocation, stage,
 or Turn in that timeout. Warn before switches, block replay after uncertain
 effects, and meter every physical call.
 
-Tool-enabled HER Direct and Primary Execution may publish Persona-authored
-interim commentary; provider progress from other stages stays internal.
+Tool-enabled HER Direct and Primary Execution may propose interim commentary,
+but only typed Persona-packaged output is user-facing; raw or packaging-failed
+provider text and provider progress from other stages stay internal.
 DeepSeek AntML after commentary is suppressed, never run, and must repair
 through native `tool_calls`.
 

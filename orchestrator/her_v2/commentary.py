@@ -25,10 +25,12 @@ MAX_DRAFT_RESPONSE_COMMENTARY_CHARS = 128_000
 
 # Immediate Response and Finalisation already own dedicated user-facing lanes.
 # The legacy Triage wire stage is the HER v2 Strategist. Sub-agents are not
-# user-facing, while Execution remains admitted for legacy reviewed-mode
-# commentary and exact provisional draft delivery.
+# user-facing. Tool-enabled Direct and Execution provider commentary enters
+# this typed lane before transport, while Execution also retains exact
+# provisional draft delivery for reviewed modes.
 COMMENTARY_STAGES = frozenset(
     {
+        Stage.DIRECT,
         Stage.TRIAGE,
         Stage.PLANNING,
         Stage.EXECUTION,

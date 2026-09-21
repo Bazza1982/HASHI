@@ -917,6 +917,81 @@ def test_private_portable_finalization_injects_only_named_deepseek_key(tmp_path)
     assert "openrouter_key" not in secrets
 
 
+def test_public_portable_data_packages_only_deepseek_provider_models(tmp_path):
+    builder = _load_builder()
+
+    builder.configure_data(tmp_path, private_deepseek_key=None)
+
+    config = json.loads(
+        (tmp_path / "data" / "agents.json").read_text(encoding="utf-8")
+    )
+    providers = config["global"]["her_providers"]["providers"]
+    assert providers["deepseek"]["models"] == [
+        "deepseek-flash",
+        "deepseek-v4-pro",
+    ]
+    assert providers["deepseek"]["fast_model"] == "deepseek-flash"
+    assert providers["deepseek"]["pro_model"] == "deepseek-v4-pro"
+    assert "qwen" in providers
+    assert "models" not in providers["qwen"]
+    assert "fast_model" not in providers["qwen"]
+    assert "pro_model" not in providers["qwen"]
+    modeled_others = [
+        name
+        for name, provider in providers.items()
+        if name != "deepseek"
+        and (
+            provider.get("models")
+            or provider.get("fast_model")
+            or provider.get("pro_model")
+        )
+    ]
+    assert modeled_others == []
+
+
+def test_portable_secrets_validation_fail_closed_on_public_credentials():
+    builder = _load_builder()
+
+    public_secrets = {
+        "authorized_telegram_id": 0,
+        "agent": "WORKBENCH_ONLY_NO_TOKEN",
+        "deepseek_api_key": "",
+        "workbench_admin_token": "",
+        "hashi_remote_shared_token": "",
+    }
+    builder.validate_portable_secrets(public_secrets)
+
+    with pytest.raises(RuntimeError, match="outside private finalization"):
+        builder.validate_portable_secrets({**public_secrets, "openrouter_key": "x"})
+    with pytest.raises(RuntimeError, match="generated credentials"):
+        builder.validate_portable_secrets(
+            {**public_secrets, "workbench_admin_token": "a" * 40}
+        )
+    with pytest.raises(RuntimeError, match="independent tokens"):
+        builder.validate_portable_secrets(
+            {**public_secrets, "deepseek_api_key": "key-value"}
+        )
+
+
+def test_portable_provider_model_validation_fail_closed(tmp_path):
+    builder = _load_builder()
+    config = json.loads(
+        (TEMPLATES / "agents.json").read_text(encoding="utf-8")
+    )
+
+    builder.validate_packaged_provider_models(config)
+
+    providers = config["global"]["her_providers"]["providers"]
+    providers["qwen"]["models"] = ["qwen-plus"]
+    with pytest.raises(RuntimeError, match="non-deepseek provider models"):
+        builder.validate_packaged_provider_models(config)
+    del providers["qwen"]["models"]
+
+    del providers["deepseek"]["models"]
+    with pytest.raises(RuntimeError, match="no deepseek provider models"):
+        builder.validate_packaged_provider_models(config)
+
+
 def test_portable_build_cli_keeps_private_key_out_of_process_arguments(tmp_path):
     builder = _load_builder()
     key_file = tmp_path / "deepseek.key"

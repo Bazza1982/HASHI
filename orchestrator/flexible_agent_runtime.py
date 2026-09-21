@@ -1121,7 +1121,6 @@ class FlexibleAgentRuntime:
                 source=item.source,
             )
         runtime_delivery_order.register_turn(self, item)
-        runtime_cross_session.capture_reply_target(self, item)
         self.request_activity.start(
             item.request_id,
             source=item.source,
