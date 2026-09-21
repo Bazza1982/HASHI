@@ -54,6 +54,11 @@ model/effort opt-ins use `allowed_backends`; shared compatibility belongs to
 the Function registry. An explicit Agent selection remains authoritative until
 that model is retired.
 
+Public Windows Portable images contain no credentials and pre-populate model
+choices only for DeepSeek. Other provider endpoints may remain configurable,
+but their model choices are supplied by the user after installation; the
+builder fails closed if either boundary is violated.
+
 An active Agent needs a PAO-started Worker. Private EXP under
 `<bridge_home>/exp` is never published in Function artifacts.
 

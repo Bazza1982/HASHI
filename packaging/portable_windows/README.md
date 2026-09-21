@@ -66,6 +66,11 @@ Engine, local LLM, semantic vector runtime, system Python or Node installation,
 global PATH change, Windows service, registry installation, or ProgramData
 runtime cache. The retired Workbench frontend and Node server are not included.
 
+Only the official DeepSeek model list is pre-populated. Other configurable
+providers, including Qwen, start without packaged model choices and must be
+completed by the user after installation. Image validation fails closed if a
+public bundle contains credentials or pre-populated non-DeepSeek models.
+
 The launched runtime is Windows-native-only: its isolated process environment
 includes the system Windows PowerShell directory explicitly, while Bash/WSL
 shell selection and direct WSL launcher execution are blocked. A missing native
