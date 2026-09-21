@@ -12,8 +12,10 @@ from orchestrator.function_worker_supervisor import (
     FunctionWorkerError,
     FunctionWorkerSupervisor,
 )
+from orchestrator.function_generation import UncommittedFunctionSourceError
 from orchestrator.reboot_manager import RebootManager, _resolve_restart_targets
 from orchestrator.reboot_receipts import RebootReceipts
+from orchestrator.reboot_ui import render_notice
 
 
 class _Process:
@@ -486,6 +488,30 @@ async def test_candidate_rejection_does_not_gate_or_touch_active_workers(capsys)
     assert old.client.process.is_alive()
     assert all("quiesce" not in event for event in kernel.events)
     assert "active Workers were not touched" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_uncommitted_function_source_has_actionable_reboot_notice(tmp_path):
+    kernel = _Kernel(names=("zelda",))
+    kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    kernel.function_workers.qualify_error = UncommittedFunctionSourceError(
+        "Function generation manifest contains files that are not committed: "
+        "remote/api/server.py"
+    )
+    manager = RebootManager(kernel, None)
+
+    result = await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+
+    assert result is False
+    record = manager.receipts.records()[-1]
+    assert record["reason"] == "source_update_incomplete"
+    english = render_notice(record, locale="en")
+    chinese = render_notice(record, locale="zh-CN")
+    assert "software update that is still in progress" in english
+    assert "saved settings are safe" in english
+    assert "程序更新尚未完成" in chinese
+    assert "已经保存的设置不会丢失" in chinese
+    assert "启动检查未通过" not in chinese
 
 
 @pytest.mark.asyncio

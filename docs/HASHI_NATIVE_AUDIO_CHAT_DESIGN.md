@@ -758,12 +758,20 @@ while its pinned native dependencies remain outside the Core runtime
 fingerprint. As a result, adopting a voice Function generation through
 `/reboot min` neither changes nor relaxes the Core dependency contract.
 
+The sidecar protocol reads and writes newline-delimited JSON as explicit UTF-8
+bytes. It never inherits a Windows code page or a Linux process locale, so
+non-ASCII attachment paths and transcripts survive the Function-to-sidecar
+round trip unchanged.
+
 Provisioning uses `scripts/provision_transcription_runtime.py` and
 `constraints/transcription-py312.lock`. The script installs only into an
 instance-owned runtime under `state/runtimes/transcription`, probes all native
 imports under that interpreter, and publishes the platform selector
 atomically only after the probe passes. Installing those dependencies directly
 into a running Core environment is an invalid deployment operation.
+
+The npm program artifact includes the provisioner, transcription requirement,
+and pinned lock so Windows and Linux installs retain this deployment path.
 
 ### 13.2 One transcription, multiple uses
 

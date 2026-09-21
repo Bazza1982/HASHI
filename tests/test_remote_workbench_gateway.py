@@ -113,6 +113,57 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_pat
     assert captured["body_bytes"] == body
 
 
+def test_gateway_proxy_uses_agent_lifecycle_budget_for_active_route(tmp_path, monkeypatch):
+    from orchestrator.agent_lifecycle import AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS
+
+    client, token = _client(tmp_path)
+    captured: dict = {}
+
+    def fake_forward(**kwargs):
+        captured.update(kwargs)
+        return 200, b'{"ok":true}', {"content-type": "application/json"}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    body = b'{"is_active":true}'
+    path = "/workbench/v1/proxy/api/agents/phd_1/active"
+    response = client.post(
+        path,
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            **_signed_headers(
+                token,
+                method="POST",
+                path=path,
+                body=body,
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["timeout"] == AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS
+    assert captured["timeout"] > remote_server._workbench_gateway_timeout()
+
+
+def test_gateway_proxy_keeps_generic_requests_on_generic_budget(tmp_path, monkeypatch):
+    client, token = _client(tmp_path)
+    captured: dict = {}
+
+    def fake_forward(**kwargs):
+        captured.update(kwargs)
+        return 200, b'{"ok":true}', {"content-type": "application/json"}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    path = "/workbench/v1/proxy/api/agents"
+    response = client.get(
+        path,
+        headers=_signed_headers(token, method="GET", path=path),
+    )
+
+    assert response.status_code == 200
+    assert captured["timeout"] is None
+
+
 def test_gateway_proxy_rejects_missing_or_wrong_shared_token(tmp_path, monkeypatch):
     client, token = _client(tmp_path, lan_mode=True)
     monkeypatch.setattr(

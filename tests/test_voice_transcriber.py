@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 from pathlib import Path
@@ -27,6 +28,61 @@ def test_isolated_worker_probe_uses_its_required_distribution_contract(
     )
 
     assert voice_transcription_worker.probe_runtime()["packages"] == versions
+
+
+def test_isolated_worker_protocol_uses_utf8_bytes_independent_of_console_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio = tmp_path / "语音.wav"
+    audio.write_bytes(b"audio")
+    request = {
+        "version": 1,
+        "id": "request-utf8",
+        "audio_path": str(audio),
+        "model_size": "small",
+        "language": None,
+    }
+    input_bytes = io.BytesIO(
+        (json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8")
+    )
+    output_bytes = io.BytesIO()
+    console_stdin = io.TextIOWrapper(input_bytes, encoding="cp1252")
+    console_stdout = io.TextIOWrapper(output_bytes, encoding="cp1252")
+    calls: list[Path] = []
+
+    class _Runtime:
+        def transcribe(
+            self,
+            audio_path: Path,
+            *,
+            model_size: str,
+            language: str | None,
+        ) -> dict[str, object]:
+            calls.append(audio_path)
+            assert model_size == "small"
+            assert language is None
+            return {
+                "text": "中文转写成功",
+                "device": "cpu",
+                "compute_type": "int8",
+                "language": "zh",
+                "language_probability": 1.0,
+                "duration": 1.0,
+            }
+
+    monkeypatch.setattr(voice_transcription_worker, "_ModelRuntime", _Runtime)
+    monkeypatch.setattr(voice_transcription_worker.sys, "stdin", console_stdin)
+    monkeypatch.setattr(voice_transcription_worker.sys, "stdout", console_stdout)
+
+    assert voice_transcription_worker._serve() == 0
+
+    record = output_bytes.getvalue().decode("utf-8").strip()
+    assert record.startswith(voice_transcription_worker.RESULT_PREFIX)
+    payload = json.loads(record.removeprefix(voice_transcription_worker.RESULT_PREFIX))
+    assert payload["ok"] is True
+    assert payload["text"] == "中文转写成功"
+    assert calls == [audio.resolve()]
 
 
 class _FakeStdin:

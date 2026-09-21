@@ -21,6 +21,7 @@ from orchestrator.function_worker_supervisor import (
     FunctionWorkerClient,
     FunctionWorkerError,
 )
+from orchestrator.function_generation import UncommittedFunctionSourceError
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
@@ -1070,7 +1071,11 @@ class RebootManager:
                 record,
                 "rejected",
                 lifecycle_state="candidate_rejected",
-                reason="candidate_rejected",
+                reason=(
+                    "source_update_incomplete"
+                    if isinstance(exc, UncommittedFunctionSourceError)
+                    else "candidate_rejected"
+                ),
             )
             return False
 

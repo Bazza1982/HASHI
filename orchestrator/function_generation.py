@@ -97,6 +97,10 @@ class FunctionGenerationError(FunctionContractError):
     """A candidate function generation cannot safely enter a Worker."""
 
 
+class UncommittedFunctionSourceError(FunctionGenerationError):
+    """Qualified Function source is not yet committed."""
+
+
 def compare_function_candidate_runtime(
     expected: RuntimeFingerprint,
     candidate: RuntimeFingerprint,
@@ -744,7 +748,7 @@ def verify_manifest_source_commit(
     )
     invalid = sorted((qualified - tracked) | (qualified & (changed | untracked)))
     if invalid:
-        raise FunctionGenerationError(
+        raise UncommittedFunctionSourceError(
             "Function generation manifest contains files that are not committed: "
             + ", ".join(invalid[:20])
         )

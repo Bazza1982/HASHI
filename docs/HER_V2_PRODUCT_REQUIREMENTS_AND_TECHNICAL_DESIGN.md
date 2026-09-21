@@ -263,6 +263,20 @@ HER prefers useful progress over perfection of intermediate artefacts:
 
 Lifecycle order remains strict even when stage content is flexible.
 
+### 3.5.1 Request attachment continuity
+
+The canonical request content and its stage-scoped attachment manifest remain
+available throughout the HER Turn. Every stage that receives an attachment also
+receives its immutable identifier and authorised reference in the stage system
+envelope. If the selected provider/model receives the content natively, the
+stage uses that copy. If routing selects the existing local fallback, the stage
+uses the exact `local_ref` through an exposed read/media tool; it must not guess
+that a similarly named workspace file is the attachment.
+
+Manifest visibility does not widen authority. Tool and filesystem policy still
+come from HASHI, bounded sub-agents receive only their explicitly delegated
+attachment subset, and the isolated JSON Repair specialist receives none.
+
 ### 3.7 Structured-response compatibility membrane
 
 Provider transport shape is not HER authority. Before stage schema validation,

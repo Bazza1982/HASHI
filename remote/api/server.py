@@ -1498,6 +1498,21 @@ def _workbench_gateway_timeout() -> float:
         return 30.0
 
 
+def _workbench_gateway_route_timeout(
+    *, method: str, api_path: str
+) -> float | None:
+    normalized_path = str(api_path or "").strip().strip("/")
+    if str(method or "").upper() == "POST" and re.fullmatch(
+        r"agents/[^/]+/active", normalized_path
+    ):
+        from orchestrator.agent_lifecycle import (
+            AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS,
+        )
+
+        return float(AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS)
+    return None
+
+
 def _workbench_admin_token() -> str:
     """Return the local Workbench token without exposing it remotely."""
 
@@ -2056,6 +2071,10 @@ def create_app(
                 query=request.url.query,
                 body_bytes=body_bytes,
                 request_headers={name.lower(): value for name, value in request.headers.items()},
+                timeout=_workbench_gateway_route_timeout(
+                    method=request.method,
+                    api_path=api_path,
+                ),
             )
         except ValueError as exc:
             return JSONResponse(

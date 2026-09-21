@@ -14,7 +14,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 PROTOCOL_VERSION = 1
 RESULT_PREFIX = "HASHI_VOICE_TRANSCRIPTION_RESULT="
@@ -144,12 +144,21 @@ def _request_payload(raw: str) -> dict[str, Any]:
     }
 
 
+def _write_result(payload: dict[str, Any], output: BinaryIO | None = None) -> None:
+    """Write one locale-independent UTF-8 protocol record."""
+
+    target = output if output is not None else sys.stdout.buffer
+    record = RESULT_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n"
+    target.write(record.encode("utf-8"))
+    target.flush()
+
+
 def _serve() -> int:
     runtime = _ModelRuntime()
-    for raw in sys.stdin:
+    for raw in sys.stdin.buffer:
         request_id = ""
         try:
-            request = _request_payload(raw)
+            request = _request_payload(raw.decode("utf-8"))
             request_id = request["id"]
             result = runtime.transcribe(
                 request["audio_path"],
@@ -170,7 +179,7 @@ def _serve() -> int:
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}"[:500],
             }
-        print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+        _write_result(payload)
     return 0
 
 
@@ -190,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
                 "error": f"{type(exc).__name__}: {str(exc)[:400]}",
             }
             return_code = 1
-        print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+        _write_result(payload)
         return return_code
     return _serve()
 

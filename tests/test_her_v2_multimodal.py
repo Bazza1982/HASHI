@@ -389,6 +389,70 @@ async def test_direct_uses_existing_local_media_fallback_when_quick_is_text_only
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage",
+    [Stage.PLANNING, Stage.EXECUTION, Stage.REPLANNING, Stage.REVIEW],
+)
+async def test_later_stages_keep_authorized_attachment_reference_for_local_fallback(
+    stage,
+):
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Review the draft."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "attachment-draft",
+                "modality": "document",
+                "kind": "document",
+                "mime_type": "text/markdown",
+                "filename": "Paper_4_Introduction_Refined_v2.md",
+                "caption": "",
+                "local_ref": "/authorized/Paper_4_Introduction_Refined_v2.md",
+                "size_bytes": 7512,
+                "sha256": "3" * 64,
+                "transport": {"message_id": 3},
+            },
+        ]
+    )
+    backend = _Backend(
+        [
+            BackendResponse(
+                text="",
+                duration_ms=1,
+                structured_data={"status": "complete"},
+            )
+        ],
+        supports_tools=True,
+    )
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="text-only-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        source="test",
+    )
+    provider = HashiStageProvider(
+        backend_manager=_Manager(backend),
+        tool_registry=_MediaRegistry(),
+    )
+
+    await provider.invoke(
+        _profile(),
+        _request(stage, content, allow_tools=True),
+    )
+
+    assert backend.calls[0]["request_content"] is _MISSING
+    assert "Authorised request attachments" in backend.sys_prompt
+    assert '"attachment_id": "attachment-draft"' in backend.sys_prompt
+    assert (
+        '"local_ref": "/authorized/Paper_4_Introduction_Refined_v2.md"'
+        in backend.sys_prompt
+    )
+    assert "Do not guess a workspace copy" in backend.sys_prompt
+
+
+@pytest.mark.asyncio
 async def test_mixed_stage_merges_adapter_fallback_for_native_subset():
     content = _content(include_audio=True)
     backend = _Backend(
