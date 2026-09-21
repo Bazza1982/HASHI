@@ -22,6 +22,10 @@ committed generation, every running Agent Worker, and Remote adoption before
 reporting success. The qualified generation includes the `remote.main` service
 closure and the fixed Windows Remote/restart launcher chain, so an absent,
 modified, or uncommitted lifecycle component is rejected before cutover.
+An uncommitted qualified source file is reported separately from a candidate
+startup failure. The ordinary localized notice describes an unfinished software
+update, confirms the current Agent and saved settings remain safe, and asks the
+user to retry after the update completes; file paths remain diagnostic detail.
 
 One compatibility bridge is required when the currently running shared
 generation predates whole-Function reboot semantics. Its newly qualified Agent

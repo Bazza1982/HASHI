@@ -168,8 +168,13 @@ Attachments bind to one draft, instance, Agent, and submission. Remote sends
 verified managed bytes, never origin paths. Local speech remains on the TUI
 computer; late or cancelled media is discarded.
 
-Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize,
-escape, state plain outcomes, and keep lifecycle internals in diagnostics.
+Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize and
+escape. Remote Agent lifecycle timeouts are outcome-unknown: use PAO's budget,
+reconcile state, and never replay.
+When reboot qualification finds unfinished Function source work, the ordinary
+notice says a software update is still in progress, confirms saved settings and
+the current Agent remain safe, and asks the user to retry after it completes.
+Technical paths remain in diagnostics rather than the ordinary notice.
 `/help` derives from registered metadata. Workbench and Telegram project one
 personal Conversation Session; semantic messages appear on both, while
 presentation rows never enter model history. Menus use the authenticated path
@@ -187,10 +192,9 @@ preview, blockers and cleanup receipts bind.
 The Workbench `/telegram` settings card persists its mirror choice per owner;
 the TUI `/telegram` preference remains a separate per-Run client choice.
 
-Workbench press-to-talk is transcript-first. With Safe Voice off, admit text;
-with it on, hold a bounded preview until **Confirm and send**. Discard, expiry,
-Session/context change, or disabling it sends nothing. STT and other optional
-dependencies never enter Core; use their provisioner or sidecar.
+Workbench voice is transcript-first. Safe Voice off admits text; on holds a
+bounded preview until **Confirm and send**. Discard, expiry, Session change, or
+disabling sends nothing. Optional STT stays outside Core in a sidecar.
 
 ## Move, Clone, jobs, and HCC
 

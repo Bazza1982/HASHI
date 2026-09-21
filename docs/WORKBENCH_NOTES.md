@@ -24,6 +24,14 @@ API consumers:
   for existing Backend API authentication.
 - `/workbench/v1/*` remains a compatibility route family in Hashi Remote.
 
+The compatibility proxy keeps its generic bounded transport timeout, but an
+authenticated `POST /api/agents/{agent}/active` relay uses the PAO Agent
+lifecycle request budget. Worker generation can legitimately take longer than
+the generic gateway budget; a frontend timeout therefore means outcome unknown
+until the Backend API Agent projection confirms the requested terminal state.
+Clients must reconcile by reading state and must not replay the mutation merely
+because their shorter presentation deadline expired.
+
 These identifiers do not mean that Workbench is still included. New HASHI
 documentation and user-facing status text call the service **Backend API**.
 

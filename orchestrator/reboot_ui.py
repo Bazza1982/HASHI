@@ -54,9 +54,13 @@ def render_notice(
         status = record["status"]
         if status == "failed":
             status = "restored" if record.get("restored") else "unavailable"
-    key = "reboot.notice." + status
+    reason = record.get("reason")
+    source_update_incomplete = reason == "source_update_incomplete"
+    key = "reboot.notice." + (
+        "source_update_incomplete" if source_update_incomplete else status
+    )
     broad = mode in {"same", "max"}
-    if broad and status in {
+    if broad and not source_update_incomplete and status in {
         "starting",
         "candidate_rejected",
         "committed",
@@ -89,8 +93,7 @@ def render_notice(
                 escape(str(names.get(name) or name)) for name in recovered_targets[:6]
             ),
         )
-    reason = record.get("reason")
-    if reason and not starting:
+    if reason and not starting and not source_update_incomplete:
         text += "\n" + ui_language.tr(
             "reboot.reason",
             locale=language,
