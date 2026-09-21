@@ -352,11 +352,14 @@ the same configured display name and polite form of address `您` as its entire
 fallback Persona guidance; it never falls back to the rest of `system_md`.
 
 During a tool-enabled Direct or Primary Execution call, the provider may emit
-concise interim commentary before a tool call. That text may enter the
-commentary lane only because the applicable prompt already contains the
-validated Persona block. Provider commentary from Planning, Replanning, Review,
-tool-disabled Direct or Execution, or generic runtime activity remains internal
-and cannot enter that lane.
+concise interim commentary before a tool call. The provider text is only a
+neutral source candidate: it must cross the typed commentary lane and the
+isolated Persona Commentary Agent before delivery. A prompt containing the
+validated Persona block is useful authoring guidance but is not proof that a
+long tool loop preserved the Persona. Missing, rejected, or failed packaging
+keeps the raw provider text internal without changing workflow. Provider
+commentary from Planning, Replanning, Review, tool-disabled Direct or Execution,
+or generic runtime activity also remains internal and cannot enter that lane.
 
 This boundary governs interim commentary packaging, Triage clarification
 rendering, and the Persona inputs used by Immediate Response, Primary
@@ -1843,6 +1846,8 @@ HER v2 is ready for production rollout only when:
   startup preflight, and initialization failure; `her` resolves to HER v2 and
   `claw-cli` is rejected;
 - lifecycle and workflow events cannot generate Persona commentary;
+- tool-enabled Direct and Execution provider commentary reaches the user only
+  after typed Persona packaging; rejected raw text remains internal;
 - commentary and Triage-clarification packaging receive no raw request, plan,
   reasoning trace, lifecycle snapshot, or unmarked `system_md` content;
 - applicable Finalisation receives the current request, `draft_response`, and

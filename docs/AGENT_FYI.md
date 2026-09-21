@@ -126,8 +126,9 @@ heartbeats, and excludes Tool execution; never wrap a whole invocation, stage,
 or Turn in that timeout. Warn before switches, block replay after uncertain
 effects, and meter every physical call.
 
-Tool-enabled HER Direct and Primary Execution may publish Persona-authored
-interim commentary; provider progress from other stages stays internal.
+Tool-enabled HER Direct and Primary Execution may propose interim commentary,
+but only typed Persona-packaged output is user-facing; raw or packaging-failed
+provider text and provider progress from other stages stay internal.
 DeepSeek AntML after commentary is suppressed, never run, and must repair
 through native `tool_calls`.
 

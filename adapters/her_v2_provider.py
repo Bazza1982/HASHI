@@ -46,6 +46,7 @@ from orchestrator.her_v2.cognitive_control import (
     cognitive_system_contract,
 )
 from orchestrator.her_v2.commentary import (
+    CommentaryPort,
     MAX_PACKAGED_COMMENTARY_CHARS,
     NeutralCommentary,
     PackagedCommentary,
@@ -2280,6 +2281,7 @@ class HashiStageProvider(StageProvider):
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
         self.on_stream_event = on_stream_event
+        self._commentary_port: CommentaryPort | None = None
         self.silent = silent
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.audit_log = audit_log
@@ -2312,6 +2314,11 @@ class HashiStageProvider(StageProvider):
         # profile.engine / profile.model / stage are still known.
         self.usage_line_items: list[PerCallUsageLineItem] = []
         self._observed_provider_request_ids: set[str] = set()
+
+    def bind_commentary_port(self, commentary: CommentaryPort | None) -> None:
+        """Bind the typed Persona lane for provider-authored commentary."""
+
+        self._commentary_port = commentary
 
     def _track_active_backend(self, backend: Any) -> None:
         with self._active_backend_lock:
@@ -3663,9 +3670,13 @@ class HashiStageProvider(StageProvider):
         provider_replay_activity = False
         provider_text_activity = False
         provider_request_inflight: tuple[str, str, str, bool] | None = None
+        provider_commentary_serial = 0
 
         async def _capture(event: StreamEvent) -> None:
-            nonlocal provider_replay_activity, provider_text_activity, provider_tool_activity
+            nonlocal provider_commentary_serial
+            nonlocal provider_replay_activity
+            nonlocal provider_text_activity
+            nonlocal provider_tool_activity
             content = str(event.raw_delta or event.summary or "")
             if content or event.tool_name:
                 provider_replay_activity = True
@@ -3711,18 +3722,63 @@ class HashiStageProvider(StageProvider):
             if not event.delivery_class:
                 event.delivery_class = owner
             # Provider-native progress is not the HER v2 commentary contract.
-            # The exceptions are model-authored commentary from actual
-            # tool-enabled Direct and Execution calls, whose prompts already
-            # contain the validated Persona block.
-            persona_authored_commentary = bool(
+            # Model-authored commentary from actual tool-enabled Direct and
+            # Execution calls must cross the typed Persona pipeline before it
+            # can become user-facing. The stage prompt remains helpful source
+            # guidance, but it is not proof that a long tool loop preserved
+            # the configured Persona.
+            package_provider_commentary = bool(
                 event.kind == KIND_COMMENTARY
+                and event.delivery_class == DELIVERY_USER_COMMENTARY
                 and request.stage in {Stage.DIRECT, Stage.EXECUTION}
                 and request.allow_tools
             )
+            if package_provider_commentary and self._commentary_port is not None:
+                provider_commentary_serial += 1
+                invocation = str(
+                    request.invocation_id
+                    or (
+                        f"{request.turn_id}:{request.stage.value}:"
+                        f"attempt:{request.attempt}"
+                    )
+                )
+                source_identity = str(event.event_id or "").strip()
+                source_key = (
+                    hashlib.sha256(source_identity.encode("utf-8")).hexdigest()[:16]
+                    if source_identity
+                    else str(provider_commentary_serial)
+                )
+                commentary_event_id = (
+                    f"{invocation}:provider-commentary:{source_key}"
+                )
+                try:
+                    accepted = bool(
+                        await self._commentary_port.publish(
+                            NeutralCommentary(
+                                event_id=commentary_event_id,
+                                turn_id=request.turn_id,
+                                stage=request.stage,
+                                attempt=max(1, int(request.attempt)),
+                                text=str(event.summary or "").strip(),
+                            )
+                        )
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - optional presentation
+                    accepted = False
+                    self.logger.warning(
+                        "HER v2 provider commentary packaging failed safely at "
+                        "%s/%s: %s",
+                        request.stage.value,
+                        request.attempt,
+                        type(exc).__name__,
+                    )
+                if accepted:
+                    return
             if (
                 event.delivery_class == DELIVERY_USER_COMMENTARY
                 and event.kind != "voice_warning"
-                and not persona_authored_commentary
             ):
                 event.delivery_class = DELIVERY_INTERNAL
             event.origin = event.origin or f"her_v2:{profile.engine}"

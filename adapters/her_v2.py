@@ -1887,6 +1887,8 @@ class HERv2Adapter(BaseBackend):
                     {Stage.TRIAGE, Stage.PLANNING}
                 ),
             )
+        if isinstance(provider, HashiStageProvider):
+            provider.bind_commentary_port(commentary)
 
         required_persona = getattr(
             self.config, "_her_v2_required_persona_renderer", None
