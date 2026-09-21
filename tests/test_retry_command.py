@@ -373,35 +373,7 @@ def test_interrupted_task_survives_restart_and_last_prompt_overwrite(tmp_path):
     assert state["unfinished_task"]["prompt"] == original["prompt"]
 
 
-@pytest.mark.parametrize(
-    "prompt",
-    [
-        "You can continue now",
-        "please resume",
-        "pick up where you left off",
-        "继续",
-        "可以继续了",
-        "从刚才停下的地方继续",
-    ],
-)
-def test_explicit_continuation_phrases_are_recognized(prompt):
-    assert runtime_retry.is_explicit_continuation(prompt) is True
-
-
-@pytest.mark.parametrize(
-    "prompt",
-    [
-        "Continue using PostgreSQL for the new service",
-        "Write a new report",
-        "/retry",
-        "The work can continue after approval",
-    ],
-)
-def test_unrelated_prompts_do_not_resume_interrupted_task(prompt):
-    assert runtime_retry.is_explicit_continuation(prompt) is False
-
-
-def test_repeated_stop_of_continuation_keeps_original_task_and_success_clears_it(tmp_path):
+def test_natural_continuation_does_not_bind_or_clear_stopped_task(tmp_path):
     runtime = SimpleNamespace(workspace_dir=tmp_path, logger=_Logger(), current_request_meta={})
     original = runtime_retry.remember_interrupted_task(
         runtime,
@@ -428,29 +400,13 @@ def test_repeated_stop_of_continuation_keeps_original_task_and_success_clears_it
         item.prompt,
         backend="her-v2",
     )
-    runtime.current_request_meta = {
-        "request_id": item.request_id,
-        "prompt": item.prompt,
-        "source": item.source,
-        "summary": item.summary,
-        "resumed_interrupted_task": item._resumed_interrupted_task,
-    }
-
-    saved_again = runtime_retry.remember_interrupted_task(
-        runtime,
-        runtime.current_request_meta,
-        backend="her-v2",
-    )
-
     assert original is not None
-    assert "Complete the original implementation" in prepared
-    assert saved_again is not None
-    assert saved_again.request_id == "req-original"
-    assert saved_again.prompt == "Complete the original implementation"
-    assert runtime_retry.clear_completed_interrupted_task(runtime, item) is True
-    assert runtime_retry.capture_interrupted_task(runtime) is None
+    assert prepared == item.prompt
+    assert not hasattr(item, "_resumed_interrupted_task")
+    assert runtime_retry.clear_completed_interrupted_task(runtime, item) is False
+    assert runtime_retry.capture_interrupted_task(runtime) == original
     state = json.loads(runtime_retry.retry_state_path(runtime).read_text(encoding="utf-8"))
-    assert "unfinished_task" not in state
+    assert state["unfinished_task"]["request_id"] == "req-original"
 
 
 def test_fresh_boundary_prevents_old_interrupted_task_from_rebinding(tmp_path):

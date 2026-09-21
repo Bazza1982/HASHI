@@ -210,6 +210,13 @@ snapshot or delta with explicit authority and provenance.
 
 PAO must not privately reconstruct a competing PCM envelope.
 
+PAO also does not infer an ordinary Message's semantic referent from words such
+as `3`, `yes`, or `continue`. It preserves the accepted text and supplies
+Session identity plus ordered history to PCM; the selected Engine reasons about
+which earlier exchange is relevant. Typed slash/control operations remain
+separate from ordinary conversation and must never be synthesized from reply
+prose.
+
 ### 6.2 PAO to Engine Providers
 
 PAO supplies:

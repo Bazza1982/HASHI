@@ -1139,18 +1139,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         refresh_tool_context(item.request_id)
     effective_prompt = runtime._consume_session_primer(item)
     backend = runtime.backend_manager.current_backend
-    effective_prompt = runtime_cross_session.prepare_reply_binding(
-        runtime, item, effective_prompt
-    )
     request_meta = request_meta_for(runtime, item.request_id)
-    if not request_meta.get("cross_session_receipt"):
-        effective_prompt = runtime_retry.prepare_interrupted_task_continuation(
-            runtime,
-            item,
-            effective_prompt,
-            backend=str(getattr(runtime.config, "active_backend", "") or ""),
-        )
-        request_meta = request_meta_for(runtime, item.request_id)
     supports_sessions = bool(
         getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
     )

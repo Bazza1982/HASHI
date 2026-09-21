@@ -71,7 +71,8 @@ ask for a fresh action; never blindly retry or restore stale bytes. See
 
 Qualify “Session”: PAO owns the HASHI Conversation Session, Messages, and Runs;
 the selected Engine owns its Engine Session and Turns; Provider context is
-rebuildable transport state; frontend history is a disposable projection.
+rebuildable; frontend history is a disposable projection. Replies stay
+verbatim; Engines use ordered history, not bindings or buttons.
 
 External frontends atomically stage advertised attachments into one ordered
 Message/Run; required failure rejects it, never creates per-file Turns.
