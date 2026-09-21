@@ -1,0 +1,440 @@
+diff --git a/adapters/her_v2.py b/adapters/her_v2.py
+index d347a14..9002269 100644
+--- a/adapters/her_v2.py
++++ b/adapters/her_v2.py
+@@ -1499,6 +1499,7 @@ class HERv2Adapter(BaseBackend):
+         # ingress. A concurrent /provider or /model change updates only the
+         # adapter default used by the next call to generate_response.
+         turn_config = self._v2_config
++        style_original_prompt = prompt
+         request_meta = self._runtime_request_meta(request_id)
+         try:
+             effort_resolution = resolve_request_effort(
+@@ -1743,6 +1744,7 @@ class HERv2Adapter(BaseBackend):
+                         for route in Route
+                         for profile in (turn_config.profile_for_route(route),)
+                     },
++                    "style_finalisation_enabled": turn_config.style_finalisation.enabled,
+                     "voice_origin_active": bool(turn_config.voice_origin_active),
+                 }
+                 frozen_route = self._session_coordinator.store.freeze_turn_routing(
+@@ -1912,8 +1914,22 @@ class HERv2Adapter(BaseBackend):
+ 
+         if habit_context_suppressed(self._runtime_context()):
+             habit_advisor = None
++        final_style = None
++        if runtime_config.style_finalisation.enabled:
++            try:
++                from adapters.her_v2_style import capture_style_context, make_final_style_pass
++
++                final_style = make_final_style_pass(
++                    provider=provider, config=runtime_config,
++                    context=capture_style_context(self, style_original_prompt, fixed_turn),
++                    request_id=request_id,
++                )
++            except Exception as exc:
++                # Snapshot/configuration failure degrades only this optional editor.
++                self.logger.warning("Style finalisation unavailable: %s", type(exc).__name__)
+         runtime = HERv2Runtime(
+             config=runtime_config,
++            final_style=final_style,
+             provider=execution_provider,
+             ledger_store=self._ledger_store,
+             audit_log=self._audit_log,
+diff --git a/adapters/her_v2_provider.py b/adapters/her_v2_provider.py
+index ea19485..9de973e 100644
+--- a/adapters/her_v2_provider.py
++++ b/adapters/her_v2_provider.py
+@@ -4917,6 +4917,7 @@ class HashiStageProvider(StageProvider):
+         max_chars: int,
+         attempt: int,
+         activity: ProviderActivityTracker,
++        metering_phase: str = "persona",
+     ) -> str:
+         backend = None
+         try:
+@@ -4975,7 +4976,7 @@ class HashiStageProvider(StageProvider):
+             self._bind_provider_call_observer(
+                 backend,
+                 request_id=request_id,
+-                phase="persona",
++                phase=metering_phase,
+                 engine=profile.engine,
+                 model=profile.model,
+                 invocation_id=request_id,
+@@ -4983,10 +4984,12 @@ class HashiStageProvider(StageProvider):
+                 recovery_kind=("fresh_connection_retry" if attempt > 1 else "none"),
+                 turn_id=persona_turn_id,
+                 request_ref=persona_request_ref,
+-                role="persona_packager",
++                role="style_editor" if metering_phase == "style_rewrite" else "persona_packager",
+             )
+             effective_prompt = prompt
+             if not _install_system_prompt(backend, system_prompt):
++                if metering_phase == "style_rewrite":
++                    raise StageInvocationError("style editor cannot isolate its system prompt", retryable=False)
+                 effective_prompt = f"{system_prompt}\n\n{prompt}"
+             response = await backend.generate_response(
+@@ -5006,7 +5009,7 @@ class HashiStageProvider(StageProvider):
+             self.cost_usd += float(response.cost_usd or 0.0)
+             self._record_usage_line_item(
+                 request_id=request_id,
+-                phase="persona",
++                phase=metering_phase,
+                 engine=profile.engine,
+                 model=profile.model,
+                 response=response,
+diff --git a/adapters/her_v2_style.py b/adapters/her_v2_style.py
+new file mode 100644
+index 0000000..bb5c89b
+--- /dev/null
++++ b/adapters/her_v2_style.py
+@@ -0,0 +1,157 @@
++"""JEV style decision + existing HER light-model text renderer, opt-in only."""
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import time
++from dataclasses import replace
++from typing import Any, Mapping
++
++import httpx
++
++from adapters.base import BackendResponse, TokenUsage
++from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
++from orchestrator.her_v2.final_style import FinalStylePass, STYLE_QUESTION
++from orchestrator.her_v2.models import Route
++from orchestrator.her_v2.progress import ProviderActivityTracker
++from orchestrator.her_v2.prompt_catalog import load_prompt_asset
++from orchestrator.pcm import load_pcm_document
++from orchestrator.privacy_levels import require_level_available
++
++TYPESAFE_SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone"
++_STYLE_AUTHORITIES = frozenset({"permanent_system", "global_system", "local_system", "persona"})
++
++
++def capture_style_context(adapter: Any, original_prompt: str, fixed_turn: Any) -> dict[str, Any]:
++    """Use typed, accepted PCM sources, never promote history/draft into policy."""
++    sources = []
++    if fixed_turn is not None:
++        coordinator = adapter._session_coordinator
++        session = coordinator.store.session(fixed_turn.session_id)
++        if not session or session["pcm_revision"] != fixed_turn.pcm_revision:
++            raise ValueError("style PCM revision changed")
++        for value in (session.get("pcm") or {}).values():
++            if isinstance(value, Mapping) and value.get("authority") in _STYLE_AUTHORITIES:
++                sources.append({"authority": value["authority"],
++                                "source": str(value.get("key") or ""),
++                                "text": str(value.get("text") or "")})
++        envelope = HerBackendSessionCoordinator.decode(original_prompt) or {}
++        current_request = str((envelope.get("turn") or {}).get("user_message") or "")
++        if not current_request:
++            raise ValueError("style current request unavailable")
++    else:
++        # Legacy/non-fixed callers have no typed envelope. Read configured sources
++        # once at ingress, rather than mining instructions from user-authored text.
++        path = getattr(adapter.config, "system_md", None)
++        if path:
++            document = load_pcm_document(path)
++            sources.extend((
++                {"authority": "permanent_system", "source": "agent.md#sys", "text": document.system},
++                {"authority": "persona", "source": "agent.md#persona", "text": document.persona},
++            ))
++        runtime = adapter._runtime_context()
++        for attr, authority in (("global_sys_prompt_manager", "global_system"),
++                                ("sys_prompt_manager", "local_system")):
++            manager = getattr(runtime, attr, None)
++            if manager is not None:
++                for text in manager.get_active_texts():
++                    sources.append({"authority": authority, "source": attr, "text": str(text)})
++        current_request = original_prompt
++    return {"instruction_sources": sources, "current_request": current_request}
++
++
++def make_final_style_pass(*, provider: Any, config: Any, context: Mapping[str, Any],
++                          request_id: str) -> FinalStylePass:
++    """Bind the normal light slot, never a hard-coded Flash model or Pro fallback."""
++    options = config.style_finalisation
++    # Direct is contractually the Quick/light slot. Remove the request-local
++    # native voice overlay and use a non-thinking, tool-free presentation call.
++    quick = replace(config, voice_origin_active=False).profile_for_route(Route.DIRECT)
++    quick = replace(quick, reasoning="off", options={
++        **dict(quick.options), "provider_reasoning": "off", "reasoning_effort": "off",
++    })
++    request_ref = f"hashi-request:{request_id}"
++
++    def observe(event: str, payload: Mapping[str, Any], turn_id: str) -> None:
++        if provider.audit_log is not None:
++            provider.audit_log.append(
++                event_id=f"{turn_id}:style:{event}", turn_id=turn_id,
++                request_ref=request_ref, stage="style_finalisation", role="style_editor",
++                event=f"style_{event}", payload=dict(payload),
++            )
++
++    async def check(state: Mapping[str, Any], turn_id: str) -> Mapping[str, Any]:
++        require_level_available(provider.backend_manager.privacy_level)
++        api_key = os.environ.get(options.api_key_env, "").strip()
++        if not api_key:
++            raise ValueError("style API credential unavailable")
++        call_id = f"{turn_id}:style:jev"
++        began = time.perf_counter()
++        usage = None
++        model = options.model
++        status = "failed"
++        provider_request_id = call_id
++        try:
++            async with httpx.AsyncClient(timeout=options.check_timeout_s, follow_redirects=False) as client:
++                response = await client.post(
++                    TYPESAFE_SYSTEM_ONE_URL,
++                    headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
++                    json={"model": options.model, "state": dict(state), "questions": {"style": STYLE_QUESTION}},
++                )
++            provider_request_id = response.headers.get("x-typesafe-request-id") or call_id
++            response.raise_for_status()
++            data = response.json()
++            if not isinstance(data, dict):
++                raise ValueError("style response must be an object")
++            model = str(data.get("model") or model)
++            raw_usage = data.get("usage") or {}
++            if isinstance(raw_usage, dict) and all(
++                isinstance(raw_usage.get(key), int) and not isinstance(raw_usage[key], bool)
++                and raw_usage[key] >= 0 for key in ("input_tokens", "output_tokens")
++            ):
++                usage = TokenUsage(input_tokens=raw_usage["input_tokens"],
++                                   output_tokens=raw_usage["output_tokens"])
++            status = "completed"
++            return data
++        finally:
++            # No invented price or token counts. Preserve one separate physical
++            # call receipt, including failures, through the existing meter.
++            elapsed = (time.perf_counter() - began) * 1000
++            result = BackendResponse(
++                text="", is_success=status == "completed", usage=usage,
++                duration_ms=elapsed,
++                stream_metadata={"meter": {"provider_calls": [{
++                    "provider_request_id": provider_request_id, "model": model,
++                    "input": usage.input_tokens if usage else 0,
++                    "output": usage.output_tokens if usage else 0,
++                    "token_source": "provider" if usage else "unknown",
++                    "status": status, "provider_call_latency_ms": elapsed,
++                }]}},
++            )
++            provider._accumulate_usage(usage)
++            provider._record_usage_line_item(
++                request_id=request_ref, phase="style_check", engine="typesafe-api",
++                model=model, response=result, invocation_id=call_id,
++            )
++
++    async def rewrite(state: Mapping[str, Any], turn_id: str) -> str:
++        call_id = f"{turn_id}:style:rewrite"
++        provider.bind_persona_audit_context(call_id, turn_id=turn_id, request_ref=request_ref)
++        return await provider._package_persona_text_once(
++            quick, prompt=json.dumps(dict(state), ensure_ascii=False),
++            system_prompt=load_prompt_asset("system_style_rewrite"),
++            request_id=call_id, message_label="final style", max_chars=64_000,
++            attempt=1, activity=ProviderActivityTracker(), metering_phase="style_rewrite",
++        )
++
++    observe_context = hashlib.sha256(
++        json.dumps(dict(context), ensure_ascii=False, sort_keys=True).encode("utf-8")
++    ).hexdigest()
++
++    def with_context(event: str, payload: Mapping[str, Any], turn_id: str) -> None:
++        observe(event, {**payload, "instruction_snapshot_sha256": observe_context,
++                        "rewrite_provider": quick.engine, "rewrite_model": quick.model}, turn_id)
++
++    return FinalStylePass(config=options, context=context, check=check, rewrite=rewrite,
++                          observe=with_context)
+diff --git a/docs/HER_V2_JEV_STYLE_EXPERIMENT.md b/docs/HER_V2_JEV_STYLE_EXPERIMENT.md
+new file mode 100644
+index 0000000..8a3bde7
+--- /dev/null
++++ b/docs/HER_V2_JEV_STYLE_EXPERIMENT.md
+@@ -0,0 +1,120 @@
++# HERv2J: optional final style pass
++
++Branch: `exp-herv2j`. Base: `6073915a8694b5b9e5ed83f17f43e2cbe1498e2b`.
++Owner: HER v2. Engineering layer: Functions, with Agent-local opt-in configuration.
++Status: experimental implementation; real JEV/Quick inference and local adoption remain to be tested.
++
++## The one change
++
++After a normal text answer is ready, optionally ask TypeSafe/JEV whether its
++**wording** follows this turn's system/style/Persona instructions. A clear
++mismatch triggers **one** silent rewrite using the configured HER **Quick/light**
++provider and model, with reasoning off and no tools. A keep/uncertain result
++publishes the original. There is no second check, retry loop, Pro fallback,
++review, replanning, fact check, evidence check, completion decision, or new work.
++Execution commentary is unchanged; neither added call publishes commentary.
++
++Disabled is the default. Direct, Strategic and Planned retain their existing
++execution paths and model choices. Direct still has one primary execution
++invocation; enabling the experiment adds separate presentation calls, not a
++second execution agent. The legacy full `Stage.FINALISATION` is not activated.
++
++## Configure and try locally
++
++1. Pull this branch into a clean test checkout, preferably a separate worktree.
++2. Set `TYPESAFE_API_KEY` in the environment used to launch the test HASHI
++   instance/Functions. Do not put the API key into chat, `/model`, tracked files,
++   screenshots, or logs. No TypeSafe SDK or skill installation is required.
++3. Select HER v2, open `/model`, then **Style finalisation**. Choose **ON**.
++   The equivalent text command is `/model style on`; inspect with `/model style`.
++4. In Hybrid mode (or while another configuration draft is open), use the
++   existing **Apply draft** button or `/model apply`. Until Apply, the effective
++   configuration remains unchanged. Single-provider settings save immediately.
++5. The rewrite model is the normal **Quick** selection in `/model`. It is not
++   hard-coded to DeepSeek or to a particular Flash model. Changing Quick changes
++   this editor for future turns as well.
++6. Disable with `/model style off` (and Apply when editing a draft).
++
++The setting is persisted using the existing HER model-configuration transaction.
++It affects future turns; an active turn keeps its captured option and target.
++Enabling explicitly permits the draft and applicable instructions to be sent to
++TypeSafe, and mismatching drafts to the configured Quick provider. Missing keys,
++service errors, malformed answers, or editing timeouts retain the original text
++and emit an internal degradation record, not an extra user-facing message.
++Stop/cancel and mandatory audit-persistence failures keep their existing meaning.
++
++Advanced non-secret parameters may be supplied under the existing `her_v2`
++configuration; `/model` persists only the ON/OFF preference:
++
++```json
++{
++  "style_finalisation": {
++    "enabled": false,
++    "model": "jev-latest",
++    "api_key_env": "TYPESAFE_API_KEY",
++    "check_timeout_s": 5.0,
++    "rewrite_timeout_s": 20.0,
++    "rewrite_probability": 0.7
++  }
++}
++```
++
++These are experimental defaults, not measured latency promises or calibrated
++accuracy guarantees. The endpoint is fixed to `https://api.typesafe.ai/v1/systemone`
++with TLS verification and no redirects. The request/response contract was checked
++against the official `typesafe-ai/typesafe-sdk-python` source at
++`0ffd094c72ed9445223060b24ffd7a56aa781fb4` (constants, endpoints, and Choice answer).
++No new dependency is added to Core or to the repository's runtime lock files.
++
++## Instruction sources and publication
++
++The fixed HER session supplies typed, accepted PCM sections: permanent `[sys]`,
++instance-global `/sys`, Agent-local `/sys`, and presentation Persona. The actual
++current user request is kept separately. History, memories and the answer draft
++are not promoted into system policy. The same immutable snapshot is used for both
++calls; changes made while execution runs do not change the editor's instructions.
++For non-fixed compatibility calls, sources are read once from configured PCM and
++active `/sys` managers. A failed snapshot skips the optional editor.
++
++The original execution record remains unchanged. The selected final text is used
++for **both delivery and TurnResult**, so the conversation does not remember a
++response different from the one displayed. Input over 64,000 characters is not
++silently truncated; the optional pass is skipped. Exact output formats and
++substantive content must be preserved by the prompts, but this experiment does
++not add a factual or semantic-verification gate.
++
++Covered exits: `_run_direct()`, normal Strategic/Planned work completion, and the
++existing post-triage Direct route when Immediate was skipped. Not covered:
++provisionally delivered parallel Immediate answers, progress commentary, native
++voice/rich output, clarification/error notices, and the dormant high-effort full
++review/finalisation flow. Their scheduling and delivery remain unchanged.
++
++## Observability and basic tests
++
++Internal events: `style_checked`, `style_rewritten`, `style_degraded`,
++`style_skipped`, with instruction snapshot hash and selected rewrite target.
++Per-call usage stays in the existing meter under `style_check` and `style_rewrite`.
++Unavailable usage/pricing is not reported as free. API credentials and response
++bodies are not added to these style-decision events.
++
++Focused offline checks:
++
++```bash
++python -m pytest -q tests/test_her_v2_final_style.py
++python scripts/check_protected_core_changes.py
++```
++
++The local sandbox passed 18 non-UI cases (two UI cases require the repository's
++Telegram dependency). They cover the disabled path, keep/uncertain decisions,
++one rewrite, failure fallback, cancellation/audit failure, normal final delivery
++in all three modes, unchanged Immediate behavior, once-only/rich-output guard,
++configuration roundtrip, typed instruction capture, mocked TypeSafe transport,
++Quick routing, and the actual silent tool-free provider helper. UI cases exercise
++saved settings, Hybrid staging/apply, localized labels and escaping. A temporary
++mutation that bypassed the final-style hook made the Direct integration case
++fail; restoring the hook passed. The mutation is not committed.
++
++No real JEV/Quick calls, production restart, live frontend acceptance, broad
++regression suite, or measured quality/latency claims are part of this change.
++For a small local comparison, reuse identical prompts with the option off/on,
++then inspect the actual wording, additional delay, and call receipts.
+diff --git a/locales/runtime/en.json b/locales/runtime/en.json
+index da9b1c6..7310c49 100644
+--- a/locales/runtime/en.json
++++ b/locales/runtime/en.json
+@@ -4,6 +4,13 @@
+   "native_name": "English",
+   "telegram_language_code": "en",
+   "strings": {
++    "menu.her.style.label": "Style finalisation",
++    "menu.her.style.button": "Style finalisation · {state}",
++    "menu.her.style.title": "HER v2 style finalisation",
++    "menu.her.style.scope": "Optional text-only style and Persona fix. No task review or extra commentary.",
++    "menu.her.style.target": "Rewrite model: <code>{target}</code> (Quick/light, reasoning off).",
++    "menu.her.style.effect": "When enabled, the final draft and active instructions are sent to TypeSafe/JEV for one style check. Only a clear mismatch is rewritten once. Requires TYPESAFE_API_KEY. Saved for future turns; existing execution modes are unchanged.",
++    "menu.her.style.usage": "Use /model style on or /model style off. Change the rewrite model through Quick settings.",
+     "common.back": "← Back",
+     "common.refresh": "↻ Refresh",
+     "common.on": "ON",
+diff --git a/locales/runtime/zh-CN.json b/locales/runtime/zh-CN.json
+index 600d45a..30c2633 100644
+--- a/locales/runtime/zh-CN.json
++++ b/locales/runtime/zh-CN.json
+@@ -4,6 +4,13 @@
+   "native_name": "简体中文",
+   "telegram_language_code": "zh",
+   "strings": {
++    "menu.her.style.label": "表达风格整理",
++    "menu.her.style.button": "表达风格整理 · {state}",
++    "menu.her.style.title": "HER v2 表达风格整理",
++    "menu.her.style.scope": "可选的文字风格与人格表达整理，不评审工作，也不增加过程说明。",
++    "menu.her.style.target": "改写模型：<code>{target}</code>（Quick／轻量模型，关闭推理）。",
++    "menu.her.style.effect": "启用后，将最终草稿及本轮有效指令发送至 TypeSafe/JEV 检查一次风格，仅在明确不符时改写一次。需要设置 TYPESAFE_API_KEY。设置保存后对后续请求生效，不改变现有执行模式。",
++    "menu.her.style.usage": "请使用 /model style on 或 /model style off。改写模型随 Quick 设置选择。",
+     "common.back": "← 返回",
+     "common.refresh": "↻ 刷新",
+     "common.on": "开启",
+diff --git a/orchestrator/her_v2/config.py b/orchestrator/her_v2/config.py
+index 7c35374..00e9021 100644
+--- a/orchestrator/her_v2/config.py
++++ b/orchestrator/her_v2/config.py
+@@ -6,6 +6,8 @@ from collections.abc import Mapping
+ from dataclasses import dataclass, field, replace
+ from typing import Any
+ 
++from .final_style import FinalStyleConfig
++
+ from .models import (
+     DEFAULT_ROUTES_BY_STAGE,
+     EXECUTION_ROUTES,
+@@ -181,6 +183,7 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
+ class HERv2Config:
+     profiles: Mapping[str, ProviderProfile]
+     stage_roles: Mapping[Stage, str]
++    style_finalisation: FinalStyleConfig = field(default_factory=FinalStyleConfig)
+     routing_mode: str = "single"
+     stage_reasoning: Mapping[Stage, str] = field(default_factory=dict)
+     slot_models: Mapping[str, str] = field(default_factory=dict)
+@@ -661,6 +664,7 @@ class HERv2Config:
+             },
+         )
+         return cls(
++            style_finalisation=FinalStyleConfig.from_mapping(raw.get("style_finalisation")),
+             profiles=profiles,
+             stage_roles=stage_roles,
+             routing_mode=routing_mode,
