@@ -527,10 +527,8 @@ class WIPJournal:
                 else ""
             )
             transition_failed = event == "transition" and transition_target in {
-                "COMPLETED_WITH_LIMITATIONS",
                 "ERROR",
                 "FAILED",
-                "PENDING_USER_INPUT",
                 "STOPPED",
             }
             if "failed" in event or event == "provider_error" or transition_failed:

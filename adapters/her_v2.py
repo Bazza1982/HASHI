@@ -2025,7 +2025,11 @@ class HERv2Adapter(BaseBackend):
                         and str(record.get("request_ref") or "") == request_ref
                     ],
                 )
-            if ledger_status == "COMPLETED":
+            if ledger_status in {
+                "COMPLETED",
+                "COMPLETED_WITH_LIMITATIONS",
+                "PENDING_USER_INPUT",
+            }:
                 wip_journal.clear_completed()
                 self._record_wip_lifecycle(
                     "wip_journal_cleared",
@@ -2034,7 +2038,7 @@ class HERv2Adapter(BaseBackend):
                     payload={
                         **final_wip_summary,
                         "ledger_status": ledger_status,
-                        "reason": "completed_ledger_durable",
+                        "reason": "settled_ledger_durable",
                     },
                 )
             else:

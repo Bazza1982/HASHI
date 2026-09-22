@@ -1200,9 +1200,18 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
 
         immediate_text = ""
+        immediate_content = ()
         if immediate_pair is not None:
             _immediate_response, immediate_text = immediate_pair
             assert isinstance(immediate_text, str)
+            immediate_content = tuple(immediate_pair[0].content)
+
+        if triage.classification is TriageClassification.DIRECT_RESPONSE:
+            immediate_text = await self._final_style_text(
+                state,
+                immediate_text,
+                content=immediate_content,
+            )
 
         clarification = triage.clarification
         clarification_provenance = ""
@@ -1217,6 +1226,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 text=triage.clarification,
                 event_id=f"{state.ledger.turn_id}:clarification",
             )
+            clarification = await self._final_style_text(state, clarification)
 
         immediate_resolution_delivered = False
         if immediate_delivered_early:
@@ -1244,15 +1254,26 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         )
         if immediate_text and (
             not immediate_delivery_attempted_early or not immediate_delivered_early
-        ):
-            immediate_content = (
-                tuple(immediate_pair[0].content) if immediate_pair else ()
+            or (
+                triage.classification is TriageClassification.DIRECT_RESPONSE
+                and not immediate_resolution_delivered
             )
+        ):
+            immediate_event_id = f"{state.ledger.turn_id}:immediate"
+            if (
+                triage.classification is TriageClassification.DIRECT_RESPONSE
+                and immediate_delivered_early
+                and not immediate_resolution_delivered
+            ):
+                # The provisional transport message could not be promoted or
+                # replaced. Use a fresh idempotency key so the authoritative,
+                # style-checked final is still delivered.
+                immediate_event_id = f"{state.ledger.turn_id}:final"
             await self._deliver(
                 state,
                 kind=immediate_kind,
                 text=immediate_text,
-                event_id=f"{state.ledger.turn_id}:immediate",
+                event_id=immediate_event_id,
                 required=(
                     immediate_kind == "final"
                     or _content_includes_audio(immediate_content)
@@ -2025,6 +2046,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
             if diagnostic not in report:
                 report = f"{report.rstrip()}\n\n{diagnostic}"
+
+        if finalisation is not None:
+            report = await self._final_style_text(state, report)
 
         await self._settle_late_immediate(
             state,

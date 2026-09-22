@@ -30,9 +30,11 @@ and apply only within that boundary.
 3. HASHI durably appends a bounded request boundary for the new turn. While the
    turn is active, selected HER v2 events are projected into small recovery
    facts only after their canonical audit records are durable.
-4. An error, interruption, or other non-`COMPLETED` Ledger state preserves the
-   accumulated Journal. A normal later `COMPLETED` Ledger still clears it
-   atomically after the Ledger commit.
+4. An error, interruption, stop, or other unsettled Ledger state preserves the
+   accumulated Journal. `COMPLETED`, `COMPLETED_WITH_LIMITATIONS`, and
+   `PENDING_USER_INPUT` are settled user-visible boundaries and clear the
+   Journal atomically after the Ledger commit; asking a clarification or
+   disclosing a completed limitation is not unfinished execution.
 5. The user may run `/compact` at any context size. HASHI first commits a
    deterministic recovery capsule into quoted Session history and then clears
    only the exact Journal snapshot that was committed.
@@ -98,9 +100,11 @@ If that primary audit path is unavailable, the durable fallback remains:
 
 ## Legacy `/compact` recovery phase
 
-For legacy Sessions without canonical recovery state, WIP recovery and ordinary
-conversation compaction are independent phases of the same command. Current
-canonical Sessions skip Journal re-ingestion:
+For legacy Sessions without unsettled canonical recovery state, WIP recovery
+and ordinary conversation compaction are independent phases of the same
+command. Current canonical Sessions skip Journal re-ingestion only while the
+canonical recovery row is genuinely active or unresolved. An explicitly
+settled row does not veto clearing a stale shadow Journal:
 
 1. **WIP recovery phase — always eligible.** It snapshots each active current
    Session or legacy Journal, generates a deterministic capsule without a
@@ -151,6 +155,8 @@ behaviour independently inspectable.
 - A non-empty Journal after an interrupted turn or failed recovery commit is
   expected and must produce a warning on each later HER v2 request that sees
   it.
+- A clarification that was delivered and durably settled must not leave an
+  active Journal or produce a later unfinished-work warning.
 - Receiving a recovery summary proves only that bounded context was supplied;
   it does not prove that old work was resumed or completed.
 - A torn final JSONL line is ignored without hiding earlier durable records.

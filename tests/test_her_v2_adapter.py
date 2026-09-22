@@ -617,7 +617,55 @@ async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_p
     assert lifecycle["wip_journal_turn_started"]["context_injected"] is True
     assert lifecycle["wip_journal_context_injected"]["record_count"] == 2
     assert lifecycle["wip_journal_cleared"]["ledger_status"] == "COMPLETED"
+    assert lifecycle["wip_journal_cleared"]["reason"] == "settled_ledger_durable"
     assert lifecycle["wip_journal_cleared"]["record_count"] > 2
+
+
+@pytest.mark.asyncio
+async def test_adapter_clears_wip_after_settled_user_input_boundary(tmp_path):
+    class _ClarificationProvider(_DirectProvider):
+        async def invoke(self, profile, request):
+            response = await super().invoke(profile, request)
+            if request.stage is Stage.TRIAGE:
+                data = dict(response.data)
+                data["classification"] = "CONFIRMATION_REQUIRED"
+                data["real_goal"] = None
+                data["clarification"] = "Which account should be changed?"
+                return StageResponse(
+                    data=data,
+                    provider=response.provider,
+                    model=response.model,
+                )
+            return response
+
+    config = _agent_config(tmp_path)
+    setattr(config, "_her_v2_stage_provider", _ClarificationProvider())
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+    assert adapter._wip_journal is not None
+
+    response = await adapter.generate_response(
+        "Change the account",
+        "req-clarification",
+    )
+
+    assert response.is_success is True
+    assert response.text == "Which account should be changed?"
+    assert adapter._wip_journal.records() == []
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "agent" / "her_v2_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    cleared = next(
+        row["payload"]
+        for row in audit_rows
+        if row["stage"] == "wip_journal"
+        and row["event"] == "wip_journal_cleared"
+    )
+    assert cleared["ledger_status"] == "PENDING_USER_INPUT"
+    assert cleared["reason"] == "settled_ledger_durable"
 
 
 @pytest.mark.asyncio

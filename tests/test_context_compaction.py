@@ -2700,6 +2700,100 @@ async def test_compact_below_64k_preserves_wip_capsule_then_clears_journal(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_compact_ignores_settled_canonical_recovery_and_clears_stale_wip(
+    tmp_path,
+):
+    runtime = _Runtime(tmp_path)
+    runtime._last_full_prompt_tokens = 6_917
+    session = runtime_session.initialize_runtime_sessions(runtime)
+    workspace = runtime_session.ensure_store(runtime).session_workspace(
+        session["session_id"], int(session["context_generation"])
+    )
+    journal = WIPJournal(
+        workspace / "backend_state" / "her_v2" / "wip_journal.jsonl"
+    )
+    journal.begin_turn(
+        request_id="req-settled",
+        prompt="Which account?",
+        session_id=session["session_id"],
+        context_generation=int(session["context_generation"]),
+    )
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=session["session_id"],
+        _session_coordinator=SimpleNamespace(
+            store=SimpleNamespace(
+                active_turn_recovery=lambda _session_id: {
+                    "status": "settled",
+                    "recovery_disposition": "settled",
+                }
+            )
+        ),
+    )
+
+    result = await execute_local_command(
+        runtime,
+        "/compact",
+        session_metadata={
+            "session_id": session["session_id"],
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+        },
+    )
+
+    text = result["messages"][0]["text"]
+    assert "WIP recovery compacted" in text
+    assert "WIP_RECOVERY_COMPACTED" in text
+    assert "Context compaction not needed" in text
+    assert journal.snapshot().active is False
+
+
+@pytest.mark.asyncio
+async def test_compact_reports_and_preserves_unsettled_canonical_recovery(tmp_path):
+    runtime = _Runtime(tmp_path)
+    runtime._last_full_prompt_tokens = 6_917
+    session = runtime_session.initialize_runtime_sessions(runtime)
+    workspace = runtime_session.ensure_store(runtime).session_workspace(
+        session["session_id"], int(session["context_generation"])
+    )
+    journal = WIPJournal(
+        workspace / "backend_state" / "her_v2" / "wip_journal.jsonl"
+    )
+    journal.begin_turn(
+        request_id="req-active",
+        prompt="unfinished work",
+        session_id=session["session_id"],
+        context_generation=int(session["context_generation"]),
+    )
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=session["session_id"],
+        _session_coordinator=SimpleNamespace(
+            store=SimpleNamespace(
+                active_turn_recovery=lambda _session_id: {
+                    "status": "terminated",
+                    "recovery_disposition": "UNKNOWN_SIDE_EFFECT",
+                }
+            )
+        ),
+    )
+
+    result = await execute_local_command(
+        runtime,
+        "/compact",
+        session_metadata={
+            "session_id": session["session_id"],
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+        },
+    )
+
+    text = result["messages"][0]["text"]
+    assert "Canonical recovery retained" in text
+    assert "CANONICAL_RECOVERY_AUTHORITATIVE" in text
+    assert "still unsettled" in text
+    assert journal.snapshot().active is True
+
+
+@pytest.mark.asyncio
 async def test_compact_wip_commit_failure_preserves_journal_and_stops_history_phase(
     tmp_path,
     monkeypatch,

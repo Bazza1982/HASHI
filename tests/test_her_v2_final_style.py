@@ -14,7 +14,11 @@ from adapters.her_v2_style import capture_style_context, make_final_style_pass
 from orchestrator.her_v2.audit import AuditPersistenceError
 from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
 from orchestrator.her_v2.final_style import FinalStyleConfig, FinalStylePass
-from orchestrator.her_v2.interfaces import TurnStopped
+from orchestrator.her_v2.interfaces import (
+    RecordingDelivery,
+    StageInvocationError,
+    TurnStopped,
+)
 from orchestrator.her_v2.models import Effort, Route, Stage, StageResponse, TerminalState
 from orchestrator.her_v2.runtime_configuration import (
     apply_her_v2_runtime_configuration, resolve_her_v2_configuration,
@@ -107,13 +111,146 @@ async def test_final_text_is_rewritten_once_without_altering_execution(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_parallel_immediate_answer_path_is_unchanged(tmp_path):
+async def test_parallel_immediate_answer_uses_final_style_pass(tmp_path):
     provider = ScriptedProvider(_initial("DIRECT_RESPONSE"))
     runtime = _runtime(tmp_path, provider)
     gate, check, rewrite, _ = _pass()
     runtime.final_style = gate
     result = await runtime.run_turn("Hi", "r", effort=Effort.LOW)
     assert result.final_was_immediate
+    assert result.text == "Done. Here is the result."
+    assert [(record.kind, record.text) for record in runtime.delivery.records] == [
+        ("final", result.text)
+    ]
+    check.assert_awaited_once()
+    rewrite.assert_awaited_once()
+    assert check.call_args.args[0]["draft_response"] == "I have it."
+
+
+@pytest.mark.asyncio
+async def test_immediate_resolution_failure_delivers_fresh_styled_final(tmp_path):
+    class RejectingResolutionDelivery(RecordingDelivery):
+        async def resolve_initial(self, **_kwargs):
+            return False
+
+    provider = ScriptedProvider(
+        _initial("DIRECT_RESPONSE"),
+        delays={Stage.IMMEDIATE_RESPONSE: 0.001, Stage.TRIAGE: 0.05},
+    )
+    delivery = RejectingResolutionDelivery()
+    runtime = _runtime(tmp_path, provider, delivery=delivery)
+    gate, check, rewrite, _ = _pass()
+    runtime.final_style = gate
+
+    result = await runtime.run_turn("Hi", "r-resolution", effort=Effort.LOW)
+
+    assert result.final_was_immediate
+    assert result.final_already_delivered is False
+    assert [(record.kind, record.text) for record in delivery.records] == [
+        ("immediate", "I have it."),
+        ("final", "Done. Here is the result."),
+    ]
+    check.assert_awaited_once()
+    rewrite.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_triage_clarification_uses_final_style_pass(tmp_path):
+    provider = ScriptedProvider(
+        _initial(
+            "CONFIRMATION_REQUIRED",
+            clarification="Which account should be changed?",
+        )
+    )
+    runtime = _runtime(tmp_path, provider)
+    gate, check, rewrite, _ = _pass()
+    runtime.final_style = gate
+
+    result = await runtime.run_turn(
+        "Change the account",
+        "request-confirm",
+        effort=Effort.LOW,
+    )
+
+    assert result.terminal_state is TerminalState.PENDING_USER_INPUT
+    assert result.text == "Done. Here is the result."
+    assert runtime.delivery.records[-1].kind == "clarification"
+    assert runtime.delivery.records[-1].text == result.text
+    check.assert_awaited_once()
+    rewrite.assert_awaited_once()
+    assert (
+        check.call_args.args[0]["draft_response"]
+        == "Which account should be changed?"
+    )
+
+
+@pytest.mark.asyncio
+async def test_combined_finalisation_report_uses_final_style_pass(tmp_path):
+    original = "Implementation report: completed with the recorded evidence."
+    provider = ScriptedProvider(
+        {
+            **_initial("COMPLEX_TASK"),
+            Stage.PLANNING: [{"plan": ["Make change"]}],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Completed."}
+            ],
+            Stage.REVIEW: [
+                {"outcome": "PASS", "summary": "Evidence is sufficient."}
+            ],
+            Stage.FINALISATION: [{"report": original}],
+        }
+    )
+    runtime = _runtime(tmp_path, provider)
+    gate, check, rewrite, _ = _pass()
+    runtime.final_style = gate
+
+    result = await runtime.run_turn(
+        "Make the change; be brief.",
+        "request-finalisation",
+        effort=Effort.XHIGH,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Done. Here is the result."
+    assert runtime.delivery.records[-1].text == result.text
+    assert any(
+        request.stage is Stage.FINALISATION
+        for _profile, request in provider.requests
+    )
+    check.assert_awaited_once()
+    rewrite.assert_awaited_once()
+    assert check.call_args.args[0]["draft_response"] == original
+
+
+@pytest.mark.asyncio
+async def test_deterministic_finalisation_error_is_not_style_rewritten(tmp_path):
+    provider = ScriptedProvider(
+        {
+            **_initial("COMPLEX_TASK"),
+            Stage.PLANNING: [{"plan": ["Make change"]}],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Completed."}
+            ],
+            Stage.REVIEW: [
+                {"outcome": "PASS", "summary": "Evidence is sufficient."}
+            ],
+            Stage.FINALISATION: [
+                StageInvocationError("finalisation unavailable", retryable=False)
+            ],
+        }
+    )
+    runtime = _runtime(tmp_path, provider)
+    gate, check, rewrite, _ = _pass()
+    runtime.final_style = gate
+
+    result = await runtime.run_turn(
+        "Make the change.",
+        "request-finalisation-error",
+        effort=Effort.XHIGH,
+    )
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert "could not produce a trustworthy final report" in result.text
     check.assert_not_awaited()
     rewrite.assert_not_awaited()
 

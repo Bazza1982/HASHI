@@ -87,11 +87,13 @@ silently truncated; the optional pass is skipped. Exact output formats and
 substantive content must be preserved by the prompts, but this experiment does
 not add a factual or semantic-verification gate.
 
-Covered exits: `_run_direct()`, normal Strategic/Planned work completion, and the
-existing post-triage Direct route when Immediate was skipped. Not covered:
-provisionally delivered parallel Immediate answers, progress commentary, native
-voice/rich output, clarification/error notices, and the dormant high-effort full
-review/finalisation flow. Their scheduling and delivery remain unchanged.
+Covered exits: `_run_direct()`, post-triage Direct, parallel Immediate answers
+once Triage confirms they are final, normal Strategic/Planned work completion,
+required clarifications, and the high-effort Review/Finalisation report. The
+pass still runs at most once per turn. Provisional acknowledgements and progress
+commentary are not terminal text and are not edited. Native voice/rich output,
+deterministic technical errors, stop notices, and runtime-authored safety
+fallbacks remain exact and are intentionally excluded.
 
 ## Observability and basic tests
 
@@ -108,15 +110,12 @@ python -m pytest -q tests/test_her_v2_final_style.py
 python scripts/check_protected_core_changes.py
 ```
 
-The local sandbox passed 18 non-UI cases (two UI cases require the repository's
-Telegram dependency). They cover the disabled path, keep/uncertain decisions,
-one rewrite, failure fallback, cancellation/audit failure, normal final delivery
-in all three modes, unchanged Immediate behavior, once-only/rich-output guard,
+The focused suite covers the disabled path, keep/uncertain decisions, one
+rewrite, failure fallback, cancellation/audit failure, every eligible terminal
+text exit, once-only/rich-output guards, exact runtime error fallbacks,
 configuration roundtrip, typed instruction capture, mocked TypeSafe transport,
-Quick routing, and the actual silent tool-free provider helper. UI cases exercise
-saved settings, Hybrid staging/apply, localized labels and escaping. A temporary
-mutation that bypassed the final-style hook made the Direct integration case
-fail; restoring the hook passed. The mutation is not committed.
+Quick routing, and the actual silent tool-free provider helper. UI cases
+exercise saved settings, Hybrid staging/apply, localized labels and escaping.
 
 No broad rollout, formal frontend acceptance, or measured quality/latency claim
 is part of this experiment. For a small local comparison, reuse identical
@@ -148,3 +147,29 @@ Isolated Python 3.12 runner, full focused module (including UI): `21 passed`.
   was separately exercised with the same real JEV and Quick provider before
   adoption; it was not forced when the live canary already met its requested
   style.
+
+## HASHI2 bypass and recovery correction — 2026-09-22
+
+- **Approval:** the current user approved correcting the observed recovery bug
+  and all model-authored terminal exits that bypassed Style finalisation on the
+  HASHI2 experiment branch.
+- **Observed red evidence:** Arale produced JEV receipts for a normal final
+  answer, but recent Direct and clarification turns had no `style_check`
+  receipt. A normal clarification also left a 23-record WIP shadow, and
+  `/compact` reported the 64,000-token history threshold instead of clearing
+  that stale shadow because a settled canonical recovery row was mistaken for
+  an active recovery.
+- **Implementation:** Direct answers, clarifications, and high-effort
+  Finalisation reports now use the same once-only style pass. Settled
+  `PENDING_USER_INPUT` boundaries clear their WIP shadow. `/compact` ignores an
+  explicitly settled canonical recovery row, while unknown or genuinely
+  unsettled canonical recovery remains fail-closed and visibly retained.
+- **Boundary:** commentary, acknowledgements, rich output, stop notices, and
+  deterministic technical/safety text remain outside the style pass.
+- **Offline validation:** 44 focused Style/WIP/Compact regressions passed; the
+  extended HER v2 runtime/adapter/recovery suite passed 311 tests with one
+  intentional skip. Changed Python files compiled, locale catalogues validated,
+  and the protected-Core gate passed.
+- **Adoption:** source and offline verification are separate from the running
+  HASHI2 Function generation. Live adoption requires separately authorised
+  Function replacement.

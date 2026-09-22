@@ -118,8 +118,12 @@ disabled by default. It asks TypeSafe/JEV one presentation-only question and,
 only for a clear mismatch, performs one silent text-only rewrite through the
 configured Quick/light target with reasoning and tools off. It is not task
 review, replanning, fact checking, or the legacy Finalisation stage. Failure
-publishes the original answer. Credentials come from `TYPESAFE_API_KEY` or the
-instance-local `typesafe_api_key` secret; never place them in tracked config.
+publishes the original answer. Eligible terminal text includes Direct answers,
+required clarifications, ordinary work results, and reviewed Finalisation
+reports. Progress/acknowledgement text, rich output, stop notices, and
+deterministic technical or safety fallbacks are intentionally not rewritten.
+Credentials come from `TYPESAFE_API_KEY` or the instance-local
+`typesafe_api_key` secret; never place them in tracked config.
 
 Use current metadata for context, price, effort, and modality. Media needs model,
 Adapter, and policy support; distinguish unknown, unsupported, unimplemented,

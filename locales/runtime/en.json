@@ -2039,6 +2039,8 @@
     "compact.wip.completed_message": "Unfinished HER v2 work was converted into deterministic quoted Session context, then its active Journal was cleared.",
     "compact.wip.completed": "✅ WIP recovery compacted",
     "compact.wip.failed": "⚠️ WIP recovery failed safely",
+    "compact.wip.canonical_retained": "ℹ️ Canonical recovery retained",
+    "compact.wip.canonical_message": "Canonical HER recovery is still unsettled. Its WIP shadow was preserved and was not copied into Session history.",
     "compact.code": "Code",
     "compact.recovery_capsule": "Recovery capsule",
     "compact.chars": "characters",

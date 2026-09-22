@@ -2039,6 +2039,8 @@
     "compact.wip.completed_message": "未完成的 HER v2 工作已转换为确定性的引用会话上下文，随后启用中的恢复日志已清理。",
     "compact.wip.completed": "✅ 已压缩未完成工作恢复信息",
     "compact.wip.failed": "⚠️ 未完成工作恢复安全失败",
+    "compact.wip.canonical_retained": "ℹ️ 已保留规范恢复状态",
+    "compact.wip.canonical_message": "规范 HER 恢复状态尚未结算。其 WIP 影子记录已保留，且没有复制进会话历史。",
     "compact.code": "代码",
     "compact.recovery_capsule": "恢复摘要",
     "compact.chars": "字符",

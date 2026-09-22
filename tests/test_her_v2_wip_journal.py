@@ -255,6 +255,46 @@ def test_recovery_capsule_does_not_label_normal_lifecycle_transition_as_failure(
     assert capsule["failures"][0]["facts"]["to"] == "ERROR"
 
 
+def test_recovery_capsule_does_not_label_user_input_boundary_as_failure(tmp_path):
+    journal = WIPJournal(tmp_path / "wip.jsonl")
+    journal.begin_turn(request_id="req-1", prompt="needs a choice")
+    journal.append_audit(
+        {
+            "event": "transition",
+            "stage": "lifecycle",
+            "payload": {
+                "from": "TRIAGED",
+                "to": "PENDING_USER_INPUT",
+                "terminal_reason": "confirmation_required",
+            },
+        }
+    )
+
+    capsule = journal.recovery_capsule(journal.snapshot().records)
+
+    assert capsule["failures"] == []
+
+
+def test_recovery_capsule_does_not_label_limited_completion_as_failure(tmp_path):
+    journal = WIPJournal(tmp_path / "wip.jsonl")
+    journal.begin_turn(request_id="req-1", prompt="complete with limitations")
+    journal.append_audit(
+        {
+            "event": "transition",
+            "stage": "lifecycle",
+            "payload": {
+                "from": "FINALISING",
+                "to": "COMPLETED_WITH_LIMITATIONS",
+                "terminal_reason": "completed_with_disclosed_limitations",
+            },
+        }
+    )
+
+    capsule = journal.recovery_capsule(journal.snapshot().records)
+
+    assert capsule["failures"] == []
+
+
 def test_audit_observer_receives_only_after_durable_audit_write(tmp_path):
     observed = []
     audit = DurableAuditLog(

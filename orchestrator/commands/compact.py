@@ -80,6 +80,20 @@ def _coordinator_running(coordinator: Any) -> bool:
     return bool(task is not None and callable(done) and not done())
 
 
+def _canonical_recovery_is_unsettled(recovery: Mapping[str, Any]) -> bool:
+    status = str(recovery.get("status") or "").strip().casefold()
+    disposition = str(
+        recovery.get("recovery_disposition") or ""
+    ).strip().casefold()
+    if status in {"settled", "archived"}:
+        return False
+    if disposition in {"settled", "cancelled"}:
+        return False
+    # Missing or unknown fields fail closed: only an explicitly settled
+    # canonical row allows the legacy/shadow Journal to be ingested.
+    return True
+
+
 def _compact_wip_journals(
     runtime: Any,
     *,
@@ -100,7 +114,9 @@ def _compact_wip_journals(
         if session_id and callable(recovery_getter)
         else None
     )
-    if isinstance(canonical_recovery, Mapping):
+    if isinstance(canonical_recovery, Mapping) and _canonical_recovery_is_unsettled(
+        canonical_recovery
+    ):
         # New sessions recover from the canonical SQLite state. The WIP file
         # remains a comparison shadow during the retirement window and must
         # not be ingested into history a second time.
@@ -111,7 +127,7 @@ def _compact_wip_journals(
             journal_count=len(journals),
             record_count=sum(snapshot.record_count for snapshot in snapshots),
             source_bytes=sum(snapshot.size_bytes for snapshot in snapshots),
-            message="Canonical HER recovery state retained; WIP is shadow-only.",
+            message=ui_language.tr("compact.wip.canonical_message"),
         )
     committed = 0
     record_count = 0
@@ -281,6 +297,20 @@ def _outcome_text(
             ]
         )
         return "\n".join(lines)
+    elif (
+        wip is not None
+        and wip.code == "CANONICAL_RECOVERY_AUTHORITATIVE"
+    ):
+        lines.extend(
+            [
+                f"<b>{ui_language.tr('compact.wip.canonical_retained')}</b>",
+                f"<b>{html.escape(ui_language.tr('compact.code'))}</b> Â· <code>{html.escape(wip.code)}</code>",
+                f"<b>{html.escape(ui_language.tr('compact.recovery_records'))}</b> Â· <code>{wip.record_count:,}</code>",
+                "",
+                html.escape(wip.message),
+                "",
+            ]
+        )
     title = {
         "completed": ui_language.tr("compact.outcome.completed"),
         "not_needed": ui_language.tr("compact.outcome.not_needed"),
