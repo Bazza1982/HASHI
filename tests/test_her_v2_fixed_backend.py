@@ -353,7 +353,9 @@ def test_current_message_context_is_explicitly_upserted_and_cleared_each_turn(tm
     ]
 
 
-def test_resource_delta_sends_only_additions_and_explicit_revocations(tmp_path):
+def test_resource_delta_is_incremental_while_attachments_stay_bound_to_their_turn(
+    tmp_path,
+):
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     first_resource = {
         "attachment_id": "attachment-a",
@@ -368,43 +370,89 @@ def test_resource_delta_sends_only_additions_and_explicit_revocations(tmp_path):
     first_transport, _audit = _prepare(
         coordinator,
         request_id="turn-1",
-        message="First",
+        message="Review alpha.png",
         resources=[first_resource],
     )
+    first_payload = json.loads(first_transport.split("\n", 1)[1])
+    assert first_payload["initial_turn"]["resource_keys"] == [
+        "attachment_id:attachment-a"
+    ]
     first = coordinator.accept(first_transport)
-    coordinator.complete(first, assistant_text="Done")
+    assert "CURRENT MESSAGE ATTACHMENTS" in first.materialized_prompt
+    assert "alpha.png" in first.materialized_prompt
+    coordinator.complete(first, assistant_text="Alpha reviewed")
+
+    no_attachment_transport, no_attachment_audit = _prepare(
+        coordinator,
+        request_id="turn-2",
+        message="Now answer an unrelated question",
+    )
+    no_attachment_payload = json.loads(no_attachment_transport.split("\n", 1)[1])
+    assert no_attachment_payload["resource_delta"]["attachments_added"] == []
+    assert no_attachment_payload["resource_delta"]["attachments_revoked"] == []
+    assert no_attachment_payload["turn"]["resource_keys"] == []
+    assert "alpha.png" not in no_attachment_transport
+    assert no_attachment_audit["resource_attachments_unchanged"] == 0
+    no_attachment = coordinator.accept(no_attachment_transport)
+    current_context, history = no_attachment.materialized_prompt.split(
+        "--- HER FIXED SESSION CONTINUITY — CONTEXT ONLY ---", 1
+    )
+    assert "alpha.png" not in current_context
+    assert "Review alpha.png" in history
+    assert "alpha.png" in history
+    assert "ATTACHMENTS ON THIS HISTORICAL EXCHANGE" in history
+    assert no_attachment.resource_attachments == ()
+    coordinator.complete(no_attachment, assistant_text="Unrelated answer")
 
     unchanged_transport, unchanged_audit = _prepare(
         coordinator,
-        request_id="turn-2",
-        message="Second",
+        request_id="turn-3",
+        message="Review alpha.png again",
         resources=[first_resource],
     )
     unchanged_payload = json.loads(unchanged_transport.split("\n", 1)[1])
     assert unchanged_payload["resource_delta"]["attachments_added"] == []
     assert unchanged_payload["resource_delta"]["attachments_revoked"] == []
-    assert "alpha.png" not in unchanged_transport
+    assert unchanged_payload["turn"]["resource_keys"] == [
+        "attachment_id:attachment-a"
+    ]
+    assert '"filename":"alpha.png"' not in unchanged_transport
     assert unchanged_audit["resource_attachments_unchanged"] == 1
     unchanged = coordinator.accept(unchanged_transport)
-    assert "alpha.png" in unchanged.materialized_prompt
-    coordinator.complete(unchanged, assistant_text="Done again")
+    current_context = unchanged.materialized_prompt.split(
+        "--- HER FIXED SESSION CONTINUITY — CONTEXT ONLY ---", 1
+    )[0]
+    assert "CURRENT MESSAGE ATTACHMENTS" in current_context
+    assert "alpha.png" in current_context
+    assert unchanged.resource_attachments == (first_resource,)
+    coordinator.complete(unchanged, assistant_text="Alpha reviewed again")
 
     added_transport, _audit = _prepare(
         coordinator,
-        request_id="turn-3",
-        message="Third",
+        request_id="turn-4",
+        message="Review beta.png",
         resources=[second_resource],
     )
     added_payload = json.loads(added_transport.split("\n", 1)[1])
     assert added_payload["resource_delta"]["attachments_added"] == [second_resource]
+    assert added_payload["turn"]["resource_keys"] == [
+        "attachment_id:attachment-b"
+    ]
     assert "alpha.png" not in added_transport
     added = coordinator.accept(added_transport)
-    coordinator.complete(added, assistant_text="Third done")
+    current_context, history = added.materialized_prompt.split(
+        "--- HER FIXED SESSION CONTINUITY — CONTEXT ONLY ---", 1
+    )
+    assert "beta.png" in current_context
+    assert "alpha.png" not in current_context
+    assert "alpha.png" in history
+    assert added.resource_attachments == (second_resource,)
+    coordinator.complete(added, assistant_text="Beta reviewed")
 
     revoked_transport, _audit = _prepare(
         coordinator,
-        request_id="turn-4",
-        message="Fourth",
+        request_id="turn-5",
+        message="Forget the old alpha attachment",
         revoked_resource_ids=["attachment-a"],
     )
     revoked_payload = json.loads(revoked_transport.split("\n", 1)[1])
@@ -417,6 +465,50 @@ def test_resource_delta_sends_only_additions_and_explicit_revocations(tmp_path):
         "attachments"
     ]
     assert [item["attachment_id"] for item in resources] == ["attachment-b"]
+
+
+def test_cancelled_turn_attachment_is_not_activated_by_a_later_turn(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    stale_resource = {
+        "attachment_id": "attachment-stale",
+        "filename": "three-days-old.pdf",
+        "sha256": "c" * 64,
+    }
+    first_transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-1",
+        message="Read this old PDF",
+        resources=[stale_resource],
+    )
+    first = coordinator.accept(first_transport)
+    coordinator.cancel(first, reason="This request was cancelled")
+
+    second_transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-2",
+        message="Describe the new image",
+    )
+    second = coordinator.accept(second_transport)
+
+    assert "three-days-old.pdf" not in second.materialized_prompt
+    assert second.resource_attachments == ()
+
+
+def test_turn_resource_reference_must_exist_before_session_state_is_written(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-1",
+        message="Read the attachment",
+    )
+    payload = json.loads(transport.split("\n", 1)[1])
+    payload["initial_turn"]["resource_keys"] = ["attachment_id:not-present"]
+
+    with pytest.raises(HerFixedProtocolError) as caught:
+        coordinator.accept(coordinator.encode(payload))
+
+    assert caught.value.code == "invalid_turn_resources"
+    assert coordinator.store.session("her-session-1") is None
 
 
 def test_append_rejects_canonical_sequence_conflict_before_model_work(tmp_path):

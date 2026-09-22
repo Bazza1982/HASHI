@@ -35,6 +35,7 @@ follow the red/green failure-proof rule in [TESTING_POLICY.md](TESTING_POLICY.md
 | A Fixed incremental request contains only the current user text and no PCM background. | Replace. | Fixed mode omits repeated recent history after bootstrap but sends current delta PCM on every external user turn. |
 | Flat string position alone establishes PCM authority. | Replace. | A typed authority envelope separates system instructions, the current user request, memory, runtime context and persona; adapter rendering must preserve those semantics. |
 | A history cap may retain older chats while clipping or discarding newer chats. | Replace wherever present. | Capacity pruning removes the oldest complete exchanges first, preserves newer complete exchanges, protects the current request and higher-authority PCM, and audits omissions. |
+| Every attachment accumulated in a fixed Engine Session remains a current resource on every later Turn until explicitly revoked. | Replace. | The session registry remains incremental transport/audit state, while each Turn records its own attachment references. Only the current Turn's attachments appear as current references; completed historical attachments remain bound to their chronological exchange, and failed or cancelled Turn attachments are not projected into later Turns. |
 
 ### 2.1 Exact tests that need semantic rewrites
 
@@ -50,6 +51,7 @@ be renamed or rewritten rather than merely patched until green:
 - `test_context_profiles_separate_persistent_cli_and_stateless_api_memory`
 - `test_incremental_memory_plus_prompt_keeps_authoritative_request_marker_without_background`
 - `test_fixed_session_backend_uses_incremental_prompt`
+- `test_resource_delta_sends_only_additions_and_explicit_revocations`
 - HASHI-side transfer assertions that expect a persisted `system_md` field or an unstructured identity document
 
 Configuration tests that merely use `system_md` as unrelated fixture data

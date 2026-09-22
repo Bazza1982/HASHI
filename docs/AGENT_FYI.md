@@ -77,12 +77,16 @@ Message/Run; required failure rejects it, never creates per-file Turns.
 Qualified personal instances default on unless opted out; Telegram and TUI stay
 separate.
 
-Frontend-published files remain part of that Message. Bound audio is promoted
-to indefinite retention and the authenticated transcript route may read its
-isolated audio store; validating only the database row is not delivery proof.
-Verify the real play/download route. Per-turn meter output is one
-presentation-only Session message shared by Telegram and Workbench and never
-enters Agent or Engine history.
+Frontend-published files remain part of that Message. A cumulative Engine
+resource registry is transport/audit state, not a relevance selector: only the
+current Message's attachments are current references, while completed older
+attachments stay inside their chronological exchanges and failed/cancelled
+attachments never leak forward. Bound audio is promoted to indefinite retention
+and the authenticated transcript route may read its isolated audio store;
+validating only the database row is not delivery proof. Verify the real
+play/download route. Per-turn meter output is one presentation-only Session
+message shared by Telegram and Workbench and never enters Agent or Engine
+history.
 
 Every input has protected `CURRENT MESSAGE CONTEXT`. Keep source, ingress,
 instance, sender assurance, authorization, and destination distinct. Only a

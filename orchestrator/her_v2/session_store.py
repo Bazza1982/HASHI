@@ -13,7 +13,7 @@ import json
 import os
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -113,6 +113,21 @@ def _resource_map(
     return normalized
 
 
+def _turn_resource_keys(values: Sequence[str]) -> list[str]:
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise HerSessionStoreError(
+            "invalid_turn_resources",
+            "Every HER Turn resource key must be a non-empty string.",
+        )
+    normalized = [value.strip() for value in values]
+    if len(normalized) != len(set(normalized)):
+        raise HerSessionStoreError(
+            "invalid_turn_resources",
+            "A HER Turn resource key occurs more than once.",
+        )
+    return sorted(normalized)
+
+
 class HerSessionStoreError(RuntimeError):
     """Typed durable-session conflict raised before model or tool work."""
 
@@ -202,6 +217,7 @@ class HerSessionStore:
                     resource_revision INTEGER NOT NULL DEFAULT 0,
                     authority_digest TEXT NOT NULL DEFAULT '',
                     user_message TEXT NOT NULL,
+                    resource_refs_json TEXT NOT NULL DEFAULT '[]',
                     assistant_text TEXT,
                     error_text TEXT,
                     status TEXT NOT NULL,
@@ -346,6 +362,7 @@ class HerSessionStore:
                     "pcm_revision": "INTEGER NOT NULL DEFAULT 0",
                     "resource_revision": "INTEGER NOT NULL DEFAULT 0",
                     "authority_digest": "TEXT NOT NULL DEFAULT ''",
+                    "resource_refs_json": "TEXT NOT NULL DEFAULT '[]'",
                     "routing_revision": "INTEGER NOT NULL DEFAULT 0",
                     "capability_revision": "INTEGER NOT NULL DEFAULT 0",
                     "pricing_revision": "TEXT NOT NULL DEFAULT ''",
@@ -417,6 +434,9 @@ class HerSessionStore:
         result = dict(row)
         result["route_snapshot"] = _object(
             result.pop("route_snapshot_json", "{}")
+        )
+        result["resource_attachments"] = _array(
+            result.pop("resource_refs_json", "[]")
         )
         return result
 
@@ -521,7 +541,12 @@ class HerSessionStore:
                 """,
                 (str(session_id), max(0, int(limit))),
             ).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        result: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            turn = self._turn_dict(row)
+            if turn is not None:
+                result.append(turn)
+        return result
 
     @staticmethod
     def _assert_binding(
@@ -748,6 +773,7 @@ class HerSessionStore:
         message_id: str,
         idempotency_key: str,
         user_message: str,
+        turn_resource_keys: Sequence[str] = (),
         execution_owner_id: str = "",
         execution_owner_pid: int = 0,
         execution_owner_started_at: str = "",
@@ -758,6 +784,18 @@ class HerSessionStore:
         resource_state = dict(resources)
         initial_attachments = list(resource_state.get("attachments") or [])
         initial_resource_map = _resource_map(initial_attachments)
+        current_turn_resource_keys = _turn_resource_keys(turn_resource_keys)
+        missing_turn_resources = set(current_turn_resource_keys) - set(
+            initial_resource_map
+        )
+        if missing_turn_resources:
+            raise HerSessionStoreError(
+                "invalid_turn_resources",
+                "HER Turn references an attachment outside its materialised resource state.",
+            )
+        turn_resources = [
+            initial_resource_map[key] for key in current_turn_resource_keys
+        ]
         resource_digest = str(resource_state.get("digest") or "")
         if resource_digest != _digest(initial_resource_map):
             raise HerSessionStoreError(
@@ -793,6 +831,12 @@ class HerSessionStore:
                     if (
                         str(duplicate["message_id"]) != message_id
                         or str(duplicate["user_message"]) != user_message
+                        or sorted(
+                            _resource_map(
+                                _array(duplicate["resource_refs_json"])
+                            )
+                        )
+                        != current_turn_resource_keys
                     ):
                         raise HerSessionStoreError(
                             "duplicate_message_conflict",
@@ -879,10 +923,11 @@ class HerSessionStore:
                 INSERT INTO her_turns(
                     session_id, turn_id, request_id, message_id,
                     idempotency_key, sequence, pcm_revision, resource_revision,
-                    authority_digest, user_message, execution_owner_id,
+                    authority_digest, user_message, resource_refs_json,
+                    execution_owner_id,
                     execution_owner_pid, execution_owner_started_at,
                     execution_lease_updated_at, status, accepted_at
-                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
                 """,
                 (
                     session_id,
@@ -894,6 +939,7 @@ class HerSessionStore:
                     int(resource_revision),
                     authority_digest,
                     user_message,
+                    _json(turn_resources),
                     str(execution_owner_id),
                     max(0, int(execution_owner_pid or 0)),
                     str(execution_owner_started_at),
@@ -2226,11 +2272,13 @@ class HerSessionStore:
         message_id: str,
         idempotency_key: str,
         user_message: str,
+        turn_resource_keys: Sequence[str] = (),
         execution_owner_id: str = "",
         execution_owner_pid: int = 0,
         execution_owner_started_at: str = "",
     ) -> dict[str, Any]:
         now = _utc_now()
+        current_turn_resource_keys = _turn_resource_keys(turn_resource_keys)
         with self._transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM her_sessions WHERE session_id = ?",
@@ -2258,6 +2306,10 @@ class HerSessionStore:
                 if (
                     str(duplicate["message_id"]) != message_id
                     or str(duplicate["user_message"]) != user_message
+                    or sorted(
+                        _resource_map(_array(duplicate["resource_refs_json"]))
+                    )
+                    != current_turn_resource_keys
                 ):
                     raise HerSessionStoreError(
                         "duplicate_message_conflict",
@@ -2340,6 +2392,17 @@ class HerSessionStore:
             resource_map.update(additions)
             for key in revocations:
                 resource_map.pop(key, None)
+            missing_turn_resources = set(current_turn_resource_keys) - set(
+                resource_map
+            )
+            if missing_turn_resources:
+                raise HerSessionStoreError(
+                    "invalid_turn_resources",
+                    "HER Turn references an attachment outside its materialised resource state.",
+                )
+            turn_resources = [
+                resource_map[key] for key in current_turn_resource_keys
+            ]
             attachments = [resource_map[key] for key in sorted(resource_map)]
             if str(resource_target_digest or "") != _digest(resource_map):
                 raise HerSessionStoreError(
@@ -2367,10 +2430,11 @@ class HerSessionStore:
                 INSERT INTO her_turns(
                     session_id, turn_id, request_id, message_id,
                     idempotency_key, sequence, pcm_revision, resource_revision,
-                    authority_digest, user_message, execution_owner_id,
+                    authority_digest, user_message, resource_refs_json,
+                    execution_owner_id,
                     execution_owner_pid, execution_owner_started_at,
                     execution_lease_updated_at, status, accepted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
                 """,
                 (
                     session_id,
@@ -2383,6 +2447,7 @@ class HerSessionStore:
                     int(resource_target_revision),
                     authority_digest,
                     user_message,
+                    _json(turn_resources),
                     str(execution_owner_id),
                     max(0, int(execution_owner_pid or 0)),
                     str(execution_owner_started_at),
@@ -2442,6 +2507,7 @@ class HerSessionStore:
                     "pcm_operation_count": len(pcm_operations),
                     "resource_addition_count": len(additions),
                     "resource_revocation_count": len(revocations),
+                    "turn_resource_count": len(turn_resources),
                 },
             )
             session_row = connection.execute(
