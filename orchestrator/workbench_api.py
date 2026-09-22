@@ -4647,7 +4647,7 @@ class WorkbenchApiServer:
         )
 
     async def handle_transcript_attachment(self, request):
-        """Serve one image already visible in the shared conversation."""
+        """Serve one attachment already visible in the shared conversation."""
 
         name = request.match_info["name"]
         owner_id = self._v1_owner_id(request)
@@ -4716,6 +4716,11 @@ class WorkbenchApiServer:
                     (Path(configured_media) / "session_attachments" if configured_media else None),
                     (Path(configured_media) if configured_media else None),
                     getattr(self.session_store, "attachment_files_root", None),
+                    getattr(
+                        getattr(self.session_store, "audio_assets", None),
+                        "files_root",
+                        None,
+                    ),
                     bridge_home / "media" / name,
                     bridge_home / "media" / "session_attachments",
                     bridge_home / "media",
@@ -4730,7 +4735,14 @@ class WorkbenchApiServer:
                 )
             expected_size = int(attachment.get("size_bytes") or 0)
             actual_size = candidate.stat().st_size
-            size_limit = 25 * 1024 * 1024 if disposition_inline else MAX_SESSION_ATTACHMENT_BYTES
+            is_download = str(
+                request.query.get("download") or ""
+            ).strip().casefold() in {"1", "true", "yes"}
+            size_limit = (
+                25 * 1024 * 1024
+                if disposition_inline and not is_download
+                else MAX_SESSION_ATTACHMENT_BYTES
+            )
             if actual_size <= 0 or actual_size > size_limit:
                 raise SessionConflict("visible attachment exceeds the allowed size limit")
             if expected_size and expected_size != actual_size:
@@ -4740,7 +4752,6 @@ class WorkbenchApiServer:
             if expected_digest and hashlib.sha256(payload).hexdigest() != expected_digest:
                 raise SessionConflict("visible attachment content changed")
 
-            is_download = str(request.query.get("download") or "").strip().casefold() in {"1", "true", "yes"}
             disposition_type = "attachment" if (is_download or not disposition_inline) else "inline"
             filename = str(attachment.get("filename") or candidate.name).strip()
             from urllib.parse import quote

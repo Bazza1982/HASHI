@@ -10780,7 +10780,8 @@ class FlexibleAgentRuntime:
         Uses request-local ``meter_at_start`` so a mid-flight toggle never changes
         an in-progress turn.  Never writes to memory/transcript/wrapper and is
         skipped for silent, non-Telegram, transfer-buffered, or undelivered
-        turns.
+        turns. The same presentation-only report is projected to the shared
+        Session after Telegram accepts it; it never enters model history.
         """
         request_meta = runtime_pipeline.request_meta_for(self, item.request_id)
         if request_meta.get("meter_at_start") is not True:
@@ -10827,6 +10828,30 @@ class FlexibleAgentRuntime:
         except Exception:
             # A failed cost tail must never break the turn.
             self.logger.exception("meter cost tail delivery failed")
+            return
+
+        try:
+            from orchestrator import runtime_session
+
+            runtime_session.record_frontend_message(
+                self,
+                role="assistant",
+                text=text,
+                source="meter-cost",
+                transport_message_id=f"meter_cost:{item.request_id}",
+                surface=str(getattr(item, "session_surface", "") or "telegram"),
+                channel_key=str(
+                    getattr(item, "session_channel_key", "") or str(item.chat_id)
+                ),
+                explicit_owner_id=getattr(item, "owner_id", None),
+                explicit_session_id=getattr(item, "session_id", None),
+                content_format="plain-text",
+                presentation_channel="meter",
+            )
+        except Exception:
+            self.logger.debug(
+                "meter cost tail session recording failed", exc_info=True
+            )
 
     async def _send_herv2_card(
         self,

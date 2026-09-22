@@ -202,6 +202,39 @@ async def test_foreground_tail_sends_single_deduped_message():
 
 
 @pytest.mark.asyncio
+async def test_foreground_tail_projects_the_same_report_to_the_shared_session(monkeypatch):
+    from orchestrator import runtime_session
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    projected: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        runtime_session,
+        "record_frontend_message",
+        lambda _runtime, **kwargs: projected.append(kwargs),
+    )
+    runtime = FakeMeterRuntime(meter_at_start=True, receipt=_receipt())
+    item = SimpleNamespace(
+        request_id="req-1",
+        chat_id=99,
+        silent=False,
+        deliver_to_telegram=True,
+        session_surface="workbench",
+        session_channel_key="workbench:primary",
+        owner_id="user:7",
+        session_id="session-1",
+    )
+
+    await FlexibleAgentRuntime._send_meter_cost_tail(runtime, item)
+
+    assert len(runtime.sent) == 1
+    assert len(projected) == 1
+    assert projected[0]["text"] == runtime.sent[0][1]
+    assert projected[0]["presentation_channel"] == "meter"
+    assert projected[0]["content_format"] == "plain-text"
+    assert projected[0]["transport_message_id"] == "meter_cost:req-1"
+
+
+@pytest.mark.asyncio
 async def test_foreground_tail_renders_frozen_total_and_stage_timings():
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 

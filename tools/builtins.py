@@ -2042,6 +2042,9 @@ async def execute_frontend_send_attachments(
                     if item["media_type"].startswith("audio/")
                     else ""
                 ),
+                # A frontend-bound output is part of the durable assistant
+                # Message, not a temporary generated-audio preview.
+                retention_indefinite=item["media_type"].startswith("audio/"),
             )
             store.upload_attachment_bytes(
                 session_id=session_id,
