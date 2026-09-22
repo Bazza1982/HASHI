@@ -23,8 +23,10 @@ second execution agent. The legacy full `Stage.FINALISATION` is not activated.
 
 1. Pull this branch into a clean test checkout, preferably a separate worktree.
 2. Set `TYPESAFE_API_KEY` in the environment used to launch the test HASHI
-   instance/Functions. Do not put the API key into chat, `/model`, tracked files,
-   screenshots, or logs. No TypeSafe SDK or skill installation is required.
+   instance/Functions, or store it as `typesafe_api_key` in the instance-local,
+   ignored `secrets.json`. The environment takes precedence. Do not put the API
+   key into chat, `/model`, tracked files, screenshots, or logs. No TypeSafe SDK
+   or skill installation is required.
 3. Select HER v2, open `/model`, then **Style finalisation**. Choose **ON**.
    The equivalent text command is `/model style on`; inspect with `/model style`.
 4. In Hybrid mode (or while another configuration draft is open), use the
@@ -52,6 +54,7 @@ configuration; `/model` persists only the ON/OFF preference:
     "enabled": false,
     "model": "jev-latest",
     "api_key_env": "TYPESAFE_API_KEY",
+    "api_key_secret": "typesafe_api_key",
     "check_timeout_s": 5.0,
     "rewrite_timeout_s": 20.0,
     "rewrite_probability": 0.7

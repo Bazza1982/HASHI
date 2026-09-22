@@ -85,6 +85,12 @@ def make_final_style_pass(*, provider: Any, config: Any, context: Mapping[str, A
         require_level_available(provider.backend_manager.privacy_level)
         api_key = os.environ.get(options.api_key_env, "").strip()
         if not api_key:
+            secrets = getattr(provider.backend_manager, "secrets", None)
+            if isinstance(secrets, Mapping):
+                stored_key = secrets.get(options.api_key_secret)
+                if isinstance(stored_key, str):
+                    api_key = stored_key.strip()
+        if not api_key:
             raise ValueError("style API credential unavailable")
         call_id = f"{turn_id}:style:jev"
         began = time.perf_counter()

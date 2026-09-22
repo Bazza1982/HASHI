@@ -15,6 +15,7 @@ class FinalStyleConfig:
     enabled: bool = False
     model: str = "jev-latest"
     api_key_env: str = "TYPESAFE_API_KEY"
+    api_key_secret: str = "typesafe_api_key"
     check_timeout_s: float = 5.0
     rewrite_timeout_s: float = 20.0
     rewrite_probability: float = 0.7
@@ -30,8 +31,12 @@ class FinalStyleConfig:
             raise ValueError("style_finalisation.enabled must be a boolean")
         model = str(raw.get("model", "jev-latest")).strip()
         key_env = str(raw.get("api_key_env", "TYPESAFE_API_KEY")).strip()
-        if not model or not key_env or not key_env.isidentifier():
-            raise ValueError("style_finalisation requires a model and API-key environment variable")
+        key_secret = str(raw.get("api_key_secret", "typesafe_api_key")).strip()
+        if not model or not key_env or not key_env.isidentifier() or not key_secret:
+            raise ValueError(
+                "style_finalisation requires a model, API-key environment variable, "
+                "and HASHI secret name"
+            )
         numbers = {}
         for key, default in (("check_timeout_s", 5.0), ("rewrite_timeout_s", 20.0),
                              ("rewrite_probability", 0.7)):
@@ -44,7 +49,13 @@ class FinalStyleConfig:
             numbers[key] = value
         if numbers["rewrite_probability"] > 1:
             raise ValueError("style_finalisation.rewrite_probability must not exceed 1")
-        return cls(enabled=enabled, model=model, api_key_env=key_env, **numbers)
+        return cls(
+            enabled=enabled,
+            model=model,
+            api_key_env=key_env,
+            api_key_secret=key_secret,
+            **numbers,
+        )
 
 
 # One closed decision, not a general reviewer or another task classifier.

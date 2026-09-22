@@ -184,7 +184,10 @@ async def test_typesafe_wire_and_quick_route_use_one_silent_rewrite(monkeypatch)
         transport=httpx.MockTransport(transport), **kwargs))
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-only-key")
     provider = SimpleNamespace(
-        audit_log=None, backend_manager=SimpleNamespace(privacy_level=0),
+        audit_log=None,
+        backend_manager=SimpleNamespace(
+            privacy_level=0, secrets={"typesafe_api_key": "should-not-win"}
+        ),
         _accumulate_usage=lambda _: None,
         _record_usage_line_item=lambda **kwargs: None,
         bind_persona_audit_context=lambda *args, **kwargs: None,
@@ -197,6 +200,7 @@ async def test_typesafe_wire_and_quick_route_use_one_silent_rewrite(monkeypatch)
     assert await gate.render("Long report", "turn") == "Brief result."
     assert len(sent) == 1
     assert str(sent[0].url) == "https://api.typesafe.ai/v1/systemone"
+    assert sent[0].headers["Authorization"] == "Bearer test-only-key"
     body = json.loads(sent[0].content)
     assert set(body["questions"]) == {"style"}
     assert body["questions"]["style"]["type"] == "choice"
@@ -205,6 +209,46 @@ async def test_typesafe_wire_and_quick_route_use_one_silent_rewrite(monkeypatch)
     assert profile.reasoning == "off"
     assert provider._package_persona_text_once.call_args.kwargs["metering_phase"] == "style_rewrite"
     provider._package_persona_text_once.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_typesafe_key_falls_back_to_hashi_secret(monkeypatch):
+    from adapters import her_v2_style as module
+    from orchestrator.her_v2.config import HERv2Config
+
+    sent = []
+    real_client = httpx.AsyncClient
+
+    def transport(request):
+        sent.append(request)
+        return httpx.Response(200, json=_answer("keep"))
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", lambda **kwargs: real_client(
+        transport=httpx.MockTransport(transport), **kwargs))
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    provider = SimpleNamespace(
+        audit_log=None,
+        backend_manager=SimpleNamespace(
+            privacy_level=0, secrets={"typesafe_api_key": "local-test-key"}
+        ),
+        _accumulate_usage=lambda _: None,
+        _record_usage_line_item=lambda **kwargs: None,
+        bind_persona_audit_context=lambda *args, **kwargs: None,
+        _package_persona_text_once=AsyncMock(return_value="Unused"),
+    )
+    raw = _raw_config()
+    raw["style_finalisation"] = {"enabled": True}
+    gate = make_final_style_pass(
+        provider=provider,
+        config=HERv2Config.from_mapping(raw),
+        context={"current_request": "Be brief", "instruction_sources": []},
+        request_id="req",
+    )
+
+    assert await gate.render("Already brief", "turn") == "Already brief"
+    assert len(sent) == 1
+    assert sent[0].headers["Authorization"] == "Bearer local-test-key"
+    provider._package_persona_text_once.assert_not_awaited()
 
 
 @pytest.mark.asyncio
