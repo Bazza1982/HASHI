@@ -443,6 +443,25 @@ def test_planning_prompt_with_read_only_tools_keeps_mutations_in_execution() -> 
     assert "including tools whose interface can produce side effects" not in rendered
 
 
+def test_tool_enabled_planning_declares_provider_native_completion_boundary() -> None:
+    request = _request(Stage.PLANNING)
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "allow_tools": True,
+            "allow_side_effects": False,
+        }
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert "Provider's native tool-call grammar" in rendered
+    assert "assistant message content without making another tool call" in rendered
+    assert "`tool_calls is None` and `finish_reason = stop`" in rendered
+    assert "`finish_reason = tool_calls` always means continue" in rendered
+    assert "Do not print or simulate `tool_calls`" in rendered
+
+
 def test_planning_renders_exact_available_subagent_profile_names() -> None:
     request = _request(
         Stage.PLANNING,

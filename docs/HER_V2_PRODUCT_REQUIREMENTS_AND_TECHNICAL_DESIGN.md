@@ -718,6 +718,22 @@ Planning uses a premium model with a high provider reasoning setting and conside
 
 The completed plan becomes binding. Only Replanning may replace it.
 
+Tool-enabled Planning terminates through the Provider's native tool-call
+grammar, not through a HASHI-invented disposition or a loop ceiling. A response
+that contains a valid structured Tool call remains a continuation. Once the
+Planner has enough evidence, it returns the final plan JSON as ordinary
+assistant content without another Tool call. For DeepSeek this produces the
+documented `response.choices[0].message.tool_calls is None` completion boundary
+and `finish_reason = stop`; a valid `message.tool_calls` response instead uses
+`finish_reason = tool_calls`. Natural-language reasoning such as "I will now
+finalise" is not a terminal signal and must not override the structured
+Provider response. The Planning prompt must state this completion grammar and
+must not ask the model to print or simulate Provider protocol fields. This
+follows DeepSeek's official [Tool Calls](https://api-docs.deepseek.com/guides/tool_calls),
+[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode), and
+[Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion)
+contracts.
+
 When planning completes, HER records the plan reference and sends an appropriate progress update. Failure to deliver that optional progress message does not fail the stage.
 
 Planning failures are technical failures. Valid examples include:

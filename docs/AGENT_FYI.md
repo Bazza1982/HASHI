@@ -149,6 +149,14 @@ provider text and provider progress from other stages stay internal.
 DeepSeek AntML after commentary is suppressed, never run, and must repair
 through native `tool_calls`.
 
+Tool-enabled Planning closes through the Provider's native grammar. A valid
+structured `tool_calls` response means continue; once evidence is sufficient,
+the Planner returns its final JSON as ordinary assistant content without
+another Tool call. For DeepSeek the terminal boundary is `tool_calls = null`
+(`message.tool_calls is None` in the SDK) with `finish_reason = stop`. Prose
+such as "I will now finalise" is not a stop signal. Do not add a synthetic
+disposition or a Tool-loop ceiling.
+
 Validate a Tool batch before effects. Malformed batches execute zero calls;
 completed calls never replay. Repair preserves Provider fields, identity,
 finish/error, and retry count. Continuation is not retry, prose “stop” is not a
