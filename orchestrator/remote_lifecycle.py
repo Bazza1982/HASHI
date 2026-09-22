@@ -32,7 +32,8 @@ from remote.supervisor_identity import resolve_supervisor_identity
 
 
 _SYSTEMD_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
-_SUPERVISOR_HEALTH_ATTEMPTS = 12
+# WSL/systemd plus discovery startup can take longer than ten seconds.
+_SUPERVISOR_HEALTH_ATTEMPTS = 120
 _SUPERVISOR_HEALTH_INTERVAL_SECONDS = 0.25
 bridge_logger = logging.getLogger("BridgeU.Bridge")
 
