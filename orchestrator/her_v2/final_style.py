@@ -18,7 +18,6 @@ class FinalStyleConfig:
     api_key_secret: str = "typesafe_api_key"
     check_timeout_s: float = 5.0
     rewrite_timeout_s: float = 20.0
-    rewrite_probability: float = 0.7
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "FinalStyleConfig":
@@ -38,8 +37,7 @@ class FinalStyleConfig:
                 "and HASHI secret name"
             )
         numbers = {}
-        for key, default in (("check_timeout_s", 5.0), ("rewrite_timeout_s", 20.0),
-                             ("rewrite_probability", 0.7)):
+        for key, default in (("check_timeout_s", 5.0), ("rewrite_timeout_s", 20.0)):
             value = raw.get(key, default)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"style_finalisation.{key} must be a number")
@@ -47,8 +45,6 @@ class FinalStyleConfig:
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"style_finalisation.{key} must be finite and positive")
             numbers[key] = value
-        if numbers["rewrite_probability"] > 1:
-            raise ValueError("style_finalisation.rewrite_probability must not exceed 1")
         return cls(
             enabled=enabled,
             model=model,
@@ -82,7 +78,7 @@ STYLE_QUESTION = {
 }
 
 
-def parse_style_answer(payload: Mapping[str, Any], threshold: float) -> tuple[bool, str]:
+def parse_style_answer(payload: Mapping[str, Any]) -> tuple[bool, str]:
     """Validate the wire answer; a malformed/unavailable judgement is not PASS."""
     answers = payload.get("answers")
     if not isinstance(answers, Mapping):
@@ -91,20 +87,9 @@ def parse_style_answer(payload: Mapping[str, Any], threshold: float) -> tuple[bo
     if not isinstance(answer, Mapping) or answer.get("type") != "choice":
         raise ValueError("invalid style answer")
     choice = answer.get("choice")
-    probabilities = answer.get("probabilities")
-    if choice not in STYLE_QUESTION["criteria"] or not isinstance(probabilities, Mapping):
+    if choice not in STYLE_QUESTION["criteria"]:
         raise ValueError("invalid style choice")
-    values = []
-    for key in STYLE_QUESTION["criteria"]:
-        value = probabilities.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError("invalid style probabilities")
-        if not math.isfinite(value) or not 0 <= value <= 1:
-            raise ValueError("invalid style probabilities")
-        values.append(value)
-    if not math.isclose(sum(values), 1.0, abs_tol=0.01):
-        raise ValueError("invalid style probability sum")
-    return choice == "rewrite" and probabilities["rewrite"] >= threshold, str(choice)
+    return choice == "rewrite", str(choice)
 
 
 class FinalStylePass:
@@ -139,7 +124,7 @@ class FinalStylePass:
         try:
             async with asyncio.timeout(self.config.check_timeout_s):
                 result = await self.check(state, turn_id)
-            rewrite, choice = parse_style_answer(result, self.config.rewrite_probability)
+            rewrite, choice = parse_style_answer(result)
             self.observe("checked", {"choice": choice, "rewrite": rewrite}, turn_id)
             if not rewrite:
                 return draft

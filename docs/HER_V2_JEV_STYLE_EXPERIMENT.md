@@ -13,6 +13,9 @@ mismatch triggers **one** silent rewrite using the configured HER **Quick/light*
 provider and model, with reasoning off and no tools. A keep/uncertain result
 publishes the original. There is no second check, retry loop, Pro fallback,
 review, replanning, fact check, evidence check, completion decision, or new work.
+The selected Choice is the application decision: `rewrite` always invokes the
+editor, while `keep` and `uncertain` publish the original. Probability metadata
+does not override the selected Choice.
 Execution commentary is unchanged; neither added call publishes commentary.
 
 Disabled is the default. Direct, Strategic and Planned retain their existing
@@ -57,8 +60,7 @@ configuration; `/model` persists only the ON/OFF preference:
     "api_key_env": "TYPESAFE_API_KEY",
     "api_key_secret": "typesafe_api_key",
     "check_timeout_s": 5.0,
-    "rewrite_timeout_s": 20.0,
-    "rewrite_probability": 0.7
+    "rewrite_timeout_s": 20.0
   }
 }
 ```
@@ -194,3 +196,21 @@ Isolated Python 3.12 runner, full focused module (including UI): `21 passed`.
   implementation checkpoint.
 - **Live verification:** not yet performed. Source completion does not authorize
   or prove Function-generation adoption on running Arale.
+
+## HASHI2 authoritative Choice correction — 2026-09-22
+
+- **Approval:** the current user directed HER v2 to remove the probability gate
+  and treat JEV's selected Choice as the deterministic style decision.
+- **Implementation:** `rewrite` now always invokes the configured Quick/light
+  editor against the captured system/style snapshot; `keep` and `uncertain`
+  retain the original. Choice probabilities are no longer parsed or configured.
+- **Red evidence:** before the correction, a selected `rewrite` with probability
+  `0.40` incorrectly published the original because of the `0.70` gate.
+- **Offline verification:** the focused HER v2 Style/runtime/adapter/configuration
+  component run passed 272 tests with one intentional skip. Python compilation,
+  diff hygiene, and the protected-Core check passed. The separate Agent FYI
+  budget test remains a pre-existing branch failure because tracked `HEAD`
+  already exceeds its 12,000-character loader limit; this change does not hide
+  or raise that limit.
+- **Live verification:** not yet performed. Source and offline checks do not
+  authorize or prove adoption by Arale's running Function Worker.

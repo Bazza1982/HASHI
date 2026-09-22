@@ -63,6 +63,28 @@ async def test_disabled_or_no_clear_mismatch_preserves_original(choice, enabled)
     rewrite.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_rewrite_choice_is_authoritative_without_probability_gate():
+    gate, check, rewrite, events = _pass()
+    check.return_value = {
+        "answers": {
+            "style": {
+                "type": "choice",
+                "choice": "rewrite",
+                "probabilities": {
+                    "keep": 0.35,
+                    "rewrite": 0.40,
+                    "uncertain": 0.25,
+                },
+            }
+        }
+    }
+
+    assert await gate.render("Original", "turn") == "Done. Here is the result."
+    rewrite.assert_awaited_once()
+    assert events[0] == ("checked", {"choice": "rewrite", "rewrite": True})
+
+
 @pytest.mark.parametrize("failure", ["check", "rewrite", "malformed"])
 @pytest.mark.asyncio
 async def test_optional_failure_preserves_original_without_retry(failure):
