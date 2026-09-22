@@ -126,11 +126,14 @@ stage-specific policy, and per-invocation authority remain independent gates.
 
 An explicit absolute path in the current request is checked against the frozen
 Workspace/Workzone snapshot before HER v2 enters Direct or Triage Provider work.
-An outside path becomes a visible `CONFIRMATION_REQUIRED` Triage decision; it is
-not probed. Tool path admission independently performs lexical containment before
-any target resolution or metadata access, then retains the canonical symlink
-escape check for already-authorized targets. URLs and slash-command tokens are
-not filesystem requests.
+The Agent home workspace is always one exact authorized root; enabled Workzones
+add exact roots and may change the working directory without replacing Agent
+home access. An outside path becomes a visible `CONFIRMATION_REQUIRED` Triage
+decision which names every rejected location in the platform's user-facing path
+format; it is not probed. Tool path admission independently performs lexical
+containment before any target resolution or metadata access, then retains the
+canonical symlink escape check for already-authorized targets. URLs, protocol
+routes, endpoint fragments, and slash-command tokens are not filesystem requests.
 
 ## 3. Non-responsibilities
 
@@ -364,10 +367,14 @@ emergency release only for the configured authorized sender.
 ### HASHI2 Workzone and stop-control correction (2026-09-22)
 
 - **Approval:** the current user approved these PAO/HER v2 Function changes on
-  branch `exp-herv2j` for HASHI2; no protected-Core migration was authorized.
-- **Implementation:** request-path preflight is before HER Provider stages, Tool
-  admission is zero-touch for outside targets, and unresponsive `/stop` replaces
-  the Worker while preserving the Agent route.
+  branch `exp-herv2j` for HASHI2, then on 2026-09-23 corrected the Workzone
+  contract after the first implementation excluded Agent home; no protected-Core
+  migration was authorized.
+- **Implementation:** request-path preflight is before HER Provider stages, Agent
+  home remains an exact root alongside enabled Workzones, real outside targets
+  are named without being touched, protocol text is not treated as a path, Tool
+  admission uses the same exact roots, and unresponsive `/stop` replaces the
+  Worker while preserving the Agent route.
 - **Offline verification:** focused Workzone, HER v2, command, and Function Worker
   suites pass. The final protected-Core and shared-runtime gates are attached to
   the implementation checkpoint.

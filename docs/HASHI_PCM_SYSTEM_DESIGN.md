@@ -80,7 +80,7 @@ Dynamic system prompts are temporary or quickly configurable instructions manage
 
 #### Workspace
 
-Each HASHI agent has a native workspace configured during setup. By default, the agent may read from and write to that workspace. For example:
+Each HASHI agent has a native workspace configured during setup. By default, the agent may read from and write to that workspace. The exact Agent home workspace remains authorized when Session Workzones are enabled; a Workzone changes focus and may change the working directory, but does not replace Agent home access. For example:
 
 `<HASHI_ROOT>/workspaces/<agent_name>`
 
@@ -96,7 +96,7 @@ Workzones give an agent access to, and focus on, one or more project folders. Ea
 
   - Active available directories may be passed to native CLIs through repeated `--add-dir` or `--include-directories` arguments, according to backend support.
 
-  - The HASHI Tool Registry receives the exact active roots. Multiple roots are not widened to their common parent.
+  - The HASHI Tool Registry receives the exact Agent home root plus exact active Workzone roots. Multiple roots are not widened to their common parent.
 
   - Slot mutations carry an internal Session revision so stale inline menus and delayed path replies cannot overwrite newer state. This revision is control metadata and is not rendered as user-facing menu or PCM text.
 
@@ -104,9 +104,9 @@ Workzones give an agent access to, and focus on, one or more project folders. Ea
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Important** Workzone is primarily a focus and default execution location mechanism, not a security boundary by itself. Access restrictions are enforced jointly by the active backend and HASHI. Native backend sandboxes and permission modes remain applicable, while the HASHI Tool Registry and Tool Gateway enforce configured tool permissions, exact `access_roots` and other admission controls. Workzone does not override or weaken any of these controls. |
 
-When at least one slot is enabled, HASHI emits one protected `working_environment.workzones` runtime-context section. It lists only enabled slots, marks `main` as primary and numbered slots as attached, and treats every path and label as data rather than instructions. Disabled slots are retained in Session state but omitted from PCM.
+When at least one slot is enabled, HASHI emits one protected `working_environment.workzones` runtime-context section. It lists only enabled slots, marks `main` as primary and numbered slots as attached, identifies Agent home as an authorized exact secondary root for Agent-owned scripts and state, and treats every path and label as data rather than instructions. Disabled slots are retained in Session state but omitted from PCM.
 
-When all Workzones are off, HASHI does not generate a WORKZONES prompt section. The runtime restores the backend and Tool Registry working directory to the Agent home workspace and uses its normal default access root. The Agent home workspace is therefore a normal task folder when no Workzone is active; the instruction to reserve it for memory, identity, logs and workspace-state work applies only while one or more Workzones are active.
+When all Workzones are off, HASHI does not generate a WORKZONES prompt section. The runtime restores the backend and Tool Registry working directory to the Agent home workspace and uses its normal default access root. While Workzones are active, Agent home stays authorized but does not become the primary external project merely because it is available.
 
 #### High-permission or “YOLO” mode
 

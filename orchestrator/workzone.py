@@ -21,12 +21,23 @@ logger = logging.getLogger("Bridge.Workzone")
 _WINDOWS_DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 _WSL_UNC_RE = re.compile(r"^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+\\(.*)$", re.IGNORECASE)
 _URI_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+_HTTP_ROUTE_RE = re.compile(
+    r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+"
+    r"/[^\s`\"'<>()[\]{}，。；：！？、（）【】《》!?]+",
+    re.IGNORECASE,
+)
 _QUOTED_PATH_RE = re.compile(
     r"(?P<quote>[`\"'])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|/)[^`\"'\r\n]+?)(?P=quote)"
 )
-_BARE_WINDOWS_PATH_RE = re.compile(r"(?<![\w])([A-Za-z]:[\\/][^\s`\"'<>]+)")
-_BARE_UNC_PATH_RE = re.compile(r"(?<![\w])(\\\\[^\s`\"'<>]+)")
-_BARE_POSIX_PATH_RE = re.compile(r"(?<![\w:/])(/[^\s`\"'<>]+)")
+_BARE_WINDOWS_PATH_RE = re.compile(
+    r"(?<![\w])([A-Za-z]:[\\/][^\s`\"'<>()[\]{}，。；：！？、（）【】《》!?]+)"
+)
+_BARE_UNC_PATH_RE = re.compile(
+    r"(?<![\w])(\\\\[^\s`\"'<>()[\]{}，。；：！？、（）【】《》!?]+)"
+)
+_BARE_POSIX_PATH_RE = re.compile(
+    r"(?<![\w:/])(/[^\s`\"'<>()[\]{}，。；：！？、（）【】《》!?]+)"
+)
 _SLASH_COMMAND_TOKEN_RE = re.compile(
     r"^/[A-Za-z][A-Za-z0-9_-]*(?:@[A-Za-z0-9_]+)?$"
 )
@@ -108,7 +119,7 @@ def path_is_within_roots_lexically(
 
 
 def _explicit_request_paths(request: str) -> tuple[str, ...]:
-    text = _URI_RE.sub("", str(request or ""))
+    text = _URI_RE.sub("", _HTTP_ROUTE_RE.sub("", str(request or "")))
     values: list[str] = []
     for match in _QUOTED_PATH_RE.finditer(text):
         values.append(match.group("path"))
@@ -129,8 +140,13 @@ def _explicit_request_paths(request: str) -> tuple[str, ...]:
             or _SLASH_COMMAND_TOKEN_RE.fullmatch(cleaned)
         ):
             continue
+        is_supported_absolute = bool(
+            _WINDOWS_DRIVE_RE.match(cleaned)
+            or cleaned.startswith("\\\\")
+            or cleaned.startswith("/")
+        )
         candidate = _normalize_workzone_input(cleaned)
-        if candidate.is_absolute():
+        if is_supported_absolute and candidate.is_absolute():
             result.append(cleaned)
     return tuple(result)
 
@@ -155,11 +171,18 @@ def preflight_request_paths(
     )
     clarification = ""
     if outside:
-        clarification = (
-            "I can't work in the requested location because it is outside this "
-            "Session's Workspace/Workzones. Please add that location as a Workzone, "
-            "or tell me which existing Workspace/Workzone to use."
+        label = "Blocked location:" if len(outside) == 1 else "Blocked locations:"
+        displayed = tuple(
+            display_user_path(_normalize_workzone_input(raw)) for raw in outside
         )
+        clarification = "\n".join((
+            "I can't work in the requested location because it is outside this "
+            "Session's Workspace/Workzones.",
+            label,
+            *(f"- `{path}`" for path in displayed),
+            "Please add the containing folder as a Workzone, or tell me which "
+            "existing Workspace/Workzone to use.",
+        ))
     return WorkzonePathPreflight(
         requested_paths=requested,
         outside_paths=outside,
@@ -201,11 +224,12 @@ def access_roots_for_workzone_snapshot_lexically(
         return (lexical_path(default_access_root),)
 
     roots: list[Path] = []
+    workspace = lexical_path(workspace_dir)
     usable_main = any(
         item["slot_id"] == "main" and item["available"] for item in slots
     )
     if not usable_main:
-        roots.append(lexical_path(workspace_dir))
+        roots.append(workspace)
     for item in slots:
         if not item["available"]:
             continue
@@ -215,8 +239,11 @@ def access_roots_for_workzone_snapshot_lexically(
             for existing in roots
         ):
             roots.append(root)
-    if not roots:
-        roots.append(lexical_path(workspace_dir))
+    if all(
+        _lexical_path_key(workspace) != _lexical_path_key(existing)
+        for existing in roots
+    ):
+        roots.append(workspace)
     return tuple(roots)
 
 
@@ -403,7 +430,7 @@ def build_workzone_prompt(
             else:
                 lines.append(
                     "Use the available attached Workzones for task files. The Agent home "
-                    "workspace is only the execution fallback while Workzones remain active."
+                    "workspace remains the primary execution fallback and an authorized root."
                 )
         else:
             lines.append(
@@ -411,10 +438,12 @@ def build_workzone_prompt(
                 "treat these paths as context only and do not claim to inspect files."
             )
         lines.append(
-            "While one or more Workzones are active, use the Agent home workspace for "
-            "task files only when the user explicitly requests Agent memory, identity, "
-            "logs, or workspace-state work. When every Workzone is off, HASHI omits this "
-            "section and the Agent home workspace becomes the normal task workspace."
+            "The Agent home workspace remains an authorized exact secondary root while "
+            "Workzones are active. Use it for Agent-owned scripts, memory, identity, "
+            "logs, and workspace-state files; do not treat it as the primary external "
+            "project merely because it is available. When every Workzone is off, HASHI "
+            "omits this section and the Agent home workspace becomes the normal task "
+            "workspace."
         )
         return ("WORKZONES", "\n".join(lines))
     if not can_access_files:
@@ -426,7 +455,7 @@ def build_workzone_prompt(
                     f"Agent home workspace: {workspace_dir}",
                     "Treat the active workzone as conversation context and the intended project location.",
                     "This backend does not currently have filesystem tools for direct access; do not claim to inspect files unless the user provides content or switches to a tool-capable backend.",
-                    "Ignore the agent home workspace for task files unless the user explicitly asks for agent memory, identity, logs, or workspace state.",
+                    "The agent home workspace remains an authorized secondary root for Agent-owned files; the active Workzone remains the intended project location.",
                 ]
             ),
         )
@@ -437,7 +466,7 @@ def build_workzone_prompt(
                 f"Active workzone: {zone}",
                 f"Agent home workspace: {workspace_dir}",
                 "Use the active workzone as the working directory and first place to inspect.",
-                "Ignore the agent home workspace for task files unless the user explicitly asks for agent memory, identity, logs, or workspace state.",
+                "The agent home workspace remains an authorized secondary root for Agent-owned files; the active Workzone remains the intended project location.",
             ]
         ),
     )
@@ -468,17 +497,17 @@ def access_roots_for_workzones(
     if not active:
         return (Path(default_access_root).expanduser().resolve(),)
     roots: list[Path] = []
+    workspace = Path(workspace_dir).expanduser().resolve()
     if primary_workzone_path(normalized) is None:
         # Relative Tool calls still need a valid base when only attached roots
-        # are active.  Keep Agent home as that base, but do not advertise it as
-        # a task root in PCM.
-        roots.append(Path(workspace_dir).expanduser().resolve())
+        # are active.  Keep Agent home as that base.
+        roots.append(workspace)
     for item in active:
         if not item["available"]:
             continue
         root = Path(item["path"]).expanduser().resolve()
         if root not in roots:
             roots.append(root)
-    if not roots:
-        roots.append(Path(workspace_dir).expanduser().resolve())
+    if workspace not in roots:
+        roots.append(workspace)
     return tuple(roots)

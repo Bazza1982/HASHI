@@ -7,6 +7,7 @@ import pytest
 
 from orchestrator import workzone as workzone_module
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.path_presentation import display_user_path
 from orchestrator.workzone import (
     access_roots_for_workzone_snapshot_lexically,
     access_root_for_workzone,
@@ -48,7 +49,7 @@ def test_workzone_set_and_clear(tmp_path: Path):
     assert section is not None
     assert section[0] == "WORKZONE"
     assert str(zone.resolve()) in section[1]
-    assert "Ignore the agent home workspace" in section[1]
+    assert "remains an authorized" in section[1]
     assert "does not currently have filesystem tools" not in section[1]
 
     clear_workzone(workspace)
@@ -86,6 +87,8 @@ def test_request_path_preflight_blocks_an_explicit_outside_location(tmp_path: Pa
     assert decision.blocked is True
     assert decision.outside_paths == (str(outside),)
     assert "outside this Session's Workspace/Workzones" in decision.clarification
+    assert "Blocked location:" in decision.clarification
+    assert display_user_path(outside) in decision.clarification
 
 
 def test_request_path_preflight_allows_locations_inside_an_exact_root(tmp_path: Path):
@@ -102,11 +105,31 @@ def test_request_path_preflight_allows_locations_inside_an_exact_root(tmp_path: 
     assert decision.outside_paths == ()
 
 
+def test_request_path_preflight_keeps_arbitrary_posix_roots_in_scope_checks(
+    tmp_path: Path,
+):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+
+    decision = preflight_request_paths(
+        "Inspect `/custom/projects/demo`.",
+        access_roots=(allowed,),
+        workspace_dir=allowed,
+    )
+
+    assert decision.requested_paths == ("/custom/projects/demo",)
+    assert decision.outside_paths == ("/custom/projects/demo",)
+
+
 @pytest.mark.parametrize(
     "input_text",
     [
         "Explain `/stop` and why it releases the Worker.",
         "Review https://example.com/outside/path before answering.",
+        (
+            "Check HASHI1(192.168.0.211:8766)/HASHI2(192.168.0.211:8767) "
+            "and POST /protocol/announce."
+        ),
     ],
 )
 def test_request_path_preflight_does_not_treat_commands_or_urls_as_paths(
@@ -123,6 +146,51 @@ def test_request_path_preflight_does_not_treat_commands_or_urls_as_paths(
     )
 
     assert decision.requested_paths == ()
+    assert decision.blocked is False
+
+
+def test_request_path_preflight_always_allows_agent_home_with_active_main(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    main = tmp_path / "main"
+    workspace.mkdir()
+    main.mkdir()
+    state = {
+        "slots": [
+            {
+                "slot_id": "main",
+                "path": str(main),
+                "enabled": True,
+                "available": True,
+            }
+        ]
+    }
+
+    roots = access_roots_for_workzone_snapshot_lexically(
+        workspace,
+        state,
+        workspace_dir=workspace,
+    )
+    script = workspace / "scripts" / "lan_relay_guardian.sh"
+    state_path = workspace / "state" / "lan_relay_guardian_state.json"
+    log_path = workspace / "state" / "lan_relay_guardian.log"
+    decision = preflight_request_paths(
+        (
+            f"Run {script}。Check HASHI1(192.0.2.1:8766)/"
+            "HASHI2(192.0.2.1:8767) and POST /protocol/announce；"
+            f"write {state_path}（failure count），append {log_path}。"
+        ),
+        access_roots=roots,
+        workspace_dir=workspace,
+    )
+
+    assert roots == (main, workspace)
+    assert decision.requested_paths == (
+        str(script),
+        str(state_path),
+        str(log_path),
+    )
     assert decision.blocked is False
 
 
@@ -153,7 +221,7 @@ def test_preflight_projects_frozen_workzone_roots_without_filesystem_access(
         workspace,
         state,
         workspace_dir=workspace,
-    ) == (allowed,)
+    ) == (allowed, workspace)
 
 
 def test_tool_scope_rejects_outside_path_before_resolving_it(
@@ -274,7 +342,10 @@ def test_tool_registry_uses_exact_workzone_root_inside_project_scope(tmp_path: P
 
     assert manager.current_backend.tool_registry.workspace_dir == zone.resolve()
     assert manager.current_backend.tool_registry.access_root == zone.resolve()
-    assert manager.current_backend.tool_registry.access_roots == (zone.resolve(),)
+    assert manager.current_backend.tool_registry.access_roots == (
+        zone.resolve(),
+        workspace.resolve(),
+    )
 
 
 def test_tool_registry_uses_external_workzone_as_access_root_when_outside_scope(tmp_path: Path):
@@ -301,6 +372,10 @@ def test_tool_registry_uses_external_workzone_as_access_root_when_outside_scope(
 
     assert manager.current_backend.tool_registry.workspace_dir == zone.resolve()
     assert manager.current_backend.tool_registry.access_root == zone.resolve()
+    assert manager.current_backend.tool_registry.access_roots == (
+        zone.resolve(),
+        workspace.resolve(),
+    )
 
 
 def test_multi_workzone_roots_never_widen_to_common_parent(tmp_path: Path):
@@ -321,7 +396,7 @@ def test_multi_workzone_roots_never_widen_to_common_parent(tmp_path: Path):
 
     roots = access_roots_for_workzones(project, state, workspace_dir=workspace)
 
-    assert roots == (one.resolve(), two.resolve())
+    assert roots == (one.resolve(), two.resolve(), workspace.resolve())
     assert tmp_path.resolve() not in roots
 
 

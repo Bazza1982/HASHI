@@ -55,13 +55,14 @@ supply all others; validation fails closed.
 An active Agent needs a PAO-started Worker. Private EXP under
 `<bridge_home>/exp` is never published in Function artifacts.
 
-The open Tool wildcard grants permission, not capability. Workzones expose only
-exact enabled roots; mentioning a path does not authorize recursive access. HER
-v2 checks explicit current-request paths against the frozen roots before a
-Provider stage and asks for clarification when one is outside. Tool admission
-must reject an outside target lexically before resolving or touching it, then
-check canonical containment for authorized targets. Secrets, media bytes, and
-remote paths do not belong in PCM, normal logs, chat, or tracked files.
+The open Tool wildcard grants permission, not capability. Agent home remains an
+exact authorized root; Workzones add exact roots without replacing or widening
+it. HER v2 checks explicit current-request filesystem paths against the frozen
+roots before a Provider stage, names each outside location, and ignores URLs,
+protocol routes, and slash commands. Tool admission rejects an outside target
+lexically before resolving or touching it, then checks canonical containment for
+authorized targets. Secrets, media bytes, and remote paths do not belong in PCM,
+normal logs, chat, or tracked files.
 
 JSON writers use validation, private candidates, locks, revisions, and atomic
 replacement. Display fallback is read-only. On conflict, read fresh state and

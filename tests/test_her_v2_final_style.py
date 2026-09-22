@@ -371,6 +371,7 @@ async def test_enabled_style_records_initialisation_degradation_for_eligible_fin
 async def test_outside_workzone_is_clarified_before_any_provider_stage(
     tmp_path, effort
 ):
+    from orchestrator.path_presentation import display_user_path
     from orchestrator.workzone import preflight_request_paths
 
     allowed = tmp_path / "allowed"
@@ -393,6 +394,7 @@ async def test_outside_workzone_is_clarified_before_any_provider_stage(
     assert result.terminal_state is TerminalState.PENDING_USER_INPUT
     assert result.classification is TriageClassification.CONFIRMATION_REQUIRED
     assert "outside this Session's Workspace/Workzones" in result.text
+    assert display_user_path(outside) in result.text
     assert provider.requests == []
 
 
