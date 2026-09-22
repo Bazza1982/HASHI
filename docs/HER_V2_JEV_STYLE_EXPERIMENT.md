@@ -2,7 +2,8 @@
 
 Branch: `exp-herv2j`. Base: `6073915a8694b5b9e5ed83f17f43e2cbe1498e2b`.
 Owner: HER v2. Engineering layer: Functions, with Agent-local opt-in configuration.
-Status: experimental implementation; real JEV/Quick inference and local adoption remain to be tested.
+Status: experimental; HASHI2 Arale canary adopted and checked on 2026-09-22,
+with broader rollout and comparative quality evaluation still pending.
 
 ## The one change
 
@@ -117,9 +118,33 @@ saved settings, Hybrid staging/apply, localized labels and escaping. A temporary
 mutation that bypassed the final-style hook made the Direct integration case
 fail; restoring the hook passed. The mutation is not committed.
 
-No real JEV/Quick calls, production restart, live frontend acceptance, broad
-regression suite, or measured quality/latency claims are part of this change.
-For a small local comparison, reuse identical prompts with the option off/on,
-then inspect the actual wording, additional delay, and call receipts.
+No broad rollout, formal frontend acceptance, or measured quality/latency claim
+is part of this experiment. For a small local comparison, reuse identical
+prompts with the option off/on, then inspect the actual wording, additional
+delay, and call receipts.
 
-Isolated Python 3.12 runner, full focused module (including UI): `20 passed in 1.36s`.
+Isolated Python 3.12 runner, full focused module (including UI): `21 passed`.
+
+## HASHI2 canary record — 2026-09-22
+
+- **Approval:** the current user explicitly requested that branch `exp-herv2j`,
+  including expected feature commit `f048106`, be loaded and tested on HASHI2
+  Arale. That approval covered one Agent-scoped hot reboot, not a Core restart
+  or wider rollout.
+- **Implementation:** commit `cff725ed` adds a local HASHI-secret fallback while
+  retaining environment-variable precedence. The API key remains only in
+  ignored, protected instance configuration.
+- **Offline validation:** the focused final-style and HER configuration suites
+  passed 54 tests; the protected-Core gate and whitespace check passed.
+- **Live adoption:** `/reboot min` receipt
+  `fec3e1909bfa47f2afc452b6dbbda180` succeeded for target `arale`. Core PID 882
+  remained unchanged while Arale moved from Function generation `9c291aaa` to
+  `184a94e3`. `/model` then exposed the independent Style finalisation toggle
+  and the configured Quick target `deepseek-api / deepseek-flash`.
+- **Live check:** a temporary Direct-mode canary produced a completed
+  `typesafe-api` `style_check` receipt using `jev-1.13.0`; the user's saved
+  Strategic (`low`) mode and Style finalisation `OFF` state were restored after
+  the test. This canary confirmed live JEV decision traffic. The rewrite branch
+  was separately exercised with the same real JEV and Quick provider before
+  adoption; it was not forced when the live canary already met its requested
+  style.

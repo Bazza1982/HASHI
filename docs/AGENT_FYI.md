@@ -113,6 +113,14 @@ independent. `/backend` selects Engine, `/model` selects model routing, and
 Agent creation uses that same HER mode contract; it must not present
 provider/model/reasoning bundles as HER effort presets.
 
+HER v2's experimental **Style finalisation** is an Agent-local `/model` opt-in,
+disabled by default. It asks TypeSafe/JEV one presentation-only question and,
+only for a clear mismatch, performs one silent text-only rewrite through the
+configured Quick/light target with reasoning and tools off. It is not task
+review, replanning, fact checking, or the legacy Finalisation stage. Failure
+publishes the original answer. Credentials come from `TYPESAFE_API_KEY` or the
+instance-local `typesafe_api_key` secret; never place them in tracked config.
+
 Use current metadata for context, price, effort, and modality. Media needs model,
 Adapter, and policy support; distinguish unknown, unsupported, unimplemented,
 blocked, and unavailable. Provider cost wins; catalogue cost is estimated and
