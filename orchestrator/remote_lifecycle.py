@@ -32,7 +32,10 @@ from remote.supervisor_identity import resolve_supervisor_identity
 
 
 _SYSTEMD_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
-_SUPERVISOR_HEALTH_ATTEMPTS = 12
+# A supervisor acknowledging ``start`` only proves that it accepted the job.
+# Remote still has to import its Function closure, publish its ownership claim,
+# and become ready.  Keep this bounded, but allow a normal cold start up to 20s.
+_SUPERVISOR_HEALTH_ATTEMPTS = 80
 _SUPERVISOR_HEALTH_INTERVAL_SECONDS = 0.25
 bridge_logger = logging.getLogger("BridgeU.Bridge")
 

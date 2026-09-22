@@ -107,6 +107,8 @@ completion to the source Agent; HChat errors are excluded to prevent loops.
 
 Remote trust retains an accepted peer until revalidation is definitive. Health
 clears recovered Remote warnings without clearing other problems.
+Broad Function reboot gives a supervised Remote a bounded 20-second cold-start
+window; supervisor command acceptance alone is never adoption evidence.
 
 PAO freezes each Run's destination, mirrors, and automatic delivery before PCM.
 Queue acceptance is not delivery; `sent` needs a Connector receipt and failure

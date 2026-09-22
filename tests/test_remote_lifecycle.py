@@ -436,6 +436,30 @@ async def test_wait_for_owned_remote_reports_last_degraded_health(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_wait_for_owned_remote_allows_slow_supervisor_start(monkeypatch, tmp_path):
+    settings = remote_lifecycle.load_settings(tmp_path)
+    ready = {
+        "port": settings.port,
+        "health": {"ok": True, "status": "ready"},
+        "health_host": "127.0.0.1",
+        "remote_ready": True,
+        "remote_state": "ready",
+    }
+    calls = 0
+
+    async def fake_owned(_settings):
+        nonlocal calls
+        calls += 1
+        return ready if calls == 13 else None
+
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(remote_lifecycle, "_SUPERVISOR_HEALTH_INTERVAL_SECONDS", 0)
+
+    assert await remote_lifecycle._wait_for_owned_remote(settings) is ready
+    assert calls == 13
+
+
+@pytest.mark.asyncio
 async def test_ensure_remote_started_does_not_report_degraded_remote_as_ready(
     monkeypatch,
     tmp_path,
